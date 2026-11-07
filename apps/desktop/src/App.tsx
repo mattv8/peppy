@@ -89,6 +89,9 @@ import {
   type AppFilter,
   type NotificationCheck,
   type NotificationPreferences,
+  type NotificationPersistence,
+  type NotificationPersistenceSettings,
+  type DesktopBridge,
   type PublicCopy,
   type ContactResolutionMap,
   type AppLockStatus,
@@ -1100,6 +1103,15 @@ const phoneSetupDeferred = (origin: string | undefined) => {
 
 type SettingsAction = "origin" | "unlock" | "account";
 
+export function notificationPersistenceSettings(bridge: Pick<DesktopBridge, "get_notification_persistence" | "set_notification_persistence">):
+  { load(): Promise<NotificationPersistenceSettings>; save(value: NotificationPersistence): Promise<void> } | undefined {
+  if (!bridge.get_notification_persistence || !bridge.set_notification_persistence) return undefined;
+  return {
+    load: () => bridge.get_notification_persistence!(),
+    save: value => bridge.set_notification_persistence!(value),
+  };
+}
+
 function SettingsView({
   mode,
   configuredOrigin,
@@ -1214,6 +1226,7 @@ function SettingsView({
   const pendingSectionRef = useRef<string | null>(null);
   const scrollEndTimer = useRef<number | undefined>(undefined);
   const [activeSection, setActiveSection] = useState("server");
+  const persistenceSettings = useMemo(() => notificationPersistenceSettings(bridge), [bridge]);
   const syncText = syncStatusText(encryption);
   const reloadStartupStatus = useCallback(async () => {
     if (!desktop?.startupSupported) return;
@@ -1415,6 +1428,7 @@ function SettingsView({
         locked={encryption !== "unlocked" || Boolean(appLock?.locked)}
         soundSettings={!browserHost && bridge.get_notification_sound && bridge.set_notification_sound
           ? { load: bridge.get_notification_sound, save: bridge.set_notification_sound } : undefined}
+        persistenceSettings={persistenceSettings}
       />
       <ReactionSettings show={showReactions} onShow={onShowReactions} />
       <section id="settings-theme" className="settings-card" data-settings-section="theme">

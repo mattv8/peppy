@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { readAccountAccess, type AccountAccessResult } from "./bridge-contracts";
+import { notificationPersistence, readAccountAccess, type AccountAccessResult } from "./bridge-contracts";
 
 describe("account access bridge contract", () => {
   const notice: AccountAccessResult = {
@@ -28,5 +28,39 @@ describe("account access bridge contract", () => {
   it("never turns a thrown host error into a notice", async () => {
     const account_access = vi.fn().mockRejectedValue(new Error("offline"));
     await expect(readAccountAccess({ account_access })).resolves.toEqual({ kind: "temporarily_unavailable" });
+  });
+});
+
+describe("notification persistence bridge contract", () => {
+  const cases: Array<{ input: unknown; expected?: { seconds: number | null } }> = [
+    { input: { seconds: null }, expected: { seconds: null } },
+    { input: { seconds: 1 }, expected: { seconds: 1 } },
+    { input: { seconds: 5.0 }, expected: { seconds: 5 } },
+    { input: { seconds: 5.5 } },
+    { input: { seconds: 3600 }, expected: { seconds: 3600 } },
+    { input: { seconds: 0 } },
+    { input: { seconds: 3601 } },
+    { input: { seconds: -1 } },
+    { input: { seconds: -0 } },
+    { input: { seconds: Number.NaN } },
+    { input: { seconds: Number.POSITIVE_INFINITY } },
+    { input: { seconds: Number.NEGATIVE_INFINITY } },
+    { input: { seconds: "5" } },
+    { input: { seconds: true } },
+    { input: { seconds: undefined } },
+    { input: {} },
+    { input: { seconds: 5, extra: 1 } },
+    { input: { seconds: null, extra: 1 } },
+    { input: { extra: 1 } },
+    { input: [] },
+    { input: null },
+    { input: undefined },
+    { input: 5 },
+  ];
+
+  it.each(cases)("validates $input at the persistence boundary", ({ input, expected }) => {
+    const result = notificationPersistence(input);
+    expect(result).toEqual(expected);
+    if (expected) expect(result).not.toBe(input);
   });
 });

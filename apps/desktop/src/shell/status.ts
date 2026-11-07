@@ -21,6 +21,7 @@ const CONNECTION_CODE_LABEL: Record<string, string> = {
   "live-unavailable": "server offline; reconnecting",
   "live-closed": "server offline; reconnecting",
   "live-timeout": "live connection timed out; reconnecting",
+  "notification-post": "could not show a notification on this computer",
 };
 
 const SERVER_UNREACHABLE_CODES = new Set([

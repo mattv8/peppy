@@ -21,6 +21,7 @@ if [ "$3" = install ] && [ -f "$DEVICE_STATE/abi-after-install" ]; then mv "$DEV
 """
 TLS_STUB = """#!/usr/bin/env python3
 import os
+import pathlib
 import sys
 
 with open(os.environ["CALLS"], "a") as calls:
@@ -29,7 +30,9 @@ if sys.argv[1] == "enabled":
     print("true")
 elif sys.argv[1] == "ca-path":
     print(os.environ["STUB_CA"])
-elif sys.argv[1] != "prepare":
+elif sys.argv[1] == "dotenv-path":
+    print(pathlib.Path(__file__).resolve().parents[2] / ".env")
+elif sys.argv[1] not in {"prepare", "verify-apk"}:
     sys.exit(64)
 """
 
@@ -438,6 +441,39 @@ class AndroidFastTests(unittest.TestCase):
                 self.assertIn(message, result.stderr)
                 self.assertFalse(any(call.startswith("curl:") for call in fixture.call_lines()))
                 self.assert_no_build_or_deploy(fixture)
+
+    def test_trust_verifier_failure_blocks_install_and_launch_after_build(self):
+        with self.android_fixture() as fixture:
+            (fixture.repo / ".env").write_text("DEBUG=true\n")
+            fixture.write_gradle(
+                "mkdir -p app/build/outputs/apk/debug\n"
+                "python3 -c 'import zipfile; z = zipfile.ZipFile(\"app/build/outputs/apk/debug/app-debug.apk\", \"w\"); "
+                "z.writestr(\"AndroidManifest.xml\", \"synthetic\"); z.close()'"
+            )
+
+            result = fixture.run("run-fast", PEPPY_DEV_TLS_DIR=str(fixture.root / "tls"))
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("peppy_dev_tls_ca.pem", result.stderr)
+            self.assertIn("refusing to install", result.stderr)
+            calls = fixture.call_lines()
+            self.assertTrue(any(call.startswith("gradle:") for call in calls))
+            self.assertFalse(any(" install -r " in call or " am start " in call for call in calls))
+
+    def test_verifier_failure_blocks_gradle_install_and_launch(self):
+        with self.android_fixture() as fixture:
+            fixture.write_script(
+                fixture.repo / "infra/compose/verify-android-native.sh",
+                'echo "verify:$PEPPY_ANDROID_ABI" >> "$CALLS"\nexit 23',
+            )
+
+            result = fixture.run("run-fast")
+
+            self.assertNotEqual(result.returncode, 0)
+            calls = fixture.call_lines()
+            self.assertIn("verify:x86_64", calls)
+            self.assertFalse(any(call.startswith("gradle:") for call in calls))
+            self.assertFalse(any(" install -r " in call or " am start " in call for call in calls))
 
     def test_device_loss_during_build_blocks_install_and_launch(self):
         with self.android_fixture() as fixture:

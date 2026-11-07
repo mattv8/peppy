@@ -130,7 +130,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 48;
+const SCHEMA_VERSION: i64 = 49;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -597,6 +597,8 @@ pub struct NotificationPreferences {
     /// Skip SMS/MMS banners for conversations that currently have a chat head.
     #[serde(default = "default_true")]
     pub mute_with_heads: bool,
+    #[serde(default)]
+    pub show_source: bool,
 }
 
 fn default_true() -> bool {
@@ -617,6 +619,7 @@ impl Default for NotificationPreferences {
             mirrored_banners: true,
             preview: NotificationPreview::Full,
             mute_with_heads: true,
+            show_source: false,
         }
     }
 }
@@ -643,6 +646,10 @@ pub struct BannerCandidate {
     pub title: String,
     pub body: String,
     pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_icon_png_base64: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -5783,8 +5790,10 @@ CREATE TABLE IF NOT EXISTS provider_folder_writes(conversation_id TEXT PRIMARY K
 CREATE TABLE IF NOT EXISTS sender_blocklist_unmapped(number TEXT PRIMARY KEY);
 CREATE INDEX IF NOT EXISTS mms_thread_conversations_thread ON mms_thread_conversations(source_device_id, provider_thread_id);
 ";
-/// Version 45 -> 46: encrypted compose-draft synchronization bookkeeping.
-const MIGRATION_46: &str = "
+/// Feature migration 46: encrypted compose-draft synchronization bookkeeping.
+/// Production's released schema 46 instead added notification preferences, so schema 49 repairs
+/// both layouts without treating the version number as a lineage marker.
+const DRAFT_SYNC_MIGRATION: &str = "
 CREATE TABLE IF NOT EXISTS draft_sync(
   draft_id TEXT PRIMARY KEY, branch_id TEXT, accepted_revision_id TEXT,
   accepted_local_revision INTEGER,
@@ -5853,6 +5862,13 @@ fn apply_migration_47(conn: &Connection) -> Result<(), Error> {
         "branch_closed INTEGER NOT NULL DEFAULT 0",
     )
 }
+fn apply_notification_preferences_migration(conn: &Connection) -> Result<(), Error> {
+    add_column_if_missing(
+        conn,
+        "notification_preferences",
+        "show_source INTEGER NOT NULL DEFAULT 0",
+    )
+}
 fn apply_migration_45(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(
         conn,
@@ -5875,7 +5891,11 @@ fn apply_migration_40(conn: &Connection) -> Result<(), Error> {
     Ok(())
 }
 
-fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Result<(), Error> {
+pub(crate) fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    definition: &str,
+) -> Result<(), Error> {
     let column = definition
         .split_whitespace()
         .next()
@@ -6032,7 +6052,8 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_43)?;
             tx.execute_batch(MIGRATION_44)?;
             apply_migration_45(&tx)?;
-            tx.execute_batch(MIGRATION_46)?;
+            apply_notification_preferences_migration(&tx)?;
+            tx.execute_batch(DRAFT_SYNC_MIGRATION)?;
             apply_migration_47(&tx)?;
             apply_migration_48(&tx, false)?;
             gateway_settings::seed(&tx, false)?;
@@ -6043,7 +6064,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=47)) => {
+        Some(version @ (4..=48)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -6164,15 +6185,13 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             if version <= 44 {
                 apply_migration_45(&tx)?;
             }
-            if version <= 45 {
-                tx.execute_batch(MIGRATION_46)?;
-            }
-            if version <= 46 {
-                apply_migration_47(&tx)?;
-            }
-            if version <= 47 {
-                apply_migration_48(&tx, true)?;
-            }
+            // Versions 46–48 identify incompatible production and feature layouts. Repair the
+            // union by actual table/column presence rather than by the ambiguous version number.
+            apply_notification_preferences_migration(&tx)?;
+            let had_push_attempts = table_exists(&tx, "draft_push_attempts")?;
+            tx.execute_batch(DRAFT_SYNC_MIGRATION)?;
+            apply_migration_47(&tx)?;
+            apply_migration_48(&tx, !had_push_attempts)?;
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
@@ -14289,5 +14308,261 @@ mod tests {
         assert_eq!(retry.len(), 1);
         assert_eq!(client.mark_read_batch(&retry[0]).unwrap(), 1);
         assert!(client.unread_message_batches().unwrap().is_empty());
+    }
+
+    #[test]
+    fn migration_46_resumes_and_promotes_an_authentic_v45_preference_projection() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let source_config = ClientConfig {
+            database_path: directory.path().join("v45-preference-source.db"),
+            vault_id,
+            device_id: DeviceId::new(),
+        };
+        let lower_config = ClientConfig {
+            database_path: directory.path().join("v45-preference-lower.db"),
+            vault_id,
+            device_id: DeviceId::new(),
+        };
+        let target_config = ClientConfig {
+            database_path: directory.path().join("v45-preference-target.db"),
+            vault_id,
+            device_id: DeviceId::new(),
+        };
+        let key = || DatabaseKey::new(&[46; 32]).unwrap();
+        let source = Client::open(source_config.clone(), key()).unwrap();
+        let lower = Client::open(lower_config, key()).unwrap();
+        let target = Client::open(target_config.clone(), key()).unwrap();
+        for client in [&source, &lower, &target] {
+            client
+                .unlock(&profile, &header, "correct horse battery staple")
+                .unwrap();
+            client.set_server_compaction_state(true, true).unwrap();
+        }
+        target
+            .set_notification_preferences(NotificationPreferences {
+                show_source: true,
+                preview: NotificationPreview::Hidden,
+                ..Default::default()
+            })
+            .unwrap();
+        source
+            .set_notification_preferences(NotificationPreferences {
+                preview: NotificationPreview::Hidden,
+                ..Default::default()
+            })
+            .unwrap();
+        source
+            .set_notification_preferences(NotificationPreferences {
+                message_banners: false,
+                mirrored_banners: true,
+                preview: NotificationPreview::Hidden,
+                mute_with_heads: false,
+                show_source: true,
+            })
+            .unwrap();
+        lower
+            .set_notification_preferences(NotificationPreferences {
+                message_banners: true,
+                mirrored_banners: false,
+                preview: NotificationPreview::Hidden,
+                mute_with_heads: true,
+                show_source: false,
+            })
+            .unwrap();
+        let mut legacy = source.pending_outbox().unwrap().pop().unwrap();
+        let lower_event = lower.pending_outbox().unwrap().pop().unwrap();
+        let mut payload = serde_json::to_value(PrivatePayload::NotificationPreferences {
+            preferences: NotificationPreferences {
+                message_banners: false,
+                mirrored_banners: true,
+                preview: NotificationPreview::Hidden,
+                mute_with_heads: false,
+                show_source: true,
+            },
+            logical_revision: 3,
+            writer_device_id: source_config.device_id.to_string(),
+        })
+        .unwrap();
+        let payload_object = payload.as_object_mut().unwrap();
+        payload_object["preferences"]
+            .as_object_mut()
+            .unwrap()
+            .remove("showSource");
+        payload_object.insert(
+            "compaction".into(),
+            serde_json::to_value(legacy.compaction.as_ref().unwrap()).unwrap(),
+        );
+        let event_key = derive_purpose_key(&root, &profile, KeyPurpose::Event).unwrap();
+        let encrypted = encrypt(
+            &event_key,
+            &legacy.aad_bytes().unwrap(),
+            &serde_json::to_vec(&payload).unwrap(),
+        )
+        .unwrap();
+        legacy.ciphertext = seal_frame(&encrypted);
+
+        let session = target
+            .begin_snapshot_with_compaction(Cursor(2), 2, SnapshotPurpose::Resync, Some(45))
+            .unwrap();
+        let appended = target
+            .append_snapshot_page(
+                session.generation,
+                &[
+                    SnapshotRecord {
+                        cursor: Cursor(1),
+                        envelope: legacy.clone(),
+                    },
+                    SnapshotRecord {
+                        cursor: Cursor(2),
+                        envelope: lower_event,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            appended,
+            SnapshotProgress {
+                generation: session.generation,
+                high_water: Cursor(2),
+                expected_records: 2,
+                received_records: 2,
+                last_cursor: Cursor(2),
+                server_compaction_generation: Some(45),
+            }
+        );
+        target.finish_snapshot(session.generation).unwrap();
+        for _ in 0..4 {
+            target.apply_pending(1).unwrap();
+            let store = target.lock().unwrap();
+            let populated: bool = store
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM projection_notification_preferences WHERE generation=?)",
+                    [i64::try_from(session.generation).unwrap()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            drop(store);
+            if populated {
+                break;
+            }
+        }
+        let expected_provenance = (
+            false,
+            3,
+            source_config.device_id.to_string(),
+            source_config.device_id.to_string(),
+            i64::try_from(legacy.producer_sequence.0).unwrap(),
+        );
+        {
+            let store = target.lock().unwrap();
+            let staged: (bool, i64, String, String, i64, String) = store
+                .conn
+                .query_row(
+                    "SELECT show_source,logical_revision,writer_device_id,producer_device_id,source_sequence,state FROM projection_notification_preferences JOIN projection_generations USING(generation) WHERE generation=?",
+                    [i64::try_from(session.generation).unwrap()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                staged,
+                (
+                    expected_provenance.0,
+                    expected_provenance.1,
+                    expected_provenance.2.clone(),
+                    expected_provenance.3.clone(),
+                    expected_provenance.4,
+                    "staging".into(),
+                )
+            );
+            store
+                .conn
+                .execute_batch(
+                    "ALTER TABLE notification_preferences DROP COLUMN show_source;
+                     ALTER TABLE projection_notification_preferences DROP COLUMN show_source;
+                     UPDATE schema_meta SET version=45;",
+                )
+                .unwrap();
+        }
+        drop(target);
+
+        let upgraded = Client::open(target_config.clone(), key()).unwrap();
+        upgraded
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        {
+            let store = upgraded.lock().unwrap();
+            let migrated: (bool, i64, String, String, i64, String) = store
+                .conn
+                .query_row(
+                    "SELECT show_source,logical_revision,writer_device_id,producer_device_id,source_sequence,state FROM projection_notification_preferences JOIN projection_generations USING(generation) WHERE generation=?",
+                    [i64::try_from(session.generation).unwrap()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                migrated,
+                (
+                    expected_provenance.0,
+                    expected_provenance.1,
+                    expected_provenance.2.clone(),
+                    expected_provenance.3.clone(),
+                    expected_provenance.4,
+                    "staging".into(),
+                )
+            );
+        }
+        loop {
+            let report = upgraded.apply_pending(10).unwrap();
+            if report.applied + report.drained + report.quarantined + report.superseded == 0
+                && report.snapshot_remaining == 0
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            upgraded.snapshot_projection_status().unwrap().unwrap(),
+            SnapshotProjectionStatus {
+                generation: session.generation,
+                high_water: Cursor(2),
+                state: SnapshotProjectionState::Promoted,
+                reason: None,
+            }
+        );
+        assert_eq!(
+            upgraded.notification_preferences().unwrap(),
+            Some(NotificationPreferences {
+                message_banners: false,
+                mirrored_banners: true,
+                preview: NotificationPreview::Hidden,
+                mute_with_heads: false,
+                show_source: false,
+            })
+        );
+        let store = upgraded.lock().unwrap();
+        let provenance: (i64, String, String, i64) = store
+            .conn
+            .query_row(
+                "SELECT logical_revision,writer_device_id,producer_device_id,source_sequence FROM notification_preferences WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            provenance,
+            (
+                expected_provenance.1,
+                expected_provenance.2,
+                expected_provenance.3,
+                expected_provenance.4,
+            )
+        );
+        drop(store);
+        drop(upgraded);
+        Client::open(target_config, key()).unwrap();
     }
 }

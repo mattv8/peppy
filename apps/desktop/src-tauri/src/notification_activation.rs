@@ -13,6 +13,8 @@ mod macos;
 mod owner;
 #[cfg(target_os = "windows")]
 mod windows;
+#[cfg(any(target_os = "windows", test))]
+mod windows_xml;
 
 pub const EVENT: &str = "peppy://notification-activation";
 
@@ -80,6 +82,7 @@ pub fn post(
     destination: Destination,
     title: String,
     body: String,
+    icon: Option<crate::notification_icon::Icon>,
 ) -> Result<(), PostError> {
     post_with_activation(
         app,
@@ -91,6 +94,7 @@ pub fn post(
         session.cancel.clone(),
         title,
         body,
+        icon,
     )
 }
 
@@ -101,6 +105,7 @@ pub fn post_test(app: &tauri::AppHandle, title: &str, body: &str) -> Result<(), 
         tokio_util::sync::CancellationToken::new(),
         title.to_owned(),
         body.to_owned(),
+        None,
     )
     .map_err(|_| ())
 }
@@ -111,6 +116,7 @@ fn post_with_activation(
     cancel: tokio_util::sync::CancellationToken,
     title: String,
     body: String,
+    icon: Option<crate::notification_icon::Icon>,
 ) -> Result<(), PostError> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
@@ -123,6 +129,7 @@ fn post_with_activation(
                 sound: state.notifications.sound_enabled(),
                 title,
                 body,
+                icon,
             });
             // OS completion can wake state listeners, and shutdown takes this
             // mutex. Never hold it while waiting for backend acceptance.
@@ -132,7 +139,7 @@ fn post_with_activation(
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = (activation, cancel);
-    fallback::post(app, &title, &body).map_err(|_| PostError::Failed)
+    fallback::post(app, &title, &body, icon).map_err(|_| PostError::Failed)
 }
 
 impl ActivationState {
@@ -427,6 +434,8 @@ mod tests {
             title: "secret-title".into(),
             body: "secret-body".into(),
             created_at: 0,
+            source_name: None,
+            app_icon_png_base64: None,
         };
         assert_eq!(
             destination(&candidate),

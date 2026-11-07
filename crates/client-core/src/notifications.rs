@@ -438,37 +438,129 @@ impl Client {
         Ok(())
     }
     pub fn pending_banner_candidates(&self, limit: usize) -> Result<Vec<BannerCandidate>, Error> {
-        let s = self.lock()?;
+        let mut s = self.lock()?;
         prune_banners(&s.conn)?;
         if s.active_epoch
             .is_none_or(|epoch| !s.keys.contains_key(&epoch))
         {
             return Ok(Vec::new());
         }
-        let mut q=s.conn.prepare("SELECT id,kind,conversation_id,source_device_id,notification_key,lifetime,title,body,created_at FROM banner_candidates b WHERE acknowledged=0 AND NOT EXISTS(SELECT 1 FROM conversation_folders f WHERE f.conversation_id=b.conversation_id AND f.folder='spam') AND ((kind='message' AND EXISTS(SELECT 1 FROM messages m WHERE m.id=b.id AND m.seen=0)) OR (kind='notification' AND EXISTS(SELECT 1 FROM notifications n WHERE n.source_device_id=b.source_device_id AND n.notification_key=b.notification_key AND n.lifetime=b.lifetime AND n.removed=0 AND NOT n.seen AND NOT EXISTS(SELECT 1 FROM notification_dismissals d WHERE d.source_device_id=n.source_device_id AND d.notification_key=n.notification_key AND d.lifetime=n.lifetime) AND NOT EXISTS(SELECT 1 FROM app_filters f WHERE f.source_device_id=n.source_device_id AND f.package_name=n.package_name AND f.muted=1)))) ORDER BY rowid LIMIT ?")?;
-        Ok(q.query_map(params![limit.min(1000) as i64], |r| {
-            Ok(BannerCandidate {
-                id: r.get(0)?,
-                kind: r.get(1)?,
-                conversation_id: r.get(2)?,
-                notification_target: match (
-                    r.get::<_, Option<String>>(3)?,
-                    r.get::<_, Option<String>>(4)?,
-                    r.get::<_, Option<String>>(5)?,
-                ) {
-                    (Some(a), Some(b), Some(c)) => Some(NotificationTarget {
-                        source_device_id: a,
-                        notification_key: b,
-                        lifetime: c,
-                    }),
-                    _ => None,
-                },
-                title: r.get(6)?,
-                body: r.get(7)?,
-                created_at: r.get(8)?,
+        type CandidateRow = (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+            i64,
+        );
+        let rows: Vec<CandidateRow> = s.conn.prepare("SELECT id,kind,conversation_id,source_device_id,notification_key,lifetime,title,body,created_at FROM banner_candidates b WHERE acknowledged=0 AND NOT EXISTS(SELECT 1 FROM conversation_folders f WHERE f.conversation_id=b.conversation_id AND f.folder='spam') AND ((kind='message' AND EXISTS(SELECT 1 FROM messages m WHERE m.id=b.id AND m.seen=0)) OR (kind='notification' AND EXISTS(SELECT 1 FROM notifications n WHERE n.source_device_id=b.source_device_id AND n.notification_key=b.notification_key AND n.lifetime=b.lifetime AND n.removed=0 AND NOT n.seen AND NOT EXISTS(SELECT 1 FROM notification_dismissals d WHERE d.source_device_id=n.source_device_id AND d.notification_key=n.notification_key AND d.lifetime=n.lifetime) AND NOT EXISTS(SELECT 1 FROM app_filters f WHERE f.source_device_id=n.source_device_id AND f.package_name=n.package_name AND f.muted=1)))) ORDER BY rowid LIMIT ?")?.query_map(params![limit.min(1000) as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)))?.collect::<Result<_, _>>()?;
+        let rows = rows
+            .into_iter()
+            .map(|row| {
+                let (id, kind, _, source_device_id, notification_key, lifetime, _, _, _) = &row;
+                let message = (kind == "message")
+                    .then(|| s.conn.query_row("SELECT payload FROM messages WHERE id=?", [id], |row| row.get::<_, String>(0)).optional())
+                    .transpose()?
+                    .flatten()
+                    .and_then(|payload| decode::<MessagePayload>(payload.as_bytes()).ok());
+                let app = (kind == "notification")
+                    .then(|| match (source_device_id.as_deref(), notification_key.as_deref(), lifetime.as_deref()) {
+                        (Some(source_device_id), Some(notification_key), Some(lifetime)) => s.conn.query_row("SELECT app_name,app_icon_png_base64 FROM notifications WHERE source_device_id=? AND notification_key=? AND lifetime=?", params![source_device_id, notification_key, lifetime], |row| Ok::<(String, Option<String>), rusqlite::Error>((row.get(0)?, row.get(1)?))).optional(),
+                        _ => Ok(None),
+                    })
+                    .transpose()?
+                    .flatten();
+                Ok((row, message, app))
             })
-        })?
-        .collect::<Result<_, _>>()?)
+            .collect::<Result<Vec<_>, Error>>()?;
+        let has_message_sender = rows.iter().any(|(_, message, _)| {
+            message
+                .as_ref()
+                .is_some_and(|payload| payload.sender_address.is_some())
+        });
+        let resolver = if has_message_sender {
+            contact_resolution::current_display_resolver(&mut s.conn)?
+        } else {
+            None
+        };
+        rows.into_iter()
+            .map(
+                |(
+                    (
+                        id,
+                        kind,
+                        conversation_id,
+                        source_device_id,
+                        notification_key,
+                        lifetime,
+                        title,
+                        body,
+                        created_at,
+                    ),
+                    message,
+                    app,
+                )| {
+                    let notification_target = match (
+                        source_device_id.as_deref(),
+                        notification_key.as_deref(),
+                        lifetime.as_deref(),
+                    ) {
+                        (Some(source_device_id), Some(notification_key), Some(lifetime)) => {
+                            Some(NotificationTarget {
+                                source_device_id: source_device_id.to_owned(),
+                                notification_key: notification_key.to_owned(),
+                                lifetime: lifetime.to_owned(),
+                            })
+                        }
+                        _ => None,
+                    };
+                    let (source_name, app_icon_png_base64) = if kind == "message" {
+                        let source_name = message.and_then(|payload| {
+                            let sender = payload.sender_address?;
+                            resolver
+                                .as_ref()
+                                .and_then(|resolver| {
+                                    resolver
+                                        .resolve(
+                                            &sender,
+                                            Some(&payload.source_device_id.to_string()),
+                                        )
+                                        .ok()
+                                        .and_then(|resolution| resolution.chosen_display_name)
+                                })
+                                .or(Some(sender))
+                        });
+                        (source_name, None)
+                    } else {
+                        match app {
+                            Some((app_name, icon)) => (
+                                if app_name.is_empty() {
+                                    None
+                                } else {
+                                    Some(app_name)
+                                },
+                                icon.filter(|icon| valid_icon(Some(icon))),
+                            ),
+                            None => (None, None),
+                        }
+                    };
+                    Ok(BannerCandidate {
+                        id,
+                        kind,
+                        conversation_id,
+                        notification_target,
+                        title,
+                        body,
+                        created_at,
+                        source_name,
+                        app_icon_png_base64,
+                    })
+                },
+            )
+            .collect()
     }
     pub fn ack_banner_candidates(&self, ids: Vec<String>) -> Result<(), Error> {
         let s = self.lock()?;
@@ -708,5 +800,139 @@ pub(super) fn apply_notification_payload(
             Ok(true)
         }
         _ => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use peppy_crypto::{create_vault_check_header, derive_root_key};
+    use serde_json::json;
+
+    fn unlocked_client() -> (Client, tempfile::TempDir) {
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("notifications.db"),
+            vault_id,
+            device_id: DeviceId::new(),
+        };
+        let client = Client::open(config, DatabaseKey::new(&[7; 32]).unwrap()).unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        client.set_server_compaction_state(true, true).unwrap();
+        (client, directory)
+    }
+
+    fn address_index_count(client: &Client) -> i64 {
+        client
+            .lock()
+            .unwrap()
+            .conn
+            .query_row("SELECT COUNT(*) FROM contact_address_index", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn only_message_banners_refresh_the_contact_address_index() {
+        let (client, _directory) = unlocked_client();
+        let sender = "+12025550101";
+        let owner = client.lock().unwrap().config.device_id;
+        client
+            .capture_contact_book(
+                &json!({
+                    "schema_version": 1,
+                    "book": {
+                        "id": "contacts",
+                        "owner_device_id": owner.to_string(),
+                        "generation": "1",
+                        "state": "active",
+                        "region": "US",
+                    },
+                    "contacts": [{
+                        "id": "contact",
+                        "book_id": "contacts",
+                        "display_name": "Fresh Contact",
+                        "name": {},
+                        "phones": [{"id": "phone", "value": sender}],
+                        "emails": [],
+                        "addresses": [],
+                    }],
+                })
+                .to_string(),
+            )
+            .unwrap();
+        assert_eq!(
+            address_index_count(&client),
+            0,
+            "the contact index starts unbuilt"
+        );
+
+        assert!(client.pending_banner_candidates(10).unwrap().is_empty());
+        assert_eq!(
+            address_index_count(&client),
+            0,
+            "an empty batch must not refresh"
+        );
+
+        let notification = NotificationWire {
+            target: NotificationTarget {
+                source_device_id: DeviceId::new().to_string(),
+                notification_key: "mirrored".into(),
+                lifetime: uuid::Uuid::new_v4().to_string(),
+            },
+            instance: "one".into(),
+            package_name: "com.example.mail".into(),
+            app_name: "Mail".into(),
+            app_icon_png_base64: None,
+            title: "Subject".into(),
+            text: "Body".into(),
+            category: None,
+            posted_at: 1,
+            dismissible: true,
+        };
+        upsert_notification(&client.lock().unwrap().conn, &notification, 1, false).unwrap();
+        assert_eq!(client.pending_banner_candidates(10).unwrap().len(), 1);
+        assert_eq!(
+            address_index_count(&client),
+            0,
+            "mirrored-notification batches must not refresh"
+        );
+
+        let captured = client
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: sender.into(),
+                body: "Message body".into(),
+                provider_message_id: Some("message".into()),
+                imported: false,
+            })
+            .unwrap();
+        client.lock().unwrap().conn.execute(
+            "INSERT INTO banner_candidates(id,kind,conversation_id,title,body,created_at) VALUES(?, 'message', ?, ?, ?, ?)",
+            params![
+                captured.message_id.to_string(),
+                captured.conversation_id.to_string(),
+                sender,
+                "Message body",
+                now_ms()
+            ],
+        ).unwrap();
+        let candidates = client.pending_banner_candidates(10).unwrap();
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.source_name.as_deref() == Some("Fresh Contact"))
+        );
+        assert!(
+            address_index_count(&client) > 0,
+            "message batches refresh the contact address index"
+        );
     }
 }

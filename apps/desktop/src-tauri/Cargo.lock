@@ -3467,6 +3467,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe430c879247371c47fdedd328ad4e301e6b30b533c5fd5db1c06d75253d0e46"
 dependencies = [
  "futures-lite",
+ "image",
+ "lazy_static",
  "log",
  "mac-notification-sys",
  "serde",

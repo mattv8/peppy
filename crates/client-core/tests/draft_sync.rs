@@ -149,7 +149,7 @@ fn local_queue_rechecks_a_push_attempt_after_the_initial_send_gate() {
     let draft = client
         .save_new_compose_draft(ComposeDraftUpdate {
             text: "offline".into(),
-            recipients: vec![ADDRESS.into()],
+            recipients: vec!["+14155552672".into()],
             attachment_ids: vec![],
             route: Some(route(&client_config)),
         })
@@ -253,6 +253,427 @@ fn schema_47_pending_revision_is_backfilled_as_an_ambiguous_attempt_on_reopen() 
         reopened.begin_draft_send(draft.draft_id, draft.revision, None),
         Err(Error::DraftNotSynced)
     );
+}
+
+const FEATURE_DRAFT_TABLES: [&str; 14] = [
+    "draft_sync",
+    "draft_sync_conflicts",
+    "draft_sync_terminals",
+    "draft_send_intents",
+    "draft_sync_revisions",
+    "draft_media_references",
+    "draft_sync_resurrections",
+    "draft_sync_resurrection_attachments",
+    "draft_attachment_failures",
+    "draft_sync_meta",
+    "draft_sync_merge_bases",
+    "draft_sync_merge_fallbacks",
+    "draft_push_attempts",
+    "draft_sync_quarantines",
+];
+
+fn encrypted_connection(config: &ClientConfig) -> rusqlite::Connection {
+    let connection = rusqlite::Connection::open(&config.database_path).unwrap();
+    connection.execute_batch("PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\"; PRAGMA cipher_compatibility = 4; PRAGMA cipher_memory_security = ON;").unwrap();
+    connection
+}
+
+fn table_exists(connection: &rusqlite::Connection, table: &str) -> bool {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+            [table],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn column_exists(connection: &rusqlite::Connection, table: &str, column: &str) -> bool {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+            rusqlite::params![table, column],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn fresh_schema_49_contains_the_production_and_draft_layouts() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client_config = config(&dir, "fresh-49", &vault);
+    drop(unlocked(&client_config, &vault));
+
+    let connection = encrypted_connection(&client_config);
+    assert_eq!(
+        connection
+            .query_row("SELECT version FROM schema_meta", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        49
+    );
+    assert!(column_exists(
+        &connection,
+        "notification_preferences",
+        "show_source"
+    ));
+    assert!(column_exists(&connection, "draft_sync", "branch_closed"));
+    assert!(
+        FEATURE_DRAFT_TABLES
+            .iter()
+            .all(|table| table_exists(&connection, table))
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM draft_push_attempts", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn production_schema_46_keeps_legacy_drafts_and_adds_the_feature_schema() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client_config = config(&dir, "production-46", &vault);
+    let client = unlocked(&client_config, &vault);
+    let image = dir.path().join("production-46-image.png");
+    std::fs::write(&image, b"production-46-image").unwrap();
+    let attachment = client
+        .prepare_attachment(&image, "image/png", "production-46.png")
+        .unwrap();
+    let compose = client
+        .save_new_compose_draft(ComposeDraftUpdate {
+            text: "existing image".into(),
+            recipients: vec![ADDRESS.into()],
+            attachment_ids: vec![attachment.attachment_id],
+            route: None,
+        })
+        .unwrap();
+    drop(client);
+
+    let connection = encrypted_connection(&client_config);
+    connection.execute_batch(
+        "INSERT INTO drafts(conversation_id,content,revision) VALUES('legacy','keep',7);
+         INSERT INTO notification_preferences(id,message_banners,mirrored_banners,preview,mute_with_heads,logical_revision,writer_device_id,producer_device_id,source_sequence,show_source)
+         VALUES(1,1,1,'full',0,1,'writer','producer',1,1);",
+    ).unwrap();
+    for table in FEATURE_DRAFT_TABLES {
+        connection
+            .execute_batch(&format!("DROP TABLE {table}"))
+            .unwrap();
+    }
+    connection
+        .execute("UPDATE schema_meta SET version=46", [])
+        .unwrap();
+    assert!(table_exists(&connection, "drafts"));
+    assert!(table_exists(&connection, "compose_drafts"));
+    assert!(table_exists(&connection, "compose_draft_redirects"));
+    assert!(
+        FEATURE_DRAFT_TABLES
+            .iter()
+            .all(|table| !table_exists(&connection, table))
+    );
+    drop(connection);
+
+    let reopened = unlocked(&client_config, &vault);
+
+    let connection = encrypted_connection(&client_config);
+    assert_eq!(
+        connection
+            .query_row("SELECT version FROM schema_meta", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        49
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT content FROM drafts WHERE conversation_id='legacy'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "keep"
+    );
+    assert!(
+        connection
+            .query_row(
+                "SELECT show_source FROM notification_preferences WHERE id=1",
+                [],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
+    assert!(
+        FEATURE_DRAFT_TABLES
+            .iter()
+            .all(|table| table_exists(&connection, table))
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM draft_push_attempts", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    drop(connection);
+
+    assert_eq!(
+        reopened.attachment_info(attachment.attachment_id).unwrap(),
+        attachment
+    );
+    assert_eq!(
+        reopened
+            .compose_draft(compose.draft_id)
+            .unwrap()
+            .unwrap()
+            .attachment_ids,
+        vec![attachment.attachment_id]
+    );
+    assert!(
+        !reopened
+            .discard_unreferenced_attachment(attachment.attachment_id)
+            .unwrap()
+    );
+    let edited = reopened
+        .save_compose_draft(
+            compose.draft_id,
+            compose.revision,
+            ComposeDraftUpdate {
+                text: "existing image edited".into(),
+                recipients: vec![ADDRESS.into()],
+                attachment_ids: vec![attachment.attachment_id],
+                route: None,
+            },
+        )
+        .unwrap();
+    let connection = encrypted_connection(&client_config);
+    assert!(connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM draft_sync WHERE draft_id=? AND pending_sealed_record IS NOT NULL)",
+            [edited.draft_id.to_string()],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap());
+}
+
+#[test]
+fn feature_schema_46_backfills_pending_drafts_and_repairs_notification_preferences() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client_config = config(&dir, "feature-46", &vault);
+    let client = unlocked(&client_config, &vault);
+    let draft = save_draft(&client, "legacy", vec![ADDRESS.into()]);
+    drop(client);
+
+    let connection = encrypted_connection(&client_config);
+    connection
+        .execute_batch(
+            "ALTER TABLE notification_preferences DROP COLUMN show_source;
+             ALTER TABLE draft_sync DROP COLUMN branch_closed;
+             DROP TABLE draft_sync_merge_bases;
+             DROP TABLE draft_sync_merge_fallbacks;
+             DROP TABLE draft_push_attempts;
+             DROP TABLE draft_sync_quarantines;
+             UPDATE schema_meta SET version=46;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let reopened = unlocked(&client_config, &vault);
+    assert_eq!(
+        reopened.begin_draft_send(draft.draft_id, draft.revision, None),
+        Err(Error::DraftNotSynced)
+    );
+    drop(reopened);
+
+    let connection = encrypted_connection(&client_config);
+    assert_eq!(
+        connection
+            .query_row("SELECT version FROM schema_meta", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        49
+    );
+    assert!(column_exists(
+        &connection,
+        "notification_preferences",
+        "show_source"
+    ));
+    assert!(column_exists(&connection, "draft_sync", "branch_closed"));
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM draft_push_attempts WHERE draft_id=?",
+                [draft.draft_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn feature_schema_48_preserves_attempt_evidence_without_backfilling_never_attempted_drafts() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client_config = config(&dir, "feature-48", &vault);
+    let client = unlocked(&client_config, &vault);
+    let attempted = client
+        .save_new_compose_draft(ComposeDraftUpdate {
+            text: "attempted".into(),
+            recipients: vec![ADDRESS.into()],
+            attachment_ids: vec![],
+            route: None,
+        })
+        .unwrap();
+    let never_attempted = client
+        .save_new_compose_draft(ComposeDraftUpdate {
+            text: "offline".into(),
+            recipients: vec!["+14155552672".into()],
+            attachment_ids: vec![],
+            route: None,
+        })
+        .unwrap();
+    let attempted_push = client
+        .pending_draft_pushes()
+        .unwrap()
+        .into_iter()
+        .find(|push| push.draft_id == attempted.draft_id)
+        .unwrap();
+    assert!(
+        client
+            .mark_draft_push_attempt(attempted_push.draft_id, attempted_push.revision_id)
+            .unwrap()
+    );
+    drop(client);
+
+    let connection = encrypted_connection(&client_config);
+    connection.execute_batch(
+        "INSERT INTO notification_preferences(id,message_banners,mirrored_banners,preview,mute_with_heads,logical_revision,writer_device_id,producer_device_id,source_sequence,show_source)
+         VALUES(1,1,1,'hidden',0,1,'writer','producer',1,1);
+         ALTER TABLE notification_preferences DROP COLUMN show_source;
+         UPDATE schema_meta SET version=48;",
+    ).unwrap();
+    drop(connection);
+
+    let reopened = unlocked(&client_config, &vault);
+    assert_eq!(
+        reopened.begin_draft_send(attempted.draft_id, attempted.revision, None),
+        Err(Error::DraftNotSynced)
+    );
+    assert!(
+        reopened
+            .begin_draft_send(never_attempted.draft_id, never_attempted.revision, None)
+            .unwrap()
+            .remote
+            .is_none()
+    );
+    drop(reopened);
+
+    let connection = encrypted_connection(&client_config);
+    assert_eq!(
+        connection
+            .query_row("SELECT version FROM schema_meta", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        49
+    );
+    assert!(
+        !connection
+            .query_row(
+                "SELECT show_source FROM notification_preferences WHERE id=1",
+                [],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM draft_push_attempts WHERE draft_id=?",
+                [attempted.draft_id.to_string()],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+}
+
+fn assert_empty_attempt_table_preserves_never_attempted_draft(version: i64) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client_config = config(&dir, &format!("empty-attempts-{version}"), &vault);
+    let client = unlocked(&client_config, &vault);
+    let draft = save_draft(&client, "offline", vec![ADDRESS.into()]);
+    drop(client);
+
+    let connection = encrypted_connection(&client_config);
+    let before: (String, Vec<u8>) = connection
+        .query_row(
+            "SELECT pending_revision_id,pending_sealed_record FROM draft_sync WHERE draft_id=?",
+            [draft.draft_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let attempt_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM draft_push_attempts", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(attempt_count, 0);
+    connection
+        .execute("UPDATE schema_meta SET version=?", [version])
+        .unwrap();
+    drop(connection);
+
+    let reopened = unlocked(&client_config, &vault);
+    assert!(
+        !reopened
+            .draft_sync_status(draft.draft_id)
+            .unwrap()
+            .send_requires_connection
+    );
+    assert!(
+        reopened
+            .begin_draft_send(draft.draft_id, draft.revision, None)
+            .unwrap()
+            .remote
+            .is_none()
+    );
+    drop(reopened);
+
+    let connection = encrypted_connection(&client_config);
+    let after: (String, Vec<u8>) = connection
+        .query_row(
+            "SELECT pending_revision_id,pending_sealed_record FROM draft_sync WHERE draft_id=?",
+            [draft.draft_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let attempt_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM draft_push_attempts", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(attempt_count, 0);
+    assert_eq!(after, before);
+}
+
+#[test]
+fn schema_45_with_empty_attempt_table_does_not_backfill_never_attempted_draft() {
+    assert_empty_attempt_table_preserves_never_attempted_draft(45);
+}
+
+#[test]
+fn schema_48_with_empty_attempt_table_does_not_backfill_never_attempted_draft() {
+    assert_empty_attempt_table_preserves_never_attempted_draft(48);
 }
 
 fn save_draft(client: &Client, text: &str, recipients: Vec<String>) -> ComposeDraft {

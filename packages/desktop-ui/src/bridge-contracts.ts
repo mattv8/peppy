@@ -84,9 +84,24 @@ export type PublicCopy = { url: string; expiresInSeconds: number };
 export type NotificationTarget = { sourceDeviceId: string; notificationKey: string; lifetime: string };
 export type MirroredNotification = { target: NotificationTarget; packageName: string; appName: string; appIconPngBase64?: string; title: string; text: string; category?: string; postedAt: number; dismissible: boolean; seen: boolean; dismissalPending: boolean };
 export type AppFilter = { sourceDeviceId: string; packageName: string; appName: string; muted: boolean };
-export type NotificationPreferences = { messageBanners: boolean; mirroredBanners: boolean; preview: "full" | "hidden"; muteWithHeads?: boolean };
+export type NotificationPreferences = { messageBanners: boolean; mirroredBanners: boolean; preview: "full" | "hidden"; showSource?: boolean; muteWithHeads?: boolean };
 export type NotificationPermissionStatus = "granted" | "quiet" | "denied" | "unknown";
 export type NotificationCheck = { status: NotificationPermissionStatus; testSent: boolean; canOpenSettings: boolean };
+/** Per-device banner on-screen time; `seconds: null` requests banners stay until dismissed where the platform supports it. Platforms may shorten or ignore it. */
+export type NotificationPersistence = { seconds: number | null };
+export type NotificationPersistenceSettings = NotificationPersistence & { supported: boolean };
+export const DEFAULT_NOTIFICATION_PERSISTENCE: NotificationPersistence = { seconds: 5 };
+export const MAX_NOTIFICATION_PERSISTENCE_SECONDS = 3600;
+export const notificationPersistence = (value: unknown): NotificationPersistence | undefined => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || keys[0] !== "seconds") return undefined;
+  const { seconds } = value as { seconds: unknown };
+  if (seconds === null) return { seconds: null };
+  return Number.isInteger(seconds) && (seconds as number) >= 1 && (seconds as number) <= MAX_NOTIFICATION_PERSISTENCE_SECONDS
+    ? { seconds: seconds as number }
+    : undefined;
+};
 export type ContactBookState = "active" | "limited" | "unavailable" | "retired";
 /** Native values: requests go to the owner phone, so `canRestore` follows `canWrite`; `supportsNotes`/`supportsBirthday` follow the phone's platform (iOS has no notes). */
 export type BookCapabilities = { canWrite: boolean; canDelete: boolean; supportsNotes: boolean; supportsPhoto: boolean; canRestore?: boolean; supportsBirthday?: boolean; canSync?: boolean };
@@ -244,6 +259,8 @@ export interface DesktopBridge {
   open_login_items(): Promise<void>;
   get_notification_sound?(): Promise<boolean>;
   set_notification_sound?(enabled: boolean): Promise<void>;
+  get_notification_persistence?(): Promise<NotificationPersistenceSettings>;
+  set_notification_persistence?(value: NotificationPersistence): Promise<void>;
   popout_conversation(conversationId: string): Promise<{ headCreated: boolean; warning?: string }>;
   hide_head(conversationId: string): Promise<void>;
   close_composer(): Promise<void>;

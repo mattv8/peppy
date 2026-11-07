@@ -61,8 +61,419 @@ function port(): BrowserPort & { messages: unknown[]; emit(message: unknown): vo
   return result;
 }
 
+type LedgerCandidate = { id: string; kind: "message" | "notification"; title: string; body: string; createdAt: number; conversationId?: string; notificationTarget?: { sourceDeviceId: string; notificationKey: string; lifetime: string } };
+
+class BannerLedgerSession extends FakeSession {
+  public candidates: LedgerCandidate[] = [];
+  public failedAcknowledgements = 0;
+
+  public override async query(command: string, args: Record<string, unknown>): Promise<import("./core.js").CoreResult> {
+    this.calls.push({ command, args, mutation: false });
+    if (command === "pending_banner_candidates") return this.candidates.slice(0, 20);
+    if (command === "notification_preferences") return { messageBanners: true, mirroredBanners: true, preview: "full" };
+    return {};
+  }
+
+  public override async mutate(command: string, args: Record<string, unknown>): Promise<import("./core.js").CoreResult> {
+    this.calls.push({ command, args, mutation: true });
+    if (command === "ack_banner_candidates" && this.failedAcknowledgements-- > 0) throw new Error("durable acknowledgement failed");
+    if (command === "ack_banner_candidates") {
+      const acknowledged = new Set(args.ids as string[]);
+      this.candidates = this.candidates.filter(candidate => !acknowledged.has(candidate.id));
+    }
+    this.generation += 1;
+    return { command };
+  }
+}
+
+function ledgerCandidate(id: string, createdAt: number, conversationId?: string): LedgerCandidate {
+  return { id, kind: "message", title: "Private", body: "Private", createdAt, ...(conversationId ? { conversationId } : {}) };
+}
+
+function bannerCount(attached: ReturnType<typeof port>): number {
+  return attached.messages.filter(message => typeof message === "object" && message !== null && "event" in message && message.event === "banner").length;
+}
+
+function response(attached: ReturnType<typeof port>, id: number): unknown {
+  return attached.messages.find(message => typeof message === "object" && message !== null && "id" in message && message.id === id);
+}
+
 describe("browser host RPC", () => {
-  afterEach(() => { vi.useRealTimers(); });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  it("keeps the focused context over a later unfocused port and chooses the latest focused context", async () => {
+    let now = 10_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const session = new BannerLedgerSession();
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, notification: { available: false, permission: "denied", show: () => undefined } });
+    const focusedA = port();
+    const unfocusedB = port();
+    await host.attach(focusedA);
+    await host.attach(unfocusedB);
+
+    focusedA.emit({ id: 1, command: "set_notification_context", args: { view: "conversations", conversationId: "a", notificationPermission: "granted", focused: true } });
+    await eventually(() => response(focusedA, 1) !== undefined);
+    unfocusedB.emit({ id: 2, command: "set_notification_context", args: { view: "conversations", conversationId: "b", notificationPermission: "granted", focused: false } });
+    await eventually(() => response(unfocusedB, 2) !== undefined);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    session.candidates.push(ledgerCandidate("for-a", now, "a"));
+    unfocusedB.emit({ id: 3, command: "set_notification_context", args: { view: "conversations", conversationId: "b", notificationPermission: "granted", focused: false } });
+    await eventually(() => session.candidates.length === 0);
+    expect(bannerCount(unfocusedB)).toBe(0);
+    expect(bannerCount(focusedA)).toBe(0);
+
+    unfocusedB.emit({ id: 4, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted", focused: true } });
+    await eventually(() => response(unfocusedB, 4) !== undefined);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    session.candidates.push(ledgerCandidate("latest-focused", now));
+    unfocusedB.emit({ id: 5, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted", focused: true } });
+    await eventually(() => bannerCount(unfocusedB) === 1);
+    expect(bannerCount(focusedA)).toBe(0);
+  });
+
+  it("stale-suppresses disconnected recipients to free a full ledger without replaying them", async () => {
+    let now = 10_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const session = new BannerLedgerSession();
+    session.candidates = [
+      ...Array.from({ length: 20 }, (_, index) => ledgerCandidate(`candidate-${index + 1}`, now)),
+      ledgerCandidate("candidate-21", now + 2 * 60 * 1000 + 1),
+    ];
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, notification: { available: false, permission: "denied", show: () => undefined } });
+    const recipient = port();
+    const survivor = port();
+    await host.attach(recipient);
+    await host.attach(survivor);
+    recipient.emit({ id: 1, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted", focused: true } });
+    await eventually(() => bannerCount(recipient) === 20);
+    survivor.emit({ id: 2, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted", focused: false } });
+    recipient.emit({ id: 3, command: "disconnect", args: {} });
+    await eventually(() => recipient.closed);
+    expect(bannerCount(survivor)).toBe(0);
+    recipient.emit({ id: 4, command: "display_ack", args: { ids: ["candidate-1"] } });
+    survivor.emit({ id: 5, command: "display_failed", args: { ids: ["candidate-1"] } });
+    await eventually(() => response(recipient, 4) !== undefined && response(survivor, 5) !== undefined);
+    expect(response(recipient, 4)).toEqual(expect.objectContaining({ ok: false }));
+    expect(response(survivor, 5)).toEqual(expect.objectContaining({ ok: false }));
+
+    now += 2 * 60 * 1000 + 1;
+    survivor.emit({ id: 6, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted", focused: false } });
+    await eventually(() => session.candidates.length === 1);
+    survivor.emit({ id: 7, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted", focused: false } });
+    await eventually(() => bannerCount(survivor) === 1);
+    expect(session.candidates).toEqual([expect.objectContaining({ id: "candidate-21" })]);
+  });
+
+  it("keeps another recipient's outstanding banner through a different port disconnect", async () => {
+    const session = new BannerLedgerSession();
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, notification: { available: false, permission: "denied", show: () => undefined } });
+    const survivor = port();
+    const disconnecting = port();
+    await host.attach(survivor);
+    await host.attach(disconnecting);
+
+    survivor.emit({ id: 1, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted", focused: true } });
+    await eventually(() => response(survivor, 1) !== undefined);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    session.candidates.push(ledgerCandidate("survivor-candidate", Date.now()));
+    survivor.emit({ id: 2, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted", focused: true } });
+    await eventually(() => bannerCount(survivor) === 1);
+
+    disconnecting.emit({ id: 3, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted", focused: true } });
+    await eventually(() => response(disconnecting, 3) !== undefined);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    session.candidates.push(ledgerCandidate("disconnecting-candidate", Date.now()));
+    disconnecting.emit({ id: 4, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted", focused: true } });
+    await eventually(() => bannerCount(disconnecting) === 1);
+    disconnecting.emit({ id: 5, command: "disconnect", args: {} });
+    await eventually(() => disconnecting.closed);
+    expect(bannerCount(survivor)).toBe(1);
+
+    survivor.emit({ id: 6, command: "display_ack", args: { ids: ["survivor-candidate"] } });
+    await eventually(() => response(survivor, 6) !== undefined);
+    expect(response(survivor, 6)).toEqual({ id: 6, ok: true, value: undefined });
+    expect(session.candidates).not.toContainEqual(expect.objectContaining({ id: "survivor-candidate" }));
+    expect(session.candidates).toContainEqual(expect.objectContaining({ id: "disconnecting-candidate" }));
+  });
+
+  it("does not suppress a direct banner for a conversation whose focused port disconnected", async () => {
+    const session = new BannerLedgerSession();
+    const shown: Array<{ title: string; body: string; tag: string }> = [];
+    let changed: (() => void) | undefined;
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      notification: { available: true, permission: "granted", show: notification => { shown.push(notification); } },
+      network: { start: async () => undefined, stop: async () => undefined, subscribeChanges: (listener: () => void) => { changed = listener; return () => undefined; } } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const focused = port();
+    await host.attach(focused);
+    focused.emit({ id: 1, command: "set_notification_context", args: { view: "conversations", conversationId: "a", notificationPermission: "granted", focused: true } });
+    await eventually(() => response(focused, 1) !== undefined);
+    focused.emit({ id: 2, command: "disconnect", args: {} });
+    await eventually(() => focused.closed);
+
+    session.candidates.push(ledgerCandidate("for-a", Date.now(), "a"));
+    changed?.();
+    await eventually(() => shown.length === 1);
+    expect(shown).toEqual([expect.objectContaining({ tag: "peppy-for-a" })]);
+    await eventually(() => session.candidates.length === 0);
+  });
+
+  it("retries a failed durable display acknowledgement without reposting and retires its result authorization", async () => {
+    const session = new BannerLedgerSession();
+    session.candidates = [ledgerCandidate("candidate-1", Date.now())];
+    session.failedAcknowledgements = 1;
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, notification: { available: false, permission: "denied", show: () => undefined } });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted" } });
+    await eventually(() => bannerCount(attached) === 1);
+    attached.emit({ id: 2, command: "display_ack", args: { ids: ["candidate-1"] } });
+    await eventually(() => response(attached, 2) !== undefined);
+    expect(response(attached, 2)).toEqual(expect.objectContaining({ ok: false }));
+    attached.emit({ id: 3, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted" } });
+    await eventually(() => session.candidates.length === 0);
+    expect(bannerCount(attached)).toBe(1);
+    attached.emit({ id: 4, command: "display_ack", args: { ids: ["candidate-1"] } });
+    await eventually(() => response(attached, 4) !== undefined);
+    expect(response(attached, 4)).toEqual(expect.objectContaining({ ok: false }));
+  });
+
+  it("retires stale display result authorization across repeated ledger batches", async () => {
+    let now = 10_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const session = new BannerLedgerSession();
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, notification: { available: false, permission: "denied", show: () => undefined } });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted" } });
+    await eventually(() => response(attached, 1) !== undefined);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    for (const batch of [1, 2]) {
+      session.candidates = Array.from({ length: 20 }, (_, index) => ledgerCandidate(`batch-${batch}-${index}`, now));
+      attached.emit({ id: batch + 1, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted" } });
+      await eventually(() => bannerCount(attached) === batch * 20);
+      now += 2 * 60 * 1000 + 1;
+      attached.emit({ id: batch + 10, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted" } });
+      await eventually(() => session.candidates.length === 0);
+      attached.emit({ id: batch + 20, command: "display_ack", args: { ids: [`batch-${batch}-0`] } });
+      await eventually(() => response(attached, batch + 20) !== undefined);
+      expect(response(attached, batch + 20)).toEqual(expect.objectContaining({ ok: false }));
+    }
+  });
+
+  it("drops non-boolean notification persistence interaction flags", async () => {
+    const session = new FakeSession();
+    session.query = async command => {
+      if (command === "pending_banner_candidates") return [{ id: "candidate-1", kind: "message", conversationId: "conversation-1", title: "Private", body: "Private", createdAt: Date.now() }];
+      if (command === "notification_preferences") return { messageBanners: true, mirroredBanners: true, preview: "full" };
+      return {};
+    };
+    const shown: Array<Record<string, unknown>> = [];
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      notification: { available: true, permission: "granted", show: notification => { shown.push(notification); } },
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "set_notification_context", args: { view: "settings", requireInteraction: "yes" } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+
+    expect(attached.messages).toContainEqual({ id: 1, ok: true, value: undefined });
+    await eventually(() => shown.length === 1);
+    expect(shown[0]).not.toHaveProperty("requireInteraction");
+
+    attached.emit({ id: 2, command: "set_notification_context", args: { view: "settings", requireInteraction: true } });
+    await eventually(() => shown.length === 2);
+    expect(shown[1]).toMatchObject({ requireInteraction: true });
+  });
+
+  it("accepts acknowledgements only from the original forwarded recipient after focus changes", async () => {
+    const session = new FakeSession();
+    session.query = async command => {
+      if (command === "pending_banner_candidates") return [{ id: "candidate-1", kind: "message", title: "Private", body: "Private", createdAt: Date.now() }];
+      if (command === "notification_preferences") return { messageBanners: true, mirroredBanners: true, preview: "full" };
+      return {};
+    };
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      notification: { available: false, permission: "denied", show: () => undefined },
+    });
+    const first = port();
+    const second = port();
+    await host.attach(first);
+    await host.attach(second);
+
+    first.emit({ id: 1, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted", focused: true } });
+    await eventually(() => first.messages.some(message => typeof message === "object" && message !== null && "event" in message && message.event === "banner"));
+    second.emit({ id: 2, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted", focused: true } });
+    await eventually(() => second.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2));
+
+    second.emit({ id: 3, command: "display_ack", args: { ids: ["candidate-1"] } });
+    await eventually(() => second.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 3));
+    expect(second.messages).toContainEqual(expect.objectContaining({ id: 3, ok: false }));
+
+    first.emit({ id: 4, command: "display_ack", args: { ids: ["candidate-1"] } });
+    await eventually(() => session.calls.some(call => call.command === "ack_banner_candidates"));
+    await eventually(() => first.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 4));
+    expect(first.messages).toContainEqual({ id: 4, ok: true, value: undefined });
+  });
+
+  it("retries an explicit renderer failure only on a later presentation drain", async () => {
+    const session = new FakeSession();
+    session.query = async command => {
+      if (command === "pending_banner_candidates") return [{ id: "candidate-1", kind: "message", title: "Private", body: "Private", createdAt: Date.now() }];
+      if (command === "notification_preferences") return { messageBanners: true, mirroredBanners: true, preview: "full" };
+      return {};
+    };
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      notification: { available: false, permission: "denied", show: () => undefined },
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted" } });
+    await eventually(() => attached.messages.filter(message => typeof message === "object" && message !== null && "event" in message && message.event === "banner").length === 1);
+    attached.emit({ id: 2, command: "display_failed", args: { ids: ["candidate-1"] } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2));
+    expect(attached.messages.filter(message => typeof message === "object" && message !== null && "event" in message && message.event === "banner")).toHaveLength(1);
+
+    attached.emit({ id: 3, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted" } });
+    await eventually(() => attached.messages.filter(message => typeof message === "object" && message !== null && "event" in message && message.event === "banner").length === 2);
+    expect(session.calls).not.toContainEqual(expect.objectContaining({ command: "ack_banner_candidates" }));
+  });
+
+  it("invalidates presentation before lock cleanup finishes", async () => {
+    const session = new FakeSession();
+    let releaseCandidates!: () => void;
+    const candidates = new Promise<void>(resolve => { releaseCandidates = resolve; });
+    const cleanup = deferred();
+    const shown: unknown[] = [];
+    session.query = async command => {
+      if (command === "pending_banner_candidates") {
+        await candidates;
+        return [{ id: "candidate-1", kind: "message", title: "Private", body: "Private", createdAt: Date.now() }];
+      }
+      if (command === "notification_preferences") return { messageBanners: true, mirroredBanners: true, preview: "full" };
+      return {};
+    };
+    session.clearRememberedUnlock = async () => cleanup.promise;
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, notification: { available: true, permission: "granted", show: notification => { shown.push(notification); } } });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "set_notification_context", args: { view: "settings" } });
+    attached.emit({ id: 2, command: "lock_sync", args: {} });
+    releaseCandidates();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(shown).toEqual([]);
+    expect(session.calls).not.toContainEqual(expect.objectContaining({ command: "ack_banner_candidates" }));
+    attached.emit({ id: 3, command: "set_notification_context", args: { view: "settings" } });
+    expect(attached.messages).not.toContainEqual(expect.objectContaining({ id: 3, ok: true }));
+    cleanup.release();
+  });
+
+  it("does not drain presentation from network changes while lock shutdown awaits cleanup or stop", async () => {
+    const session = new FakeSession();
+    const cleanup = deferred();
+    const networkStop = deferred();
+    let changed: (() => void) | undefined;
+    let pending = false;
+    const shown: unknown[] = [];
+    session.query = async command => {
+      if (command === "pending_banner_candidates") return pending ? [{ id: "candidate-1", kind: "message", title: "Private", body: "Private", createdAt: Date.now() }] : [];
+      if (command === "notification_preferences") return { messageBanners: true, mirroredBanners: true, preview: "full" };
+      return {};
+    };
+    session.clearRememberedUnlock = async () => cleanup.promise;
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      notification: { available: true, permission: "granted", show: notification => { shown.push(notification); } },
+      network: { start: async () => undefined, stop: async () => networkStop.promise, subscribeChanges: (listener: () => void) => { changed = listener; return () => undefined; } } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "set_notification_context", args: { view: "settings" } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+
+    pending = true;
+    attached.emit({ id: 2, command: "lock_sync", args: {} });
+    changed?.();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(shown).toEqual([]);
+    cleanup.release();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    changed?.();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(shown).toEqual([]);
+    expect(session.calls).not.toContainEqual(expect.objectContaining({ command: "ack_banner_candidates" }));
+    networkStop.release();
+  });
+
+  it("authorizes bounded structured notification IDs for their assigned recipient", async () => {
+    const target = { sourceDeviceId: "device", notificationKey: "n".repeat(200), lifetime: "lifetime" };
+    const id = JSON.stringify(target);
+    expect(id.length).toBeGreaterThan(128);
+    const session = new FakeSession();
+    session.query = async command => {
+      if (command === "pending_banner_candidates") return [{ id, kind: "notification", notificationTarget: target, title: "Private", body: "Private", createdAt: Date.now() }];
+      if (command === "notification_preferences") return { messageBanners: true, mirroredBanners: true, preview: "full" };
+      return {};
+    };
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, notification: { available: false, permission: "denied", show: () => undefined } });
+    const assigned = port();
+    const forged = port();
+    await host.attach(assigned);
+    await host.attach(forged);
+    assigned.emit({ id: 1, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted" } });
+    await eventually(() => assigned.messages.some(message => typeof message === "object" && message !== null && "event" in message && message.event === "banner"));
+
+    forged.emit({ id: 2, command: "display_failed", args: { ids: [id] } });
+    await eventually(() => forged.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2));
+    expect(forged.messages).toContainEqual(expect.objectContaining({ id: 2, ok: false }));
+
+    assigned.emit({ id: 3, command: "display_ack", args: { ids: [id] } });
+    await eventually(() => assigned.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 3));
+    expect(assigned.messages).toContainEqual({ id: 3, ok: true, value: undefined });
+  });
+
+  it("retries a valid long structured ID only after its recipient reports display failure", async () => {
+    const target = { sourceDeviceId: "device", notificationKey: "n".repeat(200), lifetime: "lifetime" };
+    const id = JSON.stringify(target);
+    const session = new BannerLedgerSession();
+    session.candidates = [{ ...ledgerCandidate(id, Date.now()), id, kind: "notification", notificationTarget: target }];
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, notification: { available: false, permission: "denied", show: () => undefined } });
+    const recipient = port();
+    const forged = port();
+    await host.attach(recipient);
+    await host.attach(forged);
+    recipient.emit({ id: 1, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted" } });
+    await eventually(() => bannerCount(recipient) === 1);
+
+    forged.emit({ id: 2, command: "display_failed", args: { ids: [id] } });
+    recipient.emit({ id: 3, command: "display_failed", args: { ids: ["x".repeat(129)] } });
+    recipient.emit({ id: 4, command: "display_failed", args: { ids: [JSON.stringify({ ...target, notificationKey: "n".repeat(513) })] } });
+    await eventually(() => response(forged, 2) !== undefined && response(recipient, 3) !== undefined && response(recipient, 4) !== undefined);
+    expect(response(forged, 2)).toEqual(expect.objectContaining({ ok: false }));
+    expect(response(recipient, 3)).toEqual(expect.objectContaining({ ok: false }));
+    expect(response(recipient, 4)).toEqual(expect.objectContaining({ ok: false }));
+    expect(bannerCount(recipient)).toBe(1);
+
+    recipient.emit({ id: 5, command: "display_failed", args: { ids: [id] } });
+    await eventually(() => response(recipient, 5) !== undefined);
+    expect(response(recipient, 5)).toEqual({ id: 5, ok: true, value: undefined });
+    expect(bannerCount(recipient)).toBe(1);
+    recipient.emit({ id: 6, command: "set_notification_context", args: { view: "settings", notificationPermission: "granted" } });
+    await eventually(() => bannerCount(recipient) === 2);
+  });
 
   it("constructs worker recovery against the app origin when the logical API origin differs", async () => {
     const fetch = vi.fn(async () => new Response(null, { status: 503 })) as unknown as typeof globalThis.fetch;
@@ -2105,7 +2516,7 @@ describe("browser host RPC", () => {
     await dispatchBrowserRpc(session, { id: 3, command: "discard_draft", args: { input: { id: "draft", conversationId: "conversation", expectedRevision: "1" } } });
     expect(session.calls).toEqual([
       { command: "save_draft", args: { text: "draft" }, mutation: true },
-      { command: "set_notification_preferences", args: { messageBanners: true, mirroredBanners: true, preview: "hidden", muteWithHeads: true }, mutation: true },
+      { command: "set_notification_preferences", args: { messageBanners: true, mirroredBanners: true, preview: "hidden", showSource: false, muteWithHeads: true }, mutation: true },
       { command: "discard_draft", args: { id: "draft", conversationId: "conversation", expectedRevision: "1" }, mutation: true },
     ]);
   });
@@ -2114,7 +2525,7 @@ describe("browser host RPC", () => {
     const session = new FakeSession();
     const response = await dispatchBrowserRpc(session, { id: 1, command: "set_notification_preferences", args: { preferences: { preview: "hidden" } } });
     expect(response).toMatchObject({ ok: true });
-    expect(session.calls).toEqual([{ command: "set_notification_preferences", args: { messageBanners: true, mirroredBanners: true, preview: "hidden", muteWithHeads: true }, mutation: true }]);
+    expect(session.calls).toEqual([{ command: "set_notification_preferences", args: { messageBanners: true, mirroredBanners: true, preview: "hidden", showSource: false, muteWithHeads: true }, mutation: true }]);
   });
 
   it("keeps a failed-clear adoption bound to its original vault", async () => {
@@ -2189,7 +2600,7 @@ describe("browser host RPC", () => {
     expect(shown).toEqual([]);
     changed?.();
     await eventually(() => shown.length === 1);
-    expect(shown).toEqual([{ title: "New message", body: "Open Peppy to view it.", tag: "peppy-candidate-1" }]);
+    expect(shown).toEqual([expect.objectContaining({ title: "New message", body: "", tag: "peppy-candidate-1" })]);
     expect(wake).toHaveBeenCalledOnce();
     expect(attached.messages).toContainEqual({ event: "changed" });
   });

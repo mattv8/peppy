@@ -276,7 +276,7 @@ mod tests {
         let snapshot = call(&mut core, "snapshot", json!({}));
         assert_eq!(
             snapshot["notificationPreferences"],
-            json!({"messageBanners":false,"mirroredBanners":true,"preview":"hidden","muteWithHeads":true})
+            json!({"messageBanners":false,"mirroredBanners":true,"preview":"hidden","muteWithHeads":true,"showSource":false})
         );
         assert_eq!(
             call(&mut core, "notification_preferences", json!({})),
@@ -317,7 +317,7 @@ mod tests {
         );
         assert_eq!(
             call(&mut core, "notification_preferences", json!({})),
-            legacy
+            json!({"messageBanners":true,"mirroredBanners":false,"preview":"full","muteWithHeads":true,"showSource":false})
         );
     }
 }

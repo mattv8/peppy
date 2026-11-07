@@ -290,7 +290,7 @@ The desktop shows a notification feed, app mutes, and dismissals. Phone dismissa
 - Each draft allows up to three live branches. The vault attachment quota is set by `VAULT_ATTACHMENT_QUOTA_BYTES`; Compose defaults it to `536870912` bytes. Finalized attachments, unexpired upload reservations, and unpurged removals or public copies count against it.
 - On Android, MMS content version 4 can resize images and split a large message into groups. Split parts are sent in planned order on a best-effort basis, and carriers can deliver them out of order. Content version 3 and older get no split plan; an oversize message is refused.
 - Android keeps fitted MMS images as plaintext in app-private storage that Android does not back up, and removes them when the command settles or the fit fails.
-- Downgrading across migration 0026 is refused while draft data remains. Older client binaries refuse a database with a newer local schema; the current checkout uses schema 48.
+- Downgrading across migration 0026 is refused while draft data remains. Older client binaries refuse a database with a newer local schema; the current checkout uses schema 49.
 
 Carrier delivery order, production role permissions, and hosted deployment state are not established by this repository's tests.
 
