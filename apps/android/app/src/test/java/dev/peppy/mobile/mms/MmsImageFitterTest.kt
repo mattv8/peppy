@@ -15,7 +15,7 @@ import org.robolectric.annotation.Config
 class MmsImageFitterTest {
     @Test
     fun retriesSmallerEncodingsUntilTheMeasuredMessageFits() {
-        val root = createTempDir(prefix = "mms-fit")
+        val root = kotlin.io.path.createTempDirectory("mms-fit").toFile()
         val source = File(root, "source.jpg").apply { writeBytes(ByteArray(100_000)) }
         val fitter = MmsImageFitter(root) { _, maxEdge, quality, destination ->
             destination.apply { writeBytes(ByteArray(maxEdge / 10 + quality)) }
@@ -31,7 +31,7 @@ class MmsImageFitterTest {
 
     @Test
     fun returnsImpossibleWhenEveryEncodingExceedsTheMeasuredLimit() {
-        val root = createTempDir(prefix = "mms-fit")
+        val root = kotlin.io.path.createTempDirectory("mms-fit").toFile()
         val source = File(root, "source.jpg").apply { writeBytes(ByteArray(100_000)) }
         val fitter = MmsImageFitter(root) { _, _, _, destination ->
             destination.apply { writeBytes(ByteArray(400)) }
@@ -47,7 +47,7 @@ class MmsImageFitterTest {
 
     @Test
     fun reusesAValidCachedFitWithoutEncodingAgain() {
-        val root = createTempDir(prefix = "mms-fit")
+        val root = kotlin.io.path.createTempDirectory("mms-fit").toFile()
         val source = File(root, "source.jpg").apply { writeBytes(ByteArray(100_000)) }
         var encodes = 0
         val fitter = MmsImageFitter(root) { _, _, _, destination ->
@@ -67,7 +67,7 @@ class MmsImageFitterTest {
 
     @Test
     fun cacheUsesDurableAttachmentIdentityAndReconstructsUnchangedCurrentParts() {
-        val root = createTempDir(prefix = "mms-fit")
+        val root = kotlin.io.path.createTempDirectory("mms-fit").toFile()
         var encodes = 0
         val fitter = MmsImageFitter(root) { _, _, _, destination ->
             encodes++
@@ -93,7 +93,7 @@ class MmsImageFitterTest {
 
     @Test
     fun measurementAndPartialLadderFailuresAreTransientUntilOversizeIsProven() {
-        val root = createTempDir(prefix = "mms-fit")
+        val root = kotlin.io.path.createTempDirectory("mms-fit").toFile()
         val source = File(root, "source.jpg").apply { writeBytes(ByteArray(100_000)) }
         val fitter = MmsImageFitter(root) { _, edge, _, destination ->
             if (edge == 1600) error("encoder unavailable")
@@ -107,7 +107,7 @@ class MmsImageFitterTest {
 
     @Test
     fun partialEncoderFailureIsTransientWhenTheRemainingCandidateIsStillOversized() {
-        val root = createTempDir(prefix = "mms-fit")
+        val root = kotlin.io.path.createTempDirectory("mms-fit").toFile()
         val source = File(root, "source.jpg").apply { writeBytes(ByteArray(100_000)) }
         val fitter = MmsImageFitter(root) { _, edge, _, destination ->
             if (edge < 1600) error("encoder unavailable")
@@ -123,7 +123,7 @@ class MmsImageFitterTest {
 
     @Test
     fun truncatedMetadataRefitsEveryPartInsteadOfOmittingAnAttachment() {
-        val root = createTempDir(prefix = "mms-fit")
+        val root = kotlin.io.path.createTempDirectory("mms-fit").toFile()
         var encodes = 0
         val fitter = MmsImageFitter(root) { _, _, _, destination ->
             encodes++
@@ -145,7 +145,7 @@ class MmsImageFitterTest {
 
     @Test
     fun resizesSmallImagesWhenCaptionMakesTheMessageTooLarge() {
-        val root = createTempDir(prefix = "mms-fit")
+        val root = kotlin.io.path.createTempDirectory("mms-fit").toFile()
         val fitter = MmsImageFitter(root) { _, _, _, destination -> destination.apply { writeBytes(ByteArray(40_000)) } }
         val images = (1..3).map { index ->
             MmsFitPart(File(root, "$index.jpg").apply { writeBytes(ByteArray(85 * 1024)) }, "image/jpeg", "$index.jpg", "photo-$index")
@@ -162,7 +162,7 @@ class MmsImageFitterTest {
     fun honorsEveryExifOrientationForAnAsymmetricImage() {
         val source = Bitmap.createBitmap(2, 3, Bitmap.Config.ARGB_8888)
         (0 until 3).forEach { y -> (0 until 2).forEach { x -> source.setPixel(x, y, 0xff000000.toInt() + y * 2 + x) } }
-        val fitter = MmsImageFitter(createTempDir(prefix = "mms-fit"))
+        val fitter = MmsImageFitter(kotlin.io.path.createTempDirectory("mms-fit").toFile())
         assertTrue(fitter.orient(source, ExifInterface.ORIENTATION_NORMAL) === source)
         (ExifInterface.ORIENTATION_FLIP_HORIZONTAL..ExifInterface.ORIENTATION_ROTATE_270).forEach { orientation ->
             val matrix = fitter.orientationMatrix(orientation)
