@@ -299,10 +299,10 @@ fn column_exists(connection: &rusqlite::Connection, table: &str, column: &str) -
 }
 
 #[test]
-fn fresh_schema_49_contains_the_production_and_draft_layouts() {
+fn fresh_schema_50_contains_the_production_and_draft_layouts() {
     let dir = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();
-    let client_config = config(&dir, "fresh-49", &vault);
+    let client_config = config(&dir, "fresh-50", &vault);
     drop(unlocked(&client_config, &vault));
 
     let connection = encrypted_connection(&client_config);
@@ -312,7 +312,7 @@ fn fresh_schema_49_contains_the_production_and_draft_layouts() {
                 row.get::<_, i64>(0)
             })
             .unwrap(),
-        49
+        50
     );
     assert!(column_exists(
         &connection,
@@ -388,7 +388,7 @@ fn production_schema_46_keeps_legacy_drafts_and_adds_the_feature_schema() {
             .query_row("SELECT version FROM schema_meta", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        49
+        50
     );
     assert_eq!(
         connection
@@ -499,7 +499,7 @@ fn feature_schema_46_backfills_pending_drafts_and_repairs_notification_preferenc
                 row.get::<_, i64>(0)
             })
             .unwrap(),
-        49
+        50
     );
     assert!(column_exists(
         &connection,
@@ -583,7 +583,7 @@ fn feature_schema_48_preserves_attempt_evidence_without_backfilling_never_attemp
             .query_row("SELECT version FROM schema_meta", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        49
+        50
     );
     assert!(
         !connection

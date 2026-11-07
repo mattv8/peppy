@@ -241,6 +241,19 @@ impl Api {
         .await
     }
 
+    pub async fn post_json_with_account<B: Serialize + ?Sized, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        account_session: Option<&str>,
+    ) -> Result<T, NetError> {
+        let mut request = self.retention_mutation(self.http.post(self.url(path))).json(body);
+        if let Some(account_session) = account_session {
+            request = request.header("Peppy-Account-Session", account_session);
+        }
+        self.json(request, MAX_JSON_BYTES).await
+    }
+
     pub async fn put_json<B: Serialize + ?Sized, T: DeserializeOwned>(
         &self,
         path: &str,

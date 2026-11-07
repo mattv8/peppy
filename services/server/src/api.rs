@@ -4,6 +4,7 @@ mod attachments;
 mod drafts;
 mod instance;
 mod key_profiles;
+mod mcp;
 mod sync;
 
 pub use sync::{DrainStats, TransportOptions, compact_records, drain_outbox, prune_replay_log};
@@ -275,6 +276,7 @@ pub(super) struct ApiState {
     upload_slots: Arc<tokio::sync::Semaphore>,
     options: Arc<TransportOptions>,
     instance_account_admissions: Arc<tokio::sync::Mutex<admission::LocalAdmissions>>,
+    mcp_oauth_admissions: Arc<tokio::sync::Mutex<admission::LocalAdmissions>>,
     instance_password_slots: Arc<tokio::sync::Semaphore>,
     pub(super) instance_events: tokio::sync::broadcast::Sender<()>,
     pub(super) event_stream_slots: Arc<tokio::sync::Semaphore>,
@@ -287,6 +289,16 @@ pub(super) struct ApiState {
     claim_policy: crate::instance::ClaimPolicy,
     setup_window_started: std::time::Instant,
     trusted_proxy_cidrs: Arc<Vec<IpNet>>,
+    pub(super) mcp_worker: Option<McpWorkerClient>,
+    pub(super) enrollment_authorization: Arc<dyn EnrollmentAuthorization>,
+    pub(super) mcp_consent_origin: Option<String>,
+}
+
+#[derive(Clone)]
+pub(super) struct McpWorkerClient {
+    pub(super) url: url::Url,
+    pub(super) token_file: std::path::PathBuf,
+    pub(super) client: reqwest::Client,
 }
 struct PeerAddress(Option<IpAddr>);
 
@@ -457,12 +469,15 @@ pub(crate) struct Maintenance {
     storage: Option<Storage>,
     options: TransportOptions,
     relay_url: Option<url::Url>,
+    mcp_worker: Option<McpWorkerClient>,
 }
 
 impl Maintenance {
     pub(crate) fn start(self) {
         sync::spawn_maintenance(self.db.clone(), &self.committed, self.storage, self.options);
         spawn_instance_maintenance(self.db.clone());
+        mcp::spawn_oauth_maintenance(self.db.clone());
+        mcp::spawn_cleanup_maintenance(self.db.clone(), self.mcp_worker.clone());
         if let Some(relay_url) = self.relay_url {
             spawn_wake_maintenance(self.db, &self.committed, relay_url);
         }
@@ -540,6 +555,36 @@ pub(crate) fn build_router(
         .as_ref()
         .map(|config| config.trusted_proxy_cidrs.clone())
         .unwrap_or_default();
+    let mcp_worker = config
+        .as_ref()
+        .and_then(|config| {
+            config
+                .mcp_worker_url
+                .clone()
+                .zip(config.mcp_worker_token_file.clone())
+        })
+        .map(|(url, token_file)| McpWorkerClient {
+            url,
+            token_file,
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("fixed worker client configuration is valid"),
+        });
+    let mcp_consent_origin = config.as_ref().and_then(|config| {
+        let api = config.public_api_url.as_ref()?;
+        let web = config.web_client.as_ref()?;
+        let api_host = api.host_str()?;
+        let host = web.host.trim_end_matches('.');
+        if web.serves_all_hosts() || host.eq_ignore_ascii_case(api_host) {
+            let mut origin = api.clone();
+            origin.set_host(Some(host)).ok()?;
+            Some(origin.origin().ascii_serialization())
+        } else {
+            Some(format!("{}://{}", api.scheme(), host))
+        }
+    });
     let push_config_response = push_advertisement
         .response()
         .expect("router requires a validated push configuration");
@@ -556,6 +601,7 @@ pub(crate) fn build_router(
             put(register_wake_route).delete(revoke_wake_route),
         )
         .route("/v1/devices", get(devices))
+        .merge(mcp::routes())
         .route(
             "/v1/capabilities",
             get(capabilities).post(update_capabilities),
@@ -655,6 +701,7 @@ pub(crate) fn build_router(
         instance_account_admissions: Arc::new(tokio::sync::Mutex::new(
             admission::LocalAdmissions::new(),
         )),
+        mcp_oauth_admissions: Arc::new(tokio::sync::Mutex::new(admission::LocalAdmissions::new())),
         instance_password_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         instance_events: tokio::sync::broadcast::channel(64).0,
         event_stream_slots: Arc::new(tokio::sync::Semaphore::new(32)),
@@ -669,6 +716,9 @@ pub(crate) fn build_router(
         claim_policy,
         setup_window_started: std::time::Instant::now(),
         trusted_proxy_cidrs: Arc::new(trusted_proxy_cidrs.clone()),
+        mcp_worker: mcp_worker.clone(),
+        enrollment_authorization: enrollment_authorization.clone(),
+        mcp_consent_origin,
     });
     let manual_state = invitation_origin
         .as_ref()
@@ -733,6 +783,7 @@ pub(crate) fn build_router(
             storage,
             options,
             relay_url,
+            mcp_worker: mcp_worker.clone(),
         },
     ))
 }
@@ -2009,6 +2060,22 @@ async fn revoke_device(
         .execute(&mut *tx)
         .await
         .map_err(|error| database_unavailable(&error, "revoke_device"))?;
+    // MCP grants are fenced at the same roster-revocation linearization point.
+    // The worker cleanup is intentionally durable and retried out-of-process.
+    sqlx::query("UPDATE mcp_devices SET cleanup_pending=TRUE WHERE vault_id=$1 AND device_id=$2")
+        .bind(p.vault)
+        .bind(device_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "revoke_mcp_device"))?;
+    sqlx::query(
+        "UPDATE mcp_grants SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2 AND revoked_at IS NULL",
+    )
+    .bind(p.vault)
+    .bind(device_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| database_unavailable(&error, "revoke_mcp_grants"))?;
     sqlx::query(
         "UPDATE device_credentials SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2",
     )

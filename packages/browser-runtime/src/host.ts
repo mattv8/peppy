@@ -14,6 +14,7 @@ import { AccountAccessDriver } from "./account-access.js";
 import { DraftTransport } from "./drafts.js";
 import type { AccountAccessResult } from "@peppy/generated/account-access";
 import type { AttachmentRetentionStatusResult } from "@peppy/generated/attachment-retention";
+import type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceStatus, McpGrantView, McpScope } from "@peppy/generated/mcp";
 
 const MAX_RPC_BYTES = 1024 * 1024;
 const MAX_CONTACT_ADDRESSES = 500;
@@ -100,6 +101,13 @@ export interface BrowserNetwork {
   enrollmentDenyVaultRequest(requestId: string): Promise<void>;
   listDevices(): Promise<unknown>;
   revokeDevice(deviceId: string): Promise<void>;
+  mcpStatus(): Promise<McpDeviceStatus>;
+  mcpEnable(): Promise<McpDeviceStatus>;
+  mcpGrants(): Promise<McpGrantView[]>;
+  mcpRevokeGrant(id: string): Promise<void>;
+  mcpAuthorization(id: string): Promise<McpAuthorizationView>;
+  mcpApproveAuthorization(id: string, scopes: McpScope[]): Promise<McpAuthorizationDecision>;
+  mcpDenyAuthorization(id: string): Promise<McpAuthorizationDecision>;
   subscribeChanges?(listener: () => void): () => void;
   retryAttachment?(id: string): void;
   wake?(): void;
@@ -305,6 +313,37 @@ function errorFor(error: unknown): RpcError {
     return { code, message: "Browser operation failed.", ...details };
   }
   return { code: "unavailable", message: "Browser operation failed." };
+}
+
+function mcpErrorFor(error: unknown): RpcError {
+  if (isMcpCancellation(error)) return { code: "cancelled", message: "MCP status check was cancelled. Try again." };
+  if (error instanceof Error && error.message === "enrollment-timeout") return { code: "timeout", message: "MCP status check timed out. Try again." };
+  if (error instanceof Error && error.message === "session-expired") return { code: "session-expired", message: "Your sign-in session expired. Sign in again." };
+  const httpError = mcpHttpError(error);
+  if (httpError) return httpError;
+  if (error instanceof TypeError) return { code: "network", message: "Peppy could not connect to the MCP server. Try again." };
+  if (error instanceof Error && isMcpLocalCode(error.message)) return { code: error.message, message: "The MCP operation could not be completed. Try again." };
+  return errorFor(error);
+}
+
+function isMcpLocalCode(value: string): value is "owner_required" | "mcp-response" | "enrollment-state" {
+  return value === "owner_required" || value === "mcp-response" || value === "enrollment-state";
+}
+
+function isMcpCancellation(error: unknown): boolean {
+  return error instanceof Error && (error.name === "AbortError" || error.message === "enrollment-cancelled");
+}
+
+function mcpHttpError(error: unknown): RpcError | undefined {
+  if (typeof error !== "object" || error === null || !("status" in error) || typeof error.status !== "number" || !Number.isInteger(error.status)) return undefined;
+  const status = error.status;
+  if (status < 100 || status > 599) return undefined;
+  const code = "code" in error && isMcpServerCode(error.code) ? error.code : `http-${status}`;
+  return { code, message: "The MCP server could not complete the request. Try again." };
+}
+
+function isMcpServerCode(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z][a-z0-9_-]{0,63}$/.test(value);
 }
 
 function deviceManagementError(error: unknown): RpcError {
@@ -1044,6 +1083,12 @@ export class BrowserWorkerHost {
       if (response.ok && request.command === "revoke_device") this.changed();
       return;
     }
+    if (request.command.startsWith("mcp_")) {
+      const response = await this.mcpManagement(request);
+      port.postMessage(response);
+      if (response.ok && !["mcp_status", "mcp_grants", "mcp_authorization"].includes(request.command)) this.changed();
+      return;
+    }
     if (request.command === "advance_search_index") {
       const response = await this.explicitSearchIndexAdvance(request);
       if (this.ports.has(port)) port.postMessage(response);
@@ -1442,6 +1487,26 @@ export class BrowserWorkerHost {
     }
   }
 
+  private async mcpManagement(request: RpcRequest): Promise<RpcResponse> {
+    const network = this.dependencies.network;
+    if (!network) return { id: request.id, ok: false, error: { code: "unavailable", message: "Browser operation failed." } };
+    try {
+      if (request.command === "mcp_status" && Object.keys(request.args).length === 0) return { id: request.id, ok: true, value: await network.mcpStatus() };
+      if (request.command === "mcp_enable" && Object.keys(request.args).length === 0) return { id: request.id, ok: true, value: await network.mcpEnable() };
+      if (request.command === "mcp_grants" && Object.keys(request.args).length === 0) return { id: request.id, ok: true, value: await network.mcpGrants() };
+      if (request.command === "mcp_revoke_grant") {
+        await network.mcpRevokeGrant(requiredDeviceId(request.args.id));
+        return { id: request.id, ok: true, value: undefined };
+      }
+      if (request.command === "mcp_authorization") return { id: request.id, ok: true, value: await network.mcpAuthorization(requiredMcpAuthorizationId(request.args.id)) };
+      if (request.command === "mcp_approve_authorization") return { id: request.id, ok: true, value: await network.mcpApproveAuthorization(requiredMcpAuthorizationId(request.args.id), requiredMcpScopes(request.args.scopes)) };
+      if (request.command === "mcp_deny_authorization") return { id: request.id, ok: true, value: await network.mcpDenyAuthorization(requiredMcpAuthorizationId(request.args.id)) };
+      throw new TransportError("invalid");
+    } catch (error) {
+      return { id: request.id, ok: false, error: mcpErrorFor(error) };
+    }
+  }
+
   private async fatal(_error: Error): Promise<void> { await this.stop("fatal"); }
 
   private portMediaLeases(port: BrowserPort): MediaLeases {
@@ -1530,6 +1595,22 @@ function object(value: unknown): Record<string, unknown> {
 function requiredDeviceId(value: unknown): string {
   if (typeof value !== "string" || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value)) throw new TransportError("invalid");
   return value;
+}
+
+function requiredMcpAuthorizationId(value: unknown): string {
+  // A 32-byte unpadded base64url value has two unused and four significant final sextet bits.
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(value)) throw new TransportError("invalid");
+  return value;
+}
+
+function requiredMcpScopes(value: unknown): McpScope[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 3) throw new TransportError("invalid");
+  const scopes = value.map(scope => {
+    if (scope === "conversations:read" || scope === "messages:send" || scope === "media:send") return scope;
+    throw new TransportError("invalid");
+  });
+  if (new Set(scopes).size !== scopes.length) throw new TransportError("invalid");
+  return scopes;
 }
 
 function notificationContext(args: Record<string, unknown>): BannerContext | undefined {
@@ -1741,6 +1822,13 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
         async enrollmentDenyVaultRequest(requestId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.denyVaultRequest(requestId); },
         async listDevices() { if (!publicTransport) throw new TransportError("invalid"); return publicTransport.json("/v1/devices", { method: "GET" }); },
        async revokeDevice(deviceId) { if (!publicTransport) throw new TransportError("invalid"); await publicTransport.discard(`/v1/devices/${deviceId}/revoke`, { method: "POST" }); },
+       async mcpStatus() { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpStatus(); },
+       async mcpEnable() { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpEnable(); },
+       async mcpGrants() { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpGrants(); },
+       async mcpRevokeGrant(id) { if (!enrollment) throw new TransportError("invalid"); await enrollment.mcpRevokeGrant(id); },
+       async mcpAuthorization(id) { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpAuthorization(id); },
+       async mcpApproveAuthorization(id, scopes) { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpApproveAuthorization(id, scopes); },
+       async mcpDenyAuthorization(id) { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpDenyAuthorization(id); },
       async accountAccess() {
          return accountAccess?.status() ?? { kind: "temporarily_unavailable" };
        },

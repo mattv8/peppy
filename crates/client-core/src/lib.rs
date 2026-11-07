@@ -50,6 +50,7 @@ mod message_origin;
 mod notification_preferences;
 mod sender_blocklist;
 pub use deferred_media::{DeferredMediaRequestReport, DeferredMediaStatus, DeferredOriginal};
+mod mcp_commands;
 pub use draft_sync::{
     DraftAttachmentState, DraftConflictVersion, DraftNotice, DraftPush, DraftPushOutcome,
     DraftRecordAttachmentV1, DraftRecordV1, DraftSendGate, DraftSyncState, DraftSyncStatus,
@@ -77,6 +78,7 @@ pub use gateway_settings::{
     GatewayCapabilities, GatewayHostFacts, GatewayPlatform, GatewayPolicyDecision, GatewaySettings,
 };
 pub use local_search::*;
+pub use mcp_commands::{McpCommand, McpQueuedCommand};
 use media::STREAM_VERSION;
 pub use media::{
     AttachmentInfo, AttachmentState, CipherObject, MediaDescriptor, NativePlaintextFile,
@@ -96,8 +98,8 @@ pub use mms_backfill::{
 };
 use peppy_crypto::FileKey;
 use peppy_crypto::enrollment::{
-    EncryptedHandoff, EnrollmentContext, EnrollmentRole, HandoffRootPackage, TransferKeypair,
-    VerifiedHandoff,
+    EncryptedHandoff, EnrollmentContext, EnrollmentPurpose, EnrollmentRole, HandoffRootPackage,
+    TransferKeypair, VerifiedHandoff,
 };
 use peppy_crypto::{
     CryptoError, EncryptedEnvelope, KeyPurpose, PurposeKey, compaction_hmac, decrypt,
@@ -130,7 +132,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 49;
+const SCHEMA_VERSION: i64 = 50;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1882,6 +1884,17 @@ impl Client {
         })
     }
 
+    /// Read-only metadata for the epoch currently pinned by this local client.
+    /// It exposes neither key material nor a capability to activate an epoch.
+    pub fn active_key_profile(&self) -> Result<KeyProfile, Error> {
+        let s = self.lock()?;
+        let epoch = s.active_epoch.ok_or(Error::KeysUnavailable)?;
+        s.keys
+            .get(&epoch)
+            .map(|keys| keys.profile.clone())
+            .ok_or(Error::KeysUnavailable)
+    }
+
     /// Seals browser-local identity plaintext once with a just-imported verified vault epoch. This
     /// returns ciphertext only; neither the root nor the derived LocalWrap key crosses the core
     /// boundary. Passphrase unlocks do not install this one-shot capability.
@@ -1931,6 +1944,40 @@ impl Client {
         sender: &TransferKeypair,
         context: &EnrollmentContext,
     ) -> Result<EncryptedHandoff, Error> {
+        let s = self.lock()?;
+        let epoch = s.active_epoch.ok_or(Error::KeysUnavailable)?;
+        if context.vault_id != s.config.vault_id.0 || context.key_epoch != epoch {
+            return Err(Error::InvalidProfile);
+        }
+        let keys = s.keys.get(&epoch).ok_or(Error::KeysUnavailable)?;
+        if keys.profile.vault_id != context.vault_id
+            || keys.profile.key_epoch != context.key_epoch
+            || profile_fingerprint_bytes(&keys.profile).map_err(|_| Error::Crypto)?
+                != context.fingerprint
+        {
+            return Err(Error::InvalidProfile);
+        }
+        keys.handoff
+            .as_ref()
+            .ok_or(Error::KeysUnavailable)?
+            .seal(sender, &context.recipient_transfer_public_key, context)
+            .map_err(|_| Error::Crypto)
+    }
+
+    /// Seals a computer enrollment handoff only for an ordinary recipient device from the active
+    /// epoch's verified root capability. The enrollment context must come from authenticated local
+    /// enrollment validation, never renderer or server input directly.
+    pub fn seal_computer_handoff(
+        &self,
+        sender: &TransferKeypair,
+        context: &EnrollmentContext,
+    ) -> Result<EncryptedHandoff, Error> {
+        if context.purpose != EnrollmentPurpose::Computer
+            || context.role != EnrollmentRole::Device
+            || context.device_id.is_nil()
+        {
+            return Err(Error::InvalidProfile);
+        }
         let s = self.lock()?;
         let epoch = s.active_epoch.ok_or(Error::KeysUnavailable)?;
         if context.vault_id != s.config.vault_id.0 || context.key_epoch != epoch {
@@ -2640,6 +2687,33 @@ impl Client {
         )
     }
 
+    /// Classifies an MCP send without changing local state.
+    pub fn mcp_send_transport(
+        &self,
+        conversation_id: ConversationId,
+        recipients: &[String],
+        attachments: &[AttachmentId],
+    ) -> Result<Transport, Error> {
+        let store = self.lock()?;
+        classify_outgoing_transport(&store.conn, conversation_id, recipients, attachments)
+    }
+
+    /// Returns the recipients used when replying to a stored message.
+    pub fn reply_recipients(&self, message_id: MessageId) -> Result<Vec<String>, Error> {
+        let message = self.message_by_id(message_id)?.ok_or(Error::NotFound)?;
+        match (message.payload.transport, message.payload.direction) {
+            (_, Direction::Outgoing) => Ok(message.payload.recipients),
+            (Transport::Mms, Direction::Incoming) => self
+                .mms_reply_context(message.payload.record.conversation_id)
+                .map(|context| context.recipients),
+            (_, Direction::Incoming) => message
+                .payload
+                .sender_address
+                .map(|sender| vec![sender])
+                .ok_or(Error::NotFound),
+        }
+    }
+
     fn send_compose_draft_impl(
         &self,
         draft_id: DraftId,
@@ -2681,21 +2755,13 @@ impl Client {
             .as_ref()
             .is_some_and(|current| current.revision == expected_revision && *current == draft);
         let route = draft.route.as_ref().ok_or(Error::InvalidRequest("route"))?;
-        // For one-to-one text replies, the latest record defines the current thread transport;
-        // an old legacy picture MMS must not permanently convert a later SMS thread to MMS.
-        let latest_transport: Option<Transport> = tx
-            .query_row(
-                "SELECT payload FROM messages WHERE conversation_id=? ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1",
-                params![draft.conversation_id.to_string()],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .map(|payload| decode::<MessagePayload>(payload.as_bytes()).map(|message| message.transport))
-            .transpose()?;
-        let transport = if draft.attachment_ids.is_empty()
-            && draft.recipients.len() == 1
-            && latest_transport != Some(Transport::Mms)
-        {
+        let transport = classify_outgoing_transport(
+            &tx,
+            draft.conversation_id,
+            &draft.recipients,
+            &draft.attachment_ids,
+        )?;
+        if transport == Transport::Sms {
             validate_outgoing(
                 &OutgoingSms {
                     conversation_id: draft.conversation_id,
@@ -2704,7 +2770,6 @@ impl Client {
                 },
                 route,
             )?;
-            Transport::Sms
         } else {
             validate_outgoing_mms(
                 &draft.recipients,
@@ -2713,7 +2778,6 @@ impl Client {
                 None,
                 route,
             )?;
-            Transport::Mms
         };
         if let Some(parts) = parts {
             validate_draft_send_parts(&draft, parts)?;
@@ -2825,6 +2889,30 @@ fn queue_split_draft_messages(
         queue_part(String::new(), group)?;
     }
     Ok(first)
+}
+
+/// For one-to-one text replies, the latest record defines the current thread transport; an old
+/// legacy picture MMS must not permanently convert a later SMS thread to MMS.
+fn classify_outgoing_transport(
+    tx: &Connection,
+    conversation_id: ConversationId,
+    recipients: &[String],
+    attachments: &[AttachmentId],
+) -> Result<Transport, Error> {
+    let latest_transport: Option<Transport> = tx
+        .query_row(
+            "SELECT payload FROM messages WHERE conversation_id=? ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1",
+            params![conversation_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|payload| decode::<MessagePayload>(payload.as_bytes()).map(|message| message.transport))
+        .transpose()?;
+    if attachments.is_empty() && recipients.len() == 1 && latest_transport != Some(Transport::Mms) {
+        Ok(Transport::Sms)
+    } else {
+        Ok(Transport::Mms)
+    }
 }
 
 fn validate_outgoing(sms: &OutgoingSms, route: &GatewayRoute) -> Result<(), Error> {
@@ -4047,6 +4135,7 @@ impl Client {
         attachment_id: AttachmentId,
     ) -> Result<bool, Error> {
         let mut guard = self.lock()?;
+        let cipher_path = media::cipher_path(&guard.media_dir, attachment_id);
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -4058,15 +4147,47 @@ impl Client {
         if referenced || contact_media::blocks_discard(&tx, attachment_id)? {
             return Ok(false);
         }
-        let deleted = tx.execute(
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attachments WHERE attachment_id=?)",
+            [attachment_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            tx.commit()?;
+            return Ok(false);
+        }
+        // Commit an explicit cleanup intent before removing ciphertext. If deletion fails after
+        // unlinking, this intent survives reopen and excludes the object from reuse and download.
+        tx.execute(
+            "INSERT INTO attachment_cleanup_intents(attachment_id) VALUES(?) ON CONFLICT(attachment_id) DO NOTHING",
+            params![attachment_id.to_string()],
+        )?;
+        tx.execute(
+            "UPDATE attachments SET state=? WHERE attachment_id=?",
+            params![
+                AttachmentState::PendingDownload.code(),
+                attachment_id.to_string()
+            ],
+        )?;
+        tx.commit()?;
+        match std::fs::remove_file(cipher_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(Error::Storage),
+        }
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
             "DELETE FROM attachments WHERE attachment_id=?",
             params![attachment_id.to_string()],
-        )? != 0;
+        )?;
+        tx.execute(
+            "DELETE FROM attachment_cleanup_intents WHERE attachment_id=?",
+            params![attachment_id.to_string()],
+        )?;
         tx.commit()?;
-        if deleted {
-            let _ = std::fs::remove_file(media::cipher_path(&guard.media_dir, attachment_id));
-        }
-        Ok(deleted)
+        Ok(true)
     }
 
     /// Locally prepared objects referenced by a message or a contact photo and not yet
@@ -4183,7 +4304,7 @@ impl Client {
         let rows: Vec<(String, bool)> = store
             .conn
             .prepare(&format!(
-                "SELECT attachment_id,attachment_id IN (SELECT attachment_id FROM attachment_demand) FROM attachments a WHERE state='pending_download' AND remote_object_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM attachment_remote_state rs WHERE rs.attachment_id=a.attachment_id AND rs.removed_by_storage_policy=1) AND attachment_id NOT IN ({}) AND (attachment_id IN (SELECT attachment_id FROM attachment_demand) OR (NOT EXISTS(SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id) AND (attachment_id IN (SELECT thumbnail_attachment_id FROM message_media_meta WHERE thumbnail_attachment_id IS NOT NULL) OR (plaintext_bytes<={} AND attachment_id NOT IN (SELECT attachment_id FROM message_media_meta))))) ORDER BY rowid",
+                "SELECT attachment_id,attachment_id IN (SELECT attachment_id FROM attachment_demand) FROM attachments a WHERE state='pending_download' AND remote_object_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM attachment_cleanup_intents ci WHERE ci.attachment_id=a.attachment_id) AND NOT EXISTS(SELECT 1 FROM attachment_remote_state rs WHERE rs.attachment_id=a.attachment_id AND rs.removed_by_storage_policy=1) AND attachment_id NOT IN ({}) AND (attachment_id IN (SELECT attachment_id FROM attachment_demand) OR (NOT EXISTS(SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id) AND (attachment_id IN (SELECT thumbnail_attachment_id FROM message_media_meta WHERE thumbnail_attachment_id IS NOT NULL) OR (plaintext_bytes<={} AND attachment_id NOT IN (SELECT attachment_id FROM message_media_meta))))) ORDER BY rowid",
                 contact_media::REJECTED_DOWNLOADS_SQL, EAGER_MEDIA_PLAINTEXT_BYTES
             ))?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -4229,6 +4350,14 @@ impl Client {
         let mut guard = self.lock()?;
         if attachment_row(&guard.conn, attachment_id)?.is_none() {
             return Err(Error::NotFound);
+        }
+        let cleanup_pending: bool = guard.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attachment_cleanup_intents WHERE attachment_id=?)",
+            params![attachment_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if cleanup_pending {
+            return Err(Error::InvalidMedia);
         }
         attachment_retention::ensure_remote_available(&guard.conn, attachment_id)?;
         if media_cache::request_gateway_mms_rehydration(&mut guard, attachment_id)? {
@@ -4310,6 +4439,14 @@ impl Client {
         let (root, vault_id, row, contact_photo) = {
             let s = self.lock()?;
             let row = attachment_row(&s.conn, attachment_id)?.ok_or(Error::NotFound)?;
+            let cleanup_pending: bool = s.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM attachment_cleanup_intents WHERE attachment_id=?)",
+                params![attachment_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if cleanup_pending {
+                return Err(Error::InvalidMedia);
+            }
             attachment_retention::ensure_remote_available(&s.conn, attachment_id)?;
             let contact_photo = contact_media::is_received_photo(&s.conn, attachment_id)?;
             (s.media_dir.clone(), s.config.vault_id, row, contact_photo)
@@ -4317,37 +4454,45 @@ impl Client {
         if row.state != AttachmentState::PendingDownload {
             return Ok(());
         }
-        media::install_into_store(
-            &root,
-            attachment_id,
-            downloaded,
-            &media::Expected {
-                ciphertext_bytes: row.ciphertext_bytes,
-                ciphertext_sha256: &row.ciphertext_sha256,
-                plaintext_bytes: row.plaintext_bytes,
-            },
-            &row.file_key()?,
-            &media::media_aad(vault_id, attachment_id),
-        )?;
+        let expected = media::Expected {
+            ciphertext_bytes: row.ciphertext_bytes,
+            ciphertext_sha256: &row.ciphertext_sha256,
+            plaintext_bytes: row.plaintext_bytes,
+        };
+        let key = row.file_key()?;
+        let aad = media::media_aad(vault_id, attachment_id);
+        let staged = media::stage_download(&root, downloaded, &expected, &key, &aad)?;
         // Contact photos: the descriptor's type/size claims prove nothing about the bytes.
-        // Verify the decrypted content is a bounded 256x256 JPEG before it becomes available
-        // (state stays `pending_download` until then, so no native/web path can open it).
-        if contact_photo {
-            let valid = media::decrypt_to_bytes(
-                &root,
-                attachment_id,
-                &row.file_key()?,
-                &media::media_aad(vault_id, attachment_id),
-                row.plaintext_bytes,
-            )
-            .and_then(|bytes| contact_photos::validate_normalized(&bytes));
-            if let Err(error) = valid {
-                let _ = std::fs::remove_file(media::cipher_path(&root, attachment_id));
-                contact_media::reject_received(&self.lock()?.conn, attachment_id)?;
-                return Err(error);
-            }
+        // Verify the staged content before acquiring the publication lock.
+        if contact_photo
+            && let Err(error) =
+                media::decrypt_staged_to_bytes(&root, &staged, &key, &aad, row.plaintext_bytes)
+                    .and_then(|bytes| contact_photos::validate_normalized(&bytes))
+        {
+            contact_media::reject_received(&self.lock()?.conn, attachment_id)?;
+            return Err(error);
         }
-        self.lock()?.conn.execute(
+        #[cfg(test)]
+        media::pause_before_install_publication(attachment_id);
+        let mut store = self.lock()?;
+        let current = attachment_row(&store.conn, attachment_id)?;
+        let cleanup_pending: bool = store.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attachment_cleanup_intents WHERE attachment_id=?)",
+            params![attachment_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if cleanup_pending || current.is_none() {
+            return Err(Error::InvalidMedia);
+        }
+        if matches!(current, Some(ref current) if current.state == AttachmentState::Available) {
+            return Ok(());
+        }
+        if !matches!(current, Some(ref current) if current.state == AttachmentState::PendingDownload)
+        {
+            return Err(Error::InvalidMedia);
+        }
+        media::publish_staged_download(&root, attachment_id, &staged, &expected)?;
+        store.conn.execute(
             "UPDATE attachments SET state=? WHERE attachment_id=? AND state=?",
             params![
                 AttachmentState::Available.code(),
@@ -4355,7 +4500,6 @@ impl Client {
                 AttachmentState::PendingDownload.code()
             ],
         )?;
-        let mut store = self.lock()?;
         media_cache::record_installed_attachment(&mut store, attachment_id)
     }
 
@@ -5869,6 +6013,10 @@ fn apply_notification_preferences_migration(conn: &Connection) -> Result<(), Err
         "show_source INTEGER NOT NULL DEFAULT 0",
     )
 }
+/// Version 49 -> 50: MCP attachment cleanup intents (idempotent; safe on every repaired layout).
+const MIGRATION_50: &str = "
+CREATE TABLE IF NOT EXISTS attachment_cleanup_intents(attachment_id TEXT PRIMARY KEY);
+";
 fn apply_migration_45(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(
         conn,
@@ -6056,6 +6204,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(DRAFT_SYNC_MIGRATION)?;
             apply_migration_47(&tx)?;
             apply_migration_48(&tx, false)?;
+            tx.execute_batch(MIGRATION_50)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -6064,7 +6213,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=48)) => {
+        Some(version @ (4..=49)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -6192,6 +6341,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(DRAFT_SYNC_MIGRATION)?;
             apply_migration_47(&tx)?;
             apply_migration_48(&tx, !had_push_attempts)?;
+            tx.execute_batch(MIGRATION_50)?;
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
@@ -6201,6 +6351,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     }
     mms_backfill::initialize(conn)?;
     attachment_retention::initialize(conn)?;
+    mcp_commands::initialize(conn)?;
     media_cache::initialize(conn)?;
     deferred_media::initialize(conn)?;
     initialize_battery_lookup_indexes(conn)?;
@@ -14122,7 +14273,77 @@ mod tests {
     }
 
     #[test]
-    fn reopened_cache_only_client_cannot_seal_a_phone_handoff() {
+    fn verified_owner_seals_only_matching_computer_contexts() {
+        use peppy_crypto::create_vault_check_header;
+        use peppy_crypto::enrollment::{EnrollmentPurpose, EnrollmentRole, open_handoff};
+        use peppy_crypto::profile_fingerprint_bytes;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let owner_device_id = DeviceId::new();
+        let client = handoff_test_client(&directory, "computer-seal.db", vault_id, owner_device_id);
+        let profile = KeyProfile::new(vault_id.0, 4).unwrap();
+        let root = derive_root_key(HANDOFF_PASSPHRASE, &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        client
+            .unlock(&profile, &header, HANDOFF_PASSPHRASE)
+            .unwrap();
+        let sender = TransferKeypair::generate().unwrap();
+        let recipient = TransferKeypair::generate().unwrap();
+        let context = EnrollmentContext {
+            purpose: EnrollmentPurpose::Computer,
+            canonical_origin: "https://peppy.test".into(),
+            vault_id: vault_id.0,
+            fingerprint: profile_fingerprint_bytes(&profile).unwrap(),
+            key_epoch: 4,
+            enrollment_id: Uuid::new_v4(),
+            server_nonce: [2; 32],
+            owner_transfer_public_key: sender.public_key(),
+            recipient_transfer_public_key: recipient.public_key(),
+            recipient_signing_public_key: [3; 32],
+            device_id: DeviceId::new().0,
+            credential_digest: [4; 32],
+            role: EnrollmentRole::Device,
+        };
+
+        let sealed = client.seal_computer_handoff(&sender, &context).unwrap();
+        let handoff = open_handoff(&recipient, &sender.public_key(), &context, &sealed).unwrap();
+        assert!(handoff.sign_admission_context(&context).is_ok());
+
+        let mut wrong_purpose = context.clone();
+        wrong_purpose.purpose = EnrollmentPurpose::Phone;
+        assert!(matches!(
+            client.seal_computer_handoff(&sender, &wrong_purpose),
+            Err(Error::InvalidProfile)
+        ));
+        let mut wrong_role = context.clone();
+        wrong_role.role = EnrollmentRole::Gateway;
+        assert!(matches!(
+            client.seal_computer_handoff(&sender, &wrong_role),
+            Err(Error::InvalidProfile)
+        ));
+        let mut wrong_vault = context.clone();
+        wrong_vault.vault_id = Uuid::new_v4();
+        assert!(matches!(
+            client.seal_computer_handoff(&sender, &wrong_vault),
+            Err(Error::InvalidProfile)
+        ));
+        let mut wrong_profile = context.clone();
+        wrong_profile.fingerprint[0] ^= 1;
+        assert!(matches!(
+            client.seal_computer_handoff(&sender, &wrong_profile),
+            Err(Error::InvalidProfile)
+        ));
+        let mut missing_recipient = context.clone();
+        missing_recipient.device_id = Uuid::nil();
+        assert!(matches!(
+            client.seal_computer_handoff(&sender, &missing_recipient),
+            Err(Error::InvalidProfile)
+        ));
+    }
+
+    #[test]
+    fn reopened_cache_only_client_cannot_seal_phone_or_computer_handoffs() {
         use peppy_crypto::create_vault_check_header;
         use peppy_crypto::enrollment::{EnrollmentPurpose, EnrollmentRole};
         use peppy_crypto::profile_fingerprint_bytes;
@@ -14162,6 +14383,15 @@ mod tests {
 
         assert!(matches!(
             cache_only.seal_phone_handoff(&sender, &context),
+            Err(Error::KeysUnavailable)
+        ));
+        let computer_context = EnrollmentContext {
+            purpose: EnrollmentPurpose::Computer,
+            role: EnrollmentRole::Device,
+            ..context
+        };
+        assert!(matches!(
+            cache_only.seal_computer_handoff(&sender, &computer_context),
             Err(Error::KeysUnavailable)
         ));
     }

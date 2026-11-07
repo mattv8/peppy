@@ -1,5 +1,10 @@
 use url::Url;
 
+pub(crate) enum EnrollmentOriginError {
+    Invalid,
+    HttpsRequired,
+}
+
 pub(crate) fn canonical_origin(input: &str) -> Result<String, ()> {
     let url = Url::parse(input).map_err(|_| ())?;
     let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
@@ -14,4 +19,12 @@ pub(crate) fn canonical_origin(input: &str) -> Result<String, ()> {
         return Err(());
     }
     Ok(url.origin().ascii_serialization())
+}
+
+pub(crate) fn canonical_enrollment_origin(input: &str) -> Result<String, EnrollmentOriginError> {
+    let origin = canonical_origin(input).map_err(|_| EnrollmentOriginError::Invalid)?;
+    if origin.starts_with("http://") {
+        return Err(EnrollmentOriginError::HttpsRequired);
+    }
+    Ok(origin)
 }

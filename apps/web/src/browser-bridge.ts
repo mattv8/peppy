@@ -556,6 +556,13 @@ export class BrowserBridge implements DesktopBridge {
   public request_contact_repair(): Promise<ContactSyncStatus> { return this.call("request_contact_repair"); }
   public list_devices(): Promise<DeviceRosterView> { return this.call("list_devices"); }
   public revoke_device(deviceId: string): Promise<void> { return this.call("revoke_device", { deviceId }); }
+  public mcp_status(): Promise<import("@peppy/desktop-ui/bridge-contracts").McpDeviceStatus> { return this.call("mcp_status"); }
+  public mcp_enable(): Promise<import("@peppy/desktop-ui/bridge-contracts").McpDeviceStatus> { return this.call("mcp_enable"); }
+  public mcp_grants(): Promise<import("@peppy/desktop-ui/bridge-contracts").McpGrantView[]> { return this.call("mcp_grants"); }
+  public mcp_revoke_grant(id: string): Promise<void> { return this.call("mcp_revoke_grant", { id }); }
+  public mcp_authorization(id: string): Promise<import("@peppy/desktop-ui/bridge-contracts").McpAuthorizationView> { return this.call("mcp_authorization", { id }); }
+  public mcp_approve_authorization(id: string, scopes: import("@peppy/desktop-ui/bridge-contracts").McpScope[]): Promise<import("@peppy/desktop-ui/bridge-contracts").McpAuthorizationDecision> { return this.call("mcp_approve_authorization", { id, scopes }); }
+  public mcp_deny_authorization(id: string): Promise<import("@peppy/desktop-ui/bridge-contracts").McpAuthorizationDecision> { return this.call("mcp_deny_authorization", { id }); }
   public request_contact_sync(bookId: string): Promise<ContactScanStatus> { return this.call("request_contact_sync", { bookId }); }
   public get_contact_sync_request(bookId: string): Promise<ContactScanStatus | null> { return this.call("get_contact_sync_request", { bookId }); }
   public list_restorable_contacts(bookId: string): Promise<RestorableContact[]> { return this.call("list_restorable_contacts", { bookId }); }

@@ -3,6 +3,7 @@ import { Modal } from "@peppy/desktop-ui";
 import { bridge, type DeviceRosterView, type ManagedDeviceView } from "../bridge/bridge";
 import { errorCode } from "../bridge/bridgeErrors";
 import { peppyCopy } from "../generated/peppyCopy";
+import { McpDeviceSettings } from "./McpDeviceSettings";
 import "./device-settings.css";
 
 const deviceKind = (kind: string | null) => ({ android: "Android", ios: "iPhone or iPad", desktop: "Desktop", browser: "Browser" }[kind ?? ""] ?? "Unknown platform");
@@ -36,7 +37,7 @@ const revokeError = (error: unknown) => {
   return "The removal outcome is unknown. The roster was reloaded to check it.";
 };
 
-export function DevicesSettings({ serverOffline = false, accountReadOnly = false }: { serverOffline?: boolean; accountReadOnly?: boolean }) {
+export function DevicesSettings({ serverOffline = false, accountReadOnly = false, sessionKey = "unavailable", unlocked = false }: { serverOffline?: boolean; accountReadOnly?: boolean; sessionKey?: string; unlocked?: boolean }) {
   const [roster, setRoster] = useState<DeviceRosterView | null>(null);
   const [loading, setLoading] = useState(true);
   const [target, setTarget] = useState<ManagedDeviceView | null>(null);
@@ -45,6 +46,8 @@ export function DevicesSettings({ serverOffline = false, accountReadOnly = false
   const [error, setError] = useState("");
   const [offlineFromFailure, setOfflineFromFailure] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
+  const [mcpDeviceId, setMcpDeviceId] = useState<string | null>(null);
+  const [mcpRefreshToken, setMcpRefreshToken] = useState(0);
   const mounted = useRef(true);
   const loadSequence = useRef(0);
   const invoker = useRef<HTMLButtonElement | null>(null);
@@ -112,6 +115,7 @@ export function DevicesSettings({ serverOffline = false, accountReadOnly = false
     const selected = target;
     try {
       await bridge.revoke_device(selected.id);
+      setMcpRefreshToken(token => token + 1);
       if (!await load()) setError("Removal was accepted, but the latest roster could not be loaded. Reload before managing devices again.");
     } catch (error) {
       if (errorCode(error) === "offline") {
@@ -130,7 +134,7 @@ export function DevicesSettings({ serverOffline = false, accountReadOnly = false
     }
   };
   const rows = (revoked: boolean) => roster?.devices.filter(device => device.revoked === revoked) ?? [];
-  const row = (device: ManagedDeviceView) => <li key={device.id} data-device-id={device.id}>
+  const row = (device: ManagedDeviceView) => <li id={`device-${device.id}`} key={device.id} data-device-id={device.id}>
     <div data-device-details={device.id}>
       <strong>{deviceName(device)}</strong>
       <span data-device-metadata={device.id}>
@@ -143,22 +147,22 @@ export function DevicesSettings({ serverOffline = false, accountReadOnly = false
       </span>
       {device.kind === "ios" && !device.revoked && <small data-ios-sms-note>Can't send SMS through Peppy on iPhone</small>}
     </div>
-    {canRemove(device) ? offline ? <small data-remove-offline>Unavailable while offline</small> : <button className="secondary-button" type="button" aria-label={`Remove ${deviceName(device)}`} disabled={pending} onClick={event => { invoker.current = event.currentTarget; setTarget(device); }}>Remove</button> : !device.revoked && <small>{restriction(device)}</small>}
+    {canRemove(device) ? offline ? <small data-remove-offline>Unavailable while offline</small> : <button id={`device-remove-${device.id}`} className="secondary-button" type="button" aria-label={`Remove ${deviceName(device)}`} disabled={pending} onClick={event => { invoker.current = event.currentTarget; setTarget(device); }}>Remove</button> : !device.revoked && <small>{restriction(device)}</small>}
   </li>;
 
   return <section id="settings-devices" className="settings-card" data-settings-section="devices" aria-labelledby="settings-devices-title" aria-busy={loading}>
     <h2 id="settings-devices-title" ref={titleHeading} tabIndex={-1}>Devices</h2>
     <p>Devices can access this encrypted vault. Removing a device revokes server access; it does not erase local data or secrets.</p>
     {offline && <p id="devices-offline-notice" data-devices-offline-notice role="status" className="settings-note">{roster ? "Server offline. Showing the last loaded list; removing devices is unavailable." : "Server offline. The device list will load when the server is back."}</p>}
-    {error && <p role="alert" className="settings-error" data-devices-remove-error={error === OFFLINE_REMOVE_ERROR || undefined}>{error}</p>}
+    {error && <p id="devices-error" role="alert" className="settings-error" data-devices-remove-error={error === OFFLINE_REMOVE_ERROR || undefined}>{error}</p>}
     {accountPaused && roster && <p id="devices-read-only-caption" data-devices-read-only-caption className="settings-note">{peppyCopy.devices_read_only_caption}</p>}
-    {loading && <p role="status">Loading devices…</p>}
+    {loading && <p id="devices-loading" role="status">Loading devices…</p>}
     {!loading && (!roster || offline || loadFailed) && <button id="devices-retry" className="secondary-button" type="button" onClick={() => void load()}>Retry loading devices</button>}
     {roster && <div aria-hidden={target ? "true" : undefined} inert={target ? true : undefined}>
-      {!rows(false).length && !rows(true).length && <p>No devices enrolled.</p>}
-      <ul id="devices-active-list" aria-label="Active devices">{rows(false).map(row)}</ul>
-      {rows(true).length > 0 && <details id="devices-removed" className="settings-disclosure"><summary>Previously removed</summary><ul aria-label="Previously removed devices">{rows(true).map(row)}</ul></details>}
+      {!rows(false).length && !rows(true).length && <p id="devices-empty">No devices enrolled.</p>}
+      <ul id="devices-active-list" aria-label="Active devices">{rows(false).filter(device => device.id !== mcpDeviceId).map(row)}<McpDeviceSettings roster={roster} serverOffline={offline} accountReadOnly={accountReadOnly} sessionKey={sessionKey} unlocked={unlocked} refreshToken={mcpRefreshToken} onDeviceId={setMcpDeviceId} onMutation={async () => { await load(); setMcpRefreshToken(token => token + 1); }} onRemove={(device, opener) => { invoker.current = opener; setTarget(device); }} /></ul>
+      {rows(true).length > 0 && <details id="devices-removed" className="settings-disclosure"><summary>Previously removed</summary><ul id="devices-removed-list" aria-label="Previously removed devices">{rows(true).map(row)}</ul></details>}
     </div>}
-    {target && <Modal id="device-revoke-dialog" title={`Remove ${deviceName(target)}?`} busy={pending} onDismiss={close} opener={invoker} focusFallback={titleHeading} actions={<><button type="button" className="secondary-button" disabled={pending} onClick={close}>Cancel</button><button type="button" className="primary-button" disabled={pending} aria-busy={pending || undefined} onClick={() => void remove()}>Remove device</button></>}><p>Server access is revoked. Local data and secrets are not erased. Reconnecting requires enrollment.</p></Modal>}
+    {target && <Modal id="device-revoke-dialog" title={`Remove ${deviceName(target)}?`} busy={pending} onDismiss={close} opener={invoker} focusFallback={titleHeading} actions={<><button type="button" className="secondary-button" disabled={pending} onClick={close}>Cancel</button><button type="button" className="primary-button" disabled={pending} aria-busy={pending || undefined} onClick={() => void remove()}>Remove device</button></>}>{mcpDeviceId === target.id ? <p>Removing Peppy MCP fences its grants and device access, stops its runtime, and starts managed cleanup. Cleanup is reported separately; external copies cannot be erased. Re-enable it to approve a new server client.</p> : <p>Server access is revoked. Local data and secrets are not erased. Reconnecting requires enrollment.</p>}</Modal>}
   </section>;
 }

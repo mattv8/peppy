@@ -191,7 +191,7 @@ fn notification_reply_spike_version_43_repairs_and_upgrades() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        49
+        50
     );
     assert!(table_exists(&conn, "conversation_folders"));
     assert!(table_exists(&conn, "sender_blocklists"));
@@ -219,7 +219,7 @@ fn notification_reply_spike_repairs_already_upgraded_database() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        49
+        50
     );
     assert!(table_exists(&conn, "conversation_folders"));
     assert_notification_reply_spike_removed(&conn);
@@ -500,7 +500,7 @@ fn version_25_upgrade_adds_null_status_time_without_resetting_status() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert_eq!(status, (42, "sent".into(), None));
 }
 

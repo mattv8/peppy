@@ -24,6 +24,72 @@ use std::{
 };
 use zeroize::Zeroize;
 
+#[cfg(test)]
+#[derive(Clone)]
+struct InstallPromotionPauseSignal {
+    attachment_id: AttachmentId,
+    entered: Arc<std::sync::Barrier>,
+    resume: Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+static INSTALL_PROMOTION_PAUSES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<AttachmentId, InstallPromotionPauseSignal>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+pub(crate) struct InstallPromotionPause(InstallPromotionPauseSignal);
+
+#[cfg(test)]
+impl InstallPromotionPause {
+    pub(crate) fn wait_until_entered(&self) {
+        self.0.entered.wait();
+    }
+
+    pub(crate) fn resume(&self) {
+        self.0.resume.wait();
+    }
+}
+
+#[cfg(test)]
+impl Drop for InstallPromotionPause {
+    fn drop(&mut self) {
+        let mut pauses = INSTALL_PROMOTION_PAUSES.lock().unwrap();
+        if pauses
+            .get(&self.0.attachment_id)
+            .is_some_and(|active| Arc::ptr_eq(&active.entered, &self.0.entered))
+        {
+            pauses.remove(&self.0.attachment_id);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn pause_install_before_promotion(attachment_id: AttachmentId) -> InstallPromotionPause {
+    let signal = InstallPromotionPauseSignal {
+        attachment_id,
+        entered: Arc::new(std::sync::Barrier::new(2)),
+        resume: Arc::new(std::sync::Barrier::new(2)),
+    };
+    INSTALL_PROMOTION_PAUSES
+        .lock()
+        .unwrap()
+        .insert(attachment_id, signal.clone());
+    InstallPromotionPause(signal)
+}
+
+#[cfg(test)]
+pub(crate) fn pause_before_install_publication(attachment_id: AttachmentId) {
+    let signal = INSTALL_PROMOTION_PAUSES
+        .lock()
+        .unwrap()
+        .remove(&attachment_id);
+    if let Some(signal) = signal {
+        signal.entered.wait();
+        signal.resume.wait();
+    }
+}
+
 pub(crate) const STREAM_VERSION: u8 = 1;
 pub(crate) const MAX_ATTACHMENT_PLAINTEXT_BYTES: u64 = 32 * 1024 * 1024;
 /// Plaintext bound plus secretstream framing for 64 KiB chunks.
@@ -371,20 +437,27 @@ pub(crate) struct Expected<'a> {
     pub plaintext_bytes: u64,
 }
 
-pub(crate) fn install_into_store(
+pub(crate) struct StagedDownload(PathBuf);
+
+impl Drop for StagedDownload {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+pub(crate) fn stage_download(
     root: &Path,
-    attachment_id: AttachmentId,
     downloaded: &Path,
     expected: &Expected<'_>,
     key: &FileKey,
     aad: &[u8],
-) -> Result<(), Error> {
+) -> Result<StagedDownload, Error> {
     let (expected_bytes, expected_sha256) = (expected.ciphertext_bytes, expected.ciphertext_sha256);
     let mut source = File::open(downloaded).map_err(|_| Error::InvalidMedia)?;
-    let temporary = scratch_path(root, "tmp", "part");
-    let cleanup = Cleanup(temporary.clone());
+    let staged = StagedDownload(scratch_path(root, "tmp", "part"));
+    let temporary = &staged.0;
     let mut writer = Hashing {
-        inner: private_file(&temporary).map_err(|_| Error::Storage)?,
+        inner: private_file(temporary).map_err(|_| Error::Storage)?,
         digest: Sha256::new(),
         bytes: 0,
     };
@@ -396,7 +469,7 @@ pub(crate) fn install_into_store(
     writer.inner.sync_all().map_err(|_| Error::Storage)?;
     let verify = scratch_path(root, "plain", "verify");
     let verified = decrypt_stream_to_path(
-        File::open(&temporary).map_err(|_| Error::Storage)?,
+        File::open(temporary).map_err(|_| Error::Storage)?,
         &verify,
         key,
         aad,
@@ -407,21 +480,46 @@ pub(crate) fn install_into_store(
     if decrypted_bytes.ok() != Some(expected.plaintext_bytes) {
         return Err(Error::InvalidMedia);
     }
+    Ok(staged)
+}
+
+pub(crate) fn publish_staged_download(
+    root: &Path,
+    attachment_id: AttachmentId,
+    staged: &StagedDownload,
+    expected: &Expected<'_>,
+) -> Result<(), Error> {
     let destination = cipher_path(root, attachment_id);
     // No-clobber promotion: a concurrent installer may already have linked a verified object.
-    match promote_no_clobber(&temporary, &destination) {
+    match promote_no_clobber(&staged.0, &destination) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            if !matches_digest(&destination, expected_bytes, expected_sha256) {
+            if !matches_digest(
+                &destination,
+                expected.ciphertext_bytes,
+                expected.ciphertext_sha256,
+            ) {
                 // Not a verified object (e.g. a damaged leftover): atomically replace it.
-                fs::rename(&temporary, &destination).map_err(|_| Error::Storage)?;
+                fs::rename(&staged.0, &destination).map_err(|_| Error::Storage)?;
             }
         }
         Err(_) => return Err(Error::Storage),
     }
-    drop(cleanup);
     sync_dir(&root.join("cipher"));
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn install_into_store(
+    root: &Path,
+    attachment_id: AttachmentId,
+    downloaded: &Path,
+    expected: &Expected<'_>,
+    key: &FileKey,
+    aad: &[u8],
+) -> Result<(), Error> {
+    let staged = stage_download(root, downloaded, expected, key, aad)?;
+    publish_staged_download(root, attachment_id, &staged, expected)
 }
 fn matches_digest(path: &Path, bytes: u64, sha256: &str) -> bool {
     let Ok(file) = File::open(path) else {
@@ -468,7 +566,33 @@ pub(crate) fn decrypt_to_bytes(
     aad: &[u8],
     plaintext_bytes: u64,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, Error> {
-    let input = File::open(cipher_path(root, attachment_id)).map_err(|_| Error::InvalidMedia)?;
+    decrypt_to_bytes_from_path(
+        root,
+        &cipher_path(root, attachment_id),
+        key,
+        aad,
+        plaintext_bytes,
+    )
+}
+
+pub(crate) fn decrypt_staged_to_bytes(
+    root: &Path,
+    staged: &StagedDownload,
+    key: &FileKey,
+    aad: &[u8],
+    plaintext_bytes: u64,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, Error> {
+    decrypt_to_bytes_from_path(root, &staged.0, key, aad, plaintext_bytes)
+}
+
+fn decrypt_to_bytes_from_path(
+    root: &Path,
+    input_path: &Path,
+    key: &FileKey,
+    aad: &[u8],
+    plaintext_bytes: u64,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, Error> {
+    let input = File::open(input_path).map_err(|_| Error::InvalidMedia)?;
     let path = scratch_path(root, "plain", "bin");
     let _cleanup = Cleanup(path.clone());
     decrypt_stream_to_path(input, &path, key, aad).map_err(|_| Error::InvalidMedia)?;

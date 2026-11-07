@@ -17,3 +17,4 @@ serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 schemars = { workspace = true, features = ["uuid1"] }
+ts-rs = { version = "10.1.0", features = ["uuid-impl"] }

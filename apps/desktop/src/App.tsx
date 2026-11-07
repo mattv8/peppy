@@ -106,6 +106,7 @@ import { ContactsView, type ContactNavigationGuard, type ContactTarget } from ".
 import { findContactTarget } from "./contacts/contact-target";
 import { useHistorySearch } from "./search/useHistorySearch";
 import { DevicesSettings } from "./settings/DevicesSettings";
+import { McpAuthorizationConsent } from "./settings/McpAuthorizationConsent";
 import { AttachmentStorageSettingsHost, HostedAccountSettings } from "./settings/HostedAccountSettings";
 import { PrivacySettings } from "./settings/PrivacySettings";
 import { SetupLanding, savedSetupMode } from "./setup/SetupLanding";
@@ -1414,7 +1415,7 @@ function SettingsView({
           </button>
         )}
       </section>
-      <DevicesSettings serverOffline={serverOffline} accountReadOnly={accountReadOnly} />
+      <DevicesSettings key={`${sessionScopeId ?? "none"}:${encryption}`} serverOffline={serverOffline} accountReadOnly={accountReadOnly} sessionKey={sessionScopeId ?? "unavailable"} unlocked={encryption === "unlocked"} />
       <NotificationSettings
         notifications={notifications}
         filters={filters}
@@ -1689,6 +1690,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [headPanelBootstrap] = useState(() =>
     typeof window !== "undefined" && new URLSearchParams(window.location.search).get("head") === "1",
   );
+  const [mcpAuthorizationId, setMcpAuthorizationId] = useState(() =>
+    typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("mcp_authorize"),
+  );
+  const dismissMcpAuthorization = () => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("mcp_authorize");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    setMcpAuthorizationId(null);
+  };
   useMaximizeButtonRegion({ bridge, enabled: !browserHost && platform === "windows" && !composerConversation });
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
   const [conversationTab, setConversationTab] = useState<ConversationTab>("messages");
@@ -4433,13 +4443,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
 
   /* Locked snapshots carry no conversations, contacts, or notifications, so nothing else renders. */
   if (!browserHost && (lockCode === "app-locked" || lockCode === "secure-store-unavailable" || lockCode === "app-lock-checking"))
-    return (
+    return <>
+      {mcpAuthorizationId && snapshot && <div id="mcp-authorization-waiting" className="app-notice-row" role="status" data-mcp-authorization-waiting="locked"><p>An AI client is waiting for owner approval. Unlock Peppy to continue.</p><button className="app-notice-dismiss" type="button" onClick={dismissMcpAuthorization}>Dismiss</button></div>}
       <AppLockScreen
         state={lockCode === "app-lock-checking" ? "checking" : lockCode === "secure-store-unavailable" ? "storage-unavailable" : "locked"}
         onUnlock={unlockApp}
         onRetry={retryAppLockCheck}
       />
-    );
+    </>;
 
   if (loading && composerConversation)
     return <main ref={mainRef} id="composer-shell" aria-busy="true" data-platform={platform}>Loading messaging state…</main>;
@@ -5086,6 +5097,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       <main
         ref={mainRef}
         id="composer-shell"
+        tabIndex={-1}
         className={`theme-${theme}${headPanel ? " head-panel-shell" : ""}`}
         data-accent={accentAttribute(accentColor)}
         data-bridge-mode={snapshot?.mode ?? "unavailable"}
@@ -5138,6 +5150,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     <main
       ref={mainRef}
       id="desktop-shell"
+      tabIndex={-1}
       className={`theme-${theme}`}
       data-accent={accentAttribute(accentColor)}
       data-bridge-mode={snapshot?.mode ?? "unavailable"}
@@ -5431,6 +5444,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             onCancel={() => setSenderUnblockConfirmation(undefined)}
           />}
           {notificationsOpen && notificationActionNotice && <p id="notifications-action-notice" role="status">{notificationActionNotice}</p>}
+          {mcpAuthorizationId && snapshot && !(snapshot.encryption.state === "unlocked" && snapshot.deviceRole === "owner" && snapshot.sessionScopeId) && <div id="mcp-authorization-waiting" className="app-notice-row" role="status" data-mcp-authorization-waiting={snapshot.encryption.state === "unlocked" ? "non-owner" : "locked"}><p>{snapshot.encryption.state === "unlocked" ? "An AI client is waiting for owner approval. Approve it from the vault owner device." : "An AI client is waiting for owner approval. Unlock Peppy to continue."}</p><button className="app-notice-dismiss" type="button" onClick={dismissMcpAuthorization}>Dismiss</button></div>}
+          {mcpAuthorizationId && snapshot?.encryption.state === "unlocked" && snapshot.deviceRole === "owner" && snapshot.sessionScopeId && <McpAuthorizationConsent key={`${snapshot.sessionScopeId}:${mcpAuthorizationId}`} authorizationId={mcpAuthorizationId} browserHost={browserHost} sessionKey={snapshot.sessionScopeId} focusFallback={mainRef} onClose={dismissMcpAuthorization} />}
           {settingsOpen ? (
             <SettingsView
               mode={mode}

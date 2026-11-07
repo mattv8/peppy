@@ -1250,6 +1250,92 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("MCP authorization routing", () => {
+  it("does not load a URL authorization request for a locked or nonowner session", async () => {
+    window.history.replaceState({}, "", "/?mcp_authorize=request-1");
+    const snapshot = await fixtureBridge.load_state();
+    const authorization = vi.spyOn(bridge, "mcp_authorization");
+    vi.spyOn(bridge, "load_state")
+      .mockResolvedValueOnce({ ...snapshot, encryption: { ...snapshot.encryption, state: "locked" } })
+      .mockResolvedValueOnce({ ...snapshot, deviceRole: "device" });
+
+    const { unmount } = render(<App />);
+    await waitFor(() => expect(bridge.load_state).toHaveBeenCalled());
+    expect(authorization).not.toHaveBeenCalled();
+
+    unmount();
+    render(<App />);
+    await waitFor(() => expect(bridge.load_state).toHaveBeenCalledTimes(2));
+    expect(authorization).not.toHaveBeenCalled();
+  });
+
+  it("shows a locked owner the waiting notice, and Dismiss clears the URL without denying", async () => {
+    window.history.replaceState({}, "", "/?mcp_authorize=request-1");
+    const snapshot = await fixtureBridge.load_state();
+    vi.spyOn(bridge, "load_state").mockResolvedValue({ ...snapshot, deviceRole: "owner", encryption: { ...snapshot.encryption, state: "locked" } });
+    const authorization = vi.spyOn(bridge, "mcp_authorization");
+    const deny = vi.spyOn(bridge, "mcp_deny_authorization");
+
+    render(<App />);
+    const notice = await waitFor(() => {
+      const element = document.getElementById("mcp-authorization-waiting");
+      expect(element).not.toBeNull();
+      return element as HTMLElement;
+    });
+    expect(notice).toHaveAttribute("data-mcp-authorization-waiting", "locked");
+    expect(within(notice).getByText("An AI client is waiting for owner approval. Unlock Peppy to continue.")).toBeInTheDocument();
+
+    fireEvent.click(within(notice).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(document.getElementById("mcp-authorization-waiting")).toBeNull());
+    expect(new URLSearchParams(window.location.search).has("mcp_authorize")).toBe(false);
+    expect(deny).not.toHaveBeenCalled();
+    expect(authorization).not.toHaveBeenCalled();
+  });
+
+  it("shows a non-owner the approval-device notice while the vault is unlocked", async () => {
+    window.history.replaceState({}, "", "/?mcp_authorize=request-1");
+    const snapshot = await fixtureBridge.load_state();
+    vi.spyOn(bridge, "load_state").mockResolvedValue({ ...snapshot, deviceRole: "device", sessionScopeId: "session-a", encryption: { ...snapshot.encryption, state: "unlocked" } });
+    const authorization = vi.spyOn(bridge, "mcp_authorization");
+
+    render(<App />);
+    const notice = await waitFor(() => {
+      const element = document.getElementById("mcp-authorization-waiting");
+      expect(element).not.toBeNull();
+      return element as HTMLElement;
+    });
+    expect(notice).toHaveAttribute("data-mcp-authorization-waiting", "non-owner");
+    expect(within(notice).getByText("An AI client is waiting for owner approval. Approve it from the vault owner device.")).toBeInTheDocument();
+    expect(authorization).not.toHaveBeenCalled();
+  });
+
+  it("shows no waiting notice to an unlocked owner, who gets the consent dialog instead", async () => {
+    window.history.replaceState({}, "", "/?mcp_authorize=request-1");
+    const snapshot = await fixtureBridge.load_state();
+    vi.spyOn(bridge, "load_state").mockResolvedValue({ ...snapshot, sessionScopeId: "session-a", deviceRole: "owner", encryption: { ...snapshot.encryption, state: "unlocked" } });
+    vi.spyOn(bridge, "mcp_authorization").mockResolvedValue({ id: "request-1", clientName: "Claude", requestedScopes: ["conversations:read"], serverOrigin: "https://push.example.com", resource: "https://push.example.com/mcp", clientId: "client-1", redirectOrigin: "https://client.example", redirectIsLoopback: false });
+    vi.spyOn(bridge, "mcp_status").mockResolvedValue({ vaultId: "11111111-1111-4111-8111-111111111111", available: true, serverOrigin: "https://push.example.com", hosted: true, device: null });
+
+    render(<App />);
+    await screen.findByRole("dialog", { name: "Authorize MCP client" });
+    expect(document.getElementById("mcp-authorization-waiting")).toBeNull();
+  });
+
+  it("returns focus to the desktop shell when URL consent closes from a conversation", async () => {
+    window.history.replaceState({}, "", "/?mcp_authorize=request-1");
+    const snapshot = await fixtureBridge.load_state();
+    vi.spyOn(bridge, "load_state").mockResolvedValue({ ...snapshot, sessionScopeId: "session-a", deviceRole: "owner", encryption: { ...snapshot.encryption, state: "unlocked" } });
+    vi.spyOn(bridge, "mcp_authorization").mockResolvedValue({ id: "request-1", clientName: "Claude", requestedScopes: ["conversations:read"], serverOrigin: "https://push.example.com", resource: "https://push.example.com/mcp", clientId: "client-1", redirectOrigin: "https://client.example", redirectIsLoopback: false });
+    vi.spyOn(bridge, "mcp_status").mockResolvedValue({ vaultId: "11111111-1111-4111-8111-111111111111", available: true, serverOrigin: "https://push.example.com", hosted: true, device: null });
+
+    render(<App />);
+    const dialog = await screen.findByRole("dialog", { name: "Authorize MCP client" });
+    fireEvent(dialog, new Event("cancel", { cancelable: true }));
+
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toHaveFocus());
+  });
+});
+
 describe("lazy conversation history", () => {
   it("marks the initial conversation load busy", async () => {
     render(<App />);

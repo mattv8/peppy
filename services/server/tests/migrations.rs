@@ -3,7 +3,7 @@ use std::env;
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
-const UP: [&str; 26] = [
+const UP: [&str; 29] = [
     include_str!("../migrations/0001_foundation.sql"),
     include_str!("../migrations/0002_messaging.sql"),
     include_str!("../migrations/0003_pairing_proofs.sql"),
@@ -30,9 +30,12 @@ const UP: [&str; 26] = [
     include_str!("../migrations/0024_compacted_origin_tag_index.sql"),
     include_str!("../migrations/0025_validate_origin_tag_constraints.sql"),
     include_str!("../migrations/0026_draft_retention.sql"),
+    include_str!("../migrations/0027_mcp.sql"),
+    include_str!("../migrations/0028_mcp_oauth.sql"),
+    include_str!("../migrations/0029_mcp_cleanup_jobs.sql"),
 ];
 
-const DOWN: [&str; 26] = [
+const DOWN: [&str; 29] = [
     include_str!("../migrations/down/0001_foundation.down.sql"),
     include_str!("../migrations/down/0002_messaging.down.sql"),
     include_str!("../migrations/down/0003_pairing_proofs.down.sql"),
@@ -59,6 +62,9 @@ const DOWN: [&str; 26] = [
     include_str!("../migrations/down/0024_compacted_origin_tag_index.down.sql"),
     include_str!("../migrations/down/0025_validate_origin_tag_constraints.down.sql"),
     include_str!("../migrations/down/0026_draft_retention.down.sql"),
+    include_str!("../migrations/down/0027_mcp.down.sql"),
+    include_str!("../migrations/down/0028_mcp_oauth.down.sql"),
+    include_str!("../migrations/down/0029_mcp_cleanup_jobs.down.sql"),
 ];
 
 #[tokio::test]

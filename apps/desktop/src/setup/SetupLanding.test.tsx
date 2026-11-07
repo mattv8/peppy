@@ -1404,6 +1404,13 @@ describe("SetupLanding", () => {
       expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", "setup_window_closed");
     });
 
+    it("explains that browser setup requires HTTPS", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "error", errorCode: "https-required" }));
+      renderLanding({ fixedOrigin: "https://community.example" });
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("Use HTTPS to set up Peppy in a browser.");
+    });
+
     it("shows the admin password length message and code without rendering a native password input", async () => {
       vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "error", errorCode: "admin-password-length" }));
       renderLanding({ fixedOrigin: "https://community.example" });

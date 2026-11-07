@@ -177,6 +177,7 @@ pub struct BrowserCore {
     trusted_origin: Option<String>,
     identity_session: Option<identity_session::IdentitySession>,
     enrollment: Option<peppy_hosted_client::newenrollment::EnrollmentClient>,
+    mcp_enrollment: Option<peppy_hosted_client::newenrollment::EnrollmentClient>,
     prepared_enrollment_identity:
         Option<peppy_hosted_client::newenrollment::NativeEnrollmentIdentity>,
     hosted_provisioning: Option<peppy_hosted_client::HostedProvisioning>,
@@ -219,6 +220,7 @@ impl BrowserCore {
             trusted_origin: None,
             identity_session: None,
             enrollment: None,
+            mcp_enrollment: None,
             prepared_enrollment_identity: None,
             hosted_provisioning: None,
         }
@@ -285,7 +287,11 @@ impl BrowserCore {
             | "_worker_enrollment_computer_awaiting_owner_view"
             | "_worker_enrollment_confirm_computer"
             | "_worker_enrollment_finish_computer"
-            | "_worker_enrollment_cancel_computer_claimant" => {
+            | "_worker_enrollment_cancel_computer_claimant"
+            | "_worker_mcp_owner_create"
+            | "_worker_mcp_owner_created"
+            | "_worker_mcp_owner_approve"
+            | "_worker_mcp_owner_begin" => {
                 self.new_enrollment_command(command, raw_args.ok_or_else(invalid)?)
             }
             "_worker_enrollment_prepare_hosted_owner"
@@ -300,6 +306,7 @@ impl BrowserCore {
                 self.device_id = None;
                 self.identity_session = None;
                 self.enrollment = None;
+                self.mcp_enrollment = None;
                 self.hosted_provisioning = None;
                 self.context = HostContext::default();
                 self.gateways_known = false;

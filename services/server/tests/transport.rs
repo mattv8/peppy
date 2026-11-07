@@ -243,6 +243,8 @@ impl TestServer {
                     replay_retention: options.replay_retention,
                     relay_url,
                     web_client: None,
+                    mcp_worker_url: None,
+                    mcp_worker_token_file: None,
                 };
                 peppy_server::ServerBuilder::new(config, server_pool)
                     .build()
@@ -309,10 +311,19 @@ impl TestServer {
         self.task.abort();
         let _ = self.task.await;
         self.pool.close().await;
-        sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
-            .execute(&self.admin)
-            .await
-            .unwrap();
+        let drop_schema = format!("DROP SCHEMA {} CASCADE", self.schema);
+        let first_attempt = sqlx::query(&drop_schema).execute(&self.admin).await;
+        if matches!(
+            &first_attempt,
+            Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("40P01")
+        ) {
+            sqlx::query(&drop_schema)
+                .execute(&self.admin)
+                .await
+                .unwrap();
+        } else {
+            first_attempt.unwrap();
+        }
         self.admin.close().await;
     }
 }

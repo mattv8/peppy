@@ -4,6 +4,8 @@
 //! billing, and provisioning APIs. All types are designed for clean JSON
 //! roundtripping with explicit error handling for unknown enum variants.
 
+pub mod mcp;
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;

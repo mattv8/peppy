@@ -20,6 +20,7 @@ import type {
   AttachmentRetentionStatusResult,
 } from "@peppy/generated/attachment-retention";
 import type { AccountAccessResult } from "@peppy/generated/account-access";
+import type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceStatus, McpGrantView, McpScope } from "@peppy/generated/mcp";
 export type {
   HistorySearchAttemptInput,
   HistorySearchReason,
@@ -41,6 +42,7 @@ export type {
   AttachmentRetentionStatusResult,
 } from "@peppy/generated/attachment-retention";
 export type { AccountAccessResult, AccountNoticeDto, AccountNoticeKindDto, AccountNoticeSeverityDto } from "@peppy/generated/account-access";
+export type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceState, McpDeviceStatus, McpDeviceView, McpGrantView, McpScope } from "@peppy/generated/mcp";
 
 export type ConnectionState = "connected" | "offline" | "missing-native-host" | "error";
 export type MessageStatus = "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown";
@@ -277,6 +279,13 @@ export interface DesktopBridge {
   list_contact_books(): Promise<ContactBookView[]>;
   list_devices(): Promise<DeviceRosterView>;
   revoke_device(deviceId: string): Promise<void>;
+  mcp_status(): Promise<McpDeviceStatus>;
+  mcp_enable(): Promise<McpDeviceStatus>;
+  mcp_grants(): Promise<McpGrantView[]>;
+  mcp_revoke_grant(id: string): Promise<void>;
+  mcp_authorization(id: string): Promise<McpAuthorizationView>;
+  mcp_approve_authorization(id: string, scopes: McpScope[]): Promise<McpAuthorizationDecision>;
+  mcp_deny_authorization(id: string): Promise<McpAuthorizationDecision>;
   forget_contact_book(bookId: string): Promise<void>;
   /** One page of at most 200 contacts; request the next page with `offset`. */
   list_contacts(bookId: string, query?: string, offset?: number, sort?: ContactSort): Promise<ContactView[]>;

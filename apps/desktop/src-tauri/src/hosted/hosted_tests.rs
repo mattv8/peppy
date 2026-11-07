@@ -794,6 +794,92 @@ async fn failed_sign_out_preserves_the_pending_sign_in_generation_and_cache() {
 }
 
 #[tokio::test]
+async fn committed_account_replacement_invalidates_a_captured_mcp_session() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let account_a_generation = hosted.sign_in_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    super::commit_sign_in_session(
+        &store,
+        &hosted,
+        HTTPS_ORIGIN,
+        account_a_generation,
+        HostedSessionRecord {
+            account_id: ACCOUNT.into(),
+            bearer: Zeroizing::new("account-a-bearer".into()),
+            expires_at_unix: super::now_unix() + 3600,
+        },
+    )
+    .await
+    .unwrap();
+    let account_b_generation = hosted.sign_in_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let revision = hosted
+        .capture_mcp_account_session("account-a-bearer")
+        .await
+        .unwrap();
+    super::commit_sign_in_session(
+        &store,
+        &hosted,
+        HTTPS_ORIGIN,
+        account_b_generation,
+        HostedSessionRecord {
+            account_id: "550e8400-e29b-41d4-a716-446655440001".into(),
+            bearer: Zeroizing::new("account-b-bearer".into()),
+            expires_at_unix: super::now_unix() + 3600,
+        },
+    )
+    .await
+    .unwrap();
+
+    let error = hosted
+        .ensure_mcp_account_session_current(revision)
+        .unwrap_err();
+    assert_eq!(error.code, "hosted-account-changed");
+    assert!(hosted
+        .capture_mcp_account_session("account-b-bearer")
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn sign_out_invalidates_a_captured_mcp_session_before_the_final_result() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+    let device_session = crate::tests::open(&fixture, &fixture.binding, &[]);
+    let generation = hosted.sign_in_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    super::commit_sign_in_session(
+        &store,
+        &hosted,
+        HTTPS_ORIGIN,
+        generation,
+        HostedSessionRecord {
+            account_id: ACCOUNT.into(),
+            bearer: Zeroizing::new("account-a-bearer".into()),
+            expires_at_unix: super::now_unix() + 3600,
+        },
+    )
+    .await
+    .unwrap();
+    let revision = hosted
+        .capture_mcp_account_session("account-a-bearer")
+        .await
+        .unwrap();
+
+    super::tombstone_session(&store, &hosted, HTTPS_ORIGIN)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        hosted
+            .ensure_mcp_account_session_current(revision)
+            .unwrap_err()
+            .code,
+        "hosted-account-changed"
+    );
+    assert!(device_session.client.pending_outbox().is_ok());
+}
+
+#[tokio::test]
 async fn matching_401_tombstones_the_observed_session() {
     let store = MemoryStore::default();
     let hosted = HostedState::default();
