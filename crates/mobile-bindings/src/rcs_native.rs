@@ -1,12 +1,40 @@
 use crate::{MobileBindingsError, NativeClient, with_client};
 use peppy_client_core::{
-    NativeRcsCommitProjection, NativeRcsPreparation, NativeRcsTargetClass, RcsMappingClass,
-    RcsMappingObservation,
+    NativeRcsCommitProjection, NativeRcsPreparation, NativeRcsTargetClass,
+    RCS_CANONICALIZER_REVISION, RcsMappingClass, RcsMappingObservation, RcsMappingOutcome,
+    RcsMappingRefusal, RcsTargetDecision,
 };
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
 
 const RCS_NATIVE_JSON_CAP: usize = 65_536;
+const RCS_NATIVE_SNAPSHOT_CAP: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeRcsContextTuple {
+    pub link_generation: u64,
+    pub session_generation: u64,
+    pub context_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeRcsMappingVerification {
+    Mapped,
+    GoogleConversationAmbiguous,
+    Refused,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeRcsTargetDecision {
+    Found {
+        google_conversation_id: String,
+        snapshot_token: String,
+    },
+    Ambiguous,
+    Unknown,
+    Unsupported,
+    NotFoundComplete,
+}
 
 #[derive(uniffi::Object)]
 /// A native-only, single-use preparation. It is not a transport permit.
@@ -22,6 +50,9 @@ pub struct NativeRcsSendPreparation {
 /// trusted native consumer forwards the bytes unchanged exactly once.
 pub struct NativeRcsCommittedSend {
     commit_json: String,
+    command_id: String,
+    tmp_id: String,
+    google_conversation_id: String,
 }
 
 #[derive(Serialize)]
@@ -163,7 +194,12 @@ fn serialize_commit(
 ) -> Result<Arc<NativeRcsCommittedSend>, peppy_client_core::Error> {
     let commit_json =
         serde_json::to_string(&projection).map_err(|_| peppy_client_core::Error::Database)?;
-    Ok(Arc::new(NativeRcsCommittedSend { commit_json }))
+    Ok(Arc::new(NativeRcsCommittedSend {
+        commit_json,
+        command_id: projection.command_id,
+        tmp_id: projection.tmp_id,
+        google_conversation_id: projection.target.google_conversation_id,
+    }))
 }
 
 #[uniffi::export]
@@ -171,6 +207,162 @@ impl NativeRcsCommittedSend {
     pub fn commit_json(&self) -> String {
         self.commit_json.clone()
     }
+
+    pub fn command_id(&self) -> String {
+        self.command_id.clone()
+    }
+
+    pub fn tmp_id(&self) -> String {
+        self.tmp_id.clone()
+    }
+
+    pub fn google_conversation_id(&self) -> String {
+        self.google_conversation_id.clone()
+    }
+}
+
+#[uniffi::export]
+pub fn rcs_canonicalizer_revision() -> u32 {
+    RCS_CANONICALIZER_REVISION
+}
+
+#[uniffi::export]
+pub fn gateway_next_rcs_context_tuple(
+    client: Arc<NativeClient>,
+    runtime_id: String,
+    run_generation: u64,
+    stream_epoch: u64,
+    pairing_evidence_id: String,
+) -> Result<NativeRcsContextTuple, MobileBindingsError> {
+    with_client(&client.client, |core| {
+        core.next_rcs_context_tuple(
+            &runtime_id,
+            run_generation,
+            stream_epoch,
+            &pairing_evidence_id,
+        )
+    })
+    .map(|tuple| NativeRcsContextTuple {
+        link_generation: tuple.link_generation,
+        session_generation: tuple.session_generation,
+        context_revision: tuple.context_revision,
+    })
+}
+
+#[uniffi::export]
+pub fn gateway_next_rcs_mapping_revision(
+    client: Arc<NativeClient>,
+    conversation_id: String,
+) -> Result<u64, MobileBindingsError> {
+    with_client(&client.client, |core| {
+        let conversation_id = conversation_id
+            .parse()
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid conversation id"))?;
+        core.next_rcs_mapping_revision(conversation_id)
+    })
+}
+
+#[uniffi::export]
+pub fn gateway_verify_rcs_mapping(
+    client: Arc<NativeClient>,
+    observation_json: String,
+    now_ms: i64,
+) -> Result<NativeRcsMappingVerification, MobileBindingsError> {
+    with_client(&client.client, |core| {
+        if observation_json.len() > RCS_NATIVE_JSON_CAP {
+            return Err(peppy_client_core::Error::InvalidRequest(
+                "observation too large",
+            ));
+        }
+        let observation = serde_json::from_str::<RcsMappingObservation>(&observation_json)
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid observation"))?;
+        core.verify_rcs_mapping(&observation, now_ms)
+    })
+    .map(|outcome| match outcome {
+        RcsMappingOutcome::Mapped(_) => NativeRcsMappingVerification::Mapped,
+        RcsMappingOutcome::Refused(RcsMappingRefusal::GoogleConversationAmbiguous) => {
+            NativeRcsMappingVerification::GoogleConversationAmbiguous
+        }
+        RcsMappingOutcome::Refused(_) => NativeRcsMappingVerification::Refused,
+    })
+}
+
+#[uniffi::export]
+pub fn gateway_classify_rcs_target(
+    client: Arc<NativeClient>,
+    conversation_id: String,
+    recipient: String,
+    snapshot_json: String,
+    now_ms: i64,
+) -> Result<NativeRcsTargetDecision, MobileBindingsError> {
+    with_client(&client.client, |core| {
+        if snapshot_json.len() > RCS_NATIVE_SNAPSHOT_CAP {
+            return Err(peppy_client_core::Error::InvalidRequest(
+                "snapshot too large",
+            ));
+        }
+        let conversation_id = conversation_id
+            .parse()
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid conversation id"))?;
+        core.classify_and_commit_rcs_target(conversation_id, &recipient, &snapshot_json, now_ms)
+    })
+    .map(|decision| match decision {
+        RcsTargetDecision::Found {
+            google_conversation_id,
+            snapshot_token,
+        } => NativeRcsTargetDecision::Found {
+            google_conversation_id,
+            snapshot_token,
+        },
+        RcsTargetDecision::Ambiguous { .. } => NativeRcsTargetDecision::Ambiguous,
+        RcsTargetDecision::Unknown { .. } => NativeRcsTargetDecision::Unknown,
+        RcsTargetDecision::Unsupported { .. } => NativeRcsTargetDecision::Unsupported,
+        RcsTargetDecision::NotFoundComplete { .. } => NativeRcsTargetDecision::NotFoundComplete,
+    })
+}
+
+#[uniffi::export]
+pub fn gateway_record_rcs_transport_ack(
+    client: Arc<NativeClient>,
+    command_id: String,
+    ack_at_ms: i64,
+) -> Result<(), MobileBindingsError> {
+    with_client(&client.client, |core| {
+        let command_id = command_id
+            .parse()
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid command id"))?;
+        core.record_rcs_transport_ack(command_id, ack_at_ms, "accepted")
+    })
+}
+
+#[uniffi::export]
+pub fn gateway_record_rcs_submitted(
+    client: Arc<NativeClient>,
+    command_id: String,
+) -> Result<(), MobileBindingsError> {
+    with_client(&client.client, |core| {
+        let command_id = command_id
+            .parse()
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid command id"))?;
+        core.record_rcs_submitted(command_id)
+    })
+    .map(|_| ())
+}
+
+#[uniffi::export]
+pub fn gateway_record_rcs_pre_effect_refusal(
+    client: Arc<NativeClient>,
+    command_id: String,
+    tmp_id: String,
+    google_conversation_id: String,
+) -> Result<(), MobileBindingsError> {
+    with_client(&client.client, |core| {
+        let command_id = command_id
+            .parse()
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid command id"))?;
+        core.record_native_rcs_pre_effect_refusal(command_id, &tmp_id, &google_conversation_id)
+    })
+    .map(|_| ())
 }
 
 #[cfg(test)]

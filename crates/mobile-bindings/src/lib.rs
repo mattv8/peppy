@@ -36,7 +36,12 @@ mod rcs_status;
 mod typing;
 
 pub use rcs_native::{
-    NativeRcsCommittedSend, NativeRcsSendPreparation, gateway_prepare_native_rcs_send,
+    NativeRcsCommittedSend, NativeRcsContextTuple, NativeRcsMappingVerification,
+    NativeRcsSendPreparation, NativeRcsTargetDecision, gateway_classify_rcs_target,
+    gateway_next_rcs_context_tuple, gateway_next_rcs_mapping_revision,
+    gateway_prepare_native_rcs_send, gateway_record_rcs_pre_effect_refusal,
+    gateway_record_rcs_submitted, gateway_record_rcs_transport_ack, gateway_verify_rcs_mapping,
+    rcs_canonicalizer_revision,
 };
 pub use rcs_status::{
     NativeRcsEligibility, NativeRcsEligibilityProjection, NativeRcsLinkState, NativeRcsLinkStatus,

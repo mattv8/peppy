@@ -1091,3 +1091,452 @@ fn native_preparation_refuses_nontext_command_without_an_attempt() {
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 }
+
+#[test]
+fn native_pre_effect_refusal_requires_the_exact_unacknowledged_rcs_attempt() {
+    let (_directory, _vault, config, gateway, command_id, observation) = rcs_command("peer-local");
+    let permit = gateway
+        .begin_rcs_send_attempt(command_id, &observation, 1_000)
+        .unwrap();
+    let tmp_id = permit.tmp_id().to_owned();
+    let google_conversation_id = permit.google_conversation_id().to_owned();
+    let outbox_before = gateway.pending_outbox().unwrap().len();
+
+    for (wrong_tmp_id, wrong_google_conversation_id) in [
+        ("wrong-tmp", google_conversation_id.as_str()),
+        (tmp_id.as_str(), "wrong-google-conversation"),
+    ] {
+        assert!(
+            gateway
+                .record_native_rcs_pre_effect_refusal(
+                    command_id,
+                    wrong_tmp_id,
+                    wrong_google_conversation_id,
+                )
+                .is_err()
+        );
+        let state: String = encrypted_connection(&config)
+            .query_row(
+                "SELECT state FROM attempts WHERE command_id=?",
+                [command_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "attempt_recorded");
+        assert_eq!(gateway.pending_outbox().unwrap().len(), outbox_before);
+    }
+
+    assert_eq!(
+        gateway
+            .record_native_rcs_pre_effect_refusal(command_id, &tmp_id, &google_conversation_id)
+            .unwrap(),
+        SendState::FailedBeforeSubmission
+    );
+    let outbox_after_failure = gateway.pending_outbox().unwrap().len();
+    assert_eq!(outbox_after_failure, outbox_before + 1);
+    assert_eq!(
+        gateway
+            .record_native_rcs_pre_effect_refusal(command_id, &tmp_id, &google_conversation_id)
+            .unwrap(),
+        SendState::FailedBeforeSubmission
+    );
+    assert_eq!(
+        gateway.pending_outbox().unwrap().len(),
+        outbox_after_failure
+    );
+
+    let (_directory, _vault, _config, acknowledged, command_id, observation) =
+        rcs_command("peer-local");
+    let permit = acknowledged
+        .begin_rcs_send_attempt(command_id, &observation, 1_000)
+        .unwrap();
+    acknowledged
+        .record_rcs_transport_ack(command_id, 1_001, "accepted")
+        .unwrap();
+    assert!(
+        acknowledged
+            .record_native_rcs_pre_effect_refusal(
+                command_id,
+                permit.tmp_id(),
+                permit.google_conversation_id()
+            )
+            .is_err()
+    );
+
+    for result in [SendResult::Submitted, SendResult::Sent] {
+        let (_directory, _vault, _config, gateway, command_id, observation) =
+            rcs_command("peer-local");
+        let permit = gateway
+            .begin_rcs_send_attempt(command_id, &observation, 1_000)
+            .unwrap();
+        gateway.record_send_result(command_id, result).unwrap();
+        assert!(
+            gateway
+                .record_native_rcs_pre_effect_refusal(
+                    command_id,
+                    permit.tmp_id(),
+                    permit.google_conversation_id()
+                )
+                .is_err()
+        );
+    }
+
+    let (_directory, _vault, config, gateway, command_id, observation) = rcs_command("peer-local");
+    let permit = gateway
+        .begin_rcs_send_attempt(command_id, &observation, 1_000)
+        .unwrap();
+    encrypted_connection(&config)
+        .execute(
+            "UPDATE attempts SET state='outcome_unknown' WHERE command_id=?",
+            [command_id.to_string()],
+        )
+        .unwrap();
+    assert!(
+        gateway
+            .record_native_rcs_pre_effect_refusal(
+                command_id,
+                permit.tmp_id(),
+                permit.google_conversation_id(),
+            )
+            .is_err()
+    );
+
+    let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+    assert!(
+        gateway
+            .record_native_rcs_pre_effect_refusal(command_id, "tmp", "google")
+            .is_err()
+    );
+}
+
+#[test]
+fn native_pre_effect_refusal_rolls_back_when_status_outbox_insert_aborts() {
+    let (_directory, _vault, config, gateway, command_id, observation) = rcs_command("peer-local");
+    let permit = gateway
+        .begin_rcs_send_attempt(command_id, &observation, 1_000)
+        .unwrap();
+    let connection = encrypted_connection(&config);
+    let state = || {
+        (
+            connection
+                .query_row(
+                    "SELECT state FROM attempts WHERE command_id=?",
+                    [command_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT state FROM send_status WHERE command_id=?",
+                    [command_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            connection
+                .query_row("SELECT COUNT(*) FROM outbox", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT v FROM metadata WHERE k='producer_sequence'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+    };
+    let before = state();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_native_refusal_outbox BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT, 'reject'); END;",
+        )
+        .unwrap();
+    assert!(matches!(
+        gateway.record_native_rcs_pre_effect_refusal(
+            command_id,
+            permit.tmp_id(),
+            permit.google_conversation_id(),
+        ),
+        Err(Error::Database)
+    ));
+    assert_eq!(state(), before);
+    connection
+        .execute_batch("DROP TRIGGER reject_native_refusal_outbox")
+        .unwrap();
+    assert_eq!(
+        gateway
+            .record_native_rcs_pre_effect_refusal(
+                command_id,
+                permit.tmp_id(),
+                permit.google_conversation_id(),
+            )
+            .unwrap(),
+        SendState::FailedBeforeSubmission
+    );
+    let after = state();
+    assert_eq!(after.0, "failed_before_submission");
+    assert_eq!(after.1, "failed_before_submission");
+    assert_eq!(after.2, before.2 + 1);
+    assert_eq!(
+        after.3.parse::<u64>().unwrap(),
+        before.3.parse::<u64>().unwrap() + 1
+    );
+}
+
+// Compare complete rows (including ciphertext and producer metadata), not only counts.
+fn refusal_persisted_rows(config: &ClientConfig) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    let connection = encrypted_connection(config);
+    [
+        "attempts",
+        "rcs_send_ledger",
+        "send_status",
+        "outbox",
+        "metadata",
+    ]
+    .into_iter()
+    .map(|table| {
+        let mut query = connection
+            .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+            .unwrap();
+        let columns = query.column_count();
+        query
+            .query_map([], |row| {
+                (0..columns).map(|column| row.get(column)).collect()
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    })
+    .collect()
+}
+
+fn assert_refusal_unchanged(
+    gateway: &Client,
+    config: &ClientConfig,
+    command_id: CommandId,
+    tmp_id: &str,
+    google_id: &str,
+) {
+    let before = refusal_persisted_rows(config);
+    assert!(
+        gateway
+            .record_native_rcs_pre_effect_refusal(command_id, tmp_id, google_id)
+            .is_err()
+    );
+    assert_eq!(refusal_persisted_rows(config), before);
+}
+
+#[test]
+fn native_refusal_rechecks_identity_and_ack_even_for_an_already_failed_attempt() {
+    let (directory, vault, config, gateway, command_id, observation) = rcs_command("peer-local");
+    let first = gateway
+        .begin_rcs_send_attempt(command_id, &observation, 1_000)
+        .unwrap();
+
+    // Receive and admit a second real command in the same gateway database.
+    let sender_config = ClientConfig {
+        database_path: directory.path().join("second-sender.db"),
+        vault_id: config.vault_id,
+        device_id: DeviceId::new(),
+    };
+    let sender = unlocked(&sender_config, &vault);
+    let second = sender
+        .queue_send(
+            OutgoingSms {
+                conversation_id: first.conversation_id(),
+                recipients: vec!["peer-local".into()],
+                body: "second command".into(),
+            },
+            GatewayRoute::RcsLink {
+                gateway_device_id: config.device_id,
+            },
+        )
+        .unwrap();
+    let mut cursor = gateway.receive_cursor().unwrap().0;
+    for envelope in sender.pending_outbox().unwrap() {
+        cursor += 1;
+        gateway.ingest(&envelope, Cursor(cursor)).unwrap();
+    }
+    gateway.apply_pending(100).unwrap();
+    let second = gateway
+        .begin_rcs_send_attempt(second.command_id, &observation, 1_000)
+        .unwrap();
+    assert_ne!(first.tmp_id(), second.tmp_id());
+    assert_refusal_unchanged(
+        &gateway,
+        &config,
+        first.command_id(),
+        second.tmp_id(),
+        second.google_conversation_id(),
+    );
+    assert_refusal_unchanged(
+        &gateway,
+        &config,
+        CommandId::new(),
+        first.tmp_id(),
+        first.google_conversation_id(),
+    );
+    assert_refusal_unchanged(
+        &gateway,
+        &config,
+        command_id,
+        "wrong-tmp",
+        first.google_conversation_id(),
+    );
+    assert_refusal_unchanged(
+        &gateway,
+        &config,
+        command_id,
+        first.tmp_id(),
+        "wrong-google",
+    );
+    gateway
+        .record_native_rcs_pre_effect_refusal(
+            command_id,
+            first.tmp_id(),
+            first.google_conversation_id(),
+        )
+        .unwrap();
+    assert_refusal_unchanged(
+        &gateway,
+        &config,
+        command_id,
+        "wrong-tmp",
+        first.google_conversation_id(),
+    );
+    assert_refusal_unchanged(
+        &gateway,
+        &config,
+        command_id,
+        first.tmp_id(),
+        "wrong-google",
+    );
+    let before = refusal_persisted_rows(&config);
+    assert_eq!(
+        gateway
+            .record_native_rcs_pre_effect_refusal(
+                command_id,
+                first.tmp_id(),
+                first.google_conversation_id()
+            )
+            .unwrap(),
+        SendState::FailedBeforeSubmission
+    );
+    assert_eq!(refusal_persisted_rows(&config), before);
+    gateway
+        .record_rcs_transport_ack(command_id, 1_001, "accepted")
+        .unwrap();
+    assert_refusal_unchanged(
+        &gateway,
+        &config,
+        command_id,
+        first.tmp_id(),
+        first.google_conversation_id(),
+    );
+}
+
+#[test]
+fn native_refusal_cannot_rewrite_acknowledged_submitted_sent_delivered_or_reopened_attempts() {
+    for result in [
+        SendResult::Submitted,
+        SendResult::Sent,
+        SendResult::Delivered,
+    ] {
+        let (_directory, _vault, config, gateway, command_id, observation) =
+            rcs_command("peer-local");
+        let permit = gateway
+            .begin_rcs_send_attempt(command_id, &observation, 1_000)
+            .unwrap();
+        gateway.record_send_result(command_id, result).unwrap();
+        assert_refusal_unchanged(
+            &gateway,
+            &config,
+            command_id,
+            permit.tmp_id(),
+            permit.google_conversation_id(),
+        );
+    }
+    let (_directory, vault, config, gateway, command_id, observation) = rcs_command("peer-local");
+    let permit = gateway
+        .begin_rcs_send_attempt(command_id, &observation, 1_000)
+        .unwrap();
+    gateway
+        .record_rcs_transport_ack(command_id, 1_001, "accepted")
+        .unwrap();
+    assert_refusal_unchanged(
+        &gateway,
+        &config,
+        command_id,
+        permit.tmp_id(),
+        permit.google_conversation_id(),
+    );
+    drop(gateway);
+    let reopened = unlocked(&config, &vault);
+    assert!(matches!(
+        reopened
+            .begin_automatic_send_attempt(command_id, Some(&observation), 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::AlreadyAttempted(SendState::OutcomeUnknown)
+    ));
+    assert_refusal_unchanged(
+        &reopened,
+        &config,
+        command_id,
+        permit.tmp_id(),
+        permit.google_conversation_id(),
+    );
+
+    // Reopen without an ack too: otherwise the ack check alone masks the state fence.
+    let (_directory, vault, config, gateway, command_id, observation) = rcs_command("peer-local");
+    let permit = gateway
+        .begin_rcs_send_attempt(command_id, &observation, 1_000)
+        .unwrap();
+    drop(gateway);
+    let reopened = unlocked(&config, &vault);
+    assert!(matches!(
+        reopened
+            .begin_automatic_send_attempt(command_id, Some(&observation), 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::AlreadyAttempted(SendState::OutcomeUnknown)
+    ));
+    assert_refusal_unchanged(
+        &reopened,
+        &config,
+        command_id,
+        permit.tmp_id(),
+        permit.google_conversation_id(),
+    );
+}
+
+#[test]
+fn native_refusal_rejects_real_carrier_attempt_and_retained_ledger_corruption() {
+    let (_directory, _vault, config, gateway, command_id) = carrier_command();
+    assert!(matches!(
+        gateway.begin_send_attempt_at(command_id, 1_000).unwrap(),
+        PermitDecision::Permit(_)
+    ));
+    assert_eq!(attempt_count(&config, command_id), 1);
+    assert_refusal_unchanged(&gateway, &config, command_id, "tmp", "google");
+
+    // Deliberate corruption fixture: retain an exact RCS ledger while changing only
+    // finalized_transport. A normal carrier attempt has no RCS ledger and cannot
+    // independently discriminate the finalized_transport predicate.
+    let (_directory, _vault, config, gateway, command_id, observation) = rcs_command("peer-local");
+    let permit = gateway
+        .begin_rcs_send_attempt(command_id, &observation, 1_000)
+        .unwrap();
+    encrypted_connection(&config)
+        .execute(
+            "UPDATE attempts SET finalized_transport='carrier' WHERE command_id=?",
+            [command_id.to_string()],
+        )
+        .unwrap();
+    assert_refusal_unchanged(
+        &gateway,
+        &config,
+        command_id,
+        permit.tmp_id(),
+        permit.google_conversation_id(),
+    );
+}

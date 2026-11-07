@@ -4165,6 +4165,56 @@ impl Client {
         self.record_send_result(command_id, SendResult::Submitted)
     }
 
+    /// Records trusted native proof that the exact RCS attempt had no transport effect.
+    pub fn record_native_rcs_pre_effect_refusal(
+        &self,
+        command_id: CommandId,
+        tmp_id: &str,
+        google_conversation_id: &str,
+    ) -> Result<SendState, Error> {
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let matched: Option<()> = tx
+            .query_row(
+                "SELECT 1 FROM attempts a JOIN rcs_send_ledger r ON r.command_id=a.command_id WHERE a.command_id=? AND a.finalized_transport='rcs' AND r.tmp_id=? AND r.google_conversation_id=?",
+                params![command_id.to_string(), tmp_id, google_conversation_id],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if matched.is_none() {
+            return Err(Error::NoAttempt);
+        }
+        let acknowledged: Option<i64> = tx.query_row(
+            "SELECT transport_ack_at_ms FROM rcs_send_ledger WHERE command_id=?",
+            [command_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if acknowledged.is_some() {
+            return Err(Error::InvalidRequest("RCS transport already acknowledged"));
+        }
+        let current = attempt_state(&tx, command_id)?.ok_or(Error::NoAttempt)?;
+        if current == SendState::FailedBeforeSubmission {
+            return Ok(current);
+        }
+        if current != SendState::AttemptRecorded {
+            return Err(Error::IllegalTransition {
+                from: current,
+                to: SendState::FailedBeforeSubmission,
+            });
+        }
+        tx.execute(
+            "UPDATE attempts SET state=? WHERE command_id=?",
+            params![
+                state_code(SendState::FailedBeforeSubmission),
+                command_id.to_string()
+            ],
+        )?;
+        emit_status(&tx, &ctx, command_id, SendState::FailedBeforeSubmission)?;
+        tx.commit()?;
+        Ok(SendState::FailedBeforeSubmission)
+    }
+
     /// Creates a new local RCS command after the original attempt is explicitly known unknown.
     /// The new command has no permit until it is received through the normal command ledger.
     pub fn resend_rcs_outcome_unknown(&self, command_id: CommandId) -> Result<QueuedSend, Error> {

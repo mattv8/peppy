@@ -4818,7 +4818,13 @@ public func FfiConverterTypeNativePlaintextHandle_lower(_ value: NativePlaintext
  */
 public protocol NativeRcsCommittedSendProtocol: AnyObject, Sendable {
     
+    func commandId()  -> String
+    
     func commitJson()  -> String
+    
+    func googleConversationId()  -> String
+    
+    func tmpId()  -> String
     
 }
 /**
@@ -4880,10 +4886,37 @@ open class NativeRcsCommittedSend: NativeRcsCommittedSendProtocol, @unchecked Se
     
 
     
+open func commandId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativercscommittedsend_command_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
 open func commitJson() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativercscommittedsend_commit_json(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func googleConversationId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativercscommittedsend_google_conversation_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func tmpId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativercscommittedsend_tmp_id(
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
@@ -9532,6 +9565,64 @@ public func FfiConverterTypeNativeRawSnapshotRecord_lower(_ value: NativeRawSnap
 }
 
 
+public struct NativeRcsContextTuple: Equatable, Hashable {
+    public var linkGeneration: UInt64
+    public var sessionGeneration: UInt64
+    public var contextRevision: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(linkGeneration: UInt64, sessionGeneration: UInt64, contextRevision: UInt64) {
+        self.linkGeneration = linkGeneration
+        self.sessionGeneration = sessionGeneration
+        self.contextRevision = contextRevision
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeRcsContextTuple: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRcsContextTuple: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsContextTuple {
+        return
+            try NativeRcsContextTuple(
+                linkGeneration: FfiConverterUInt64.read(from: &buf), 
+                sessionGeneration: FfiConverterUInt64.read(from: &buf), 
+                contextRevision: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeRcsContextTuple, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.linkGeneration, into: &buf)
+        FfiConverterUInt64.write(value.sessionGeneration, into: &buf)
+        FfiConverterUInt64.write(value.contextRevision, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsContextTuple_lift(_ buf: RustBuffer) throws -> NativeRcsContextTuple {
+    return try FfiConverterTypeNativeRcsContextTuple.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsContextTuple_lower(_ value: NativeRcsContextTuple) -> RustBuffer {
+    return FfiConverterTypeNativeRcsContextTuple.lower(value)
+}
+
+
 public struct NativeRcsEligibilityProjection: Equatable, Hashable {
     public var conversationId: String
     public var gatewayDeviceId: String
@@ -13710,6 +13801,170 @@ public func FfiConverterTypeNativeRcsLinkState_lower(_ value: NativeRcsLinkState
 
 
 
+public enum NativeRcsMappingVerification: Equatable, Hashable {
+    
+    case mapped
+    case googleConversationAmbiguous
+    case refused
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeRcsMappingVerification: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRcsMappingVerification: FfiConverterRustBuffer {
+    typealias SwiftType = NativeRcsMappingVerification
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsMappingVerification {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .mapped
+        
+        case 2: return .googleConversationAmbiguous
+        
+        case 3: return .refused
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeRcsMappingVerification, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .mapped:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .googleConversationAmbiguous:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .refused:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsMappingVerification_lift(_ buf: RustBuffer) throws -> NativeRcsMappingVerification {
+    return try FfiConverterTypeNativeRcsMappingVerification.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsMappingVerification_lower(_ value: NativeRcsMappingVerification) -> RustBuffer {
+    return FfiConverterTypeNativeRcsMappingVerification.lower(value)
+}
+
+
+
+
+public enum NativeRcsTargetDecision: Equatable, Hashable {
+    
+    case found(googleConversationId: String, snapshotToken: String
+    )
+    case ambiguous
+    case unknown
+    case unsupported
+    case notFoundComplete
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeRcsTargetDecision: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRcsTargetDecision: FfiConverterRustBuffer {
+    typealias SwiftType = NativeRcsTargetDecision
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsTargetDecision {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .found(googleConversationId: try FfiConverterString.read(from: &buf), snapshotToken: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 2: return .ambiguous
+        
+        case 3: return .unknown
+        
+        case 4: return .unsupported
+        
+        case 5: return .notFoundComplete
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeRcsTargetDecision, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .found(googleConversationId,snapshotToken):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(googleConversationId, into: &buf)
+            FfiConverterString.write(snapshotToken, into: &buf)
+            
+        
+        case .ambiguous:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .unsupported:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .notFoundComplete:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsTargetDecision_lift(_ buf: RustBuffer) throws -> NativeRcsTargetDecision {
+    return try FfiConverterTypeNativeRcsTargetDecision.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsTargetDecision_lower(_ value: NativeRcsTargetDecision) -> RustBuffer {
+    return FfiConverterTypeNativeRcsTargetDecision.lower(value)
+}
+
+
+
+
 public enum NativeRemoteAttachmentState: Equatable, Hashable {
     
     case available
@@ -15974,6 +16229,39 @@ public func ownerPhoneShouldRotate(stage: NativeOwnerPhoneStage, expiresInSecond
     )
 })
 }
+public func gatewayClassifyRcsTarget(client: NativeClient, conversationId: String, recipient: String, snapshotJson: String, nowMs: Int64)throws  -> NativeRcsTargetDecision  {
+    return try  FfiConverterTypeNativeRcsTargetDecision_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_classify_rcs_target(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(conversationId),
+        FfiConverterString.lower(recipient),
+        FfiConverterString.lower(snapshotJson),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+public func gatewayNextRcsContextTuple(client: NativeClient, runtimeId: String, runGeneration: UInt64, streamEpoch: UInt64, pairingEvidenceId: String)throws  -> NativeRcsContextTuple  {
+    return try  FfiConverterTypeNativeRcsContextTuple_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_next_rcs_context_tuple(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(runtimeId),
+        FfiConverterUInt64.lower(runGeneration),
+        FfiConverterUInt64.lower(streamEpoch),
+        FfiConverterString.lower(pairingEvidenceId),uniffiCallStatus
+    )
+})
+}
+public func gatewayNextRcsMappingRevision(client: NativeClient, conversationId: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_next_rcs_mapping_revision(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(conversationId),uniffiCallStatus
+    )
+})
+}
 /**
  * Captures core-owned stored mapping facts for a trusted native observation.
  */
@@ -15984,6 +16272,50 @@ public func gatewayPrepareNativeRcsSend(client: NativeClient, commandId: String,
         FfiConverterTypeNativeClient_lower(client),
         FfiConverterString.lower(commandId),
         FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+public func gatewayRecordRcsPreEffectRefusal(client: NativeClient, commandId: String, tmpId: String, googleConversationId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_pre_effect_refusal(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(commandId),
+        FfiConverterString.lower(tmpId),
+        FfiConverterString.lower(googleConversationId),uniffiCallStatus
+    )
+}
+}
+public func gatewayRecordRcsSubmitted(client: NativeClient, commandId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_submitted(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(commandId),uniffiCallStatus
+    )
+}
+}
+public func gatewayRecordRcsTransportAck(client: NativeClient, commandId: String, ackAtMs: Int64)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_transport_ack(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(commandId),
+        FfiConverterInt64.lower(ackAtMs),uniffiCallStatus
+    )
+}
+}
+public func gatewayVerifyRcsMapping(client: NativeClient, observationJson: String, nowMs: Int64)throws  -> NativeRcsMappingVerification  {
+    return try  FfiConverterTypeNativeRcsMappingVerification_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_verify_rcs_mapping(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(observationJson),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+public func rcsCanonicalizerRevision() -> UInt32  {
+    return try!  FfiConverterUInt32.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_rcs_canonicalizer_revision(uniffiCallStatus
     )
 })
 }
@@ -16126,7 +16458,31 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_func_owner_phone_should_rotate() != 43566) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_classify_rcs_target() != 39946) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_context_tuple() != 10501) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_mapping_revision() != 61152) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_prepare_native_rcs_send() != 22733) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_pre_effect_refusal() != 16858) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_submitted() != 28724) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_transport_ack() != 60251) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_mapping() != 16011) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_rcs_canonicalizer_revision() != 21371) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_outbox() != 17788) {
@@ -16876,7 +17232,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentidentity_metadata() != 35415) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativercscommittedsend_command_id() != 32645) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativercscommittedsend_commit_json() != 35277) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativercscommittedsend_google_conversation_id() != 14157) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativercscommittedsend_tmp_id() != 44828) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativercssendpreparation_begin() != 16625) {

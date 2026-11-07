@@ -757,7 +757,23 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_owner_phone_should_rotate(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_classify_rcs_target(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_context_tuple(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_mapping_revision(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_prepare_native_rcs_send(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_pre_effect_refusal(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_submitted(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_transport_ack(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_mapping(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_rcs_canonicalizer_revision(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_outbox(
     ): Int
@@ -1257,7 +1273,13 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentidentity_metadata(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativercscommittedsend_command_id(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativercscommittedsend_commit_json(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativercscommittedsend_google_conversation_id(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativercscommittedsend_tmp_id(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativercssendpreparation_begin(
     ): Int
@@ -1813,7 +1835,13 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_free_nativercscommittedsend(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativercscommittedsend_command_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativercscommittedsend_commit_json(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativercscommittedsend_google_conversation_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativercscommittedsend_tmp_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_clone_nativercssendpreparation(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -1905,8 +1933,24 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_func_owner_phone_should_rotate(`stage`: RustBuffer.ByValue,`expiresInSeconds`: Int,`active`: RustBuffer.ByValue,`requested`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_classify_rcs_target(`client`: Long,`conversationId`: RustBuffer.ByValue,`recipient`: RustBuffer.ByValue,`snapshotJson`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_next_rcs_context_tuple(`client`: Long,`runtimeId`: RustBuffer.ByValue,`runGeneration`: Long,`streamEpoch`: Long,`pairingEvidenceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_next_rcs_mapping_revision(`client`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_prepare_native_rcs_send(`client`: Long,`commandId`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_pre_effect_refusal(`client`: Long,`commandId`: RustBuffer.ByValue,`tmpId`: RustBuffer.ByValue,`googleConversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_submitted(`client`: Long,`commandId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_transport_ack(`client`: Long,`commandId`: RustBuffer.ByValue,`ackAtMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_verify_rcs_mapping(`client`: Long,`observationJson`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_rcs_canonicalizer_revision(uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
     external fun ffi_peppy_mobile_bindings_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun ffi_peppy_mobile_bindings_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2149,7 +2193,31 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_owner_phone_should_rotate() and 0xFFFF) != 43566) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_classify_rcs_target() and 0xFFFF) != 39946) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_context_tuple() and 0xFFFF) != 10501) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_mapping_revision() and 0xFFFF) != 61152) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_prepare_native_rcs_send() and 0xFFFF) != 22733) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_pre_effect_refusal() and 0xFFFF) != 16858) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_submitted() and 0xFFFF) != 28724) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_transport_ack() and 0xFFFF) != 60251) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_mapping() and 0xFFFF) != 16011) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_rcs_canonicalizer_revision() and 0xFFFF) != 21371) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_outbox() and 0xFFFF) != 17788) {
@@ -2899,7 +2967,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentidentity_metadata() and 0xFFFF) != 35415) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativercscommittedsend_command_id() and 0xFFFF) != 32645) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativercscommittedsend_commit_json() and 0xFFFF) != 35277) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativercscommittedsend_google_conversation_id() and 0xFFFF) != 14157) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativercscommittedsend_tmp_id() and 0xFFFF) != 44828) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativercssendpreparation_begin() and 0xFFFF) != 16625) {
@@ -9731,7 +9808,13 @@ public object FfiConverterTypeNativePlaintextHandle: FfiConverter<NativePlaintex
  */
 public interface NativeRcsCommittedSendInterface {
     
+    fun `commandId`(): kotlin.String
+    
     fun `commitJson`(): kotlin.String
+    
+    fun `googleConversationId`(): kotlin.String
+    
+    fun `tmpId`(): kotlin.String
     
     companion object
 }
@@ -9843,11 +9926,50 @@ open class NativeRcsCommittedSend: Disposable, AutoCloseable, NativeRcsCommitted
         }
     }
 
+    override fun `commandId`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativercscommittedsend_command_id(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
     override fun `commitJson`(): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativercscommittedsend_commit_json(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `googleConversationId`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativercscommittedsend_google_conversation_id(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `tmpId`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativercscommittedsend_tmp_id(
         it,
         _status)
 }
@@ -13707,6 +13829,49 @@ public object FfiConverterTypeNativeRawSnapshotRecord: FfiConverterRustBuffer<Na
 
 
 
+data class NativeRcsContextTuple (
+    var `linkGeneration`: kotlin.ULong
+    , 
+    var `sessionGeneration`: kotlin.ULong
+    , 
+    var `contextRevision`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsContextTuple: FfiConverterRustBuffer<NativeRcsContextTuple> {
+    override fun read(buf: ByteBuffer): NativeRcsContextTuple {
+        return NativeRcsContextTuple(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeRcsContextTuple) = (
+            FfiConverterULong.allocationSize(value.`linkGeneration`) +
+            FfiConverterULong.allocationSize(value.`sessionGeneration`) +
+            FfiConverterULong.allocationSize(value.`contextRevision`)
+    )
+
+    override fun write(value: NativeRcsContextTuple, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`linkGeneration`, buf)
+            FfiConverterULong.write(value.`sessionGeneration`, buf)
+            FfiConverterULong.write(value.`contextRevision`, buf)
+    }
+}
+
+
+
 data class NativeRcsEligibilityProjection (
     var `conversationId`: kotlin.String
     , 
@@ -16636,6 +16801,160 @@ public object FfiConverterTypeNativeRcsLinkState: FfiConverterRustBuffer<NativeR
 
 
 
+enum class NativeRcsMappingVerification {
+    
+    MAPPED,
+    GOOGLE_CONVERSATION_AMBIGUOUS,
+    REFUSED;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsMappingVerification: FfiConverterRustBuffer<NativeRcsMappingVerification> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeRcsMappingVerification.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeRcsMappingVerification) = 4UL
+
+    override fun write(value: NativeRcsMappingVerification, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+sealed class NativeRcsTargetDecision {
+    
+    data class Found(
+        val `googleConversationId`: kotlin.String, 
+        val `snapshotToken`: kotlin.String) : NativeRcsTargetDecision()
+        
+    {
+        
+
+        companion object
+    }
+    
+    object Ambiguous : NativeRcsTargetDecision()
+    
+    
+    object Unknown : NativeRcsTargetDecision()
+    
+    
+    object Unsupported : NativeRcsTargetDecision()
+    
+    
+    object NotFoundComplete : NativeRcsTargetDecision()
+    
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsTargetDecision : FfiConverterRustBuffer<NativeRcsTargetDecision>{
+    override fun read(buf: ByteBuffer): NativeRcsTargetDecision {
+        return when(buf.getInt()) {
+            1 -> NativeRcsTargetDecision.Found(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                )
+            2 -> NativeRcsTargetDecision.Ambiguous
+            3 -> NativeRcsTargetDecision.Unknown
+            4 -> NativeRcsTargetDecision.Unsupported
+            5 -> NativeRcsTargetDecision.NotFoundComplete
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: NativeRcsTargetDecision): ULong = when(value) {
+        is NativeRcsTargetDecision.Found -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`googleConversationId`)
+                + FfiConverterString.allocationSize(value.`snapshotToken`)
+            )
+        }
+        is NativeRcsTargetDecision.Ambiguous -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is NativeRcsTargetDecision.Unknown -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is NativeRcsTargetDecision.Unsupported -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is NativeRcsTargetDecision.NotFoundComplete -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: NativeRcsTargetDecision, buf: ByteBuffer) {
+        when(value) {
+            is NativeRcsTargetDecision.Found -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`googleConversationId`, buf)
+                FfiConverterString.write(value.`snapshotToken`, buf)
+                Unit
+            }
+            is NativeRcsTargetDecision.Ambiguous -> {
+                buf.putInt(2)
+                Unit
+            }
+            is NativeRcsTargetDecision.Unknown -> {
+                buf.putInt(3)
+                Unit
+            }
+            is NativeRcsTargetDecision.Unsupported -> {
+                buf.putInt(4)
+                Unit
+            }
+            is NativeRcsTargetDecision.NotFoundComplete -> {
+                buf.putInt(5)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
 enum class NativeRemoteAttachmentState {
     
     AVAILABLE,
@@ -18828,6 +19147,51 @@ public object FfiConverterSequenceTypeNativeSmsScanPlan: FfiConverterRustBuffer<
     }
     
 
+    @Throws(MobileBindingsException::class) fun `gatewayClassifyRcsTarget`(`client`: NativeClient, `conversationId`: kotlin.String, `recipient`: kotlin.String, `snapshotJson`: kotlin.String, `nowMs`: kotlin.Long): NativeRcsTargetDecision {
+            return FfiConverterTypeNativeRcsTargetDecision.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_classify_rcs_target(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`conversationId`),
+        FfiConverterString.lower(`recipient`),
+        FfiConverterString.lower(`snapshotJson`),
+        FfiConverterLong.lower(`nowMs`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `gatewayNextRcsContextTuple`(`client`: NativeClient, `runtimeId`: kotlin.String, `runGeneration`: kotlin.ULong, `streamEpoch`: kotlin.ULong, `pairingEvidenceId`: kotlin.String): NativeRcsContextTuple {
+            return FfiConverterTypeNativeRcsContextTuple.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_next_rcs_context_tuple(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`runtimeId`),
+        FfiConverterULong.lower(`runGeneration`),
+        FfiConverterULong.lower(`streamEpoch`),
+        FfiConverterString.lower(`pairingEvidenceId`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `gatewayNextRcsMappingRevision`(`client`: NativeClient, `conversationId`: kotlin.String): kotlin.ULong {
+            return FfiConverterULong.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_next_rcs_mapping_revision(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`conversationId`),_status)
+}
+    )
+    }
+    
+
         /**
          * Captures core-owned stored mapping facts for a trusted native observation.
          */
@@ -18840,6 +19204,69 @@ public object FfiConverterSequenceTypeNativeSmsScanPlan: FfiConverterRustBuffer<
         FfiConverterTypeNativeClient.lower(`client`),
         FfiConverterString.lower(`commandId`),
         FfiConverterLong.lower(`nowMs`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `gatewayRecordRcsPreEffectRefusal`(`client`: NativeClient, `commandId`: kotlin.String, `tmpId`: kotlin.String, `googleConversationId`: kotlin.String)
+        = 
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_pre_effect_refusal(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`commandId`),
+        FfiConverterString.lower(`tmpId`),
+        FfiConverterString.lower(`googleConversationId`),_status)
+}
+    
+    
+
+    @Throws(MobileBindingsException::class) fun `gatewayRecordRcsSubmitted`(`client`: NativeClient, `commandId`: kotlin.String)
+        = 
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_submitted(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`commandId`),_status)
+}
+    
+    
+
+    @Throws(MobileBindingsException::class) fun `gatewayRecordRcsTransportAck`(`client`: NativeClient, `commandId`: kotlin.String, `ackAtMs`: kotlin.Long)
+        = 
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_transport_ack(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`commandId`),
+        FfiConverterLong.lower(`ackAtMs`),_status)
+}
+    
+    
+
+    @Throws(MobileBindingsException::class) fun `gatewayVerifyRcsMapping`(`client`: NativeClient, `observationJson`: kotlin.String, `nowMs`: kotlin.Long): NativeRcsMappingVerification {
+            return FfiConverterTypeNativeRcsMappingVerification.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_verify_rcs_mapping(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`observationJson`),
+        FfiConverterLong.lower(`nowMs`),_status)
+}
+    )
+    }
+    
+ fun `rcsCanonicalizerRevision`(): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_rcs_canonicalizer_revision(
+    
+        _status)
 }
     )
     }
