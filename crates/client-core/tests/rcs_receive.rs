@@ -228,6 +228,70 @@ fn history_tokens_are_canonical_opaque_values() {
 }
 
 #[test]
+fn duplicate_link_identity_advances_a_valid_checkpoint_and_rejected_writes_do_not() {
+    let (_directory, client, conversation_id, config) = client();
+    let owner = client
+        .begin_rcs_link_ownership(conversation_id, "initial", 0)
+        .unwrap();
+    assert_eq!(
+        client
+            .record_rcs_link_identity(
+                conversation_id,
+                owner.ownership_generation,
+                "message",
+                "conversation",
+                Some("first"),
+            )
+            .unwrap(),
+        RcsIdentityOutcome::Recorded
+    );
+    assert_eq!(
+        client
+            .record_rcs_link_identity(
+                conversation_id,
+                owner.ownership_generation,
+                "message",
+                "conversation",
+                Some("second"),
+            )
+            .unwrap(),
+        RcsIdentityOutcome::Duplicate
+    );
+    drop(client);
+    let reopened = open(&config);
+    assert_eq!(
+        reopened
+            .rcs_receive_state(conversation_id)
+            .unwrap()
+            .unwrap()
+            .history_token
+            .as_deref(),
+        Some("second")
+    );
+    assert_eq!(
+        reopened
+            .record_rcs_link_identity(
+                conversation_id,
+                owner.ownership_generation + 1,
+                "message",
+                "conversation",
+                Some("rejected"),
+            )
+            .unwrap(),
+        RcsIdentityOutcome::Rejected(RcsReceiveCode::OwnershipStale)
+    );
+    assert_eq!(
+        reopened
+            .rcs_receive_state(conversation_id)
+            .unwrap()
+            .unwrap()
+            .history_token
+            .as_deref(),
+        Some("second")
+    );
+}
+
+#[test]
 fn identity_is_scoped_to_the_google_conversation_and_stale_writes_are_refused() {
     let (_directory, client, first, _config) = client();
     let second = ConversationId::new();

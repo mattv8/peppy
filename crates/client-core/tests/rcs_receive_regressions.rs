@@ -162,21 +162,53 @@ fn matched_duplicate_page_advances_token_and_publication_failure_is_atomic() {
             .as_deref(),
         Some("B")
     );
+    let before_unchanged_duplicate: i64 = connection
+        .query_row("SELECT COUNT(*) FROM outbox", [], |row| row.get(0))
+        .unwrap();
+    let mut unchanged = record("echo");
+    unchanged.direction = Direction::Outgoing;
+    unchanged.tmp_id = Some("tmp".into());
+    unchanged.history_token = Some("C".into());
+    unchanged.sent_at_ms = Some(now());
+    unchanged.rcs_reported = true;
+    assert_eq!(
+        reopened
+            .ingest_rcs_projected_record(conversation, owner.ownership_generation, unchanged)
+            .unwrap(),
+        RcsReceiveOutcome::Duplicate
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM outbox", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        before_unchanged_duplicate
+    );
+    assert_eq!(
+        reopened
+            .rcs_receive_state(conversation)
+            .unwrap()
+            .unwrap()
+            .history_token
+            .as_deref(),
+        Some("C")
+    );
 
     connection.execute_batch("CREATE TRIGGER reject_rcs_fact BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT, 'reject'); END;").unwrap();
     let before = receive_snapshot(&connection, conversation);
     let mut failed = record("failed");
     failed.direction = Direction::Outgoing;
     failed.tmp_id = Some("tmp".into());
-    failed.history_token = Some("C".into());
+    failed.history_token = Some("D".into());
     failed.sent_at_ms = Some(now());
+    failed.e2ee_reported = Some(true);
     assert!(
         reopened
             .ingest_rcs_projected_record(conversation, owner.ownership_generation, failed)
             .is_err()
     );
     assert_eq!(receive_snapshot(&connection, conversation), before);
-    // Reverting src/rcs_receive.rs checkpoint_record call in the Duplicate tmp-match branch fails token B.
+    // Reverting the duplicate checkpoint or no-op fact publication fences fails token C or the count.
 }
 
 #[test]
@@ -671,6 +703,42 @@ fn opened_fact_only_payload_contains_no_provider_identity() {
     assert!(encoded.get("google_message_id").is_none());
     assert!(encoded.get("google_conversation_id").is_none());
     assert!(encoded.get("tmp_id").is_none());
+}
+
+#[test]
+fn known_rcs_payload_variants_apply_and_malformed_variants_do_not_deserialize() {
+    let (directory, vault, _config, client, conversation, owner) = fixture();
+    client
+        .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("valid"))
+        .unwrap();
+    client
+        .apply_rcs_projected_status(
+            conversation,
+            owner.ownership_generation,
+            status("valid", None, RcsProjectedStatus::Sent),
+        )
+        .unwrap();
+    let message_id = only_message(&client, conversation)
+        .payload
+        .record
+        .message_id;
+    let peer = unlocked(&config(&directory, "valid-peer", &vault), &vault);
+    let mut server = Server::default();
+    server.upload(&client);
+    assert_eq!(server.sync(&peer).quarantined, 0);
+    assert_eq!(peer.rcs_message_reported(message_id).unwrap(), Some(true));
+    assert_eq!(
+        peer.rcs_message_status(message_id).unwrap().unwrap().status,
+        RcsMessageStatus::Sent
+    );
+
+    for payload in [
+        serde_json::json!({"kind":"rcs_message_reported","message_id":7}),
+        serde_json::json!({"kind":"rcs_message_status","message_id":7}),
+    ] {
+        assert!(serde_json::from_value::<PrivatePayload>(payload).is_err());
+    }
+    assert!(serde_json::from_str::<PrivatePayload>(r#"{"kind":"future_rcs_fact"}"#).is_err());
 }
 
 #[derive(Clone, Copy, Debug)]

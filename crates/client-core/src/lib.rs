@@ -3571,7 +3571,7 @@ impl Client {
             Vec::new()
         } else {
             let mut query = tx.prepare(&format!(
-                "SELECT LENGTH(wire),cursor,wire,historical FROM journal WHERE status='pending' AND cursor<=?1 AND key_epoch IN ({epochs}) ORDER BY cursor LIMIT ?2"
+                "SELECT LENGTH(wire),cursor,wire,historical FROM journal INDEXED BY journal_apply_eligible WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated' AND cursor<=?1 AND key_epoch IN ({epochs}) ORDER BY cursor LIMIT ?2"
             ))?;
             take_within_budget(
                 query.query(params![ceiling, to_i64(limit as u64)?])?,
@@ -3580,7 +3580,14 @@ impl Client {
             )?
         };
         for (cursor, wire, historical) in rows {
-            if let Some(suppression) = &suppression
+            let ordinary_rcs = match snapshot_projection::rcs_live_apply(&tx, &ctx, cursor, &wire)?
+            {
+                Some(snapshot_projection::RcsLiveApply::Defer) => continue,
+                Some(snapshot_projection::RcsLiveApply::ApplyOrdinary) => true,
+                None => false,
+            };
+            if !ordinary_rcs
+                && let Some(suppression) = &suppression
                 && let Some(reason) = suppression.decision(&tx, &ctx, cursor, &wire)?
             {
                 match reason {
@@ -3617,7 +3624,7 @@ impl Client {
         }
         let waiting: i64 = tx.query_row(
             &format!(
-                "SELECT COUNT(*) FROM journal WHERE status='pending' AND cursor<=?1 AND key_epoch NOT IN ({epochs})"
+                "SELECT COUNT(*) FROM journal WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated' AND cursor<=?1 AND key_epoch NOT IN ({epochs})"
             ),
             params![ceiling],
             |r| r.get(0),
@@ -3660,7 +3667,7 @@ impl Client {
             exists(
                 &store.conn,
                 &format!(
-                    "SELECT 1 FROM journal WHERE status='pending' AND key_epoch IN ({epochs}) LIMIT 1"
+                    "SELECT 1 FROM journal INDEXED BY journal_apply_eligible WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated' AND key_epoch IN ({epochs}) LIMIT 1"
                 ),
             )?
         };
@@ -5629,6 +5636,7 @@ fn journal_record(
         .optional()?;
     if let Some(existing) = existing {
         return if existing == wire {
+            snapshot_projection::release_snapshot_origin_at_cursor(tx, cursor)?;
             Ok(IngestResult::Duplicate)
         } else {
             Err(Error::Conflict)
@@ -5647,6 +5655,11 @@ fn journal_record(
             // Published records are committed history awaiting drain.
             (Some(staged), true) => {
                 return if staged == wire {
+                    snapshot_projection::observe_ordinary_snapshot_replay(
+                        tx,
+                        generation.number,
+                        cursor,
+                    )?;
                     Ok(IngestResult::Duplicate)
                 } else {
                     Err(Error::Conflict)
@@ -5679,6 +5692,14 @@ fn journal_record(
             reason
         ],
     )?;
+    if matches!(result, IngestResult::Duplicate)
+        && let Some(envelope) = envelope
+    {
+        snapshot_projection::release_snapshot_origins_for_envelope(
+            tx,
+            &envelope.envelope_id.to_string(),
+        )?;
+    }
     Ok(result)
 }
 
@@ -5832,7 +5853,7 @@ fn waiting_for_keys(
     let received = to_i64(received)?;
     let waiting: i64 = if keys.is_empty() {
         conn.query_row(
-            "SELECT COUNT(*) FROM journal WHERE status='pending' AND cursor<=?",
+            "SELECT COUNT(*) FROM journal WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated' AND cursor<=?",
             params![received],
             |row| row.get(0),
         )?
@@ -5844,7 +5865,7 @@ fn waiting_for_keys(
             .join(",");
         conn.query_row(
             &format!(
-                "SELECT COUNT(*) FROM journal WHERE status='pending' AND cursor<=?1 AND (key_epoch IS NULL OR key_epoch NOT IN ({epochs}))"
+                "SELECT COUNT(*) FROM journal WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated' AND cursor<=?1 AND (key_epoch IS NULL OR key_epoch NOT IN ({epochs}))"
             ),
             params![received],
             |row| row.get(0),
@@ -6051,6 +6072,19 @@ fn drain_snapshot(
                 status,
                 reason
             ])?;
+            if projected {
+                snapshot_projection::record_snapshot_import_origin(
+                    conn,
+                    generation.number,
+                    cursor,
+                )?;
+                snapshot_projection::consume_ordinary_snapshot_replay(
+                    conn,
+                    generation.number,
+                    cursor,
+                )?;
+                snapshot_projection::isolate_snapshot_rcs_event(conn, ctx, cursor, &wire)?;
+            }
         }
         if projected {
             snapshot_projection::retain(conn, generation.number, cursor, &wire)?;
@@ -6156,6 +6190,7 @@ CREATE TABLE journal(cursor INTEGER PRIMARY KEY, envelope_id TEXT, key_epoch INT
   status TEXT NOT NULL CHECK(status IN ('pending','applied','duplicate','quarantined')), reason TEXT);
 CREATE INDEX journal_envelope ON journal(envelope_id);
 CREATE INDEX journal_pending ON journal(status, key_epoch, cursor);
+CREATE INDEX journal_apply_eligible ON journal(key_epoch,cursor) WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated';
 CREATE TABLE outbox(seq INTEGER PRIMARY KEY, envelope_id TEXT NOT NULL UNIQUE, command_id TEXT UNIQUE,
    purpose TEXT NOT NULL CHECK(purpose IN ('command','event')), route TEXT, plain BLOB, wire BLOB,
    state TEXT NOT NULL CHECK(state IN ('unsealed','queued','acknowledged')));
@@ -7045,6 +7080,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     deferred_media::initialize(conn)?;
     initialize_battery_lookup_indexes(conn)?;
     mms_identity::install_query_indexes(conn)?;
+    install_snapshot_apply_index(conn)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for (key, value) in [
         ("vault_id", store.config.vault_id.to_string()),
@@ -7086,6 +7122,13 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
         emit_status(&tx, &ctx, parse(&id)?, SendState::OutcomeUnknown)?;
     }
     tx.commit()?;
+    Ok(())
+}
+
+fn install_snapshot_apply_index(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS journal_apply_eligible ON journal(key_epoch,cursor) WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated';",
+    )?;
     Ok(())
 }
 
@@ -7751,6 +7794,8 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
     matches!(
         kind,
         "rcs_conversation_metadata"
+            | "rcs_message_reported"
+            | "rcs_message_status"
             | "rcs_link_status"
             | "rcs_link_eligibility"
             | "message"
@@ -13767,6 +13812,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn authenticated_malformed_rcs_events_are_invalid_but_unknown_events_are_tolerated() {
+        use peppy_crypto::{create_vault_check_header, derive_root_key};
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let event_key = derive_purpose_key(&root, &profile, KeyPurpose::Event).unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: dir.path().join("d.db"),
+                vault_id,
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[5; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let mut store = client.lock().unwrap();
+        let (_, ctx) = store.parts();
+        for kind in [
+            "rcs_message_status",
+            "rcs_message_reported",
+            "future_unknown_event",
+        ] {
+            let mut envelope = Envelope {
+                protocol_version: PROTOCOL_VERSION,
+                envelope_id: EnvelopeId::new(),
+                command_id: None,
+                vault_id,
+                producer_device_id: DeviceId::new(),
+                producer_sequence: SourceSequence(1),
+                key_epoch: 1,
+                crypto_suite: profile.crypto_suite,
+                profile_fingerprint: profile.fingerprint().unwrap(),
+                purpose: EnvelopePurpose::Event,
+                route: None,
+                compaction: None,
+                origin_tag: None,
+                ciphertext: Vec::new(),
+            };
+            // Known RCS kinds require fields absent here. Encrypt raw JSON to exercise
+            // receiver classification, without the producer's strict payload decoder.
+            let plain = serde_json::to_vec(&serde_json::json!({ "kind": kind })).unwrap();
+            envelope.ciphertext =
+                seal_frame(&encrypt(&event_key, &envelope.aad_bytes().unwrap(), &plain).unwrap());
+            let opened = open_payload(&ctx, &envelope);
+            if kind == "future_unknown_event" {
+                assert!(matches!(opened, Ok(Opened::UnknownEvent)), "{kind}");
+            } else {
+                assert!(
+                    matches!(opened, Err(QuarantineReason::InvalidPayload)),
+                    "{kind}"
+                );
+            }
+        }
+    }
+
     /// Apply-level MMS validation: authenticated payloads with inconsistent media are
     /// quarantined and roll back, and an attachment ID cannot be rebound to new metadata.
     #[test]
@@ -15784,5 +15890,36 @@ mod tests {
         assert_eq!(retry.len(), 1);
         assert_eq!(client.mark_read_batch(&retry[0]).unwrap(), 1);
         assert!(client.unread_message_batches().unwrap().is_empty());
+    }
+
+    #[test]
+    fn isolated_snapshot_rcs_rows_do_not_starve_actionable_journal_query() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        install_snapshot_apply_index(&conn).unwrap();
+        conn.execute_batch(&format!(
+            "WITH RECURSIVE held(cursor) AS (VALUES(1) UNION ALL SELECT cursor+1 FROM held WHERE cursor<1000)
+             INSERT INTO journal(cursor,key_epoch,wire,status,reason)
+             SELECT cursor,1,X'01','pending','{}' FROM held;
+             INSERT INTO journal(cursor,key_epoch,wire,status,reason) VALUES(1001,1,X'02','pending',NULL);",
+            snapshot_projection::RCS_ISOLATED_REASON
+        ))
+        .unwrap();
+        let cursor: i64 = conn
+            .query_row(
+                "SELECT cursor FROM journal INDEXED BY journal_apply_eligible WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated' AND key_epoch=1 ORDER BY cursor LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cursor, 1001);
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT cursor FROM journal INDEXED BY journal_apply_eligible WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated' AND key_epoch=1 ORDER BY cursor LIMIT 1",
+                [],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("journal_apply_eligible"), "{plan}");
     }
 }

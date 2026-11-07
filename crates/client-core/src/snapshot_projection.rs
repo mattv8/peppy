@@ -44,9 +44,9 @@
 //! live apply ignores them by quarantine.
 use crate::{
     AppFilter, Client, Ctx, Cursor, EnvelopePurpose, Error, MAX_SNAPSHOT_PAGE_BYTES,
-    NotificationTarget, NotificationWire, Opened, PrivatePayload, RcsMessageStatus, contact_media,
-    contacts, conversation_folders, conversation_pinning, conversation_tones,
-    notification_preferences, notifications, open_payload, parse_wire, take_within_budget, to_i64,
+    NotificationTarget, NotificationWire, Opened, PrivatePayload, contact_media, contacts,
+    conversation_folders, conversation_pinning, conversation_tones, notification_preferences,
+    notifications, open_payload, parse_wire, rcs_receive, take_within_budget, to_i64,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
@@ -57,6 +57,11 @@ const GC_BATCH: i64 = 2_000;
 const PROMOTE_PAGE: i64 = 256;
 /// Journal reason for compactable rows the authoritative snapshot proved superseded.
 pub(crate) const SUPERSEDED_REASON: &str = "snapshot_superseded";
+pub(crate) const RCS_ISOLATED_REASON: &str = "snapshot_rcs_isolated";
+const SNAPSHOT_IMPORT_ORIGIN_PREFIX: &str = "snapshot_import_origin:";
+const SNAPSHOT_IMPORT_OBSERVED_PREFIX: &str = "snapshot_import_observed:";
+const SNAPSHOT_ORIGIN_GC_POSITION: &str = "snapshot_origin_gc_position";
+const SNAPSHOT_IMPORT_ORIGIN_UPPER_BOUND: &str = "snapshot_import_origin;";
 
 /// Metadata latch: this device's contact/notification projection must be rebuilt from an
 /// authoritative compaction snapshot. Value is the reason (`upgrade` or `requested`).
@@ -321,6 +326,124 @@ pub(crate) fn retain(
     Ok(())
 }
 
+fn origin_key(cursor: i64) -> String {
+    format!("{SNAPSHOT_IMPORT_ORIGIN_PREFIX}{cursor}")
+}
+
+fn observed_key(cursor: i64) -> String {
+    format!("{SNAPSHOT_IMPORT_OBSERVED_PREFIX}{cursor}")
+}
+
+pub(crate) fn record_snapshot_import_origin(
+    conn: &Connection,
+    generation: i64,
+    cursor: i64,
+) -> Result<(), Error> {
+    conn.execute(
+        "INSERT OR IGNORE INTO metadata(k,v) VALUES(?,?)",
+        params![origin_key(cursor), generation],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn observe_ordinary_snapshot_replay(
+    conn: &Connection,
+    generation: i64,
+    cursor: i64,
+) -> Result<(), Error> {
+    conn.execute(
+        "INSERT OR REPLACE INTO metadata(k,v) VALUES(?,?)",
+        params![observed_key(cursor), generation],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn consume_ordinary_snapshot_replay(
+    conn: &Connection,
+    generation: i64,
+    cursor: i64,
+) -> Result<(), Error> {
+    if conn.execute(
+        "DELETE FROM metadata WHERE k=? AND v=?",
+        params![observed_key(cursor), generation],
+    )? > 0
+    {
+        release_snapshot_origin_at_cursor(conn, cursor)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn release_snapshot_origin_at_cursor(
+    conn: &Connection,
+    cursor: i64,
+) -> Result<(), Error> {
+    conn.execute("DELETE FROM metadata WHERE k=?", [origin_key(cursor)])?;
+    conn.execute(
+        "UPDATE journal SET reason=NULL WHERE cursor=? AND reason=?",
+        params![cursor, RCS_ISOLATED_REASON],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn release_snapshot_origins_for_envelope(
+    conn: &Connection,
+    envelope_id: &str,
+) -> Result<(), Error> {
+    conn.execute(
+        "DELETE FROM metadata WHERE k IN (SELECT ?1 || cursor FROM journal WHERE envelope_id=?2)",
+        params![SNAPSHOT_IMPORT_ORIGIN_PREFIX, envelope_id],
+    )?;
+    conn.execute(
+        "UPDATE journal SET reason=NULL WHERE envelope_id=? AND reason=?",
+        params![envelope_id, RCS_ISOLATED_REASON],
+    )?;
+    Ok(())
+}
+
+fn has_snapshot_import_origin(conn: &Connection, cursor: i64) -> Result<bool, Error> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM metadata WHERE k=?",
+            [origin_key(cursor)],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+fn authenticated_rcs_event(ctx: &Ctx, wire: &[u8]) -> bool {
+    let Some(envelope) = parse_wire(wire) else {
+        return false;
+    };
+    if envelope.purpose != EnvelopePurpose::Event {
+        return false;
+    }
+    match open_payload(ctx, &envelope) {
+        Ok(Opened::Payload(
+            PrivatePayload::RcsMessageReported { .. } | PrivatePayload::RcsMessageStatus { .. },
+        )) => true,
+        Ok(Opened::Payload(PrivatePayload::RcsConversationMetadata(metadata))) => {
+            rcs_receive::valid_metadata(&metadata, envelope.producer_device_id)
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn isolate_snapshot_rcs_event(
+    conn: &Connection,
+    ctx: &Ctx,
+    cursor: i64,
+    wire: &[u8],
+) -> Result<(), Error> {
+    if authenticated_rcs_event(ctx, wire) && has_snapshot_import_origin(conn, cursor)? {
+        conn.execute(
+            "UPDATE journal SET reason=? WHERE cursor=? AND status='pending'",
+            params![RCS_ISOLATED_REASON, cursor],
+        )?;
+    }
+    Ok(())
+}
+
 /// `drain_snapshot` hook once the generation's last record reached the journal.
 pub(crate) fn drained(conn: &Connection, generation: i64) -> Result<(), Error> {
     conn.execute(
@@ -448,6 +571,31 @@ pub(crate) fn advance(
     Ok(None)
 }
 
+/// RCS status/fact/metadata events retained by an in-flight authoritative snapshot must not
+/// update the live projection before that snapshot promotes. Other replay events keep their
+/// normal apply path, and malformed records remain available for the regular quarantine path.
+pub(crate) enum RcsLiveApply {
+    Defer,
+    ApplyOrdinary,
+}
+
+pub(crate) fn rcs_live_apply(
+    conn: &Connection,
+    ctx: &Ctx,
+    cursor: i64,
+    wire: &[u8],
+) -> Result<Option<RcsLiveApply>, Error> {
+    if !authenticated_rcs_event(ctx, wire) {
+        return Ok(None);
+    }
+    if has_snapshot_import_origin(conn, cursor)? {
+        isolate_snapshot_rcs_event(conn, ctx, cursor, wire)?;
+        Ok(Some(RcsLiveApply::Defer))
+    } else {
+        Ok(Some(RcsLiveApply::ApplyOrdinary))
+    }
+}
+
 /// Reduces one authenticated retained payload. `Ok(false)` means it failed validation.
 fn stage(
     conn: &Connection,
@@ -492,24 +640,17 @@ pub(super) fn reduce(
             status,
             rcs_reported,
         } => {
-            let rank = match status {
-                RcsMessageStatus::Sending => 1,
-                RcsMessageStatus::Sent => 2,
-                RcsMessageStatus::Failed => 3,
-                RcsMessageStatus::Delivered => 4,
-                RcsMessageStatus::Read => 5,
-            };
             conn.execute(
-                "INSERT INTO projection_rcs_message_status(generation,message_id,status_rank,rcs_reported) VALUES(?,?,?,?) ON CONFLICT(generation,message_id) DO UPDATE SET status_rank=MAX(status_rank,excluded.status_rank),rcs_reported=excluded.rcs_reported",
-                params![generation, message_id.to_string(), rank, rcs_reported],
+                "INSERT INTO projection_rcs_message_status(generation,message_id,status_rank,rcs_reported) VALUES(?,?,?,?) ON CONFLICT(generation,message_id) DO UPDATE SET status_rank=MAX(projection_rcs_message_status.status_rank,excluded.status_rank),rcs_reported=MAX(projection_rcs_message_status.rcs_reported,excluded.rcs_reported)",
+                params![generation, message_id.to_string(), crate::rcs_receive::status_rank(status), rcs_reported],
             )?;
             Ok(true)
         }
         PrivatePayload::RcsConversationMetadata(metadata) => {
-            if metadata.logical_revision == 0
-                || metadata.logical_revision >= i64::MAX as u64
-                || metadata.writer_device_id != producer
-            {
+            let producer_id = producer
+                .parse()
+                .map_err(|_| Error::InvalidRequest("producer"))?;
+            if !crate::rcs_receive::valid_metadata(&metadata, producer_id) {
                 return Ok(false);
             }
             conn.execute(
@@ -956,16 +1097,15 @@ fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Res
     )?;
     notifications::prune_banners(conn)?;
 
-    conn.execute("DELETE FROM rcs_message_status", [])?;
     conn.execute(
-        "INSERT INTO rcs_message_status(message_id,status_rank,rcs_reported) SELECT message_id,status_rank,rcs_reported FROM projection_rcs_message_status WHERE generation=?",
+        "INSERT INTO rcs_message_status(message_id,status_rank,rcs_reported) SELECT message_id,status_rank,rcs_reported FROM projection_rcs_message_status WHERE generation=? ON CONFLICT(message_id) DO UPDATE SET status_rank=MAX(rcs_message_status.status_rank,excluded.status_rank),rcs_reported=MAX(rcs_message_status.rcs_reported,excluded.rcs_reported) WHERE excluded.status_rank>rcs_message_status.status_rank OR excluded.rcs_reported>rcs_message_status.rcs_reported",
         [generation],
     )?;
-    conn.execute("DELETE FROM rcs_conversation_metadata", [])?;
     conn.execute(
-        "INSERT INTO rcs_conversation_metadata(conversation_id,transport,rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,producer_device_id,source_sequence) SELECT conversation_id,'rcs',rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,producer_device_id,source_sequence FROM projection_rcs_conversation_metadata WHERE generation=?",
+        "INSERT INTO rcs_conversation_metadata(conversation_id,transport,rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,producer_device_id,source_sequence) SELECT conversation_id,'rcs',rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,producer_device_id,source_sequence FROM projection_rcs_conversation_metadata WHERE generation=? ON CONFLICT(conversation_id) DO UPDATE SET rcs_encryption=excluded.rcs_encryption,rcs_history_gap=excluded.rcs_history_gap,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,producer_device_id=excluded.producer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>rcs_conversation_metadata.logical_revision OR (excluded.logical_revision=rcs_conversation_metadata.logical_revision AND excluded.writer_device_id>rcs_conversation_metadata.writer_device_id)",
         [generation],
     )?;
+    release_promoted_snapshot_origins(conn, generation)?;
 
     // App filters (any source, any writer). This device's own write is kept while there is
     // no proof the snapshot covers it: its outbox row's echo is not journaled at or below the
@@ -1169,6 +1309,19 @@ fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Res
     Ok(())
 }
 
+fn release_promoted_snapshot_origins(conn: &Connection, generation: i64) -> Result<(), Error> {
+    let cursors = "SELECT cursor FROM projection_retained WHERE generation=?1 UNION SELECT cursor FROM projection_legacy_retained WHERE generation=?1";
+    conn.execute(
+        &format!("DELETE FROM metadata WHERE k IN (SELECT ?2 || cursor FROM ({cursors}))"),
+        params![generation, SNAPSHOT_IMPORT_ORIGIN_PREFIX],
+    )?;
+    conn.execute(
+        &format!("UPDATE journal SET reason=NULL WHERE reason=?2 AND cursor IN ({cursors})"),
+        params![generation, RCS_ISOLATED_REASON],
+    )?;
+    Ok(())
+}
+
 /// Decides, for one pending journal row, whether the newest authoritative snapshot proved it
 /// superseded. Loaded once per `apply_pending` batch (after `advance`).
 pub(crate) struct Suppression {
@@ -1334,9 +1487,67 @@ fn live_contact_older(
     Ok(older)
 }
 
+fn collect_snapshot_origin_garbage(conn: &Connection) -> Result<(), Error> {
+    let after = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [SNAPSHOT_ORIGIN_GC_POSITION],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| SNAPSHOT_IMPORT_ORIGIN_PREFIX.to_owned());
+    let mut query =
+        conn.prepare("SELECT k FROM metadata WHERE k>?1 AND k<?2 ORDER BY k LIMIT ?3")?;
+    let keys = query
+        .query_map(
+            params![after, SNAPSHOT_IMPORT_ORIGIN_UPPER_BOUND, GC_BATCH],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let next = keys
+        .last()
+        .cloned()
+        .unwrap_or_else(|| SNAPSHOT_IMPORT_ORIGIN_PREFIX.to_owned());
+    conn.execute(
+        "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        params![SNAPSHOT_ORIGIN_GC_POSITION, next],
+    )?;
+    for key in keys {
+        let Some(cursor) = key
+            .strip_prefix(SNAPSHOT_IMPORT_ORIGIN_PREFIX)
+            .and_then(|value| value.parse::<i64>().ok())
+        else {
+            continue;
+        };
+        let status = conn
+            .query_row(
+                "SELECT status FROM journal WHERE cursor=?",
+                [cursor],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if status.as_deref() != Some("pending") {
+            conn.execute("DELETE FROM metadata WHERE k=?", [key])?;
+        }
+    }
+    Ok(())
+}
+
 /// Bounded removal of stage rows no longer needed (promoted, failed or superseded) and of
 /// retained sets that no longer govern suppression.
 pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
+    let metadata_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata')",
+        [],
+        |row| row.get(0),
+    )?;
+    if metadata_exists {
+        conn.execute(
+            "DELETE FROM metadata WHERE rowid IN (SELECT m.rowid FROM metadata m WHERE m.k GLOB ? AND NOT EXISTS(SELECT 1 FROM snapshot_generations s WHERE s.generation=CAST(m.v AS INTEGER)) LIMIT ?)",
+            params![format!("{SNAPSHOT_IMPORT_OBSERVED_PREFIX}*"), GC_BATCH],
+        )?;
+        collect_snapshot_origin_garbage(conn)?;
+    }
     for table in [
         "projection_books",
         "projection_contacts",
@@ -1349,10 +1560,12 @@ pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
         "projection_sender_unblock_requests",
         "projection_conversation_tones",
         "projection_notification_preferences",
+        "projection_rcs_message_status",
+        "projection_rcs_conversation_metadata",
         "projection_legacy_retained",
     ] {
         conn.execute(
-            &format!("DELETE FROM {table} WHERE rowid IN (SELECT t.rowid FROM {table} t JOIN projection_generations g ON g.generation=t.generation WHERE g.state IN ('promoted','failed','superseded') LIMIT ?)"),
+            &format!("DELETE FROM {table} WHERE rowid IN (SELECT t.rowid FROM {table} t WHERE NOT EXISTS(SELECT 1 FROM projection_generations g WHERE g.generation=t.generation) OR EXISTS(SELECT 1 FROM projection_generations g WHERE g.generation=t.generation AND g.state IN ('promoted','failed','superseded')) LIMIT ?)"),
             params![GC_BATCH],
         )?;
     }
@@ -1373,6 +1586,8 @@ pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
            AND NOT EXISTS(SELECT 1 FROM projection_sender_unblock_requests r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_conversation_tones r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_notification_preferences r WHERE r.generation=projection_generations.generation)
+           AND NOT EXISTS(SELECT 1 FROM projection_rcs_message_status r WHERE r.generation=projection_generations.generation)
+           AND NOT EXISTS(SELECT 1 FROM projection_rcs_conversation_metadata r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_legacy_retained r WHERE r.generation=projection_generations.generation)",
         [],
     )?;
@@ -1382,6 +1597,44 @@ pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staged_rcs_status_merges_rank_and_reported_evidence_independently() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        let message_id = crate::MessageId::new();
+
+        for (status, rcs_reported) in [
+            (crate::RcsMessageStatus::Sent, true),
+            (crate::RcsMessageStatus::Read, false),
+        ] {
+            assert!(
+                reduce(
+                    &conn,
+                    1,
+                    "device",
+                    "device",
+                    1,
+                    PrivatePayload::RcsMessageStatus {
+                        message_id,
+                        status,
+                        rcs_reported,
+                    },
+                )
+                .unwrap()
+            );
+        }
+
+        assert_eq!(
+            conn.query_row(
+                "SELECT status_rank,rcs_reported FROM projection_rcs_message_status WHERE generation=1 AND message_id=?",
+                [message_id.to_string()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+            )
+            .unwrap(),
+            (5, true)
+        );
+    }
 
     fn latch(conn: &Connection) -> Option<String> {
         conn.query_row("SELECT v FROM metadata WHERE k=?", [REPAIR_LATCH], |r| {
@@ -1482,56 +1735,247 @@ mod tests {
     }
 
     #[test]
-    fn garbage_collection_keeps_superseded_generation_until_pin_and_legacy_rows_are_empty() {
+    fn garbage_collection_reclaims_orphan_failed_and_superseded_rcs_rows_in_batches() {
         let conn = Connection::open_in_memory().unwrap();
         initialize(&conn).unwrap();
         conn.execute(
-            "INSERT INTO projection_generations(generation,high_water,state) VALUES(1,1,'superseded'),(2,2,'superseded')",
+            "INSERT INTO projection_generations(generation,high_water,state) VALUES(1,1,'superseded'),(2,2,'failed'),(3,3,'staging')",
             [],
         )
         .unwrap();
         conn.execute_batch(&format!(
             "WITH RECURSIVE rows(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM rows WHERE value<{})
-             INSERT INTO projection_conversation_pins(generation,conversation_id,pinned,source_sequence,producer_device_id,logical_revision,writer_device_id)
-             SELECT 1,printf('conversation-%d',value),1,value,'producer',value,'writer' FROM rows;
+             INSERT INTO projection_rcs_message_status(generation,message_id,status_rank,rcs_reported)
+             SELECT 1,printf('message-%d',value),0,0 FROM rows;
              WITH RECURSIVE rows(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM rows WHERE value<{})
-             INSERT INTO projection_legacy_retained(generation,producer_device_id,producer_sequence,cursor)
-             SELECT 2,'producer',value,value FROM rows;",
+             INSERT INTO projection_rcs_conversation_metadata(generation,conversation_id,rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,producer_device_id,source_sequence)
+              SELECT 1,printf('conversation-%d',value),NULL,0,value,'writer','producer',value FROM rows;
+             WITH RECURSIVE rows(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM rows WHERE value<{})
+             INSERT INTO projection_rcs_message_status(generation,message_id,status_rank,rcs_reported)
+             SELECT 4,printf('orphan-message-%d',value),0,0 FROM rows;
+             WITH RECURSIVE rows(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM rows WHERE value<{})
+             INSERT INTO projection_rcs_conversation_metadata(generation,conversation_id,rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,producer_device_id,source_sequence)
+             SELECT 5,printf('orphan-conversation-%d',value),NULL,0,value,'writer','producer',value FROM rows;
+              INSERT INTO projection_rcs_message_status(generation,message_id,status_rank,rcs_reported) VALUES(2,'failed-message',0,0),(3,'active-message',0,0);
+              INSERT INTO projection_rcs_conversation_metadata(generation,conversation_id,rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,producer_device_id,source_sequence) VALUES(2,'failed-conversation',NULL,0,1,'writer','producer',1),(3,'active-conversation',NULL,0,1,'writer','producer',1);",
+            GC_BATCH + 1,
+            GC_BATCH + 1,
             GC_BATCH + 1,
             GC_BATCH + 1
         ))
         .unwrap();
 
         collect_garbage(&conn).unwrap();
-        for table in ["projection_conversation_pins", "projection_legacy_retained"] {
+        for table in [
+            "projection_rcs_message_status",
+            "projection_rcs_conversation_metadata",
+        ] {
             let remaining: i64 = conn
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                    row.get(0)
-                })
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE generation != 3"),
+                    [],
+                    |row| row.get(0),
+                )
                 .unwrap();
-            assert_eq!(remaining, 1, "{table} must be collected in bounded batches");
+            assert_eq!(
+                remaining,
+                GC_BATCH + 3,
+                "{table} must delete only one bounded batch"
+            );
         }
         assert_eq!(
             states(&conn),
             [
                 (1, "superseded".into(), None),
-                (2, "superseded".into(), None),
-            ]
+                (2, "failed".into(), None),
+                (3, "staging".into(), None),
+            ],
+            "superseded parent must remain while both RCS child tables are partially drained"
         );
-
-        collect_garbage(&conn).unwrap();
-        for table in ["projection_conversation_pins", "projection_legacy_retained"] {
-            let remaining: i64 = conn
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                    row.get(0)
-                })
+        for table in [
+            "projection_rcs_message_status",
+            "projection_rcs_conversation_metadata",
+        ] {
+            let children: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE generation=1"),
+                    [],
+                    |row| row.get(0),
+                )
                 .unwrap();
-            assert_eq!(remaining, 0, "{table} must be fully collected");
+            assert_eq!(children, 1, "{table} must still hold a superseded child");
         }
-        assert!(
-            states(&conn).is_empty(),
-            "the superseded generation must remain until both child tables are empty"
+        collect_garbage(&conn).unwrap();
+        for table in [
+            "projection_rcs_message_status",
+            "projection_rcs_conversation_metadata",
+        ] {
+            let remaining: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE generation != 3"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(remaining, 3, "{table} must require more than one batch");
+            let superseded: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE generation=1"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(superseded, 0, "{table} superseded children are now empty");
+        }
+        assert_eq!(
+            states(&conn),
+            [(2, "failed".into(), None), (3, "staging".into(), None)],
+            "superseded parent is reclaimed only after both RCS child tables empty"
         );
+        collect_garbage(&conn).unwrap();
+        for table in [
+            "projection_rcs_message_status",
+            "projection_rcs_conversation_metadata",
+        ] {
+            let remaining: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE generation != 3"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(remaining, 0, "{table} must fully collect stale rows");
+        }
+        assert_eq!(
+            states(&conn),
+            [(2, "failed".into(), None), (3, "staging".into(), None)]
+        );
+        for table in [
+            "projection_rcs_message_status",
+            "projection_rcs_conversation_metadata",
+        ] {
+            let active: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE generation=3"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(active, 1, "active staging row in {table} must remain");
+        }
+    }
+
+    #[test]
+    fn semantic_invalid_rcs_metadata_is_not_snapshot_isolation_eligible() {
+        use peppy_crypto::{
+            KeyPurpose, create_vault_check_header, derive_purpose_key, derive_root_key, encrypt,
+        };
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = crate::VaultId::new();
+        let producer = crate::DeviceId::new();
+        let profile = peppy_crypto::KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let client = Client::open(
+            crate::ClientConfig {
+                database_path: directory.path().join("semantic-invalid.db"),
+                vault_id,
+                device_id: producer,
+            },
+            crate::DatabaseKey::new(&[8; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let metadata = crate::RcsConversationMetadata {
+            conversation_id: crate::ConversationId::new(),
+            transport: crate::RcsConversationTransport::Rcs,
+            rcs_encryption: Some(true),
+            rcs_history_gap: false,
+            logical_revision: 0,
+            writer_device_id: producer.to_string(),
+        };
+        let mut envelope = crate::Envelope {
+            protocol_version: 1,
+            envelope_id: crate::EnvelopeId::new(),
+            command_id: None,
+            vault_id,
+            producer_device_id: producer,
+            producer_sequence: crate::SourceSequence(1),
+            key_epoch: 1,
+            crypto_suite: profile.crypto_suite,
+            profile_fingerprint: profile.fingerprint().unwrap(),
+            purpose: EnvelopePurpose::Event,
+            route: None,
+            compaction: None,
+            origin_tag: None,
+            ciphertext: Vec::new(),
+        };
+        let plain = serde_json::to_vec(&PrivatePayload::RcsConversationMetadata(metadata)).unwrap();
+        let key = derive_purpose_key(&root, &profile, KeyPurpose::Event).unwrap();
+        let encrypted = encrypt(&key, &envelope.aad_bytes().unwrap(), &plain).unwrap();
+        envelope.ciphertext = [encrypted.nonce.as_slice(), &encrypted.ciphertext].concat();
+        let wire = serde_json::to_vec(&envelope).unwrap();
+        let mut store = client.lock().unwrap();
+        let (_, ctx) = store.parts();
+        assert!(!authenticated_rcs_event(&ctx, &wire));
+    }
+
+    #[test]
+    fn origin_gc_removes_only_resolved_or_absent_journal_origins_across_reopen() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = crate::ClientConfig {
+            database_path: directory.path().join("origin-gc.db"),
+            vault_id: crate::VaultId::new(),
+            device_id: crate::DeviceId::new(),
+        };
+        {
+            let client =
+                Client::open(config.clone(), crate::DatabaseKey::new(&[9; 32]).unwrap()).unwrap();
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "INSERT INTO journal(cursor,wire,status) VALUES(1,X'01','pending'),(2,X'02','duplicate');
+                     INSERT INTO metadata(k,v) VALUES
+                       ('snapshot_import_origin:1','1'),
+                       ('snapshot_import_origin:2','1'),
+                       ('snapshot_import_origin:3','1');",
+                )
+                .unwrap();
+            collect_garbage(&store.conn).unwrap();
+            let origins: Vec<String> = store
+                .conn
+                .prepare("SELECT k FROM metadata WHERE k>=? AND k<? ORDER BY k")
+                .unwrap()
+                .query_map(
+                    params![
+                        SNAPSHOT_IMPORT_ORIGIN_PREFIX,
+                        SNAPSHOT_IMPORT_ORIGIN_UPPER_BOUND
+                    ],
+                    |row| row.get(0),
+                )
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            assert_eq!(origins, ["snapshot_import_origin:1"]);
+        }
+        let client = Client::open(config, crate::DatabaseKey::new(&[9; 32]).unwrap()).unwrap();
+        let store = client.lock().unwrap();
+        for _ in 0..4 {
+            collect_garbage(&store.conn).unwrap();
+        }
+        let held: bool = store
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM metadata WHERE k='snapshot_import_origin:1')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(held, "unresolved pending origin must survive GC and reopen");
     }
 
     #[test]

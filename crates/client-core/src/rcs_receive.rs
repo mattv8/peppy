@@ -329,15 +329,16 @@ impl Client {
             google_conversation_id,
             None,
         )?;
-        if outcome != RcsIdentityOutcome::Recorded {
-            return Ok(outcome);
+        match outcome {
+            RcsIdentityOutcome::Recorded => {}
+            RcsIdentityOutcome::Duplicate => {
+                checkpoint_record(&tx, conversation_id, ownership_generation, history_token)?;
+                tx.commit()?;
+                return Ok(outcome);
+            }
+            RcsIdentityOutcome::Rejected(_) => return Ok(outcome),
         }
-        if let Some(token) = history_token {
-            tx.execute(
-                "UPDATE rcs_lane_ownership SET history_token=? WHERE conversation_id=? AND ownership_generation=?",
-                params![token, conversation_id.to_string(), ownership_generation],
-            )?;
-        }
+        checkpoint_record(&tx, conversation_id, ownership_generation, history_token)?;
         tx.commit()?;
         Ok(RcsIdentityOutcome::Recorded)
     }
@@ -478,10 +479,6 @@ impl Client {
                 if insert_message(&tx, &payload)? != Inserted::New {
                     return Err(Error::Database);
                 }
-                tx.execute(
-                    "INSERT INTO rcs_message_status(message_id,status_rank,rcs_reported) VALUES(?,?,?)",
-                    params![message_id.to_string(), 0, record.rcs_reported],
-                )?;
                 enqueue(
                     &tx,
                     &ctx,
@@ -904,25 +901,21 @@ fn apply_status(
     status: RcsMessageStatus,
     rcs_reported: bool,
 ) -> Result<bool, Error> {
-    let rank = |status| match status {
+    let rank = status_rank(status);
+    Ok(conn.execute(
+        "INSERT INTO rcs_message_status(message_id,status_rank,rcs_reported) VALUES(?,?,?) ON CONFLICT(message_id) DO UPDATE SET status_rank=MAX(rcs_message_status.status_rank,excluded.status_rank),rcs_reported=MAX(rcs_message_status.rcs_reported,excluded.rcs_reported) WHERE excluded.status_rank>rcs_message_status.status_rank OR excluded.rcs_reported>rcs_message_status.rcs_reported",
+        params![message_id.to_string(), rank, rcs_reported],
+    )? > 0)
+}
+
+pub(crate) fn status_rank(status: RcsMessageStatus) -> i64 {
+    match status {
         RcsMessageStatus::Sending => 1,
         RcsMessageStatus::Sent => 2,
         RcsMessageStatus::Failed => 3,
         RcsMessageStatus::Delivered => 4,
         RcsMessageStatus::Read => 5,
-    };
-    let current: Option<i64> = conn
-        .query_row(
-            "SELECT status_rank FROM rcs_message_status WHERE message_id=?",
-            [message_id.to_string()],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if current.is_some_and(|current| current >= rank(status)) {
-        return Ok(false);
     }
-    conn.execute("INSERT INTO rcs_message_status(message_id,status_rank,rcs_reported) VALUES(?,?,?) ON CONFLICT(message_id) DO UPDATE SET status_rank=excluded.status_rank,rcs_reported=excluded.rcs_reported", params![message_id.to_string(), rank(status), rcs_reported])?;
-    Ok(true)
 }
 
 fn status_from_rank(rank: i64) -> Result<RcsMessageStatus, rusqlite::Error> {
@@ -944,18 +937,24 @@ fn apply_reported_facts(
     rcs_reported: bool,
     e2ee_reported: Option<bool>,
 ) -> Result<(), Error> {
-    apply_replicated_reported(conn, message_id, rcs_reported)?;
-    enqueue(
-        conn,
-        ctx,
-        EnvelopePurpose::Event,
-        None,
-        None,
-        &PrivatePayload::RcsMessageReported {
-            message_id,
-            rcs_reported,
-        },
-    )?;
+    if apply_replicated_reported(conn, message_id, rcs_reported)? {
+        let rcs_reported = conn.query_row(
+            "SELECT rcs_reported FROM rcs_message_status WHERE message_id=?",
+            [message_id.to_string()],
+            |row| row.get(0),
+        )?;
+        enqueue(
+            conn,
+            ctx,
+            EnvelopePurpose::Event,
+            None,
+            None,
+            &PrivatePayload::RcsMessageReported {
+                message_id,
+                rcs_reported,
+            },
+        )?;
+    }
     if e2ee_reported.is_some() {
         let history_gap = load_receive_state(conn, conversation_id)?
             .map(|state| history_gap(state.alert))
@@ -979,11 +978,10 @@ pub(crate) fn apply_replicated_reported(
     message_id: MessageId,
     rcs_reported: bool,
 ) -> Result<bool, Error> {
-    conn.execute(
-        "INSERT INTO rcs_message_status(message_id,status_rank,rcs_reported) VALUES(?,?,?) ON CONFLICT(message_id) DO UPDATE SET rcs_reported=MAX(rcs_reported,excluded.rcs_reported)",
+    Ok(conn.execute(
+        "INSERT INTO rcs_message_status(message_id,status_rank,rcs_reported) VALUES(?,?,?) ON CONFLICT(message_id) DO UPDATE SET rcs_reported=MAX(rcs_reported,excluded.rcs_reported) WHERE excluded.rcs_reported>rcs_message_status.rcs_reported",
         params![message_id.to_string(), 0, rcs_reported],
-    )?;
-    Ok(true)
+    )? > 0)
 }
 
 pub(crate) fn apply_replicated_metadata(
@@ -1016,11 +1014,7 @@ fn apply_metadata(
     producer: DeviceId,
     sequence: u64,
 ) -> Result<bool, Error> {
-    if metadata.logical_revision == 0
-        || metadata.logical_revision >= i64::MAX as u64
-        || metadata.writer_device_id != producer.to_string()
-        || metadata.writer_device_id.parse::<DeviceId>().is_err()
-    {
+    if !valid_metadata(metadata, producer) {
         return Ok(false);
     }
     let revision = i64::try_from(metadata.logical_revision).map_err(|_| Error::Database)?;
@@ -1030,6 +1024,13 @@ fn apply_metadata(
         params![metadata.conversation_id.to_string(), metadata.rcs_encryption.map(i64::from), metadata.rcs_history_gap, revision, metadata.writer_device_id, producer.to_string(), sequence],
     )?;
     Ok(true)
+}
+
+pub(crate) fn valid_metadata(metadata: &RcsConversationMetadata, producer: DeviceId) -> bool {
+    metadata.logical_revision > 0
+        && metadata.logical_revision < i64::MAX as u64
+        && metadata.writer_device_id == producer.to_string()
+        && metadata.writer_device_id.parse::<DeviceId>().is_ok()
 }
 
 fn history_gap(alert: RcsReceiveAlert) -> bool {
@@ -1043,17 +1044,27 @@ fn publish_metadata(
     rcs_encryption: Option<bool>,
     rcs_history_gap: bool,
 ) -> Result<(), Error> {
-    let existing: Option<Option<i64>> = conn
+    let existing: Option<(Option<i64>, bool)> = conn
         .query_row(
-            "SELECT rcs_encryption FROM rcs_conversation_metadata WHERE conversation_id=?",
+            "SELECT rcs_encryption,rcs_history_gap FROM rcs_conversation_metadata WHERE conversation_id=?",
             [conversation_id.to_string()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
+    let rcs_encryption = rcs_encryption.or_else(|| {
+        existing
+            .as_ref()
+            .and_then(|(value, _)| value.map(|value| value != 0))
+    });
+    if existing.as_ref().is_some_and(|(value, history_gap)| {
+        value.map(|value| value != 0) == rcs_encryption && *history_gap == rcs_history_gap
+    }) {
+        return Ok(());
+    }
     let metadata = RcsConversationMetadata {
         conversation_id,
         transport: RcsConversationTransport::Rcs,
-        rcs_encryption: rcs_encryption.or_else(|| existing.flatten().map(|value| value != 0)),
+        rcs_encryption,
         rcs_history_gap,
         logical_revision: metadata_clock(conn, conversation_id)?
             .checked_add(1)
@@ -1200,5 +1211,34 @@ mod tests {
             Client::open(config, DatabaseKey::new(&[17; 32]).unwrap()),
             Err(Error::UnsupportedSchema)
         ));
+    }
+
+    #[test]
+    fn status_merge_keeps_reported_evidence_when_rank_does_not_improve() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client =
+            Client::open(config(&directory), DatabaseKey::new(&[17; 32]).unwrap()).unwrap();
+        let store = client.lock().unwrap();
+        let equal_rank = MessageId::new();
+        let higher_rank = MessageId::new();
+
+        assert!(apply_status(&store.conn, equal_rank, RcsMessageStatus::Read, false).unwrap());
+        assert!(apply_status(&store.conn, equal_rank, RcsMessageStatus::Sent, true).unwrap());
+        assert!(apply_status(&store.conn, higher_rank, RcsMessageStatus::Sent, true).unwrap());
+        assert!(apply_status(&store.conn, higher_rank, RcsMessageStatus::Read, false).unwrap());
+
+        for message_id in [equal_rank, higher_rank] {
+            assert_eq!(
+                store
+                    .conn
+                    .query_row(
+                        "SELECT status_rank,rcs_reported FROM rcs_message_status WHERE message_id=?",
+                        [message_id.to_string()],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+                    )
+                    .unwrap(),
+                (5, true)
+            );
+        }
     }
 }
