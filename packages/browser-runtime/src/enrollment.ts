@@ -1,11 +1,14 @@
 import { ATTACHMENT_RETENTION_PROTOCOL_HEADER_NAME, ATTACHMENT_RETENTION_PROTOCOL_HEADER_VALUE } from "@peppy/generated/attachment-retention";
 import { CheckpointError, RuntimeCoreError } from "./checkpoint.js";
 import { BrowserCoreError, CoreRejectedError } from "./core.js";
+import type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceState, McpDeviceStatus, McpGrantView, McpScope } from "@peppy/generated/mcp";
 
 const MAX_JSON_BYTES = 64 * 1024;
 // Must exceed the server's 15 s long-poll (?wait=15) plus margin for the bounded body read.
 const ENROLLMENT_REQUEST_TIMEOUT_MS = 25_000;
 const DEVICE_NAME = "Peppy Browser";
+const MAX_MCP_CLIENT_ID_LENGTH = 256;
+const MAX_MCP_ORIGIN_LENGTH = 2048;
 
 type DeploymentMode = "community" | "hosted";
 type EnrollmentStage = "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_approved" | "phone_connected" | "computer_waiting" | "computer_approved" | "computer_finishing" | "computer_connected" | "computer_expired" | "computer_denied" | "computer_error" | "expired" | "error" | "invite_request" | "invite_waiting" | "invite_approved" | "invite_denied" | "invite_expired";
@@ -102,6 +105,55 @@ export class BrowserEnrollment {
   }
 
   public async generateSecret(): Promise<string> { return required(await this.core.invoke({ command: "_worker_enrollment_generate_secret", args: {} }), "passphrase"); }
+
+  public async mcpStatus(): Promise<McpDeviceStatus> {
+    return mcpDeviceStatus(await this.request("/v1/mcp/device", "GET", undefined, true));
+  }
+
+  public async mcpEnable(): Promise<McpDeviceStatus> {
+    if (this.session.phase !== "ready" || this.requireIdentity().role !== "owner") throw new Error("owner_required");
+    await this.initializeExistingOwner(this.origin);
+    await this.restoreCustodySession();
+    const vaultId = mcpId(required(record(await this.core.invoke({ command: "_worker_identity_metadata", args: {} })), "vaultId"));
+    if ((await this.mcpStatus()).vaultId !== vaultId) throw new Error("mcp-response");
+    const preparation = record(await this.request("/v1/mcp/device/prepare", "POST", undefined, true));
+    const operationId = required(preparation, "operation_id");
+    const pairing = record(preparation.pairing);
+    const invitationId = required(pairing, "invitation_id");
+    const create = record(await this.core.invoke({ command: "_worker_mcp_owner_create", args: { pairingJson: JSON.stringify(pairing) } }));
+    const created = await this.request("/v1/enrollment/computers", "POST", JSON.parse(required(create, "request")), true);
+    await this.core.invoke({ command: "_worker_mcp_owner_created", args: { createdJson: JSON.stringify(created) } });
+    const approval = record(await this.core.invoke({ command: "_worker_mcp_owner_approve", args: {} }));
+    const status = await this.request(`/v1/enrollment/computers/${encodeURIComponent(invitationId)}/approve`, "POST", JSON.parse(required(approval, "request")), true);
+    const activation = record(await this.request("/v1/mcp/device/activate", "POST", { operation_id: operationId, status }, true));
+    const confirmation = record(activation.confirm);
+    const admission = await this.request(`/v1/enrollment/computers/${encodeURIComponent(invitationId)}/confirm`, "POST", confirmation, true);
+    const result = mcpDeviceStatus(await this.request("/v1/mcp/device/complete", "POST", { operation_id: operationId, admission }, true));
+    if (result.vaultId !== vaultId) throw new Error("mcp-response");
+    return result;
+  }
+
+  public async mcpGrants(): Promise<McpGrantView[]> {
+    const value = await this.request("/v1/mcp/grants", "GET", undefined, true);
+    if (!Array.isArray(value)) throw new Error("mcp-response");
+    return value.map(mcpGrant);
+  }
+
+  public async mcpRevokeGrant(id: string): Promise<void> {
+    await this.request(`/v1/mcp/grants/${encodeURIComponent(mcpId(id))}/revoke`, "POST", undefined, true);
+  }
+
+  public async mcpAuthorization(id: string): Promise<McpAuthorizationView> {
+    return mcpAuthorization(await this.request(`/v1/mcp/authorizations/${encodeURIComponent(mcpAuthorizationId(id))}`, "GET", undefined, true));
+  }
+
+  public async mcpApproveAuthorization(id: string, scopes: McpScope[]): Promise<McpAuthorizationDecision> {
+    return mcpDecision(await this.request(`/v1/mcp/authorizations/${encodeURIComponent(mcpAuthorizationId(id))}/approve`, "POST", { scopes: mcpScopes(scopes) }, true));
+  }
+
+  public async mcpDenyAuthorization(id: string): Promise<McpAuthorizationDecision> {
+    return mcpDecision(await this.request(`/v1/mcp/authorizations/${encodeURIComponent(mcpAuthorizationId(id))}/deny`, "POST", undefined, true));
+  }
 
   public async createOwner(secrets: EnrollmentSecrets, username?: string): Promise<EnrollmentView> {
     try {
@@ -593,6 +645,15 @@ export class BrowserEnrollment {
     }
   }
 
+  private async restoreCustodySession(): Promise<void> {
+    if (this.viewValue.mode === "hosted") {
+      if (!await this.hostedSession()) throw new Error("session-expired");
+      return;
+    }
+    await this.restoreCommunitySession();
+    if (!this.csrf) throw new Error("session-expired");
+  }
+
   private async hostedSession(): Promise<boolean> {
     const session = await this.request("/hosted/v1/web/app-session", "GET");
     if (typeof session.signed_in !== "boolean") throw new Error("enrollment-response");
@@ -775,7 +836,7 @@ export class BrowserEnrollment {
   }
 
   private fail(error: unknown): void {
-    const errorCode = error instanceof HttpStatusError ? error.code ?? `http-${error.status}` : error instanceof Error ? error.message : "enrollment-error";
+    const errorCode = error instanceof HttpStatusError ? error.code ?? `http-${error.status}` : error instanceof CoreRejectedError ? error.code : error instanceof Error ? error.message : "enrollment-error";
     const { setupCodeRequired: _setupCodeRequired, ...view } = this.viewValue;
     this.viewValue = { ...view, stage: "error", errorCode };
   }
@@ -783,6 +844,114 @@ export class BrowserEnrollment {
 
 function isDefinitiveVaultRequestRejection(error: unknown): boolean {
   return error instanceof HttpStatusError && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429;
+}
+
+function mcpDeviceStatus(value: unknown): McpDeviceStatus {
+  const status = record(value);
+  const device = status.device === null ? null : mcpDevice(record(status.device));
+  return {
+    vaultId: mcpId(required(status, "vaultId")),
+    available: requiredBoolean(status, "available"),
+    serverOrigin: required(status, "serverOrigin"),
+    hosted: requiredBoolean(status, "hosted"),
+    device,
+  };
+}
+
+function mcpDevice(value: Record<string, unknown>): McpDeviceStatus["device"] {
+  return {
+    deviceId: mcpId(required(value, "deviceId")),
+    name: required(value, "name"),
+    state: mcpDeviceState(required(value, "state")),
+    lastSyncedAt: optionalString(value, "lastSyncedAt"),
+    cleanupPending: requiredBoolean(value, "cleanupPending"),
+  };
+}
+
+function mcpGrant(value: unknown): McpGrantView {
+  const grant = record(value);
+  const scopes = grant.scopes;
+  if (!Array.isArray(scopes)) throw new Error("mcp-response");
+  return {
+    id: mcpId(required(grant, "id")),
+    clientName: required(grant, "clientName"),
+    scopes: mcpScopes(scopes),
+    createdAt: required(grant, "createdAt"),
+    lastUsedAt: optionalString(grant, "lastUsedAt"),
+  };
+}
+
+function mcpAuthorization(value: unknown): McpAuthorizationView {
+  const authorization = record(value);
+  const scopes = authorization.requestedScopes;
+  if (!Array.isArray(scopes)) throw new Error("mcp-response");
+  return {
+    id: mcpAuthorizationId(required(authorization, "id")),
+    clientName: required(authorization, "clientName"),
+    clientId: mcpOpaqueString(authorization, "clientId", MAX_MCP_CLIENT_ID_LENGTH),
+    requestedScopes: mcpScopes(scopes),
+    serverOrigin: required(authorization, "serverOrigin"),
+    resource: required(authorization, "resource"),
+    redirectOrigin: mcpOrigin(authorization, "redirectOrigin"),
+    redirectIsLoopback: requiredBoolean(authorization, "redirectIsLoopback"),
+  };
+}
+
+function mcpOpaqueString(value: Record<string, unknown>, field: string, maxLength: number): string {
+  const candidate = value[field];
+  if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > maxLength || /[\u0000-\u001F\u007F]/.test(candidate)) throw new Error("mcp-response");
+  return candidate;
+}
+
+function mcpOrigin(value: Record<string, unknown>, field: string): string {
+  const candidate = mcpOpaqueString(value, field, MAX_MCP_ORIGIN_LENGTH);
+  let origin: URL;
+  try {
+    origin = new URL(candidate);
+  } catch {
+    throw new Error("mcp-response");
+  }
+  if ((origin.protocol !== "http:" && origin.protocol !== "https:") || origin.origin !== candidate) throw new Error("mcp-response");
+  return candidate;
+}
+
+function mcpDecision(value: unknown): McpAuthorizationDecision {
+  return { redirectUri: required(record(value), "redirectUri") };
+}
+
+function mcpScopes(values: unknown[]): McpScope[] {
+  return values.map(value => {
+    if (value === "conversations:read" || value === "messages:send" || value === "media:send") return value;
+    throw new Error("mcp-response");
+  });
+}
+
+function mcpDeviceState(value: string): McpDeviceState {
+  if (value === "pending" || value === "online" || value === "offline" || value === "needs_approval" || value === "revoked") return value;
+  throw new Error("mcp-response");
+}
+
+function mcpId(value: string): string {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) throw new Error("mcp-response");
+  return value;
+}
+
+function mcpAuthorizationId(value: string): string {
+  // A 32-byte unpadded base64url value has two unused and four significant final sextet bits.
+  if (!/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(value)) throw new Error("mcp-response");
+  return value;
+}
+
+function requiredBoolean(value: Record<string, unknown>, field: string): boolean {
+  if (typeof value[field] !== "boolean") throw new Error("mcp-response");
+  return value[field];
+}
+
+function optionalString(value: Record<string, unknown>, field: string): string | null {
+  const candidate = value[field];
+  if (candidate === null) return null;
+  if (typeof candidate !== "string") throw new Error("mcp-response");
+  return candidate;
 }
 
 function isTransientVaultRequestFailure(error: unknown): boolean {

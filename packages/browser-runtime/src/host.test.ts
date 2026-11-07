@@ -74,6 +74,33 @@ describe("browser host RPC", () => {
     expect(fetch).toHaveBeenCalledWith("https://app.peppy.pro/hosted/v1/web/app-session", expect.objectContaining({ credentials: "include" }));
   });
 
+  it("accepts canonical opaque MCP authorization IDs and rejects unsafe path values", async () => {
+    const authorizationIds = [..."AEIMQUYcgkosw048"].map(finalCharacter => `${"A".repeat(42)}${finalCharacter}`);
+    const authorization = vi.fn(async (id: string) => ({ id }));
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => new FakeSession(),
+      network: {
+        start: async () => undefined,
+        stop: async () => undefined,
+        mcpAuthorization: authorization,
+      } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    for (const [index, authorizationId] of authorizationIds.entries()) {
+      attached.emit({ id: index + 1, command: "mcp_authorization", args: { id: authorizationId } });
+    }
+    await eventually(() => authorization.mock.calls.length === authorizationIds.length);
+    expect(authorization.mock.calls.map(([id]) => id)).toEqual(authorizationIds);
+
+    attached.emit({ id: 17, command: "mcp_authorization", args: { id: `${"A".repeat(42)}.` } });
+    await eventually(() => attached.messages.some(message => (message as { id?: number }).id === 17));
+    expect(authorization).toHaveBeenCalledTimes(16);
+    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 17, ok: false }));
+  });
+
   it.each(["locked", "unenrolled"] as const)("does not start networking for a %s boot", async phase => {
     const session = new FakeSession();
     session.phase = phase;

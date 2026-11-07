@@ -281,7 +281,10 @@ impl BrowserCore {
             | "_worker_enrollment_computer_awaiting_owner_view"
             | "_worker_enrollment_confirm_computer"
             | "_worker_enrollment_finish_computer"
-            | "_worker_enrollment_cancel_computer_claimant" => {
+            | "_worker_enrollment_cancel_computer_claimant"
+            | "_worker_mcp_owner_create"
+            | "_worker_mcp_owner_created"
+            | "_worker_mcp_owner_approve" => {
                 self.new_enrollment_command(command, raw_args.ok_or_else(invalid)?)
             }
             "_worker_enrollment_prepare_hosted_owner"

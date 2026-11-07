@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { BrowserEnrollment, type EnrollmentIdentity, type EnrollmentSession } from "./enrollment.js";
 import { CheckpointError } from "./checkpoint.js";
-import { CoreRejectedError } from "./core.js";
+import { BrowserCore, CoreRejectedError, type EmscriptenCoreModule } from "./core.js";
 
 const origin = "https://peppy.test";
 const vaultId = "00000000-0000-0000-0000-000000000001";
@@ -9,6 +9,8 @@ const deviceId = "00000000-0000-0000-0000-000000000002";
 const invitationId = "00000000-0000-0000-0000-000000000003";
 const replacementInvitationId = "00000000-0000-0000-0000-000000000005";
 const challengeId = "00000000-0000-0000-0000-000000000004";
+const authorizationId = `${"A".repeat(42)}E`;
+const authorizationIds = [..."AEIMQUYcgkosw048"].map(finalCharacter => `${"A".repeat(42)}${finalCharacter}`);
 
 class TestSession implements EnrollmentSession {
   public phase: "unenrolled" | "locked" | "ready" = "unenrolled";
@@ -102,6 +104,182 @@ function lifecycleFetcher(statuses: Array<Record<string, unknown>> = []) {
 }
 
 describe("BrowserEnrollment", () => {
+  it("relays the canonical confirm activation wire through the private MCP enable sequence", async () => {
+    const mcpVaultId = "550e8400-e29b-41d4-a716-446655440000";
+    const events: string[] = [];
+    const core = {
+      invoke: vi.fn(async ({ command }: { command: string }) => {
+        events.push(command);
+        if (command === "_worker_enrollment_new_owner_from_identity") return {};
+        if (command === "_worker_identity_metadata") return { vaultId: mcpVaultId };
+        if (command === "_worker_mcp_owner_create") return { request: JSON.stringify({ claimant: "private" }) };
+        if (command === "_worker_mcp_owner_created") return {};
+        if (command === "_worker_mcp_owner_approve") return { request: JSON.stringify({ approval: "private" }) };
+        throw new Error(`unexpected ${command}`);
+      }),
+    };
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const path = pathOf(input);
+      events.push(`${init?.method ?? "GET"} ${path}`);
+      if (path === "/v1/instance/session" && init?.method === "GET") return json({ csrf_token: "csrf" });
+      if (path === "/v1/mcp/device" && init?.method === "GET") return json({ vaultId: mcpVaultId, available: true, serverOrigin: origin, hosted: false, device: null });
+      if (path === "/v1/mcp/device/prepare") return json({ operation_id: invitationId, pairing: { invitation_id: invitationId } });
+      if (path === "/v1/enrollment/computers") return json({ server_nonce: "nonce", expires_in_seconds: 60 });
+      if (path === `/v1/enrollment/computers/${invitationId}/approve`) return json({ state: "approved" });
+      if (path === "/v1/mcp/device/activate") return json({ confirm: { claimant_proof: "private" } });
+      if (path === `/v1/enrollment/computers/${invitationId}/confirm`) return json({ vault_id: mcpVaultId, device_id: deviceId, role: "device" });
+      if (path === "/v1/mcp/device/complete") return json({ vaultId: mcpVaultId, available: true, serverOrigin: origin, hosted: false, device: null });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.mcpEnable()).resolves.toMatchObject({ vaultId: mcpVaultId, available: true });
+    const ownerFacadeCall = events.indexOf("_worker_enrollment_new_owner_from_identity");
+    const prepareCall = events.indexOf("POST /v1/mcp/device/prepare");
+    expect(ownerFacadeCall).toBeGreaterThanOrEqual(0);
+    expect(prepareCall).toBeGreaterThanOrEqual(0);
+    expect(ownerFacadeCall).toBeLessThan(prepareCall);
+    const prepareFetchCall = fetcher.mock.calls.findIndex(([input]) => pathOf(input) === "/v1/mcp/device/prepare");
+    expect(fetcher.mock.calls[prepareFetchCall]?.[1]?.headers).toMatchObject({ "X-Peppy-CSRF-Token": "csrf" });
+    expect(fetcher.mock.calls.map(([input]) => pathOf(input))).toContain(`/v1/enrollment/computers/${invitationId}/confirm`);
+    expect(fetcher.mock.calls.map(([input]) => pathOf(input))).toContain("/v1/enrollment/computers");
+    expect(fetcher.mock.calls.map(([input]) => pathOf(input))).not.toContain(`/v1/enrollment/computers/${invitationId}`);
+    expect(fetcher.mock.calls.map(([input]) => pathOf(input))).toContain("/v1/mcp/device/complete");
+  });
+
+  it("does not prepare MCP enrollment when owner facade reconstruction fails", async () => {
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_enrollment_new_owner_from_identity") throw new Error("credentials-required");
+      throw new Error(`unexpected ${command}`);
+    }) };
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      throw new Error(`unexpected ${pathOf(input)}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.mcpEnable()).rejects.toThrow("credentials-required");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("rejects MCP enablement without posting when a restored community session expires", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    let sessionRequests = 0;
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/instance/session" && init?.method === "GET") {
+        sessionRequests += 1;
+        return sessionRequests === 1 ? json({ csrf_token: "stale-csrf" }) : json({ code: "invalid_session" }, { status: 401 });
+      }
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.discover();
+    await expect(enrollment.mcpEnable()).rejects.toThrow("session-expired");
+    expect(sessionRequests).toBe(2);
+    expect(fetcher.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+  });
+
+  it("rejects MCP enablement without posting when the hosted session is signed out", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({ mode: "hosted" });
+      if (path === "/hosted/v1/web/app-session" && init?.method === "GET") return json({ signed_in: false });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.discover();
+    await expect(enrollment.mcpEnable()).rejects.toThrow("session-expired");
+    expect(fetcher.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+  });
+
+  it("accepts opaque authorization IDs and rejects unsafe path values", async () => {
+    const core = { invoke: vi.fn() };
+    const session = new TestSession();
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const authorizationPath = "/v1/mcp/authorizations/";
+      if (pathOf(input).startsWith(authorizationPath) && !pathOf(input).endsWith("/approve") && !pathOf(input).endsWith("/deny")) {
+        return json({ id: pathOf(input).slice(authorizationPath.length), clientName: "MCP client", clientId: "client-id", requestedScopes: ["conversations:read"], serverOrigin: origin, resource: "resource", redirectOrigin: "https://client.example", redirectIsLoopback: false });
+      }
+      if (pathOf(input) === `/v1/mcp/authorizations/${authorizationId}/approve` || pathOf(input) === `/v1/mcp/authorizations/${authorizationId}/deny`) {
+        return json({ redirectUri: "https://client.example/callback" });
+      }
+      throw new Error(`unexpected ${pathOf(input)}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    for (const id of authorizationIds) {
+      await expect(enrollment.mcpAuthorization(id)).resolves.toMatchObject({ id, clientId: "client-id", redirectOrigin: "https://client.example", redirectIsLoopback: false });
+    }
+    await expect(enrollment.mcpApproveAuthorization(authorizationId, ["conversations:read"])).resolves.toEqual({ redirectUri: "https://client.example/callback" });
+    await expect(enrollment.mcpDenyAuthorization(authorizationId)).resolves.toEqual({ redirectUri: "https://client.example/callback" });
+    for (const invalid of ["A".repeat(44), `${"A".repeat(42)}.`, `${"A".repeat(41)}/Q`]) {
+      await expect(enrollment.mcpAuthorization(invalid)).rejects.toThrow("mcp-response");
+    }
+    expect(fetcher).toHaveBeenCalledTimes(18);
+  });
+
+  it("rejects malformed authorization client and redirect display fields", async () => {
+    const core = { invoke: vi.fn() };
+    const session = new TestSession();
+    const response: Record<string, unknown> = { id: authorizationId, clientName: "MCP client", clientId: "client-id", requestedScopes: ["conversations:read"], serverOrigin: origin, resource: "resource", redirectOrigin: "https://client.example", redirectIsLoopback: false };
+    const fetcher = vi.fn<typeof fetch>(async () => json(response));
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    for (const [field, value] of [["clientId", ""], ["clientId", "x".repeat(257)], ["redirectOrigin", "https://client.example/path"], ["redirectOrigin", "ftp://client.example"], ["redirectIsLoopback", "false"]] as const) {
+      response[field] = value;
+      await expect(enrollment.mcpAuthorization(authorizationId)).rejects.toThrow("mcp-response");
+      response[field] = field === "redirectIsLoopback" ? false : field === "redirectOrigin" ? "https://client.example" : "client-id";
+    }
+  });
+
+  it("preserves the HTTPS requirement through the browser core boundary", async () => {
+    const heap = new Uint8Array(256);
+    const wasm: EmscriptenCoreModule = {
+      HEAPU8: heap,
+      UTF8ToString: () => JSON.stringify({ ok: false, error: { code: "https-required" } }),
+      _peppy_browser_alloc: () => 8,
+      _peppy_browser_dispatch: () => 100,
+      _peppy_browser_free_request: () => undefined,
+      _peppy_browser_free_response: () => undefined,
+    };
+    const core = new BrowserCore(async () => wasm);
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      if (pathOf(input) === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (pathOf(input) === "/v1/instance") return json(instanceInfo(false));
+      throw new Error(`unexpected ${pathOf(input)}`);
+    });
+    const enrollment = new BrowserEnrollment(core, new TestSession(), origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ stage: "error", errorCode: "https-required" });
+  });
+
+  it("accepts a bounded long redirect origin", async () => {
+    const core = { invoke: vi.fn() };
+    const session = new TestSession();
+    const redirectOrigin = `https://${"a".repeat(300)}.example`;
+    const fetcher = vi.fn<typeof fetch>(async () => json({ id: authorizationId, clientName: "MCP client", clientId: "client-id", requestedScopes: ["conversations:read"], serverOrigin: origin, resource: "resource", redirectOrigin, redirectIsLoopback: false }));
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.mcpAuthorization(authorizationId)).resolves.toMatchObject({ redirectOrigin });
+  });
+
   it("keeps a computer claimant waiting on a status 404, then checkpoint-activates only after local confirmation", async () => {
     const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
       if (command === "_worker_enrollment_new") return {};
