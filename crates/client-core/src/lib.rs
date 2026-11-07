@@ -3668,6 +3668,41 @@ impl Client {
             .transpose()
     }
 
+    /// Highest `messages.local_order` (insertion order, AUTOINCREMENT), or 0 when empty.
+    pub fn latest_message_local_order(&self) -> Result<i64, Error> {
+        let store = self.lock()?;
+        store
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(local_order), 0) FROM messages",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Error::from)
+    }
+
+    /// Incoming messages with `local_order` greater than `after`, ascending, at most `limit`.
+    pub fn incoming_messages_after(
+        &self,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, MessagePayload)>, Error> {
+        let store = self.lock()?;
+        let limit = i64::try_from(limit.clamp(1, MAX_HISTORY_PAGE)).map_err(|_| Error::Database)?;
+        let mut query = store.conn.prepare(
+            "SELECT local_order,payload FROM messages WHERE local_order>?1 AND json_extract(payload, '$.direction')='incoming' ORDER BY local_order LIMIT ?2",
+        )?;
+        query
+            .query_map(params![after, limit], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .map(|row| {
+                let (local_order, payload) = row?;
+                Ok((local_order, decode(payload.as_bytes())?))
+            })
+            .collect()
+    }
+
     /// Returns one validated, decrypted message by its durable ID.
     pub fn message_by_id(&self, message_id: MessageId) -> Result<Option<Message>, Error> {
         let store = self.lock()?;
@@ -10070,6 +10105,97 @@ mod tests {
     use serde_json::json;
     use std::time::Instant;
     use uuid::Uuid;
+
+    fn webhook_test_client() -> (tempfile::TempDir, Client) {
+        let directory = tempfile::tempdir().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("webhooks.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[1; 32]).unwrap(),
+        )
+        .unwrap();
+        (directory, client)
+    }
+
+    fn webhook_test_message(sequence: u64, direction: Direction) -> MessagePayload {
+        MessagePayload {
+            record: MessageRecord {
+                message_id: MessageId::new(),
+                conversation_id: ConversationId::new(),
+                source_sequence: SourceSequence(sequence),
+                attachments: Vec::new(),
+            },
+            source_device_id: DeviceId::new(),
+            provider_message_id: None,
+            sender_address: None,
+            recipients: Vec::new(),
+            subject: None,
+            body: format!("message {sequence}"),
+            transport: Transport::Sms,
+            direction,
+            imported: false,
+            sent_at_ms: None,
+            ordered_at_ms: None,
+            mms_context: None,
+        }
+    }
+
+    fn insert_webhook_test_message(client: &Client, sequence: u64, direction: Direction) {
+        let store = client.lock().unwrap();
+        assert_eq!(
+            insert_message(&store.conn, &webhook_test_message(sequence, direction)).unwrap(),
+            Inserted::New
+        );
+    }
+
+    #[test]
+    fn latest_message_local_order_is_zero_for_an_empty_database() {
+        let (_directory, client) = webhook_test_client();
+
+        assert_eq!(client.latest_message_local_order().unwrap(), 0);
+        assert!(client.incoming_messages_after(0, 20).unwrap().is_empty());
+    }
+
+    #[test]
+    fn incoming_messages_are_ordered_exclude_outgoing_and_use_an_exclusive_cursor() {
+        let (_directory, client) = webhook_test_client();
+        insert_webhook_test_message(&client, 1, Direction::Incoming);
+        insert_webhook_test_message(&client, 2, Direction::Outgoing);
+        insert_webhook_test_message(&client, 3, Direction::Incoming);
+
+        assert_eq!(client.latest_message_local_order().unwrap(), 3);
+        let messages = client.incoming_messages_after(1, 20).unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|(local_order, payload)| (*local_order, payload.body.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(3, "message 3")]
+        );
+        assert_eq!(
+            client
+                .incoming_messages_after(0, 20)
+                .unwrap()
+                .iter()
+                .map(|(local_order, _)| *local_order)
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+    }
+
+    #[test]
+    fn incoming_messages_limit_is_bounded() {
+        let (_directory, client) = webhook_test_client();
+        for sequence in 1..=3 {
+            insert_webhook_test_message(&client, sequence, Direction::Incoming);
+        }
+
+        assert_eq!(client.incoming_messages_after(0, 0).unwrap().len(), 1);
+        assert_eq!(client.incoming_messages_after(0, 2).unwrap().len(), 2);
+    }
 
     #[test]
     fn malformed_scan_payload_kinds_remain_strict_known_events() {
