@@ -1,8 +1,9 @@
 use crate::{MobileBindingsError, NativeClient, NativeConversation, NativeMessage, with_client};
 use peppy_client_core::{
     Client, Conversation, ConversationId, Direction, Message, RcsContextExpectation, RcsCutover,
-    RcsIdentityOutcome, RcsObservationProvenance, RcsProjectedRecord, RcsProjectedStatus,
-    RcsProviderDetector, RcsReceiveCode, RcsReceiveContext, RcsReceiveOutcome, RcsReceiveOwner,
+    RcsIdentityOutcome, RcsObservationProvenance, RcsOwnerUnlinkCutoverCandidate,
+    RcsProjectedRecord, RcsProjectedStatus, RcsProviderDetector, RcsProviderRow,
+    RcsProviderRowRoute, RcsReceiveCode, RcsReceiveContext, RcsReceiveOutcome, RcsReceiveOwner,
     RcsStatusApplication, RcsUnlinkCutoverGenerations, Transport,
 };
 use serde::Deserialize;
@@ -263,6 +264,30 @@ pub struct NativeRcsUnlinkCutoverGenerations {
     pub lifecycle_generation: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeRcsOwnerUnlinkCutoverCandidate {
+    pub conversation_id: String,
+    pub ownership_generation: u64,
+    pub lifecycle_generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeRcsProviderRowRoute {
+    Provider,
+    DetectorRecorded,
+    Alert,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProviderRowJson {
+    provider_row_id: i64,
+    provider_thread_id: i64,
+    provider_type: i64,
+    observed_at_ms: i64,
+    addresses: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum NativeRcsReceiveOwner {
     Link,
@@ -301,6 +326,24 @@ fn cutover_generations_view(
     NativeRcsUnlinkCutoverGenerations {
         ownership_generation: value.ownership_generation,
         lifecycle_generation: value.lifecycle_generation,
+    }
+}
+
+fn unlink_candidate_view(
+    value: RcsOwnerUnlinkCutoverCandidate,
+) -> NativeRcsOwnerUnlinkCutoverCandidate {
+    NativeRcsOwnerUnlinkCutoverCandidate {
+        conversation_id: value.conversation_id.to_string(),
+        ownership_generation: value.ownership_generation,
+        lifecycle_generation: value.lifecycle_generation,
+    }
+}
+
+fn provider_row_route(value: RcsProviderRowRoute) -> NativeRcsProviderRowRoute {
+    match value {
+        RcsProviderRowRoute::Provider => NativeRcsProviderRowRoute::Provider,
+        RcsProviderRowRoute::DetectorRecorded => NativeRcsProviderRowRoute::DetectorRecorded,
+        RcsProviderRowRoute::Alert => NativeRcsProviderRowRoute::Alert,
     }
 }
 
@@ -525,6 +568,36 @@ impl NativeClient {
         })
         .map(identity_outcome)
     }
+    pub fn gateway_rcs_owner_unlink_cutover_candidates(
+        &self,
+    ) -> Result<Vec<NativeRcsOwnerUnlinkCutoverCandidate>, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.rcs_owner_unlink_cutover_candidates()
+        })
+        .map(|values| values.into_iter().map(unlink_candidate_view).collect())
+    }
+
+    pub fn gateway_route_rcs_provider_row_json(
+        &self,
+        provider_row_json: String,
+    ) -> Result<NativeRcsProviderRowRoute, MobileBindingsError> {
+        if provider_row_json.len() > GO_RECORD_JSON_CAP {
+            return Err(MobileBindingsError::InvalidRequest);
+        }
+        let row: ProviderRowJson = serde_json::from_str(&provider_row_json)
+            .map_err(|_| MobileBindingsError::InvalidRequest)?;
+        with_client(&self.client, |client| {
+            client.route_rcs_provider_row(RcsProviderRow {
+                provider_row_id: row.provider_row_id,
+                provider_thread_id: row.provider_thread_id,
+                provider_type: row.provider_type,
+                observed_at_ms: row.observed_at_ms,
+                addresses: row.addresses,
+            })
+        })
+        .map(provider_row_route)
+    }
+
     pub fn gateway_record_rcs_provider_detector_json(
         &self,
         conversation_id: String,

@@ -5,6 +5,7 @@ use crate::{
 };
 use peppy_crypto::compaction_hmac;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 const MAX_DETECTORS_PER_CONVERSATION: i64 = 1_024;
@@ -50,6 +51,29 @@ pub struct RcsProviderDetector {
     pub provider_type: i64,
     pub observed_at_ms: i64,
     pub observed_generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RcsOwnerUnlinkCutoverCandidate {
+    pub conversation_id: ConversationId,
+    pub ownership_generation: u64,
+    pub lifecycle_generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RcsProviderRow {
+    pub provider_row_id: i64,
+    pub provider_thread_id: i64,
+    pub provider_type: i64,
+    pub observed_at_ms: i64,
+    pub addresses: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RcsProviderRowRoute {
+    Provider,
+    DetectorRecorded,
+    Alert,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -862,6 +886,131 @@ impl Client {
         Ok(contexts)
     }
 
+    /// Enumerates terminal Link-owned lanes only after the current explicit unlink completed.
+    pub fn rcs_owner_unlink_cutover_candidates(
+        &self,
+    ) -> Result<Vec<RcsOwnerUnlinkCutoverCandidate>, Error> {
+        let mut store = self.lock()?;
+        let tx = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let lifecycle = crate::rcs_mapping::recorded_link_lifecycle_metadata(&tx)?
+            .ok_or(Error::InvalidRequest("terminal RCS unlink is unavailable"))?;
+        if lifecycle.state != crate::RcsCapabilityState::Unlinked
+            || !crate::rcs_send::intentional_unlink_is_current(&tx)?
+        {
+            return Err(Error::InvalidRequest("terminal RCS unlink is unavailable"));
+        }
+        let candidates = {
+            let mut statement = tx.prepare(
+                "SELECT conversation_id,ownership_generation FROM rcs_lane_ownership WHERE owner='link' ORDER BY conversation_id LIMIT 100",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+                })?
+                .map(|row| {
+                    let (conversation_id, ownership_generation) = row?;
+                    Ok(RcsOwnerUnlinkCutoverCandidate {
+                        conversation_id: conversation_id.parse().map_err(|_| Error::Database)?,
+                        ownership_generation,
+                        lifecycle_generation: lifecycle.generation,
+                    })
+                })
+                .collect::<Result<Vec<_>, Error>>()?
+        };
+        tx.commit()?;
+        Ok(candidates)
+    }
+
+    /// Routes a provider row without creating message, acquisition, or conversation state.
+    pub fn route_rcs_provider_row(
+        &self,
+        row: RcsProviderRow,
+    ) -> Result<RcsProviderRowRoute, Error> {
+        validate_provider_row(&row)?;
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !local_gateway(&tx, ctx.device_id)? {
+            return Err(Error::InvalidRequest("local RCS gateway is unavailable"));
+        }
+        let row_identities = row
+            .addresses
+            .iter()
+            .filter_map(|address| crate::rcs_mapping::canonical_recipient(address))
+            .collect::<BTreeSet<_>>();
+        let (resolved, uncertain) =
+            crate::rcs_mapping::peppy_conversations_for_identity_set(&tx, &row_identities)?;
+        let mut conversations = resolved.into_iter().collect::<BTreeSet<_>>();
+        let mut statement = tx.prepare(
+            "SELECT m.peppy_conversation_id,p.canonical_participant,p.identity_region,p.own_identity FROM rcs_conversation_mappings m JOIN rcs_mapping_proofs p ON p.peppy_conversation_id=m.peppy_conversation_id AND p.mapping_revision=m.mapping_revision",
+        )?;
+        let proofs = statement
+            .query_map([], |record| {
+                Ok((
+                    record.get::<_, String>(0)?,
+                    record.get::<_, String>(1)?,
+                    record.get::<_, String>(2)?,
+                    record.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        for (conversation, participant, region, own) in proofs {
+            let participants = row
+                .addresses
+                .iter()
+                .filter(|address| {
+                    !crate::conversation_match::confirmed_own_address(&own, address, Some(&region))
+                })
+                .filter_map(|address| crate::rcs_mapping::canonical_recipient(address))
+                .collect::<BTreeSet<_>>();
+            if participants == BTreeSet::from([participant]) {
+                conversations.insert(conversation.parse().map_err(|_| Error::Database)?);
+            }
+        }
+        if uncertain || conversations.len() > 1 {
+            tx.commit()?;
+            return Ok(RcsProviderRowRoute::Alert);
+        }
+        let Some(conversation_id) = conversations.pop_first() else {
+            let has_link_lane: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM rcs_lane_ownership WHERE owner='link')",
+                [],
+                |record| record.get(0),
+            )?;
+            tx.commit()?;
+            return Ok(if has_link_lane {
+                RcsProviderRowRoute::Alert
+            } else {
+                RcsProviderRowRoute::Provider
+            });
+        };
+        let Some(ownership) = load_ownership(&tx, conversation_id)? else {
+            tx.commit()?;
+            return Ok(RcsProviderRowRoute::Provider);
+        };
+        if ownership.owner != RcsReceiveOwner::Link {
+            tx.commit()?;
+            return Ok(RcsProviderRowRoute::Provider);
+        }
+        record_provider_detector_in_transaction(
+            &tx,
+            &ctx,
+            conversation_id,
+            RcsProviderDetector {
+                provider_row_id: row.provider_row_id,
+                provider_thread_id: row.provider_thread_id,
+                provider_type: row.provider_type,
+                observed_at_ms: row.observed_at_ms,
+                observed_generation: ownership.ownership_generation,
+            },
+        )?;
+        tx.commit()?;
+        Ok(RcsProviderRowRoute::DetectorRecorded)
+    }
+
     /// Records detector metadata only; this method never writes a vault message.
     pub fn record_rcs_provider_detector(
         &self,
@@ -893,55 +1042,10 @@ impl Client {
                 RcsReceiveCode::GatewayUnavailable,
             ));
         }
-        let conversation_key = conversation_id.to_string();
-        tx.execute(
-            "UPDATE rcs_lane_ownership SET observed_detector_high_water=MAX(observed_detector_high_water,?) WHERE conversation_id=?",
-            params![detector.provider_row_id, conversation_key],
-        )?;
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM rcs_provider_detectors WHERE conversation_id=? AND provider_row_id=?)",
-            params![conversation_key, detector.provider_row_id],
-            |row| row.get(0),
-        )?;
-        if exists {
-            tx.commit()?;
-            return Ok(RcsIdentityOutcome::Duplicate);
-        }
-        tx.execute(
-            "DELETE FROM rcs_provider_detectors WHERE conversation_id=? AND provider_row_id IN (
-                SELECT provider_row_id FROM rcs_provider_detectors
-                WHERE conversation_id=? AND resolved=1
-                  AND (SELECT COUNT(*) FROM rcs_provider_detectors WHERE conversation_id=?) >= ?
-                ORDER BY observed_at_ms,provider_row_id
-                LIMIT 1
-            )",
-            params![
-                conversation_key,
-                conversation_key,
-                conversation_key,
-                MAX_DETECTORS_PER_CONVERSATION
-            ],
-        )?;
-        let count: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM rcs_provider_detectors WHERE conversation_id=?",
-            [conversation_key.as_str()],
-            |row| row.get(0),
-        )?;
-        if count >= MAX_DETECTORS_PER_CONVERSATION {
-            tx.execute(
-                "UPDATE rcs_lane_ownership SET alert_code='detector_overflow' WHERE conversation_id=?",
-                [conversation_key.as_str()],
-            )?;
-            publish_metadata(&tx, &ctx, conversation_id, None, true)?;
-            tx.commit()?;
-            return Ok(RcsIdentityOutcome::Recorded);
-        }
-        tx.execute(
-            "INSERT INTO rcs_provider_detectors(conversation_id,provider_row_id,provider_thread_id,provider_type,observed_at_ms,observed_generation,resolved) VALUES(?,?,?,?,?,?,0)",
-            params![conversation_key, detector.provider_row_id, detector.provider_thread_id, detector.provider_type, detector.observed_at_ms, detector.observed_generation],
-        )?;
+        let outcome =
+            record_provider_detector_in_transaction(&tx, &ctx, conversation_id, detector)?;
         tx.commit()?;
-        Ok(RcsIdentityOutcome::Recorded)
+        Ok(outcome)
     }
 
     /// Freezes link writing and makes provider ownership effective for rows after this floor.
@@ -1231,6 +1335,65 @@ fn valid_token(token: &str) -> bool {
         && token
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn validate_provider_row(row: &RcsProviderRow) -> Result<(), Error> {
+    if row.provider_row_id < 0
+        || row.provider_thread_id < 0
+        || row.provider_type < 0
+        || row.addresses.is_empty()
+        || row.addresses.len() > 100
+        || row
+            .addresses
+            .iter()
+            .any(|address| address.trim().is_empty() || address.len() > 512)
+    {
+        return Err(Error::InvalidRequest("invalid RCS provider row"));
+    }
+    Ok(())
+}
+
+fn record_provider_detector_in_transaction(
+    tx: &Connection,
+    ctx: &Ctx<'_>,
+    conversation_id: ConversationId,
+    detector: RcsProviderDetector,
+) -> Result<RcsIdentityOutcome, Error> {
+    let conversation_key = conversation_id.to_string();
+    tx.execute(
+        "UPDATE rcs_lane_ownership SET observed_detector_high_water=MAX(observed_detector_high_water,?) WHERE conversation_id=?",
+        params![detector.provider_row_id, conversation_key],
+    )?;
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rcs_provider_detectors WHERE conversation_id=? AND provider_row_id=?)",
+        params![conversation_key, detector.provider_row_id],
+        |record| record.get(0),
+    )?;
+    if exists {
+        return Ok(RcsIdentityOutcome::Duplicate);
+    }
+    tx.execute(
+        "DELETE FROM rcs_provider_detectors WHERE conversation_id=? AND provider_row_id IN (SELECT provider_row_id FROM rcs_provider_detectors WHERE conversation_id=? AND resolved=1 AND (SELECT COUNT(*) FROM rcs_provider_detectors WHERE conversation_id=?) >= ? ORDER BY observed_at_ms,provider_row_id LIMIT 1)",
+        params![conversation_key, conversation_key, conversation_key, MAX_DETECTORS_PER_CONVERSATION],
+    )?;
+    let count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM rcs_provider_detectors WHERE conversation_id=?",
+        [conversation_key.as_str()],
+        |record| record.get(0),
+    )?;
+    if count >= MAX_DETECTORS_PER_CONVERSATION {
+        tx.execute(
+            "UPDATE rcs_lane_ownership SET alert_code='detector_overflow' WHERE conversation_id=?",
+            [conversation_key.as_str()],
+        )?;
+        publish_metadata(tx, ctx, conversation_id, None, true)?;
+        return Ok(RcsIdentityOutcome::Recorded);
+    }
+    tx.execute(
+        "INSERT INTO rcs_provider_detectors(conversation_id,provider_row_id,provider_thread_id,provider_type,observed_at_ms,observed_generation,resolved) VALUES(?,?,?,?,?,?,0)",
+        params![conversation_key, detector.provider_row_id, detector.provider_thread_id, detector.provider_type, detector.observed_at_ms, detector.observed_generation],
+    )?;
+    Ok(RcsIdentityOutcome::Recorded)
 }
 
 fn unique_current_gateway(conn: &Connection, device_id: DeviceId) -> Result<bool, Error> {

@@ -1,4 +1,6 @@
-use crate::rcs_receive::{NativeRcsContextExpectation, NativeRcsObservationProvenance};
+use crate::rcs_receive::{
+    NativeRcsContextExpectation, NativeRcsObservationProvenance, NativeRcsProviderRowRoute,
+};
 use crate::{
     MobileBindingsError, NativeClient, NativeOpenConfig, create_vault_material, open_native_client,
     with_client,
@@ -135,7 +137,8 @@ fn go_exported_receive_record_ingests_through_mobile_boundary() {
             fixture.conversation_id.clone(),
             fixture.generation,
             decoded.to_string(),
-            NativeRcsObservationProvenance::Historical,
+            // The exported projection models a live Go stream event, not a gap-page record.
+            NativeRcsObservationProvenance::Live,
         )
         .unwrap();
     assert_eq!(result.record_outcome, "unmatched_outgoing");
@@ -406,6 +409,7 @@ struct Fixture {
     client: Arc<NativeClient>,
     conversation_id: String,
     generation: u64,
+    database_path: String,
 }
 
 fn fixture() -> Fixture {
@@ -416,7 +420,7 @@ fn fixture() -> Fixture {
         .to_string_lossy()
         .into_owned();
     let client = open_native_client(NativeOpenConfig {
-        database_path,
+        database_path: database_path.clone(),
         vault_id: vault_id.clone(),
         device_id: device_id.clone(),
         database_key: vec![7; 32],
@@ -461,6 +465,7 @@ fn fixture() -> Fixture {
         client,
         conversation_id,
         generation,
+        database_path,
     }
 }
 
@@ -746,6 +751,88 @@ fn mobile_rcs_status_and_metadata_mapping_is_sanitized() {
         .pop()
         .unwrap();
     assert!(conversation.rcs_history_gap);
+}
+
+#[test]
+fn owner_unlink_candidates_require_current_completion_and_are_bounded() {
+    let fixture = fixture();
+    assert!(matches!(
+        fixture.client.gateway_rcs_owner_unlink_cutover_candidates(),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+    with_client(&fixture.client.client, |core| {
+        core.record_rcs_link_lifecycle(
+            RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            1_000,
+            1_000,
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(matches!(
+        fixture.client.gateway_rcs_owner_unlink_cutover_candidates(),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+    with_client(&fixture.client.client, |core| {
+        core.record_rcs_explicit_unlink_completed(1_000, 1_000)
+    })
+    .unwrap();
+    let candidates = fixture
+        .client
+        .gateway_rcs_owner_unlink_cutover_candidates()
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].conversation_id, fixture.conversation_id);
+    assert_eq!(candidates[0].ownership_generation, fixture.generation);
+    assert_eq!(candidates[0].lifecycle_generation, 1);
+}
+
+#[test]
+fn provider_row_route_records_only_detector_state_for_the_single_link_lane() {
+    let fixture = fixture();
+    let connection = rusqlite::Connection::open(&fixture.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO rcs_conversation_mappings(peppy_conversation_id,google_conversation_id,class,proof_version,proof_hash,mapping_revision,verified_at_ms) VALUES(?, 'google-route', 'one_to_one', 2, ?, 1, 1000)",
+            rusqlite::params![fixture.conversation_id, vec![0_u8; 32]],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO rcs_mapping_proofs(peppy_conversation_id,mapping_revision,canonical_participant,identity_region,own_identity) VALUES(?,1,'+14155552671','US','+14155550100')",
+            [&fixture.conversation_id],
+        )
+        .unwrap();
+    let before = reads(&fixture);
+    let outcome = fixture
+        .client
+        .gateway_route_rcs_provider_row_json(
+            serde_json::json!({
+                "providerRowId": 41,
+                "providerThreadId": 7,
+                "providerType": 1,
+                "observedAtMs": 1_000,
+                "addresses": ["+14155552671"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+    assert_eq!(outcome, NativeRcsProviderRowRoute::DetectorRecorded);
+    assert_eq!(reads(&fixture), before);
+    let count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM rcs_provider_detectors", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 1);
 }
 
 fn detector(provider_row_id: i64, observed_generation: u64) -> String {

@@ -1179,11 +1179,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_rcs_link_owned_conversations(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_rcs_owner_unlink_cutover_candidates(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_rcs_receive_context(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_rcs_unlink_cutover_generations(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_record_rcs_provider_detector_json(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_route_rcs_provider_row_json(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_export_vault_identity_recovery_key_for_native_storage(
     ): Int
@@ -1745,11 +1749,15 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_rcs_link_owned_conversations(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_rcs_owner_unlink_cutover_candidates(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_rcs_receive_context(`ptr`: Long,`googleConversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_rcs_unlink_cutover_generations(`ptr`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_record_rcs_provider_detector_json(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`ownershipGeneration`: Long,`detectorJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_route_rcs_provider_row_json(`ptr`: Long,`providerRowJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_export_vault_identity_recovery_key_for_native_storage(`ptr`: Long,`epoch`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -2906,6 +2914,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_rcs_link_owned_conversations() and 0xFFFF) != 45786) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_rcs_owner_unlink_cutover_candidates() and 0xFFFF) != 15082) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_rcs_receive_context() and 0xFFFF) != 33984) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2913,6 +2924,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_record_rcs_provider_detector_json() and 0xFFFF) != 34724) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_route_rcs_provider_row_json() and 0xFFFF) != 52165) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_export_vault_identity_recovery_key_for_native_storage() and 0xFFFF) != 61042) {
@@ -4144,11 +4158,15 @@ public interface NativeClientInterface {
     
     fun `gatewayRcsLinkOwnedConversations`(): List<NativeRcsReceiveContext>
     
+    fun `gatewayRcsOwnerUnlinkCutoverCandidates`(): List<NativeRcsOwnerUnlinkCutoverCandidate>
+    
     fun `gatewayRcsReceiveContext`(`googleConversationId`: kotlin.String): NativeRcsReceiveContext?
     
     fun `gatewayRcsUnlinkCutoverGenerations`(`conversationId`: kotlin.String): NativeRcsUnlinkCutoverGenerations?
     
     fun `gatewayRecordRcsProviderDetectorJson`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `detectorJson`: kotlin.String): kotlin.String
+    
+    fun `gatewayRouteRcsProviderRowJson`(`providerRowJson`: kotlin.String): NativeRcsProviderRowRoute
     
     fun `exportVaultIdentityRecoveryKeyForNativeStorage`(`epoch`: kotlin.UInt): kotlin.ByteArray
     
@@ -7479,6 +7497,20 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `gatewayRcsOwnerUnlinkCutoverCandidates`(): List<NativeRcsOwnerUnlinkCutoverCandidate> {
+            return FfiConverterSequenceTypeNativeRcsOwnerUnlinkCutoverCandidate.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_rcs_owner_unlink_cutover_candidates(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `gatewayRcsReceiveContext`(`googleConversationId`: kotlin.String): NativeRcsReceiveContext? {
             return FfiConverterOptionalTypeNativeRcsReceiveContext.lift(
     callWithHandle {
@@ -7519,6 +7551,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         FfiConverterString.lower(`conversationId`),
         FfiConverterULong.lower(`ownershipGeneration`),
         FfiConverterString.lower(`detectorJson`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `gatewayRouteRcsProviderRowJson`(`providerRowJson`: kotlin.String): NativeRcsProviderRowRoute {
+            return FfiConverterTypeNativeRcsProviderRowRoute.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_route_rcs_provider_row_json(
+        it,
+        
+        FfiConverterString.lower(`providerRowJson`),_status)
 }
     }
     )
@@ -14645,6 +14692,49 @@ public object FfiConverterTypeNativeRcsLinkStatus: FfiConverterRustBuffer<Native
 
 
 
+data class NativeRcsOwnerUnlinkCutoverCandidate (
+    var `conversationId`: kotlin.String
+    , 
+    var `ownershipGeneration`: kotlin.ULong
+    , 
+    var `lifecycleGeneration`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsOwnerUnlinkCutoverCandidate: FfiConverterRustBuffer<NativeRcsOwnerUnlinkCutoverCandidate> {
+    override fun read(buf: ByteBuffer): NativeRcsOwnerUnlinkCutoverCandidate {
+        return NativeRcsOwnerUnlinkCutoverCandidate(
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeRcsOwnerUnlinkCutoverCandidate) = (
+            FfiConverterString.allocationSize(value.`conversationId`) +
+            FfiConverterULong.allocationSize(value.`ownershipGeneration`) +
+            FfiConverterULong.allocationSize(value.`lifecycleGeneration`)
+    )
+
+    override fun write(value: NativeRcsOwnerUnlinkCutoverCandidate, buf: ByteBuffer) {
+            FfiConverterString.write(value.`conversationId`, buf)
+            FfiConverterULong.write(value.`ownershipGeneration`, buf)
+            FfiConverterULong.write(value.`lifecycleGeneration`, buf)
+    }
+}
+
+
+
 data class NativeRcsReceiveContext (
     var `conversationId`: kotlin.String
     , 
@@ -17704,6 +17794,41 @@ public object FfiConverterTypeNativeRcsObservationProvenance: FfiConverterRustBu
 
 
 
+enum class NativeRcsProviderRowRoute {
+    
+    PROVIDER,
+    DETECTOR_RECORDED,
+    ALERT;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsProviderRowRoute: FfiConverterRustBuffer<NativeRcsProviderRowRoute> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeRcsProviderRowRoute.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeRcsProviderRowRoute) = 4UL
+
+    override fun write(value: NativeRcsProviderRowRoute, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
 enum class NativeRcsReceiveOwner {
     
     LINK,
@@ -19598,6 +19723,34 @@ public object FfiConverterSequenceTypeNativeRcsEligibilityPublication: FfiConver
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeNativeRcsEligibilityPublication.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeNativeRcsOwnerUnlinkCutoverCandidate: FfiConverterRustBuffer<List<NativeRcsOwnerUnlinkCutoverCandidate>> {
+    override fun read(buf: ByteBuffer): List<NativeRcsOwnerUnlinkCutoverCandidate> {
+        val len = buf.getInt()
+        return List<NativeRcsOwnerUnlinkCutoverCandidate>(len) {
+            FfiConverterTypeNativeRcsOwnerUnlinkCutoverCandidate.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativeRcsOwnerUnlinkCutoverCandidate>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativeRcsOwnerUnlinkCutoverCandidate.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativeRcsOwnerUnlinkCutoverCandidate>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativeRcsOwnerUnlinkCutoverCandidate.write(it, buf)
         }
     }
 }

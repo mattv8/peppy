@@ -717,3 +717,337 @@ fn receive_state_survives_reopen() {
     );
     drop(directory);
 }
+
+#[test]
+fn terminal_unlink_candidates_require_completion_and_are_stably_bounded() {
+    let (_directory, client, first, _config) = client();
+    client.begin_rcs_link_ownership(first, "first", 1).unwrap();
+    for index in 0..100 {
+        client
+            .begin_rcs_link_ownership(ConversationId::new(), &format!("token{index}"), 1)
+            .unwrap();
+    }
+    assert!(client.rcs_owner_unlink_cutover_candidates().is_err());
+    client
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            1_000,
+            1_000,
+        )
+        .unwrap();
+    assert!(client.rcs_owner_unlink_cutover_candidates().is_err());
+    client
+        .record_rcs_explicit_unlink_completed(1_000, 1_000)
+        .unwrap();
+    let candidates = client.rcs_owner_unlink_cutover_candidates().unwrap();
+    assert_eq!(candidates.len(), 100);
+    assert!(
+        candidates
+            .windows(2)
+            .all(|rows| rows[0].conversation_id < rows[1].conversation_id)
+    );
+    assert!(candidates.iter().all(|row| row.lifecycle_generation == 1));
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 2_000, 2_000)
+        .unwrap();
+    assert!(client.rcs_owner_unlink_cutover_candidates().is_err());
+}
+
+fn insert_route_proof(
+    connection: &Connection,
+    conversation_id: ConversationId,
+    google_id: &str,
+    participant: &str,
+) {
+    connection
+        .execute(
+            "INSERT INTO rcs_conversation_mappings(peppy_conversation_id,google_conversation_id,class,proof_version,proof_hash,mapping_revision,verified_at_ms) VALUES(?, ?, 'one_to_one', 2, ?, 1, 1000)",
+            rusqlite::params![conversation_id.to_string(), google_id, vec![0_u8; 32]],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO rcs_mapping_proofs(peppy_conversation_id,mapping_revision,canonical_participant,identity_region,own_identity) VALUES(?,1,?,'US','+14155550100')",
+            rusqlite::params![conversation_id.to_string(), participant],
+        )
+        .unwrap();
+}
+
+#[test]
+fn provider_row_routing_uses_exact_proofs_without_creating_domain_rows() {
+    let (_directory, client, link_conversation, config) = client();
+    client
+        .begin_rcs_link_ownership(link_conversation, "cursor", 1)
+        .unwrap();
+    let connection = sqlcipher(&config.database_path);
+    insert_route_proof(
+        &connection,
+        link_conversation,
+        "google-link",
+        "+14155552671",
+    );
+    let before_messages: i64 = connection
+        .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+        .unwrap();
+    let before_domain_rows: i64 = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM addresses) + (SELECT COUNT(*) FROM sms_acquisitions) + (SELECT COUNT(*) FROM mms_acquisitions)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let route = client
+        .route_rcs_provider_row(RcsProviderRow {
+            provider_row_id: 9,
+            provider_thread_id: 3,
+            provider_type: 1,
+            observed_at_ms: 1_000,
+            addresses: vec!["+1 (415) 555-2671".into()],
+        })
+        .unwrap();
+    assert_eq!(route, RcsProviderRowRoute::DetectorRecorded);
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        before_messages
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM addresses) + (SELECT COUNT(*) FROM sms_acquisitions) + (SELECT COUNT(*) FROM mms_acquisitions)",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        before_domain_rows
+    );
+    client.begin_rcs_unlink_cutover(link_conversation).unwrap();
+    assert_eq!(
+        client
+            .route_rcs_provider_row(RcsProviderRow {
+                provider_row_id: 10,
+                provider_thread_id: 4,
+                provider_type: 1,
+                observed_at_ms: 1_001,
+                addresses: vec!["+14155552671".into()],
+            })
+            .unwrap(),
+        RcsProviderRowRoute::Provider
+    );
+    assert_eq!(
+        client
+            .route_rcs_provider_row(RcsProviderRow {
+                provider_row_id: 12,
+                provider_thread_id: 6,
+                provider_type: 1,
+                observed_at_ms: 1_001,
+                addresses: vec!["+14155559999".into()],
+            })
+            .unwrap(),
+        RcsProviderRowRoute::Provider
+    );
+    let second = ConversationId::new();
+    insert_route_proof(&connection, second, "google-ambiguous", "+14155552671");
+    assert_eq!(
+        client
+            .route_rcs_provider_row(RcsProviderRow {
+                provider_row_id: 11,
+                provider_thread_id: 5,
+                provider_type: 1,
+                observed_at_ms: 1_002,
+                addresses: vec!["+14155552671".into()],
+            })
+            .unwrap(),
+        RcsProviderRowRoute::Alert
+    );
+}
+
+#[test]
+fn provider_row_routing_refuses_a_foreign_current_gateway() {
+    let (_directory, client, _conversation, config) = client();
+    let connection = sqlcipher(&config.database_path);
+    connection
+        .execute(
+            "UPDATE rcs_link_status_projection SET gateway_device_id=?",
+            [DeviceId::new().to_string()],
+        )
+        .unwrap();
+    assert!(
+        client
+            .route_rcs_provider_row(RcsProviderRow {
+                provider_row_id: 1,
+                provider_thread_id: 1,
+                provider_type: 1,
+                observed_at_ms: 1_000,
+                addresses: vec!["+14155552671".into()],
+            })
+            .is_err()
+    );
+}
+
+#[test]
+fn raw_identity_link_lane_routes_to_detector() {
+    let (_directory, client, _unused, config) = client();
+    let captured = client
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "peer-local".into(),
+            body: "existing".into(),
+            provider_message_id: Some("provider-existing".into()),
+            imported: true,
+        })
+        .unwrap();
+    client
+        .begin_rcs_link_ownership(captured.conversation_id, "raw-link", 1)
+        .unwrap();
+    let connection = sqlcipher(&config.database_path);
+    insert_route_proof(
+        &connection,
+        captured.conversation_id,
+        "google-raw",
+        "raw:peer-local",
+    );
+    assert_eq!(
+        client
+            .route_rcs_provider_row(RcsProviderRow {
+                provider_row_id: 101,
+                provider_thread_id: 17,
+                provider_type: 1,
+                observed_at_ms: 1_000,
+                addresses: vec!["peer-local".into()],
+            })
+            .unwrap(),
+        RcsProviderRowRoute::DetectorRecorded
+    );
+}
+
+#[test]
+fn exact_raw_identity_link_lane_without_mapping_never_routes_provider() {
+    let (_directory, client, _unused, _config) = client();
+    let captured = client
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "unmapped-peer".into(),
+            body: "existing".into(),
+            provider_message_id: Some("provider-unmapped".into()),
+            imported: true,
+        })
+        .unwrap();
+    client
+        .begin_rcs_link_ownership(captured.conversation_id, "unmapped-link", 1)
+        .unwrap();
+    assert_ne!(
+        client
+            .route_rcs_provider_row(RcsProviderRow {
+                provider_row_id: 102,
+                provider_thread_id: 18,
+                provider_type: 1,
+                observed_at_ms: 1_000,
+                addresses: vec!["unmapped-peer".into()],
+            })
+            .unwrap(),
+        RcsProviderRowRoute::Provider
+    );
+}
+
+#[test]
+fn outage_provider_routing_preserves_detector_floor_for_local_link_lane() {
+    let (_directory, client, _unused, config) = client();
+    let captured = client
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "outage-peer".into(),
+            body: "existing".into(),
+            provider_message_id: Some("provider-outage-existing".into()),
+            imported: true,
+        })
+        .unwrap();
+    let owner = client
+        .begin_rcs_link_ownership(captured.conversation_id, "outage-link", 0)
+        .unwrap();
+    let states = [
+        (RcsCapabilityState::SignedOut, true, true),
+        (RcsCapabilityState::NeedsRelink, true, true),
+        (RcsCapabilityState::Unlinked, true, true),
+        (RcsCapabilityState::Unavailable, false, false),
+        (RcsCapabilityState::Linked, false, true),
+    ];
+    for (index, (state, availability, health)) in states.into_iter().enumerate() {
+        let observed_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        client
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id: config.device_id,
+                    state,
+                    availability,
+                    health,
+                    phone_responsive: health,
+                    observed_at_ms,
+                    capability_revision: u64::try_from(index + 2).unwrap(),
+                    feature_bits: 0,
+                    linked_since_ms: None,
+                },
+                &[],
+                observed_at_ms,
+            )
+            .unwrap();
+        assert_eq!(
+            client
+                .route_rcs_provider_row(RcsProviderRow {
+                    provider_row_id: i64::try_from(index + 1).unwrap(),
+                    provider_thread_id: 20,
+                    provider_type: 1,
+                    observed_at_ms,
+                    addresses: vec!["outage-peer".into()],
+                })
+                .unwrap(),
+            RcsProviderRowRoute::DetectorRecorded
+        );
+    }
+    assert_eq!(owner.owner, RcsReceiveOwner::Link);
+    let cutover = client
+        .begin_rcs_unlink_cutover(captured.conversation_id)
+        .unwrap();
+    assert_eq!(cutover.freeze_detector_floor, 5);
+    assert!(cutover.ambiguous_detector_alert);
+}
+
+#[test]
+fn group_provider_row_never_routes_into_a_single_participant_link_lane() {
+    let (_directory, client, _unused, config) = client();
+    let captured = client
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "group-peer-a".into(),
+            body: "existing".into(),
+            provider_message_id: Some("provider-group-existing".into()),
+            imported: true,
+        })
+        .unwrap();
+    client
+        .begin_rcs_link_ownership(captured.conversation_id, "group-link", 0)
+        .unwrap();
+    let connection = sqlcipher(&config.database_path);
+    let before = receive_rows(&connection);
+    assert_eq!(
+        client
+            .route_rcs_provider_row(RcsProviderRow {
+                provider_row_id: 201,
+                provider_thread_id: 21,
+                provider_type: 2,
+                observed_at_ms: 1_000,
+                addresses: vec!["group-peer-a".into(), "group-peer-b".into()],
+            })
+            .unwrap(),
+        RcsProviderRowRoute::Alert
+    );
+    assert_eq!(receive_rows(&connection), before);
+}

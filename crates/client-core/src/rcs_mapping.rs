@@ -13,6 +13,11 @@ use sha2::{Digest, Sha256};
 
 pub const RCS_MAPPING_PROOF_VERSION: u32 = 2;
 pub const RCS_MAPPING_FRESHNESS_MS: i64 = 30_000;
+const MAX_PROVIDER_ROUTE_MESSAGE_SCAN: usize = 10_000;
+
+#[cfg(test)]
+static PROVIDER_ROUTE_SCAN_QUERIES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RcsMappingClass {
@@ -486,7 +491,7 @@ fn validated_visible_participants(
         .ok_or(RcsMappingRefusal::ParticipantAmbiguous)
 }
 
-fn peppy_conversations_for_identity(
+pub(crate) fn peppy_conversations_for_identity(
     conn: &Connection,
     identity: &str,
 ) -> Result<(Vec<ConversationId>, bool), Error> {
@@ -510,6 +515,47 @@ fn peppy_conversations_for_identity(
             uncertain = true;
         } else if identities.len() == 1 && identities.contains(identity) {
             conversations.insert(crate::parse(&conversation_id).map_err(|_| Error::Database)?);
+        }
+    }
+    Ok((conversations.into_iter().collect(), uncertain))
+}
+
+pub(crate) fn peppy_conversations_for_identity_set(
+    conn: &Connection,
+    expected: &std::collections::BTreeSet<String>,
+) -> Result<(Vec<ConversationId>, bool), Error> {
+    #[cfg(test)]
+    PROVIDER_ROUTE_SCAN_QUERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut statement = conn.prepare(
+        "SELECT conversation_id,payload FROM messages ORDER BY local_order DESC LIMIT ?",
+    )?;
+    let rows = statement.query_map(
+        [i64::try_from(MAX_PROVIDER_ROUTE_MESSAGE_SCAN + 1).map_err(|_| Error::Database)?],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    let mut conversations = std::collections::BTreeSet::new();
+    let mut uncertain = false;
+    for (index, row) in rows.enumerate() {
+        if index == MAX_PROVIDER_ROUTE_MESSAGE_SCAN {
+            uncertain = true;
+            break;
+        }
+        let (conversation_id, payload) = row?;
+        let payload: crate::MessagePayload = crate::decode(payload.as_bytes())?;
+        let identities = payload
+            .sender_address
+            .iter()
+            .chain(payload.recipients.iter())
+            .filter_map(|address| canonical_identity(address))
+            .collect::<std::collections::BTreeSet<_>>();
+        if identities == *expected {
+            if payload.mms_context.is_some() {
+                uncertain = true;
+            } else {
+                conversations.insert(crate::parse(&conversation_id).map_err(|_| Error::Database)?);
+            }
+        } else if payload.mms_context.is_some() && !identities.is_disjoint(expected) {
+            uncertain = true;
         }
     }
     Ok((conversations.into_iter().collect(), uncertain))
@@ -1723,5 +1769,23 @@ mod tests {
             MappingObservationStatus::Exact
         );
         assert_eq!(get(&conn, conversation_id).unwrap(), Some(mapping));
+    }
+    #[test]
+    fn provider_identity_batch_uses_one_bounded_history_query() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages(conversation_id TEXT NOT NULL,payload TEXT NOT NULL,local_order INTEGER NOT NULL);",
+        )
+        .unwrap();
+        let identities = (0..100)
+            .map(|index| format!("raw:participant-{index}"))
+            .collect::<std::collections::BTreeSet<_>>();
+        PROVIDER_ROUTE_SCAN_QUERIES.store(0, std::sync::atomic::Ordering::Relaxed);
+        let result = peppy_conversations_for_identity_set(&conn, &identities).unwrap();
+        assert_eq!(result, (Vec::new(), false));
+        assert_eq!(
+            PROVIDER_ROUTE_SCAN_QUERIES.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 }

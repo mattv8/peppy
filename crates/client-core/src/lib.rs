@@ -154,8 +154,9 @@ pub use rcs_native::{
 };
 pub use rcs_receive::{
     RcsContextExpectation, RcsConversationMetadata, RcsConversationTransport, RcsCutover,
-    RcsIdentityOutcome, RcsMessageStatusProjection, RcsObservationProvenance, RcsOwnership,
-    RcsProjectedRecord, RcsProjectedStatus, RcsProviderDetector, RcsReceiveAlert, RcsReceiveCode,
+    RcsIdentityOutcome, RcsMessageStatusProjection, RcsObservationProvenance,
+    RcsOwnerUnlinkCutoverCandidate, RcsOwnership, RcsProjectedRecord, RcsProjectedStatus,
+    RcsProviderDetector, RcsProviderRow, RcsProviderRowRoute, RcsReceiveAlert, RcsReceiveCode,
     RcsReceiveContext, RcsReceiveOutcome, RcsReceiveOwner, RcsReceiveState, RcsStatusApplication,
     RcsUnlinkCutoverGenerations,
 };

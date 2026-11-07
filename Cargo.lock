@@ -2268,6 +2268,7 @@ dependencies = [
  "peppy-hosted-api",
  "peppy-hosted-client",
  "peppy-protocol",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
