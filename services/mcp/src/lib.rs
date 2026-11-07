@@ -10,6 +10,7 @@ pub mod http;
 pub mod registry;
 pub mod runtime;
 pub mod tools;
+pub mod webhooks;
 
 pub use config::WorkerConfig;
 pub use runtime::{Runtime, RuntimeState};

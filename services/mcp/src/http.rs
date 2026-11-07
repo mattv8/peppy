@@ -17,7 +17,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use peppy_hosted_api::mcp::{
     McpDeviceState, McpWorkerActivateRequest, McpWorkerCallRequest, McpWorkerCancelRequest,
     McpWorkerCompleteRequest, McpWorkerPrepareRequest, McpWorkerRevokeRequest,
-    McpWorkerStatusRequest, McpWorkerStatusResponse,
+    McpWorkerStatusRequest, McpWorkerStatusResponse, McpWorkerWebhookOp, McpWorkerWebhookRequest,
 };
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -74,6 +74,7 @@ impl WorkerHttp {
             .route("/internal/mcp/cancel", post(cancel))
             .route("/internal/mcp/status", post(status))
             .route("/internal/mcp/revoke", post(revoke))
+            .route("/internal/mcp/webhooks", post(webhooks))
             .layer(DefaultBodyLimit::max(64 * 1024));
         let calls = Router::new()
             .route("/internal/mcp/call", post(call))
@@ -324,6 +325,95 @@ async fn revoke(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn webhooks(
+    State(state): State<WorkerHttp>,
+    headers: HeaderMap,
+    Json(request): Json<McpWorkerWebhookRequest>,
+) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+    authorize(&headers, &state).map_err(error_status)?;
+    let runtime = state
+        .runtimes
+        .get(request.vault_id)
+        .await
+        .ok_or_else(|| error(StatusCode::CONFLICT, "mcp_device_required"))?;
+    if runtime.device_id().0 != request.device_id {
+        return Err(error(StatusCode::CONFLICT, "mcp_device_required"));
+    }
+    let engine = state.runtimes.webhooks();
+    let response: Result<Value, crate::webhooks::engine::WebhookError> = match request.op {
+        McpWorkerWebhookOp::List => engine
+            .list(request.vault_id, request.device_id)
+            .await
+            .and_then(to_value),
+        McpWorkerWebhookOp::Create => match request.input {
+            Some(input) => engine.create(&runtime, input).await.and_then(to_value),
+            None => Err(crate::webhooks::engine::WebhookError::Code(
+                "webhook_filter_invalid",
+            )),
+        },
+        McpWorkerWebhookOp::Update => match (request.id, request.input) {
+            (Some(id), Some(input)) => engine.update(&runtime, id, input).await.and_then(to_value),
+            _ => Err(crate::webhooks::engine::WebhookError::Code(
+                "webhook_filter_invalid",
+            )),
+        },
+        McpWorkerWebhookOp::Delete => match request.id {
+            Some(id) => {
+                return engine
+                    .delete(&runtime, id)
+                    .await
+                    .map(|_| StatusCode::NO_CONTENT.into_response())
+                    .map_err(webhook_error);
+            }
+            None => return Err(error(StatusCode::BAD_REQUEST, "webhook_not_found")),
+        },
+        McpWorkerWebhookOp::RevealSecret => match request.id {
+            Some(id) => engine.reveal(&runtime, id).await.and_then(to_value),
+            None => Err(crate::webhooks::engine::WebhookError::Missing),
+        },
+        McpWorkerWebhookOp::RotateSecret => match request.id {
+            Some(id) => engine.rotate(&runtime, id).await.and_then(to_value),
+            None => Err(crate::webhooks::engine::WebhookError::Missing),
+        },
+        McpWorkerWebhookOp::Test => match request.id {
+            Some(id) => engine.test(&runtime, id).await.and_then(to_value),
+            None => Err(crate::webhooks::engine::WebhookError::Missing),
+        },
+    };
+    response
+        .map(Json)
+        .map(IntoResponse::into_response)
+        .map_err(webhook_error)
+}
+
+fn to_value<T: serde::Serialize>(value: T) -> Result<Value, crate::webhooks::engine::WebhookError> {
+    serde_json::to_value(value)
+        .map_err(|_| crate::webhooks::engine::WebhookError::Code("webhooks_unavailable"))
+}
+
+fn error(status: StatusCode, code: &'static str) -> (StatusCode, Json<Value>) {
+    (status, Json(json!({"code": code})))
+}
+fn error_status(status: StatusCode) -> (StatusCode, Json<Value>) {
+    error(status, "unauthorized")
+}
+fn webhook_error(
+    webhook_error: crate::webhooks::engine::WebhookError,
+) -> (StatusCode, Json<Value>) {
+    match webhook_error {
+        crate::webhooks::engine::WebhookError::Missing => {
+            error(StatusCode::NOT_FOUND, "webhook_not_found")
+        }
+        crate::webhooks::engine::WebhookError::Code("webhook_limit") => {
+            error(StatusCode::CONFLICT, "webhook_limit")
+        }
+        crate::webhooks::engine::WebhookError::Code("webhooks_unavailable") => {
+            error(StatusCode::SERVICE_UNAVAILABLE, "webhooks_unavailable")
+        }
+        crate::webhooks::engine::WebhookError::Code(code) => error(StatusCode::BAD_REQUEST, code),
+    }
+}
+
 async fn call(
     State(state): State<WorkerHttp>,
     headers: HeaderMap,
@@ -470,6 +560,9 @@ mod tests {
             key_file: root.path().join("storage-key"),
             worker_token_file: root.path().join("control-token"),
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            webhooks_enabled: false,
+            webhooks_allow_private: false,
+            app_origin: "http://127.0.0.1:1".into(),
         };
         let worker = WorkerHttp::new(config.clone()).unwrap();
         let token = fs::read_to_string(&config.worker_token_file).unwrap();
@@ -504,6 +597,9 @@ mod tests {
             key_file: root.path().join("storage-key"),
             worker_token_file: root.path().join("control-token"),
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            webhooks_enabled: false,
+            webhooks_allow_private: false,
+            app_origin: "http://127.0.0.1:1".into(),
         };
         let worker = WorkerHttp::new(config.clone()).unwrap();
         let token = fs::read_to_string(&config.worker_token_file).unwrap();
@@ -562,6 +658,9 @@ mod tests {
             key_file: root.path().join("storage-key"),
             worker_token_file: root.path().join("control-token"),
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            webhooks_enabled: false,
+            webhooks_allow_private: false,
+            app_origin: "http://127.0.0.1:1".into(),
         };
         let worker = WorkerHttp::new(config.clone()).unwrap();
         let runtime_state_dir = root.path().join("runtime");

@@ -12,6 +12,9 @@ pub struct WorkerConfig {
     pub key_file: PathBuf,
     pub worker_token_file: PathBuf,
     pub bind_addr: std::net::SocketAddr,
+    pub webhooks_enabled: bool,
+    pub webhooks_allow_private: bool,
+    pub app_origin: String,
 }
 
 #[derive(Debug, Error)]
@@ -28,25 +31,28 @@ pub enum ConfigError {
 
 impl WorkerConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
-        let public_api_url =
-            std::env::var("PUBLIC_API_URL").map_err(|_| ConfigError::InvalidPublicApiUrl)?;
+        Self::from_getter(|name| std::env::var(name).ok())
+    }
+
+    fn from_getter(get: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        let public_api_url = get("PUBLIC_API_URL").ok_or(ConfigError::InvalidPublicApiUrl)?;
         let public_api_url = canonical_public_api_url(&public_api_url)?;
-        let state_dir = std::env::var_os("PEPPY_MCP_STATE_DIR")
+        let state_dir = get("PEPPY_MCP_STATE_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/var/lib/peppy-mcp"));
-        let api_url =
-            std::env::var("PEPPY_MCP_API_URL").map_err(|_| ConfigError::InvalidPrivateApiUrl)?;
+        let api_url = get("PEPPY_MCP_API_URL").ok_or(ConfigError::InvalidPrivateApiUrl)?;
         let api_url = canonical_private_api_url(&api_url)?;
-        let key_file = std::env::var_os("PEPPY_MCP_KEY_FILE")
+        let key_file = get("PEPPY_MCP_KEY_FILE")
             .map(PathBuf::from)
             .unwrap_or_else(|| state_dir.join("storage-key"));
-        let worker_token_file = std::env::var_os("PEPPY_MCP_WORKER_TOKEN_FILE")
+        let worker_token_file = get("PEPPY_MCP_WORKER_TOKEN_FILE")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/run/peppy-mcp/control-token"));
-        let bind_addr = std::env::var("PEPPY_MCP_BIND_ADDR")
-            .unwrap_or_else(|_| "0.0.0.0:8091".into())
+        let bind_addr = get("PEPPY_MCP_BIND_ADDR")
+            .unwrap_or_else(|| "0.0.0.0:8091".into())
             .parse()
             .map_err(|_| ConfigError::InvalidBindAddress)?;
+        let app_origin = app_origin(get("PEPPY_WEB_CLIENT_HOST"), &public_api_url);
         Ok(Self {
             api_url,
             public_api_url,
@@ -54,8 +60,24 @@ impl WorkerConfig {
             key_file,
             worker_token_file,
             bind_addr,
+            webhooks_enabled: enabled(get("PEPPY_WEBHOOKS_ENABLED")),
+            webhooks_allow_private: enabled(get("PEPPY_WEBHOOKS_ALLOW_PRIVATE_NETWORKS")),
+            app_origin,
         })
     }
+}
+
+fn enabled(value: Option<String>) -> bool {
+    value.is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn app_origin(host: Option<String>, fallback: &str) -> String {
+    host.and_then(|host| {
+        let parsed = url::Url::parse(&format!("https://{host}")).ok()?;
+        (parsed.host_str().is_some() && parsed.path() == "/" && parsed.username().is_empty())
+            .then(|| parsed.origin().ascii_serialization())
+    })
+    .unwrap_or_else(|| fallback.to_owned())
 }
 
 fn canonical_public_api_url(value: &str) -> Result<String, ConfigError> {
@@ -138,5 +160,20 @@ mod tests {
                 "accepted {value}"
             );
         }
+    }
+
+    #[test]
+    fn webhook_environment_is_parsed_without_process_environment() {
+        let config = WorkerConfig::from_getter(|name| match name {
+            "PUBLIC_API_URL" => Some("https://api.example.test".into()),
+            "PEPPY_MCP_API_URL" => Some("http://api:8080".into()),
+            "PEPPY_WEBHOOKS_ENABLED" => Some("true".into()),
+            "PEPPY_WEBHOOKS_ALLOW_PRIVATE_NETWORKS" => Some("1".into()),
+            "PEPPY_WEB_CLIENT_HOST" => Some("app.example.test".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert!(config.webhooks_enabled && config.webhooks_allow_private);
+        assert_eq!(config.app_origin, "https://app.example.test");
     }
 }

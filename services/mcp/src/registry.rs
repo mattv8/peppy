@@ -103,6 +103,7 @@ pub struct RuntimeRegistry {
 struct RegistryContext {
     state_dir: PathBuf,
     custody: Arc<Custody>,
+    webhooks: Arc<crate::webhooks::engine::WebhookEngine>,
     identities: Arc<Mutex<HashMap<Uuid, RuntimeIdentity>>>,
     revoked_fences: Arc<Mutex<Vec<RevokedFence>>>,
     runtimes: Arc<Mutex<HashMap<Uuid, Arc<Runtime>>>>,
@@ -174,10 +175,16 @@ impl RuntimeRegistry {
             }
         }
         let (shutdown, _) = watch::channel(false);
+        let custody = Arc::new(custody);
+        let webhooks = Arc::new(crate::webhooks::engine::WebhookEngine::new(
+            custody.clone(),
+            config.clone(),
+        ));
         Ok(Self {
             context: RegistryContext {
                 state_dir: config.state_dir,
-                custody: Arc::new(custody),
+                custody,
+                webhooks,
                 identities: Arc::new(Mutex::new(identity_map)),
                 revoked_fences: Arc::new(Mutex::new(record.revoked_fences)),
                 runtimes: Arc::new(Mutex::new(runtimes)),
@@ -244,6 +251,10 @@ impl RuntimeRegistry {
 
     pub async fn get(&self, vault_id: Uuid) -> Option<Arc<Runtime>> {
         self.context.runtimes.lock().await.get(&vault_id).cloned()
+    }
+
+    pub fn webhooks(&self) -> Arc<crate::webhooks::engine::WebhookEngine> {
+        self.context.webhooks.clone()
     }
 
     pub async fn insert(&self, runtime: Runtime) -> Result<(), RuntimeError> {
@@ -373,6 +384,7 @@ impl RuntimeRegistry {
         let vault_id = runtime.vault_id().0;
         let device_id = runtime.device_id().0;
         let context = self.context.clone();
+        let webhooks = self.context.webhooks.clone();
         let mut tasks_guard = self.context.tasks.lock().await;
         // A receiver subscribed after `send(true)` never observes `changed()`,
         // so a post-shutdown spawn must be refused here rather than rely on it.
@@ -419,6 +431,7 @@ impl RuntimeRegistry {
                             }
                             break;
                         }
+                        run_webhooks(&webhooks, &runtime, vault_id).await;
                     }
                     _ = interval.tick() => {
                         if !supervise_sync(runtime.clone(), vault_id, &mut shutdown, &mut stop_requested).await {
@@ -427,6 +440,7 @@ impl RuntimeRegistry {
                             }
                             break;
                         }
+                        run_webhooks(&webhooks, &runtime, vault_id).await;
                     }
                 }
             }
@@ -512,6 +526,21 @@ async fn retry_pending_cleanup(context: &RegistryContext) {
         {
             log_failure("cleanup", identity.vault_id, &error);
         }
+    }
+}
+
+async fn run_webhooks(
+    engine: &crate::webhooks::engine::WebhookEngine,
+    runtime: &Runtime,
+    vault_id: Uuid,
+) {
+    let outcome = tokio::time::timeout(Duration::from_secs(60), async {
+        engine.after_sync(runtime).await?;
+        engine.dispatch_due(runtime).await
+    })
+    .await;
+    if outcome.is_err() || outcome.ok().is_some_and(|result| result.is_err()) {
+        tracing::warn!(category = "webhooks", vault = %short_vault_id(vault_id), "webhook processing failed");
     }
 }
 
@@ -616,6 +645,11 @@ async fn revoke_registered_inner(
         Some(runtime) => runtime.revoke().await,
         None => Runtime::cleanup_state_dir(&vault_state_dir(&context.state_dir, vault_id)),
     }?;
+    context
+        .webhooks
+        .remove_vault(vault_id, device_id)
+        .await
+        .map_err(|_| RuntimeError::Core)?;
     let mut next = context.identities.lock().await.clone();
     let mut revoked = tombstone;
     revoked.cleanup_pending = false;
@@ -718,6 +752,9 @@ mod tests {
             key_file: root.path().join("key"),
             worker_token_file: root.path().join("token"),
             bind_addr: "127.0.0.1:0".parse().unwrap(),
+            webhooks_enabled: false,
+            webhooks_allow_private: false,
+            app_origin: "http://127.0.0.1:1".into(),
         }
     }
 
