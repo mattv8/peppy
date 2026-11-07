@@ -36,6 +36,7 @@ export interface BrowserSessionOptions {
   checkpoint: IndexedDbCheckpointStore;
   onFatal: (error: Error) => void;
   rememberedUnlock?: RememberedUnlockLifecycle;
+  liveTeardown?: () => Promise<void>;
 }
 
 function isReadyAttachment(value: CoreResult): value is Record<string, unknown> {
@@ -96,7 +97,7 @@ export class BrowserSession {
       return session;
     } catch (error: unknown) {
       const failure = error instanceof Error ? error : new CheckpointError("storage-unavailable");
-      session.shutdown();
+      await session.shutdown();
       throw failure;
     }
   }
@@ -405,14 +406,16 @@ export class BrowserSession {
     return this.transportToken;
   }
 
-  public shutdown(): void {
+  public async shutdown(): Promise<void> {
     if (this.phaseValue === "closed") return;
+    this.lifetime.abort();
+    const liveTeardown = this.options.liveTeardown;
+    if (liveTeardown) await liveTeardown().catch(() => undefined);
     this.phaseValue = "closed";
     this.transportToken = undefined;
     this.publicIdentityValue = undefined;
     this.previews.clear();
     this.previewedIds.clear();
-    this.lifetime.abort();
   }
 
   private async withPreview(value: CoreResult): Promise<CoreResult> {
@@ -497,7 +500,7 @@ export class BrowserSession {
       await operation();
     } catch (error: unknown) {
       if (error instanceof BrowserSessionError && error.code === "cancelled") {
-        this.shutdown();
+        await this.shutdown();
         throw error;
       }
       if (error instanceof CoreRejectedError) throw error;
@@ -600,7 +603,7 @@ export class BrowserSession {
   }
 
   private fatal(error: Error): void {
-    this.shutdown();
+    void this.shutdown();
     if (this.fatalReported) return;
     this.fatalReported = true;
     this.options.onFatal(error);

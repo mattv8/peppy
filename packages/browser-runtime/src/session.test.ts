@@ -572,8 +572,24 @@ describe("BrowserSession", () => {
     const session = await BrowserSession.boot(sessionOptions(core, new MemoryFs(), store));
     await session.unlock("passphrase");
     await expect(session.previewAttachment(id)).resolves.toBe("data:image/png;base64,cHJldmlldw==");
-    session.shutdown();
+    await session.shutdown();
     await expect(session.previewAttachment(id)).rejects.toThrow(BrowserSessionError);
+  });
+
+  it("stops live transport while its device token is still available", async () => {
+    const store = new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`);
+    await store.commit(checkpoint(0));
+    let session!: BrowserSession;
+    const observed: string[] = [];
+    session = await BrowserSession.boot({
+      ...sessionOptions(new TrustedCore(), new MemoryFs(), store),
+      liveTeardown: async () => { observed.push(session.tokenForTransport()); },
+    });
+    await session.unlock("passphrase");
+    expect(session.phase).toBe("ready");
+    await session.shutdown();
+    expect(observed).toEqual(["private-token"]);
+    expect(() => session.tokenForTransport()).toThrow(BrowserSessionError);
   });
 
   it("keeps ready-media availability, hydration, and export atomic when queued eviction races two callers", async () => {

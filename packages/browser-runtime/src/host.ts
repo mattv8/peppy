@@ -11,6 +11,7 @@ import { publishAttachment, type PublicCopyTransport } from "./publication.js";
 import { RememberedUnlock } from "./remembered-unlock.js";
 import { AttachmentRetentionDriver, AttachmentRetentionStatusFacade } from "./attachment-retention.js";
 import { AccountAccessDriver } from "./account-access.js";
+import { LiveSupervisor } from "./live.js";
 import type { AccountAccessResult } from "@peppy/generated/account-access";
 import type { AttachmentRetentionStatusResult } from "@peppy/generated/attachment-retention";
 
@@ -51,7 +52,7 @@ export interface HostSession {
   enroll(metadata: unknown, deviceToken: string, passphrase: string): Promise<void>;
   clearRememberedUnlock?(): Promise<void>;
   validateRememberedUnlock?(): Promise<void>;
-  shutdown(): void;
+  shutdown(): void | Promise<void>;
   drain?(): Promise<void>;
   tokenForTransport?(): string;
   stageInput?(bytes: Uint8Array): Promise<string>;
@@ -826,7 +827,7 @@ export class BrowserWorkerHost {
   }
 
   private async acquire(): Promise<void> {
-    const owner = await acquireWorkerOwner({ locks: this.dependencies.locks, name: OWNER_NAME, start: signal => this.dependencies.boot(signal, error => { void this.fatal(error); }), stop: async session => { session.shutdown(); await session.drain?.(); } });
+    const owner = await acquireWorkerOwner({ locks: this.dependencies.locks, name: OWNER_NAME, start: signal => this.dependencies.boot(signal, error => { void this.fatal(error); }), stop: async session => { await session.shutdown(); await session.drain?.(); } });
     this.owner = owner;
     try {
       this.presenter = new BannerPresenter(owner.owner, new MigratingCoreNotificationSettings(owner.owner, this.dependencies.legacySettings, () => { this.changed(); this.dependencies.network?.wake?.(); }), this.dependencies.notification ?? new BrowserNotificationAdapter(), () => {
@@ -1501,12 +1502,14 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
   let pollDelay = 5_000;
   let syncProgress: SchedulerSyncProgress | undefined;
   let activeSession: BrowserSession | undefined;
+  let liveSupervisor: LiveSupervisor | undefined;
   const changeListeners = new Set<() => void>();
   const stopNetwork = async () => {
     polling = false;
     if (pollTimer !== undefined) clearTimeout(pollTimer);
     pollTimer = undefined;
     scheduler?.stop();
+    await liveSupervisor?.stop();
     enrollmentAbort?.abort();
     retentionAbort?.abort();
     retentionStatus?.clear();
@@ -1586,11 +1589,16 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       const core = new BrowserCore(() => modulePromise);
       const module = await modulePromise as EmscriptenCoreModule & { FS: EmscriptenFilesystem };
       const origins = await browserOrigins();
-      const session = await BrowserSession.boot({ origin: origins.logicalOrigin, core, filesystem: module.FS, checkpoint: new IndexedDbCheckpointStore(OWNER_NAME), rememberedUnlock: browserRememberedUnlock(origins.fetchBase), onFatal });
+      const session = await BrowserSession.boot({ origin: origins.logicalOrigin, core, filesystem: module.FS, checkpoint: new IndexedDbCheckpointStore(OWNER_NAME), rememberedUnlock: browserRememberedUnlock(origins.fetchBase), liveTeardown: () => liveSupervisor?.stop() ?? Promise.resolve(), onFatal });
       activeSession = session;
         enrollmentAbort = new AbortController();
         enrollment = new BrowserEnrollment(core, session, origins.logicalOrigin, undefined, origins.fetchBase, enrollmentAbort.signal);
        publicTransport = new OriginTransport({ origin: self.location.origin, deviceToken: () => session.tokenForTransport() });
+       liveSupervisor = new LiveSupervisor({
+         transport: publicTransport,
+         origin: self.location.origin,
+         socket: (url, protocol) => new WebSocket(url, protocol),
+       });
        retentionGeneration += 1;
        retentionAbort = new AbortController();
        retention = new AttachmentRetentionDriver(session, { retention: (request, signal) => publicTransport!.retention(request, signal) });
