@@ -26,16 +26,16 @@ impl UrlError {
 }
 
 /// Validates an endpoint URL before it is stored.
-pub fn validate_url(raw: &str, allow_private: bool) -> Result<Url, UrlError> {
+pub fn validate_url(raw: &str) -> Result<Url, UrlError> {
     if raw.len() > MAX_URL_BYTES {
         return Err(UrlError::Invalid);
     }
     let mut url = Url::parse(raw).map_err(|_| UrlError::Invalid)?;
-    if !matches!(url.scheme(), "https" | "http") || url.host_str().is_none() {
-        return Err(UrlError::Invalid);
-    }
-    if !allow_private && url.scheme() != "https" {
+    if url.scheme() != "https" {
         return Err(UrlError::Insecure);
+    }
+    if url.host_str().is_none() {
+        return Err(UrlError::Invalid);
     }
     if !url.username().is_empty() || url.password().is_some() {
         return Err(UrlError::Invalid);
@@ -47,16 +47,14 @@ pub fn validate_url(raw: &str, allow_private: bool) -> Result<Url, UrlError> {
 /// Resolves and validates every address used for an endpoint.
 pub async fn resolve_checked(
     url: &Url,
-    allow_private: bool,
     deny_hosts: &[String],
 ) -> Result<Vec<SocketAddr>, UrlError> {
-    resolve_checked_with(url, allow_private, deny_hosts, false).await
+    resolve_checked_with(url, deny_hosts, false).await
 }
 
 /// Test harness only: permits loopback after all other address checks.
 pub(crate) async fn resolve_checked_with(
     url: &Url,
-    allow_private: bool,
     deny_hosts: &[String],
     permit_loopback: bool,
 ) -> Result<Vec<SocketAddr>, UrlError> {
@@ -72,7 +70,7 @@ pub(crate) async fn resolve_checked_with(
     if addresses.is_empty()
         || addresses
             .iter()
-            .any(|address| is_blocked_for_resolution(address.ip(), allow_private, permit_loopback))
+            .any(|address| is_blocked_for_resolution(address.ip(), permit_loopback))
     {
         return Err(UrlError::Blocked);
     }
@@ -80,8 +78,8 @@ pub(crate) async fn resolve_checked_with(
 }
 
 /// Returns whether an IP is disallowed for webhook egress.
-pub fn is_blocked_ip(ip: IpAddr, allow_private: bool) -> bool {
-    is_blocked_for_resolution(ip, allow_private, false)
+pub fn is_blocked_ip(ip: IpAddr) -> bool {
+    is_blocked_for_resolution(ip, false)
 }
 
 fn blocked_host(host: &str, deny_hosts: &[String]) -> bool {
@@ -93,14 +91,14 @@ fn blocked_host(host: &str, deny_hosts: &[String]) -> bool {
             .any(|denied| denied.eq_ignore_ascii_case(&host))
 }
 
-fn is_blocked_for_resolution(ip: IpAddr, allow_private: bool, permit_loopback: bool) -> bool {
+fn is_blocked_for_resolution(ip: IpAddr, permit_loopback: bool) -> bool {
     match ip {
-        IpAddr::V4(ip) => blocked_v4(ip, allow_private, permit_loopback),
-        IpAddr::V6(ip) => blocked_v6(ip, allow_private, permit_loopback),
+        IpAddr::V4(ip) => blocked_v4(ip, permit_loopback),
+        IpAddr::V6(ip) => blocked_v6(ip, permit_loopback),
     }
 }
 
-fn blocked_v4(ip: Ipv4Addr, allow_private: bool, permit_loopback: bool) -> bool {
+fn blocked_v4(ip: Ipv4Addr, permit_loopback: bool) -> bool {
     let [a, b, c, d] = ip.octets();
     let always_blocked = (!permit_loopback && a == 127)
         || (a == 0 && b == 0 && c == 0 && d == 0)
@@ -110,20 +108,17 @@ fn blocked_v4(ip: Ipv4Addr, allow_private: bool, permit_loopback: bool) -> bool 
         || (a == 198 && b == 51 && c == 100)
         || (a == 203 && b == 0 && c == 113)
         || (a == 255 && b == 255 && c == 255 && d == 255);
-    if always_blocked {
-        return true;
-    }
-    !allow_private
-        && (a == 10
-            || (a == 172 && (16..=31).contains(&b))
-            || (a == 192 && b == 168)
-            || (a == 100 && (64..=127).contains(&b))
-            || (a == 198 && (18..=19).contains(&b))
-            || a == 0
-            || a >= 240)
+    always_blocked
+        || a == 10
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 168)
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 198 && (18..=19).contains(&b))
+        || a == 0
+        || a >= 240
 }
 
-fn blocked_v6(ip: Ipv6Addr, allow_private: bool, permit_loopback: bool) -> bool {
+fn blocked_v6(ip: Ipv6Addr, permit_loopback: bool) -> bool {
     // Native IPv6 classes are checked first so that `::1` and `::` are never
     // mistaken for IPv4-compatible `0.0.0.1` / `0.0.0.0`.
     let segments = ip.segments();
@@ -136,9 +131,9 @@ fn blocked_v6(ip: Ipv6Addr, allow_private: bool, permit_loopback: bool) -> bool 
         return true;
     }
     if let Some(v4) = embedded_v4(ip) {
-        return blocked_v4(v4, allow_private, permit_loopback);
+        return blocked_v4(v4, permit_loopback);
     }
-    !allow_private && (segments[0] & 0xfe00) == 0xfc00
+    (segments[0] & 0xfe00) == 0xfc00
 }
 
 /// IPv4 addresses carried inside IPv6: IPv4-mapped `::ffff:0:0/96`,
@@ -161,54 +156,40 @@ mod tests {
 
     #[test]
     fn validates_and_normalizes_urls() {
-        let url = validate_url("https://example.com/path#fragment", false).expect("valid URL");
+        let url = validate_url("https://example.com/path#fragment").expect("valid URL");
         assert_eq!(url.as_str(), "https://example.com/path");
+        assert_eq!(validate_url("http://example.com"), Err(UrlError::Insecure));
         assert_eq!(
-            validate_url("http://example.com", false),
-            Err(UrlError::Insecure)
-        );
-        assert_eq!(
-            validate_url("https://user@example.com", false),
+            validate_url("https://user@example.com"),
             Err(UrlError::Invalid)
         );
     }
 
     #[test]
     fn blocks_special_and_private_addresses() {
-        assert!(is_blocked_ip("127.0.0.1".parse().expect("ip"), true));
-        assert!(is_blocked_ip("169.254.169.254".parse().expect("ip"), true));
-        assert!(is_blocked_ip("10.0.0.1".parse().expect("ip"), false));
-        assert!(!is_blocked_ip("10.0.0.1".parse().expect("ip"), true));
-        assert!(is_blocked_ip("::ffff:127.0.0.1".parse().expect("ip"), true));
-        assert!(is_blocked_ip("64:ff9b::a00:1".parse().expect("ip"), false));
-        assert!(!is_blocked_ip("8.8.8.8".parse().expect("ip"), false));
+        assert!(is_blocked_ip("127.0.0.1".parse().expect("ip")));
+        assert!(is_blocked_ip("169.254.169.254".parse().expect("ip")));
+        assert!(is_blocked_ip("10.0.0.1".parse().expect("ip")));
+        assert!(is_blocked_ip("::ffff:127.0.0.1".parse().expect("ip")));
+        assert!(is_blocked_ip("64:ff9b::a00:1".parse().expect("ip")));
+        assert!(!is_blocked_ip("8.8.8.8".parse().expect("ip")));
     }
 
     #[test]
     fn native_ipv6_classes_are_not_read_as_embedded_ipv4() {
-        // Regression: `::1` used to parse as IPv4-compatible `0.0.0.1`, which passed
-        // with allow_private. Native classes are now checked before embedded IPv4.
-        for (address, allow_private, blocked) in [
-            ("::1", true, true),
-            ("::1", false, true),
-            ("::", true, true),
-            ("::", false, true),
-            ("::ffff:127.0.0.1", true, true),
-            ("::ffff:127.0.0.1", false, true),
-            ("::ffff:10.0.0.1", false, true),
-            ("::ffff:10.0.0.1", true, false),
-            ("64:ff9b::a9fe:a9fe", true, true),
-            ("64:ff9b::a9fe:a9fe", false, true),
-            ("fe80::1", true, true),
-            ("fe80::1", false, true),
-            ("ff02::1", true, true),
+        // Regression: `::1` must not parse as IPv4-compatible `0.0.0.1`.
+        // Native classes are checked before embedded IPv4.
+        for (address, blocked) in [
+            ("::1", true),
+            ("::", true),
+            ("::ffff:127.0.0.1", true),
+            ("::ffff:10.0.0.1", true),
+            ("64:ff9b::a9fe:a9fe", true),
+            ("fe80::1", true),
+            ("ff02::1", true),
         ] {
             let ip: IpAddr = address.parse().expect("ip");
-            assert_eq!(
-                is_blocked_ip(ip, allow_private),
-                blocked,
-                "{address} allow_private={allow_private}"
-            );
+            assert_eq!(is_blocked_ip(ip), blocked, "{address}");
         }
     }
 
@@ -216,11 +197,11 @@ mod tests {
     async fn resolution_rejects_denied_and_loopback_hosts() {
         let loopback = Url::parse("http://127.0.0.1:8080").expect("url");
         assert_eq!(
-            resolve_checked(&loopback, true, &[]).await,
+            resolve_checked(&loopback, &[]).await,
             Err(UrlError::Blocked)
         );
         assert_eq!(
-            resolve_checked_with(&loopback, true, &[], true)
+            resolve_checked_with(&loopback, &[], true)
                 .await
                 .expect("permitted")[0]
                 .ip(),
@@ -228,7 +209,7 @@ mod tests {
         );
         let public = Url::parse("https://8.8.8.8").expect("url");
         assert_eq!(
-            resolve_checked(&public, false, &["8.8.8.8".to_owned()]).await,
+            resolve_checked(&public, &["8.8.8.8".to_owned()]).await,
             Err(UrlError::Blocked)
         );
     }

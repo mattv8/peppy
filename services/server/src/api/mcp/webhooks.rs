@@ -17,6 +17,8 @@ use super::super::{
 };
 use super::webhook_worker_request;
 
+const HOSTED_APP_ORIGIN: &str = "https://app.peppy.pro";
+
 pub(super) fn routes() -> Router<ApiState> {
     Router::new()
         .route("/v1/mcp/webhooks", get(list).post(create))
@@ -194,6 +196,7 @@ async fn forward<T: serde::de::DeserializeOwned>(
     let body = serde_json::to_value(McpWorkerWebhookRequest {
         vault_id,
         device_id,
+        source_origin: source_origin(state),
         op,
         id,
         input,
@@ -202,6 +205,22 @@ async fn forward<T: serde::de::DeserializeOwned>(
     let response = webhook_worker_request(state, &body).await?;
     serde_json::from_value(response)
         .map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "mcp_worker_invalid"))
+}
+
+fn source_origin(state: &ApiState) -> String {
+    if state.row_security {
+        return HOSTED_APP_ORIGIN.into();
+    }
+    state
+        .mcp_consent_origin
+        .clone()
+        .or_else(|| {
+            state
+                .instance_origin
+                .as_ref()
+                .map(|origin| origin.origin().ascii_serialization())
+        })
+        .unwrap_or_default()
 }
 
 async fn live_device_id(state: &ApiState, vault_id: Uuid) -> ApiResult<Option<Uuid>> {

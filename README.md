@@ -229,13 +229,7 @@ Removing the MCP device or revoking a client grant fences new MCP access. Cleanu
 
 #### Webhooks
 
-An unlocked vault owner can add up to 10 outbound webhooks per vault in desktop or web **Settings → Advanced**. A webhook fires for each inbound SMS or MMS and filters by sender: `all` sends every inbound message, `only` sends messages from the listed contacts or numbers, and `except` sends every message except those. Up to 50 filter entries are allowed per webhook. Delivery runs on the server-resident MCP worker, so no desktop, browser, or phone needs to be online. Webhooks require the MCP overlays plus the webhooks overlay:
-
-```sh
-docker compose -f docker-compose.yml -f infra/compose/compose.mcp.yml -f infra/compose/compose.webhooks.yml up -d
-```
-
-For a release deployment, add the Community overlays exactly as in the MCP command above, with `infra/compose/compose.webhooks.yml` last. The overlay enables webhooks in the worker, adds a non-internal `webhooks-egress` network for outbound requests, and publishes no port. The worker stays on `private`.
+An unlocked vault owner can add up to 10 outbound webhooks per vault in desktop or web **Settings → Advanced**. A webhook fires for each inbound SMS or MMS and filters by sender: `all` sends every inbound message, `only` sends messages from the listed contacts or numbers, and `except` sends every message except those. Up to 50 filter entries are allowed per webhook. Delivery runs on the server-resident MCP worker, so no desktop, browser, or phone needs to be online. Webhooks need no extra configuration: they are available whenever Peppy MCP is enabled, and every control is in the settings UI. The MCP overlay attaches the worker to a non-internal `mcp-egress` network for webhook delivery, in addition to `private`; it still publishes no port.
 
 Each request carries Standard Webhooks headers:
 
@@ -267,7 +261,7 @@ A `message.received` payload looks like this (values abbreviated):
 }
 ```
 
-`source` is the Peppy app origin. `contact_name` and `subject` may be `null`. Attachments include only an id, content type, and size, never bytes or URLs. The editor's **Send test** button sends a `webhook.test` event with `data.message` set to `"This is a test event from Peppy."`. A test is not queued and does not change the webhook's delivery status.
+`source` is the Peppy app origin, derived from the server's existing configuration. `contact_name` and `subject` may be `null`. Attachments include only an id, content type, and size, never bytes or URLs. The editor's **Send test** button sends a `webhook.test` event with `data.message` set to `"This is a test event from Peppy."`. A test is not queued and does not change the webhook's delivery status.
 
 Delivery semantics:
 
@@ -279,9 +273,8 @@ Delivery semantics:
 
 Endpoint policy:
 
-- Endpoints must use `https://`. Private and LAN addresses are blocked unless the operator sets `PEPPY_WEBHOOKS_ALLOW_PRIVATE_NETWORKS=true` in `.env`. That setting also permits `http://` endpoints.
-- Loopback, link-local (including the `169.254.169.254` metadata address), and multicast destinations are always blocked.
-- **Warning:** enabling private networks lets every vault owner on this server make the worker contact hosts on your LAN.
+- Endpoints must use `https://` and resolve to public addresses.
+- Private and LAN, loopback, link-local (including the `169.254.169.254` metadata address), CGNAT, unique-local, and multicast destinations are always blocked. To reach a service on your LAN, expose it through a public HTTPS endpoint or tunnel.
 
 Privacy: webhook payloads contain plaintext message content, sent to the endpoint you configure. That traffic is outside Peppy's encryption. Queued deliveries are encrypted at rest in `mcp-state`.
 

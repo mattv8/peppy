@@ -22,6 +22,8 @@ pub(crate) struct WebhookState {
     pub device_id: Uuid,
     pub cursor: i64,
     pub cursor_initialized: bool,
+    #[serde(default)]
+    pub source_origin: String,
     pub webhooks: Vec<StoredWebhook>,
     pub queue: VecDeque<Delivery>,
     pub recent: VecDeque<(Uuid, String)>,
@@ -65,6 +67,7 @@ impl WebhookState {
             device_id,
             cursor: 0,
             cursor_initialized: false,
+            source_origin: String::new(),
             webhooks: Vec::new(),
             queue: VecDeque::new(),
             recent: VecDeque::new(),

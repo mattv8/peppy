@@ -752,9 +752,6 @@ mod tests {
             key_file: root.path().join("key"),
             worker_token_file: root.path().join("token"),
             bind_addr: "127.0.0.1:0".parse().unwrap(),
-            webhooks_enabled: false,
-            webhooks_allow_private: false,
-            app_origin: "http://127.0.0.1:1".into(),
         }
     }
 

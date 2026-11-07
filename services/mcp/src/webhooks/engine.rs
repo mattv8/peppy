@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use super::store::{self, MAX_QUEUE, MAX_WEBHOOKS, StoredWebhook, WebhookState};
 use crate::{
-    config::WorkerConfig,
+    config::{WorkerConfig, canonical_public_api_url},
     custody::Custody,
     runtime::{Runtime, RuntimeState},
     webhooks::{
@@ -157,7 +157,7 @@ impl WebhookEngine {
             }
         }
         let state = store::load(&self.custody, vault, device)
-            .map_err(|_| WebhookError::Code("webhooks_unavailable"))?;
+            .map_err(|_| WebhookError::Code("mcp_unavailable"))?;
         let inner = Arc::new(Mutex::new(state));
         states.insert(vault, inner.clone());
         Ok(Handle { inner, device })
@@ -167,8 +167,7 @@ impl WebhookEngine {
         if state.revoked {
             return Err(WebhookError::Missing);
         }
-        store::save(&self.custody, vault, state)
-            .map_err(|_| WebhookError::Code("webhooks_unavailable"))
+        store::save(&self.custody, vault, state).map_err(|_| WebhookError::Code("mcp_unavailable"))
     }
     /// Revokes the vault's webhook state: fences any cached handle under its mutex
     /// (waiting for in-flight operations to finish), clears it, and deletes the record.
@@ -186,16 +185,10 @@ impl WebhookEngine {
         state.recent.clear();
         state.cursor = 0;
         state.cursor_initialized = false;
-        store::remove(&self.custody, vault).map_err(|_| WebhookError::Code("webhooks_unavailable"))
+        store::remove(&self.custody, vault).map_err(|_| WebhookError::Code("mcp_unavailable"))
     }
 
     pub async fn list(&self, vault: Uuid, device: Uuid) -> Result<WebhookList, WebhookError> {
-        if !self.config.webhooks_enabled {
-            return Ok(WebhookList {
-                available: false,
-                webhooks: Vec::new(),
-            });
-        }
         let state = self.state(vault, device).await?;
         let state = state.lock().await?;
         Ok(WebhookList {
@@ -212,7 +205,6 @@ impl WebhookEngine {
         runtime: &Runtime,
         input: WebhookInput,
     ) -> Result<WebhookCreated, WebhookError> {
-        self.available()?;
         validate(&input, &self.config).await?;
         let vault = runtime.vault_id().0;
         let state = self.state(vault, runtime.device_id().0).await?;
@@ -224,7 +216,7 @@ impl WebhookEngine {
             state.cursor = runtime
                 .client()
                 .latest_message_local_order()
-                .map_err(|_| WebhookError::Code("webhooks_unavailable"))?;
+                .map_err(|_| WebhookError::Code("mcp_unavailable"))?;
             state.cursor_initialized = true;
         }
         let secret = generate_secret();
@@ -257,7 +249,6 @@ impl WebhookEngine {
         id: Uuid,
         input: WebhookInput,
     ) -> Result<WebhookView, WebhookError> {
-        self.available()?;
         validate(&input, &self.config).await?;
         let vault = runtime.vault_id().0;
         let state = self.state(vault, runtime.device_id().0).await?;
@@ -293,7 +284,6 @@ impl WebhookEngine {
         Ok(result)
     }
     pub async fn delete(&self, runtime: &Runtime, id: Uuid) -> Result<(), WebhookError> {
-        self.available()?;
         let vault = runtime.vault_id().0;
         let state = self.state(vault, runtime.device_id().0).await?;
         let mut state = state.lock().await?;
@@ -306,7 +296,6 @@ impl WebhookEngine {
         self.save(vault, &state)
     }
     pub async fn reveal(&self, runtime: &Runtime, id: Uuid) -> Result<WebhookSecret, WebhookError> {
-        self.available()?;
         let state = self
             .state(runtime.vault_id().0, runtime.device_id().0)
             .await?;
@@ -322,7 +311,6 @@ impl WebhookEngine {
         })
     }
     pub async fn rotate(&self, runtime: &Runtime, id: Uuid) -> Result<WebhookSecret, WebhookError> {
-        self.available()?;
         let vault = runtime.vault_id().0;
         let state = self.state(vault, runtime.device_id().0).await?;
         let mut state = state.lock().await?;
@@ -344,9 +332,8 @@ impl WebhookEngine {
         runtime: &Runtime,
         id: Uuid,
     ) -> Result<WebhookTestResult, WebhookError> {
-        self.available()?;
         // Snapshot under the mutex, then release it before any DNS or HTTP.
-        let (url, secret) = {
+        let (url, secret, source_origin) = {
             let state = self
                 .state(runtime.vault_id().0, runtime.device_id().0)
                 .await?;
@@ -356,15 +343,18 @@ impl WebhookEngine {
                 .iter()
                 .find(|hook| hook.id == id)
                 .ok_or(WebhookError::Missing)?;
-            (hook.url.clone(), hook.secret.clone())
+            (
+                hook.url.clone(),
+                hook.secret.clone(),
+                self.source_origin(&locked),
+            )
         };
-        let body = test_payload(id, &self.config.app_origin, self.now()).to_string();
-        Ok(self.send(&url, &secret, random_delivery_id(), body).await)
+        let body = test_payload(id, &source_origin, self.now()).to_string();
+        Ok(self
+            .send(&url, &secret, random_delivery_id(), body, &source_origin)
+            .await)
     }
     pub async fn after_sync(&self, runtime: &Runtime) -> Result<(), WebhookError> {
-        if !self.config.webhooks_enabled {
-            return Ok(());
-        }
         if matches!(
             runtime.state().await,
             RuntimeState::Revoked | RuntimeState::NeedsApproval
@@ -378,7 +368,7 @@ impl WebhookEngine {
             locked.cursor = runtime
                 .client()
                 .latest_message_local_order()
-                .map_err(|_| WebhookError::Code("webhooks_unavailable"))?;
+                .map_err(|_| WebhookError::Code("mcp_unavailable"))?;
             locked.cursor_initialized = true;
             self.save(vault, &locked)?;
             return Ok(());
@@ -390,11 +380,14 @@ impl WebhookEngine {
             let messages = runtime
                 .client()
                 .incoming_messages_after(cursor, 200)
-                .map_err(|_| WebhookError::Code("webhooks_unavailable"))?;
+                .map_err(|_| WebhookError::Code("mcp_unavailable"))?;
             if messages.is_empty() {
                 break;
             }
-            let hooks = state.lock().await?.webhooks.clone();
+            let (hooks, source_origin) = {
+                let locked = state.lock().await?;
+                (locked.webhooks.clone(), self.source_origin(&locked))
+            };
             let now = self.now();
             let mut additions = Vec::new();
             for (order, message) in &messages {
@@ -421,7 +414,7 @@ impl WebhookEngine {
                             webhook_id: hook.id,
                             body: message_payload(
                                 hook.id,
-                                &self.config.app_origin,
+                                &source_origin,
                                 message,
                                 contact
                                     .as_ref()
@@ -469,12 +462,10 @@ impl WebhookEngine {
     /// Sends due deliveries. The queue item stays persisted until its attempt is
     /// recorded, so a cancelled or crashed attempt is retried rather than lost.
     pub async fn dispatch_due(&self, runtime: &Runtime) -> Result<(), WebhookError> {
-        if !self.config.webhooks_enabled
-            || matches!(
-                runtime.state().await,
-                RuntimeState::Revoked | RuntimeState::NeedsApproval
-            )
-        {
+        if matches!(
+            runtime.state().await,
+            RuntimeState::Revoked | RuntimeState::NeedsApproval
+        ) {
             return Ok(());
         }
         let vault = runtime.vault_id().0;
@@ -484,7 +475,13 @@ impl WebhookEngine {
                 break;
             };
             let result = self
-                .send(&due.url, &due.secret, due.delivery_id.clone(), due.body)
+                .send(
+                    &due.url,
+                    &due.secret,
+                    due.delivery_id.clone(),
+                    due.body,
+                    &due.source_origin,
+                )
                 .await;
             self.record_attempt(vault, &state, &due.delivery_id, result)
                 .await?;
@@ -512,6 +509,7 @@ impl WebhookEngine {
                         url,
                         secret,
                         body: item.body.clone(),
+                        source_origin: self.source_origin(&locked),
                     });
                 }
                 None => {
@@ -561,15 +559,36 @@ impl WebhookEngine {
         }
         self.save(vault, &locked)
     }
-    fn available(&self) -> Result<(), WebhookError> {
-        if self.config.webhooks_enabled {
-            Ok(())
+    pub async fn update_source_origin(
+        &self,
+        vault: Uuid,
+        device: Uuid,
+        source_origin: &str,
+    ) -> Result<(), WebhookError> {
+        let Ok(source_origin) = canonical_public_api_url(source_origin) else {
+            return Ok(());
+        };
+        let state = self.state(vault, device).await?;
+        let mut state = state.lock().await?;
+        state.source_origin = source_origin;
+        self.save(vault, &state)
+    }
+    fn source_origin(&self, state: &WebhookState) -> String {
+        if state.source_origin.is_empty() {
+            self.config.public_api_url.clone()
         } else {
-            Err(WebhookError::Code("webhooks_unavailable"))
+            state.source_origin.clone()
         }
     }
-    async fn send(&self, url: &str, secret: &str, id: String, body: String) -> WebhookTestResult {
-        self.send_within(DELIVERY_TIMEOUT, url, secret, id, body)
+    async fn send(
+        &self,
+        url: &str,
+        secret: &str,
+        id: String,
+        body: String,
+        source_origin: &str,
+    ) -> WebhookTestResult {
+        self.send_within(DELIVERY_TIMEOUT, url, secret, id, body, source_origin)
             .await
     }
     /// Bounds one whole attempt (validation, DNS, HTTP, drain) by `limit`.
@@ -580,9 +599,15 @@ impl WebhookEngine {
         secret: &str,
         id: String,
         body: String,
+        source_origin: &str,
     ) -> WebhookTestResult {
         let started = std::time::Instant::now();
-        match tokio::time::timeout(limit, self.send_unbounded(url, secret, id, body)).await {
+        match tokio::time::timeout(
+            limit,
+            self.send_unbounded(url, secret, id, body, source_origin),
+        )
+        .await
+        {
             Ok(outcome) => outcome,
             Err(_) => result(false, None, started, "timeout"),
         }
@@ -593,16 +618,16 @@ impl WebhookEngine {
         secret: &str,
         id: String,
         body: String,
+        source_origin: &str,
     ) -> WebhookTestResult {
         let started = std::time::Instant::now();
-        let parsed = match egress::validate_url(url, self.config.webhooks_allow_private) {
+        let parsed = match self.validate_delivery_url(url) {
             Ok(value) => value,
             Err(error) => return result(false, None, started, error.code()),
         };
         let deny = api_host(&self.config.api_url);
         let addresses = match egress::resolve_checked_with(
             &parsed,
-            self.config.webhooks_allow_private,
             &deny.into_iter().collect::<Vec<_>>(),
             self.permit_loopback(),
         )
@@ -614,7 +639,7 @@ impl WebhookEngine {
         let timestamp = self.now() / 1000;
         let signature = match super::signing::sign(secret, &id, timestamp, body.as_bytes()) {
             Ok(value) => value,
-            Err(_) => return result(false, None, started, "webhooks_unavailable"),
+            Err(_) => return result(false, None, started, "mcp_unavailable"),
         };
         let Some(host) = parsed.host_str() else {
             return result(false, None, started, "webhook_url_invalid");
@@ -624,12 +649,12 @@ impl WebhookEngine {
             .timeout(Duration::from_secs(10))
             .connect_timeout(Duration::from_secs(5))
             .no_proxy()
-            .user_agent(format!("Peppy-Webhooks/1 (+{})", self.config.app_origin))
+            .user_agent(format!("Peppy-Webhooks/1 (+{source_origin})"))
             .resolve_to_addrs(host, &addresses)
             .build()
         {
             Ok(client) => client,
-            Err(_) => return result(false, None, started, "webhooks_unavailable"),
+            Err(_) => return result(false, None, started, "mcp_unavailable"),
         };
         match client
             .post(parsed)
@@ -661,6 +686,13 @@ impl WebhookEngine {
             Err(_) => result(false, None, started, "timeout"),
         }
     }
+    fn validate_delivery_url(&self, raw: &str) -> Result<url::Url, egress::UrlError> {
+        #[cfg(test)]
+        if self.permit_loopback() {
+            return url::Url::parse(raw).map_err(|_| egress::UrlError::Invalid);
+        }
+        egress::validate_url(raw)
+    }
 }
 fn result(
     ok: bool,
@@ -686,6 +718,7 @@ struct DueDelivery {
     url: String,
     secret: String,
     body: String,
+    source_origin: String,
 }
 
 /// Index of the first queued delivery whose attempt is due, in queue order.
@@ -840,8 +873,7 @@ async fn validate(input: &WebhookInput, config: &WorkerConfig) -> Result<(), Web
     {
         return Err(WebhookError::Code("webhook_name_invalid"));
     }
-    let url = egress::validate_url(&input.url, config.webhooks_allow_private)
-        .map_err(|error| WebhookError::Code(error.code()))?;
+    let url = egress::validate_url(&input.url).map_err(|error| WebhookError::Code(error.code()))?;
     if input.events != vec![WebhookEvent::MessageReceived]
         || input.filter.len() > 50
         || matches!(input.filter_mode, WebhookFilterMode::All) && !input.filter.is_empty()
@@ -863,12 +895,9 @@ async fn validate(input: &WebhookInput, config: &WorkerConfig) -> Result<(), Web
         return Err(WebhookError::Code("webhook_filter_invalid"));
     }
     let deny = api_host(&config.api_url).into_iter().collect::<Vec<_>>();
-    bounded_resolution(
-        SAVE_RESOLVE_TIMEOUT,
-        egress::resolve_checked(&url, config.webhooks_allow_private, &deny),
-    )
-    .await
-    .map(|_| ())
+    bounded_resolution(SAVE_RESOLVE_TIMEOUT, egress::resolve_checked(&url, &deny))
+        .await
+        .map(|_| ())
 }
 
 /// Applies a save-time time limit to DNS validation. A stalled lookup rejects the URL.
@@ -1028,9 +1057,6 @@ mod tests {
                 key_file: dir.path().join("key"),
                 worker_token_file: dir.path().join("token"),
                 bind_addr: "127.0.0.1:0".parse().unwrap(),
-                webhooks_enabled: true,
-                webhooks_allow_private: true,
-                app_origin: "https://app.test".into(),
             };
             let custody = Arc::new(
                 Custody::bootstrap(dir.path().join("custody"), dir.path().join("key")).unwrap(),
@@ -1231,6 +1257,25 @@ mod tests {
         assert_eq!(hook.last_delivery_state, WebhookDeliveryState::Delivered);
         assert_eq!(hook.last_status_code, Some(200));
         assert_eq!(hook.last_error, None);
+    }
+
+    #[tokio::test]
+    async fn control_origin_is_persisted_and_invalid_values_keep_the_previous_origin() {
+        let env = TestEnv::new(Vec::new()).await;
+
+        env.engine
+            .update_source_origin(env.vault(), env.device(), "https://app.example.test")
+            .await
+            .unwrap();
+        env.engine
+            .update_source_origin(env.vault(), env.device(), "http://example.test")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            env.with_state(|state| state.source_origin.clone()).await,
+            "https://app.example.test"
+        );
     }
 
     #[tokio::test]
@@ -1516,22 +1561,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_engine_leaves_persisted_queue_untouched() {
-        let (env, stored) = armed(Vec::new()).await;
-        let mut disabled = env.engine.clone();
-        disabled.config.webhooks_enabled = false;
-
-        disabled.dispatch_due(&env.runtime).await.unwrap();
-
-        assert!(env.requests().is_empty());
-        assert_eq!(env.queue().await.len(), 1);
-        assert_eq!(
-            env.hook(stored.id).await.last_delivery_state,
-            WebhookDeliveryState::Never
-        );
-    }
-
-    #[tokio::test]
     async fn cancelled_attempt_keeps_the_item_queued() {
         let (env, _stored) = armed(vec![hanging()]).await;
 
@@ -1693,6 +1722,7 @@ mod tests {
                 &generate_secret(),
                 "msg_stalled".into(),
                 "{}".into(),
+                "https://app.test",
             )
             .await;
         assert!(!result.ok);

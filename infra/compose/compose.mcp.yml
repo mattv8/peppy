@@ -52,7 +52,8 @@ services:
       timeout: 3s
       retries: 20
       start_period: 5s
-    networks: [private]
+    # private reaches the API control channel; mcp-egress carries outbound webhooks.
+    networks: [private, mcp-egress]
     restart: unless-stopped
 
   api:
@@ -64,6 +65,9 @@ services:
         condition: service_healthy
     volumes:
       - mcp-control:/run/peppy-mcp:ro
+
+networks:
+  mcp-egress:
 
 volumes:
   mcp-state:

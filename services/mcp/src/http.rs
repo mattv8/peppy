@@ -340,6 +340,10 @@ async fn webhooks(
         return Err(error(StatusCode::CONFLICT, "mcp_device_required"));
     }
     let engine = state.runtimes.webhooks();
+    engine
+        .update_source_origin(request.vault_id, request.device_id, &request.source_origin)
+        .await
+        .map_err(webhook_error)?;
     let response: Result<Value, crate::webhooks::engine::WebhookError> = match request.op {
         McpWorkerWebhookOp::List => engine
             .list(request.vault_id, request.device_id)
@@ -388,7 +392,7 @@ async fn webhooks(
 
 fn to_value<T: serde::Serialize>(value: T) -> Result<Value, crate::webhooks::engine::WebhookError> {
     serde_json::to_value(value)
-        .map_err(|_| crate::webhooks::engine::WebhookError::Code("webhooks_unavailable"))
+        .map_err(|_| crate::webhooks::engine::WebhookError::Code("mcp_unavailable"))
 }
 
 fn error(status: StatusCode, code: &'static str) -> (StatusCode, Json<Value>) {
@@ -407,8 +411,8 @@ fn webhook_error(
         crate::webhooks::engine::WebhookError::Code("webhook_limit") => {
             error(StatusCode::CONFLICT, "webhook_limit")
         }
-        crate::webhooks::engine::WebhookError::Code("webhooks_unavailable") => {
-            error(StatusCode::SERVICE_UNAVAILABLE, "webhooks_unavailable")
+        crate::webhooks::engine::WebhookError::Code("mcp_unavailable") => {
+            error(StatusCode::SERVICE_UNAVAILABLE, "mcp_unavailable")
         }
         crate::webhooks::engine::WebhookError::Code(code) => error(StatusCode::BAD_REQUEST, code),
     }
@@ -560,9 +564,6 @@ mod tests {
             key_file: root.path().join("storage-key"),
             worker_token_file: root.path().join("control-token"),
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
-            webhooks_enabled: false,
-            webhooks_allow_private: false,
-            app_origin: "http://127.0.0.1:1".into(),
         };
         let worker = WorkerHttp::new(config.clone()).unwrap();
         let token = fs::read_to_string(&config.worker_token_file).unwrap();
@@ -597,9 +598,6 @@ mod tests {
             key_file: root.path().join("storage-key"),
             worker_token_file: root.path().join("control-token"),
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
-            webhooks_enabled: false,
-            webhooks_allow_private: false,
-            app_origin: "http://127.0.0.1:1".into(),
         };
         let worker = WorkerHttp::new(config.clone()).unwrap();
         let token = fs::read_to_string(&config.worker_token_file).unwrap();
@@ -658,9 +656,6 @@ mod tests {
             key_file: root.path().join("storage-key"),
             worker_token_file: root.path().join("control-token"),
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
-            webhooks_enabled: false,
-            webhooks_allow_private: false,
-            app_origin: "http://127.0.0.1:1".into(),
         };
         let worker = WorkerHttp::new(config.clone()).unwrap();
         let runtime_state_dir = root.path().join("runtime");

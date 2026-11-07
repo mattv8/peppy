@@ -112,7 +112,7 @@ describe("WebhookSettings", () => {
       vi.mocked(bridge.webhooks_list).mockResolvedValue({ available: false, webhooks: [] });
       const { container } = renderSettings();
 
-      expect(await screen.findByText("Webhooks are turned off on this server.")).toBeInTheDocument();
+      expect(await screen.findByText("Webhooks are unavailable because this server isn't running the Peppy server client.")).toBeInTheDocument();
       expect(container.querySelector("#webhooks-needs-server-client")).not.toBeInTheDocument();
     });
   });

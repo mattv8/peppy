@@ -428,7 +428,20 @@ async fn webhook_routes_forward_live_device_requests_and_worker_errors() {
         .unwrap();
     let worker = fake_worker().await;
     let worker_config_lock = worker_config_lock().lock().await;
+    let public_api_url = std::env::var_os("PUBLIC_API_URL");
+    unsafe {
+        std::env::set_var("PUBLIC_API_URL", "https://instance.example.test");
+    }
     let router = router_for_worker(fixture.pool.clone(), &worker, &worker_config_lock);
+    if let Some(public_api_url) = public_api_url {
+        unsafe {
+            std::env::set_var("PUBLIC_API_URL", public_api_url);
+        }
+    } else {
+        unsafe {
+            std::env::remove_var("PUBLIC_API_URL");
+        }
+    }
 
     let (status, body) = webhook_request(
         router.clone(),
@@ -443,6 +456,7 @@ async fn webhook_routes_forward_live_device_requests_and_worker_errors() {
     let request = worker.bodies("/internal/mcp/webhooks").await.pop().unwrap();
     assert_eq!(request["vault_id"], json!(fixture.vault));
     assert_eq!(request["device_id"], json!(fixture.device));
+    assert_eq!(request["source_origin"], "https://instance.example.test");
     assert_eq!(request["op"], "list");
 
     worker

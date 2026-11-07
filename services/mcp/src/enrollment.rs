@@ -424,9 +424,6 @@ mod tests {
             key_file: root.path().join("storage-key"),
             worker_token_file: root.path().join("worker-token"),
             bind_addr: "127.0.0.1:8091".parse().unwrap(),
-            webhooks_enabled: false,
-            webhooks_allow_private: false,
-            app_origin: "https://enroll.example".into(),
         };
         RuntimeRegistry::open(config.clone()).unwrap();
         config

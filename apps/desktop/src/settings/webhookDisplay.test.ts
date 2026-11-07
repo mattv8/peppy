@@ -180,7 +180,6 @@ describe("webhookErrorMessage", () => {
     ["webhook_url_insecure", "Use an https:// URL."],
     ["webhook_url_blocked", "This address isn't allowed (private or local network)."],
     ["webhook_limit", "You can have up to 10 webhooks."],
-    ["webhooks_unavailable", "Webhooks are turned off on this server."],
   ])("maps %s to friendly copy", (code, message) => {
     expect(webhookErrorMessage(code)).toBe(message);
   });

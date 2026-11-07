@@ -12,9 +12,6 @@ pub struct WorkerConfig {
     pub key_file: PathBuf,
     pub worker_token_file: PathBuf,
     pub bind_addr: std::net::SocketAddr,
-    pub webhooks_enabled: bool,
-    pub webhooks_allow_private: bool,
-    pub app_origin: String,
 }
 
 #[derive(Debug, Error)]
@@ -52,7 +49,6 @@ impl WorkerConfig {
             .unwrap_or_else(|| "0.0.0.0:8091".into())
             .parse()
             .map_err(|_| ConfigError::InvalidBindAddress)?;
-        let app_origin = app_origin(get("PEPPY_WEB_CLIENT_HOST"), &public_api_url);
         Ok(Self {
             api_url,
             public_api_url,
@@ -60,27 +56,11 @@ impl WorkerConfig {
             key_file,
             worker_token_file,
             bind_addr,
-            webhooks_enabled: enabled(get("PEPPY_WEBHOOKS_ENABLED")),
-            webhooks_allow_private: enabled(get("PEPPY_WEBHOOKS_ALLOW_PRIVATE_NETWORKS")),
-            app_origin,
         })
     }
 }
 
-fn enabled(value: Option<String>) -> bool {
-    value.is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-}
-
-fn app_origin(host: Option<String>, fallback: &str) -> String {
-    host.and_then(|host| {
-        let parsed = url::Url::parse(&format!("https://{host}")).ok()?;
-        (parsed.host_str().is_some() && parsed.path() == "/" && parsed.username().is_empty())
-            .then(|| parsed.origin().ascii_serialization())
-    })
-    .unwrap_or_else(|| fallback.to_owned())
-}
-
-fn canonical_public_api_url(value: &str) -> Result<String, ConfigError> {
+pub(crate) fn canonical_public_api_url(value: &str) -> Result<String, ConfigError> {
     let parsed = url::Url::parse(value).map_err(|_| ConfigError::InvalidPublicApiUrl)?;
     let loopback = match parsed.host() {
         Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
@@ -163,17 +143,13 @@ mod tests {
     }
 
     #[test]
-    fn webhook_environment_is_parsed_without_process_environment() {
+    fn worker_configuration_does_not_read_webhook_environment() {
         let config = WorkerConfig::from_getter(|name| match name {
             "PUBLIC_API_URL" => Some("https://api.example.test".into()),
             "PEPPY_MCP_API_URL" => Some("http://api:8080".into()),
-            "PEPPY_WEBHOOKS_ENABLED" => Some("true".into()),
-            "PEPPY_WEBHOOKS_ALLOW_PRIVATE_NETWORKS" => Some("1".into()),
-            "PEPPY_WEB_CLIENT_HOST" => Some("app.example.test".into()),
             _ => None,
         })
         .unwrap();
-        assert!(config.webhooks_enabled && config.webhooks_allow_private);
-        assert_eq!(config.app_origin, "https://app.example.test");
+        assert_eq!(config.public_api_url, "https://api.example.test");
     }
 }

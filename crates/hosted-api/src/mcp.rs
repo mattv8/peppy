@@ -384,6 +384,7 @@ pub enum McpWorkerWebhookOp {
 pub struct McpWorkerWebhookRequest {
     pub vault_id: Uuid,
     pub device_id: Uuid,
+    pub source_origin: String,
     pub op: McpWorkerWebhookOp,
     #[serde(default)]
     pub id: Option<Uuid>,
@@ -462,17 +463,20 @@ mod tests {
         let request: McpWorkerWebhookRequest = serde_json::from_value(serde_json::json!({
             "vault_id": vault_id,
             "device_id": device_id,
+            "source_origin": "https://app.example.test",
             "op": "list",
         }))
         .unwrap();
 
         assert_eq!(request.vault_id, vault_id);
+        assert_eq!(request.source_origin, "https://app.example.test");
         assert!(request.id.is_none());
         assert!(request.input.is_none());
         assert!(
             serde_json::from_value::<McpWorkerWebhookRequest>(serde_json::json!({
                 "vault_id": vault_id,
                 "device_id": device_id,
+                "source_origin": "https://app.example.test",
                 "op": "list",
                 "unexpected": true,
             }))

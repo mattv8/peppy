@@ -120,7 +120,7 @@ export function WebhookSettings({ sessionKey, unlocked, serverOffline, onOpenDev
           </>
         );
       case "unavailable":
-        return <p id="webhooks-unavailable" className="settings-note">Webhooks are turned off on this server.</p>;
+        return <p id="webhooks-unavailable" className="settings-note">Webhooks are unavailable because this server isn't running the Peppy server client.</p>;
       case "ready":
         return (
           <WebhookReadyView

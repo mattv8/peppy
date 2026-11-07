@@ -1058,7 +1058,7 @@ fn webhook_worker_error(status: StatusCode, body: &[u8]) -> ApiError {
         "webhook_filter_invalid" => "webhook_filter_invalid",
         "webhook_limit" => "webhook_limit",
         "webhook_not_found" => "webhook_not_found",
-        "webhooks_unavailable" => "webhooks_unavailable",
+        "mcp_unavailable" => "mcp_unavailable",
         "mcp_device_required" => "mcp_device_required",
         _ => return ApiError(StatusCode::BAD_GATEWAY, "mcp_worker_invalid"),
     };
@@ -1161,7 +1161,7 @@ mod worker_wire_tests {
             ("webhook_filter_invalid", StatusCode::BAD_REQUEST),
             ("webhook_limit", StatusCode::CONFLICT),
             ("webhook_not_found", StatusCode::NOT_FOUND),
-            ("webhooks_unavailable", StatusCode::SERVICE_UNAVAILABLE),
+            ("mcp_unavailable", StatusCode::SERVICE_UNAVAILABLE),
             ("mcp_device_required", StatusCode::CONFLICT),
         ] {
             let error = webhook_worker_error(status, format!(r#"{{"code":"{code}"}}"#).as_bytes());

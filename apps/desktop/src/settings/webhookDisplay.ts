@@ -32,7 +32,6 @@ const SERVER_ERROR_MESSAGES = new Map<string, string>([
   ["webhook_filter_invalid", "Check the contacts and numbers in this filter."],
   ["webhook_limit", WEBHOOK_LIMIT_MESSAGE],
   ["webhook_not_found", "This webhook no longer exists."],
-  ["webhooks_unavailable", "Webhooks are turned off on this server."],
   ["mcp_device_required", "Set up the Peppy server client in Devices first."],
 ]);
 
