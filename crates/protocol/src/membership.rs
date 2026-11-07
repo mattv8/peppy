@@ -412,7 +412,7 @@ fn membership_id_schema() -> serde_json::Value {
 }
 
 fn membership_device_schema() -> serde_json::Value {
-    serde_json::json!({"type":"object","additionalProperties":false,"properties":{"device_id":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},"revoked":{"type":"boolean"},"key_epoch":{"type":"integer","format":"uint32","minimum":1},"role":{"enum":["owner","gateway","device"]}},"required":["device_id","revoked","key_epoch","role"]})
+    serde_json::json!({"type":"object","additionalProperties":false,"properties":{"device_id":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},"revoked":{"type":"boolean"},"key_epoch":{"type":"integer","format":"uint32","minimum":1,"maximum":u32::MAX},"role":{"enum":["owner","gateway","device"]}},"required":["device_id","revoked","key_epoch","role"]})
 }
 
 fn canonical_decimal_pattern(maximum: &str) -> String {

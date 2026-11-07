@@ -107,6 +107,30 @@ fn emitted_membership_schemas_match_runtime_version_and_id_boundaries() {
     }
 }
 
+#[test]
+fn membership_key_epoch_schema_matches_u32_runtime_bounds() {
+    let schema: serde_json::Value =
+        serde_json::from_str(&peppy_protocol::generate_contracts().openapi).unwrap();
+    for value in [json!(1), json!(u32::MAX)] {
+        let mut control = bootstrap();
+        control["roster"][0]["key_epoch"] = value;
+        assert_schema_and_union_accept(&schema, &control);
+    }
+    for value in [
+        json!(0),
+        json!(u64::from(u32::MAX) + 1),
+        json!(-1),
+        json!(1.5),
+        json!("1"),
+        json!(true),
+        serde_json::Value::Null,
+    ] {
+        let mut control = bootstrap();
+        control["roster"][0]["key_epoch"] = value;
+        assert_schema_and_union_reject(&schema, &control, "key_epoch");
+    }
+}
+
 fn assert_schema_and_union_accept(schema: &serde_json::Value, control: &serde_json::Value) {
     assert!(schema_validates(
         schema_for_control(schema, control),

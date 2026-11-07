@@ -473,6 +473,33 @@ fn emitted_v2_scalar_schemas_match_runtime_canonical_boundaries() {
     }
 }
 
+#[test]
+fn v2_key_epoch_schema_matches_u32_runtime_bounds() {
+    let schema: serde_json::Value =
+        serde_json::from_str(&peppy_protocol::generate_contracts().openapi).unwrap();
+    let valid = serde_json::to_value(signal(EphemeralSignalV2Kind::Typing)).unwrap();
+    for value in [serde_json::json!(1), serde_json::json!(u32::MAX)] {
+        let mut candidate = valid.clone();
+        candidate["key_epoch"] = value;
+        assert!(schema_validates(&schema, "EphemeralSignalV2", &candidate));
+        assert!(serde_json::from_value::<EphemeralSignalV2>(candidate).is_ok());
+    }
+    for value in [
+        serde_json::json!(0),
+        serde_json::json!(u64::from(u32::MAX) + 1),
+        serde_json::json!(-1),
+        serde_json::json!(1.5),
+        serde_json::json!("1"),
+        serde_json::json!(true),
+        serde_json::Value::Null,
+    ] {
+        let mut candidate = valid.clone();
+        candidate["key_epoch"] = value;
+        assert!(!schema_validates(&schema, "EphemeralSignalV2", &candidate));
+        assert!(serde_json::from_value::<EphemeralSignalV2>(candidate).is_err());
+    }
+}
+
 fn schema_validates(schema: &serde_json::Value, name: &str, instance: &serde_json::Value) -> bool {
     jsonschema::validator_for(&schema["components"]["schemas"][name])
         .unwrap()

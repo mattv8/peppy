@@ -249,7 +249,7 @@ fn v2_header_schema(
     ciphertext_max_length: usize,
     requires_padding_at_max_length: bool,
 ) -> serde_json::Value {
-    serde_json::json!({"type":"object","additionalProperties":false,"properties":{"protocol_version":{"const":2},"kind":{"const":kind},"sender_device_id":{"type":"string","pattern":CANONICAL_UUID_PATTERN},"key_epoch":{"type":"integer","format":"uint32","minimum":1},"session_id":{"type":"string","pattern":CANONICAL_SESSION_ID_PATTERN},"sent_at_ms":canonical_u64_schema(false),"expires_at_ms":canonical_u64_schema(false),"sequence":canonical_u64_schema(true),"ciphertext_b64":canonical_standard_base64_schema(ciphertext_max_length,requires_padding_at_max_length)},"required":["protocol_version","kind","sender_device_id","key_epoch","session_id","sent_at_ms","expires_at_ms","sequence","ciphertext_b64"]})
+    serde_json::json!({"type":"object","additionalProperties":false,"properties":{"protocol_version":{"const":2},"kind":{"const":kind},"sender_device_id":{"type":"string","pattern":CANONICAL_UUID_PATTERN},"key_epoch":{"type":"integer","format":"uint32","minimum":1,"maximum":u32::MAX},"session_id":{"type":"string","pattern":CANONICAL_SESSION_ID_PATTERN},"sent_at_ms":canonical_u64_schema(false),"expires_at_ms":canonical_u64_schema(false),"sequence":canonical_u64_schema(true),"ciphertext_b64":canonical_standard_base64_schema(ciphertext_max_length,requires_padding_at_max_length)},"required":["protocol_version","kind","sender_device_id","key_epoch","session_id","sent_at_ms","expires_at_ms","sequence","ciphertext_b64"]})
 }
 
 fn typing_plaintext_schema(origin: &str, includes_gateway: bool) -> serde_json::Value {
