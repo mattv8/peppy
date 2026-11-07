@@ -866,7 +866,7 @@ class GoogleMessagesLinkPanelTest {
         }
         LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
         compose.setContent { PeppyTheme { GoogleMessagesLinkPanel {} } }
-        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-panel").fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-status").fetchSemanticsNodes().isNotEmpty() }
         assertion()
     }
 
