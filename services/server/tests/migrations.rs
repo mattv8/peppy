@@ -3,7 +3,7 @@ use std::env;
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
-const UP: [&str; 25] = [
+const UP: [&str; 29] = [
     include_str!("../migrations/0001_foundation.sql"),
     include_str!("../migrations/0002_messaging.sql"),
     include_str!("../migrations/0003_pairing_proofs.sql"),
@@ -29,9 +29,13 @@ const UP: [&str; 25] = [
     include_str!("../migrations/0023_origin_tag_indexes.sql"),
     include_str!("../migrations/0024_compacted_origin_tag_index.sql"),
     include_str!("../migrations/0025_validate_origin_tag_constraints.sql"),
+    include_str!("../migrations/0026_draft_retention.sql"),
+    include_str!("../migrations/0027_mcp.sql"),
+    include_str!("../migrations/0028_mcp_oauth.sql"),
+    include_str!("../migrations/0029_mcp_cleanup_jobs.sql"),
 ];
 
-const DOWN: [&str; 25] = [
+const DOWN: [&str; 29] = [
     include_str!("../migrations/down/0001_foundation.down.sql"),
     include_str!("../migrations/down/0002_messaging.down.sql"),
     include_str!("../migrations/down/0003_pairing_proofs.down.sql"),
@@ -57,6 +61,10 @@ const DOWN: [&str; 25] = [
     include_str!("../migrations/down/0023_origin_tag_indexes.down.sql"),
     include_str!("../migrations/down/0024_compacted_origin_tag_index.down.sql"),
     include_str!("../migrations/down/0025_validate_origin_tag_constraints.down.sql"),
+    include_str!("../migrations/down/0026_draft_retention.down.sql"),
+    include_str!("../migrations/down/0027_mcp.down.sql"),
+    include_str!("../migrations/down/0028_mcp_oauth.down.sql"),
+    include_str!("../migrations/down/0029_mcp_cleanup_jobs.down.sql"),
 ];
 
 #[tokio::test]
@@ -118,10 +126,72 @@ async fn migrations_round_trip_in_an_isolated_schema() {
         latest_schema
     );
 
+    assert_populated_draft_downgrade_refused(&mut database, &schema, &latest_schema).await;
+
     sqlx::query(&format!("DROP SCHEMA {quoted_schema} CASCADE"))
         .execute(&mut database)
         .await
         .unwrap();
+}
+
+const DRAFT_BASE_SEED: &str = "
+    INSERT INTO vaults(vault_id, public_key_profile, encrypted_vault_check_header, key_epoch, profile_fingerprint)
+    VALUES ('00000000-0000-0000-0000-000000000030', '{}', '\\x01', 1, repeat('d', 64));
+    INSERT INTO devices(vault_id, device_id, role, public_key, profile_fingerprint, key_epoch)
+    VALUES ('00000000-0000-0000-0000-000000000030', '00000000-0000-0000-0000-000000000031', 'device', '{}', repeat('d', 64), 1);
+";
+
+/// Each populated draft source must refuse the 0026 downgrade and leave the schema unchanged.
+async fn assert_populated_draft_downgrade_refused(
+    database: &mut PgConnection,
+    schema: &str,
+    latest_schema: &str,
+) {
+    let cases: [(&str, &str); 6] = [
+        (
+            "draft_incarnations",
+            "INSERT INTO draft_incarnations(vault_id, draft_id) VALUES ('00000000-0000-0000-0000-000000000030', '00000000-0000-0000-0000-000000000033')",
+        ),
+        (
+            "draft_branches",
+            "INSERT INTO draft_branches(vault_id, draft_id, branch_id, head_revision_id, state, expires_at, change_seq) VALUES ('00000000-0000-0000-0000-000000000030', '00000000-0000-0000-0000-000000000033', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000035', 'live', now() + interval '1 day', 1)",
+        ),
+        (
+            "draft_terminals",
+            "INSERT INTO draft_terminals(vault_id, draft_id, reason, change_seq) VALUES ('00000000-0000-0000-0000-000000000030', '00000000-0000-0000-0000-000000000033', 'discarded', 1)",
+        ),
+        (
+            "attachments.draft_id",
+            "INSERT INTO attachments(vault_id, attachment_id, object_key, ciphertext_bytes, ciphertext_sha256, created_by_device_id, draft_id) VALUES ('00000000-0000-0000-0000-000000000030', '00000000-0000-0000-0000-000000000036', 'draft-attachment', 1, decode(repeat('01', 32), 'hex'), '00000000-0000-0000-0000-000000000031', '00000000-0000-0000-0000-000000000033')",
+        ),
+        (
+            "upload_reservations.draft_id",
+            "INSERT INTO upload_reservations(vault_id, attachment_id, device_id, object_key, declared_bytes, declared_sha256, draft_id) VALUES ('00000000-0000-0000-0000-000000000030', '00000000-0000-0000-0000-000000000037', '00000000-0000-0000-0000-000000000031', 'draft-reservation', 1, decode(repeat('02', 32), 'hex'), '00000000-0000-0000-0000-000000000033')",
+        ),
+        (
+            "draft_expired deletions",
+            "INSERT INTO storage_deletions(object_key, vault_id, reason) VALUES ('draft-expired', '00000000-0000-0000-0000-000000000030', 'draft_expired')",
+        ),
+    ];
+    for (source, seed) in cases {
+        run(database, "BEGIN").await;
+        run(database, DRAFT_BASE_SEED).await;
+        run(database, seed).await;
+        let error = run_result(database, DOWN[25])
+            .await
+            .expect_err(source)
+            .to_string();
+        assert!(
+            error.contains("draft data is present"),
+            "{source}: unexpected refusal: {error}"
+        );
+        run(database, "ROLLBACK").await;
+        assert_eq!(
+            schema_fingerprint(database, schema).await,
+            latest_schema,
+            "{source}: refused downgrade must leave the schema unchanged"
+        );
+    }
 }
 
 async fn assert_populated_downgrade_case(database: &mut PgConnection, version: usize) {
@@ -171,6 +241,14 @@ async fn assert_latest_schema(database: &mut PgConnection) {
     assert!(trigger_exists(database, "encrypted_records_immutable").await);
     assert!(column_exists(database, "encrypted_records", "origin_tag").await);
     assert!(column_exists(database, "compacted_records", "origin_tag").await);
+    assert!(table_exists(database, "draft_incarnations").await);
+    assert!(table_exists(database, "draft_branches").await);
+    assert!(table_exists(database, "draft_revisions").await);
+    assert!(table_exists(database, "draft_terminals").await);
+    assert!(table_exists(database, "draft_attachment_holds").await);
+    assert!(column_exists(database, "vaults", "draft_change_seq").await);
+    assert!(column_exists(database, "attachments", "draft_id").await);
+    assert!(index_exists(database, "draft_terminals_change_seq").await);
     assert!(index_exists(database, "encrypted_records_origin_tag_unique").await);
     assert!(index_exists(database, "compacted_records_origin_tag_unique").await);
 }

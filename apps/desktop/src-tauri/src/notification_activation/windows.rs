@@ -1,4 +1,6 @@
 use super::{owner::Signal, PostError};
+use crate::notification_icon::{self, Icon, Lease};
+use tauri::{AppHandle, Manager};
 use windows::{
     core::{IInspectable, HSTRING},
     Data::Xml::Dom::XmlDocument,
@@ -23,6 +25,7 @@ pub fn prepare() -> Option<()> {
 pub struct Backend {
     notifier: ToastNotifier,
     app_id: HSTRING,
+    app: AppHandle,
 }
 pub struct Item {
     toast: ToastNotification,
@@ -30,6 +33,7 @@ pub struct Item {
     activated: Option<i64>,
     dismissed: Option<i64>,
     failed: Option<i64>,
+    _icon: Option<Lease>,
 }
 
 impl Drop for Item {
@@ -53,7 +57,11 @@ impl Backend {
         }
         let app_id = HSTRING::from(&app.config().identifier);
         match ToastNotificationManager::CreateToastNotifierWithId(&app_id) {
-            Ok(notifier) => Some(Self { notifier, app_id }),
+            Ok(notifier) => Some(Self {
+                notifier,
+                app_id,
+                app: app.clone(),
+            }),
             Err(_) => {
                 unsafe {
                     RoUninitialize();
@@ -69,9 +77,10 @@ impl Backend {
         title: &str,
         body: &str,
         sound: bool,
+        icon: Option<&Icon>,
         signal: Signal,
     ) -> Result<Item, PostError> {
-        self.post_inner(id, title, body, sound, signal)
+        self.post_inner(id, title, body, sound, icon, signal)
             .map_err(|_| PostError::Failed)
     }
 
@@ -89,12 +98,25 @@ impl Backend {
         title: &str,
         body: &str,
         sound: bool,
+        icon: Option<&Icon>,
         signal: Signal,
     ) -> windows::core::Result<Item> {
+        let icon = icon.and_then(|icon| notification_icon::materialize(&self.app, icon));
+        let icon_uri = icon
+            .as_ref()
+            .and_then(|lease| url::Url::from_file_path(lease.path()).ok())
+            .map(|url| url.to_string());
         let document = XmlDocument::new()?;
-        document.LoadXml(&HSTRING::from(format!(
-            "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual>{}</toast>",
-            escape(title), escape(body), super::windows_audio(sound))))?;
+        document.LoadXml(&HSTRING::from(super::windows_xml::toast_xml(
+            title,
+            body,
+            icon_uri.as_deref(),
+            super::windows_audio(sound),
+            self.app
+                .state::<crate::AppState>()
+                .notifications
+                .persistence(),
+        )))?;
         let toast = ToastNotification::CreateToastNotification(&document)?;
         let tag = HSTRING::from(id);
         toast.SetTag(&tag)?;
@@ -105,6 +127,7 @@ impl Backend {
             activated: None,
             dismissed: None,
             failed: None,
+            _icon: icon,
         };
         let click = signal.clone();
         item.activated = Some(item.toast.Activated(&TypedEventHandler::<
@@ -163,12 +186,4 @@ impl Drop for Backend {
             RoUninitialize();
         }
     }
-}
-
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }

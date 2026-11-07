@@ -19,9 +19,16 @@ import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.NativeSendResult
 
 /** Durable, content-free evidence for one MMS platform callback. */
-class MmsCallbackStore(context: Context, private val now: () -> Long = System::currentTimeMillis) {
+class MmsCallbackStore(
+    context: Context,
+    private val now: () -> Long = System::currentTimeMillis,
+    private val pendingCommandIds: () -> Set<String>? = {
+        runCatching { NativeGateway.open(context)?.pendingCommands()?.map { it.commandId }?.toSet() }.getOrNull()
+    },
+) {
     private val prefs = context.getSharedPreferences("peppy-mms-callbacks", Context.MODE_PRIVATE)
     private val pduDir = File(context.filesDir, "mms-pdu")
+    private val fitDir = File(context.noBackupFilesDir, "mms-fit")
     fun register(commandId: String): Boolean = synchronized(LOCK) {
         if (!valid(commandId)) return@synchronized false
         if (prefs.contains(key(commandId))) return@synchronized true
@@ -45,7 +52,10 @@ class MmsCallbackStore(context: Context, private val now: () -> Long = System::c
         record.remove("owed")
         record.put("state", "settled").put("activity", now())
         val ok = prefs.edit().putString(key(commandId), record.toString()).commit()
-        if (ok) file(commandId).delete()
+        if (ok) {
+            file(commandId).delete()
+            fitted(commandId).deleteRecursively()
+        }
         ok
     }
     fun owed(): List<Pair<String, NativeSendResult>> = synchronized(LOCK) { prefs.all.mapNotNull { (key, value) ->
@@ -63,12 +73,19 @@ class MmsCallbackStore(context: Context, private val now: () -> Long = System::c
             if (!valid(id) || record.optBoolean("owed")) return@forEach
             val state = record.optString("state")
             if (state == "settled" || (state in setOf("pending", "unknown") && maxOf(record.optLong("created"), record.optLong("activity")) < cutoff)) {
-                file(id).delete(); prefs.edit().remove(name).commit()
+                file(id).delete(); fitted(id).deleteRecursively(); prefs.edit().remove(name).commit()
             }
         }
         pduDir.listFiles()?.forEach { candidate ->
             if (!candidate.name.matches(TEMP) && !candidate.name.matches(PDU)) return@forEach
             if (candidate.lastModified() < cutoff && !prefs.contains(key(candidate.name.removeSuffix(".pdu")))) candidate.delete()
+        }
+        val pending = pendingCommandIds() ?: return@synchronized
+        val inFlight = prefs.all.keys.asSequence().filter { it.startsWith(PREFIX) }.map { it.removePrefix(PREFIX) }.toSet()
+        fitDir.listFiles()?.asSequence()?.filter { candidate ->
+            candidate.isDirectory && valid(candidate.name) && candidate.name !in pending && candidate.name !in inFlight
+        }?.take(MAX_FIT_DIRECTORIES)?.forEach { candidate ->
+            candidate.deleteRecursively()
         }
     }
     fun hasBudget(projectedBytes: Long): Boolean = synchronized(LOCK) {
@@ -88,9 +105,10 @@ class MmsCallbackStore(context: Context, private val now: () -> Long = System::c
         if (valid(commandId) && !prefs.contains(key(commandId))) file(commandId).delete() else false
     }
     private fun file(commandId: String) = File(pduDir, "$commandId.pdu")
+    private fun fitted(commandId: String) = File(fitDir, commandId)
     private fun valid(commandId: String) = UUID.matches(commandId)
     private companion object {
-        const val PREFIX = "command:"; val LOCK = Any(); const val MAX_BYTES = 512L * 1024 * 1024
+        const val PREFIX = "command:"; val LOCK = Any(); const val MAX_BYTES = 512L * 1024 * 1024; const val MAX_FIT_DIRECTORIES = 64
         val RETAIN_MILLIS = TimeUnit.DAYS.toMillis(7); val UUID = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
         val PDU = Regex("${UUID.pattern}.pdu"); val TEMP = Regex("\\.mms-pdu-.*\\.tmp")
     }

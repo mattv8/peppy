@@ -11,6 +11,7 @@ import { publishAttachment, type PublicCopyTransport } from "./publication.js";
 import { RememberedUnlock } from "./remembered-unlock.js";
 import { AttachmentRetentionDriver, AttachmentRetentionStatusFacade } from "./attachment-retention.js";
 import { AccountAccessDriver } from "./account-access.js";
+import { DraftTransport } from "./drafts.js";
 import type { AccountAccessResult } from "@peppy/generated/account-access";
 import type { AttachmentRetentionStatusResult } from "@peppy/generated/attachment-retention";
 import type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceStatus, McpGrantView, McpScope } from "@peppy/generated/mcp";
@@ -27,6 +28,7 @@ const SEARCH_INDEX_DELAY_MS = 1_000;
 const SEARCH_INDEX_MAX_RETRIES = 3;
 const SEARCH_INDEX_IDLE_RETRY_MS = 100;
 const REMEMBERED_UNLOCK_VALIDATION_INTERVAL_MS = 60_000;
+const DRAFT_SYNC_DEBOUNCE_MS = 2_000;
 const RECOVERY_CLEAR_ERROR: RpcError = { code: "recovery-clear-failed", message: "Browser recovery could not be forgotten." };
 
 export type RpcError = { code: string; message: string; conversationId?: string; currentRevision?: string; draftId?: string };
@@ -41,6 +43,8 @@ export interface BrowserPort {
   close(): void;
   onmessage: ((event: MessageEvent<unknown>) => void) | null;
 }
+
+type PresentationContext = { context: BannerContext; sequence: number };
 
 export interface HostSession {
   readonly phase: BrowserSessionPhase;
@@ -115,6 +119,9 @@ export interface BrowserNetwork {
   producerReady?(): boolean;
   attachmentRetentionStatus?(): Promise<AttachmentRetentionStatusResult>;
   accountAccess?(): Promise<AccountAccessResult>;
+  sendDraft?(args: Record<string, unknown>): Promise<unknown>;
+  draftSaved?(): void;
+  flushDraftSync?(): void;
 }
 
 export interface BrowserHostDependencies {
@@ -125,6 +132,47 @@ export interface BrowserHostDependencies {
   legacySettings?: LegacyNotificationSettings;
   publisher?: PublicCopyTransport & { origin: string };
   notification?: NotificationAdapter;
+}
+
+export class DraftSyncPrompt {
+  private timer?: ReturnType<typeof setTimeout>;
+  private pending = false;
+
+  public constructor(
+    private readonly canRun: () => boolean,
+    private readonly run: () => void,
+  ) {}
+
+  public schedule(): void {
+    this.pending = true;
+    this.cancel();
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.runPending();
+    }, DRAFT_SYNC_DEBOUNCE_MS);
+  }
+
+  public flush(): void {
+    if (!this.pending) return;
+    this.cancel();
+    this.runPending();
+  }
+
+  public stop(): void {
+    this.cancel();
+    this.pending = false;
+  }
+
+  private runPending(): void {
+    if (!this.pending) return;
+    this.pending = false;
+    if (this.canRun()) this.run();
+  }
+
+  private cancel(): void {
+    if (this.timer !== undefined) clearTimeout(this.timer);
+    this.timer = undefined;
+  }
 }
 
 type LegacyNotificationSettings = {
@@ -140,6 +188,8 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   save_draft: { coreCommand: "save_draft", mutation: true },
   send_draft: { coreCommand: "send_draft", mutation: true },
   discard_draft: { coreCommand: "discard_draft", mutation: true },
+  resolve_draft_conflict: { coreCommand: "resolve_draft_conflict", mutation: true },
+  acknowledge_draft_notice: { coreCommand: "acknowledge_draft_notice", mutation: true },
   mark_seen: { coreCommand: "mark_seen", mutation: true },
   unread_message_batches: { coreCommand: "unread_message_batches", mutation: false },
   mark_read_batch: { coreCommand: "mark_read_batch", mutation: true },
@@ -235,6 +285,23 @@ function safeSnapshot(phase: BrowserSessionPhase): Record<string, unknown> {
 }
 
 function errorFor(error: unknown): RpcError {
+  if (typeof error === "object" && error !== null && (error as { code?: unknown }).code === "draft-reconnect") {
+    return { code: "unavailable", message: "Reconnect to check this draft before sending." };
+  }
+  if (typeof error === "object" && error !== null && (error as { code?: unknown }).code === "draft-not-synced") {
+    return { code: "draft-not-synced", message: "This draft is still syncing. Wait for sync to finish, then send again.", ...errorDetails(error) };
+  }
+  if (typeof error === "object" && error !== null && typeof (error as { code?: unknown }).code === "string") {
+    const code = (error as { code: string }).code;
+    const terminalMessages: Record<string, string> = {
+      draft_already_sent: "This draft was already sent from another device.",
+      draft_discarded: "This draft was discarded on another device.",
+      draft_expired: "This draft expired on another device.",
+      draft_revision_not_head: "A newer draft version exists on another device.",
+      draft_sent: "This draft was already sent from another device.",
+    };
+    if (terminalMessages[code]) return { code, message: terminalMessages[code], ...errorDetails(error) };
+  }
   if (error instanceof TransportError) {
     return { code: error.kind === "offline" ? "offline" : "unavailable", message: "Browser operation failed." };
   }
@@ -383,7 +450,9 @@ async function dispatchValidatedBrowserRpc(session: HostSession, request: RpcReq
       const metadataOnly = args.metadataOnly === true;
       const contacts = await session.query("contact_snapshot", { addresses: contactAddresses(snapshot as Record<string, unknown>) });
       if (typeof contacts !== "object" || contacts === null || Array.isArray(contacts)) throw { code: "invalid-request" };
-      const enriched = metadataOnly ? snapshot as Record<string, unknown> : await addVisiblePreviews(session, snapshot as Record<string, unknown>, MAX_PREVIEWS_PER_SNAPSHOT);
+      const enriched = metadataOnly
+        ? { ...(snapshot as Record<string, unknown>), draft: await addDraftPreviews(session, (snapshot as Record<string, unknown>).draft, { remaining: MAX_PREVIEWS_PER_SNAPSHOT }) }
+        : await addVisiblePreviews(session, snapshot as Record<string, unknown>, MAX_PREVIEWS_PER_SNAPSHOT);
       return { id, ok: true, value: { ...enriched, ...contacts as Record<string, unknown>, ...(syncProgress ? { syncProgress } : {}), ...(context?.sessionScopeId ? { sessionScopeId: context.sessionScopeId } : {}) } };
     }
     if (command === "load_history" || command === "load_message_window") {
@@ -467,6 +536,9 @@ async function dispatchValidatedBrowserRpc(session: HostSession, request: RpcReq
     const value = invocation.mutation
       ? await session.mutate(invocation.coreCommand, invocationArgs)
       : await session.query(invocation.coreCommand, invocationArgs);
+    if (command === "save_draft") {
+      return { id, ok: true, value: await addDraftPreviews(session, value, { remaining: MAX_PREVIEWS_PER_SNAPSHOT }) };
+    }
     return { id, ok: true, value };
   } catch (error: unknown) {
     return { id, ok: false, error: errorFor(error) };
@@ -496,7 +568,7 @@ async function adoptLegacyPreferences(session: HostSession, legacy: LegacyNotifi
 
 function sameNotificationPreferences(left: NotificationPreferences, right: NotificationPreferences): boolean {
   return left.messageBanners === right.messageBanners && left.mirroredBanners === right.mirroredBanners
-    && left.preview === right.preview && left.muteWithHeads === right.muteWithHeads;
+    && left.preview === right.preview && left.showSource === right.showSource && left.muteWithHeads === right.muteWithHeads;
 }
 
 class MigratingCoreNotificationSettings implements NotificationSettings {
@@ -551,24 +623,39 @@ function contactAddresses(snapshot: Record<string, unknown>): Array<{ address: s
   return [...addresses.values()];
 }
 
-async function addVisiblePreviews(session: HostSession, snapshot: Record<string, unknown>, budget: number): Promise<Record<string, unknown>> {
-  if (!Array.isArray(snapshot.conversations)) return snapshot;
+type PreviewBudget = { remaining: number };
+
+async function addVisiblePreviews(session: HostSession, snapshot: Record<string, unknown>, limit: number): Promise<Record<string, unknown>> {
+  const budget = { remaining: limit };
+  const draft = await addDraftPreviews(session, snapshot.draft, budget);
+  const enrichedSnapshot = draft === snapshot.draft ? snapshot : { ...snapshot, draft };
+  if (!Array.isArray(snapshot.conversations)) return enrichedSnapshot;
   const activeId = typeof snapshot.activeConversationId === "string" ? snapshot.activeConversationId : undefined;
   const conversation = snapshot.conversations.find(value => typeof value === "object" && value !== null && (value as Record<string, unknown>).id === activeId);
-  if (!conversation || typeof conversation !== "object" || conversation === null) return snapshot;
+  if (!conversation || typeof conversation !== "object" || conversation === null) return enrichedSnapshot;
   const view = conversation as Record<string, unknown>;
-  if (!Array.isArray(view.messages)) return snapshot;
+  if (!Array.isArray(view.messages)) return enrichedSnapshot;
   const messages = await addMessagePreviews(session, view.messages, budget);
-  return { ...snapshot, conversations: snapshot.conversations.map(value => value === conversation ? { ...view, messages } : value) };
+  return { ...enrichedSnapshot, conversations: snapshot.conversations.map(value => value === conversation ? { ...view, messages } : value) };
 }
 
 async function addHistoryPreviews(session: HostSession, page: Record<string, unknown>): Promise<Record<string, unknown>> {
   if (!Array.isArray(page.messages)) return page;
-  return { ...page, messages: await addMessagePreviews(session, page.messages, MAX_PREVIEWS_PER_HISTORY_PAGE) };
+  return { ...page, messages: await addMessagePreviews(session, page.messages, { remaining: MAX_PREVIEWS_PER_HISTORY_PAGE }) };
 }
 
-async function addMessagePreviews(session: HostSession, messages: unknown[], budget: number): Promise<unknown[]> {
-  let remainingPreviews = budget;
+async function addDraftPreviews(session: HostSession, draft: unknown, budget: PreviewBudget): Promise<unknown> {
+  const view = objectOrUndefined(draft);
+  if (!view || !Array.isArray(view.attachments)) return draft;
+  const attachments = await Promise.all(view.attachments.map(async attachment => {
+    if (budget.remaining <= 0 || !previewableAttachment(attachment)) return attachment;
+    budget.remaining -= 1;
+    return addAttachmentPreview(session, attachment);
+  }));
+  return { ...view, attachments };
+}
+
+async function addMessagePreviews(session: HostSession, messages: unknown[], budget: PreviewBudget): Promise<unknown[]> {
   const enrichRetention = attachmentRetentionEnricher(session);
   const previewedMessages = await Promise.all(messages.map(async message => {
     if (typeof message !== "object" || message === null) return message;
@@ -580,8 +667,8 @@ async function addMessagePreviews(session: HostSession, messages: unknown[], bud
       const mediaMeta = objectOrUndefined(view.mediaMeta);
       const thumbnail = mediaMeta?.thumbnail;
       const previewTarget = previewableAttachment(thumbnail) ? thumbnail : attachment;
-      const preview = remainingPreviews > 0 && previewableAttachment(previewTarget);
-      if (preview) remainingPreviews -= 1;
+      const preview = budget.remaining > 0 && previewableAttachment(previewTarget);
+      if (preview) budget.remaining -= 1;
       const enriched = await enrichRetention(attachment);
       if (!preview) return enriched;
       if (previewTarget === attachment) return addAttachmentPreview(session, enriched);
@@ -630,7 +717,7 @@ async function addAttachmentPreview(session: HostSession, attachment: unknown): 
 function previewableAttachment(attachment: unknown): boolean {
   if (typeof attachment !== "object" || attachment === null || Array.isArray(attachment)) return false;
   const view = attachment as Record<string, unknown>;
-  return typeof view.id === "string" && typeof view.mediaType === "string" && /^image\/(jpeg|png|webp|gif)$/.test(view.mediaType) && view.state === "ready";
+  return typeof view.id === "string" && typeof view.mediaType === "string" && /^image\/(jpeg|png|webp|gif)$/.test(view.mediaType) && (view.state === "uploading" || view.state === "ready");
 }
 function mediaPageArgs(args: Record<string, unknown>): Record<string, unknown> {
   const conversationId = args.conversationId;
@@ -725,6 +812,10 @@ function requiredId(args: Record<string, unknown>): string {
   if (typeof id !== "string" || !/^[0-9a-f-]{36}$/.test(id)) throw { code: "invalid-request" };
   return id;
 }
+function requiredString(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) throw { code: "invalid-request" };
+  return value;
+}
 async function prepareAttachment(session: HostSession, args: Record<string, unknown>): Promise<CoreResult> {
   const displayName = args.displayName;
   const mediaType = args.mediaType;
@@ -766,7 +857,9 @@ export class BrowserWorkerHost {
   private stopping = false;
   private unsubscribeNetwork?: () => void;
   private presenter?: BannerPresenter;
-  private presentationPort?: BrowserPort;
+  private readonly presentationContexts = new Map<BrowserPort, PresentationContext>();
+  private readonly presentationRecipients = new Map<string, BrowserPort>();
+  private presentationSequence = 0;
   private readonly mediaLeases = new Map<BrowserPort, Map<string, number>>();
   /** View-local interest only; core retains admitted work after a port detaches. */
   private readonly historyAttempts = new Map<BrowserPort, string>();
@@ -813,15 +906,30 @@ export class BrowserWorkerHost {
   }
 
   public async stop(reason = "closed", acknowledge?: () => void): Promise<void> {
-    if (this.stopping) return;
-    this.stopping = true;
+    if (!this.beginStop()) return;
     try {
       if (reason === "revoked") {
         try { await this.owner?.owner.clearRememberedUnlock?.(); } catch {}
       }
+      await this.finishStop(reason, acknowledge);
+    } catch {
+      await this.finishStop(reason, acknowledge);
+    }
+  }
+
+  private beginStop(): boolean {
+    if (this.stopping) return false;
+    this.stopping = true;
+    this.presenter?.clear();
+    this.presentationContexts.clear();
+    this.presentationRecipients.clear();
+    return true;
+  }
+
+  private async finishStop(reason: string, acknowledge?: () => void): Promise<void> {
+    try {
       try { await this.dependencies.network?.stop(); } catch {}
       this.unsubscribeNetwork?.();
-      this.presenter?.clear();
       this.cancelSearchIndex();
       this.owner?.owner.shutdown();
       try { await this.owner?.owner.drain?.(); } catch {}
@@ -849,7 +957,13 @@ export class BrowserWorkerHost {
     const owner = await acquireWorkerOwner({ locks: this.dependencies.locks, name: OWNER_NAME, start: signal => this.dependencies.boot(signal, error => { void this.fatal(error); }), stop: async session => { session.shutdown(); await session.drain?.(); } });
     this.owner = owner;
     try {
-      this.presenter = new BannerPresenter(owner.owner, new MigratingCoreNotificationSettings(owner.owner, this.dependencies.legacySettings, () => { this.changed(); this.dependencies.network?.wake?.(); }), this.dependencies.notification ?? new BrowserNotificationAdapter(), () => this.presentationPort ? candidate => this.presentationPort?.postMessage({ event: "banner", candidate }) : undefined);
+      this.presenter = new BannerPresenter(owner.owner, new MigratingCoreNotificationSettings(owner.owner, this.dependencies.legacySettings, () => { this.changed(); this.dependencies.network?.wake?.(); }), this.dependencies.notification ?? new BrowserNotificationAdapter(), () => {
+        const recipient = this.selectedPresentationPort();
+        return recipient ? candidate => {
+          this.presentationRecipients.set(candidate.id, recipient);
+          recipient.postMessage({ event: "banner", candidate });
+        } : undefined;
+      }, Date.now, ids => ids.forEach(id => this.presentationRecipients.delete(id)));
       this.unsubscribeNetwork = this.dependencies.network?.subscribeChanges?.(() => this.changed());
       if (owner.owner.phase === "ready") { const ready = await this.dependencies.network?.start(); this.producerAdmissionReady = ready !== false; }
       void this.startSearchIndexWhenReady();
@@ -874,9 +988,10 @@ export class BrowserWorkerHost {
       return;
     }
     if (request.command === "lock_sync") {
+      if (!this.beginStop()) return;
       let clearFailed = false;
       try { await this.owner.owner.clearRememberedUnlock?.(); } catch { clearFailed = true; }
-      await this.stop(clearFailed ? "locked-recovery-clear-failed" : "locked", () => port.postMessage(clearFailed ? { id: request.id, ok: false, error: RECOVERY_CLEAR_ERROR } : { id: request.id, ok: true, value: undefined }));
+      await this.finishStop(clearFailed ? "locked-recovery-clear-failed" : "locked", () => port.postMessage(clearFailed ? { id: request.id, ok: false, error: RECOVERY_CLEAR_ERROR } : { id: request.id, ok: true, value: undefined }));
       return;
     }
     if (request.command === "disconnect") {
@@ -884,7 +999,7 @@ export class BrowserWorkerHost {
         this.ports.delete(port);
         this.mediaLeases.delete(port);
         this.detachHistoryAttempt(port);
-        if (this.presentationPort === port) { this.presentationPort = undefined; this.presenter?.clear(); }
+        this.removePresentationPort(port);
         port.postMessage({ event: "stopped", reason: "disconnected" });
         port.close();
       }
@@ -893,16 +1008,30 @@ export class BrowserWorkerHost {
     if (request.command === "set_notification_context") {
       const context = notificationContext(request.args);
       if (!context) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
-      this.presentationPort = port;
-      this.presenter?.setContext(context);
+      this.presentationContexts.set(port, { context, sequence: ++this.presentationSequence });
+      this.updatePresentationContext();
       port.postMessage({ id: request.id, ok: true, value: undefined });
       this.drainPresentation();
       return;
     }
+    if (request.command === "flush_draft_sync") {
+      if (Object.keys(request.args).length !== 0) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
+      this.dependencies.network?.flushDraftSync?.();
+      port.postMessage({ id: request.id, ok: true, value: undefined });
+      return;
+    }
     if (request.command === "display_ack") {
       const ids = request.args.ids;
-      if (port !== this.presentationPort || !Array.isArray(ids) || ids.some(id => typeof id !== "string")) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
-      try { await this.presenter?.acknowledgeDisplayed(ids); port.postMessage({ id: request.id, ok: true, value: undefined }); } catch (error) { port.postMessage({ id: request.id, ok: false, error: errorFor(error) }); }
+      if (!validDisplayIds(ids) || ids.some(id => this.presentationRecipients.get(id) !== port)) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
+      try { await this.presenter?.acknowledgeDisplayed(ids); ids.forEach(id => this.presentationRecipients.delete(id)); port.postMessage({ id: request.id, ok: true, value: undefined }); } catch (error) { port.postMessage({ id: request.id, ok: false, error: errorFor(error) }); }
+      return;
+    }
+    if (request.command === "display_failed") {
+      const ids = request.args.ids;
+      if (!validDisplayIds(ids) || ids.some(id => this.presentationRecipients.get(id) !== port)) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
+      this.presenter?.releaseDisplayed(ids);
+      ids.forEach(id => this.presentationRecipients.delete(id));
+      port.postMessage({ id: request.id, ok: true, value: undefined });
       return;
     }
     if (request.command === "attachment_retention_status") {
@@ -970,6 +1099,21 @@ export class BrowserWorkerHost {
       if (this.ports.has(port)) port.postMessage(response);
       return;
     }
+    if (request.command === "send_draft" && this.dependencies.network?.sendDraft) {
+      if (producerCommand(request) && !(this.dependencies.network.producerReady?.() ?? this.producerAdmissionReady)) {
+        port.postMessage({ id: request.id, ok: false, error: { code: "unavailable", message: "Browser session is not ready." } });
+        return;
+      }
+      try {
+        const value = await this.dependencies.network.sendDraft(request.args);
+        port.postMessage({ id: request.id, ok: true, value });
+        this.changed();
+        this.dependencies.network.wake?.();
+      } catch (error) {
+        port.postMessage({ id: request.id, ok: false, error: errorFor(error) });
+      }
+      return;
+    }
     const generation = this.visibleGeneration();
     const command = request.command;
     if (this.dependencies.network && producerCommand(request) && !(this.dependencies.network.producerReady?.() ?? this.producerAdmissionReady)) { port.postMessage({ id: request.id, ok: false, error: { code: "unavailable", message: "Browser session is not ready." } }); return; }
@@ -1013,6 +1157,7 @@ export class BrowserWorkerHost {
     const generationChanged = generation !== this.visibleGeneration();
     if (mutationChanged || successfulSideEffect || generationChanged) {
       this.changed();
+      if (response.ok && command === "save_draft") this.dependencies.network?.draftSaved?.();
       if (command === "unlock") void this.startSearchIndexWhenReady();
       if (command === "load_state" && generationChanged) this.dependencies.network?.wake?.();
       if (command === "retry_attachment") this.dependencies.network?.retryAttachment?.(requiredId(request.args));
@@ -1030,7 +1175,7 @@ export class BrowserWorkerHost {
     try {
       const identity = object(await session.query("_worker_identity_metadata", {}));
       if (typeof identity.vaultId !== "string" || identity.vaultId.length === 0 || typeof identity.deviceId !== "string" || identity.deviceId.length === 0) return undefined;
-      const binding = `${identity.vaultId} ${identity.deviceId}`;
+      const binding = `${identity.vaultId}\0${identity.deviceId}`;
       if (this.deviceSessionScope?.binding !== binding) this.deviceSessionScope = { binding, id: crypto.randomUUID() };
       return this.deviceSessionScope.id;
     } catch {
@@ -1097,7 +1242,30 @@ export class BrowserWorkerHost {
     this.drainPresentation();
   }
 
-  private drainPresentation(): void { void this.presenter?.drain().catch(() => undefined); }
+  private drainPresentation(): void {
+    if (this.stopping) return;
+    void this.presenter?.drain().catch(() => undefined);
+  }
+
+  private selectedPresentationPort(): BrowserPort | undefined {
+    const contexts = [...this.presentationContexts.entries()];
+    const focused = contexts.filter(([, entry]) => entry.context.focused);
+    return (focused.length > 0 ? focused : contexts)
+      .sort(([, left], [, right]) => right.sequence - left.sequence)[0]?.[0];
+  }
+
+  private updatePresentationContext(): void {
+    const port = this.selectedPresentationPort();
+    this.presenter?.setContext(port ? this.presentationContexts.get(port)!.context : undefined);
+  }
+
+  private removePresentationPort(port: BrowserPort): void {
+    this.presentationContexts.delete(port);
+    for (const [id, recipient] of this.presentationRecipients) {
+      if (recipient === port) this.presentationRecipients.delete(id);
+    }
+    this.updatePresentationContext();
+  }
 
   /** Reads index metadata first so an already-indexed unlock writes no maintenance checkpoint. */
   private async startSearchIndexWhenReady(): Promise<void> {
@@ -1450,7 +1618,29 @@ function notificationContext(args: Record<string, unknown>): BannerContext | und
   if (args.conversationId !== undefined && typeof args.conversationId !== "string") return undefined;
   if (args.notificationPermission !== undefined && args.notificationPermission !== "granted" && args.notificationPermission !== "denied" && args.notificationPermission !== "default" && args.notificationPermission !== "unsupported") return undefined;
   if (args.focused !== undefined && typeof args.focused !== "boolean") return undefined;
-  return { view: args.view, ...(typeof args.conversationId === "string" ? { conversationId: args.conversationId } : {}), ...(typeof args.notificationPermission === "string" ? { notificationPermission: args.notificationPermission } : {}), ...(typeof args.focused === "boolean" ? { focused: args.focused } : {}) };
+  return { view: args.view, ...(typeof args.conversationId === "string" ? { conversationId: args.conversationId } : {}), ...(typeof args.notificationPermission === "string" ? { notificationPermission: args.notificationPermission } : {}), ...(typeof args.focused === "boolean" ? { focused: args.focused } : {}), ...(typeof args.requireInteraction === "boolean" ? { requireInteraction: args.requireInteraction } : {}) };
+}
+
+function validDisplayIds(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.length <= 20 && value.every(validDisplayId);
+}
+
+function validDisplayId(id: unknown): id is string {
+  if (typeof id !== "string") return false;
+  if (/^[a-zA-Z0-9-]{1,128}$/.test(id)) return true;
+  if (new TextEncoder().encode(id).byteLength > 3_328) return false;
+  try {
+    const target = JSON.parse(id) as unknown;
+    if (!target || typeof target !== "object" || Array.isArray(target) || Object.keys(target).length !== 3) return false;
+    const value = target as Record<string, unknown>;
+    return boundedDisplayIdComponent(value.sourceDeviceId, 128) && boundedDisplayIdComponent(value.notificationKey, 512) && boundedDisplayIdComponent(value.lifetime, 128);
+  } catch {
+    return false;
+  }
+}
+
+function boundedDisplayIdComponent(value: unknown, maxBytes: number): value is string {
+  return typeof value === "string" && value.length > 0 && new TextEncoder().encode(value).byteLength <= maxBytes;
 }
 
 
@@ -1487,6 +1677,46 @@ export function browserRememberedUnlock(fetchBase: string, fetchImpl: typeof fet
   return new RememberedUnlock(OWNER_NAME, { origin: fetchBase, fetch: fetchImpl });
 }
 
+export async function sendBrowserDraft(options: {
+  session: Pick<BrowserSession, "mutate" | "signal">;
+  transport: ConstructorParameters<typeof DraftTransport>[0];
+  synchronizeDraft(): Promise<void>;
+  args: Record<string, unknown>;
+}): Promise<unknown> {
+  const { session, transport, synchronizeDraft, args } = options;
+  const input = object(args.input);
+  const prepared = object(await session.mutate("_worker_draft_prepare_send", { input }));
+  const draftId = requiredId(prepared);
+  const expectedRevision = requiredString(prepared.expectedRevision);
+  const revisionChanged = expectedRevision !== requiredString(input.expectedRevision);
+  if (revisionChanged) await synchronizeDraft();
+  let gate: Record<string, unknown>;
+  try {
+    gate = object(await session.mutate("_worker_draft_begin_send", { draftId, expectedRevision }));
+  } catch (error) {
+    if (!(revisionChanged && error instanceof CoreRejectedError && error.code === "draft-not-synced")) throw error;
+    await synchronizeDraft();
+    gate = object(await session.mutate("_worker_draft_begin_send", { draftId, expectedRevision }));
+  }
+  if (gate.remote === null) return session.mutate("send_draft", prepared);
+  const remote = object(gate.remote);
+  try {
+    const accepted = await new DraftTransport(transport).acceptDraftSend({
+      draftId: requiredString(remote.draftId),
+      revisionId: requiredString(remote.revisionId),
+      commandId: requiredString(remote.commandId),
+    }, session.signal);
+    return session.mutate("_worker_draft_send_accepted", { input: prepared, commandId: accepted.commandId });
+  } catch (error) {
+    if (isTerminalDraftSendRejection(error)) {
+      await session.mutate("_worker_draft_abort_send_intent", { draftId, commandId: requiredString(remote.commandId) });
+      throw { code: error.code };
+    }
+    if (error instanceof TransportError && (error.kind === "offline" || error.kind === "cancelled" || error.kind === "status")) throw { code: "draft-reconnect" };
+    throw error;
+  }
+}
+
 export function browserHostDependencies(locks: OwnerLockManager | undefined, terminate: () => void): BrowserHostDependencies {
   let enrollment: BrowserEnrollment | undefined;
   let enrollmentAbort: AbortController | undefined;
@@ -1504,10 +1734,15 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
   let syncProgress: SchedulerSyncProgress | undefined;
   let activeSession: BrowserSession | undefined;
   const changeListeners = new Set<() => void>();
+  const draftSyncPrompt = new DraftSyncPrompt(
+    () => polling && scheduler?.isDraftSyncEnabled === true && scheduler.status.connection === "connected",
+    () => { void scheduler?.poll().catch(() => undefined); },
+  );
   const stopNetwork = async () => {
     polling = false;
     if (pollTimer !== undefined) clearTimeout(pollTimer);
     pollTimer = undefined;
+    draftSyncPrompt.stop();
     scheduler?.stop();
     enrollmentAbort?.abort();
     retentionAbort?.abort();
@@ -1531,12 +1766,20 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       if (polling) pollTimer = setTimeout(schedulePoll, pollDelay);
     });
   };
+  const sendDraft = async (args: Record<string, unknown>): Promise<unknown> => {
+    const session = activeSession;
+    const sendScheduler = scheduler;
+    if (!session || !publicTransport || !sendScheduler) throw { code: "draft-reconnect" };
+    return sendBrowserDraft({ session, transport: publicTransport, synchronizeDraft: async () => { await sendScheduler.poll(); }, args });
+  };
   return {
     locks,
     terminate,
     network: {
       async start() { if (!scheduler || !retentionAbort) return false; const ready = await scheduler.ensureRetentionNegotiated(retentionAbort.signal); if (!polling) { polling = true; schedulePoll(); } return ready; },
       wake() { void scheduler?.poll().catch(() => undefined); },
+      draftSaved() { draftSyncPrompt.schedule(); },
+      flushDraftSync() { draftSyncPrompt.flush(); },
        startHistorySearch(attemptId) { scheduler?.trackHistorySearch(attemptId); void scheduler?.poll().catch(() => undefined); },
        stopHistorySearch(attemptId) { scheduler?.untrackHistorySearch(attemptId); },
       retryAttachment(id) { scheduler?.retryAttachment(id); },
@@ -1586,9 +1829,10 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
        async mcpAuthorization(id) { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpAuthorization(id); },
        async mcpApproveAuthorization(id, scopes) { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpApproveAuthorization(id, scopes); },
        async mcpDenyAuthorization(id) { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpDenyAuthorization(id); },
-       async accountAccess() {
+      async accountAccess() {
          return accountAccess?.status() ?? { kind: "temporarily_unavailable" };
        },
+      sendDraft,
        },
     async boot(_signal, onFatal) {
       const modulePromise = loadBrowserCore();
@@ -1630,4 +1874,11 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       },
     },
   };
+}
+
+function isTerminalDraftSendRejection(error: unknown): error is TransportError {
+  return error instanceof TransportError
+    && error.kind === "status"
+    && ((error.status === 409 && ["draft_already_sent", "draft_revision_not_head"].includes(error.code ?? ""))
+      || (error.status === 410 && ["draft_sent", "draft_discarded", "draft_expired"].includes(error.code ?? "")));
 }

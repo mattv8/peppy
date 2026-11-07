@@ -1,5 +1,6 @@
 use crate::{
-    cleared_draft_after_accepted_send, draft_event_target_labels_after_save, load_state_for_window,
+    cleared_draft_after_accepted_send, draft_event_target_labels_after_save,
+    draft_view_with_conflict_attachments, load_state_for_window, resolve_draft_conflict_view,
     save_draft_for_window,
     secure_store::MemoryStore,
     send_draft_for_window, session_for_update_flush, session_is_current,
@@ -656,9 +657,11 @@ async fn draft_event_targets_composer_after_move_and_not_unrelated_composer() {
         text: moved.text.clone(),
         recipient_ids: moved.recipient_ids.clone(),
         attachment_ids: moved.attachment_ids.clone(),
+        attachments: moved.attachments.clone(),
         gateway_id: moved.gateway_id.clone(),
         sim_id: moved.sim_id.clone(),
         revision: moved.revision.clone(),
+        sync: None,
     };
     assert_eq!(
         draft_event_target_labels_after_save(
@@ -765,6 +768,84 @@ fn saved_draft_for_target(
         .unwrap();
     assert_eq!(saved.conversation_id, target);
     (target, saved)
+}
+
+#[test]
+fn resolved_draft_view_includes_its_attachment_dtos() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let notifications = Arc::new(AtomicUsize::new(0));
+    let session =
+        crate::session::open_session(fixture.dir.path(), &fixture.store, &fixture.binding, &[], {
+            let notifications = notifications.clone();
+            Arc::new(move || {
+                notifications.fetch_add(1, Ordering::Relaxed);
+            })
+        })
+        .unwrap();
+    unlock(&session, &fixture);
+    let source = fixture.dir.path().join("conflict-image.png");
+    std::fs::write(&source, crate::media::tests::sample_png(2, 2)).unwrap();
+    let attachment = session.prepare_attachment(&source).unwrap();
+    let draft = session.client.recipientless_compose_draft().unwrap();
+    let mut draft_input = input(
+        &draft.draft_id.to_string(),
+        &draft.conversation_id.to_string(),
+        "image",
+        &[],
+        &draft.revision.to_string(),
+    );
+    draft_input.attachment_ids = vec![attachment.id.clone()];
+    session.save_draft(&draft_input).unwrap();
+
+    let resolved = resolve_draft_conflict_view(&session, draft.draft_id, None).unwrap();
+
+    assert_eq!(resolved.attachment_ids, vec![attachment.id.clone()]);
+    assert_eq!(resolved.attachments.unwrap()[0].id, attachment.id);
+    assert_eq!(notifications.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn resolved_draft_view_unions_local_and_conflict_attachment_dtos() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = open(&fixture, &fixture.binding, &[]);
+    unlock(&session, &fixture);
+    let local_path = fixture.dir.path().join("local-image.png");
+    let conflict_path = fixture.dir.path().join("conflict-image.png");
+    std::fs::write(&local_path, crate::media::tests::sample_png(2, 2)).unwrap();
+    std::fs::write(&conflict_path, crate::media::tests::sample_png(3, 3)).unwrap();
+    let local = session.prepare_attachment(&local_path).unwrap();
+    let conflict = session.prepare_attachment(&conflict_path).unwrap();
+    let draft = session.client.recipientless_compose_draft().unwrap();
+    let mut draft_input = input(
+        &draft.draft_id.to_string(),
+        &draft.conversation_id.to_string(),
+        "image",
+        &[],
+        &draft.revision.to_string(),
+    );
+    draft_input.attachment_ids = vec![local.id.clone()];
+    session.save_draft(&draft_input).unwrap();
+    let current = session
+        .client
+        .compose_draft(draft.draft_id)
+        .unwrap()
+        .unwrap();
+
+    let view = draft_view_with_conflict_attachments(
+        &session,
+        &current,
+        vec![conflict.id.parse().unwrap()],
+    )
+    .unwrap();
+
+    let attachments = view.attachments.unwrap();
+    assert_eq!(attachments.len(), 2);
+    assert!(attachments
+        .iter()
+        .any(|attachment| attachment.id == local.id));
+    assert!(attachments
+        .iter()
+        .any(|attachment| attachment.id == conflict.id));
 }
 
 #[tokio::test]

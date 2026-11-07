@@ -5,6 +5,7 @@ import {
   persistLayoutPatch,
   persistRecipientPosition,
   readAccentColor,
+  readComposerAttachmentLayout,
   readCompactTimestamps,
   readContactsDetailWidth,
   readGroupSenderAvatars,
@@ -64,6 +65,15 @@ describe("layout persistence", () => {
     expect(persistAccentColor(null)).toBe(true);
 
     expect(JSON.parse(localStorage.getItem(LAYOUT_KEY)!)).toEqual({ sibling: "kept" });
+  });
+
+  it("preserves accent and attachment layout preferences when either changes", () => {
+    persistLayoutPatch({ composerAttachmentLayout: "rows" });
+    expect(persistAccentColor(61)).toBe(true);
+    expect(readComposerAttachmentLayout()).toBe("rows");
+
+    persistLayoutPatch({ composerAttachmentLayout: "tiles" });
+    expect(readAccentColor()).toBe(61);
   });
 
   it("does not overwrite malformed saved layout JSON with an accent color", () => {

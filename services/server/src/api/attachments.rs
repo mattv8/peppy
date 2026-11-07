@@ -44,7 +44,8 @@ use super::sync::parse_cursor;
 use super::{
     AccessPrincipal, ApiError, ApiResult, ApiState, DeviceAttachmentRetentionError, Operation,
     Principal, attachment_quota, auth_with_mode, authorize, authorize_resolved,
-    database_unavailable, insert_error, revalidate_principal, withdraw_legacy_retention_mutation,
+    database_error_kind, database_unavailable, insert_error, revalidate_principal,
+    withdraw_legacy_retention_mutation,
 };
 use crate::attachment_retention::retention_storage_status_on_connection;
 use crate::scope;
@@ -387,7 +388,7 @@ async fn mark_retention_victims(
     policy_version: Option<&str>,
 ) -> ApiResult<Option<RetentionVictims>> {
     let candidates = sqlx::query(
-        "WITH ranked AS (SELECT a.attachment_id,row_number() OVER (ORDER BY a.finalized_at,a.attachment_id) AS position,sum(a.ciphertext_bytes) OVER (ORDER BY a.finalized_at,a.attachment_id) AS running_bytes FROM attachments a WHERE a.vault_id=$1 AND a.retention_class='message_media' AND EXISTS (SELECT 1 FROM attachment_retention_uses h WHERE h.vault_id=a.vault_id AND h.attachment_id=a.attachment_id AND h.kind='message_history') AND NOT EXISTS (SELECT 1 FROM attachment_retention_uses u WHERE u.vault_id=a.vault_id AND u.attachment_id=a.attachment_id AND u.kind <> 'message_history' AND u.released_at IS NULL)), cutoff AS (SELECT min(position) AS position FROM ranked WHERE running_bytes >= $2), chosen AS (SELECT r.attachment_id FROM ranked r CROSS JOIN cutoff c WHERE r.position <= c.position) SELECT a.attachment_id,a.object_key,a.ciphertext_bytes FROM attachments a JOIN chosen USING(attachment_id) WHERE a.vault_id=$1 ORDER BY a.finalized_at,a.attachment_id FOR UPDATE OF a",
+        "WITH ranked AS (SELECT a.attachment_id,row_number() OVER (ORDER BY a.finalized_at,a.attachment_id) AS position,sum(a.ciphertext_bytes) OVER (ORDER BY a.finalized_at,a.attachment_id) AS running_bytes FROM attachments a WHERE a.vault_id=$1 AND a.retention_class='message_media' AND EXISTS (SELECT 1 FROM attachment_retention_uses h WHERE h.vault_id=a.vault_id AND h.attachment_id=a.attachment_id AND h.kind='message_history') AND NOT EXISTS (SELECT 1 FROM attachment_retention_uses u WHERE u.vault_id=a.vault_id AND u.attachment_id=a.attachment_id AND u.kind <> 'message_history' AND u.released_at IS NULL) AND NOT EXISTS (SELECT 1 FROM draft_attachment_holds h WHERE h.vault_id=a.vault_id AND h.attachment_id=a.attachment_id AND h.expires_at>now())), cutoff AS (SELECT min(position) AS position FROM ranked WHERE running_bytes >= $2), chosen AS (SELECT r.attachment_id FROM ranked r CROSS JOIN cutoff c WHERE r.position <= c.position) SELECT a.attachment_id,a.object_key,a.ciphertext_bytes FROM attachments a JOIN chosen USING(attachment_id) WHERE a.vault_id=$1 ORDER BY a.finalized_at,a.attachment_id FOR UPDATE OF a",
     )
     .bind(vault_id)
     .bind(required_bytes)
@@ -501,6 +502,26 @@ pub(super) async fn reserve_attachment(
     // Serializing on the vault row makes aggregate quota admission race-free.
     lock_vault(&mut tx, principal.vault).await?;
     withdraw_legacy_retention_mutation(&mut tx, &h, principal.vault, principal.device).await?;
+    if let Some(draft_id) = request.draft_id {
+        let terminal: Option<String> = sqlx::query_scalar(
+            "SELECT reason FROM draft_terminals WHERE vault_id=$1 AND draft_id=$2",
+        )
+        .bind(principal.vault)
+        .bind(draft_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "attachment_reserve_draft_terminal"))?;
+        if let Some(reason) = terminal {
+            return Err(ApiError(
+                StatusCode::GONE,
+                match reason.as_str() {
+                    "sent" => "draft_sent",
+                    "discarded" => "draft_discarded",
+                    _ => "draft_expired",
+                },
+            ));
+        }
+    }
     removal_error(&mut tx, principal.vault, attachment_id).await?;
     if let Some(existing) = sqlx::query("SELECT device_id,declared_bytes,declared_sha256,retention_class,expires_at > now() AS live,deleting_at IS NULL AS available FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2")
         .bind(principal.vault).bind(attachment_id).fetch_optional(&mut *tx).await.map_err(|error| database_unavailable(&error, "attachment_reserve_duplicate"))? {
@@ -564,8 +585,8 @@ pub(super) async fn reserve_attachment(
         tracing::info!(vault_id=%principal.vault, victim_count=victims.count, victim_bytes=victims.bytes, policy_version=policy.policy_version.as_deref().unwrap_or("unknown"), cause="quota_admission", "attachment retention cleanup queued");
         return Err(ApiError(StatusCode::CONFLICT, "storage_cleanup_pending"));
     }
-    sqlx::query("INSERT INTO upload_reservations(vault_id,attachment_id,device_id,object_key,declared_bytes,declared_sha256,reference_tracked,retention_class) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
-        .bind(principal.vault).bind(attachment_id).bind(principal.device).bind(key).bind(request.declared_ciphertext_bytes).bind(hash).bind(request.reference_tracking).bind(retention_class_name(request.retention_class))
+    sqlx::query("INSERT INTO upload_reservations(vault_id,attachment_id,device_id,object_key,declared_bytes,declared_sha256,reference_tracked,retention_class,draft_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+        .bind(principal.vault).bind(attachment_id).bind(principal.device).bind(key).bind(request.declared_ciphertext_bytes).bind(hash).bind(request.reference_tracking).bind(retention_class_name(request.retention_class)).bind(request.draft_id)
         .execute(&mut *tx).await.map_err(|error| insert_error(error, "attachment_reserve"))?;
     tx.commit()
         .await
@@ -784,7 +805,7 @@ pub(super) async fn finalize_attachment(
             return Err(ApiError(StatusCode::CONFLICT, "device_revoked"));
         }
         removal_error(&mut tx, principal.vault, attachment_id).await?;
-        let locked = sqlx::query("SELECT object_key,declared_sha256,retention_class,finalized_at IS NOT NULL AS finalized FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2 AND device_id=$3 AND deleting_at IS NULL AND (finalized_at IS NOT NULL OR expires_at > now()) FOR UPDATE")
+        let locked = sqlx::query("SELECT object_key,declared_sha256,retention_class,draft_id,finalized_at IS NOT NULL AS finalized FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2 AND device_id=$3 AND deleting_at IS NULL AND (finalized_at IS NOT NULL OR expires_at > now()) FOR UPDATE")
             .bind(principal.vault).bind(attachment_id).bind(principal.device)
             .fetch_optional(&mut *tx).await
             .map_err(|error| database_unavailable(&error, "attachment_finalize_lock"))?
@@ -797,15 +818,65 @@ pub(super) async fn finalize_attachment(
         if locked.get::<String, _>("object_key") != key {
             continue;
         }
-        sqlx::query("INSERT INTO attachments(vault_id,attachment_id,object_key,ciphertext_bytes,ciphertext_sha256,created_by_device_id,retention_class) VALUES($1,$2,$3,$4,$5,$6,$7)")
+        let draft_id: Option<Uuid> = locked.get("draft_id");
+        if let Some(draft_id) = draft_id {
+            let terminal: Option<String> = sqlx::query_scalar(
+                "SELECT reason FROM draft_terminals WHERE vault_id=$1 AND draft_id=$2 FOR UPDATE",
+            )
+            .bind(principal.vault)
+            .bind(draft_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| database_unavailable(&error, "attachment_finalize_draft_terminal"))?;
+            if let Some(reason) = terminal {
+                sqlx::query(
+                    "DELETE FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2",
+                )
+                .bind(principal.vault)
+                .bind(attachment_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| {
+                    database_unavailable(&error, "attachment_finalize_expire_reservation")
+                })?;
+                sqlx::query(QUEUE_NOW)
+                    .bind(&key)
+                    .bind(principal.vault)
+                    .bind("draft_expired")
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| {
+                        database_unavailable(&error, "attachment_finalize_expire_enqueue")
+                    })?;
+                // Commit the queued deletion before reporting the terminal draft; an
+                // early return would roll it back and orphan the uploaded object.
+                tx.commit().await.map_err(|error| {
+                    database_unavailable(&error, "attachment_finalize_expire_commit")
+                })?;
+                return Err(ApiError(
+                    StatusCode::GONE,
+                    match reason.as_str() {
+                        "sent" => "draft_sent",
+                        "discarded" => "draft_discarded",
+                        _ => "draft_expired",
+                    },
+                ));
+            }
+        }
+        sqlx::query("INSERT INTO attachments(vault_id,attachment_id,object_key,ciphertext_bytes,ciphertext_sha256,created_by_device_id,retention_class,draft_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
             .bind(principal.vault).bind(attachment_id).bind(&key).bind(bytes)
-            .bind(locked.get::<Vec<u8>, _>("declared_sha256")).bind(principal.device).bind(locked.get::<String, _>("retention_class"))
+            .bind(locked.get::<Vec<u8>, _>("declared_sha256")).bind(principal.device).bind(locked.get::<String, _>("retention_class")).bind(draft_id)
             .execute(&mut *tx).await
             .map_err(|error| insert_error(error, "attachment_finalize_insert"))?;
         sqlx::query("UPDATE upload_reservations SET finalized_at=now() WHERE vault_id=$1 AND attachment_id=$2")
             .bind(principal.vault).bind(attachment_id)
             .execute(&mut *tx).await
             .map_err(|error| database_unavailable(&error, "attachment_finalize_mark"))?;
+        if let Some(draft_id) = draft_id {
+            sqlx::query("INSERT INTO draft_attachment_holds(vault_id,draft_id,attachment_id,kind,expires_at) VALUES($1,$2,$3,'staging',now()+interval '30 days') ON CONFLICT(vault_id,draft_id,attachment_id,kind) DO UPDATE SET expires_at=EXCLUDED.expires_at")
+                .bind(principal.vault).bind(draft_id).bind(attachment_id).execute(&mut *tx).await
+                .map_err(|error| database_unavailable(&error, "attachment_finalize_draft_hold"))?;
+        }
         tx.commit()
             .await
             .map_err(|error| database_unavailable(&error, "attachment_finalize_commit"))?;
@@ -1279,6 +1350,12 @@ pub(super) async fn release_attachment(
             "attachment_not_reference_tracked",
         ));
     }
+    let held: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM draft_attachment_holds WHERE vault_id=$1 AND attachment_id=$2 AND expires_at>now())")
+        .bind(principal.vault).bind(attachment_id).fetch_one(&mut *tx).await
+        .map_err(|error| database_unavailable(&error, "attachment_release_holds"))?;
+    if held {
+        return Err(not_proven);
+    }
     let current_generation: i64 = vault.get("compaction_generation");
     let replay_floor: i64 = vault.get("replay_floor_cursor");
     if generation == 0 || generation != current_generation || cutoff > replay_floor {
@@ -1711,7 +1788,7 @@ pub(super) async fn process_storage_deletions(
 /// copies, then process due deletions.
 pub(super) async fn storage_maintenance(
     db: &PgPool,
-    store: &Storage,
+    store: Option<&Storage>,
     limit: i64,
 ) -> Result<DeletionStats, sqlx::Error> {
     retire_expired_reservations(db, None, limit).await?;
@@ -1720,7 +1797,16 @@ pub(super) async fn storage_maintenance(
     // so a crash before the SQL commit safely retries; purged_at is recorded only
     // after a full purge.
     crate::attachment_retention::repair_retention_cleanup_queue(db, limit).await?;
-    process_storage_deletions(db, store, limit).await
+    if let Err(error) = crate::draft_retention::expire_due(db, limit).await {
+        tracing::warn!(
+            error_kind = database_error_kind(&error),
+            "draft retention expiry failed; continuing storage cleanup"
+        );
+    }
+    match store {
+        Some(store) => process_storage_deletions(db, store, limit).await,
+        None => Ok(DeletionStats::default()),
+    }
 }
 
 #[cfg(test)]

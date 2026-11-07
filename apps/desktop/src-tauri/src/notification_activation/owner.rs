@@ -29,6 +29,7 @@ pub struct Post {
     pub title: String,
     pub body: String,
     pub sound: bool,
+    pub icon: Option<crate::notification_icon::Icon>,
 }
 
 #[derive(Clone)]
@@ -65,7 +66,7 @@ impl Signal {
 }
 
 enum Command {
-    Post(Post, SyncSender<Result<(), PostError>>),
+    Post(Box<Post>, SyncSender<Result<(), PostError>>),
     Wake,
 }
 
@@ -133,6 +134,7 @@ trait Backend {
         title: &str,
         body: &str,
         sound: bool,
+        icon: Option<&crate::notification_icon::Icon>,
         signal: Signal,
     ) -> Result<Self::Item, PostError>;
     fn remove(&mut self, item: &Self::Item) -> bool;
@@ -146,9 +148,10 @@ impl Backend for platform::Backend {
         title: &str,
         body: &str,
         sound: bool,
+        icon: Option<&crate::notification_icon::Icon>,
         signal: Signal,
     ) -> Result<Self::Item, PostError> {
-        platform::Backend::post(self, id, title, body, sound, signal)
+        platform::Backend::post(self, id, title, body, sound, icon, signal)
     }
     fn ensure_authorized(&mut self) -> Result<(), PostError> {
         platform::Backend::ensure_authorized(self)
@@ -191,6 +194,7 @@ impl<B: Backend> Registry<B> {
             &post.title,
             &post.body,
             post.sound,
+            post.icon.as_ref(),
             signal.clone(),
         )?;
         self.entries.push_back(Entry {
@@ -254,7 +258,7 @@ fn serve<B: Backend>(
             activate(sequence, activation, cancel);
         }
         if let Command::Post(post, reply) = command {
-            let result = registry.post(post);
+            let result = registry.post(*post);
             let _ = reply.try_send(if stop.load(Ordering::Acquire) {
                 Err(PostError::Failed)
             } else {
@@ -309,7 +313,7 @@ impl Owner {
             accepted: false,
         };
         self.sender
-            .try_send(Command::Post(post, reply))
+            .try_send(Command::Post(Box::new(post), reply))
             .map_err(|_| PostError::Failed)?;
         Ok(acceptance)
     }
@@ -327,6 +331,7 @@ impl Owner {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::atomic::AtomicUsize;
 
     type BackendAcceptanceGate = (SyncSender<()>, mpsc::Receiver<Result<(), ()>>);
 
@@ -334,6 +339,7 @@ mod tests {
     struct TestBackend {
         callbacks: HashMap<String, Signal>,
         sounds: Vec<bool>,
+        icons: Vec<&'static str>,
         log: Arc<Mutex<Vec<String>>>,
         fail_post: bool,
         post_outcomes: VecDeque<Result<(), PostError>>,
@@ -341,10 +347,16 @@ mod tests {
         reject_after: Option<usize>,
         acceptance: Option<BackendAcceptanceGate>,
         retired: Option<SyncSender<()>>,
+        lease_root: Option<std::path::PathBuf>,
+        leases: Vec<std::path::PathBuf>,
+        post_attempts: Arc<AtomicUsize>,
+        lease_paths: Arc<Mutex<Vec<std::path::PathBuf>>>,
+        callback_leases: Option<Arc<Mutex<HashMap<String, crate::notification_icon::Lease>>>>,
     }
     struct TestItem {
         id: String,
         log: Arc<Mutex<Vec<String>>>,
+        _icon: Option<crate::notification_icon::Lease>,
     }
     impl Drop for TestItem {
         fn drop(&mut self) {
@@ -362,9 +374,16 @@ mod tests {
             _: &str,
             _: &str,
             sound: bool,
+            icon: Option<&crate::notification_icon::Icon>,
             signal: Signal,
         ) -> Result<TestItem, PostError> {
+            self.post_attempts.fetch_add(1, Ordering::AcqRel);
             self.sounds.push(sound);
+            self.icons.push(match icon {
+                None => "none",
+                Some(crate::notification_icon::Icon::Message) => "message",
+                Some(crate::notification_icon::Icon::App(_)) => "app",
+            });
             if let Some(outcome) = self.post_outcomes.pop_front() {
                 outcome?;
             }
@@ -378,10 +397,27 @@ mod tests {
                     .map_err(|_| PostError::Failed)?
                     .map_err(|_| PostError::Failed)?;
             }
+            let icon = self.lease_root.as_ref().and_then(|root| {
+                icon.and_then(|icon| crate::notification_icon::materialize_for_test(root, icon))
+            });
+            if let Some(icon) = &icon {
+                self.leases.push(icon.path().to_path_buf());
+                self.lease_paths
+                    .lock()
+                    .unwrap()
+                    .push(icon.path().to_path_buf());
+                if let Some(callback_leases) = &self.callback_leases {
+                    callback_leases
+                        .lock()
+                        .unwrap()
+                        .insert(id.into(), icon.clone());
+                }
+            }
             self.callbacks.insert(id.into(), signal);
             Ok(TestItem {
                 id: id.into(),
                 log: self.log.clone(),
+                _icon: icon,
             })
         }
         fn remove(&mut self, item: &TestItem) -> bool {
@@ -416,6 +452,7 @@ mod tests {
             title: "not retained".into(),
             body: "not retained".into(),
             sound: false,
+            icon: Some(crate::notification_icon::Icon::Message),
         }
     }
 
@@ -450,6 +487,7 @@ mod tests {
             title: "Peppy".into(),
             body: "Test notification".into(),
             sound: true,
+            icon: Some(crate::notification_icon::Icon::Message),
         }
     }
 
@@ -502,6 +540,179 @@ mod tests {
         audible.sound = true;
         registry.post(audible).unwrap();
         assert_eq!(registry.backend.sounds, [false, true]);
+    }
+
+    #[test]
+    fn notification_icon_choice_reaches_the_backend_without_changing_delivery() {
+        let mut registry = registry();
+        let mut app_icon = post(0);
+        app_icon.icon = Some(crate::notification_icon::Icon::App(vec![1, 2, 3]));
+        registry.post(app_icon).unwrap();
+        assert_eq!(registry.backend.icons, ["app"]);
+        assert_eq!(registry.entries.len(), 1);
+    }
+
+    #[test]
+    fn notification_icon_lease_is_released_when_eviction_retires_a_real_owner_item() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut registry = Registry {
+            backend: TestBackend {
+                lease_root: Some(directory.path().to_path_buf()),
+                ..Default::default()
+            },
+            entries: VecDeque::new(),
+            sequence: Arc::new(AtomicU64::new(0)),
+            wake: mpsc::sync_channel(1).0,
+        };
+        registry.post(post(0)).unwrap();
+        let first = registry.backend.leases[0].clone();
+        assert!(first.exists());
+        for id in 1..=CAPACITY {
+            registry.post(post(id)).unwrap();
+        }
+        assert!(!first.exists());
+    }
+
+    #[test]
+    fn notification_failed_eviction_removal_retains_the_real_owner_lease() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut registry = Registry {
+            backend: TestBackend {
+                lease_root: Some(directory.path().to_path_buf()),
+                ..Default::default()
+            },
+            entries: VecDeque::new(),
+            sequence: Arc::new(AtomicU64::new(0)),
+            wake: mpsc::sync_channel(1).0,
+        };
+        for id in 0..CAPACITY {
+            registry.post(post(id)).unwrap();
+        }
+        let first = registry.backend.leases[0].clone();
+        registry.backend.fail_remove = true;
+
+        assert_eq!(registry.post(post(CAPACITY)), Err(PostError::Failed));
+        assert!(first.exists());
+        assert_eq!(registry.entries.len(), CAPACITY);
+    }
+
+    #[test]
+    fn notification_icon_write_failure_does_not_retry_or_block_native_submission() {
+        let directory = tempfile::tempdir().unwrap();
+        let root_file = directory.path().join("not-a-directory");
+        std::fs::write(&root_file, b"file").unwrap();
+        let mut registry = Registry {
+            backend: TestBackend {
+                lease_root: Some(root_file),
+                ..Default::default()
+            },
+            entries: VecDeque::new(),
+            sequence: Arc::new(AtomicU64::new(0)),
+            wake: mpsc::sync_channel(1).0,
+        };
+        registry.post(post(0)).unwrap();
+        assert_eq!(registry.entries.len(), 1);
+        assert!(registry.backend.leases.is_empty());
+        assert_eq!(registry.backend.post_attempts.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn notification_icon_write_failure_posts_once_and_acknowledges_the_candidate() {
+        let (_fixture, session, settings) = durable_candidates(1);
+        let directory = tempfile::tempdir().unwrap();
+        let root_file = directory.path().join("not-a-directory");
+        std::fs::write(&root_file, b"file").unwrap();
+        let post_attempts = Arc::new(AtomicUsize::new(0));
+        let owner = test_owner(
+            TestBackend {
+                lease_root: Some(root_file),
+                post_attempts: post_attempts.clone(),
+                ..Default::default()
+            },
+            0,
+        );
+
+        assert!(!drain_to_owner(&session, &settings, &owner).unwrap());
+        owner.stop();
+        assert!(session
+            .client
+            .pending_banner_candidates(100)
+            .unwrap()
+            .is_empty());
+        assert_eq!(post_attempts.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn notification_icon_lease_is_released_when_cancellation_retires_the_owner_item() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut registry = Registry {
+            backend: TestBackend {
+                lease_root: Some(directory.path().to_path_buf()),
+                ..Default::default()
+            },
+            entries: VecDeque::new(),
+            sequence: Arc::new(AtomicU64::new(0)),
+            wake: mpsc::sync_channel(1).0,
+        };
+        let cancelled = post(0);
+        let cancellation = cancelled.cancel.clone();
+        registry.post(cancelled).unwrap();
+        let path = registry.backend.leases[0].clone();
+        cancellation.cancel();
+        assert!(registry.reconcile().is_empty());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn notification_icon_lease_is_released_when_registry_shutdown_retires_owner_items() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = {
+            let mut registry = Registry {
+                backend: TestBackend {
+                    lease_root: Some(directory.path().to_path_buf()),
+                    ..Default::default()
+                },
+                entries: VecDeque::new(),
+                sequence: Arc::new(AtomicU64::new(0)),
+                wake: mpsc::sync_channel(1).0,
+            };
+            registry.post(post(0)).unwrap();
+            registry.backend.leases[0].clone()
+        };
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn notification_timeout_late_acceptance_keeps_real_lease_until_callback_releases_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let (started, observing) = mpsc::sync_channel(1);
+        let (complete, result) = mpsc::sync_channel(1);
+        let (retired, retirement) = mpsc::sync_channel(1);
+        let callback_leases = Arc::new(Mutex::new(HashMap::new()));
+        let lease_paths = Arc::new(Mutex::new(Vec::new()));
+        let owner = test_owner(
+            TestBackend {
+                acceptance: Some((started, result)),
+                retired: Some(retired),
+                lease_root: Some(directory.path().to_path_buf()),
+                lease_paths: lease_paths.clone(),
+                callback_leases: Some(callback_leases.clone()),
+                ..Default::default()
+            },
+            0,
+        );
+        let receipt = owner.submit(anonymous_post()).unwrap();
+        observing.recv_timeout(PLATFORM_TIMEOUT).unwrap();
+        assert!(receipt.wait_for(std::time::Duration::ZERO).is_err());
+
+        complete.send(Ok(())).unwrap();
+        retirement.recv_timeout(PLATFORM_TIMEOUT).unwrap();
+        owner.stop();
+        let path = lease_paths.lock().unwrap()[0].clone();
+        assert!(path.exists());
+        let (_, lease) = callback_leases.lock().unwrap().drain().next().unwrap();
+        drop(lease);
+        assert!(!path.exists());
     }
 
     fn test_owner(backend: TestBackend, prefill: usize) -> Owner {
@@ -596,7 +807,7 @@ mod tests {
             settings,
             || false,
             |_, _| false,
-            |destination, title, body| {
+            |destination, title, body, icon| {
                 owner
                     .submit(Post {
                         activation: Some(NotificationActivation {
@@ -608,6 +819,7 @@ mod tests {
                         sound: settings.sound_enabled(),
                         title,
                         body,
+                        icon,
                     })
                     .and_then(Acceptance::wait)
             },
@@ -665,7 +877,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |_, _, _| Err(PostError::AwaitingAuthorization),
+            |_, _, _, _| Err(PostError::AwaitingAuthorization),
         )
         .unwrap());
         assert_eq!(
@@ -684,7 +896,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |_, _, _| {
+            |_, _, _, _| {
                 posts.set(posts.get() + 1);
                 Err(PostError::AwaitingAuthorization)
             },
@@ -707,7 +919,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |_, _, _| await_authorization(),
+            |_, _, _, _| await_authorization(),
         )
         .unwrap());
         let posted = std::cell::Cell::new(0);
@@ -716,7 +928,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |_, _, _| {
+            |_, _, _, _| {
                 posted.set(posted.get() + 1);
                 Ok(())
             },
@@ -738,7 +950,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |_, _, _| Err(PostError::AwaitingAuthorization),
+            |_, _, _, _| Err(PostError::AwaitingAuthorization),
         )
         .unwrap());
         assert!(!crate::notifications::drain_with_delivery(
@@ -746,7 +958,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |_, _, _| Err(PostError::NotAllowed),
+            |_, _, _, _| Err(PostError::NotAllowed),
         )
         .unwrap());
         assert!(session
@@ -906,7 +1118,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |destination, title, body| {
+            |destination, title, body, icon| {
                 let receipt = owner.submit(Post {
                     activation: Some(NotificationActivation {
                         request_id: "late-post".into(),
@@ -917,6 +1129,7 @@ mod tests {
                     sound: settings.sound_enabled(),
                     title,
                     body,
+                    icon,
                 })?;
                 observing.recv_timeout(PLATFORM_TIMEOUT).unwrap();
                 receipt.wait_for(std::time::Duration::ZERO)

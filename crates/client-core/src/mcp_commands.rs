@@ -104,8 +104,9 @@ impl Client {
                 body: command.body,
             },
             &command.route,
-            &command.attachment_ids,
+            local_references(&tx, &command.attachment_ids)?,
             transport,
+            None,
             None,
         )?;
         let response = McpQueuedCommand {
@@ -509,7 +510,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, AttachmentState::PendingUpload.code());
-        assert_eq!(inventory, (46, 1, 0));
+        assert_eq!(inventory, (SCHEMA_VERSION, 1, 0));
     }
 
     #[test]

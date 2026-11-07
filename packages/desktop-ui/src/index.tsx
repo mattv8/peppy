@@ -1,4 +1,4 @@
-import type { KeyboardEvent, PointerEvent, ReactElement, ReactNode } from "react";
+import type { ClipboardEvent, KeyboardEvent, PointerEvent, ReactElement, ReactNode } from "react";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import {
   Archive,
@@ -37,6 +37,23 @@ import {
 } from "./phone";
 import { conversationAvatar, seedKey, type AvatarIdentity } from "./avatar";
 import { ContactAvatar } from "./ContactAvatar";
+import { ComposerAttachmentTray, type Attachment, type AttachmentLayout } from "./ComposerAttachmentTray";
+import {
+  MAX_COMPOSER_ATTACHMENTS,
+  MAX_COMPOSER_ATTACHMENT_SIZE_LABEL,
+  extractComposerPaste,
+} from "./composerPaste";
+import type { DraftAttachmentState } from "./bridge-contracts";
+export { ComposerAttachmentTray, type Attachment, type AttachmentLayout } from "./ComposerAttachmentTray";
+export {
+  MAX_COMPOSER_ATTACHMENTS,
+  MAX_COMPOSER_ATTACHMENT_BYTES,
+  MAX_COMPOSER_ATTACHMENT_SIZE_LABEL,
+  extractComposerPaste,
+  type ComposerPaste,
+  type ComposerPasteRejection,
+} from "./composerPaste";
+export type { DraftAttachmentState };
 export { BusyIndicator } from "./BusyIndicator";
 import type { ConversationFolder } from "./bridge-contracts";
 export { TonePicker, TONE_PRESETS, type TonePickerProps } from "./TonePicker";
@@ -150,13 +167,6 @@ export type Conversation = {
   folderReason?: "marked" | "blocked";
   unblock?: "pending" | "failed";
   canUnblock?: boolean;
-};
-export type Attachment = {
-  id: string;
-  name: string;
-  state: "pending" | "ready" | "uploading" | "failed";
-  error?: string;
-  previewUrl?: string;
 };
 
 export type StatusTone = "neutral" | "ok" | "warning" | "error";
@@ -727,6 +737,16 @@ function smsCounter(text: string): string | null {
   return `${segments} SMS · ${remaining} left`;
 }
 
+function formatPasteRejections(rejections: { name: string; reason: "type" | "size" | "limit" }[], maxAttachments: number): string | null {
+  if (!rejections.length) return null;
+  const copy = {
+    type: "Use PNG, JPEG, GIF or WebP.",
+    size: `Images can be up to ${MAX_COMPOSER_ATTACHMENT_SIZE_LABEL}.`,
+    limit: `Up to ${maxAttachments} images per message.`,
+  } as const;
+  return rejections.map((rejection) => `Couldn't add ${rejection.name}. ${copy[rejection.reason]}`).join(" ");
+}
+
 export function detectPlatform(): "macos" | "windows" | "linux" {
   if (typeof navigator === "undefined") return "linux";
   const source = navigator.platform ?? navigator.userAgent;
@@ -1295,6 +1315,37 @@ export function RecipientPicker({
   );
 }
 
+export function mapSelectionThroughEdit(oldText: string, newText: string, position: number): number {
+  if (!oldText) return newText.length;
+  if (position >= oldText.length) return newText.length;
+
+  let prefixLength = 0;
+  while (prefixLength < oldText.length && prefixLength < newText.length && oldText[prefixLength] === newText[prefixLength]) prefixLength += 1;
+
+  let suffixLength = 0;
+  while (
+    suffixLength < oldText.length - prefixLength &&
+    suffixLength < newText.length - prefixLength &&
+    oldText[oldText.length - 1 - suffixLength] === newText[newText.length - 1 - suffixLength]
+  ) suffixLength += 1;
+
+  const mappedPosition = position <= prefixLength
+    ? position
+    : position >= oldText.length - suffixLength
+      ? newText.length - (oldText.length - position)
+      : prefixLength;
+  const boundedPosition = Math.max(0, Math.min(mappedPosition, newText.length));
+  return boundedPosition > 0 && boundedPosition < newText.length && isSurrogatePair(newText, boundedPosition - 1, boundedPosition)
+    ? boundedPosition - 1
+    : boundedPosition;
+}
+
+function isSurrogatePair(text: string, highIndex: number, lowIndex: number): boolean {
+  const high = text.charCodeAt(highIndex);
+  const low = text.charCodeAt(lowIndex);
+  return high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff;
+}
+
 export function Composer({
   draft,
   attachments,
@@ -1315,6 +1366,13 @@ export function Composer({
   composerUserSized = false,
   maxAutoGrowHeight = 176,
   platform,
+  attachmentLayout = "tiles",
+  attachmentHeaderDetail,
+  draftKey,
+  draftIdentity,
+  onPasteImages,
+  onRetryAttachment,
+  maxAttachments = MAX_COMPOSER_ATTACHMENTS,
 }: {
   draft: string;
   attachments: Attachment[];
@@ -1337,18 +1395,85 @@ export function Composer({
   /** CSS max-height: 176px remains the hard ceiling (8 lines); this can only lower auto-grow. */
   maxAutoGrowHeight?: number;
   platform?: "macos" | "windows" | "linux";
+  attachmentLayout?: AttachmentLayout;
+  attachmentHeaderDetail?: ReactNode;
+  /** Raw draft key used by callers that do not provide a stable logical identity. */
+  draftKey?: string;
+  /** Stable logical draft identity; remains unchanged when a first save rekeys `draftKey`. */
+  draftIdentity?: string;
+  onPasteImages?(files: File[]): void;
+  onRetryAttachment?(id: string): void;
+  maxAttachments?: number;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const pastedCaretRef = useRef<{ draft: string; position: number } | null>(null);
+  const previousDraftRef = useRef(draft);
+  const logicalDraftIdentity = draftIdentity ?? draftKey;
+  const previousDraftIdentityRef = useRef(logicalDraftIdentity);
+  const localDraftRef = useRef<string | null>(null);
+  const compositionValueRef = useRef<string | null>(null);
+  const compositionHasLocalEditRef = useRef(false);
+  const pendingSelectionRef = useRef<{ draft: string; start: number; end: number } | null>(null);
+  const [isComposing, setIsComposing] = useState(false);
+  const [pasteRejection, setPasteRejection] = useState<string | null>(null);
   const hasContent = Boolean(draft.trim()) || attachments.length > 0;
   const canSend = sendSupported && !readOnly && hasContent;
   const counter = !attachments.length ? smsCounter(draft) : null;
   const fallbackShown = !sendSupported && !gatewaySlot && !statusSlot;
+  if (logicalDraftIdentity !== previousDraftIdentityRef.current) {
+    previousDraftIdentityRef.current = logicalDraftIdentity;
+    previousDraftRef.current = draft;
+    localDraftRef.current = null;
+    compositionValueRef.current = null;
+    compositionHasLocalEditRef.current = false;
+    pendingSelectionRef.current = null;
+    pastedCaretRef.current = null;
+    setPasteRejection(null);
+  }
+  if (
+    draft !== previousDraftRef.current &&
+    localDraftRef.current !== draft &&
+    pastedCaretRef.current?.draft !== draft &&
+    !isComposing &&
+    textareaRef.current
+  ) {
+    pendingSelectionRef.current = {
+      draft: previousDraftRef.current,
+      start: textareaRef.current.selectionStart,
+      end: textareaRef.current.selectionEnd,
+    };
+  }
   useEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea || composerUserSized) return;
     textarea.style.height = "0";
     textarea.style.height = `${Math.min(textarea.scrollHeight, maxAutoGrowHeight)}px`;
   }, [composerUserSized, draft, maxAutoGrowHeight]);
+  useLayoutEffect(() => {
+    const pastedCaret = pastedCaretRef.current;
+    if (!pastedCaret || pastedCaret.draft !== draft) return;
+    const textarea = textareaRef.current;
+    if (textarea && document.activeElement === textarea) textarea.setSelectionRange(pastedCaret.position, pastedCaret.position);
+    pastedCaretRef.current = null;
+  }, [draft]);
+  useLayoutEffect(() => {
+    if (isComposing && draft !== previousDraftRef.current) {
+      compositionValueRef.current ??= textareaRef.current?.value ?? previousDraftRef.current;
+    }
+    const pendingSelection = pendingSelectionRef.current;
+    if (!isComposing && pendingSelection && pendingSelection.draft !== draft) {
+      const textarea = textareaRef.current;
+      if (textarea && document.activeElement === textarea) {
+        textarea.setSelectionRange(
+          mapSelectionThroughEdit(pendingSelection.draft, draft, pendingSelection.start),
+          mapSelectionThroughEdit(pendingSelection.draft, draft, pendingSelection.end),
+        );
+      }
+    }
+    pendingSelectionRef.current = null;
+    previousDraftRef.current = draft;
+    if (localDraftRef.current === draft) localDraftRef.current = null;
+  }, [draft, isComposing]);
   const keydown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (
       event.key === "Enter" &&
@@ -1359,16 +1484,22 @@ export function Composer({
       if (canSend) onSend();
     }
   };
-  const icon = (state: Attachment["state"]) =>
-    state === "ready" ? (
-      <Check size={12} />
-    ) : state === "failed" ? (
-      <X size={12} />
-    ) : state === "uploading" ? (
-      <Loader size={12} />
-    ) : (
-      <Clock size={12} />
-    );
+  const pasteImages = (event: ClipboardEvent<HTMLTextAreaElement | HTMLUListElement>) => {
+    if (readOnly || !onPasteImages) return;
+    const pasted = extractComposerPaste(event.clipboardData, maxAttachments - attachments.length);
+    if (!pasted.images.length && !pasted.rejected.length) return;
+    event.preventDefault();
+    if (pasted.text) {
+      const textarea = textareaRef.current;
+      const selectionStart = textarea?.selectionStart ?? draft.length;
+      const selectionEnd = textarea?.selectionEnd ?? draft.length;
+      const nextDraft = `${draft.slice(0, selectionStart)}${pasted.text}${draft.slice(selectionEnd)}`;
+      pastedCaretRef.current = { draft: nextDraft, position: selectionStart + pasted.text.length };
+      onDraftChange(nextDraft);
+    }
+    if (pasted.images.length) onPasteImages(pasted.images);
+    setPasteRejection(formatPasteRejections(pasted.rejected, maxAttachments));
+  };
   return (
     <section
       id="shared-composer"
@@ -1379,43 +1510,7 @@ export function Composer({
         <div id="composer-banner-row" hidden={!bannerSlot}>
           {bannerSlot}
         </div>
-        {attachments.length > 0 && (
-        <ul id="attachment-tray" aria-label="Attachments">
-          {attachments.map((a) => (
-            <li
-              key={a.id}
-              data-attachment-id={a.id}
-              className={`attachment-chip ${a.state}`}
-            >
-              {a.previewUrl && (
-                <img
-                  src={a.previewUrl}
-                  alt={a.name}
-                  onError={(e) => {
-                    e.currentTarget.hidden = true;
-                  }}
-                />
-              )}
-              <span>{a.name}</span>
-              <span className="attachment-state" aria-label={a.state}>
-                {icon(a.state)}
-              </span>
-               {a.error && <span role="alert">{a.error}</span>}
-               {onRemoveAttachment && (
-                 <button
-                   type="button"
-                   className="attachment-remove"
-                   aria-label={`Remove ${a.name}`}
-                   title={`Remove ${a.name}`}
-                   onClick={() => onRemoveAttachment(a.id)}
-                 >
-                   <X size={12} aria-hidden />
-                 </button>
-               )}
-            </li>
-          ))}
-        </ul>
-      )}
+        <ComposerAttachmentTray key={logicalDraftIdentity} attachments={attachments} layout={attachmentLayout} attachmentHeaderDetail={attachmentHeaderDetail} onRemoveAttachment={onRemoveAttachment} onRetryAttachment={onRetryAttachment} onPaste={pasteImages} onFocusTextarea={() => textareaRef.current?.focus()} />
         <div id="composer-input-row">
         <label htmlFor="composer-textarea" className="sr-only">
           Message
@@ -1424,12 +1519,43 @@ export function Composer({
           ref={textareaRef}
           id="composer-textarea"
           aria-label="Message"
-          value={draft}
+          value={isComposing ? compositionValueRef.current ?? draft : draft}
           readOnly={readOnly}
           onChange={(e) => {
-            if (!readOnly) onDraftChange(e.target.value);
+            if (!readOnly) {
+              setPasteRejection(null);
+              localDraftRef.current = e.target.value;
+              if (isComposing) {
+                compositionValueRef.current = e.target.value;
+                compositionHasLocalEditRef.current = true;
+              }
+              onDraftChange(e.target.value);
+            }
+          }}
+          onCompositionStart={(event) => {
+            compositionValueRef.current = event.currentTarget.value;
+            compositionHasLocalEditRef.current = false;
+            setIsComposing(true);
+          }}
+          onCompositionEnd={(event) => {
+            const localValue = event.currentTarget.value;
+            if (compositionHasLocalEditRef.current) {
+              localDraftRef.current = localValue;
+              pendingSelectionRef.current = null;
+              if (draft !== localValue) onDraftChange(localValue);
+            } else if (draft !== localValue) {
+              pendingSelectionRef.current = {
+                draft: localValue,
+                start: event.currentTarget.selectionStart,
+                end: event.currentTarget.selectionEnd,
+              };
+            }
+            compositionValueRef.current = null;
+            compositionHasLocalEditRef.current = false;
+            setIsComposing(false);
           }}
           onKeyDown={keydown}
+          onPaste={pasteImages}
           placeholder={
             placeholder ??
             (composerName ? `Message ${composerName}` : "Type a message")
@@ -1439,7 +1565,7 @@ export function Composer({
       </div>
         <div
           id="composer-status-row"
-          hidden={!(statusActive || status || fallbackShown)}
+          hidden={!(statusActive || status || fallbackShown || pasteRejection)}
         >
           {statusSlot}
           {status && (
@@ -1447,6 +1573,7 @@ export function Composer({
               {status}
             </p>
           )}
+          {pasteRejection && <p data-composer-paste-rejection className="composer-paste-rejection" role="alert">{pasteRejection}</p>}
            {fallbackShown && <span id="unavailable-hint">Sending unavailable: {unavailableReason ?? "phone is offline"}</span>}
         </div>
         <div id="composer-toolbar">

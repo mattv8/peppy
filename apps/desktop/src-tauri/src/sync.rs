@@ -5,19 +5,27 @@
 use crate::{
     error::{core_error, BridgeError, BridgeResult},
     gateways::{extract_device_role, gateway_views, CapabilitiesResponse, DevicesResponse},
-    net::{NetError, MAX_JSON_BYTES, MAX_PAGE_BYTES},
+    net::{NetError, MAX_JSON_BYTES, MAX_PAGE_BYTES, NON_API_ERROR_CODE},
     origin::websocket_url,
     session::{Session, VaultSummary},
 };
 use futures_util::{SinkExt, StreamExt};
 use peppy_client_core::{
-    Client, Cursor, EnvelopePurpose, HistorySearchReplayProof, HistorySearchSyncFacts, KeyProfile,
-    RawReplayRecord, RawSnapshotRecord, SnapshotPurpose, VaultCheckHeader, MAX_APPLY_BATCH,
-    MAX_SEAL_BATCH, MAX_SNAPSHOT_PAGE,
+    Client, Cursor, DraftPushOutcome, DraftTerminalReasonCore, DraftTransferDirection,
+    EnvelopePurpose, HistorySearchReplayProof, HistorySearchSyncFacts, KeyProfile, RawReplayRecord,
+    RawSnapshotRecord, SnapshotPurpose, VaultCheckHeader, MAX_APPLY_BATCH, MAX_SEAL_BATCH,
+    MAX_SNAPSHOT_PAGE,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, LazyLock, Mutex,
+    },
+    time::Duration,
+};
 use tokio::time::{sleep, timeout, Instant};
 use tokio_tungstenite::tungstenite::{
     self, client::IntoClientRequest, protocol::WebSocketConfig, Message,
@@ -25,6 +33,7 @@ use tokio_tungstenite::tungstenite::{
 
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const WORK_INTERVAL: Duration = Duration::from_secs(15);
+const DRAFT_SAVE_WAKE_DELAY: Duration = Duration::from_secs(2);
 const GATEWAY_REFRESH_EVERY: u32 = 4;
 const WS_MAX_MESSAGE: usize = 2 * 1024 * 1024;
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -44,6 +53,15 @@ const DOWNLOAD_UNAVAILABLE_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const APPLY_STEPS: usize = 8;
 const WS_CLOSE_REVOKED: u16 = 4401;
 const WS_CLOSE_RESYNC: u16 = 4409;
+
+struct DraftSaveWake {
+    generation: u64,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+static DRAFT_SAVE_WAKE_GENERATION: AtomicU64 = AtomicU64::new(0);
+static DRAFT_SAVE_WAKES: LazyLock<Mutex<HashMap<usize, DraftSaveWake>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(crate) struct DownloadRetryState {
     attempts: u8,
@@ -152,6 +170,93 @@ pub async fn blocking<T: Send + 'static>(
 
 fn client(session: &Arc<Session>) -> Client {
     session.client.clone()
+}
+
+/// Resets the save debounce for this session. Cancellation fences delayed work from retired
+/// sessions, while the generation ensures a superseded save cannot wake early.
+pub(crate) fn schedule_draft_push(session: Arc<Session>, delay: Duration) {
+    let key = Arc::as_ptr(&session) as usize;
+    let generation = DRAFT_SAVE_WAKE_GENERATION.fetch_add(1, Ordering::Relaxed);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let previous = DRAFT_SAVE_WAKES
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(
+            key,
+            DraftSaveWake {
+                generation,
+                cancel: cancel.clone(),
+            },
+        );
+    if let Some(previous) = previous {
+        previous.cancel.cancel();
+    }
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = session.cancel.cancelled() => {}
+            _ = cancel.cancelled() => {}
+            _ = sleep(delay) => {
+                let current = {
+                    let mut wakes = DRAFT_SAVE_WAKES
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    if wakes.get(&key).is_some_and(|wake| wake.generation == generation) {
+                        wakes.remove(&key);
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if current && !session.cancel.is_cancelled() {
+                    session.request_work();
+                }
+                return;
+            }
+        }
+        let mut wakes = DRAFT_SAVE_WAKES
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if wakes
+            .get(&key)
+            .is_some_and(|wake| wake.generation == generation)
+        {
+            wakes.remove(&key);
+        }
+    });
+}
+
+pub(crate) async fn schedule_draft_push_after_save(session: Arc<Session>, draft_id: String) {
+    let client = client(&session);
+    let pending = blocking(move || {
+        client
+            .pending_draft_pushes()
+            .map(|pushes| {
+                pushes
+                    .iter()
+                    .any(|push| push.draft_id.to_string() == draft_id)
+            })
+            .map_err(core_error)
+    })
+    .await
+    .unwrap_or(false);
+    if pending && !session.cancel.is_cancelled() {
+        schedule_draft_push(session, DRAFT_SAVE_WAKE_DELAY);
+    }
+}
+
+pub(crate) async fn wake_draft_sync_if_pending(session: Arc<Session>) {
+    let client = client(&session);
+    let pending = blocking(move || {
+        client
+            .pending_draft_pushes()
+            .map(|pushes| !pushes.is_empty())
+            .map_err(core_error)
+    })
+    .await
+    .unwrap_or(false);
+    if pending && !session.cancel.is_cancelled() {
+        session.request_work();
+    }
 }
 
 #[derive(Deserialize)]
@@ -779,6 +884,14 @@ pub(crate) fn classify(failure: &Failure) -> MediaOutcome {
     }
 }
 
+fn draft_transfer_failure_direction(
+    is_draft_attachment: bool,
+    direction: DraftTransferDirection,
+    failure: &Failure,
+) -> Option<DraftTransferDirection> {
+    (is_draft_attachment && classify(failure) == MediaOutcome::Permanent).then_some(direction)
+}
+
 /// Applies the media failure policy; returns `Err` only for a round-ending transport failure.
 fn handle_media_failure(
     session: &Arc<Session>,
@@ -795,18 +908,39 @@ fn handle_media_failure(
             Ok(())
         }
         MediaOutcome::Permanent => {
-            let message = match failure {
-                Failure::Net(error) => BridgeError::from(error).message,
-                Failure::Permanent(error) => error.message,
-            };
             session
                 .transfer_errors
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .insert(id, message);
+                .insert(id, "media-transfer-failed".into());
             Ok(())
         }
     }
+}
+
+async fn record_draft_transfer_failure(
+    session: &Arc<Session>,
+    id: peppy_client_core::AttachmentId,
+    direction: DraftTransferDirection,
+) -> BridgeResult<()> {
+    let c = client(session);
+    blocking(move || {
+        c.record_draft_attachment_transfer_failure(id, direction)
+            .map_err(core_error)
+    })
+    .await
+}
+
+async fn clear_draft_transfer_failure(
+    session: &Arc<Session>,
+    id: peppy_client_core::AttachmentId,
+) -> BridgeResult<()> {
+    let c = client(session);
+    blocking(move || {
+        c.clear_draft_attachment_transfer_failure(id)
+            .map_err(core_error)
+    })
+    .await
 }
 
 fn handle_download_failure(
@@ -867,6 +1001,14 @@ async fn upload_object(
     session: &Arc<Session>,
     object: peppy_client_core::CipherObject,
 ) -> Result<(), Failure> {
+    upload_object_for_draft(session, object, None).await
+}
+
+async fn upload_object_for_draft(
+    session: &Arc<Session>,
+    object: peppy_client_core::CipherObject,
+    draft_id: Option<peppy_client_core::DraftId>,
+) -> Result<(), Failure> {
     if session.cancel.is_cancelled() {
         return Ok(());
     }
@@ -885,6 +1027,7 @@ async fn upload_object(
         "declared_ciphertext_sha256": object.ciphertext_sha256,
         "reference_tracking": retention.reference_tracking,
         "retention_class": retention_class,
+        "draft_id": draft_id.map(|id| id.to_string()),
     });
     let recovering_finalized = match session
         .api
@@ -1010,6 +1153,447 @@ async fn download_one(
     installed.map_err(Failure::Permanent)
 }
 
+fn draft_timestamp_ms(value: &str) -> Result<i64, NetError> {
+    time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+        .map_err(|_| NetError::Invalid)
+        .map(|value| value.unix_timestamp_nanos().div_euclid(1_000_000) as i64)
+}
+
+fn remote_draft_change(
+    change: peppy_hosted_api::drafts::DraftChange,
+) -> Result<peppy_client_core::RemoteDraftChange, NetError> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use peppy_client_core::{DraftId, RemoteDraftChange};
+    use peppy_hosted_api::drafts::{DraftChange, DraftTerminalReason};
+    Ok(match change {
+        DraftChange::Head {
+            draft_id,
+            branch_id,
+            revision_id,
+            parent_revision_id,
+            sealed_record,
+            attachment_ids,
+            expires_at,
+            ..
+        } => RemoteDraftChange::Head {
+            draft_id: DraftId(draft_id),
+            branch_id,
+            revision_id,
+            parent_revision_id,
+            sealed_record: URL_SAFE_NO_PAD
+                .decode(sealed_record)
+                .map_err(|_| NetError::Invalid)?,
+            attachment_ids: attachment_ids
+                .into_iter()
+                .map(peppy_client_core::AttachmentId)
+                .collect(),
+            expires_at_ms: draft_timestamp_ms(&expires_at)?,
+        },
+        DraftChange::BranchClosed {
+            draft_id,
+            branch_id,
+            ..
+        } => RemoteDraftChange::BranchClosed {
+            draft_id: DraftId(draft_id),
+            branch_id,
+        },
+        DraftChange::Terminal {
+            draft_id,
+            reason,
+            command_id,
+            ..
+        } => RemoteDraftChange::Terminal {
+            draft_id: DraftId(draft_id),
+            reason: match reason {
+                DraftTerminalReason::Sent => DraftTerminalReasonCore::Sent,
+                DraftTerminalReason::Discarded => DraftTerminalReasonCore::Discarded,
+                DraftTerminalReason::Expired => DraftTerminalReasonCore::Expired,
+            },
+            command_id: command_id.map(peppy_client_core::CommandId),
+        },
+    })
+}
+
+/// Synchronizes encrypted draft metadata and draft-only attachment objects. Draft contents are
+/// deliberately never logged; malformed server records fail the round without advancing the cursor.
+async fn sync_drafts(
+    session: &Arc<Session>,
+    retention_maintenance_ready: bool,
+    failed: &[peppy_client_core::AttachmentId],
+) -> BridgeResult<bool> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use peppy_hosted_api::drafts::{
+        DraftChangesResponse, PutDraftRevisionRequest, PutDraftRevisionResponse,
+    };
+    // Two MAX_DRAFT_RECORD_BYTES records can expand to roughly 700 KiB as JSON/base64, below browser's 1 MiB page cap.
+    const DRAFT_PAGE_LIMIT: usize = 2;
+
+    let c = client(session);
+    let bootstrap = blocking(move || c.draft_bootstrap_required().map_err(core_error)).await?;
+    let after = if bootstrap {
+        "0".to_owned()
+    } else {
+        let c = client(session);
+        blocking(move || c.draft_sync_cursor().map_err(core_error)).await?
+    };
+    let first: DraftChangesResponse = match session
+        .api
+        .get_json(
+            &format!("/v1/drafts?after={after}&limit={DRAFT_PAGE_LIMIT}"),
+            MAX_PAGE_BYTES,
+        )
+        .await
+    {
+        Ok(page) => page,
+        Err(NetError::Status {
+            status: 404 | 405,
+            code: Some(code),
+        }) if code != NON_API_ERROR_CODE => {
+            let c = client(session);
+            blocking(move || c.set_draft_sync_supported(false).map_err(core_error)).await?;
+            return Ok(false);
+        }
+        Err(NetError::Status {
+            status: 404,
+            code: None,
+        }) => match session
+            .api
+            .get_json_200::<serde_json::Value>("/v1/vault", MAX_JSON_BYTES)
+            .await
+        {
+            Ok(_) => {
+                let c = client(session);
+                blocking(move || c.set_draft_sync_supported(false).map_err(core_error)).await?;
+                return Ok(false);
+            }
+            Err(error) if transport_fatal(&error) => return Err(error.into()),
+            Err(_) => return Ok(false),
+        },
+        Err(error) if transport_fatal(&error) => return Err(error.into()),
+        Err(_) => return Ok(false),
+    };
+    let c = client(session);
+    blocking(move || c.set_draft_sync_supported(true).map_err(core_error)).await?;
+    let mut seen_draft_ids = Vec::new();
+    let mut fully_applied = true;
+    let mut page = first;
+    loop {
+        if bootstrap {
+            seen_draft_ids.extend(page.changes.iter().map(|change| match change {
+                peppy_hosted_api::drafts::DraftChange::Head { draft_id, .. }
+                | peppy_hosted_api::drafts::DraftChange::BranchClosed { draft_id, .. }
+                | peppy_hosted_api::drafts::DraftChange::Terminal { draft_id, .. } => {
+                    peppy_client_core::DraftId(*draft_id)
+                }
+            }));
+        }
+        let changes = page
+            .changes
+            .into_iter()
+            .map(remote_draft_change)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(BridgeError::from)?;
+        let next_after = page.next_after.clone();
+        let c = client(session);
+        let applied_cursor = next_after.clone();
+        let applied =
+            tokio::task::spawn_blocking(move || c.apply_draft_changes(changes, &applied_cursor))
+                .await
+                .map_err(|_| BridgeError::host_state())?;
+        if let Err(error) = applied {
+            match error {
+                peppy_client_core::Error::KeysUnavailable
+                | peppy_client_core::Error::Crypto
+                | peppy_client_core::Error::InvalidMedia
+                | peppy_client_core::Error::InvalidRequest(_) => {
+                    record_work_error(session, "draft-apply-deferred");
+                    fully_applied = false;
+                    break;
+                }
+                error => return Err(core_error(error)),
+            }
+        }
+        if session.cancel.is_cancelled() {
+            return Ok(false);
+        }
+        if !page.more {
+            break;
+        }
+        page = session
+            .api
+            .get_json(
+                &format!("/v1/drafts?after={next_after}&limit={DRAFT_PAGE_LIMIT}"),
+                MAX_PAGE_BYTES,
+            )
+            .await
+            .map_err(BridgeError::from)?;
+    }
+    if bootstrap && fully_applied {
+        let c = client(session);
+        blocking(move || {
+            c.finish_draft_bootstrap(&seen_draft_ids)
+                .map_err(core_error)
+        })
+        .await?;
+    }
+    if retention_maintenance_ready {
+        let c = client(session);
+        let uploads = blocking(move || c.pending_draft_uploads().map_err(core_error)).await?;
+        for upload in uploads
+            .into_iter()
+            .filter(|upload| !failed.contains(&upload.object.attachment_id))
+            .take(MEDIA_PER_ROUND)
+        {
+            if session.cancel.is_cancelled() {
+                return Ok(true);
+            }
+            let id = upload.object.attachment_id;
+            match upload_object_for_draft(session, upload.object, Some(upload.draft_id)).await {
+                Ok(()) => clear_draft_transfer_failure(session, id).await?,
+                Err(failure) => {
+                    let direction = draft_transfer_failure_direction(
+                        true,
+                        DraftTransferDirection::Upload,
+                        &failure,
+                    );
+                    handle_media_failure(session, id, failure)?;
+                    if let Some(direction) = direction {
+                        record_draft_transfer_failure(session, id, direction).await?;
+                    }
+                }
+            }
+        }
+    }
+    let c = client(session);
+    for push in blocking(move || c.pending_draft_pushes().map_err(core_error)).await? {
+        let c = client(session);
+        let attempted = blocking(move || {
+            c.mark_draft_push_attempt(push.draft_id, push.revision_id)
+                .map_err(core_error)
+        })
+        .await?;
+        if !attempted {
+            continue;
+        }
+        let request = PutDraftRevisionRequest {
+            base_revision_id: push.base_revision_id,
+            sealed_record: URL_SAFE_NO_PAD.encode(push.sealed_record),
+            attachment_ids: push.attachment_ids.iter().map(|id| id.0).collect(),
+            authored: push.authored,
+            resolves_branch_ids: push.resolves_branch_ids,
+        };
+        let outcome = match session
+            .api
+            .put_json::<_, PutDraftRevisionResponse>(
+                &format!(
+                    "/v1/drafts/{}/revisions/{}",
+                    push.draft_id, push.revision_id
+                ),
+                &request,
+            )
+            .await
+        {
+            Ok(response) => DraftPushOutcome::Accepted {
+                branch_id: response.branch_id,
+                expires_at_ms: draft_timestamp_ms(&response.expires_at)
+                    .map_err(BridgeError::from)?,
+                conflict: response.conflict,
+            },
+            Err(NetError::Status {
+                status: 410,
+                code: Some(code),
+            }) => match code.as_str() {
+                "draft_sent" => DraftPushOutcome::Terminated(DraftTerminalReasonCore::Sent),
+                "draft_discarded" => {
+                    DraftPushOutcome::Terminated(DraftTerminalReasonCore::Discarded)
+                }
+                "draft_expired" => DraftPushOutcome::Terminated(DraftTerminalReasonCore::Expired),
+                _ => continue,
+            },
+            Err(NetError::Status {
+                status: 409,
+                code: Some(code),
+            }) if code == "draft_branch_limit" => DraftPushOutcome::BranchLimit,
+            Err(NetError::Status {
+                status: 422,
+                code: Some(code),
+            }) if code == "draft_attachment_unavailable" => DraftPushOutcome::AttachmentUnavailable,
+            Err(NetError::Status {
+                status: 413,
+                code: Some(code),
+            }) if code == "draft_record_too_large" => DraftPushOutcome::Rejected,
+            Err(NetError::Status {
+                status: 422,
+                code: Some(code),
+            }) if code == "draft_invalid_request" => DraftPushOutcome::Rejected,
+            Err(error) if transport_fatal(&error) => return Err(error.into()),
+            Err(_) => continue,
+        };
+        let c = client(session);
+        blocking(move || {
+            c.record_draft_push(push.draft_id, push.revision_id, outcome)
+                .map_err(core_error)
+        })
+        .await?;
+    }
+    let c = client(session);
+    for draft_id in blocking(move || c.pending_draft_discards().map_err(core_error)).await? {
+        match session
+            .api
+            .post_discard(
+                &format!("/v1/drafts/{draft_id}/discard"),
+                &serde_json::json!({}),
+            )
+            .await
+        {
+            Ok(()) => {
+                let c = client(session);
+                blocking(move || c.record_draft_discard(draft_id).map_err(core_error)).await?;
+            }
+            Err(error) if transport_fatal(&error) => return Err(error.into()),
+            Err(_) => {}
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod draft_push_outcome_tests {
+    use super::*;
+    use crate::{
+        contacts::tests::mock_server,
+        tests::{fixture_at, open},
+    };
+
+    #[test]
+    fn only_documented_client_rejections_are_permanent() {
+        let cases = [
+            (413, "draft_record_too_large", true),
+            (422, "draft_invalid_request", true),
+            (413, "draft_invalid_request", false),
+            (422, "draft_record_too_large", false),
+            (500, "draft_invalid_request", false),
+        ];
+        for (status, code, rejected) in cases {
+            let outcome = match (status, code) {
+                (413, "draft_record_too_large") | (422, "draft_invalid_request") => {
+                    Some(DraftPushOutcome::Rejected)
+                }
+                _ => None,
+            };
+            assert_eq!(outcome.is_some(), rejected);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_draft_route_uses_the_authenticated_vault_probe() {
+        let (origin, seen) = mock_server(|method, path, _| match (method, path) {
+            // A router 404 is JSON but has no API error code. A plaintext 404 is classified as
+            // a proxy/non-API response and must not disable draft sync.
+            ("GET", "/v1/drafts?after=0&limit=2") => (404, "{}".into()),
+            ("GET", "/v1/vault") => (200, "{}".into()),
+            _ => (404, "{}".into()),
+        })
+        .await;
+        let fixture = fixture_at(&origin);
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+
+        assert!(!sync_drafts(&session, false, &[]).await.unwrap());
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().any(|request| request.path == "/v1/vault"));
+        assert!(seen.iter().all(|request| request.path != "/v1/gateways"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_draft_route_probe_propagates_revocation() {
+        let (origin, _) = mock_server(|method, path, _| match (method, path) {
+            ("GET", "/v1/drafts?after=0&limit=2") => (404, "{}".into()),
+            ("GET", "/v1/vault") => (401, "{}".into()),
+            _ => (404, "{}".into()),
+        })
+        .await;
+        let fixture = fixture_at(&origin);
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+
+        assert_eq!(
+            sync_drafts(&session, false, &[]).await.unwrap_err().code,
+            "revoked"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deferred_bootstrap_page_does_not_complete_absence_reconciliation() {
+        let response = serde_json::json!({
+            "changes": [{
+                "kind": "head",
+                "seq": "1",
+                "draft_id": "00000000-0000-0000-0000-000000000001",
+                "branch_id": "00000000-0000-0000-0000-000000000002",
+                "revision_id": "00000000-0000-0000-0000-000000000003",
+                "parent_revision_id": null,
+                "sealed_record": "AA",
+                "attachment_ids": [],
+                "expires_at": "2026-12-01T00:00:00Z"
+            }],
+            "next_after": "1",
+            "more": true
+        })
+        .to_string();
+        let (origin, _) = mock_server(move |method, path, _| match (method, path) {
+            ("GET", "/v1/drafts?after=0&limit=2") => (200, response.clone()),
+            _ => (404, "{}".into()),
+        })
+        .await;
+        let fixture = fixture_at(&origin);
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+
+        sync_drafts(&session, false, &[]).await.unwrap();
+        assert!(session.client.draft_bootstrap_required().unwrap());
+    }
+
+    #[test]
+    fn production_classifier_retries_transient_server_failures() {
+        assert_eq!(
+            classify(&Failure::Net(NetError::Status {
+                status: 503,
+                code: None,
+            })),
+            MediaOutcome::Retry
+        );
+    }
+
+    #[test]
+    fn production_draft_failure_policy_records_permanent_downloads_only_for_drafts() {
+        assert_eq!(
+            draft_transfer_failure_direction(
+                true,
+                DraftTransferDirection::Download,
+                &Failure::Net(NetError::Invalid),
+            ),
+            Some(DraftTransferDirection::Download)
+        );
+        assert_eq!(
+            draft_transfer_failure_direction(
+                false,
+                DraftTransferDirection::Download,
+                &Failure::Net(NetError::Invalid),
+            ),
+            None
+        );
+        assert_eq!(
+            draft_transfer_failure_direction(
+                true,
+                DraftTransferDirection::Download,
+                &Failure::Net(NetError::Status {
+                    status: 503,
+                    code: None,
+                }),
+            ),
+            None
+        );
+    }
+}
+
 /// Bounded outbound and media work: uploads (before held MMS envelopes can seal), sealing,
 /// outbox upload with acknowledgement only after HTTP acceptance, then verified downloads.
 pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
@@ -1046,6 +1630,7 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
         .keys()
         .copied()
         .collect();
+    changed |= sync_drafts(session, retention_maintenance_ready, &failed).await?;
     let tracked = contact_photo_transfers(session).await?;
     if !tracked.unavailable.is_empty() {
         record_work_error(session, "contact-photo-unavailable");
@@ -1139,19 +1724,41 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
             .map(|candidate| (candidate.object, candidate.demanded))
             .collect(),
     );
+    let c = client(session);
+    let draft_attachment_ids = blocking(move || {
+        c.compose_drafts().map_err(core_error).map(|drafts| {
+            drafts
+                .into_iter()
+                .flat_map(|draft| draft.attachment_ids)
+                .collect::<Vec<_>>()
+        })
+    })
+    .await?;
     for object in downloads {
         if session.cancel.is_cancelled() {
             return Ok(());
         }
         let id = object.attachment_id;
+        let is_draft_attachment = draft_attachment_ids.contains(&id);
         match download_one(session, object).await {
             Ok(()) => {
                 clear_download_retry(session, &id);
+                if is_draft_attachment {
+                    clear_draft_transfer_failure(session, id).await?;
+                }
                 session.invalidate_cached_attachment(&id);
                 changed = true;
             }
             Err(failure) => {
+                let direction = draft_transfer_failure_direction(
+                    is_draft_attachment,
+                    DraftTransferDirection::Download,
+                    &failure,
+                );
                 handle_download_failure(session, id, failure)?;
+                if let Some(direction) = direction {
+                    record_draft_transfer_failure(session, id, direction).await?;
+                }
                 changed = true;
             }
         }
@@ -1533,6 +2140,22 @@ fn schedule_presence_refresh(due: &mut Option<Instant>, now: Instant) {
     }
 }
 
+fn handle_live_hint(
+    session: &Session,
+    kind: &str,
+    presence_refresh_due: &mut Option<Instant>,
+) -> bool {
+    match kind {
+        "presence_changed" => schedule_presence_refresh(presence_refresh_due, Instant::now()),
+        "drafts_changed" => {
+            session.request_work();
+            return true;
+        }
+        _ => {}
+    }
+    false
+}
+
 fn close_code(frame: Option<&tungstenite::protocol::CloseFrame>) -> Option<u16> {
     frame.map(|frame| u16::from(frame.code))
 }
@@ -1693,8 +2316,8 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                         let _ = observe_history_progress(session).await;
                     }
                     "resync_required" => return WsEnd::Resync,
-                    "presence_changed" => {
-                        schedule_presence_refresh(&mut presence_refresh_due, Instant::now())
+                    "presence_changed" | "drafts_changed" => {
+                        handle_live_hint(session, &frame.kind, &mut presence_refresh_due);
                     }
                     _ => {}
                 }
@@ -1800,6 +2423,70 @@ mod transport_status_tests {
         },
         time::Duration,
     };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn draft_save_wake_debounces_many_saves() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+        let wake = session.work_wake.notified();
+
+        for _ in 0..3 {
+            schedule_draft_push(session.clone(), Duration::from_millis(10));
+        }
+
+        tokio::time::timeout(Duration::from_millis(100), wake)
+            .await
+            .expect("the latest save wakes draft sync");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), session.work_wake.notified())
+                .await
+                .is_err(),
+            "cancelled debounce timers must not add a second wake"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replaced_session_cancels_its_draft_save_wake() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+        schedule_draft_push(session.clone(), Duration::from_millis(10));
+        session.cancel.cancel();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), session.work_wake.notified())
+                .await
+                .is_err(),
+            "a cancelled session must never receive its delayed wake"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drafts_changed_frame_wakes_draft_sync_but_unknown_frame_does_not() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+        let mut presence_refresh_due = None;
+
+        assert!(handle_live_hint(
+            &session,
+            "drafts_changed",
+            &mut presence_refresh_due
+        ));
+        tokio::time::timeout(Duration::from_millis(25), session.work_wake.notified())
+            .await
+            .expect("drafts_changed wakes draft sync");
+
+        assert!(!handle_live_hint(
+            &session,
+            "unknown_frame",
+            &mut presence_refresh_due
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), session.work_wake.notified())
+                .await
+                .is_err(),
+            "unknown frames remain ignored"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn transport_revocation_does_not_reopen_the_same_binding() {

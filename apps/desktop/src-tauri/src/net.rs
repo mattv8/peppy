@@ -18,6 +18,7 @@ pub const MAX_JSON_BYTES: usize = 1024 * 1024;
 /// History/snapshot pages: same bound core applies to a snapshot page.
 pub const MAX_PAGE_BYTES: usize = peppy_client_core::MAX_SNAPSHOT_PAGE_BYTES;
 const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
+pub const NON_API_ERROR_CODE: &str = "non_api_error";
 const TRANSFER_CHUNK: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,8 +177,18 @@ impl Api {
         let code = read_bounded(response, MAX_ERROR_BODY_BYTES)
             .await
             .ok()
-            .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok())
-            .and_then(|value| sanitize_code(&value));
+            .and_then(|body| {
+                let non_api_response = !body.is_empty()
+                    && matches!(
+                        status,
+                        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+                    )
+                    && serde_json::from_slice::<serde_json::Value>(&body).is_err();
+                serde_json::from_slice::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|value| sanitize_code(&value))
+                    .or_else(|| non_api_response.then(|| NON_API_ERROR_CODE.into()))
+            });
         if status == StatusCode::UNAUTHORIZED {
             return Err(NetError::Revoked);
         }
@@ -204,6 +215,19 @@ impl Api {
         self.json(self.http.get(self.url(path)), cap).await
     }
 
+    pub async fn get_json_200<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        cap: usize,
+    ) -> Result<T, NetError> {
+        let response = self.execute(self.http.get(self.url(path))).await?;
+        if response.status() != StatusCode::OK {
+            return Err(NetError::Invalid);
+        }
+        let body = read_bounded(response, cap).await?;
+        serde_json::from_slice(&body).map_err(|_| NetError::Invalid)
+    }
+
     pub async fn post_json<B: Serialize + ?Sized, T: DeserializeOwned>(
         &self,
         path: &str,
@@ -228,6 +252,19 @@ impl Api {
             request = request.header("Peppy-Account-Session", account_session);
         }
         self.json(request, MAX_JSON_BYTES).await
+    }
+
+    pub async fn put_json<B: Serialize + ?Sized, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, NetError> {
+        self.json(
+            self.retention_mutation(self.http.put(self.url(path)))
+                .json(body),
+            MAX_JSON_BYTES,
+        )
+        .await
     }
 
     pub async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T, NetError> {
@@ -732,7 +769,7 @@ pub mod tests {
             .await
             .unwrap_err()
             .is_status(409, "resync_required"));
-        let body = b"{\"code\":\"<script>\"}".to_vec();
+        let body = b"plain bad request".to_vec();
         let origin = serve_once(
             format!(
                 "HTTP/1.1 400 Bad Request\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -748,6 +785,53 @@ pub mod tests {
                 .unwrap_err(),
             NetError::Status {
                 status: 400,
+                code: None
+            }
+        );
+        let body = b"{\"code\":\"invalid_request\"}".to_vec();
+        let origin = serve_once(
+            format!(
+                "HTTP/1.1 400 Bad Request\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            ),
+            body,
+        )
+        .await;
+        let api = Api::new(&origin, "t").unwrap();
+        assert!(api
+            .get_json::<serde_json::Value>("/", 4096)
+            .await
+            .unwrap_err()
+            .is_status(400, "invalid_request"));
+        for (status, reason) in [(404, "Not Found"), (405, "Method Not Allowed")] {
+            let body = b"<html>not an API route</html>".to_vec();
+            let origin = serve_once(
+                format!(
+                    "HTTP/1.1 {status} {reason}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                ),
+                body,
+            )
+            .await;
+            let api = Api::new(&origin, "t").unwrap();
+            assert!(api
+                .get_json::<serde_json::Value>("/v1/drafts", 4096)
+                .await
+                .unwrap_err()
+                .is_status(status, NON_API_ERROR_CODE));
+        }
+        let origin = serve_once(
+            "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".into(),
+            vec![],
+        )
+        .await;
+        let api = Api::new(&origin, "t").unwrap();
+        assert_eq!(
+            api.get_json::<serde_json::Value>("/v1/drafts", 4096)
+                .await
+                .unwrap_err(),
+            NetError::Status {
+                status: 404,
                 code: None
             }
         );

@@ -1697,10 +1697,21 @@ async fn versioned_deletion_queue_preserves_referenced_versions_and_purges_unref
         .unwrap();
     server.storage.delete(&unreferenced_key).await.unwrap();
     let removal = Uuid::new_v4();
+    let mut tx = server.pool.begin().await.unwrap();
     sqlx::query("INSERT INTO attachment_removals(vault_id,attachment_id,object_key,ciphertext_bytes) VALUES($1,$2,$3,1)")
-        .bind(server.vault).bind(removal).bind(&unreferenced_key).execute(&server.pool).await.unwrap();
+        .bind(server.vault)
+        .bind(removal)
+        .bind(&unreferenced_key)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
     sqlx::query("INSERT INTO storage_deletions(object_key,vault_id,reason) VALUES($1,$2,'retention_cleanup')")
-        .bind(&unreferenced_key).bind(server.vault).execute(&server.pool).await.unwrap();
+        .bind(&unreferenced_key)
+        .bind(server.vault)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
 
     wait_until(
         10,

@@ -47,7 +47,9 @@ export type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceState, Mc
 export type ConnectionState = "connected" | "offline" | "missing-native-host" | "error";
 export type MessageStatus = "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown";
 export type AttachmentState = "pending" | "uploading" | "failed" | "ready";
-export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; mediaHold?: "held" | "requested"; mediaMeta?: MediaMetadataView; remoteState?: "available" | "removed_by_storage_policy"; localAvailable?: boolean };
+export type DraftAttachmentState = "saving" | "local" | "waiting" | "uploading" | "uploaded" | "upload-failed" | "downloading" | "download-failed" | "unavailable";
+export const MAX_DRAFT_ATTACHMENTS = 10;
+export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; draftState?: DraftAttachmentState; mediaHold?: "held" | "requested"; mediaMeta?: MediaMetadataView; remoteState?: "available" | "removed_by_storage_policy"; localAvailable?: boolean };
 export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms"; subject?: string; participants?: string[] };
 export type MessageWindow = GeneratedMessageWindow<MessageView>;
 export type MediaCursor = { sortAtMs: string; localOrder: string; messageId: string; attachmentPosition: number };
@@ -65,7 +67,13 @@ export type HistoryPage = { conversationId: string; messages: MessageView[]; has
 export type GatewayAvailability = "unknown" | "connected" | "delayed" | "offline" | "never_connected" | "no_sms_sim" | "sms_permission_needed" | "sms_unavailable" | "capabilities_unknown" | "unsupported_platform";
 export type GatewayPresence = { state: "connected" | "seen" | "never"; last_seen_age_seconds: number | null };
 export type GatewayView = { id: string; name: string; simId: string; online: boolean; simulated: boolean; supportsSms: boolean; supportsMms: boolean; availability?: GatewayAvailability; lastSeenAgeSeconds?: number; presence?: GatewayPresence; wakeRoute?: boolean; capabilityNote?: string; mmsContentVersion?: number; mmsMaxBytes?: number; mmsLimitSource?: "carrier" | "fallback"; mmsMaxRecipients?: number };
-export type Draft = { id: string; conversationId: string; text: string; recipientIds: string[]; attachmentIds: string[]; gatewayId?: string; simId?: string; revision: string };
+export type DraftConflictView = { branchId: string; text: string; attachmentIds: string[]; recipientIds: string[]; gatewayId?: string; simId?: string };
+export type DraftSyncView = { state: "local-only" | "saving" | "saved-local" | "syncing" | "synced" | "paused" | "failed"; expiresAt: string | null; conflicts: DraftConflictView[]; notice: "restored-after-expiry" | "kept-after-sent" | "updated-from-other-device" | null; sendRequiresConnection: boolean };
+export type SendResultView = { accepted: boolean; status: MessageStatus; reason?: string; revision?: string; parts?: number };
+export type Draft = { id: string; conversationId: string; text: string; recipientIds: string[]; attachmentIds: string[]; gatewayId?: string; simId?: string; revision: string; /** Authoritative host views for the draft's attachments. */ attachments?: AttachmentView[]; sync?: DraftSyncView };
+export type PastedImage = { bytes: ArrayBuffer; name: string; mediaType: string };
+/** Successful pasted attachments plus per-file failures. Hosts never discard successful files because another file failed. */
+export type PreparedPastedAttachments = { views: AttachmentView[]; failures: string[] };
 /** Exact durable cursors only; `targetHighWater` is a transient authenticated replay cut, not a percentage denominator. */
 export type SyncProgress = { phase: "receiving" | "applying" | "waitingForKeys" | "current"; receivedThrough: string; processedThrough: string; targetHighWater?: string; snapshotReceived?: string; snapshotExpected?: string; snapshotRemaining?: string };
 export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; sessionScopeId?: string; head: { enabled: boolean; capability: "available" | "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus; toneOverrides?: Record<string, number>; syncProgress?: SyncProgress };
@@ -78,9 +86,24 @@ export type PublicCopy = { url: string; expiresInSeconds: number };
 export type NotificationTarget = { sourceDeviceId: string; notificationKey: string; lifetime: string };
 export type MirroredNotification = { target: NotificationTarget; packageName: string; appName: string; appIconPngBase64?: string; title: string; text: string; category?: string; postedAt: number; dismissible: boolean; seen: boolean; dismissalPending: boolean };
 export type AppFilter = { sourceDeviceId: string; packageName: string; appName: string; muted: boolean };
-export type NotificationPreferences = { messageBanners: boolean; mirroredBanners: boolean; preview: "full" | "hidden"; muteWithHeads?: boolean };
+export type NotificationPreferences = { messageBanners: boolean; mirroredBanners: boolean; preview: "full" | "hidden"; showSource?: boolean; muteWithHeads?: boolean };
 export type NotificationPermissionStatus = "granted" | "quiet" | "denied" | "unknown";
 export type NotificationCheck = { status: NotificationPermissionStatus; testSent: boolean; canOpenSettings: boolean };
+/** Per-device banner on-screen time; `seconds: null` requests banners stay until dismissed where the platform supports it. Platforms may shorten or ignore it. */
+export type NotificationPersistence = { seconds: number | null };
+export type NotificationPersistenceSettings = NotificationPersistence & { supported: boolean };
+export const DEFAULT_NOTIFICATION_PERSISTENCE: NotificationPersistence = { seconds: 5 };
+export const MAX_NOTIFICATION_PERSISTENCE_SECONDS = 3600;
+export const notificationPersistence = (value: unknown): NotificationPersistence | undefined => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || keys[0] !== "seconds") return undefined;
+  const { seconds } = value as { seconds: unknown };
+  if (seconds === null) return { seconds: null };
+  return Number.isInteger(seconds) && (seconds as number) >= 1 && (seconds as number) <= MAX_NOTIFICATION_PERSISTENCE_SECONDS
+    ? { seconds: seconds as number }
+    : undefined;
+};
 export type ContactBookState = "active" | "limited" | "unavailable" | "retired";
 /** Native values: requests go to the owner phone, so `canRestore` follows `canWrite`; `supportsNotes`/`supportsBirthday` follow the phone's platform (iOS has no notes). */
 export type BookCapabilities = { canWrite: boolean; canDelete: boolean; supportsNotes: boolean; supportsPhoto: boolean; canRestore?: boolean; supportsBirthday?: boolean; canSync?: boolean };
@@ -191,7 +214,7 @@ export interface DesktopBridge {
   save_draft(input: DraftInput): Promise<Draft>;
   discard_draft(input: DiscardDraftInput): Promise<void>;
   /** `accepted` means durably queued in the local encrypted outbox; `revision` is the stored draft revision afterwards. */
-  send_draft(input: SendDraftInput): Promise<{ accepted: boolean; status: MessageStatus; reason?: string; revision?: string }>;
+  send_draft(input: SendDraftInput): Promise<SendResultView>;
   mark_seen(visibleMessageIds: string[]): Promise<void>;
   /** Actual number changed, encoded as a canonical unsigned decimal string. */
   mark_all_read(): Promise<string>;
@@ -208,6 +231,9 @@ export interface DesktopBridge {
   request_notification_permission(): Promise<NotificationCheck>;
   open_notification_settings(): Promise<void>;
   pick_attachments(): Promise<AttachmentView[]>;
+  prepare_pasted_attachments(files: PastedImage[]): Promise<PreparedPastedAttachments>;
+  resolve_draft_conflict(input: { draftId: string; keepBranchId: string | null }): Promise<Draft>;
+  acknowledge_draft_notice(draftId: string): Promise<void>;
   retry_attachment(id: string): Promise<void>;
   save_attachment(id: string): Promise<boolean>;
   request_attachment_download(id: string): Promise<void>;
@@ -235,6 +261,8 @@ export interface DesktopBridge {
   open_login_items(): Promise<void>;
   get_notification_sound?(): Promise<boolean>;
   set_notification_sound?(enabled: boolean): Promise<void>;
+  get_notification_persistence?(): Promise<NotificationPersistenceSettings>;
+  set_notification_persistence?(value: NotificationPersistence): Promise<void>;
   popout_conversation(conversationId: string): Promise<{ headCreated: boolean; warning?: string }>;
   hide_head(conversationId: string): Promise<void>;
   close_composer(): Promise<void>;

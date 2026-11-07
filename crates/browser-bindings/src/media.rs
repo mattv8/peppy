@@ -147,20 +147,35 @@ impl BrowserCore {
         Ok(json!(self.client()?.pending_uploads().map_err(core)?.into_iter().map(|item| json!({"id": item.attachment_id.to_string(), "ciphertextBytes": item.ciphertext_bytes})).collect::<Vec<_>>()))
     }
     fn pending_downloads(&self) -> Result<Value, Failure> {
-        let downloads = self
-            .client()?
+        let client = self.client()?;
+        let drafts = client.compose_drafts().map_err(core)?;
+        let downloads = client
             .pending_downloads()
             .map_err(core)?
             .into_iter()
             .map(|item| {
+                let attachment_id = item.attachment_id.to_string();
+                let draft_id = drafts
+                    .iter()
+                    .find(|draft| {
+                        draft
+                            .attachment_ids
+                            .iter()
+                            .any(|id| id.to_string() == attachment_id)
+                    })
+                    .map(|draft| draft.draft_id.to_string());
                 let remote_object_id = item
                     .remote_object_id
                     .ok_or_else(|| core(CoreError::InvalidMedia))?;
-                Ok(json!({
-                    "id": item.attachment_id.to_string(),
+                let mut download = json!({
+                    "id": attachment_id,
                     "ciphertextBytes": item.ciphertext_bytes,
                     "remoteObjectId": remote_object_id,
-                }))
+                });
+                if let Some(draft_id) = draft_id {
+                    download["draftId"] = Value::String(draft_id);
+                }
+                Ok(download)
             })
             .collect::<Result<Vec<_>, Failure>>()?;
         Ok(json!(downloads))

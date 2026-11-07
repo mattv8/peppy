@@ -3,9 +3,26 @@
 use notify_rust::Notification;
 use tauri::{AppHandle, Manager};
 
-pub(crate) fn post(app: &AppHandle, title: &str, body: &str) -> Result<(), ()> {
+pub(crate) fn post(
+    app: &AppHandle,
+    title: &str,
+    body: &str,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] icon: Option<
+        crate::notification_icon::Icon,
+    >,
+) -> Result<(), ()> {
     let sound = app.state::<crate::AppState>().notifications.sound_enabled();
-    let notification = notification(title, body, sound);
+    let persistence = app.state::<crate::AppState>().notifications.persistence();
+    #[cfg(target_os = "linux")]
+    let icon = crate::notification_icon::inline_image(icon.as_ref());
+    #[cfg(target_os = "linux")]
+    let mut notification = notification(title, body, sound, persistence);
+    #[cfg(not(target_os = "linux"))]
+    let notification = notification(title, body, sound, persistence);
+    #[cfg(target_os = "linux")]
+    if let Some(icon) = icon {
+        notification.image_data(icon);
+    }
     #[cfg(target_os = "windows")]
     let notification = {
         let mut notification = notification;
@@ -28,7 +45,12 @@ pub(crate) fn post(app: &AppHandle, title: &str, body: &str) -> Result<(), ()> {
     notification.show().map(drop).map_err(|_| ())
 }
 
-fn notification(title: &str, body: &str, sound: bool) -> Notification {
+fn notification(
+    title: &str,
+    body: &str,
+    sound: bool,
+    persistence: crate::notification_persistence::NotificationPersistence,
+) -> Notification {
     let mut notification = Notification::new();
     notification.summary(title).body(body).auto_icon();
     if sound {
@@ -41,6 +63,13 @@ fn notification(title: &str, body: &str, sound: bool) -> Notification {
     }
     #[cfg(target_os = "linux")]
     notification.hint(notify_rust::Hint::SuppressSound(!sound));
+    #[cfg(target_os = "linux")]
+    notification.timeout(match persistence.seconds {
+        Some(seconds) => notify_rust::Timeout::Milliseconds(u32::from(seconds) * 1000),
+        None => notify_rust::Timeout::Never,
+    });
+    #[cfg(not(target_os = "linux"))]
+    let _ = persistence;
     notification
 }
 
@@ -69,12 +98,32 @@ mod tests {
 
     #[test]
     fn notification_fallback_preserves_content_auto_icon_and_no_actions() {
-        let notification = notification("provided title", "provided body", false);
+        let notification = notification(
+            "provided title",
+            "provided body",
+            false,
+            crate::notification_persistence::NotificationPersistence::default_value(),
+        );
         assert_eq!(notification.summary, "provided title");
         assert_eq!(notification.body, "provided body");
         assert!(!notification.icon.is_empty());
         assert!(notification.actions.is_empty());
         assert!(notification.subtitle.is_none());
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(notification.timeout, notify_rust::Timeout::Default);
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            notification.timeout,
+            notify_rust::Timeout::Milliseconds(5_000)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn notification_fallback_keeps_indefinite_banners_until_dismissed() {
+        let indefinite = serde_json::from_str(r#"{"seconds":null}"#).unwrap();
+        let notification = notification("title", "body", false, indefinite);
+        assert_eq!(notification.timeout, notify_rust::Timeout::Never);
     }
 
     #[test]

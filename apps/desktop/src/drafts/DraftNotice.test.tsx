@@ -23,6 +23,7 @@ function candidateOf(kind: DraftNoticeKind, sequence: number, options: RecoveryO
   switch (kind) {
     case "send-failed":
     case "moved":
+    case "attachment-feedback":
       return { kind, sequence, detail: "Recipient", ...options };
     default:
       return { kind, sequence, ...options };

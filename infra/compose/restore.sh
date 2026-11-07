@@ -116,5 +116,22 @@ if ! "${compose[@]}" up --wait postgres; then
   echo "PostgreSQL startup failed; restore aborted before pg_restore" >&2
   exit 74
 fi
+# pg_isready can mark the entrypoint's temporary socket-only server healthy
+# before it creates POSTGRES_DB. Require the initialized TCP server and target
+# database before restoring.
+if ! "${compose[@]}" exec -T postgres sh -ec '
+  attempt=0
+  while test "$attempt" -lt 60; do
+    if PGCONNECT_TIMEOUT=2 PGPASSWORD="$POSTGRES_PASSWORD" psql --no-password -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atqc "SELECT 1" 2>/dev/null | grep -qx 1; then
+      exit 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  exit 1
+'; then
+  echo "PostgreSQL target database did not become ready; restore aborted before pg_restore" >&2
+  exit 74
+fi
 "${compose[@]}" exec -T postgres sh -ec 'pg_restore --single-transaction --exit-on-error -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-owner --no-privileges' < "$archive/postgres.dump"
 echo "Restore complete for $target_project. API and migrations remain stopped for operator reconciliation." >&2

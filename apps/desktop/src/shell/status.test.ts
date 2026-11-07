@@ -38,6 +38,13 @@ describe("status severity", () => {
     expect(connectionText({ state: "offline", errorCode: "server-unavailable" })).toBe("Offline — server offline; reconnecting");
   });
 
+  it("labels notification posting failures without treating them as server outages", () => {
+    expect(connectionText({ state: "error", errorCode: "notification-post" })).toBe(
+      "Connection error — could not show a notification on this computer",
+    );
+    expect(isServerUnreachable({ state: "error", errorCode: "notification-post" })).toBe(false);
+  });
+
   it("includes the changing native connection and sync state in the summary", () => {
     expect(
       statusSummary(

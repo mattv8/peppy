@@ -42,6 +42,11 @@ pub const TENANT_TABLES: &[&str] = &[
     "mcp_operations",
     "mcp_oauth_codes",
     "mcp_oauth_tokens",
+    "draft_incarnations",
+    "draft_branches",
+    "draft_revisions",
+    "draft_terminals",
+    "draft_attachment_holds",
 ];
 
 const CONTROL_PLANE_TABLES: &[&str] = &[

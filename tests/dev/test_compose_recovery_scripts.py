@@ -25,10 +25,13 @@ MCP_ARTIFACTS = (*BASELINE_ARTIFACTS, "mcp-state.tar.gz")
 MCP_CONFIGURED = {"postgres": "postgres:fixture", "seaweedfs": "seaweed:fixture", "mcp": "mcp:fixture"}
 MCP_RUNNING = {"postgres": POSTGRES_ID, "seaweedfs": SEAWEED_ID, "mcp": API_ID}
 MCP_RESTORE_EXISTING_VOLUME = 73
+BASELINE_CONFIGURED = {"postgres": "postgres:fixture", "seaweedfs": "seaweed:fixture"}
+BASELINE_RUNNING = {"postgres": POSTGRES_ID, "seaweedfs": SEAWEED_ID}
+RESTORE_FIXTURE_PASSWORD = "recovery_fixture_password"
 
 
 FAKE_DOCKER = r'''#!/usr/bin/env python3
-import json, os, sys
+import json, os, subprocess, sys
 
 args = sys.argv[1:]
 with open(os.environ["DOCKER_LOG"], "a") as log:
@@ -45,14 +48,26 @@ if args[0] == "compose":
         if args[-1] in listed:
             print("container-" + args[-1])
     elif "exec" in args:
-        sys.stdout.buffer.write(b"postgres dump")
+        command = args[-1]
+        if "psql --no-password -h 127.0.0.1" in command:
+            container_environment = os.environ | {
+                "POSTGRES_DB": "recovery",
+                "POSTGRES_USER": "recovery",
+                "POSTGRES_PASSWORD": os.environ["EXPECTED_POSTGRES_PASSWORD"],
+            }
+            result = subprocess.run(["sh", "-ec", command], env=container_environment)
+            sys.exit(result.returncode)
+        if "pg_restore" not in command:
+            sys.stdout.buffer.write(b"postgres dump")
     sys.exit(0)
 if args[:2] == ["volume", "inspect"]:
     name = args[-1]
     explicit = json.loads(os.environ.get("EXISTING_VOLUMES", "{}"))
     if name in explicit:
         sys.exit(0 if explicit[name] else 1)
-    sys.exit(1 if os.environ.get("VOLUME_INSPECT_MODE") == "absent" else 0)
+    if os.environ.get("VOLUME_INSPECT_MODE") == "absent":
+        sys.exit(1)
+    sys.exit(0 if os.environ.get("VOLUMES_EXIST", "1") == "1" else 1)
 if args[0] == "inspect":
     service = args[-1].removeprefix("container-")
     if "{{.State.ExitCode}}" in args:
@@ -72,6 +87,38 @@ if args[0] == "run":
     sys.exit(0)
 sys.exit(0)
 '''
+
+
+FAKE_PSQL = r'''#!/usr/bin/env python3
+import json, os, pathlib, sys
+
+args = sys.argv[1:]
+attempt_path = pathlib.Path(os.environ["PSQL_ATTEMPT_FILE"])
+attempt = int(attempt_path.read_text()) + 1 if attempt_path.exists() else 1
+attempt_path.write_text(str(attempt))
+ready = attempt > int(os.environ["READINESS_FAILURES"])
+password_from_environment = os.environ.get("PGPASSWORD") == os.environ["EXPECTED_POSTGRES_PASSWORD"]
+connect_timeout = os.environ.get("PGCONNECT_TIMEOUT")
+event = {
+    "tool": "psql",
+    "args": args,
+    "attempt": attempt,
+    "ready": ready,
+    "password_from_environment": password_from_environment,
+    "connect_timeout": connect_timeout,
+}
+with open(os.environ["DOCKER_LOG"], "a") as log:
+    log.write(json.dumps(event) + "\n")
+expected = ["--no-password", "-h", "127.0.0.1", "-U", "recovery", "-d", "recovery", "-Atqc", "SELECT 1"]
+if args != expected or not password_from_environment or connect_timeout != "2":
+    sys.exit(64)
+if not ready:
+    sys.exit(1)
+print("1")
+'''
+
+
+FAKE_SLEEP = "#!/bin/sh\nexit 0\n"
 
 
 def compose_config(api_image: str | None, seaweed_image: str, mcp_overlay: bool = False) -> str:
@@ -152,9 +199,10 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
         (root / ".env").write_text("fixture=true\n")
         tools = root / "tools"
         tools.mkdir()
-        docker = tools / "docker"
-        docker.write_text(FAKE_DOCKER)
-        docker.chmod(0o755)
+        for name, contents in (("docker", FAKE_DOCKER), ("psql", FAKE_PSQL), ("sleep", FAKE_SLEEP)):
+            tool = tools / name
+            tool.write_text(contents)
+            tool.chmod(0o755)
         return root, tools, root / "docker.log"
 
     def backup_fixture(
@@ -187,26 +235,30 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
 
     def restore_fixture(
         self,
-        artifacts: tuple[str, ...],
-        configured: dict,
-        running: dict,
-        config_json: str,
-        image_ids: dict,
+        artifacts: tuple[str, ...] = BASELINE_ARTIFACTS,
+        configured: dict = BASELINE_CONFIGURED,
+        running: dict = BASELINE_RUNNING,
+        config_json: str | None = None,
+        image_ids: dict | None = None,
         existing_volumes: dict[str, bool] | None = None,
+        readiness_failures: int = 0,
     ):
         root, tools, log = self.fake_docker_root()
         archive = write_restore_archive(root, artifacts, configured, running)
         environment = os.environ | {
             "PATH": f"{tools}:{os.environ['PATH']}",
             "DOCKER_LOG": str(log),
-            "COMPOSE_CONFIG": config_json,
+            "COMPOSE_CONFIG": config_json or compose_config(None, "seaweed:fixture"),
             "RUNNING_IDS": "{}",
-            "IMAGE_IDS": json.dumps(image_ids),
-            "VOLUME_INSPECT_MODE": "absent",
+            "IMAGE_IDS": json.dumps(image_ids or {"postgres:fixture": POSTGRES_ID, POSTGRES_ID: POSTGRES_ID}),
+            "VOLUMES_EXIST": "0",
             "EXISTING_VOLUMES": json.dumps(existing_volumes or {}),
             "PS_RUNNING": "",
             "PS_ALL": "[]",
             "EXIT_CODES": "{}",
+            "READINESS_FAILURES": str(readiness_failures),
+            "PSQL_ATTEMPT_FILE": str(root / "psql-attempts"),
+            "EXPECTED_POSTGRES_PASSWORD": RESTORE_FIXTURE_PASSWORD,
         }
         return root, archive, log, environment
 
@@ -223,6 +275,49 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
             self.assertEqual(result.returncode, expected_code, result.stderr)
         self.assertNotIn('"stop"', log.read_text())
         self.assertEqual(list(destination.iterdir()), [])
+
+    @staticmethod
+    def recovery_events(log):
+        return [json.loads(line) for line in log.read_text().splitlines()]
+
+    def test_restore_waits_for_authenticated_tcp_database_without_retrying_restore(self):
+        root, archive, log, environment = self.restore_fixture(readiness_failures=2)
+        password = environment["EXPECTED_POSTGRES_PASSWORD"]
+
+        result = self.run_restore(root, archive, environment)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = self.recovery_events(log)
+        readiness = [event for event in events if isinstance(event, dict) and event.get("tool") == "psql"]
+        self.assertEqual([event["ready"] for event in readiness], [False, False, True])
+        self.assertTrue(all(event["password_from_environment"] for event in readiness))
+        self.assertTrue(all(event["connect_timeout"] == "2" for event in readiness))
+        restore_calls = [
+            event
+            for event in events
+            if isinstance(event, list) and any("pg_restore" in argument for argument in event)
+        ]
+        self.assertEqual(len(restore_calls), 1)
+        self.assertGreater(events.index(restore_calls[0]), events.index(readiness[-1]))
+        self.assertNotIn(password, log.read_text())
+
+    def test_restore_refuses_pg_restore_when_target_database_never_becomes_ready(self):
+        root, archive, log, environment = self.restore_fixture(readiness_failures=100)
+
+        result = self.run_restore(root, archive, environment)
+
+        self.assertEqual(result.returncode, 74, result.stderr)
+        self.assertIn("target database did not become ready", result.stderr)
+        events = self.recovery_events(log)
+        readiness = [event for event in events if isinstance(event, dict) and event.get("tool") == "psql"]
+        self.assertEqual(len(readiness), 60)
+        self.assertFalse(any(event["ready"] for event in readiness))
+        self.assertFalse(
+            any(
+                isinstance(event, list) and any("pg_restore" in argument for argument in event)
+                for event in events
+            )
+        )
 
     def test_root_build_only_shape_uses_compose_default_tag_and_private_host_artifacts(self):
         root, destination, log, environment = self.backup_fixture(None, "seaweed:root")

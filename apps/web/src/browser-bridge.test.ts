@@ -6,9 +6,13 @@ class TestPort {
   public onmessage: ((event: MessageEvent) => void) | null = null;
   public onmessageerror: (() => void) | null = null;
   public readonly sent: unknown[] = [];
+  public readonly transfers: Transferable[][] = [];
   public start = vi.fn();
   public close = vi.fn();
-  public postMessage(message: unknown): void { this.sent.push(message); }
+  public postMessage(message: unknown, transfer: Transferable[] = []): void {
+    this.sent.push(message);
+    this.transfers.push(transfer);
+  }
   public reply(message: unknown): void { this.onmessage?.({ data: message } as MessageEvent); }
 }
 
@@ -21,7 +25,185 @@ function stubShowModal(showModal = vi.fn()): () => void {
   };
 }
 
+function installLocalStorage(): { storage: Storage; restore(): void } {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const values = new Map<string, string>();
+  const storage = {
+    get length() { return values.size; },
+    clear: () => values.clear(),
+    getItem: (key: string) => values.get(key) ?? null,
+    key: (index: number) => [...values.keys()][index] ?? null,
+    removeItem: (key: string) => values.delete(key),
+    setItem: (key: string, value: string) => values.set(key, value),
+  } as Storage;
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
+  return { storage, restore: () => { if (original) Object.defineProperty(globalThis, "localStorage", original); else delete (globalThis as { localStorage?: Storage }).localStorage; } };
+}
+
 describe("BrowserBridge", () => {
+  it("passes the worker-selected icon to forwarded browser notifications", () => {
+    const port = new TestPort();
+    const original = globalThis.Notification;
+    const posted = vi.fn();
+    class TestNotification {
+      public static permission: NotificationPermission = "granted";
+      public onclose: (() => void) | null = null;
+      public constructor(title: string, options: NotificationOptions) { posted(title, options); }
+      public close(): void { this.onclose?.(); }
+    }
+    Object.defineProperty(globalThis, "Notification", { configurable: true, value: TestNotification });
+    try {
+      new BrowserBridge(port as unknown as MessagePort);
+      port.reply({ event: "banner", candidate: { id: "candidate-1", title: "Source", body: "", icon: "data:image/png;base64,icon" } });
+      expect(posted).toHaveBeenCalledWith("Source", { body: "", tag: "peppy-candidate-1", icon: "data:image/png;base64,icon" });
+    } finally {
+      Object.defineProperty(globalThis, "Notification", { configurable: true, value: original });
+    }
+  });
+
+  it("uses the local indefinite setting for forwarded browser notifications", () => {
+    const port = new TestPort();
+    const original = globalThis.Notification;
+    const posted = vi.fn();
+    class TestNotification {
+      public static permission: NotificationPermission = "granted";
+      public onclose: (() => void) | null = null;
+      public constructor(title: string, options: NotificationOptions) { posted(title, options); }
+      public close(): void { this.onclose?.(); }
+    }
+    const local = installLocalStorage();
+    Object.defineProperty(TestNotification.prototype, "requireInteraction", { configurable: true, value: false });
+    Object.defineProperty(globalThis, "Notification", { configurable: true, value: TestNotification });
+    local.storage.setItem("peppy.notification-persistence", JSON.stringify({ seconds: null }));
+    try {
+      new BrowserBridge(port as unknown as MessagePort);
+      port.reply({ event: "banner", candidate: { id: "candidate-1", title: "Source", body: "" } });
+      expect(posted).toHaveBeenCalledWith("Source", { body: "", tag: "peppy-candidate-1", requireInteraction: true });
+    } finally {
+      local.restore();
+      Object.defineProperty(globalThis, "Notification", { configurable: true, value: original });
+    }
+  });
+
+  it("defaults malformed persistence and refreshes notification context after saving", async () => {
+    const port = new TestPort();
+    const original = globalThis.Notification;
+    class TestNotification { public static permission: NotificationPermission = "granted"; }
+    const local = installLocalStorage();
+    Object.defineProperty(TestNotification.prototype, "requireInteraction", { configurable: true, value: false });
+    Object.defineProperty(globalThis, "Notification", { configurable: true, value: TestNotification });
+    local.storage.setItem("peppy.notification-persistence", "not-json");
+    try {
+      const bridge = new BrowserBridge(port as unknown as MessagePort);
+      await expect(bridge.get_notification_persistence?.()).resolves.toEqual({ seconds: 5, supported: true });
+      const context = bridge.set_notification_context("settings");
+      port.reply({ id: 1, ok: true, value: undefined });
+      await context;
+      expect(port.sent).toContainEqual(expect.objectContaining({ command: "set_notification_context", args: expect.objectContaining({ requireInteraction: false }) }));
+      await bridge.set_notification_persistence?.({ seconds: null });
+      expect(port.sent.at(-1)).toEqual(expect.objectContaining({ command: "set_notification_context", args: expect.objectContaining({ requireInteraction: true }) }));
+    } finally {
+      local.restore();
+      Object.defineProperty(globalThis, "Notification", { configurable: true, value: original });
+    }
+  });
+
+  it("reports persistence unsupported when browser notifications are unavailable", async () => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, "Notification");
+    Object.defineProperty(globalThis, "Notification", { configurable: true, value: undefined });
+    try {
+      await expect(new BrowserBridge(new TestPort() as unknown as MessagePort).get_notification_persistence?.()).resolves.toEqual({ seconds: 5, supported: false });
+    } finally {
+      if (original) Object.defineProperty(globalThis, "Notification", original);
+      else delete (globalThis as { Notification?: typeof Notification }).Notification;
+    }
+  });
+
+  it("does not require interaction for finite persistence or an unsupported indefinite setting", async () => {
+    const original = globalThis.Notification;
+    const local = installLocalStorage();
+    const posted = vi.fn();
+    class SupportedNotification {
+      public static permission: NotificationPermission = "granted";
+      public onclose: (() => void) | null = null;
+      public constructor(title: string, options: NotificationOptions) { posted(title, options); }
+      public close(): void { this.onclose?.(); }
+    }
+    Object.defineProperty(SupportedNotification.prototype, "requireInteraction", { configurable: true, value: false });
+    Object.defineProperty(globalThis, "Notification", { configurable: true, value: SupportedNotification });
+    try {
+      local.storage.setItem("peppy.notification-persistence", JSON.stringify({ seconds: 30 }));
+      const finitePort = new TestPort();
+      new BrowserBridge(finitePort as unknown as MessagePort);
+      finitePort.reply({ event: "banner", candidate: { id: "finite", title: "Source", body: "" } });
+      expect(posted).toHaveBeenCalledWith("Source", { body: "", tag: "peppy-finite" });
+
+      local.storage.removeItem("peppy.notification-persistence");
+      const defaultPort = new TestPort();
+      new BrowserBridge(defaultPort as unknown as MessagePort);
+      defaultPort.reply({ event: "banner", candidate: { id: "default", title: "Source", body: "" } });
+      expect(posted).toHaveBeenLastCalledWith("Source", { body: "", tag: "peppy-default" });
+
+      class UnsupportedNotification {
+        public static permission: NotificationPermission = "granted";
+        public onclose: (() => void) | null = null;
+        public constructor(title: string, options: NotificationOptions) { posted(title, options); }
+        public close(): void { this.onclose?.(); }
+      }
+      Object.defineProperty(globalThis, "Notification", { configurable: true, value: UnsupportedNotification });
+      local.storage.setItem("peppy.notification-persistence", JSON.stringify({ seconds: null }));
+      const unsupportedPort = new TestPort();
+      const unsupported = new BrowserBridge(unsupportedPort as unknown as MessagePort);
+      await expect(unsupported.get_notification_persistence?.()).resolves.toEqual({ seconds: null, supported: false });
+      unsupportedPort.reply({ event: "banner", candidate: { id: "unsupported", title: "Source", body: "" } });
+      expect(posted).toHaveBeenLastCalledWith("Source", { body: "", tag: "peppy-unsupported" });
+    } finally {
+      local.restore();
+      Object.defineProperty(globalThis, "Notification", { configurable: true, value: original });
+    }
+  });
+
+  it("refreshes notification context only for persistence storage changes and removes the listener on dispose", async () => {
+    const port = new TestPort();
+    const add = vi.spyOn(window, "addEventListener");
+    const remove = vi.spyOn(window, "removeEventListener");
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const context = bridge.set_notification_context("settings");
+    port.reply({ id: 1, ok: true, value: undefined });
+    await context;
+    port.sent.length = 0;
+    try {
+      window.dispatchEvent(new StorageEvent("storage", { key: "another-key" }));
+      expect(port.sent).toEqual([]);
+      window.dispatchEvent(new StorageEvent("storage", { key: "peppy.notification-persistence" }));
+      expect(port.sent).toHaveLength(1);
+      window.dispatchEvent(new StorageEvent("storage", { key: null }));
+      expect(port.sent).toHaveLength(2);
+      expect(add).toHaveBeenCalledWith("storage", expect.any(Function));
+
+      bridge.dispose();
+      port.sent.length = 0;
+      window.dispatchEvent(new StorageEvent("storage", { key: "peppy.notification-persistence" }));
+      expect(port.sent).toEqual([]);
+      expect(remove).toHaveBeenCalledWith("storage", expect.any(Function));
+    } finally {
+      add.mockRestore();
+      remove.mockRestore();
+    }
+  });
+
+  it("reports local persistence write failures without exposing storage details", async () => {
+    const local = installLocalStorage();
+    const failure = vi.spyOn(local.storage, "setItem").mockImplementation(() => { throw new Error("quota"); });
+    try {
+      await expect(new BrowserBridge(new TestPort() as unknown as MessagePort).set_notification_persistence({ seconds: 30 }))
+        .rejects.toMatchObject({ code: "notification-persistence", message: "Notification persistence could not be saved." });
+    } finally {
+      failure.mockRestore();
+      local.restore();
+    }
+  });
+
   it("parses only server-shaped vault request snapshots", () => {
     expect(parseVaultRequestSnapshot(JSON.stringify({ type: "snapshot", requests: [{ request_id: "request", display_name: "Taylor", client: "browser", state: "pending", created_at: "2026-10-12T00:00:00Z", expires_in_seconds: 60 }] }))).toEqual([{ requestId: "request", displayName: "Taylor", client: "browser", state: "pending", createdAt: "2026-10-12T00:00:00Z", expiresInSeconds: 60 }]);
     expect(() => parseVaultRequestSnapshot("{}")).toThrow("Invalid vault request snapshot.");
@@ -56,6 +238,29 @@ describe("BrowserBridge", () => {
     await expect(state).resolves.toEqual({ mode: "browser" });
   });
 
+  it("flushes pending draft sync when the page hides or unloads, then removes lifecycle listeners", () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const visibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+
+    try {
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(port.sent).toContainEqual({ id: 1, command: "flush_draft_sync", args: {} });
+
+      window.dispatchEvent(new PageTransitionEvent("pagehide"));
+      expect(port.sent).toContainEqual({ id: 2, command: "flush_draft_sync", args: {} });
+
+      bridge.dispose();
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new PageTransitionEvent("pagehide"));
+      expect(port.sent).toHaveLength(3);
+    } finally {
+      if (visibility) Object.defineProperty(document, "visibilityState", visibility);
+      else delete (document as { visibilityState?: unknown }).visibilityState;
+    }
+  });
+
   it("forwards conversation pin mutations with the canonical arguments", async () => {
     const port = new TestPort();
     const bridge = new BrowserBridge(port as unknown as MessagePort);
@@ -64,6 +269,58 @@ describe("BrowserBridge", () => {
     expect(port.sent).toEqual([{ id: 1, command: "set_conversation_pinned", args: { conversationId: "conversation-1", pinned: true } }]);
     port.reply({ id: 1, ok: true, value: {} });
     await expect(pinned).resolves.toEqual({});
+    bridge.dispose();
+  });
+
+  it("prepares pasted images through the attachment worker command", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const bytes = new Uint8Array([1, 2, 3]).buffer;
+    const prepared = bridge.prepare_pasted_attachments([{ bytes, name: "pasted.png", mediaType: "image/png" }]);
+
+    expect(port.sent).toEqual([{ id: 1, command: "prepare_attachment", args: { bytes, displayName: "pasted.png", mediaType: "image/png" } }]);
+    port.reply({ id: 1, ok: true, value: { id: "attachment-1", name: "pasted.png", mediaType: "image/png", byteSize: 3, state: "ready" } });
+    await expect(prepared).resolves.toMatchObject({ views: [{ id: "attachment-1" }], failures: [] });
+    bridge.dispose();
+  });
+
+  it("prepares pasted images independently, transferring accepted bytes and retaining partial success", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const first = new Uint8Array([1]).buffer;
+    const second = new Uint8Array([2]).buffer;
+    const prepared = bridge.prepare_pasted_attachments([
+      { bytes: first, name: "first.png", mediaType: "image/png" },
+      { bytes: second, name: "second.png", mediaType: "image/png" },
+    ]);
+
+    expect(port.sent).toEqual([
+      { id: 1, command: "prepare_attachment", args: { bytes: first, displayName: "first.png", mediaType: "image/png" } },
+      { id: 2, command: "prepare_attachment", args: { bytes: second, displayName: "second.png", mediaType: "image/png" } },
+    ]);
+    expect(port.transfers).toEqual([[first], [second]]);
+    port.reply({ id: 1, ok: true, value: { id: "attachment-1", name: "first.png", mediaType: "image/png", byteSize: 1, state: "ready" } });
+    port.reply({ id: 2, ok: false, error: { code: "storage", message: "disk full" } });
+
+    await expect(prepared).resolves.toMatchObject({
+      views: [{ id: "attachment-1" }],
+      failures: ["disk full"],
+    });
+    bridge.dispose();
+  });
+
+  it("rejects invalid pasted image types and sizes before posting to the worker", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+
+    await expect(bridge.prepare_pasted_attachments([
+      { bytes: new ArrayBuffer(1), name: "image.bmp", mediaType: "image/bmp" },
+      { bytes: new ArrayBuffer(32 * 1024 * 1024 + 1), name: "large.png", mediaType: "image/png" },
+    ])).resolves.toMatchObject({
+      views: [],
+      failures: ["Only PNG, JPEG, GIF, and WebP images can be pasted.", "Images must be 32 MiB or smaller."],
+    });
+    expect(port.sent).toEqual([]);
     bridge.dispose();
   });
 
@@ -1199,6 +1456,23 @@ describe("BrowserBridge", () => {
     bridge.dispose();
   });
 
+  it("reports an explicit display failure when constructing a granted banner throws", () => {
+    const port = new TestPort();
+    const original = globalThis.Notification;
+    class FailingNotification {
+      public static permission: NotificationPermission = "granted";
+      public constructor() { throw new Error("blocked"); }
+    }
+    Object.defineProperty(globalThis, "Notification", { configurable: true, value: FailingNotification });
+    try {
+      new BrowserBridge(port as unknown as MessagePort);
+      port.reply({ event: "banner", candidate: { id: "candidate-1", title: "Private", body: "Body" } });
+      expect(port.sent).toEqual([{ id: 1, command: "display_failed", args: { ids: ["candidate-1"] } }]);
+    } finally {
+      Object.defineProperty(globalThis, "Notification", { configurable: true, value: original });
+    }
+  });
+
   it("sends a content-free browser test notification only when granted", async () => {
     const original = globalThis.Notification;
     const posted = vi.fn();
@@ -1215,7 +1489,7 @@ describe("BrowserBridge", () => {
     try {
       const bridge = new BrowserBridge(new TestPort() as unknown as MessagePort);
       await expect(bridge.request_notification_permission()).resolves.toEqual({ status: "granted", testSent: true, canOpenSettings: false });
-      expect(posted).toHaveBeenCalledWith("Peppy", { body: "Test notification: desktop banners are working." });
+      expect(posted).toHaveBeenCalledWith("New notification", { body: "" });
 
       TestNotification.permission = "denied";
       await expect(bridge.request_notification_permission()).resolves.toEqual({ status: "denied", testSent: false, canOpenSettings: false });

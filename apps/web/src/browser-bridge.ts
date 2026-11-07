@@ -6,8 +6,9 @@ import type {
   MessageWindowRequest, NotificationCheck, NotificationPreferences, NotificationTarget, PublicCopy,
   RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput, StartHistorySearchInput,
   BillingSummaryView, HostedSignInProvider, PurchaseOptions, StartupStatus, StoreProduct,
-  AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult, ConversationFolder,
+  AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult, ConversationFolder, NotificationPersistence, NotificationPersistenceSettings, PastedImage,
 } from "@peppy/desktop-ui/bridge-contracts";
+import { DEFAULT_NOTIFICATION_PERSISTENCE, notificationPersistence } from "@peppy/desktop-ui/bridge-contracts";
 import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
 import { validateAccountUrl } from "./account-navigation";
 import { beginHostedAuthorization, fetchHostedWebConfig } from "./newhosted-app-auth";
@@ -15,7 +16,7 @@ import { appSessionRenewal } from "./app-session-renewal";
 import { inlineMediaType, safeSuggestedFilename } from "./attachment-safety";
 
 type RpcReply = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: BridgeError };
-type WorkerEvent = { event: "changed" } | { event: "ready"; version: 1 } | { event: "stopped"; reason?: string } | { event: "banner"; candidate: { id: string; title: string; body: string } };
+type WorkerEvent = { event: "changed" } | { event: "ready"; version: 1 } | { event: "stopped"; reason?: string } | { event: "banner"; candidate: { id: string; title: string; body: string; icon?: string } };
 type PendingRequest = { resolve(value: unknown): void; reject(error: Error): void; timer: number };
 type EnrollmentStage = "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_approved" | "phone_connected" | "expired" | "error" | "invite_request" | "invite_waiting" | "invite_approved" | "invite_denied" | "invite_expired";
 export type EnrollmentView = { mode: "community" | "hosted"; stage: EnrollmentStage; origin?: string; owner?: boolean; hasGateway?: boolean; qrPayload?: string; verificationCode?: string; expiresInSeconds?: number; errorCode?: string; setupCodeRequired?: boolean; vaultOwnerRequired?: boolean; displayName?: string; username?: string };
@@ -35,6 +36,7 @@ const MIN_ADMIN_PASSWORD_BYTES = 12;
 const MAX_ADMIN_PASSWORD_BYTES = 1024;
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 const CONVERSATION_FOLDERS: readonly ConversationFolder[] = ["inbox", "archived", "spam"];
+const NOTIFICATION_PERSISTENCE_KEY = "peppy.notification-persistence";
 let activeSecretDialog: (() => void) | undefined;
 let capturedInviteLink = captureInviteLink();
 
@@ -348,7 +350,10 @@ export class BrowserBridge implements DesktopBridge {
     port.start();
     window.addEventListener("focus", this.refreshNotificationContext);
     window.addEventListener("blur", this.refreshNotificationContext);
+    window.addEventListener("storage", this.refreshNotificationContextOnStorage);
     document.addEventListener("visibilitychange", this.refreshNotificationContext);
+    document.addEventListener("visibilitychange", this.flushDraftSyncWhenHidden);
+    window.addEventListener("pagehide", this.flushDraftSync);
   }
 
   public onStopped(listener: (reason: string) => void): () => void {
@@ -396,7 +401,10 @@ export class BrowserBridge implements DesktopBridge {
     this.banners.clear();
     window.removeEventListener("focus", this.refreshNotificationContext);
     window.removeEventListener("blur", this.refreshNotificationContext);
+    window.removeEventListener("storage", this.refreshNotificationContextOnStorage);
     document.removeEventListener("visibilitychange", this.refreshNotificationContext);
+    document.removeEventListener("visibilitychange", this.flushDraftSyncWhenHidden);
+    window.removeEventListener("pagehide", this.flushDraftSync);
     this.stoppedListeners.forEach((listener) => listener(reason));
     this.port.close();
   }
@@ -437,18 +445,44 @@ export class BrowserBridge implements DesktopBridge {
     if (!this.notificationContext || this.stopped) return;
     void this.call("set_notification_context", this.notificationContextArgs()).catch(() => undefined);
   };
+  private readonly flushDraftSyncWhenHidden = (): void => {
+    if (document.visibilityState === "hidden") this.flushDraftSync();
+  };
+  private readonly flushDraftSync = (): void => {
+    if (this.stopped) return;
+    void this.call("flush_draft_sync").catch(() => undefined);
+  };
+  private readonly refreshNotificationContextOnStorage = (event: StorageEvent): void => {
+    if (event.key === null || event.key === NOTIFICATION_PERSISTENCE_KEY) this.refreshNotificationContext();
+  };
   private notificationContextArgs(): Record<string, unknown> {
     const permission = typeof Notification === "undefined" ? "unsupported" : Notification.permission;
-    return { ...this.notificationContext, notificationPermission: permission, focused: document.visibilityState === "visible" && document.hasFocus() };
+    return { ...this.notificationContext, notificationPermission: permission, focused: document.visibilityState === "visible" && document.hasFocus(), requireInteraction: this.requiresNotificationInteraction() };
   }
-  private showBanner(candidate: { id: string; title: string; body: string }): void {
+  private notificationPersistence(): NotificationPersistence {
+    try {
+      const stored = localStorage.getItem(NOTIFICATION_PERSISTENCE_KEY);
+      return stored === null ? DEFAULT_NOTIFICATION_PERSISTENCE : notificationPersistence(JSON.parse(stored)) ?? DEFAULT_NOTIFICATION_PERSISTENCE;
+    } catch {
+      return DEFAULT_NOTIFICATION_PERSISTENCE;
+    }
+  }
+  private notificationPersistenceSupported(): boolean {
+    return typeof Notification !== "undefined" && "requireInteraction" in Notification.prototype;
+  }
+  private requiresNotificationInteraction(): boolean {
+    return this.notificationPersistenceSupported() && this.notificationPersistence().seconds === null;
+  }
+  private showBanner(candidate: { id: string; title: string; body: string; icon?: string }): void {
     if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
     try {
-      const notification = new Notification(candidate.title, { body: candidate.body, tag: `peppy-${candidate.id}` });
+      const notification = new Notification(candidate.title, { body: candidate.body, tag: `peppy-${candidate.id}`, ...(candidate.icon ? { icon: candidate.icon } : {}), ...(this.requiresNotificationInteraction() ? { requireInteraction: true } : {}) });
       this.banners.add(notification);
       notification.onclose = () => this.banners.delete(notification);
       void this.call("display_ack", { ids: [candidate.id] }).catch(() => undefined);
-    } catch { /* The worker retains the candidate when a browser post throws. */ }
+    } catch {
+      void this.call("display_failed", { ids: [candidate.id] }).catch(() => undefined);
+    }
   }
   public dispose(): void {
     activeSecretDialog?.();
@@ -498,6 +532,17 @@ export class BrowserBridge implements DesktopBridge {
   public set_app_muted(sourceDeviceId: string, packageName: string, appName: string, muted: boolean): Promise<void> { return this.call("set_app_muted", { sourceDeviceId, packageName, appName, muted }); }
   public mark_notifications_seen(targets: NotificationTarget[]): Promise<void> { return this.call("mark_notifications_seen", { targets }); }
   public set_notification_preferences(preferences: NotificationPreferences): Promise<void> { return this.call("set_notification_preferences", { preferences }); }
+  public async get_notification_persistence(): Promise<NotificationPersistenceSettings> { return { ...this.notificationPersistence(), supported: this.notificationPersistenceSupported() }; }
+  public async set_notification_persistence(value: NotificationPersistence): Promise<void> {
+    const persistence = notificationPersistence(value);
+    if (!persistence) throw new BrowserBridgeError("invalid-request", "Invalid notification persistence.");
+    try {
+      localStorage.setItem(NOTIFICATION_PERSISTENCE_KEY, JSON.stringify(persistence));
+    } catch {
+      throw new BrowserBridgeError("notification-persistence", "Notification persistence could not be saved.");
+    }
+    this.refreshNotificationContext();
+  }
   public set_notification_context(view: "conversations" | "notifications" | "settings" | "contacts", conversationId?: string): Promise<void> {
     this.notificationContext = { view, ...(conversationId ? { conversationId } : {}) };
     return this.call("set_notification_context", this.notificationContextArgs());
@@ -541,7 +586,7 @@ export class BrowserBridge implements DesktopBridge {
     const status = await Notification.requestPermission();
     if (status !== "granted") return { status: status === "default" ? "unknown" : status, testSent: false, canOpenSettings: false };
     try {
-      new Notification("Peppy", { body: "Test notification: desktop banners are working." });
+      new Notification("New notification", { body: "" });
       return { status, testSent: true, canOpenSettings: false };
     } catch {
       return { status, testSent: false, canOpenSettings: false };
@@ -553,6 +598,19 @@ export class BrowserBridge implements DesktopBridge {
     if (files.some((file) => file.size > MAX_FILE_BYTES)) throw new BrowserBridgeError("attachment-too-large", "Attachments must be 32 MiB or smaller.");
     return Promise.all(files.map(async (file) => { const bytes = await file.arrayBuffer(); return this.call<AttachmentView>("prepare_attachment", { bytes, displayName: file.name, mediaType: file.type || "application/octet-stream" }, [bytes]); }));
   }
+  public async prepare_pasted_attachments(files: PastedImage[]) {
+    const prepared = await Promise.allSettled(files.map(({ bytes, name, mediaType }) => {
+      if (!IMAGE_TYPES.has(mediaType)) return Promise.reject(new BrowserBridgeError("invalid-attachment", "Only PNG, JPEG, GIF, and WebP images can be pasted."));
+      if (bytes.byteLength > MAX_FILE_BYTES) return Promise.reject(new BrowserBridgeError("attachment-too-large", "Images must be 32 MiB or smaller."));
+      return this.call<AttachmentView>("prepare_attachment", { bytes, displayName: name, mediaType }, [bytes]);
+    }));
+    return {
+      views: prepared.flatMap(result => result.status === "fulfilled" ? [result.value] : []),
+      failures: prepared.flatMap(result => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : "Could not add pasted image."] : []),
+    };
+  }
+  public resolve_draft_conflict(input: { draftId: string; keepBranchId: string | null }): Promise<Draft> { return this.call("resolve_draft_conflict", input); }
+  public acknowledge_draft_notice(draftId: string): Promise<void> { return this.call("acknowledge_draft_notice", { draftId }); }
   public retry_attachment(id: string): Promise<void> { return this.call("retry_attachment", { id }); }
   public attachment_retention_state(attachmentId: string): Promise<AttachmentRetentionStateDto> { return this.call("attachment_retention_state", { attachmentId }); }
   public attachment_retention_status(): Promise<AttachmentRetentionStatusResult> { return this.call("attachment_retention_status"); }

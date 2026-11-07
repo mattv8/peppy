@@ -27,14 +27,26 @@ impl Client {
         }
 
         let mut store = self.lock()?;
+        let draft_key = store.active_epoch.and_then(|epoch| {
+            store
+                .keys
+                .get(&epoch)
+                .and_then(|keys| keys.draft.clone())
+                .map(|key| (epoch, key))
+        });
+        let vault_id = store.config.vault_id;
         let tx = store
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let draft = if update.recipients.is_empty() {
+        let (previous, mut draft) = if update.recipients.is_empty() {
             save_recipientless_draft(&tx, update)?
         } else {
             save_addressed_draft(&tx, update)?
         };
+        if let Some((epoch, key)) = draft_key {
+            draft =
+                crate::draft_sync::record_local_save(&tx, &previous, draft, vault_id, epoch, &key)?;
+        }
         tx.commit()?;
         Ok(draft)
     }
@@ -43,24 +55,27 @@ impl Client {
 fn save_recipientless_draft(
     conn: &rusqlite::Connection,
     update: ComposeDraftUpdate,
-) -> Result<ComposeDraft, Error> {
+) -> Result<(ComposeDraft, ComposeDraft), Error> {
     let existing = crate::recipientless_draft(conn, None)?;
     let Some(existing) = existing else {
-        return insert_initial_draft(conn, ConversationId::new(), update);
+        let draft = insert_initial_draft(conn, ConversationId::new(), update)?;
+        return Ok((blank_draft(&draft), draft));
     };
     if is_blank_payload(&update) {
-        return establish_recipientless_intent(conn, existing);
+        let draft = establish_recipientless_intent(conn, existing.clone())?;
+        return Ok((existing, draft));
     }
-    if !is_blank_draft(&existing) {
+    if !is_blank_draft(&existing) && !is_reusable_retired_draft(conn, &existing)? {
         return Err(moved_to(&existing));
     }
-    update_existing_draft(conn, existing, update)
+    let draft = update_existing_draft(conn, existing.clone(), update)?;
+    Ok((existing, draft))
 }
 
 fn save_addressed_draft(
     conn: &rusqlite::Connection,
     update: ComposeDraftUpdate,
-) -> Result<ComposeDraft, Error> {
+) -> Result<(ComposeDraft, ComposeDraft), Error> {
     let region = crate::conversation_match::identity_region(conn)?;
     let target = conversation_for_compose_recipients(
         conn,
@@ -69,19 +84,35 @@ fn save_addressed_draft(
         &region,
     )?;
     let Some(conversation_id) = target else {
-        return insert_initial_draft(conn, ConversationId::new(), update);
+        let draft = insert_initial_draft(conn, ConversationId::new(), update)?;
+        return Ok((blank_draft(&draft), draft));
     };
     let existing = load_compose_draft(conn, "conversation_id", &conversation_id.to_string())?;
     let Some(existing) = existing else {
-        return insert_initial_draft(conn, conversation_id, update);
+        let draft = insert_initial_draft(conn, conversation_id, update)?;
+        return Ok((blank_draft(&draft), draft));
     };
     if is_blank_payload(&update) {
-        return establish_addressed_intent(conn, existing, update.recipients);
+        let draft = establish_addressed_intent(conn, existing.clone(), update.recipients)?;
+        return Ok((existing, draft));
     }
-    if !is_blank_draft(&existing) {
+    if !is_blank_draft(&existing) && !is_reusable_retired_draft(conn, &existing)? {
         return Err(moved_to(&existing));
     }
-    update_existing_draft(conn, existing, update)
+    let draft = update_existing_draft(conn, existing.clone(), update)?;
+    Ok((existing, draft))
+}
+
+fn blank_draft(draft: &ComposeDraft) -> ComposeDraft {
+    ComposeDraft {
+        draft_id: draft.draft_id,
+        conversation_id: draft.conversation_id,
+        text: String::new(),
+        recipients: Vec::new(),
+        attachment_ids: Vec::new(),
+        route: None,
+        revision: 0,
+    }
 }
 
 fn establish_recipientless_intent(
@@ -180,6 +211,15 @@ fn is_blank_payload(draft: &ComposeDraftUpdate) -> bool {
 
 fn is_blank_draft(draft: &ComposeDraft) -> bool {
     draft.text.is_empty() && draft.attachment_ids.is_empty() && draft.route.is_none()
+}
+
+fn is_reusable_retired_draft(
+    conn: &rusqlite::Connection,
+    draft: &ComposeDraft,
+) -> Result<bool, Error> {
+    Ok(draft.text.is_empty()
+        && draft.attachment_ids.is_empty()
+        && crate::draft_sync::is_retired_draft(conn, draft.draft_id)?)
 }
 
 fn moved_to(draft: &ComposeDraft) -> Error {
