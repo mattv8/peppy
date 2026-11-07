@@ -123,7 +123,7 @@ internal class MmsImageFitter(
         } catch (_: OutOfMemoryError) { null } catch (_: RuntimeException) { null } catch (_: java.io.IOException) { null }
     }
 
-    private fun orientation(file: File): Int = runCatching { ExifInterface(file).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL) }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+    private fun orientation(file: File): Int = runCatching { ExifInterface(file.path).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL) }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
     internal fun orient(bitmap: Bitmap, orientation: Int): Bitmap {
         val matrix = orientationMatrix(orientation) ?: return bitmap
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
