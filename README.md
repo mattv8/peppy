@@ -18,6 +18,7 @@
 - [Quick Start](#quick-start)
 - [Clients](#clients)
 - [Post-install and first run](#post-install-and-first-run)
+- [Server-resident MCP](#server-resident-mcp)
 - [Concepts](#concepts)
 - [Operations](#operations)
 - [Contributing](#contributing)
@@ -191,6 +192,32 @@ The browser client uses the server's canonical API origin for enrollment and get
 4. Open the server address in a browser or enter it in a desktop or mobile client.
 
 For a source-based local development stack, use `just dev-setup` and `just dev-up`. Run `just smoke-infra` to start the root stack, check `/healthz` and `/readyz`, and run the storage check.
+
+### Server-resident MCP
+
+Peppy MCP is an opt-in, always-on client that runs beside the API on the same server. It is not a desktop bridge or a separate public hostname. For a release deployment, use matching, signed immutable API and worker image digests:
+
+```sh
+docker compose -f docker-compose.yml -f infra/compose/compose.community.yml -f infra/compose/compose.mcp.yml -f infra/compose/compose.community-mcp.yml up -d
+```
+
+Set `PEPPY_SERVER_IMAGE` and `PEPPY_MCP_IMAGE` to matching approved release digests. Do not mix a pinned API image with an arbitrary checkout-built worker. This repository does not currently publish the companion worker image; until the release pipeline does, operators must build, sign, verify, and retain a worker image from the exact same approved source revision before enabling this overlay.
+
+For source development only, omit the two Community overlays:
+
+```sh
+docker compose -f docker-compose.yml -f infra/compose/compose.mcp.yml up -d
+```
+
+The overlay publishes no worker port. The existing server origin exposes `/mcp`; the API reaches the worker only on the private Compose network. The worker runs as UID 10001 with a read-only root filesystem. Its durable `mcp-state` volume holds encrypted client state, while the worker-owned `mcp-control` volume supplies a control token read-only to the API. The worker creates its control token and storage key only in an empty initialized volume. Keep both volumes private and back them up together with the vault database and attachment data. The shipped backup and restore scripts do not include MCP volumes: extend them before enabling MCP. Stop the worker for a consistent backup, and preserve its SQLCipher database, media and keys, protected client cache, and device credential in the same backup set.
+
+Peppy Hosted keeps MCP optional. Operate one separately managed worker per hosted environment, with one stable private DNS alias and external state/control volumes shared only with the active API colors. Start and verify that singleton before applying its API overlay to either color. Upgrade or cut over the worker only while it is stopped; never run two workers against the same state volume. Existing Hosted releases that do not use the MCP overlays remain unchanged.
+
+In **Settings → Devices**, an unlocked vault owner can enable Peppy MCP after accepting that the server operator can hold the selected vault's purpose keys. The current server is selected automatically. Enabling creates an ordinary enrolled device for that vault; it does not add a paid entitlement or require an enrollment CLI. The UI lists each authorized AI client and its read, text-send, and image-send permissions. Reapprove when the displayed status or epoch requires it.
+
+Peppy MCP reads and sends only within an authorized client grant. To connect an AI client, add `https://your-server/mcp` as a remote Streamable HTTP MCP server using OAuth. When it opens Peppy, unlock the vault on an owner device and approve only the requested permissions it needs. To verify the connection safely, ask: `List the available Peppy tools and their permissions. Do not read messages or send anything.` The AI client must be able to reach the server address. A cloud-hosted client cannot use an address that works only on a private network. SMS and MMS still require an enabled, permission-ready Android gateway. A reaction-text request sends the literal text as a message; it is not a native carrier reaction. Queued sends are not delivery evidence, and an uncertain carrier outcome is not retried automatically.
+
+Removing the MCP device or revoking a client grant fences new MCP access. Cleanup of the server-side worker state is reported separately, and revocation cannot erase copies that an external AI client already received. If a backup or restore loses any bound component (the SQLCipher database, media and their keys, protected client cache, or device credential), remove and re-enable MCP from an unlocked owner device rather than trying to recreate the binding from a partial backup.
 
 ## Post-install and first run
 
