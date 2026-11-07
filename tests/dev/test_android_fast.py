@@ -21,6 +21,7 @@ if [ "$3" = install ] && [ -f "$DEVICE_STATE/abi-after-install" ]; then mv "$DEV
 """
 TLS_STUB = """#!/usr/bin/env python3
 import os
+import pathlib
 import sys
 
 with open(os.environ["CALLS"], "a") as calls:
@@ -29,7 +30,9 @@ if sys.argv[1] == "enabled":
     print("true")
 elif sys.argv[1] == "ca-path":
     print(os.environ["STUB_CA"])
-elif sys.argv[1] != "prepare":
+elif sys.argv[1] == "dotenv-path":
+    print(pathlib.Path(__file__).resolve().parents[2] / ".env")
+elif sys.argv[1] not in {"prepare", "verify-apk"}:
     sys.exit(64)
 """
 

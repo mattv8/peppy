@@ -6,10 +6,14 @@ import contextlib
 import fcntl
 import os
 import re
+import ssl
 import subprocess
 import sys
 import tempfile
+import zipfile
+import zlib
 from pathlib import Path
+from typing import Optional
 
 try:
     from .dev_port import development_port, development_tls_enabled, dotenv_values, rewrite_loopback_url
@@ -21,6 +25,8 @@ ROOT = Path(__file__).resolve().parents[2]
 TLS_FILENAMES = ("ca.pem", "ca-key.pem", "server.pem", "server-key.pem")
 PRIVATE_FILENAMES = ("ca-key.pem", "server-key.pem")
 LEAF_RENEWAL_SECONDS = 30 * 24 * 60 * 60
+APK_CA_RESOURCE = "res/raw/peppy_dev_tls_ca.pem"
+MAX_APK_CA_BYTES = 64 * 1024
 
 
 class TlsError(RuntimeError):
@@ -34,8 +40,53 @@ def configured_debug(dotenv: Path) -> bool:
         raise TlsError(str(error)) from error
 
 
+def has_dotenv(root: Path) -> bool:
+    path = root / ".env"
+    return path.exists() or path.is_symlink()
+
+
+def primary_worktree(root: Path) -> Optional[Path]:
+    """Return the primary checkout when root is a linked worktree, read from git's own worktree metadata."""
+    marker = root / ".git"
+    if not marker.is_file():
+        return None
+    try:
+        gitdir_line = marker.read_text().strip()
+        if not gitdir_line.startswith("gitdir:"):
+            return None
+        git_dir = (root / gitdir_line[len("gitdir:"):].strip()).resolve()
+        common_dir = (git_dir / (git_dir / "commondir").read_text().strip()).resolve()
+    except (OSError, ValueError):
+        return None
+    if common_dir.name != ".git" or not common_dir.is_dir():
+        return None
+    return common_dir.parent
+
+
+def config_root() -> Path:
+    """Return the checkout that owns the development stack's .env and TLS directory."""
+    override = os.environ.get("PEPPY_DEV_CONFIG_ROOT")
+    if override:
+        root = Path(override).resolve()
+        if not has_dotenv(root):
+            raise TlsError(f"PEPPY_DEV_CONFIG_ROOT has no .env: {root}")
+        return root
+    if has_dotenv(ROOT):
+        return ROOT
+    primary = primary_worktree(ROOT)
+    if primary is not None and has_dotenv(primary):
+        return primary
+    return ROOT
+
+
+def default_dotenv() -> Path:
+    return config_root() / ".env"
+
+
 def tls_directory() -> Path:
-    return Path(os.environ.get("PEPPY_DEV_TLS_DIR", ROOT / ".opencode/dev/tls")).resolve()
+    if "PEPPY_DEV_TLS_DIR" in os.environ:
+        return Path(os.environ["PEPPY_DEV_TLS_DIR"]).resolve()
+    return (config_root() / ".opencode/dev/tls").resolve()
 
 
 def run_openssl(arguments: list[str], error: str) -> None:
@@ -197,28 +248,68 @@ def compose_arguments(dotenv: Path, arguments: list[str], teardown: bool) -> Non
     raise AssertionError("docker compose did not execute")
 
 
+def certificate_der(pem: bytes, name: str) -> bytes:
+    try:
+        return ssl.PEM_cert_to_DER_cert(pem.decode("ascii"))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise TlsError(f"{name} is not a PEM certificate") from error
+
+
+def verify_apk(apk: Path) -> None:
+    """Require an APK built with DEBUG=true to embed the current development CA."""
+    if not configured_debug(default_dotenv()):
+        return
+    if not apk.is_file():
+        raise TlsError(f"APK is missing: {apk}; rebuild it (Android: Rebuild and open)")
+    try:
+        with zipfile.ZipFile(apk) as archive:
+            try:
+                entry = archive.getinfo(APK_CA_RESOURCE)
+            except KeyError as error:
+                raise TlsError(f"{apk} does not contain {APK_CA_RESOURCE}; rebuild it (Android: Rebuild and open)") from error
+            if entry.file_size > MAX_APK_CA_BYTES:
+                raise TlsError(f"{apk}:{APK_CA_RESOURCE} is too large to be a CA certificate")
+            embedded = archive.read(entry)
+    except TlsError:
+        raise
+    except (zipfile.BadZipFile, RuntimeError, NotImplementedError, EOFError, zlib.error) as error:
+        raise TlsError(f"{apk} is not a valid APK archive") from error
+    ca = tls_directory() / "ca.pem"
+    if not ca.is_file():
+        raise TlsError(f"development TLS CA is missing at {ca}; run 'python3 infra/dev/dev_tls.py prepare' first")
+    if certificate_der(embedded, f"{apk}:{APK_CA_RESOURCE}") != certificate_der(ca.read_bytes(), str(ca)):
+        raise TlsError(f"{apk} does not trust the current development CA; rebuild it (Android: Rebuild and open)")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("enabled", "prepare"):
         subparser = subparsers.add_parser(command)
-        subparser.add_argument("dotenv", nargs="?", default=ROOT / ".env", type=Path)
+        subparser.add_argument("dotenv", nargs="?", type=Path)
     subparsers.add_parser("ca-path")
+    subparsers.add_parser("dotenv-path")
+    verify = subparsers.add_parser("verify-apk")
+    verify.add_argument("apk", type=Path)
     compose = subparsers.add_parser("compose")
     compose.add_argument("--teardown", action="store_true")
     arguments, _ = parser.parse_known_args()
     try:
         if arguments.command == "enabled":
-            print("true" if configured_debug(arguments.dotenv) else "false")
+            print("true" if configured_debug(arguments.dotenv or default_dotenv()) else "false")
         elif arguments.command == "prepare":
-            prepare(arguments.dotenv)
+            prepare(arguments.dotenv or default_dotenv())
         elif arguments.command == "ca-path":
             print(tls_directory() / "ca.pem")
+        elif arguments.command == "dotenv-path":
+            print(default_dotenv())
+        elif arguments.command == "verify-apk":
+            verify_apk(arguments.apk)
         else:
             command_arguments = sys.argv[sys.argv.index("compose") + 1:]
             if arguments.teardown:
                 command_arguments.remove("--teardown")
-            compose_arguments(ROOT / ".env", command_arguments, arguments.teardown)
+            compose_arguments(default_dotenv(), command_arguments, arguments.teardown)
     except (OSError, TlsError, ValueError) as error:
         print(f"development TLS: {error}", file=sys.stderr)
         return 1
