@@ -102,6 +102,7 @@ const enrollmentErrorMessage = (errorCode: EnrollmentView["errorCode"]) => {
   if (errorCode === "invalid_setup_token") return copy("enrollment_error_invalid_setup_token");
   if (errorCode === "instance_already_claimed") return copy("enrollment_error_already_claimed");
   if (errorCode === "setup_window_closed") return "Setup window closed. Restart the server to continue setup.";
+  if (errorCode === "https-required") return "Use HTTPS to set up Peppy in a browser.";
   if (errorCode === "invite_invalid") return copy("enrollment_error_invite_invalid");
   if (errorCode === "vault_owner_required") return copy("enrollment_error_vault_owner_required");
   if (errorCode === "username_taken") return "That username is already in use. Choose another.";
