@@ -36,12 +36,22 @@ describe("browser UI bridge", () => {
   });
 
   it("does not expose typing controls without browser typing capabilities", async () => {
-    const browserBridge = { load_state: async () => await desktopBridge.fixtureBridge.load_state(), subscribe: () => () => undefined, subscribe_lifecycle: () => () => undefined, subscribe_lifecycle_finished: () => () => undefined, set_notification_context: async () => undefined, mark_seen: async () => undefined } satisfies Partial<DesktopBridge>;
-    const partialBrowserBridge = browserBridge as DesktopBridge;
+    const browserBridge: DesktopBridge = {
+      ...desktopBridge.fixtureBridge,
+      load_state: async () => await desktopBridge.fixtureBridge.load_state(),
+      subscribe: () => () => undefined,
+      subscribe_lifecycle: () => () => undefined,
+      subscribe_lifecycle_finished: () => () => undefined,
+      set_notification_context: async () => undefined,
+      mark_seen: async () => undefined,
+    };
+    delete browserBridge.send_typing;
+    delete browserBridge.set_typing_sharing;
+    delete browserBridge.subscribe_typing;
     const previousBridge = uiBridge.bridge;
     const previousDesktopBridge = desktopBridge.bridge;
-    uiBridge.installBrowserBridge(partialBrowserBridge);
-    installDesktopBrowserBridge(partialBrowserBridge);
+    uiBridge.installBrowserBridge(browserBridge);
+    installDesktopBrowserBridge(browserBridge);
     try {
       render(<App hostKind="browser" />);
       await waitFor(() => expect(document.getElementById("shared-composer")).toBeInTheDocument());
