@@ -78,6 +78,12 @@ fn imported_sms_plan_is_paused(client: &Client) -> bool {
         .paused
 }
 
+fn schema_version(connection: &rusqlite::Connection) -> i64 {
+    connection
+        .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+        .unwrap()
+}
+
 fn remove_rcs_mapping_schema(connection: &rusqlite::Connection) {
     connection
         .execute_batch(
@@ -158,10 +164,7 @@ fn version_39_upgrade_adds_phone_read_defaults_and_reinstalls_history_backpressu
             "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
         )
         .unwrap();
-    let version: i64 = connection
-        .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(version, 50);
+    let expected_schema_version = schema_version(&connection);
     let outbox_index: String = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
@@ -195,6 +198,7 @@ fn version_39_upgrade_adds_phone_read_defaults_and_reinstalls_history_backpressu
             "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
         )
         .unwrap();
+    assert_eq!(schema_version(&connection), expected_schema_version);
     let index_count: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('outbox_pending_events_history','contact_photo_registrations_unacknowledged')",
@@ -265,10 +269,7 @@ fn version_36_reinstalls_history_backpressure_indexes_on_reopen() {
             "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
         )
         .unwrap();
-    let version: i64 = connection
-        .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(version, 50);
+    let expected_schema_version = schema_version(&connection);
     let outbox_index: String = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
@@ -296,6 +297,7 @@ fn version_36_reinstalls_history_backpressure_indexes_on_reopen() {
             "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
         )
         .unwrap();
+    assert_eq!(schema_version(&connection), expected_schema_version);
     let index_count: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('outbox_pending_events_history','contact_photo_registrations_unacknowledged')",

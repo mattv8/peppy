@@ -1,3 +1,4 @@
+use crate::rcs_receive::{NativeRcsContextExpectation, NativeRcsObservationProvenance};
 use crate::{
     MobileBindingsError, NativeClient, NativeOpenConfig, create_vault_material, open_native_client,
     with_client,
@@ -130,14 +131,200 @@ fn go_exported_receive_record_ingests_through_mobile_boundary() {
     let fixture = fixture();
     let result = fixture
         .client
-        .gateway_ingest_go_rcs_record_json(
+        .gateway_ingest_rcs_projected_observation(
             fixture.conversation_id.clone(),
             fixture.generation,
             decoded.to_string(),
+            NativeRcsObservationProvenance::Historical,
         )
         .unwrap();
     assert_eq!(result.record_outcome, "unmatched_outgoing");
     assert_eq!(result.status_outcome.as_deref(), Some("status_applied"));
+}
+
+#[test]
+fn projected_observation_wrapper_requires_explicit_provenance_and_preserves_cursor_candidate() {
+    for provenance in [
+        NativeRcsObservationProvenance::Live,
+        NativeRcsObservationProvenance::Historical,
+    ] {
+        let fixture = fixture();
+        let mut observation = serde_json::from_str::<serde_json::Value>(&go_incoming("")).unwrap();
+        if provenance == NativeRcsObservationProvenance::Historical {
+            observation["sent_at_ms"] = json!(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as i64
+                    + 1
+            );
+        }
+        let result = fixture
+            .client
+            .gateway_ingest_rcs_projected_observation(
+                fixture.conversation_id.clone(),
+                fixture.generation,
+                observation.to_string(),
+                provenance,
+            )
+            .unwrap();
+        assert_eq!(result.record_outcome, "inserted");
+        assert_eq!(result.cursor.as_deref(), Some("AAAAAAAAAAFtZXNzYWdlLTE"));
+        assert_eq!(history_token(&fixture), Some("cursor".into()));
+    }
+}
+
+#[test]
+fn projected_observation_wrapper_rejects_malformed_records_and_stale_generations_without_writes() {
+    let fixture = fixture();
+    let before = reads(&fixture);
+    assert!(matches!(
+        fixture.client.gateway_ingest_rcs_projected_observation(
+            fixture.conversation_id.clone(),
+            fixture.generation,
+            "{".into(),
+            NativeRcsObservationProvenance::Live,
+        ),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+    assert_eq!(reads(&fixture), before);
+    let result = fixture
+        .client
+        .gateway_ingest_rcs_projected_observation(
+            fixture.conversation_id.clone(),
+            fixture.generation + 1,
+            go_incoming(""),
+            NativeRcsObservationProvenance::Live,
+        )
+        .unwrap();
+    assert_eq!(result.record_outcome, "rejected:ownership_stale");
+    assert_eq!(reads(&fixture), before);
+}
+
+#[test]
+fn fenced_cutover_wrappers_require_current_generations_without_writes() {
+    let linked_fixture = fixture();
+    let before = reads(&linked_fixture);
+    assert!(matches!(
+        linked_fixture
+            .client
+            .gateway_begin_rcs_unlink_cutover_if_current(
+                linked_fixture.conversation_id.clone(),
+                linked_fixture.generation + 1,
+            ),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+    assert_eq!(reads(&linked_fixture), before);
+    let cutover = linked_fixture
+        .client
+        .gateway_begin_rcs_unlink_cutover_if_current(
+            linked_fixture.conversation_id.clone(),
+            linked_fixture.generation,
+        )
+        .unwrap();
+    assert_eq!(cutover.ownership_generation, linked_fixture.generation + 1);
+
+    let owner_fixture = fixture();
+    with_client(&owner_fixture.client.client, |core| {
+        core.record_rcs_link_lifecycle(
+            RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            1_000,
+            1_000,
+        )?;
+        core.record_rcs_explicit_unlink_completed(1_000, 1_000)
+    })
+    .unwrap();
+    let generations = owner_fixture
+        .client
+        .gateway_rcs_unlink_cutover_generations(owner_fixture.conversation_id.clone())
+        .unwrap()
+        .unwrap();
+    assert_eq!(generations.ownership_generation, owner_fixture.generation);
+    assert!(matches!(
+        owner_fixture.client.gateway_begin_rcs_owner_unlink_cutover(
+            owner_fixture.conversation_id.clone(),
+            generations.ownership_generation,
+            generations.lifecycle_generation + 1,
+        ),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+    let cutover = owner_fixture
+        .client
+        .gateway_begin_rcs_owner_unlink_cutover(
+            owner_fixture.conversation_id.clone(),
+            generations.ownership_generation,
+            generations.lifecycle_generation,
+        )
+        .unwrap();
+    assert_eq!(cutover.ownership_generation, owner_fixture.generation + 1);
+}
+
+#[test]
+fn google_event_invalidation_wrapper_rejects_stale_expectations_without_writes() {
+    let fixture = fixture();
+    let before = reads(&fixture);
+    assert!(matches!(
+        fixture
+            .client
+            .gateway_invalidate_rcs_context_for_google_event(
+                fixture.conversation_id.clone(),
+                "google-conversation".into(),
+                NativeRcsContextExpectation {
+                    ownership_generation: fixture.generation + 1,
+                    link_generation: 1,
+                    session_generation: 1,
+                    context_revision: 1,
+                },
+            ),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+    assert_eq!(reads(&fixture), before);
+}
+
+#[test]
+fn new_receive_wrappers_reject_closed_clients() {
+    let fixture = fixture();
+    fixture.client.dispose().unwrap();
+    assert!(matches!(
+        fixture.client.gateway_ingest_rcs_projected_observation(
+            fixture.conversation_id.clone(),
+            fixture.generation,
+            go_incoming(""),
+            NativeRcsObservationProvenance::Live,
+        ),
+        Err(MobileBindingsError::Closed)
+    ));
+    assert!(matches!(
+        fixture.client.gateway_begin_rcs_unlink_cutover_if_current(
+            fixture.conversation_id.clone(),
+            fixture.generation,
+        ),
+        Err(MobileBindingsError::Closed)
+    ));
+    assert!(matches!(
+        fixture
+            .client
+            .gateway_invalidate_rcs_context_for_google_event(
+                fixture.conversation_id.clone(),
+                "google-conversation".into(),
+                NativeRcsContextExpectation {
+                    ownership_generation: fixture.generation,
+                    link_generation: 1,
+                    session_generation: 1,
+                    context_revision: 1,
+                },
+            ),
+        Err(MobileBindingsError::Closed)
+    ));
+    assert!(matches!(
+        fixture
+            .client
+            .gateway_rcs_unlink_cutover_generations(fixture.conversation_id),
+        Err(MobileBindingsError::Closed)
+    ));
 }
 
 #[test]

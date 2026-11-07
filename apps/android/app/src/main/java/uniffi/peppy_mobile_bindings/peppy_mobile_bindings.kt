@@ -763,7 +763,11 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_mapping_revision(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_pending_native_rcs_commands(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_prepare_native_rcs_send(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_publish_rcs_eligibility(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_explicit_unlink_completed(
     ): Int
@@ -1159,13 +1163,45 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_apply_rcs_status_json(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_begin_rcs_owner_unlink_cutover(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_begin_rcs_unlink_cutover_if_current(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_checkpoint_rcs_history(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_go_rcs_record_json(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_rcs_projected_observation(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_rcs_record_json(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_invalidate_rcs_context_for_google_event(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_rcs_link_owned_conversations(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_rcs_receive_context(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_rcs_unlink_cutover_generations(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_record_rcs_provider_detector_json(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_export_vault_identity_recovery_key_for_native_storage(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_adopt_vault_identity(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_begin_vault_identity_establishment(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_commit_vault_identity_acceptance(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_confirm_vault_identity_pending_durable(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_restore_vault_identity_from_protected(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_vault_identity_readiness(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_vault_identity_snapshot(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_import_vault_identity_recovery_key_from_native_storage(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeplaintexthandle_dispose(
     ): Int
@@ -1693,14 +1729,46 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_apply_rcs_status_json(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`ownershipGeneration`: Long,`statusJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_begin_rcs_owner_unlink_cutover(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`expectedOwnershipGeneration`: Long,`expectedLifecycleGeneration`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_begin_rcs_unlink_cutover_if_current(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`expectedOwnershipGeneration`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_checkpoint_rcs_history(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`ownershipGeneration`: Long,`historyToken`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_ingest_go_rcs_record_json(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`ownershipGeneration`: Long,`goRecordJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_ingest_rcs_projected_observation(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`ownershipGeneration`: Long,`goRecordJson`: RustBuffer.ByValue,`provenance`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_ingest_rcs_record_json(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`ownershipGeneration`: Long,`recordJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_invalidate_rcs_context_for_google_event(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`googleConversationId`: RustBuffer.ByValue,`expected`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_rcs_link_owned_conversations(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_rcs_receive_context(`ptr`: Long,`googleConversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_rcs_unlink_cutover_generations(`ptr`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_record_rcs_provider_detector_json(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`ownershipGeneration`: Long,`detectorJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_export_vault_identity_recovery_key_for_native_storage(`ptr`: Long,`epoch`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_adopt_vault_identity(`ptr`: Long,`statusJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_begin_vault_identity_establishment(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_commit_vault_identity_acceptance(`ptr`: Long,`operationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_confirm_vault_identity_pending_durable(`ptr`: Long,`operationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_restore_vault_identity_from_protected(`ptr`: Long,`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_vault_identity_readiness(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_vault_identity_snapshot(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_import_vault_identity_recovery_key_from_native_storage(`ptr`: Long,`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_clone_nativeplaintexthandle(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_free_nativeplaintexthandle(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1943,8 +2011,12 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_next_rcs_mapping_revision(`client`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_pending_native_rcs_commands(`client`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_prepare_native_rcs_send(`client`: Long,`commandId`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_publish_rcs_eligibility(`client`: Long,`publications`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_explicit_unlink_completed(`client`: Long,`observedAtMs`: Long,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_outcome_unknown(`client`: Long,`commandId`: RustBuffer.ByValue,`tmpId`: RustBuffer.ByValue,`googleConversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2210,7 +2282,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_mapping_revision() and 0xFFFF) != 61152) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_pending_native_rcs_commands() and 0xFFFF) != 31102) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_prepare_native_rcs_send() and 0xFFFF) != 22733) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_publish_rcs_eligibility() and 0xFFFF) != 19264) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_explicit_unlink_completed() and 0xFFFF) != 33636) {
@@ -2804,16 +2882,64 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_apply_rcs_status_json() and 0xFFFF) != 28431) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_begin_rcs_owner_unlink_cutover() and 0xFFFF) != 33240) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_begin_rcs_unlink_cutover_if_current() and 0xFFFF) != 38270) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_checkpoint_rcs_history() and 0xFFFF) != 17731) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_go_rcs_record_json() and 0xFFFF) != 18128) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_rcs_projected_observation() and 0xFFFF) != 24444) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_rcs_record_json() and 0xFFFF) != 37536) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_invalidate_rcs_context_for_google_event() and 0xFFFF) != 56850) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_rcs_link_owned_conversations() and 0xFFFF) != 45786) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_rcs_receive_context() and 0xFFFF) != 33984) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_rcs_unlink_cutover_generations() and 0xFFFF) != 7497) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_record_rcs_provider_detector_json() and 0xFFFF) != 34724) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_export_vault_identity_recovery_key_for_native_storage() and 0xFFFF) != 61042) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_adopt_vault_identity() and 0xFFFF) != 10762) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_begin_vault_identity_establishment() and 0xFFFF) != 6680) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_commit_vault_identity_acceptance() and 0xFFFF) != 40262) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_confirm_vault_identity_pending_durable() and 0xFFFF) != 33630) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_restore_vault_identity_from_protected() and 0xFFFF) != 38620) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_vault_identity_readiness() and 0xFFFF) != 59966) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_vault_identity_snapshot() and 0xFFFF) != 14709) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_import_vault_identity_recovery_key_from_native_storage() and 0xFFFF) != 28374) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeplaintexthandle_dispose() and 0xFFFF) != 40845) {
@@ -3997,6 +4123,10 @@ public interface NativeClientInterface {
     
     fun `gatewayApplyRcsStatusJson`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `statusJson`: kotlin.String): kotlin.String
     
+    fun `gatewayBeginRcsOwnerUnlinkCutover`(`conversationId`: kotlin.String, `expectedOwnershipGeneration`: kotlin.ULong, `expectedLifecycleGeneration`: kotlin.ULong): NativeRcsCutover
+    
+    fun `gatewayBeginRcsUnlinkCutoverIfCurrent`(`conversationId`: kotlin.String, `expectedOwnershipGeneration`: kotlin.ULong): NativeRcsCutover
+    
     fun `gatewayCheckpointRcsHistory`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `historyToken`: kotlin.String): kotlin.String
     
     /**
@@ -4006,9 +4136,37 @@ public interface NativeClientInterface {
      */
     fun `gatewayIngestGoRcsRecordJson`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `goRecordJson`: kotlin.String): NativeRcsIngestOutcome
     
+    fun `gatewayIngestRcsProjectedObservation`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `goRecordJson`: kotlin.String, `provenance`: NativeRcsObservationProvenance): NativeRcsIngestOutcome
+    
     fun `gatewayIngestRcsRecordJson`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `recordJson`: kotlin.String): kotlin.String
     
+    fun `gatewayInvalidateRcsContextForGoogleEvent`(`conversationId`: kotlin.String, `googleConversationId`: kotlin.String, `expected`: NativeRcsContextExpectation): kotlin.ULong
+    
+    fun `gatewayRcsLinkOwnedConversations`(): List<NativeRcsReceiveContext>
+    
+    fun `gatewayRcsReceiveContext`(`googleConversationId`: kotlin.String): NativeRcsReceiveContext?
+    
+    fun `gatewayRcsUnlinkCutoverGenerations`(`conversationId`: kotlin.String): NativeRcsUnlinkCutoverGenerations?
+    
     fun `gatewayRecordRcsProviderDetectorJson`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `detectorJson`: kotlin.String): kotlin.String
+    
+    fun `exportVaultIdentityRecoveryKeyForNativeStorage`(`epoch`: kotlin.UInt): kotlin.ByteArray
+    
+    fun `gatewayAdoptVaultIdentity`(`statusJson`: kotlin.String): NativeVaultIdentityAdoption
+    
+    fun `gatewayBeginVaultIdentityEstablishment`(): NativeVaultIdentityPendingMaterial
+    
+    fun `gatewayCommitVaultIdentityAcceptance`(`operationId`: kotlin.String)
+    
+    fun `gatewayConfirmVaultIdentityPendingDurable`(`operationId`: kotlin.String)
+    
+    fun `gatewayRestoreVaultIdentityFromProtected`(`bytes`: kotlin.ByteArray)
+    
+    fun `gatewayVaultIdentityReadiness`(): kotlin.String
+    
+    fun `gatewayVaultIdentitySnapshot`(): NativeVaultIdentitySnapshot
+    
+    fun `importVaultIdentityRecoveryKeyFromNativeStorage`(`bytes`: kotlin.ByteArray)
     
     companion object
 }
@@ -7183,6 +7341,39 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `gatewayBeginRcsOwnerUnlinkCutover`(`conversationId`: kotlin.String, `expectedOwnershipGeneration`: kotlin.ULong, `expectedLifecycleGeneration`: kotlin.ULong): NativeRcsCutover {
+            return FfiConverterTypeNativeRcsCutover.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_begin_rcs_owner_unlink_cutover(
+        it,
+        
+        FfiConverterString.lower(`conversationId`),
+        FfiConverterULong.lower(`expectedOwnershipGeneration`),
+        FfiConverterULong.lower(`expectedLifecycleGeneration`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `gatewayBeginRcsUnlinkCutoverIfCurrent`(`conversationId`: kotlin.String, `expectedOwnershipGeneration`: kotlin.ULong): NativeRcsCutover {
+            return FfiConverterTypeNativeRcsCutover.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_begin_rcs_unlink_cutover_if_current(
+        it,
+        
+        FfiConverterString.lower(`conversationId`),
+        FfiConverterULong.lower(`expectedOwnershipGeneration`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `gatewayCheckpointRcsHistory`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `historyToken`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
@@ -7222,6 +7413,24 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `gatewayIngestRcsProjectedObservation`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `goRecordJson`: kotlin.String, `provenance`: NativeRcsObservationProvenance): NativeRcsIngestOutcome {
+            return FfiConverterTypeNativeRcsIngestOutcome.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_ingest_rcs_projected_observation(
+        it,
+        
+        FfiConverterString.lower(`conversationId`),
+        FfiConverterULong.lower(`ownershipGeneration`),
+        FfiConverterString.lower(`goRecordJson`),
+        FfiConverterTypeNativeRcsObservationProvenance.lower(`provenance`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `gatewayIngestRcsRecordJson`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `recordJson`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
@@ -7232,6 +7441,67 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         FfiConverterString.lower(`conversationId`),
         FfiConverterULong.lower(`ownershipGeneration`),
         FfiConverterString.lower(`recordJson`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `gatewayInvalidateRcsContextForGoogleEvent`(`conversationId`: kotlin.String, `googleConversationId`: kotlin.String, `expected`: NativeRcsContextExpectation): kotlin.ULong {
+            return FfiConverterULong.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_invalidate_rcs_context_for_google_event(
+        it,
+        
+        FfiConverterString.lower(`conversationId`),
+        FfiConverterString.lower(`googleConversationId`),
+        FfiConverterTypeNativeRcsContextExpectation.lower(`expected`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `gatewayRcsLinkOwnedConversations`(): List<NativeRcsReceiveContext> {
+            return FfiConverterSequenceTypeNativeRcsReceiveContext.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_rcs_link_owned_conversations(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `gatewayRcsReceiveContext`(`googleConversationId`: kotlin.String): NativeRcsReceiveContext? {
+            return FfiConverterOptionalTypeNativeRcsReceiveContext.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_rcs_receive_context(
+        it,
+        
+        FfiConverterString.lower(`googleConversationId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `gatewayRcsUnlinkCutoverGenerations`(`conversationId`: kotlin.String): NativeRcsUnlinkCutoverGenerations? {
+            return FfiConverterOptionalTypeNativeRcsUnlinkCutoverGenerations.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_rcs_unlink_cutover_generations(
+        it,
+        
+        FfiConverterString.lower(`conversationId`),_status)
 }
     }
     )
@@ -7253,6 +7523,134 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     }
     )
     }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `exportVaultIdentityRecoveryKeyForNativeStorage`(`epoch`: kotlin.UInt): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_export_vault_identity_recovery_key_for_native_storage(
+        it,
+        
+        FfiConverterUInt.lower(`epoch`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `gatewayAdoptVaultIdentity`(`statusJson`: kotlin.String): NativeVaultIdentityAdoption {
+            return FfiConverterTypeNativeVaultIdentityAdoption.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_adopt_vault_identity(
+        it,
+        
+        FfiConverterString.lower(`statusJson`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `gatewayBeginVaultIdentityEstablishment`(): NativeVaultIdentityPendingMaterial {
+            return FfiConverterTypeNativeVaultIdentityPendingMaterial.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_begin_vault_identity_establishment(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `gatewayCommitVaultIdentityAcceptance`(`operationId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_commit_vault_identity_acceptance(
+        it,
+        
+        FfiConverterString.lower(`operationId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `gatewayConfirmVaultIdentityPendingDurable`(`operationId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_confirm_vault_identity_pending_durable(
+        it,
+        
+        FfiConverterString.lower(`operationId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `gatewayRestoreVaultIdentityFromProtected`(`bytes`: kotlin.ByteArray)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_restore_vault_identity_from_protected(
+        it,
+        
+        FfiConverterByteArray.lower(`bytes`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `gatewayVaultIdentityReadiness`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_vault_identity_readiness(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `gatewayVaultIdentitySnapshot`(): NativeVaultIdentitySnapshot {
+            return FfiConverterTypeNativeVaultIdentitySnapshot.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_vault_identity_snapshot(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `importVaultIdentityRecoveryKeyFromNativeStorage`(`bytes`: kotlin.ByteArray)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_import_vault_identity_recovery_key_from_native_storage(
+        it,
+        
+        FfiConverterByteArray.lower(`bytes`),_status)
+}
+    }
+    
     
 
     
@@ -13415,6 +13813,49 @@ public object FfiConverterTypeNativePendingAttachmentRetentionOperation: FfiConv
 
 
 
+data class NativePendingRcsCommand (
+    var `commandId`: kotlin.String
+    , 
+    var `conversationId`: kotlin.String
+    , 
+    var `recipient`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativePendingRcsCommand: FfiConverterRustBuffer<NativePendingRcsCommand> {
+    override fun read(buf: ByteBuffer): NativePendingRcsCommand {
+        return NativePendingRcsCommand(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativePendingRcsCommand) = (
+            FfiConverterString.allocationSize(value.`commandId`) +
+            FfiConverterString.allocationSize(value.`conversationId`) +
+            FfiConverterString.allocationSize(value.`recipient`)
+    )
+
+    override fun write(value: NativePendingRcsCommand, buf: ByteBuffer) {
+            FfiConverterString.write(value.`commandId`, buf)
+            FfiConverterString.write(value.`conversationId`, buf)
+            FfiConverterString.write(value.`recipient`, buf)
+    }
+}
+
+
+
 data class NativePendingVaultRequest (
     var `origin`: kotlin.String
     , 
@@ -13843,6 +14284,54 @@ public object FfiConverterTypeNativeRawSnapshotRecord: FfiConverterRustBuffer<Na
 
 
 
+data class NativeRcsContextExpectation (
+    var `ownershipGeneration`: kotlin.ULong
+    , 
+    var `linkGeneration`: kotlin.ULong
+    , 
+    var `sessionGeneration`: kotlin.ULong
+    , 
+    var `contextRevision`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsContextExpectation: FfiConverterRustBuffer<NativeRcsContextExpectation> {
+    override fun read(buf: ByteBuffer): NativeRcsContextExpectation {
+        return NativeRcsContextExpectation(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeRcsContextExpectation) = (
+            FfiConverterULong.allocationSize(value.`ownershipGeneration`) +
+            FfiConverterULong.allocationSize(value.`linkGeneration`) +
+            FfiConverterULong.allocationSize(value.`sessionGeneration`) +
+            FfiConverterULong.allocationSize(value.`contextRevision`)
+    )
+
+    override fun write(value: NativeRcsContextExpectation, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`ownershipGeneration`, buf)
+            FfiConverterULong.write(value.`linkGeneration`, buf)
+            FfiConverterULong.write(value.`sessionGeneration`, buf)
+            FfiConverterULong.write(value.`contextRevision`, buf)
+    }
+}
+
+
+
 data class NativeRcsContextTuple (
     var `linkGeneration`: kotlin.ULong
     , 
@@ -13881,6 +14370,49 @@ public object FfiConverterTypeNativeRcsContextTuple: FfiConverterRustBuffer<Nati
             FfiConverterULong.write(value.`linkGeneration`, buf)
             FfiConverterULong.write(value.`sessionGeneration`, buf)
             FfiConverterULong.write(value.`contextRevision`, buf)
+    }
+}
+
+
+
+data class NativeRcsCutover (
+    var `ownershipGeneration`: kotlin.ULong
+    , 
+    var `freezeDetectorFloor`: kotlin.Long
+    , 
+    var `ambiguousDetectorAlert`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsCutover: FfiConverterRustBuffer<NativeRcsCutover> {
+    override fun read(buf: ByteBuffer): NativeRcsCutover {
+        return NativeRcsCutover(
+            FfiConverterULong.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeRcsCutover) = (
+            FfiConverterULong.allocationSize(value.`ownershipGeneration`) +
+            FfiConverterLong.allocationSize(value.`freezeDetectorFloor`) +
+            FfiConverterBoolean.allocationSize(value.`ambiguousDetectorAlert`)
+    )
+
+    override fun write(value: NativeRcsCutover, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`ownershipGeneration`, buf)
+            FfiConverterLong.write(value.`freezeDetectorFloor`, buf)
+            FfiConverterBoolean.write(value.`ambiguousDetectorAlert`, buf)
     }
 }
 
@@ -13943,6 +14475,39 @@ public object FfiConverterTypeNativeRcsEligibilityProjection: FfiConverterRustBu
             FfiConverterUInt.write(value.`featureBits`, buf)
             FfiConverterULong.write(value.`mappingRevision`, buf)
             FfiConverterLong.write(value.`observedAtMs`, buf)
+    }
+}
+
+
+
+data class NativeRcsEligibilityPublication (
+    var `conversationId`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsEligibilityPublication: FfiConverterRustBuffer<NativeRcsEligibilityPublication> {
+    override fun read(buf: ByteBuffer): NativeRcsEligibilityPublication {
+        return NativeRcsEligibilityPublication(
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeRcsEligibilityPublication) = (
+            FfiConverterString.allocationSize(value.`conversationId`)
+    )
+
+    override fun write(value: NativeRcsEligibilityPublication, buf: ByteBuffer) {
+            FfiConverterString.write(value.`conversationId`, buf)
     }
 }
 
@@ -14075,6 +14640,107 @@ public object FfiConverterTypeNativeRcsLinkStatus: FfiConverterRustBuffer<Native
             FfiConverterULong.write(value.`capabilityRevision`, buf)
             FfiConverterUInt.write(value.`featureBits`, buf)
             FfiConverterOptionalLong.write(value.`expiresAtMs`, buf)
+    }
+}
+
+
+
+data class NativeRcsReceiveContext (
+    var `conversationId`: kotlin.String
+    , 
+    var `googleConversationId`: kotlin.String
+    , 
+    var `ownershipGeneration`: kotlin.ULong
+    , 
+    var `lifecycleGeneration`: kotlin.ULong
+    , 
+    var `owner`: NativeRcsReceiveOwner
+    , 
+    var `historyToken`: kotlin.String?
+    , 
+    var `expectation`: NativeRcsContextExpectation
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsReceiveContext: FfiConverterRustBuffer<NativeRcsReceiveContext> {
+    override fun read(buf: ByteBuffer): NativeRcsReceiveContext {
+        return NativeRcsReceiveContext(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterTypeNativeRcsReceiveOwner.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterTypeNativeRcsContextExpectation.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeRcsReceiveContext) = (
+            FfiConverterString.allocationSize(value.`conversationId`) +
+            FfiConverterString.allocationSize(value.`googleConversationId`) +
+            FfiConverterULong.allocationSize(value.`ownershipGeneration`) +
+            FfiConverterULong.allocationSize(value.`lifecycleGeneration`) +
+            FfiConverterTypeNativeRcsReceiveOwner.allocationSize(value.`owner`) +
+            FfiConverterOptionalString.allocationSize(value.`historyToken`) +
+            FfiConverterTypeNativeRcsContextExpectation.allocationSize(value.`expectation`)
+    )
+
+    override fun write(value: NativeRcsReceiveContext, buf: ByteBuffer) {
+            FfiConverterString.write(value.`conversationId`, buf)
+            FfiConverterString.write(value.`googleConversationId`, buf)
+            FfiConverterULong.write(value.`ownershipGeneration`, buf)
+            FfiConverterULong.write(value.`lifecycleGeneration`, buf)
+            FfiConverterTypeNativeRcsReceiveOwner.write(value.`owner`, buf)
+            FfiConverterOptionalString.write(value.`historyToken`, buf)
+            FfiConverterTypeNativeRcsContextExpectation.write(value.`expectation`, buf)
+    }
+}
+
+
+
+data class NativeRcsUnlinkCutoverGenerations (
+    var `ownershipGeneration`: kotlin.ULong
+    , 
+    var `lifecycleGeneration`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsUnlinkCutoverGenerations: FfiConverterRustBuffer<NativeRcsUnlinkCutoverGenerations> {
+    override fun read(buf: ByteBuffer): NativeRcsUnlinkCutoverGenerations {
+        return NativeRcsUnlinkCutoverGenerations(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeRcsUnlinkCutoverGenerations) = (
+            FfiConverterULong.allocationSize(value.`ownershipGeneration`) +
+            FfiConverterULong.allocationSize(value.`lifecycleGeneration`)
+    )
+
+    override fun write(value: NativeRcsUnlinkCutoverGenerations, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`ownershipGeneration`, buf)
+            FfiConverterULong.write(value.`lifecycleGeneration`, buf)
     }
 }
 
@@ -14698,6 +15364,160 @@ public object FfiConverterTypeNativeSnapshotReport: FfiConverterRustBuffer<Nativ
             FfiConverterULong.write(value.`duplicate`, buf)
             FfiConverterULong.write(value.`quarantined`, buf)
             FfiConverterString.write(value.`receiveCursor`, buf)
+    }
+}
+
+
+
+data class NativeVaultIdentityAdoption (
+    var `kind`: kotlin.String
+    , 
+    var `operationId`: kotlin.String?
+    , 
+    var `protectedAcceptedBytes`: kotlin.ByteArray?
+    , 
+    var `pendingCleanup`: kotlin.Boolean
+    , 
+    var `code`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeVaultIdentityAdoption: FfiConverterRustBuffer<NativeVaultIdentityAdoption> {
+    override fun read(buf: ByteBuffer): NativeVaultIdentityAdoption {
+        return NativeVaultIdentityAdoption(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalByteArray.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeVaultIdentityAdoption) = (
+            FfiConverterString.allocationSize(value.`kind`) +
+            FfiConverterOptionalString.allocationSize(value.`operationId`) +
+            FfiConverterOptionalByteArray.allocationSize(value.`protectedAcceptedBytes`) +
+            FfiConverterBoolean.allocationSize(value.`pendingCleanup`) +
+            FfiConverterOptionalString.allocationSize(value.`code`)
+    )
+
+    override fun write(value: NativeVaultIdentityAdoption, buf: ByteBuffer) {
+            FfiConverterString.write(value.`kind`, buf)
+            FfiConverterOptionalString.write(value.`operationId`, buf)
+            FfiConverterOptionalByteArray.write(value.`protectedAcceptedBytes`, buf)
+            FfiConverterBoolean.write(value.`pendingCleanup`, buf)
+            FfiConverterOptionalString.write(value.`code`, buf)
+    }
+}
+
+
+
+data class NativeVaultIdentityPendingMaterial (
+    var `operationId`: kotlin.String
+    , 
+    var `protectedPendingBytes`: kotlin.ByteArray
+    , 
+    var `establishBodyJson`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeVaultIdentityPendingMaterial: FfiConverterRustBuffer<NativeVaultIdentityPendingMaterial> {
+    override fun read(buf: ByteBuffer): NativeVaultIdentityPendingMaterial {
+        return NativeVaultIdentityPendingMaterial(
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeVaultIdentityPendingMaterial) = (
+            FfiConverterString.allocationSize(value.`operationId`) +
+            FfiConverterByteArray.allocationSize(value.`protectedPendingBytes`) +
+            FfiConverterString.allocationSize(value.`establishBodyJson`)
+    )
+
+    override fun write(value: NativeVaultIdentityPendingMaterial, buf: ByteBuffer) {
+            FfiConverterString.write(value.`operationId`, buf)
+            FfiConverterByteArray.write(value.`protectedPendingBytes`, buf)
+            FfiConverterString.write(value.`establishBodyJson`, buf)
+    }
+}
+
+
+
+data class NativeVaultIdentitySnapshot (
+    var `state`: kotlin.String
+    , 
+    var `ready`: kotlin.Boolean
+    , 
+    var `needsFetch`: kotlin.Boolean
+    , 
+    var `operationId`: kotlin.String?
+    , 
+    var `keyEpoch`: kotlin.UInt?
+    , 
+    var `unavailableCode`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeVaultIdentitySnapshot: FfiConverterRustBuffer<NativeVaultIdentitySnapshot> {
+    override fun read(buf: ByteBuffer): NativeVaultIdentitySnapshot {
+        return NativeVaultIdentitySnapshot(
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeVaultIdentitySnapshot) = (
+            FfiConverterString.allocationSize(value.`state`) +
+            FfiConverterBoolean.allocationSize(value.`ready`) +
+            FfiConverterBoolean.allocationSize(value.`needsFetch`) +
+            FfiConverterOptionalString.allocationSize(value.`operationId`) +
+            FfiConverterOptionalUInt.allocationSize(value.`keyEpoch`) +
+            FfiConverterOptionalString.allocationSize(value.`unavailableCode`)
+    )
+
+    override fun write(value: NativeVaultIdentitySnapshot, buf: ByteBuffer) {
+            FfiConverterString.write(value.`state`, buf)
+            FfiConverterBoolean.write(value.`ready`, buf)
+            FfiConverterBoolean.write(value.`needsFetch`, buf)
+            FfiConverterOptionalString.write(value.`operationId`, buf)
+            FfiConverterOptionalUInt.write(value.`keyEpoch`, buf)
+            FfiConverterOptionalString.write(value.`unavailableCode`, buf)
     }
 }
 
@@ -16849,6 +17669,74 @@ public object FfiConverterTypeNativeRcsMappingVerification: FfiConverterRustBuff
 
 
 
+
+enum class NativeRcsObservationProvenance {
+    
+    LIVE,
+    HISTORICAL;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsObservationProvenance: FfiConverterRustBuffer<NativeRcsObservationProvenance> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeRcsObservationProvenance.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeRcsObservationProvenance) = 4UL
+
+    override fun write(value: NativeRcsObservationProvenance, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class NativeRcsReceiveOwner {
+    
+    LINK,
+    PROVIDER;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsReceiveOwner: FfiConverterRustBuffer<NativeRcsReceiveOwner> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeRcsReceiveOwner.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeRcsReceiveOwner) = 4UL
+
+    override fun write(value: NativeRcsReceiveOwner, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 sealed class NativeRcsTargetDecision {
     
     data class Found(
@@ -17528,6 +18416,38 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
 /**
  * @suppress
  */
+public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteArray?> {
+    override fun read(buf: ByteBuffer): kotlin.ByteArray? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterByteArray.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.ByteArray?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterByteArray.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.ByteArray?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterByteArray.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeNativeAttachmentRetentionProtocolHeader: FfiConverterRustBuffer<NativeAttachmentRetentionProtocolHeader?> {
     override fun read(buf: ByteBuffer): NativeAttachmentRetentionProtocolHeader? {
         if (buf.get().toInt() == 0) {
@@ -17742,6 +18662,70 @@ public object FfiConverterOptionalTypeNativeRcsLinkStatus: FfiConverterRustBuffe
         } else {
             buf.put(1)
             FfiConverterTypeNativeRcsLinkStatus.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeNativeRcsReceiveContext: FfiConverterRustBuffer<NativeRcsReceiveContext?> {
+    override fun read(buf: ByteBuffer): NativeRcsReceiveContext? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNativeRcsReceiveContext.read(buf)
+    }
+
+    override fun allocationSize(value: NativeRcsReceiveContext?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNativeRcsReceiveContext.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NativeRcsReceiveContext?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNativeRcsReceiveContext.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeNativeRcsUnlinkCutoverGenerations: FfiConverterRustBuffer<NativeRcsUnlinkCutoverGenerations?> {
+    override fun read(buf: ByteBuffer): NativeRcsUnlinkCutoverGenerations? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNativeRcsUnlinkCutoverGenerations.read(buf)
+    }
+
+    override fun allocationSize(value: NativeRcsUnlinkCutoverGenerations?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNativeRcsUnlinkCutoverGenerations.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NativeRcsUnlinkCutoverGenerations?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNativeRcsUnlinkCutoverGenerations.write(value, buf)
         }
     }
 }
@@ -18456,6 +19440,34 @@ public object FfiConverterSequenceTypeNativePendingAttachmentRetentionOperation:
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeNativePendingRcsCommand: FfiConverterRustBuffer<List<NativePendingRcsCommand>> {
+    override fun read(buf: ByteBuffer): List<NativePendingRcsCommand> {
+        val len = buf.getInt()
+        return List<NativePendingRcsCommand>(len) {
+            FfiConverterTypeNativePendingRcsCommand.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativePendingRcsCommand>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativePendingRcsCommand.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativePendingRcsCommand>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativePendingRcsCommand.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeNativePhoneReadCandidate: FfiConverterRustBuffer<List<NativePhoneReadCandidate>> {
     override fun read(buf: ByteBuffer): List<NativePhoneReadCandidate> {
         val len = buf.getInt()
@@ -18558,6 +19570,62 @@ public object FfiConverterSequenceTypeNativeRawSnapshotRecord: FfiConverterRustB
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeNativeRawSnapshotRecord.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeNativeRcsEligibilityPublication: FfiConverterRustBuffer<List<NativeRcsEligibilityPublication>> {
+    override fun read(buf: ByteBuffer): List<NativeRcsEligibilityPublication> {
+        val len = buf.getInt()
+        return List<NativeRcsEligibilityPublication>(len) {
+            FfiConverterTypeNativeRcsEligibilityPublication.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativeRcsEligibilityPublication>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativeRcsEligibilityPublication.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativeRcsEligibilityPublication>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativeRcsEligibilityPublication.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeNativeRcsReceiveContext: FfiConverterRustBuffer<List<NativeRcsReceiveContext>> {
+    override fun read(buf: ByteBuffer): List<NativeRcsReceiveContext> {
+        val len = buf.getInt()
+        return List<NativeRcsReceiveContext>(len) {
+            FfiConverterTypeNativeRcsReceiveContext.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativeRcsReceiveContext>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativeRcsReceiveContext.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativeRcsReceiveContext>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativeRcsReceiveContext.write(it, buf)
         }
     }
 }
@@ -19206,6 +20274,18 @@ public object FfiConverterSequenceTypeNativeSmsScanPlan: FfiConverterRustBuffer<
     }
     
 
+    @Throws(MobileBindingsException::class) fun `gatewayPendingNativeRcsCommands`(`client`: NativeClient): List<NativePendingRcsCommand> {
+            return FfiConverterSequenceTypeNativePendingRcsCommand.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_pending_native_rcs_commands(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),_status)
+}
+    )
+    }
+    
+
         /**
          * Captures core-owned stored mapping facts for a trusted native observation.
          */
@@ -19217,6 +20297,20 @@ public object FfiConverterSequenceTypeNativeSmsScanPlan: FfiConverterRustBuffer<
         
         FfiConverterTypeNativeClient.lower(`client`),
         FfiConverterString.lower(`commandId`),
+        FfiConverterLong.lower(`nowMs`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `gatewayPublishRcsEligibility`(`client`: NativeClient, `publications`: List<NativeRcsEligibilityPublication>, `nowMs`: kotlin.Long): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_publish_rcs_eligibility(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterSequenceTypeNativeRcsEligibilityPublication.lower(`publications`),
         FfiConverterLong.lower(`nowMs`),_status)
 }
     )

@@ -75,6 +75,21 @@ pub struct RcsProjectedRecord {
     pub history_token: Option<String>,
 }
 
+/// The acquisition source of an RCS observation. Callers must select this explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RcsObservationProvenance {
+    Live,
+    Historical,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RcsContextExpectation {
+    pub ownership_generation: u64,
+    pub link_generation: u64,
+    pub session_generation: u64,
+    pub context_revision: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RcsReceiveOutcome {
     Inserted,
@@ -142,6 +157,17 @@ pub struct RcsCutover {
     pub ambiguous_detector_alert: bool,
 }
 
+enum CutoverAuthority {
+    Legacy,
+    LinkedGateway {
+        expected_ownership_generation: u64,
+    },
+    OwnerUnlink {
+        expected_ownership_generation: u64,
+        expected_lifecycle_generation: u64,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RcsReceiveAlert {
     None,
@@ -171,6 +197,23 @@ pub struct RcsReceiveState {
     pub proof_time_ms: i64,
     pub observed_detector_high_water: i64,
     pub alert: RcsReceiveAlert,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RcsUnlinkCutoverGenerations {
+    pub ownership_generation: u64,
+    pub lifecycle_generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RcsReceiveContext {
+    pub conversation_id: ConversationId,
+    pub google_conversation_id: String,
+    pub ownership_generation: u64,
+    pub lifecycle_generation: u64,
+    pub owner: RcsReceiveOwner,
+    pub history_token: Option<String>,
+    pub expectation: RcsContextExpectation,
 }
 
 impl Client {
@@ -350,6 +393,49 @@ impl Client {
         ownership_generation: u64,
         record: RcsProjectedRecord,
     ) -> Result<RcsReceiveOutcome, Error> {
+        let provenance = if record.history_token.is_some() {
+            RcsObservationProvenance::Historical
+        } else {
+            RcsObservationProvenance::Live
+        };
+        self.ingest_rcs_projected_record_with_provenance(
+            conversation_id,
+            ownership_generation,
+            record,
+            provenance,
+            true,
+        )
+    }
+
+    pub fn ingest_rcs_projected_observation(
+        &self,
+        conversation_id: ConversationId,
+        ownership_generation: u64,
+        record: RcsProjectedRecord,
+        provenance: RcsObservationProvenance,
+    ) -> Result<RcsReceiveOutcome, Error> {
+        if record.history_token.is_some() {
+            return Err(Error::InvalidRequest(
+                "RCS observations cannot carry a history checkpoint",
+            ));
+        }
+        self.ingest_rcs_projected_record_with_provenance(
+            conversation_id,
+            ownership_generation,
+            record,
+            provenance,
+            false,
+        )
+    }
+
+    fn ingest_rcs_projected_record_with_provenance(
+        &self,
+        conversation_id: ConversationId,
+        ownership_generation: u64,
+        record: RcsProjectedRecord,
+        provenance: RcsObservationProvenance,
+        checkpoint_history_token: bool,
+    ) -> Result<RcsReceiveOutcome, Error> {
         if record.google_message_id.is_empty()
             || record.google_conversation_id.is_empty()
             || record.body.len() > 16_384
@@ -386,7 +472,8 @@ impl Client {
                 RcsReceiveCode::GatewayUnavailable,
             ));
         }
-        if record.history_token.is_some()
+        let historical = provenance == RcsObservationProvenance::Historical;
+        if historical
             && record
                 .sent_at_ms
                 .is_none_or(|sent_at_ms| sent_at_ms <= ownership.proof_time_ms)
@@ -422,7 +509,9 @@ impl Client {
                             record.rcs_reported,
                             record.e2ee_reported,
                         )?;
-                        checkpoint_record(&tx, conversation_id, ownership_generation, record.history_token.as_deref())?;
+                        if checkpoint_history_token {
+                            checkpoint_record(&tx, conversation_id, ownership_generation, record.history_token.as_deref())?;
+                        }
                         tx.commit()?;
                         Ok(RcsReceiveOutcome::OutgoingMatched)
                     }
@@ -435,7 +524,9 @@ impl Client {
                             record.rcs_reported,
                             record.e2ee_reported,
                         )?;
-                        checkpoint_record(&tx, conversation_id, ownership_generation, record.history_token.as_deref())?;
+                        if checkpoint_history_token {
+                            checkpoint_record(&tx, conversation_id, ownership_generation, record.history_token.as_deref())?;
+                        }
                         tx.commit()?;
                         Ok(RcsReceiveOutcome::Duplicate)
                     }
@@ -474,7 +565,7 @@ impl Client {
                     body: record.body,
                     transport: Transport::Rcs,
                     direction: record.direction,
-                    imported: record.history_token.is_some(),
+                    imported: historical,
                     sent_at_ms: record.sent_at_ms,
                     ordered_at_ms: None,
                     mms_context: None,
@@ -528,7 +619,7 @@ impl Client {
                 record.e2ee_reported,
             )?;
         }
-        if let Some(token) = record.history_token {
+        if checkpoint_history_token && let Some(token) = record.history_token {
             checkpoint_record(&tx, conversation_id, ownership_generation, Some(&token))?;
         }
         tx.commit()?;
@@ -687,6 +778,90 @@ impl Client {
         load_receive_state(&self.lock()?.conn, conversation_id)
     }
 
+    pub fn rcs_unlink_cutover_generations(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<RcsUnlinkCutoverGenerations>, Error> {
+        let store = self.lock()?;
+        let Some(ownership) = load_ownership(&store.conn, conversation_id)? else {
+            return Ok(None);
+        };
+        let Some(lifecycle) = crate::rcs_mapping::recorded_link_lifecycle_metadata(&store.conn)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(RcsUnlinkCutoverGenerations {
+            ownership_generation: ownership.ownership_generation,
+            lifecycle_generation: lifecycle.generation,
+        }))
+    }
+
+    pub fn rcs_receive_context(
+        &self,
+        google_conversation_id: &str,
+    ) -> Result<Option<RcsReceiveContext>, Error> {
+        let mut store = self.lock()?;
+        let device_id = store.config.device_id;
+        receive_context_in_transaction(&mut store.conn, device_id, google_conversation_id, || {})
+    }
+
+    pub fn rcs_link_owned_conversations(&self) -> Result<Vec<RcsReceiveContext>, Error> {
+        let mut store = self.lock()?;
+        let device_id = store.config.device_id;
+        let tx = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Deferred)?;
+        if !unique_current_gateway(&tx, device_id)? {
+            return Err(Error::InvalidRequest("local RCS gateway is unavailable"));
+        }
+        let Some(lifecycle) = crate::rcs_mapping::recorded_link_lifecycle_metadata(&tx)? else {
+            return Err(Error::InvalidRequest("local RCS gateway is unavailable"));
+        };
+        if lifecycle.state != crate::RcsCapabilityState::Linked {
+            return Err(Error::InvalidRequest("local RCS gateway is unavailable"));
+        }
+        let rows = {
+            let mut statement = tx.prepare(
+                "SELECT o.conversation_id,m.google_conversation_id,o.ownership_generation,o.history_token FROM rcs_lane_ownership o JOIN rcs_conversation_mappings m ON m.peppy_conversation_id=o.conversation_id WHERE o.owner='link' AND m.invalidated_at_ms IS NULL ORDER BY o.conversation_id LIMIT 100",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if rows.is_empty() {
+            tx.commit()?;
+            return Ok(Vec::new());
+        }
+        let context_tuple = current_context_tuple(&tx)?
+            .ok_or(Error::InvalidRequest("local RCS context is unavailable"))?;
+        let contexts = rows
+            .into_iter()
+            .map(
+                |(conversation_id, google_conversation_id, ownership_generation, history_token)| {
+                    let ownership_generation = ownership_generation as u64;
+                    Ok(RcsReceiveContext {
+                        conversation_id: conversation_id.parse().map_err(|_| Error::Database)?,
+                        google_conversation_id,
+                        ownership_generation,
+                        lifecycle_generation: lifecycle.generation,
+                        owner: RcsReceiveOwner::Link,
+                        history_token,
+                        expectation: context_tuple.with_ownership(ownership_generation),
+                    })
+                },
+            )
+            .collect::<Result<Vec<_>, Error>>()?;
+        tx.commit()?;
+        Ok(contexts)
+    }
+
     /// Records detector metadata only; this method never writes a vault message.
     pub fn record_rcs_provider_detector(
         &self,
@@ -774,6 +949,42 @@ impl Client {
         &self,
         conversation_id: ConversationId,
     ) -> Result<RcsCutover, Error> {
+        self.begin_rcs_unlink_cutover_inner(conversation_id, CutoverAuthority::Legacy)
+    }
+
+    pub fn begin_rcs_unlink_cutover_if_current(
+        &self,
+        conversation_id: ConversationId,
+        expected_ownership_generation: u64,
+    ) -> Result<RcsCutover, Error> {
+        self.begin_rcs_unlink_cutover_inner(
+            conversation_id,
+            CutoverAuthority::LinkedGateway {
+                expected_ownership_generation,
+            },
+        )
+    }
+
+    pub fn begin_rcs_owner_unlink_cutover(
+        &self,
+        conversation_id: ConversationId,
+        expected_ownership_generation: u64,
+        expected_lifecycle_generation: u64,
+    ) -> Result<RcsCutover, Error> {
+        self.begin_rcs_unlink_cutover_inner(
+            conversation_id,
+            CutoverAuthority::OwnerUnlink {
+                expected_ownership_generation,
+                expected_lifecycle_generation,
+            },
+        )
+    }
+
+    fn begin_rcs_unlink_cutover_inner(
+        &self,
+        conversation_id: ConversationId,
+        authority: CutoverAuthority,
+    ) -> Result<RcsCutover, Error> {
         let mut store = self.lock()?;
         let (conn, ctx) = store.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -782,6 +993,35 @@ impl Client {
         };
         if ownership.owner != RcsReceiveOwner::Link {
             return Err(Error::InvalidRequest("RCS link is not the current writer"));
+        }
+        match authority {
+            CutoverAuthority::Legacy => {}
+            CutoverAuthority::LinkedGateway {
+                expected_ownership_generation,
+            } => {
+                if ownership.ownership_generation != expected_ownership_generation {
+                    return Err(Error::InvalidRequest("RCS link is not the current writer"));
+                }
+                if !unique_current_gateway(&tx, ctx.device_id)? {
+                    return Err(Error::InvalidRequest("RCS gateway is not currently linked"));
+                }
+            }
+            CutoverAuthority::OwnerUnlink {
+                expected_ownership_generation,
+                expected_lifecycle_generation,
+            } => {
+                if ownership.ownership_generation != expected_ownership_generation {
+                    return Err(Error::InvalidRequest("RCS link is not the current writer"));
+                }
+                let lifecycle = crate::rcs_mapping::recorded_link_lifecycle_metadata(&tx)?;
+                if lifecycle.is_none_or(|lifecycle| {
+                    lifecycle.state != crate::RcsCapabilityState::Unlinked
+                        || lifecycle.generation != expected_lifecycle_generation
+                }) || !crate::rcs_send::intentional_unlink_is_current(&tx)?
+                {
+                    return Err(Error::InvalidRequest("RCS owner unlink is not current"));
+                }
+            }
         }
         let freeze_detector_floor: i64 = tx.query_row(
             "SELECT MAX(?, ?, COALESCE((SELECT MAX(provider_row_id) FROM rcs_provider_detectors WHERE conversation_id=?), ?))",
@@ -823,6 +1063,166 @@ impl Client {
             ambiguous_detector_alert,
         })
     }
+
+    pub fn invalidate_rcs_context_for_google_event(
+        &self,
+        conversation_id: ConversationId,
+        google_conversation_id: &str,
+        expected: RcsContextExpectation,
+    ) -> Result<u64, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(ownership) = load_ownership(&tx, conversation_id)? else {
+            return Err(Error::NotFound);
+        };
+        if ownership.owner != RcsReceiveOwner::Link
+            || ownership.ownership_generation != expected.ownership_generation
+            || !unique_current_gateway(&tx, ctx.device_id)?
+        {
+            return Err(Error::InvalidRequest("RCS context is not current"));
+        }
+        let context: Option<String> = tx
+            .query_row(
+                "SELECT v FROM metadata WHERE k='rcs_mapping_context_v1'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(context) = context else {
+            return Err(Error::InvalidRequest("RCS context is not current"));
+        };
+        let mut context: serde_json::Value =
+            serde_json::from_str(&context).map_err(|_| Error::Database)?;
+        let Some(object) = context.as_object_mut() else {
+            return Err(Error::Database);
+        };
+        let matches_context = [
+            ("link_generation", expected.link_generation),
+            ("session_generation", expected.session_generation),
+            ("context_revision", expected.context_revision),
+        ]
+        .into_iter()
+        .all(|(key, expected)| {
+            object.get(key).and_then(serde_json::Value::as_u64) == Some(expected)
+        }) && object.get("link_state").and_then(serde_json::Value::as_u64)
+            == Some(0);
+        if !matches_context {
+            return Err(Error::InvalidRequest("RCS context is not current"));
+        }
+        let targets_mapping: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM rcs_conversation_mappings WHERE peppy_conversation_id=? AND google_conversation_id=? AND invalidated_at_ms IS NULL)",
+            params![conversation_id.to_string(), google_conversation_id],
+            |row| row.get(0),
+        )?;
+        if !targets_mapping {
+            return Err(Error::InvalidRequest("RCS mapping is not current"));
+        }
+        let revision = expected
+            .context_revision
+            .checked_add(1)
+            .ok_or(Error::InvalidRequest("RCS context revision exhausted"))?;
+        object.insert("context_revision".into(), serde_json::Value::from(revision));
+        tx.execute(
+            "UPDATE metadata SET v=? WHERE k='rcs_mapping_context_v1'",
+            [serde_json::to_string(&context).map_err(|_| Error::Database)?],
+        )?;
+        crate::rcs_mapping::invalidate_mapping(&tx, conversation_id, "google_event")?;
+        tx.commit()?;
+        Ok(revision)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StoredRcsContextTuple {
+    link_generation: u64,
+    session_generation: u64,
+    context_revision: u64,
+}
+
+impl StoredRcsContextTuple {
+    fn with_ownership(self, ownership_generation: u64) -> RcsContextExpectation {
+        RcsContextExpectation {
+            ownership_generation,
+            link_generation: self.link_generation,
+            session_generation: self.session_generation,
+            context_revision: self.context_revision,
+        }
+    }
+}
+
+fn current_context_tuple(conn: &Connection) -> Result<Option<StoredRcsContextTuple>, Error> {
+    let context: Option<String> = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k='rcs_mapping_context_v1'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(context) = context else {
+        return Ok(None);
+    };
+    let context: serde_json::Value = serde_json::from_str(&context).map_err(|_| Error::Database)?;
+    let object = context.as_object().ok_or(Error::Database)?;
+    if object.get("link_state").and_then(serde_json::Value::as_u64) != Some(0) {
+        return Ok(None);
+    }
+    let value = |key| {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(Error::Database)
+    };
+    Ok(Some(StoredRcsContextTuple {
+        link_generation: value("link_generation")?,
+        session_generation: value("session_generation")?,
+        context_revision: value("context_revision")?,
+    }))
+}
+
+fn receive_context_in_transaction(
+    conn: &mut Connection,
+    device_id: DeviceId,
+    google_conversation_id: &str,
+    after_authority_read: impl FnOnce(),
+) -> Result<Option<RcsReceiveContext>, Error> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+    if !unique_current_gateway(&tx, device_id)? {
+        return Err(Error::InvalidRequest("local RCS gateway is unavailable"));
+    }
+    let Some(lifecycle) = crate::rcs_mapping::recorded_link_lifecycle_metadata(&tx)? else {
+        return Err(Error::InvalidRequest("local RCS gateway is unavailable"));
+    };
+    if lifecycle.state != crate::RcsCapabilityState::Linked {
+        return Err(Error::InvalidRequest("local RCS gateway is unavailable"));
+    }
+    after_authority_read();
+    let row: Option<(String, String, i64, Option<String>)> = tx
+        .query_row(
+            "SELECT o.conversation_id,m.google_conversation_id,o.ownership_generation,o.history_token FROM rcs_lane_ownership o JOIN rcs_conversation_mappings m ON m.peppy_conversation_id=o.conversation_id WHERE m.google_conversation_id=? AND m.invalidated_at_ms IS NULL AND o.owner='link'",
+            [google_conversation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((conversation_id, google_conversation_id, ownership_generation, history_token)) = row
+    else {
+        tx.commit()?;
+        return Ok(None);
+    };
+    let context_tuple = current_context_tuple(&tx)?
+        .ok_or(Error::InvalidRequest("local RCS context is unavailable"))?;
+    let ownership_generation = ownership_generation as u64;
+    let context = RcsReceiveContext {
+        conversation_id: conversation_id.parse().map_err(|_| Error::Database)?,
+        google_conversation_id,
+        ownership_generation,
+        lifecycle_generation: lifecycle.generation,
+        owner: RcsReceiveOwner::Link,
+        history_token,
+        expectation: context_tuple.with_ownership(ownership_generation),
+    };
+    tx.commit()?;
+    Ok(Some(context))
 }
 
 fn valid_token(token: &str) -> bool {
@@ -1285,5 +1685,130 @@ mod tests {
                 (5, true)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod receive_context_snapshot_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn receive_context_uses_one_snapshot_across_authority_and_mapping_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("receive-context-snapshot.sqlite");
+        let mut reader = Connection::open(&path).unwrap();
+        reader.pragma_update(None, "journal_mode", "WAL").unwrap();
+        reader
+            .execute_batch(
+                "CREATE TABLE metadata(k TEXT PRIMARY KEY,v TEXT NOT NULL);
+                 CREATE TABLE rcs_link_status_projection(gateway_device_id TEXT PRIMARY KEY,state TEXT NOT NULL,availability INTEGER NOT NULL,health INTEGER NOT NULL,phone_responsive INTEGER NOT NULL,observed_at_ms INTEGER NOT NULL);
+                 CREATE TABLE rcs_lane_ownership(conversation_id TEXT PRIMARY KEY,owner TEXT NOT NULL,ownership_generation INTEGER NOT NULL,history_token TEXT);
+                 CREATE TABLE rcs_conversation_mappings(peppy_conversation_id TEXT PRIMARY KEY,google_conversation_id TEXT NOT NULL,invalidated_at_ms INTEGER);",
+            )
+            .unwrap();
+        let device_id = DeviceId::new();
+        let conversation_id = ConversationId::new();
+        let now_ms = crate::notifications::now_ms();
+        reader
+            .execute(
+                "INSERT INTO rcs_link_status_projection VALUES(?,?,?,?,?,?)",
+                params![device_id.to_string(), "linked", true, true, true, now_ms],
+            )
+            .unwrap();
+        for (key, value) in [
+            ("rcs_link_lifecycle_v1", "\"linked\""),
+            ("rcs_link_lifecycle_observed_at_ms_v1", &now_ms.to_string()),
+            ("rcs_link_lifecycle_generation_v1", "1"),
+        ] {
+            reader
+                .execute("INSERT INTO metadata(k,v) VALUES(?,?)", params![key, value])
+                .unwrap();
+        }
+        reader
+            .execute(
+                "INSERT INTO metadata(k,v) VALUES('rcs_mapping_context_v1',?)",
+                [serde_json::json!({
+                    "link_generation": 3,
+                    "session_generation": 4,
+                    "context_revision": 5,
+                    "link_state": 0
+                })
+                .to_string()],
+            )
+            .unwrap();
+        reader
+            .execute(
+                "INSERT INTO rcs_lane_ownership VALUES(?,'link',7,'page-token')",
+                [conversation_id.to_string()],
+            )
+            .unwrap();
+        reader
+            .execute(
+                "INSERT INTO rcs_conversation_mappings VALUES(?,'google-conversation',NULL)",
+                [conversation_id.to_string()],
+            )
+            .unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let writer_barrier = barrier.clone();
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            let writer = Connection::open(writer_path).unwrap();
+            writer_barrier.wait();
+            writer
+                .execute(
+                    "UPDATE rcs_conversation_mappings SET invalidated_at_ms=?",
+                    [now_ms + 1],
+                )
+                .unwrap();
+            writer
+                .execute(
+                    "UPDATE metadata SET v='2' WHERE k='rcs_link_lifecycle_generation_v1'",
+                    [],
+                )
+                .unwrap();
+            writer
+                .execute(
+                    "UPDATE metadata SET v=? WHERE k='rcs_mapping_context_v1'",
+                    [serde_json::json!({
+                        "link_generation": 30,
+                        "session_generation": 40,
+                        "context_revision": 50,
+                        "link_state": 0
+                    })
+                    .to_string()],
+                )
+                .unwrap();
+            writer_barrier.wait();
+        });
+        let read_barrier = barrier.clone();
+        let context = receive_context_in_transaction(
+            &mut reader,
+            device_id,
+            "google-conversation",
+            move || {
+                read_barrier.wait();
+                read_barrier.wait();
+            },
+        )
+        .unwrap()
+        .unwrap();
+        writer.join().unwrap();
+
+        assert_eq!(context.conversation_id, conversation_id);
+        assert_eq!(context.google_conversation_id, "google-conversation");
+        assert_eq!(context.ownership_generation, 7);
+        assert_eq!(context.lifecycle_generation, 1);
+        assert_eq!(context.history_token.as_deref(), Some("page-token"));
+        assert_eq!(
+            context.expectation,
+            RcsContextExpectation {
+                ownership_generation: 7,
+                link_generation: 3,
+                session_generation: 4,
+                context_revision: 5,
+            }
+        );
     }
 }

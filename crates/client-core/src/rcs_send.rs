@@ -291,7 +291,7 @@ pub(crate) fn record_intentional_unlink(
     Ok(())
 }
 
-fn intentional_unlink_is_current(conn: &Connection) -> Result<bool, Error> {
+pub(crate) fn intentional_unlink_is_current(conn: &Connection) -> Result<bool, Error> {
     let value = conn
         .query_row(
             "SELECT v FROM metadata WHERE k=?",

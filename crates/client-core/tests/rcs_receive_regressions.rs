@@ -102,6 +102,214 @@ fn receive_snapshot(
     ).unwrap()
 }
 
+fn lifecycle_generation(config: &ClientConfig) -> u64 {
+    sql(config)
+        .query_row(
+            "SELECT CAST(v AS INTEGER) FROM metadata WHERE k='rcs_link_lifecycle_generation_v1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn record_terminal_unlink(client: &Client, config: &ClientConfig) -> u64 {
+    let observed_at_ms = now();
+    client
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            observed_at_ms,
+            observed_at_ms,
+        )
+        .unwrap();
+    client
+        .record_rcs_explicit_unlink_completed(observed_at_ms, observed_at_ms)
+        .unwrap();
+    lifecycle_generation(config)
+}
+
+#[test]
+fn deferred_observations_require_explicit_provenance_and_never_checkpoint() {
+    let (_dir, _vault, config, client, conversation, owner) = fixture();
+    let connection = sql(&config);
+    let proof_time: i64 = connection
+        .query_row(
+            "SELECT proof_time_ms FROM rcs_lane_ownership WHERE conversation_id=?",
+            [conversation.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let before = receive_snapshot(&connection, conversation);
+    let mut checkpointed = record("checkpointed");
+    checkpointed.history_token = Some("page".into());
+    assert!(matches!(
+        client.ingest_rcs_projected_observation(
+            conversation,
+            owner.ownership_generation,
+            checkpointed,
+            RcsObservationProvenance::Live,
+        ),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert_eq!(receive_snapshot(&connection, conversation), before);
+
+    let mut historical = record("historical");
+    historical.sent_at_ms = Some(proof_time + 1);
+    assert_eq!(
+        client
+            .ingest_rcs_projected_observation(
+                conversation,
+                owner.ownership_generation,
+                historical,
+                RcsObservationProvenance::Historical,
+            )
+            .unwrap(),
+        RcsReceiveOutcome::Inserted
+    );
+    assert_eq!(
+        client
+            .rcs_receive_state(conversation)
+            .unwrap()
+            .unwrap()
+            .history_token,
+        Some("initial".into())
+    );
+}
+
+#[test]
+fn fenced_unlink_cutover_rejects_stale_generation_without_mutation() {
+    let (_dir, _vault, config, client, conversation, owner) = fixture();
+    let connection = sql(&config);
+    let before = receive_snapshot(&connection, conversation);
+    assert!(matches!(
+        client.begin_rcs_unlink_cutover_if_current(conversation, owner.ownership_generation + 1),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert_eq!(receive_snapshot(&connection, conversation), before);
+    assert_eq!(
+        client
+            .begin_rcs_unlink_cutover_if_current(conversation, owner.ownership_generation)
+            .unwrap()
+            .owner,
+        RcsReceiveOwner::Provider
+    );
+}
+
+#[test]
+fn owner_unlink_cutover_requires_current_durable_completion_and_is_replay_safe() {
+    let (_dir, _vault, config, client, conversation, owner) = fixture();
+    let connection = sql(&config);
+    let observed_at_ms = now();
+    client
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            observed_at_ms,
+            observed_at_ms,
+        )
+        .unwrap();
+    let lifecycle_generation = lifecycle_generation(&config);
+    let before = receive_snapshot(&connection, conversation);
+    assert!(matches!(
+        client.begin_rcs_owner_unlink_cutover(
+            conversation,
+            owner.ownership_generation,
+            lifecycle_generation,
+        ),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert_eq!(receive_snapshot(&connection, conversation), before);
+    client
+        .record_rcs_explicit_unlink_completed(observed_at_ms, observed_at_ms)
+        .unwrap();
+    let cutover = client
+        .begin_rcs_owner_unlink_cutover(
+            conversation,
+            owner.ownership_generation,
+            lifecycle_generation,
+        )
+        .unwrap();
+    assert_eq!(cutover.owner, RcsReceiveOwner::Provider);
+    let after = receive_snapshot(&connection, conversation);
+    assert!(matches!(
+        client.begin_rcs_owner_unlink_cutover(
+            conversation,
+            owner.ownership_generation,
+            lifecycle_generation,
+        ),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert_eq!(receive_snapshot(&connection, conversation), after);
+}
+
+#[test]
+fn owner_unlink_cutover_is_fenced_by_lifecycle_and_preserves_outage_high_water() {
+    let (_dir, _vault, config, client, conversation, owner) = fixture();
+    client
+        .record_rcs_provider_detector(
+            conversation,
+            owner.ownership_generation,
+            RcsProviderDetector {
+                provider_row_id: 9,
+                provider_thread_id: 1,
+                provider_type: 1,
+                observed_at_ms: now(),
+                observed_generation: 1,
+            },
+        )
+        .unwrap();
+    let lifecycle_generation = record_terminal_unlink(&client, &config);
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, now(), now())
+        .unwrap();
+    let before = receive_snapshot(&sql(&config), conversation);
+    assert!(matches!(
+        client.begin_rcs_owner_unlink_cutover(
+            conversation,
+            owner.ownership_generation,
+            lifecycle_generation,
+        ),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert_eq!(receive_snapshot(&sql(&config), conversation), before);
+
+    let lifecycle_generation = record_terminal_unlink(&client, &config);
+    let cutover = client
+        .begin_rcs_owner_unlink_cutover(
+            conversation,
+            owner.ownership_generation,
+            lifecycle_generation,
+        )
+        .unwrap();
+    assert_eq!(cutover.freeze_detector_floor, 9);
+}
+
+#[test]
+fn terminal_lifecycle_publication_never_moves_link_owned_lanes() {
+    for state in [
+        RcsCapabilityState::Unlinked,
+        RcsCapabilityState::SignedOut,
+        RcsCapabilityState::NeedsRelink,
+    ] {
+        let (_dir, _vault, config, client, conversation, owner) = fixture();
+        client
+            .record_rcs_link_lifecycle(state, false, false, false, now(), now())
+            .unwrap();
+        let ownership: (String, u64) = sql(&config)
+            .query_row(
+                "SELECT owner,ownership_generation FROM rcs_lane_ownership WHERE conversation_id=?",
+                [conversation.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(ownership, ("link".into(), owner.ownership_generation));
+    }
+}
+
 fn install_echo_ledger(connection: &Connection, message_id: MessageId) {
     let command_id = CommandId::new();
     connection
@@ -1383,4 +1591,735 @@ fn gateway_unavailable_alert_and_metadata_roll_back_together_on_publication_fail
         RcsReceiveOutcome::Rejected(RcsReceiveCode::GatewayUnavailable)
     );
     assert_eq!(metadata_flags(&client, conversation), (Some(true), true));
+}
+
+fn mapping_observation(observed_at_ms: i64) -> RcsMappingObservation {
+    let outgoing = NativeRcsOutgoing {
+        outgoing_id: "google-outgoing".into(),
+        sim_participant_id: "google-outgoing".into(),
+        own_identity_raw: "+12025550100".into(),
+        sim_payload: NativeRcsSimPayload {
+            two: 2,
+            sim_number: 7,
+        },
+        rcs_chats_enabled: true,
+    };
+    RcsMappingObservation {
+        google_conversation_id: "google-conversation".into(),
+        google_candidate_count: 1,
+        participants: vec![RcsParticipantObservation {
+            identity: "raw-peer".into(),
+            google_participant_id: "google-peer".into(),
+            identifier_type: 1,
+            is_visible: true,
+            is_me: false,
+        }],
+        conversation_type: RcsConversationType::Rcs,
+        status: "eligible".into(),
+        send_mode: RcsSendMode::Automatic,
+        read_only: false,
+        default_outgoing: true,
+        selected_sim_id: "android-subscription-7".into(),
+        selected_sim_own_identity: "+12025550100".into(),
+        carrier_binding: NativeCarrierRouteBinding {
+            carrier_route_id: "android-subscription-7".into(),
+            android_subscription_id: 7,
+            is_current_default_sms: true,
+            own_number_raw: "+12025550100".into(),
+            own_number_source: NativeOwnNumberSource::SubscriptionManagerPhoneNumber,
+            route_observed_at_ms: observed_at_ms,
+            route_context_revision: 1,
+            same_handset_evidence_id: "verified-handset".into(),
+        },
+        outgoing: outgoing.clone(),
+        native_evidence: NativeRcsEvidence {
+            lifetime: NativeRcsLifetime {
+                runtime_id: "runtime".into(),
+                run_generation: 1,
+                link_generation: 4,
+                session_generation: 7,
+                context_revision: 1,
+            },
+            lookup_id: "lookup".into(),
+            lookup_complete: true,
+            google_candidate_count: 1,
+            settings_revision: 1,
+            settings_provenance: NativeSettingsProvenance::CurrentEvent,
+            settings_observed_at_ms: observed_at_ms,
+            settings_stream_epoch: 1,
+            settings_currentness: NativeSettingsCurrentness::ContinuousVerifiedFeed,
+            current_settings_sims: vec![outgoing],
+            settings_validated_at_ms: observed_at_ms,
+            conversation_observed_at_ms: observed_at_ms,
+        },
+        identity_region: "ZZ".into(),
+        observed_at_ms,
+        link_generation: 4,
+        session_generation: 7,
+        context_revision: 1,
+        canonicalizer_revision: 1,
+        mapping_revision: 1,
+        link_state: RcsLinkState::Linked,
+    }
+}
+
+fn mapped_fixture() -> (
+    tempfile::TempDir,
+    Vault,
+    ClientConfig,
+    Client,
+    ConversationId,
+    RcsOwnership,
+    RcsContextExpectation,
+) {
+    let (directory, vault, config, client, conversation, ownership) = fixture();
+    client
+        .capture_incoming(IncomingSms {
+            conversation_id: Some(conversation),
+            sender_address: "raw-peer".into(),
+            body: String::new(),
+            provider_message_id: Some("mapping-participant".into()),
+            imported: true,
+        })
+        .unwrap();
+    let observed_at_ms = now();
+    assert!(matches!(
+        client
+            .verify_rcs_mapping(&mapping_observation(observed_at_ms), observed_at_ms)
+            .unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    let ownership_generation = ownership.ownership_generation;
+    (
+        directory,
+        vault,
+        config,
+        client,
+        conversation,
+        ownership,
+        RcsContextExpectation {
+            ownership_generation,
+            link_generation: 4,
+            session_generation: 7,
+            context_revision: 1,
+        },
+    )
+}
+
+#[derive(Debug, PartialEq)]
+struct ContextInvalidationSnapshot {
+    ownership: (String, u64, Option<String>, i64, i64, i64, Option<String>),
+    context: Option<String>,
+    mappings: Vec<(String, String, Option<i64>)>,
+    outbox: i64,
+}
+
+fn context_invalidation_snapshot(
+    connection: &Connection,
+    conversation: ConversationId,
+) -> ContextInvalidationSnapshot {
+    let key = conversation.to_string();
+    let ownership = connection
+        .query_row(
+            "SELECT owner,ownership_generation,history_token,detector_floor,proof_time_ms,observed_detector_high_water,alert_code FROM rcs_lane_ownership WHERE conversation_id=?",
+            [key.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+        )
+        .unwrap();
+    let context = connection
+        .query_row(
+            "SELECT v FROM metadata WHERE k='rcs_mapping_context_v1'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    let mut statement = connection
+        .prepare("SELECT peppy_conversation_id,google_conversation_id,invalidated_at_ms FROM rcs_conversation_mappings ORDER BY peppy_conversation_id,google_conversation_id")
+        .unwrap();
+    let mappings = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    ContextInvalidationSnapshot {
+        ownership,
+        context,
+        mappings,
+        outbox: connection
+            .query_row("SELECT COUNT(*) FROM outbox", [], |row| row.get(0))
+            .unwrap(),
+    }
+}
+
+fn replace_context_field(connection: &Connection, field: &str, value: u64) {
+    let encoded: String = connection
+        .query_row(
+            "SELECT v FROM metadata WHERE k='rcs_mapping_context_v1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut context: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+    context[field] = serde_json::Value::from(value);
+    connection
+        .execute(
+            "UPDATE metadata SET v=? WHERE k='rcs_mapping_context_v1'",
+            [serde_json::to_string(&context).unwrap()],
+        )
+        .unwrap();
+}
+
+#[test]
+fn google_event_invalidation_bumps_once_and_replay_is_write_free() {
+    let (_directory, _vault, config, client, conversation, _ownership, expected) = mapped_fixture();
+    let connection = sql(&config);
+    assert_eq!(
+        client
+            .invalidate_rcs_context_for_google_event(conversation, "google-conversation", expected,)
+            .unwrap(),
+        2
+    );
+    let after = context_invalidation_snapshot(&connection, conversation);
+    assert!(after.mappings.iter().all(|mapping| mapping.2.is_some()));
+    let context: serde_json::Value =
+        serde_json::from_str(after.context.as_deref().unwrap()).unwrap();
+    assert_eq!(context["context_revision"].as_u64(), Some(2));
+    assert!(matches!(
+        client.invalidate_rcs_context_for_google_event(
+            conversation,
+            "google-conversation",
+            expected,
+        ),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert_eq!(
+        context_invalidation_snapshot(&connection, conversation),
+        after
+    );
+}
+
+#[test]
+fn google_event_invalidation_rejects_each_stale_context_field_without_writes() {
+    for field in ["link_generation", "session_generation", "context_revision"] {
+        let (_directory, _vault, config, client, conversation, _ownership, expected) =
+            mapped_fixture();
+        let connection = sql(&config);
+        replace_context_field(&connection, field, 99);
+        let before = context_invalidation_snapshot(&connection, conversation);
+        assert!(matches!(
+            client.invalidate_rcs_context_for_google_event(
+                conversation,
+                "google-conversation",
+                expected,
+            ),
+            Err(Error::InvalidRequest(_))
+        ));
+        assert_eq!(
+            context_invalidation_snapshot(&connection, conversation),
+            before,
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn google_event_invalidation_rejects_stale_ownership_mapping_and_cutover_without_writes() {
+    for scenario in ["ownership", "mapping", "deleted", "cutover"] {
+        let (_directory, _vault, config, client, conversation, ownership, expected) =
+            mapped_fixture();
+        let connection = sql(&config);
+        match scenario {
+            "ownership" => {
+                client
+                    .begin_rcs_link_ownership(conversation, "new-owner", 0)
+                    .unwrap();
+            }
+            "mapping" => {
+                connection
+                    .execute(
+                        "UPDATE rcs_conversation_mappings SET google_conversation_id='other-google' WHERE peppy_conversation_id=?",
+                        [conversation.to_string()],
+                    )
+                    .unwrap();
+            }
+            "deleted" => {
+                connection
+                    .execute(
+                        "DELETE FROM rcs_mapping_proofs WHERE peppy_conversation_id=?",
+                        [conversation.to_string()],
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "DELETE FROM rcs_conversation_mappings WHERE peppy_conversation_id=?",
+                        [conversation.to_string()],
+                    )
+                    .unwrap();
+            }
+            "cutover" => {
+                client
+                    .begin_rcs_unlink_cutover_if_current(
+                        conversation,
+                        ownership.ownership_generation,
+                    )
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = context_invalidation_snapshot(&connection, conversation);
+        assert!(matches!(
+            client.invalidate_rcs_context_for_google_event(
+                conversation,
+                "google-conversation",
+                expected,
+            ),
+            Err(Error::InvalidRequest(_))
+        ));
+        assert_eq!(
+            context_invalidation_snapshot(&connection, conversation),
+            before,
+            "{scenario}"
+        );
+    }
+}
+
+#[test]
+fn google_event_invalidation_rejects_revision_overflow_without_writes() {
+    let (_directory, _vault, config, client, conversation, ownership, mut expected) =
+        mapped_fixture();
+    let connection = sql(&config);
+    replace_context_field(&connection, "context_revision", u64::MAX);
+    expected.ownership_generation = ownership.ownership_generation;
+    expected.context_revision = u64::MAX;
+    let before = context_invalidation_snapshot(&connection, conversation);
+    assert!(matches!(
+        client.invalidate_rcs_context_for_google_event(
+            conversation,
+            "google-conversation",
+            expected,
+        ),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert_eq!(
+        context_invalidation_snapshot(&connection, conversation),
+        before
+    );
+}
+
+#[test]
+fn google_event_invalidation_rolls_back_context_when_mapping_update_aborts() {
+    let (_directory, _vault, config, client, conversation, _ownership, expected) = mapped_fixture();
+    let connection = sql(&config);
+    let before = context_invalidation_snapshot(&connection, conversation);
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_mapping_invalidation BEFORE UPDATE ON rcs_conversation_mappings BEGIN SELECT RAISE(ABORT, 'reject'); END;",
+        )
+        .unwrap();
+    assert!(
+        client
+            .invalidate_rcs_context_for_google_event(conversation, "google-conversation", expected,)
+            .is_err()
+    );
+    assert_eq!(
+        context_invalidation_snapshot(&connection, conversation),
+        before
+    );
+}
+
+fn assert_initial_checkpoint(client: &Client, conversation: ConversationId) {
+    assert_eq!(
+        client
+            .rcs_receive_state(conversation)
+            .unwrap()
+            .unwrap()
+            .history_token
+            .as_deref(),
+        Some("initial")
+    );
+}
+
+fn proof_time(connection: &Connection, conversation: ConversationId) -> i64 {
+    connection
+        .query_row(
+            "SELECT proof_time_ms FROM rcs_lane_ownership WHERE conversation_id=?",
+            [conversation.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn observe(
+    client: &Client,
+    conversation: ConversationId,
+    generation: u64,
+    id: &str,
+    sent_at_ms: Option<i64>,
+    provenance: RcsObservationProvenance,
+) -> Result<RcsReceiveOutcome, Error> {
+    let mut observation = record(id);
+    observation.sent_at_ms = sent_at_ms;
+    client.ingest_rcs_projected_observation(conversation, generation, observation, provenance)
+}
+
+#[test]
+fn explicit_historical_provenance_enforces_strict_floor_and_imported_semantics() {
+    let (_directory, _vault, config, client, conversation, owner) = fixture();
+    let connection = sql(&config);
+    let floor = proof_time(&connection, conversation);
+    let before = receive_snapshot(&connection, conversation);
+    for (id, sent_at_ms) in [
+        ("equal", Some(floor)),
+        ("older", Some(floor - 1)),
+        ("missing", None),
+    ] {
+        assert!(matches!(
+            observe(
+                &client,
+                conversation,
+                owner.ownership_generation,
+                id,
+                sent_at_ms,
+                RcsObservationProvenance::Historical,
+            ),
+            Ok(RcsReceiveOutcome::Rejected(RcsReceiveCode::ProviderFloor))
+        ));
+        assert_eq!(receive_snapshot(&connection, conversation), before);
+    }
+    assert_eq!(
+        observe(
+            &client,
+            conversation,
+            owner.ownership_generation,
+            "historical-floor-plus-one",
+            Some(floor + 1),
+            RcsObservationProvenance::Historical,
+        )
+        .unwrap(),
+        RcsReceiveOutcome::Inserted
+    );
+    assert!(only_message(&client, conversation).seen);
+    assert_eq!(
+        client
+            .rcs_receive_state(conversation)
+            .unwrap()
+            .unwrap()
+            .history_token
+            .as_deref(),
+        Some("initial")
+    );
+
+    let (_directory, _vault, config, client, conversation, owner) = fixture();
+    let floor = proof_time(&sql(&config), conversation);
+    assert_eq!(
+        observe(
+            &client,
+            conversation,
+            owner.ownership_generation,
+            "live-at-old-time",
+            Some(floor - 1),
+            RcsObservationProvenance::Live,
+        )
+        .unwrap(),
+        RcsReceiveOutcome::Inserted
+    );
+    assert!(!only_message(&client, conversation).seen);
+}
+
+#[test]
+fn live_then_historical_duplicate_preserves_first_created_payload() {
+    let (_directory, _vault, config, client, conversation, owner) = fixture();
+    let floor = proof_time(&sql(&config), conversation);
+    assert_eq!(
+        observe(
+            &client,
+            conversation,
+            owner.ownership_generation,
+            "same",
+            Some(floor + 1),
+            RcsObservationProvenance::Live,
+        )
+        .unwrap(),
+        RcsReceiveOutcome::Inserted
+    );
+    let before = only_message(&client, conversation);
+    assert!(!before.seen);
+    assert_eq!(
+        observe(
+            &client,
+            conversation,
+            owner.ownership_generation,
+            "same",
+            Some(floor + 2),
+            RcsObservationProvenance::Historical,
+        )
+        .unwrap(),
+        RcsReceiveOutcome::Duplicate
+    );
+    let after = only_message(&client, conversation);
+    assert_eq!(after.payload.body, before.payload.body);
+    assert!(!after.seen);
+    assert_initial_checkpoint(&client, conversation);
+}
+
+#[test]
+fn historical_then_live_duplicate_preserves_first_created_payload() {
+    let (_directory, _vault, config, client, conversation, owner) = fixture();
+    let floor = proof_time(&sql(&config), conversation);
+    assert_eq!(
+        observe(
+            &client,
+            conversation,
+            owner.ownership_generation,
+            "same",
+            Some(floor + 1),
+            RcsObservationProvenance::Historical,
+        )
+        .unwrap(),
+        RcsReceiveOutcome::Inserted
+    );
+    let before = only_message(&client, conversation);
+    assert!(before.seen);
+    assert_eq!(
+        observe(
+            &client,
+            conversation,
+            owner.ownership_generation,
+            "same",
+            Some(floor + 2),
+            RcsObservationProvenance::Live,
+        )
+        .unwrap(),
+        RcsReceiveOutcome::Duplicate
+    );
+    let after = only_message(&client, conversation);
+    assert_eq!(after.payload.body, before.payload.body);
+    assert!(after.seen);
+    assert_initial_checkpoint(&client, conversation);
+}
+
+#[test]
+fn historical_outgoing_match_preserves_outgoing_message_payload_and_checkpoint() {
+    let (_directory, _vault, config, client, conversation, owner) = fixture();
+    client
+        .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("seed"))
+        .unwrap();
+    let message = only_message(&client, conversation);
+    let message_id = message.payload.record.message_id;
+    let original_body = message.payload.body.clone();
+    let connection = sql(&config);
+    install_echo_ledger(&connection, message_id);
+    let floor = proof_time(&connection, conversation);
+    let mut echo = record("echo-observation");
+    echo.direction = Direction::Outgoing;
+    echo.tmp_id = Some("tmp".into());
+    echo.body = "must-not-replace-outgoing".into();
+    echo.sent_at_ms = Some(floor + 1);
+    assert_eq!(
+        client
+            .ingest_rcs_projected_observation(
+                conversation,
+                owner.ownership_generation,
+                echo,
+                RcsObservationProvenance::Historical,
+            )
+            .unwrap(),
+        RcsReceiveOutcome::OutgoingMatched
+    );
+    assert_eq!(
+        only_message(&client, conversation).payload.body,
+        original_body
+    );
+    assert_eq!(
+        client
+            .rcs_receive_state(conversation)
+            .unwrap()
+            .unwrap()
+            .history_token
+            .as_deref(),
+        Some("initial")
+    );
+}
+
+#[derive(Debug, PartialEq)]
+struct CutoverSnapshot {
+    ownership: (String, u64, Option<String>, i64, i64, i64, Option<String>),
+    outbox: i64,
+    metadata: Option<(Option<i64>, bool, i64, String, i64)>,
+}
+
+fn cutover_snapshot(connection: &Connection, conversation: ConversationId) -> CutoverSnapshot {
+    CutoverSnapshot {
+        ownership: connection
+            .query_row(
+                "SELECT owner,ownership_generation,history_token,detector_floor,proof_time_ms,observed_detector_high_water,alert_code FROM rcs_lane_ownership WHERE conversation_id=?",
+                [conversation.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+            )
+            .unwrap(),
+        outbox: connection
+            .query_row("SELECT COUNT(*) FROM outbox", [], |row| row.get(0))
+            .unwrap(),
+        metadata: connection
+            .query_row(
+                "SELECT rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,source_sequence FROM rcs_conversation_metadata WHERE conversation_id=?",
+                [conversation.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .ok(),
+    }
+}
+
+#[test]
+fn owner_cutover_lifecycle_generation_fence_alone_rejects_without_writes() {
+    let (_directory, _vault, config, client, conversation, owner) = fixture();
+    let lifecycle_generation = record_terminal_unlink(&client, &config);
+    let connection = sql(&config);
+    let before = cutover_snapshot(&connection, conversation);
+    assert!(matches!(
+        client.begin_rcs_owner_unlink_cutover(
+            conversation,
+            owner.ownership_generation,
+            lifecycle_generation + 1,
+        ),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert_eq!(cutover_snapshot(&connection, conversation), before);
+}
+
+#[test]
+fn owner_cutover_completion_record_fence_alone_rejects_without_writes() {
+    let (_directory, _vault, config, client, conversation, owner) = fixture();
+    let observed_at_ms = now();
+    client
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            observed_at_ms,
+            observed_at_ms,
+        )
+        .unwrap();
+    let lifecycle_generation = lifecycle_generation(&config);
+    let connection = sql(&config);
+    let before = cutover_snapshot(&connection, conversation);
+    assert!(matches!(
+        client.begin_rcs_owner_unlink_cutover(
+            conversation,
+            owner.ownership_generation,
+            lifecycle_generation,
+        ),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert_eq!(cutover_snapshot(&connection, conversation), before);
+}
+
+#[test]
+fn linked_cutover_gateway_fence_alone_rejects_each_gateway_denial_without_writes() {
+    for denial in ["unavailable", "nonlocal", "nonunique", "stale"] {
+        let (_directory, _vault, config, client, conversation, owner) = fixture();
+        let connection = sql(&config);
+        match denial {
+            "unavailable" => {
+                connection
+                    .execute("UPDATE rcs_link_status_projection SET availability=0", [])
+                    .unwrap();
+            }
+            "nonlocal" => {
+                connection
+                    .execute(
+                        "UPDATE rcs_link_status_projection SET gateway_device_id=?",
+                        [DeviceId::new().to_string()],
+                    )
+                    .unwrap();
+            }
+            "nonunique" => {
+                connection.execute(
+                    "INSERT INTO rcs_link_status_projection(gateway_device_id,state,availability,health,phone_responsive,observed_at_ms,capability_revision,feature_bits,producer_sequence) SELECT ?,state,availability,health,phone_responsive,observed_at_ms,capability_revision,feature_bits,producer_sequence FROM rcs_link_status_projection LIMIT 1",
+                    [DeviceId::new().to_string()],
+                ).unwrap();
+            }
+            "stale" => {
+                connection
+                    .execute("UPDATE rcs_link_status_projection SET observed_at_ms=0", [])
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = cutover_snapshot(&connection, conversation);
+        assert!(matches!(
+            client.begin_rcs_unlink_cutover_if_current(conversation, owner.ownership_generation,),
+            Err(Error::InvalidRequest(_))
+        ));
+        assert_eq!(
+            cutover_snapshot(&connection, conversation),
+            before,
+            "{denial}"
+        );
+    }
+}
+
+#[test]
+fn owner_cutover_ownership_generation_fence_rejects_without_writes() {
+    let (_directory, _vault, config, client, conversation, owner) = fixture();
+    let lifecycle_generation = record_terminal_unlink(&client, &config);
+    let connection = sql(&config);
+    let before = cutover_snapshot(&connection, conversation);
+    assert!(matches!(
+        client.begin_rcs_owner_unlink_cutover(
+            conversation,
+            owner.ownership_generation + 1,
+            lifecycle_generation,
+        ),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert_eq!(cutover_snapshot(&connection, conversation), before);
+}
+
+#[test]
+fn linked_cutover_publication_failure_rolls_back_ownership_and_outbox() {
+    let (_directory, _vault, config, client, conversation, owner) = fixture();
+    client
+        .record_rcs_provider_detector(
+            conversation,
+            owner.ownership_generation,
+            detector(1, owner.ownership_generation),
+        )
+        .unwrap();
+    let connection = sql(&config);
+    let before = cutover_snapshot(&connection, conversation);
+    connection.execute_batch("CREATE TRIGGER reject_linked_cutover_publication BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT, 'reject'); END;").unwrap();
+    assert!(
+        client
+            .begin_rcs_unlink_cutover_if_current(conversation, owner.ownership_generation)
+            .is_err()
+    );
+    assert_eq!(cutover_snapshot(&connection, conversation), before);
+}
+
+#[test]
+fn owner_cutover_publication_failure_rolls_back_ownership_and_outbox() {
+    let (_directory, _vault, config, client, conversation, owner) = fixture();
+    client
+        .record_rcs_provider_detector(
+            conversation,
+            owner.ownership_generation,
+            detector(1, owner.ownership_generation),
+        )
+        .unwrap();
+    let lifecycle_generation = record_terminal_unlink(&client, &config);
+    let connection = sql(&config);
+    let before = cutover_snapshot(&connection, conversation);
+    connection.execute_batch("CREATE TRIGGER reject_owner_cutover_publication BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT, 'reject'); END;").unwrap();
+    assert!(
+        client
+            .begin_rcs_owner_unlink_cutover(
+                conversation,
+                owner.ownership_generation,
+                lifecycle_generation,
+            )
+            .is_err()
+    );
+    assert_eq!(cutover_snapshot(&connection, conversation), before);
 }

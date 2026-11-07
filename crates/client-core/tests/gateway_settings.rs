@@ -100,6 +100,11 @@ fn encrypted_connection(config: &ClientConfig) -> rusqlite::Connection {
     conn
 }
 
+fn schema_version(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+        .unwrap()
+}
+
 fn table_exists(conn: &rusqlite::Connection, table: &str) -> bool {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
@@ -206,6 +211,7 @@ fn notification_reply_spike_version_43_repairs_and_upgrades() {
     drop(client);
 
     let conn = encrypted_connection(&config);
+    let expected_schema_version = schema_version(&conn);
     remove_rcs_mapping_schema(&conn);
     conn.execute_batch(
         "DROP TABLE conversation_folders;
@@ -235,7 +241,7 @@ fn notification_reply_spike_version_43_repairs_and_upgrades() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        50
+        expected_schema_version
     );
     assert!(table_exists(&conn, "conversation_folders"));
     assert!(table_exists(&conn, "sender_blocklists"));
@@ -252,6 +258,7 @@ fn notification_reply_spike_repairs_already_upgraded_database() {
     drop(open(&config));
 
     let conn = encrypted_connection(&config);
+    let expected_schema_version = schema_version(&conn);
     conn.execute_batch("DROP TABLE conversation_folders;")
         .unwrap();
     add_notification_reply_spike(&conn);
@@ -264,7 +271,7 @@ fn notification_reply_spike_repairs_already_upgraded_database() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        50
+        expected_schema_version
     );
     assert!(table_exists(&conn, "conversation_folders"));
     assert_notification_reply_spike_removed(&conn);
@@ -320,6 +327,7 @@ fn version_45_upgrade_adds_rcs_mapping_schema_without_resetting_preferences() {
     drop(client);
 
     let conn = encrypted_connection(&config);
+    let expected_schema_version = schema_version(&conn);
     remove_rcs_mapping_schema(&conn);
     conn.execute("UPDATE schema_meta SET version=45", [])
         .unwrap();
@@ -334,7 +342,7 @@ fn version_45_upgrade_adds_rcs_mapping_schema_without_resetting_preferences() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        50
+        expected_schema_version
     );
     assert_eq!(
         conn.query_row("SELECT v FROM metadata WHERE k='device_id'", [], |row| {
@@ -428,6 +436,7 @@ fn version_47_upgrade_adds_only_capability_tables_and_preserves_rcs_state() {
     client.set_gateway_settings(settings.clone()).unwrap();
     drop(client);
     let conn = encrypted_connection(&config);
+    let expected_schema_version = schema_version(&conn);
     conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
     conn.execute(
         "INSERT INTO rcs_conversation_mappings(peppy_conversation_id,google_conversation_id,class,proof_version,proof_hash,mapping_revision,verified_at_ms) VALUES(?,?,?,?,?,?,?)",
@@ -499,9 +508,13 @@ fn version_47_upgrade_adds_only_capability_tables_and_preserves_rcs_state() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        50
+        expected_schema_version
     );
     assert_rcs_mapping_schema(&conn);
+    assert!(
+        table_exists(&conn, "vault_identity_state"),
+        "the later v51 migration must add its table independently of the v47 capability step"
+    );
     let after = state_rows(&conn);
     assert_eq!(
         (
@@ -521,10 +534,10 @@ fn version_47_upgrade_adds_only_capability_tables_and_preserves_rcs_state() {
 }
 
 #[test]
-fn version_51_database_is_rejected_without_resetting_preferences() {
+fn future_schema_version_is_rejected_without_resetting_preferences() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::new();
-    let config = config(&dir, "gateway-v51-rejected", &vault);
+    let config = config(&dir, "gateway-future-version-rejected", &vault);
     let client = open(&config);
     let settings = GatewaySettings {
         mirroring_enabled: true,
@@ -534,7 +547,8 @@ fn version_51_database_is_rejected_without_resetting_preferences() {
     drop(client);
 
     let conn = encrypted_connection(&config);
-    conn.execute("UPDATE schema_meta SET version=51", [])
+    let future_schema_version = schema_version(&conn) + 1;
+    conn.execute("UPDATE schema_meta SET version=?", [future_schema_version])
         .unwrap();
     drop(conn);
 
@@ -548,7 +562,7 @@ fn version_51_database_is_rejected_without_resetting_preferences() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        51
+        future_schema_version
     );
     assert_eq!(
         conn.query_row(
@@ -775,6 +789,7 @@ fn version_25_upgrade_adds_null_status_time_without_resetting_status() {
         "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
     )
     .unwrap();
+    let expected_schema_version = schema_version(&conn);
     conn.execute(
         "INSERT INTO send_status(command_id,producer_device_id,producer_sequence,state) VALUES(?,?,?,?)",
         rusqlite::params![
@@ -809,7 +824,7 @@ fn version_25_upgrade_adds_null_status_time_without_resetting_status() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(version, 50);
+    assert_eq!(version, expected_schema_version);
     assert_eq!(status, (42, "sent".into(), None));
 }
 

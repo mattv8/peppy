@@ -34,6 +34,7 @@ mod rcs_receive;
 mod rcs_receive_tests;
 mod rcs_status;
 mod typing;
+mod vault_identity;
 
 pub use rcs_native::{
     NativeRcsCommittedSend, NativeRcsContextTuple, NativeRcsMappingVerification,

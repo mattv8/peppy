@@ -36,6 +36,55 @@ pub enum NativeRcsTargetDecision {
     NotFoundComplete,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeRcsEligibilityPublication {
+    pub conversation_id: String,
+}
+
+#[uniffi::export]
+pub fn gateway_publish_rcs_eligibility(
+    client: Arc<NativeClient>,
+    publications: Vec<NativeRcsEligibilityPublication>,
+    now_ms: i64,
+) -> Result<u32, MobileBindingsError> {
+    with_client(&client.client, |core| {
+        let conversation_ids = publications
+            .into_iter()
+            .map(|value| {
+                value
+                    .conversation_id
+                    .parse()
+                    .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid conversation"))
+            })
+            .collect::<Result<Vec<_>, peppy_client_core::Error>>()?;
+        core.publish_rcs_eligibility_from_lifecycle(&conversation_ids, now_ms)
+    })
+    .and_then(|published| u32::try_from(published).map_err(|_| MobileBindingsError::InvalidRequest))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativePendingRcsCommand {
+    pub command_id: String,
+    pub conversation_id: String,
+    pub recipient: String,
+}
+
+#[uniffi::export]
+pub fn gateway_pending_native_rcs_commands(
+    client: Arc<NativeClient>,
+) -> Result<Vec<NativePendingRcsCommand>, MobileBindingsError> {
+    with_client(&client.client, |core| core.pending_native_rcs_commands()).map(|commands| {
+        commands
+            .into_iter()
+            .map(|command| NativePendingRcsCommand {
+                command_id: command.command_id.to_string(),
+                conversation_id: command.conversation_id.to_string(),
+                recipient: command.recipient,
+            })
+            .collect()
+    })
+}
+
 #[derive(uniffi::Object)]
 /// A native-only, single-use preparation. It is not a transport permit.
 pub struct NativeRcsSendPreparation {

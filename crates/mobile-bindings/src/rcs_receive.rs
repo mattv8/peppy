@@ -1,8 +1,9 @@
 use crate::{MobileBindingsError, NativeClient, NativeConversation, NativeMessage, with_client};
 use peppy_client_core::{
-    Client, Conversation, ConversationId, Direction, Message, RcsIdentityOutcome,
-    RcsProjectedRecord, RcsProjectedStatus, RcsProviderDetector, RcsReceiveCode, RcsReceiveOutcome,
-    RcsStatusApplication, Transport,
+    Client, Conversation, ConversationId, Direction, Message, RcsContextExpectation, RcsCutover,
+    RcsIdentityOutcome, RcsObservationProvenance, RcsProjectedRecord, RcsProjectedStatus,
+    RcsProviderDetector, RcsReceiveCode, RcsReceiveContext, RcsReceiveOutcome, RcsReceiveOwner,
+    RcsStatusApplication, RcsUnlinkCutoverGenerations, Transport,
 };
 use serde::Deserialize;
 
@@ -235,6 +236,148 @@ pub struct NativeRcsIngestOutcome {
     pub cursor: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeRcsObservationProvenance {
+    Live,
+    Historical,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeRcsContextExpectation {
+    pub ownership_generation: u64,
+    pub link_generation: u64,
+    pub session_generation: u64,
+    pub context_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeRcsCutover {
+    pub ownership_generation: u64,
+    pub freeze_detector_floor: i64,
+    pub ambiguous_detector_alert: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeRcsUnlinkCutoverGenerations {
+    pub ownership_generation: u64,
+    pub lifecycle_generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeRcsReceiveOwner {
+    Link,
+    Provider,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeRcsReceiveContext {
+    pub conversation_id: String,
+    pub google_conversation_id: String,
+    pub ownership_generation: u64,
+    pub lifecycle_generation: u64,
+    pub owner: NativeRcsReceiveOwner,
+    pub history_token: Option<String>,
+    pub expectation: NativeRcsContextExpectation,
+}
+
+fn observation_provenance(value: NativeRcsObservationProvenance) -> RcsObservationProvenance {
+    match value {
+        NativeRcsObservationProvenance::Live => RcsObservationProvenance::Live,
+        NativeRcsObservationProvenance::Historical => RcsObservationProvenance::Historical,
+    }
+}
+
+fn cutover_view(value: RcsCutover) -> NativeRcsCutover {
+    NativeRcsCutover {
+        ownership_generation: value.ownership_generation,
+        freeze_detector_floor: value.freeze_detector_floor,
+        ambiguous_detector_alert: value.ambiguous_detector_alert,
+    }
+}
+
+fn cutover_generations_view(
+    value: RcsUnlinkCutoverGenerations,
+) -> NativeRcsUnlinkCutoverGenerations {
+    NativeRcsUnlinkCutoverGenerations {
+        ownership_generation: value.ownership_generation,
+        lifecycle_generation: value.lifecycle_generation,
+    }
+}
+
+fn receive_context_view(value: RcsReceiveContext) -> NativeRcsReceiveContext {
+    NativeRcsReceiveContext {
+        conversation_id: value.conversation_id.to_string(),
+        google_conversation_id: value.google_conversation_id,
+        ownership_generation: value.ownership_generation,
+        lifecycle_generation: value.lifecycle_generation,
+        owner: match value.owner {
+            RcsReceiveOwner::Link => NativeRcsReceiveOwner::Link,
+            RcsReceiveOwner::Provider => NativeRcsReceiveOwner::Provider,
+        },
+        history_token: value.history_token,
+        expectation: NativeRcsContextExpectation {
+            ownership_generation: value.expectation.ownership_generation,
+            link_generation: value.expectation.link_generation,
+            session_generation: value.expectation.session_generation,
+            context_revision: value.expectation.context_revision,
+        },
+    }
+}
+
+fn ingest_go_record(
+    owner: &NativeClient,
+    conversation_id: String,
+    ownership_generation: u64,
+    go_record_json: String,
+    ingest: impl FnOnce(
+        &Client,
+        ConversationId,
+        u64,
+        RcsProjectedRecord,
+    ) -> Result<RcsReceiveOutcome, peppy_client_core::Error>,
+) -> Result<NativeRcsIngestOutcome, MobileBindingsError> {
+    if go_record_json.len() > GO_RECORD_JSON_CAP {
+        return Err(MobileBindingsError::InvalidRequest);
+    }
+    let conversation = conversation_id
+        .parse()
+        .map_err(|_| MobileBindingsError::InvalidRequest)?;
+    let go_record: GoReceiveRecord =
+        serde_json::from_str(&go_record_json).map_err(|_| MobileBindingsError::InvalidRequest)?;
+    let GoReceiveParts {
+        record,
+        status,
+        cursor,
+    } = go_record.into_parts()?;
+    with_client(&owner.client, |client| {
+        let record_outcome = ingest(client, conversation, ownership_generation, record)?;
+        if matches!(record_outcome, RcsReceiveOutcome::Rejected(_)) {
+            return Ok(NativeRcsIngestOutcome {
+                record_outcome: receive_outcome(record_outcome),
+                status_outcome: None,
+                cursor: None,
+            });
+        }
+        let status_outcome = status
+            .map(|status| {
+                client.apply_rcs_projected_status(conversation, ownership_generation, status)
+            })
+            .transpose()?;
+        let cursor = if status_outcome
+            .is_some_and(|outcome| matches!(outcome, RcsReceiveOutcome::Rejected(_)))
+        {
+            None
+        } else {
+            cursor
+        };
+        Ok(NativeRcsIngestOutcome {
+            record_outcome: receive_outcome(record_outcome),
+            status_outcome: status_outcome.map(receive_outcome),
+            cursor,
+        })
+    })
+}
+
 fn identity_outcome(value: RcsIdentityOutcome) -> String {
     match value {
         RcsIdentityOutcome::Recorded => "recorded".into(),
@@ -254,47 +397,38 @@ impl NativeClient {
         ownership_generation: u64,
         go_record_json: String,
     ) -> Result<NativeRcsIngestOutcome, MobileBindingsError> {
-        if go_record_json.len() > GO_RECORD_JSON_CAP {
-            return Err(MobileBindingsError::InvalidRequest);
-        }
-        let conversation: ConversationId = conversation_id
-            .parse()
-            .map_err(|_| MobileBindingsError::InvalidRequest)?;
-        let go_record: GoReceiveRecord = serde_json::from_str(&go_record_json)
-            .map_err(|_| MobileBindingsError::InvalidRequest)?;
-        let GoReceiveParts {
-            record,
-            status,
-            cursor,
-        } = go_record.into_parts()?;
-        with_client(&self.client, |client| {
-            let record_outcome =
-                client.ingest_rcs_projected_record(conversation, ownership_generation, record)?;
-            if matches!(record_outcome, RcsReceiveOutcome::Rejected(_)) {
-                return Ok(NativeRcsIngestOutcome {
-                    record_outcome: receive_outcome(record_outcome),
-                    status_outcome: None,
-                    cursor: None,
-                });
-            }
-            let status_outcome = status
-                .map(|status| {
-                    client.apply_rcs_projected_status(conversation, ownership_generation, status)
-                })
-                .transpose()?;
-            let cursor = if status_outcome
-                .is_some_and(|outcome| matches!(outcome, RcsReceiveOutcome::Rejected(_)))
-            {
-                None
-            } else {
-                cursor
-            };
-            Ok(NativeRcsIngestOutcome {
-                record_outcome: receive_outcome(record_outcome),
-                status_outcome: status_outcome.map(receive_outcome),
-                cursor,
-            })
-        })
+        ingest_go_record(
+            self,
+            conversation_id,
+            ownership_generation,
+            go_record_json,
+            |client, conversation, generation, record| {
+                client.ingest_rcs_projected_record(conversation, generation, record)
+            },
+        )
+    }
+    pub fn gateway_ingest_rcs_projected_observation(
+        &self,
+        conversation_id: String,
+        ownership_generation: u64,
+        go_record_json: String,
+        provenance: NativeRcsObservationProvenance,
+    ) -> Result<NativeRcsIngestOutcome, MobileBindingsError> {
+        let provenance = observation_provenance(provenance);
+        ingest_go_record(
+            self,
+            conversation_id,
+            ownership_generation,
+            go_record_json,
+            |client, conversation, generation, record| {
+                client.ingest_rcs_projected_observation(
+                    conversation,
+                    generation,
+                    record,
+                    provenance,
+                )
+            },
+        )
     }
     pub fn gateway_ingest_rcs_record_json(
         &self,
@@ -418,5 +552,86 @@ impl NativeClient {
             )
         })
         .map(identity_outcome)
+    }
+    pub fn gateway_begin_rcs_unlink_cutover_if_current(
+        &self,
+        conversation_id: String,
+        expected_ownership_generation: u64,
+    ) -> Result<NativeRcsCutover, MobileBindingsError> {
+        let conversation = conversation_id
+            .parse()
+            .map_err(|_| MobileBindingsError::InvalidRequest)?;
+        with_client(&self.client, |client| {
+            client.begin_rcs_unlink_cutover_if_current(conversation, expected_ownership_generation)
+        })
+        .map(cutover_view)
+    }
+    pub fn gateway_begin_rcs_owner_unlink_cutover(
+        &self,
+        conversation_id: String,
+        expected_ownership_generation: u64,
+        expected_lifecycle_generation: u64,
+    ) -> Result<NativeRcsCutover, MobileBindingsError> {
+        let conversation = conversation_id
+            .parse()
+            .map_err(|_| MobileBindingsError::InvalidRequest)?;
+        with_client(&self.client, |client| {
+            client.begin_rcs_owner_unlink_cutover(
+                conversation,
+                expected_ownership_generation,
+                expected_lifecycle_generation,
+            )
+        })
+        .map(cutover_view)
+    }
+    pub fn gateway_invalidate_rcs_context_for_google_event(
+        &self,
+        conversation_id: String,
+        google_conversation_id: String,
+        expected: NativeRcsContextExpectation,
+    ) -> Result<u64, MobileBindingsError> {
+        let conversation = conversation_id
+            .parse()
+            .map_err(|_| MobileBindingsError::InvalidRequest)?;
+        with_client(&self.client, |client| {
+            client.invalidate_rcs_context_for_google_event(
+                conversation,
+                &google_conversation_id,
+                RcsContextExpectation {
+                    ownership_generation: expected.ownership_generation,
+                    link_generation: expected.link_generation,
+                    session_generation: expected.session_generation,
+                    context_revision: expected.context_revision,
+                },
+            )
+        })
+    }
+    pub fn gateway_rcs_unlink_cutover_generations(
+        &self,
+        conversation_id: String,
+    ) -> Result<Option<NativeRcsUnlinkCutoverGenerations>, MobileBindingsError> {
+        let conversation = conversation_id
+            .parse()
+            .map_err(|_| MobileBindingsError::InvalidRequest)?;
+        with_client(&self.client, |client| {
+            client.rcs_unlink_cutover_generations(conversation)
+        })
+        .map(|value| value.map(cutover_generations_view))
+    }
+    pub fn gateway_rcs_receive_context(
+        &self,
+        google_conversation_id: String,
+    ) -> Result<Option<NativeRcsReceiveContext>, MobileBindingsError> {
+        bounded_text(&google_conversation_id, GO_ID_CAP)?;
+        with_client(&self.client, |client| {
+            client.rcs_receive_context(&google_conversation_id)
+        })
+        .map(|value| value.map(receive_context_view))
+    }
+    pub fn gateway_rcs_link_owned_conversations(
+        &self,
+    ) -> Result<Vec<NativeRcsReceiveContext>, MobileBindingsError> {
+        with_client(&self.client, |client| client.rcs_link_owned_conversations())
+            .map(|contexts| contexts.into_iter().map(receive_context_view).collect())
     }
 }

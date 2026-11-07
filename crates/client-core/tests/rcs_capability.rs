@@ -58,6 +58,84 @@ fn eligibility(
     }
 }
 
+fn mapping_observation(peer: &str) -> RcsMappingObservation {
+    RcsMappingObservation {
+        google_conversation_id: "google-conversation".into(),
+        google_candidate_count: 1,
+        participants: vec![RcsParticipantObservation {
+            identity: peer.into(),
+            google_participant_id: "google-peer".into(),
+            identifier_type: 1,
+            is_visible: true,
+            is_me: false,
+        }],
+        conversation_type: RcsConversationType::Rcs,
+        status: "eligible".into(),
+        send_mode: RcsSendMode::Automatic,
+        read_only: false,
+        default_outgoing: true,
+        selected_sim_id: "android-subscription-7".into(),
+        selected_sim_own_identity: "+12025550101".into(),
+        carrier_binding: NativeCarrierRouteBinding {
+            carrier_route_id: "android-subscription-7".into(),
+            android_subscription_id: 7,
+            is_current_default_sms: true,
+            own_number_raw: "+12025550101".into(),
+            own_number_source: NativeOwnNumberSource::SubscriptionManagerPhoneNumber,
+            route_observed_at_ms: 1_000,
+            route_context_revision: 1,
+            same_handset_evidence_id: "verified-handset".into(),
+        },
+        outgoing: NativeRcsOutgoing {
+            outgoing_id: "google-outgoing".into(),
+            sim_participant_id: "google-outgoing".into(),
+            own_identity_raw: "+12025550101".into(),
+            sim_payload: NativeRcsSimPayload {
+                two: 2,
+                sim_number: 7,
+            },
+            rcs_chats_enabled: true,
+        },
+        native_evidence: NativeRcsEvidence {
+            lifetime: NativeRcsLifetime {
+                runtime_id: "runtime".into(),
+                run_generation: 1,
+                link_generation: 1,
+                session_generation: 1,
+                context_revision: 1,
+            },
+            lookup_id: "lookup".into(),
+            lookup_complete: true,
+            google_candidate_count: 1,
+            settings_revision: 1,
+            settings_provenance: NativeSettingsProvenance::CurrentEvent,
+            settings_observed_at_ms: 1_000,
+            settings_stream_epoch: 1,
+            settings_currentness: NativeSettingsCurrentness::ContinuousVerifiedFeed,
+            current_settings_sims: vec![NativeRcsOutgoing {
+                outgoing_id: "google-outgoing".into(),
+                sim_participant_id: "google-outgoing".into(),
+                own_identity_raw: "+12025550101".into(),
+                sim_payload: NativeRcsSimPayload {
+                    two: 2,
+                    sim_number: 7,
+                },
+                rcs_chats_enabled: true,
+            }],
+            settings_validated_at_ms: 1_000,
+            conversation_observed_at_ms: 1_000,
+        },
+        identity_region: "US".into(),
+        observed_at_ms: 1_000,
+        context_revision: 1,
+        link_generation: 1,
+        session_generation: 1,
+        canonicalizer_revision: 1,
+        mapping_revision: 1,
+        link_state: RcsLinkState::Linked,
+    }
+}
+
 #[test]
 fn payloads_are_strict_and_content_free() {
     let status = serde_json::json!({
@@ -1307,4 +1385,83 @@ fn relink_after_clock_rollback_keeps_old_eligibility_unknown() {
             .eligibility,
         RcsEligibility::Unknown
     );
+}
+
+#[test]
+fn lifecycle_publisher_derives_eligibility_and_monotonic_revisions_atomically() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-capability-derived", &vault);
+    let client = unlocked(&config, &vault);
+    let peer = "+12025550123";
+    let mapped = client
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: peer.into(),
+            body: String::new(),
+            provider_message_id: Some("provider-derived".into()),
+            imported: true,
+        })
+        .unwrap()
+        .conversation_id;
+    let unmapped = ConversationId::new();
+    assert!(matches!(
+        client
+            .verify_rcs_mapping(&mapping_observation(peer), 1_000)
+            .unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+        .unwrap();
+
+    assert_eq!(
+        client
+            .publish_rcs_eligibility_from_lifecycle(&[mapped, unmapped], 1_000)
+            .unwrap(),
+        2
+    );
+    let first_mapped = client
+        .rcs_eligibility_projection(mapped, config.device_id, 1_000)
+        .unwrap()
+        .unwrap();
+    let first_unmapped = client
+        .rcs_eligibility_projection(unmapped, config.device_id, 1_000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_mapped.eligibility, RcsEligibility::Eligible);
+    assert_eq!(first_unmapped.eligibility, RcsEligibility::NotEligible);
+
+    client
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::NeedsRelink,
+            false,
+            false,
+            false,
+            1_001,
+            1_001,
+        )
+        .unwrap();
+    client
+        .publish_rcs_eligibility_from_lifecycle(&[mapped], 1_001)
+        .unwrap();
+    let unavailable = client
+        .rcs_eligibility_projection(mapped, config.device_id, 1_001)
+        .unwrap()
+        .unwrap();
+    assert_eq!(unavailable.eligibility, RcsEligibility::Unknown);
+    assert!(unavailable.mapping_revision > first_mapped.mapping_revision);
+
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_002, 1_002)
+        .unwrap();
+    client
+        .publish_rcs_eligibility_from_lifecycle(&[mapped], 1_002)
+        .unwrap();
+    let invalidated = client
+        .rcs_eligibility_projection(mapped, config.device_id, 1_002)
+        .unwrap()
+        .unwrap();
+    assert_eq!(invalidated.eligibility, RcsEligibility::NotEligible);
+    assert!(invalidated.mapping_revision > unavailable.mapping_revision);
 }

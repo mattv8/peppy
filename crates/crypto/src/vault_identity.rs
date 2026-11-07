@@ -90,6 +90,12 @@ impl VaultIdentityAnchor {
         operation(&self.bytes)
     }
 
+    /// Returns the operation identifier authenticated inside this opaque anchor.
+    pub fn operation_id(&self) -> Result<Uuid, CryptoError> {
+        Uuid::from_slice(&self.bytes[ANCHOR_DOMAIN.len() + 20..ANCHOR_DOMAIN.len() + 36])
+            .map_err(|_| CryptoError::InvalidCiphertext)
+    }
+
     pub fn pin(&self) -> VaultIdentityPin {
         let mut digest = Sha256::new();
         digest.update(PIN_DOMAIN);

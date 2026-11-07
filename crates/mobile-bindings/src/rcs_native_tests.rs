@@ -3,8 +3,9 @@ use crate::{NativeOpenConfig, create_vault_material, open_native_client};
 use peppy_client_core::{
     Cursor, GatewayRoute, IncomingSms, NativeCarrierRouteBinding, NativeOwnNumberSource,
     NativeRcsEvidence, NativeRcsLifetime, NativeRcsOutgoing, NativeRcsSimPayload,
-    NativeSettingsCurrentness, NativeSettingsProvenance, OutgoingSms, RcsConversationType,
-    RcsLinkState, RcsMappingObservation, RcsParticipantObservation, RcsSendMode,
+    NativeSettingsCurrentness, NativeSettingsProvenance, OutgoingSms, RcsCapabilityState,
+    RcsConversationType, RcsEligibility, RcsLinkState, RcsMappingObservation,
+    RcsParticipantObservation, RcsSendMode,
 };
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -37,8 +38,10 @@ impl Drop for TempDir {
 
 struct Fixture {
     gateway: Arc<NativeClient>,
-    _sender: Arc<NativeClient>,
+    sender: Arc<NativeClient>,
+    next_cursor: u64,
     command_id: String,
+    conversation_id: String,
     database_path: PathBuf,
     observation: RcsMappingObservation,
     _temp_dir: TempDir,
@@ -105,12 +108,14 @@ fn fixture_with_google_conversation_id_and_peer(
             .command_id)
     })
     .unwrap();
-    deliver(&sender, &gateway);
+    let next_cursor = deliver(&sender, &gateway) + 1;
 
     Fixture {
         gateway,
-        _sender: sender,
+        sender,
+        next_cursor,
         command_id: command_id.to_string(),
+        conversation_id: conversation_id.to_string(),
         database_path,
         observation,
         _temp_dir: temp_dir,
@@ -131,7 +136,11 @@ fn native_client(temp_dir: &TempDir, vault_id: &str, device_id: String) -> Arc<N
     .unwrap()
 }
 
-fn deliver(sender: &NativeClient, gateway: &NativeClient) {
+fn deliver(sender: &NativeClient, gateway: &NativeClient) -> u64 {
+    deliver_from(sender, gateway, 1)
+}
+
+fn deliver_from(sender: &NativeClient, gateway: &NativeClient, first_cursor: u64) -> u64 {
     let envelopes = with_client(&sender.client, |core| {
         let envelopes = core.pending_outbox()?;
         for envelope in &envelopes {
@@ -142,12 +151,13 @@ fn deliver(sender: &NativeClient, gateway: &NativeClient) {
     .unwrap();
     with_client(&gateway.client, |core| {
         for (index, envelope) in envelopes.iter().enumerate() {
-            core.ingest(envelope, Cursor(index as u64 + 1))?;
+            core.ingest(envelope, Cursor(first_cursor + index as u64))?;
         }
         core.apply_pending(100)?;
         Ok(())
     })
     .unwrap();
+    first_cursor + envelopes.len() as u64 - 1
 }
 
 fn observation() -> RcsMappingObservation {
@@ -367,6 +377,41 @@ fn serialize_commit_preserves_the_exact_core_projection_bytes() {
         serialize_commit(projection).unwrap().commit_json(),
         expected
     );
+}
+
+#[test]
+fn pending_native_rcs_commands_returns_the_sanitized_candidate_shape() {
+    let fixture = fixture();
+    with_client(&fixture.gateway.client, |core| {
+        core.record_rcs_link_lifecycle(
+            peppy_client_core::RcsCapabilityState::Linked,
+            true,
+            true,
+            true,
+            1_000,
+            1_000,
+        )
+    })
+    .unwrap();
+
+    assert_eq!(
+        gateway_pending_native_rcs_commands(fixture.gateway.clone()).unwrap(),
+        vec![NativePendingRcsCommand {
+            command_id: fixture.command_id,
+            conversation_id: fixture.conversation_id,
+            recipient: "peer-local".into(),
+        }]
+    );
+}
+
+#[test]
+fn pending_native_rcs_commands_returns_closed_after_dispose() {
+    let fixture = fixture();
+    fixture.gateway.dispose().unwrap();
+    assert!(matches!(
+        gateway_pending_native_rcs_commands(fixture.gateway),
+        Err(MobileBindingsError::Closed)
+    ));
 }
 
 #[test]
@@ -1142,3 +1187,310 @@ fn explicit_unlink_completion_wrapper_requires_current_unlinked_lifecycle() {
 
 #[path = "rcs_native_tests/rcs_native_live_ticket_tests.rs"]
 mod rcs_native_live_ticket_tests;
+
+#[test]
+fn eligibility_publication_is_derived_from_core_mapping_and_revisions() {
+    let fixture = fixture();
+    with_client(&fixture.gateway.client, |core| {
+        core.record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+    })
+    .unwrap();
+    let unmapped = Uuid::new_v4().to_string();
+
+    assert_eq!(
+        gateway_publish_rcs_eligibility(
+            fixture.gateway.clone(),
+            vec![
+                NativeRcsEligibilityPublication {
+                    conversation_id: fixture.conversation_id.clone(),
+                },
+                NativeRcsEligibilityPublication {
+                    conversation_id: unmapped.clone(),
+                },
+            ],
+            1_000,
+        )
+        .unwrap(),
+        2
+    );
+    let (mapped, absent) = with_client(&fixture.gateway.client, |core| {
+        let gateway = core.device_id()?;
+        Ok((
+            core.rcs_eligibility_projection(
+                fixture.conversation_id.parse().unwrap(),
+                gateway,
+                1_000,
+            )?
+            .unwrap(),
+            core.rcs_eligibility_projection(unmapped.parse().unwrap(), gateway, 1_000)?
+                .unwrap(),
+        ))
+    })
+    .unwrap();
+    assert_eq!(mapped.eligibility, RcsEligibility::Eligible);
+    assert_eq!(absent.eligibility, RcsEligibility::NotEligible);
+    assert_ne!(mapped.mapping_revision, 999);
+    assert_ne!(absent.mapping_revision, 998);
+    let outbox_before_rejection = with_client(&fixture.gateway.client, |core| {
+        Ok(core.pending_outbox()?.len())
+    })
+    .unwrap();
+    assert!(matches!(
+        gateway_publish_rcs_eligibility(
+            fixture.gateway.clone(),
+            vec![
+                NativeRcsEligibilityPublication {
+                    conversation_id: fixture.conversation_id.clone(),
+                },
+                NativeRcsEligibilityPublication {
+                    conversation_id: fixture.conversation_id.clone(),
+                },
+            ],
+            1_000,
+        ),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+    assert_eq!(
+        with_client(&fixture.gateway.client, |core| {
+            Ok(core.pending_outbox()?.len())
+        })
+        .unwrap(),
+        outbox_before_rejection
+    );
+
+    gateway_publish_rcs_eligibility(
+        fixture.gateway.clone(),
+        vec![NativeRcsEligibilityPublication {
+            conversation_id: fixture.conversation_id.clone(),
+        }],
+        1_000,
+    )
+    .unwrap();
+    let next = with_client(&fixture.gateway.client, |core| {
+        core.rcs_eligibility_projection(
+            fixture.conversation_id.parse().unwrap(),
+            core.device_id()?,
+            1_000,
+        )
+    })
+    .unwrap()
+    .unwrap();
+    assert!(next.mapping_revision > mapped.mapping_revision);
+    assert_eq!(next.eligibility, RcsEligibility::Eligible);
+
+    with_client(&fixture.gateway.client, |core| {
+        core.record_rcs_link_lifecycle(
+            RcsCapabilityState::NeedsRelink,
+            false,
+            false,
+            false,
+            1_001,
+            1_001,
+        )
+    })
+    .unwrap();
+    gateway_publish_rcs_eligibility(
+        fixture.gateway.clone(),
+        vec![NativeRcsEligibilityPublication {
+            conversation_id: fixture.conversation_id.clone(),
+        }],
+        1_001,
+    )
+    .unwrap();
+    let unavailable = with_client(&fixture.gateway.client, |core| {
+        core.rcs_eligibility_projection(
+            fixture.conversation_id.parse().unwrap(),
+            core.device_id()?,
+            1_001,
+        )
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(unavailable.eligibility, RcsEligibility::Unknown);
+    assert!(unavailable.mapping_revision > next.mapping_revision);
+}
+
+#[test]
+fn receive_context_exports_require_current_local_link_ownership() {
+    let fixture = fixture();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let generation = with_client(&fixture.gateway.client, |core| {
+        core.record_rcs_link_lifecycle(
+            RcsCapabilityState::Linked,
+            true,
+            true,
+            true,
+            now_ms,
+            now_ms,
+        )?;
+        Ok(core
+            .begin_rcs_link_ownership(fixture.conversation_id.parse().unwrap(), "page-token", 1)?
+            .ownership_generation)
+    })
+    .unwrap();
+    let outbox_before_reads = with_client(&fixture.gateway.client, |core| {
+        Ok(core.pending_outbox()?.len())
+    })
+    .unwrap();
+
+    let context = fixture
+        .gateway
+        .gateway_rcs_receive_context(fixture.observation.google_conversation_id.clone())
+        .unwrap()
+        .unwrap();
+    assert_eq!(context.conversation_id, fixture.conversation_id);
+    assert_eq!(
+        context.google_conversation_id,
+        fixture.observation.google_conversation_id
+    );
+    assert_eq!(context.ownership_generation, generation);
+    assert_eq!(context.expectation.ownership_generation, generation);
+    assert_eq!(context.expectation.link_generation, 1);
+    assert_eq!(context.expectation.session_generation, 1);
+    assert_eq!(context.expectation.context_revision, 1);
+    let owned = fixture
+        .gateway
+        .gateway_rcs_link_owned_conversations()
+        .unwrap();
+    assert_eq!(owned.len(), 1);
+    assert_eq!(
+        owned[0].google_conversation_id,
+        context.google_conversation_id
+    );
+    assert_eq!(owned[0].expectation, context.expectation);
+    assert_eq!(
+        with_client(&fixture.gateway.client, |core| {
+            Ok(core.pending_outbox()?.len())
+        })
+        .unwrap(),
+        outbox_before_reads
+    );
+    let mut changed_expectation = context.expectation.clone();
+    changed_expectation.context_revision += 1;
+    assert!(matches!(
+        fixture
+            .gateway
+            .gateway_invalidate_rcs_context_for_google_event(
+                context.conversation_id.clone(),
+                context.google_conversation_id.clone(),
+                changed_expectation,
+            ),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+    assert_eq!(
+        fixture
+            .gateway
+            .gateway_invalidate_rcs_context_for_google_event(
+                context.conversation_id.clone(),
+                context.google_conversation_id.clone(),
+                context.expectation,
+            )
+            .unwrap(),
+        2
+    );
+
+    with_client(&fixture.gateway.client, |core| {
+        core.begin_rcs_unlink_cutover(fixture.conversation_id.parse().unwrap())?;
+        Ok(())
+    })
+    .unwrap();
+    let outbox_before_provider_reads = with_client(&fixture.gateway.client, |core| {
+        Ok(core.pending_outbox()?.len())
+    })
+    .unwrap();
+    assert!(
+        fixture
+            .gateway
+            .gateway_rcs_receive_context(fixture.observation.google_conversation_id.clone())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fixture
+            .gateway
+            .gateway_rcs_link_owned_conversations()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        with_client(&fixture.gateway.client, |core| {
+            Ok(core.pending_outbox()?.len())
+        })
+        .unwrap(),
+        outbox_before_provider_reads
+    );
+
+    with_client(&fixture.gateway.client, |core| {
+        core.record_rcs_link_lifecycle(
+            RcsCapabilityState::SignedOut,
+            false,
+            false,
+            false,
+            now_ms + 1,
+            now_ms + 1,
+        )
+    })
+    .unwrap();
+    assert!(matches!(
+        fixture
+            .gateway
+            .gateway_rcs_receive_context(fixture.observation.google_conversation_id.clone()),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+    assert!(matches!(
+        fixture.gateway.gateway_rcs_link_owned_conversations(),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+}
+
+#[test]
+fn receive_context_exports_refuse_a_foreign_current_gateway_and_closed_client() {
+    let fixture = fixture();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    with_client(&fixture.gateway.client, |core| {
+        core.record_rcs_link_lifecycle(
+            RcsCapabilityState::Linked,
+            true,
+            true,
+            true,
+            now_ms,
+            now_ms,
+        )?;
+        core.begin_rcs_link_ownership(fixture.conversation_id.parse().unwrap(), "page-token", 1)?;
+        Ok(())
+    })
+    .unwrap();
+    with_client(&fixture.sender.client, |core| {
+        core.record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, now_ms, now_ms)
+    })
+    .unwrap();
+    deliver_from(&fixture.sender, &fixture.gateway, fixture.next_cursor);
+
+    assert!(matches!(
+        fixture
+            .gateway
+            .gateway_rcs_receive_context(fixture.observation.google_conversation_id.clone()),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+    assert!(matches!(
+        fixture.gateway.gateway_rcs_link_owned_conversations(),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+    fixture.gateway.dispose().unwrap();
+    assert!(matches!(
+        fixture
+            .gateway
+            .gateway_rcs_receive_context(fixture.observation.google_conversation_id),
+        Err(MobileBindingsError::Closed)
+    ));
+    assert!(matches!(
+        fixture.gateway.gateway_rcs_link_owned_conversations(),
+        Err(MobileBindingsError::Closed)
+    ));
+}

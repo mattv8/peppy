@@ -80,6 +80,7 @@ mod rcs_target;
 mod sms_acquisition;
 mod sms_reconciliation;
 mod snapshot_projection;
+mod vault_identity;
 pub use attachment_retention::{
     AttachmentRetentionClass, AttachmentRetentionState, AttachmentUploadRetention,
     AttachmentUseKind, AttachmentUseOperationKind, AttachmentUseResponse, AttachmentUseState,
@@ -114,6 +115,7 @@ use peppy_crypto::enrollment::{
     EncryptedHandoff, EnrollmentContext, EnrollmentRole, HandoffRootPackage, TransferKeypair,
     VerifiedHandoff,
 };
+use peppy_crypto::vault_identity::RcsIdentityKey;
 use peppy_crypto::{
     CryptoError, EncryptedEnvelope, KeyPurpose, PurposeKey, compaction_hmac, decrypt,
     derive_purpose_key, derive_root_key, encrypt, profile_fingerprint_bytes,
@@ -148,13 +150,14 @@ pub use rcs_native::{
     NativeRcsCommitProjection, NativeRcsEvidence, NativeRcsLifetime, NativeRcsOutgoing,
     NativeRcsParticipant, NativeRcsPreparation, NativeRcsPrepareRequest, NativeRcsSimPayload,
     NativeRcsTargetClass, NativeSettingsCurrentness, NativeSettingsProvenance,
-    restricted_native_rcs_handoff_schema,
+    PendingNativeRcsCommand, restricted_native_rcs_handoff_schema,
 };
 pub use rcs_receive::{
-    RcsConversationMetadata, RcsConversationTransport, RcsCutover, RcsIdentityOutcome,
-    RcsMessageStatusProjection, RcsOwnership, RcsProjectedRecord, RcsProjectedStatus,
-    RcsProviderDetector, RcsReceiveAlert, RcsReceiveCode, RcsReceiveOutcome, RcsReceiveOwner,
-    RcsReceiveState, RcsStatusApplication,
+    RcsContextExpectation, RcsConversationMetadata, RcsConversationTransport, RcsCutover,
+    RcsIdentityOutcome, RcsMessageStatusProjection, RcsObservationProvenance, RcsOwnership,
+    RcsProjectedRecord, RcsProjectedStatus, RcsProviderDetector, RcsReceiveAlert, RcsReceiveCode,
+    RcsReceiveContext, RcsReceiveOutcome, RcsReceiveOwner, RcsReceiveState, RcsStatusApplication,
+    RcsUnlinkCutoverGenerations,
 };
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
 pub use rcs_target::{RcsTargetClassification, RcsTargetDecision, ValidatedCarrierRouteContext};
@@ -163,15 +166,19 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 pub use snapshot_projection::{SnapshotProjectionState, SnapshotProjectionStatus};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
 };
 use thiserror::Error;
+pub use vault_identity::{
+    VaultIdentityAdoption, VaultIdentityPendingMaterial, VaultIdentityReadiness,
+    VaultIdentitySnapshot, VaultIdentitySnapshotState,
+};
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 50;
+const SCHEMA_VERSION: i64 = 51;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1181,6 +1188,11 @@ pub(crate) struct Store {
     db_key: Zeroizing<[u8; 32]>,
     keys: BTreeMap<u32, EpochKeys>,
     active_epoch: Option<u32>,
+    identity_recovery_keys: BTreeMap<u32, PurposeKey>,
+    identity_bootstrap_epochs: BTreeSet<u32>,
+    staged_pending: Option<vault_identity::StagedPending>,
+    staged_identity: Option<vault_identity::StagedAnchor>,
+    rcs_identity_key: Option<RcsIdentityKey>,
     ephemeral: ephemeral::EphemeralTypingState,
     ephemeral_v2: ephemeral_v2::EphemeralV2State,
     pub(crate) media_dir: PathBuf,
@@ -1224,6 +1236,10 @@ pub enum ContactBookSelection {
 }
 
 impl Client {
+    pub fn device_id(&self) -> Result<DeviceId, Error> {
+        Ok(self.lock()?.config.device_id)
+    }
+
     /// Verifies host facts and atomically stores a local-only exact mapping proof.
     /// The proof digest is computed by core; host-provided digests are never accepted.
     pub fn verify_rcs_mapping(
@@ -1367,6 +1383,97 @@ impl Client {
                     projection.gateway_device_id, projection.conversation_id
                 ),
                 projection.mapping_revision,
+                now_ms,
+            )? {
+                published += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(published)
+    }
+
+    /// Re-evaluates content-free eligibility from core-owned lifecycle and exact mappings.
+    /// Native callers select conversations only; eligibility, features, time, and revisions are
+    /// assigned atomically by core.
+    pub fn publish_rcs_eligibility_from_lifecycle(
+        &self,
+        conversation_ids: &[ConversationId],
+        now_ms: i64,
+    ) -> Result<usize, Error> {
+        if conversation_ids.len() > RCS_CAPABILITY_PUBLISH_BATCH {
+            return Err(Error::InvalidRequest(
+                "RCS capability batch exceeds the maximum",
+            ));
+        }
+        if !(0..i64::MAX).contains(&now_ms) {
+            return Err(Error::InvalidRequest(
+                "invalid RCS eligibility observation time",
+            ));
+        }
+        let unique = conversation_ids.iter().copied().collect::<HashSet<_>>();
+        if unique.len() != conversation_ids.len() {
+            return Err(Error::InvalidRequest(
+                "duplicate RCS eligibility conversation",
+            ));
+        }
+
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let lifecycle = rcs_mapping::recorded_link_lifecycle_metadata(&tx)?;
+        let status = rcs_capability::status_projection(&tx, ctx.device_id, now_ms)?;
+        let linked = lifecycle.as_ref().is_some_and(|lifecycle| {
+            lifecycle.state == RcsCapabilityState::Linked
+                && status.as_ref().is_some_and(|status| {
+                    status.current && status.status.state == RcsCapabilityState::Linked
+                })
+        });
+        let feature_bits = status
+            .as_ref()
+            .filter(|status| linked && status.status.state == RcsCapabilityState::Linked)
+            .map_or(0, |status| status.status.feature_bits);
+        let mut published = 0;
+        for conversation_id in conversation_ids {
+            let mapping = linked
+                .then(|| rcs_mapping::get(&tx, *conversation_id))
+                .transpose()?
+                .flatten();
+            let eligibility = if !linked {
+                RcsEligibility::Unknown
+            } else if mapping.is_some() {
+                RcsEligibility::Eligible
+            } else {
+                RcsEligibility::NotEligible
+            };
+            let identity = format!("eligibility:{}:{}", ctx.device_id, conversation_id);
+            let previous_revision = tx
+                .query_row(
+                    "SELECT revision FROM rcs_capability_published WHERE identity=?",
+                    [&identity],
+                    |row| row.get::<_, u64>(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            let revision = previous_revision
+                .checked_add(1)
+                .filter(|revision| *revision <= i64::MAX as u64)
+                .ok_or(Error::InvalidRequest("RCS eligibility revision exhausted"))?;
+            let projection = RcsEligibilityProjection {
+                conversation_id: *conversation_id,
+                eligibility,
+                feature_bits,
+                mapping_revision: revision,
+                observed_at_ms: now_ms,
+                gateway_device_id: ctx.device_id,
+            };
+            if publish_rcs_capability_payload(
+                &tx,
+                &ctx,
+                &PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
+                    eligibility: projection,
+                }),
+                identity,
+                revision,
                 now_ms,
             )? {
                 published += 1;
@@ -1640,6 +1747,11 @@ impl Client {
             db_key: Zeroizing::new(*db_key.0),
             keys: BTreeMap::new(),
             active_epoch: None,
+            identity_recovery_keys: BTreeMap::new(),
+            identity_bootstrap_epochs: BTreeSet::new(),
+            staged_pending: None,
+            staged_identity: None,
+            rcs_identity_key: None,
             ephemeral: ephemeral::EphemeralTypingState::default(),
             ephemeral_v2: ephemeral_v2::EphemeralV2State::default(),
             media_dir,
@@ -1653,6 +1765,71 @@ impl Client {
         client.cleanup_terminal_mms_parts()?;
         registry.insert(path, Arc::downgrade(&client.0));
         Ok(client)
+    }
+
+    pub fn vault_identity_snapshot(&self) -> Result<VaultIdentitySnapshot, Error> {
+        let store = self.lock()?;
+        vault_identity::snapshot(&store)
+    }
+    pub fn vault_identity_readiness(&self) -> Result<VaultIdentityReadiness, Error> {
+        let store = self.lock()?;
+        let snapshot = vault_identity::snapshot(&store)?;
+        Ok(if snapshot.ready {
+            VaultIdentityReadiness::Ready {
+                key_epoch: snapshot.key_epoch.ok_or(Error::Database)?,
+                operation_id: snapshot.operation_id.ok_or(Error::Database)?,
+            }
+        } else {
+            VaultIdentityReadiness::Unavailable {
+                code: snapshot
+                    .unavailable_code
+                    .unwrap_or_else(|| vault_identity::IDENTITY_UNAVAILABLE.into()),
+            }
+        })
+    }
+    pub fn begin_vault_identity_establishment(
+        &self,
+    ) -> Result<VaultIdentityPendingMaterial, Error> {
+        let mut store = self.lock()?;
+        vault_identity::begin(&mut store)
+    }
+    pub fn confirm_vault_identity_pending_durable(
+        &self,
+        operation_id: String,
+    ) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        vault_identity::confirm(&mut store, &operation_id)
+    }
+    pub fn adopt_vault_identity(
+        &self,
+        status_json: String,
+    ) -> Result<VaultIdentityAdoption, Error> {
+        let mut store = self.lock()?;
+        vault_identity::adopt(&mut store, &status_json)
+    }
+    pub fn commit_vault_identity_acceptance(&self, operation_id: String) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        vault_identity::commit(&mut store, &operation_id)
+    }
+    pub fn restore_vault_identity_from_protected(&self, bytes: Vec<u8>) -> Result<(), Error> {
+        let bytes = Zeroizing::new(bytes);
+        let mut store = self.lock()?;
+        vault_identity::restore(&mut store, &bytes)
+    }
+    pub fn export_vault_identity_recovery_key_for_native_storage(
+        &self,
+        epoch: u32,
+    ) -> Result<Vec<u8>, Error> {
+        let store = self.lock()?;
+        vault_identity::export_recovery_key(&store, epoch)
+    }
+    pub fn import_vault_identity_recovery_key_from_native_storage(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Result<(), Error> {
+        let bytes = Zeroizing::new(bytes);
+        let mut store = self.lock()?;
+        vault_identity::import_recovery_key(&mut store, &bytes)
     }
 
     /// Enables automatic protected-use creation only after the host negotiated protocol v1 for
@@ -2035,6 +2212,7 @@ impl Client {
         })?;
         let derive =
             |purpose| derive_purpose_key(&root, profile, purpose).map_err(|_| Error::Crypto);
+        let identity_recovery_key = derive(KeyPurpose::VaultIdentityRecovery)?;
         let keys = EpochKeys {
             profile: profile.clone(),
             fingerprint: profile.fingerprint().map_err(|_| Error::Crypto)?,
@@ -2078,6 +2256,9 @@ impl Client {
         tx.commit()?;
         s.active_epoch = Some(active);
         s.keys.insert(profile.key_epoch, keys);
+        s.identity_recovery_keys
+            .insert(profile.key_epoch, identity_recovery_key);
+        s.identity_bootstrap_epochs.insert(profile.key_epoch);
         recover_decoder_revision(
             &s.conn,
             &Ctx {
@@ -2126,6 +2307,7 @@ impl Client {
         let command = derive(KeyPurpose::Command)?;
         let event = derive(KeyPurpose::Event)?;
         let compaction = derive(KeyPurpose::Compaction)?;
+        let identity_recovery_key = derive(KeyPurpose::VaultIdentityRecovery)?;
         let local_identity_seal = LocalIdentitySealCapability {
             key: derive(KeyPurpose::LocalWrap)?,
             verified_header: header.clone(),
@@ -2179,6 +2361,9 @@ impl Client {
         tx.commit()?;
         s.active_epoch.get_or_insert(profile.key_epoch);
         s.keys.insert(profile.key_epoch, keys);
+        s.identity_recovery_keys
+            .insert(profile.key_epoch, identity_recovery_key);
+        s.identity_bootstrap_epochs.insert(profile.key_epoch);
         recover_decoder_revision(
             &s.conn,
             &Ctx {
@@ -3786,6 +3971,15 @@ impl Client {
                 })
             })
             .collect()
+    }
+
+    /// Candidate RCS-link commands for the trusted native coordinator.
+    ///
+    /// This list grants no transport authority. Each candidate must still pass
+    /// mapping verification and native admission before an effect.
+    pub fn pending_native_rcs_commands(&self) -> Result<Vec<PendingNativeRcsCommand>, Error> {
+        let store = self.lock()?;
+        rcs_native::pending_commands(&store.conn, store.active_epoch)
     }
 
     /// Lists unattempted received commands for automatic routing without granting a transport
@@ -6815,6 +7009,17 @@ fn apply_migration_50(conn: &Connection) -> Result<(), Error> {
         "show_source INTEGER NOT NULL DEFAULT 0",
     )
 }
+const MIGRATION_51: &str = "
+CREATE TABLE IF NOT EXISTS vault_identity_state(
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  state TEXT NOT NULL CHECK(state IN ('pending','accepted','conflict')),
+  operation_id TEXT NOT NULL,
+  key_epoch INTEGER NOT NULL CHECK(key_epoch>0),
+  profile_fingerprint TEXT NOT NULL,
+  pin BLOB NOT NULL CHECK(length(pin)=32),
+  conflict_evidence BLOB,
+  updated_at_ms INTEGER NOT NULL
+);";
 fn apply_migration_45(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(
         conn,
@@ -7109,6 +7314,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_48)?;
             tx.execute_batch(MIGRATION_49)?;
             apply_migration_50(&tx)?;
+            tx.execute_batch(MIGRATION_51)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -7117,7 +7323,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=49)) => {
+        Some(version @ (4..=50)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -7252,6 +7458,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 49 {
                 apply_migration_50(&tx)?;
+            }
+            if version <= 50 {
+                tx.execute_batch(MIGRATION_51)?;
             }
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
@@ -16555,5 +16764,63 @@ mod tests {
         drop(store);
         drop(upgraded);
         Client::open(target_config, key()).unwrap();
+    }
+
+    #[test]
+    fn installed_rcs_identity_key_matches_independent_known_answer() {
+        use sha2::{Digest, Sha256};
+
+        let directory = tempfile::tempdir().unwrap();
+        let vault = VaultId(Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap());
+        let operation = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let owner = Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
+        let scope = Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("rcs-identity-vector.db"),
+            vault_id: vault,
+            device_id: DeviceId(owner),
+        };
+        let client = Client::open(config, DatabaseKey::new(&[42; 32]).unwrap()).unwrap();
+        let seed: Vec<u8> = (0_u8..32).collect();
+        let mut commitment = Sha256::new();
+        commitment.update(b"peppy-vault-identity-commitment-v1\0");
+        commitment.update(1_u16.to_be_bytes());
+        commitment.update(vault.0.as_bytes());
+        commitment.update(&seed);
+        let mut protected = Vec::new();
+        protected.extend_from_slice(b"peppy-vault-identity-anchor-v1\0");
+        protected.extend_from_slice(&1_u16.to_be_bytes());
+        protected.extend_from_slice(&1_u16.to_be_bytes());
+        protected.extend_from_slice(vault.0.as_bytes());
+        protected.extend_from_slice(operation.as_bytes());
+        protected.extend_from_slice(owner.as_bytes());
+        protected.extend_from_slice(&seed);
+        protected.extend_from_slice(&commitment.finalize());
+        let mut pin = Sha256::new();
+        pin.update(b"peppy-vault-identity-anchor-pin-v1\0");
+        pin.update(&protected);
+        {
+            let store = client.lock().unwrap();
+            store.conn.execute(
+                "INSERT INTO vault_identity_state(id,state,operation_id,key_epoch,profile_fingerprint,pin,conflict_evidence,updated_at_ms) VALUES(1,'accepted',?,1,?, ?,NULL,0)",
+                params![operation.to_string(), "a".repeat(64), pin.finalize().as_slice()],
+            ).unwrap();
+        }
+        client
+            .restore_vault_identity_from_protected(protected)
+            .unwrap();
+        let store = client.lock().unwrap();
+        let identity = vault_identity::rcs_identity_key(&store)
+            .unwrap()
+            .message_identity(scope, "conversation", "message")
+            .unwrap();
+        assert_eq!(
+            identity.digest(),
+            &[
+                0x50, 0xb7, 0x5d, 0x0e, 0x70, 0x48, 0x68, 0xef, 0x17, 0x89, 0x77, 0xa2, 0xa6, 0xe8,
+                0xf5, 0xe2, 0xab, 0xda, 0xb3, 0xe9, 0xe6, 0xc1, 0x8b, 0x3d, 0x69, 0xd0, 0xac, 0xa8,
+                0xf0, 0xb5, 0x4e, 0x51,
+            ]
+        );
     }
 }

@@ -3,9 +3,103 @@
 //! These records are intentionally separate from vault events and shared conversation DTOs. They
 //! are the only JSON-schema-capable projection an Android transport may receive after core has
 //! admitted an RCS attempt.
-use crate::{CommandId, RcsConversationType, RcsMapping, RcsMappingObservation, RcsSendMode};
+use crate::{
+    CommandId, ConversationId, Error, RcsCapabilityState, RcsConversationType, RcsMapping,
+    RcsMappingObservation, RcsSendMode, rcs_mapping,
+};
+use rusqlite::{Connection, params};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
+
+pub const NATIVE_RCS_COMMAND_PAGE_SIZE: usize = 100;
+
+/// A received RCS-link command that may be observed by the trusted native coordinator.
+/// This is only a candidate; prepare and begin remain the transport-admission boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingNativeRcsCommand {
+    pub command_id: CommandId,
+    pub conversation_id: ConversationId,
+    pub recipient: String,
+}
+
+pub(crate) fn pending_commands(
+    conn: &Connection,
+    active_epoch: Option<u32>,
+) -> Result<Vec<PendingNativeRcsCommand>, Error> {
+    if rcs_mapping::recorded_link_lifecycle(conn)? != Some(RcsCapabilityState::Linked) {
+        return Ok(Vec::new());
+    }
+    let Some(active_epoch) = active_epoch else {
+        return Ok(Vec::new());
+    };
+    let mut query = conn.prepare(
+        "SELECT l.local_order,l.command_id FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE a.command_id IS NULL AND l.historical=0 AND l.subscription_id='' AND l.key_epoch=? AND (l.local_order>? OR (l.local_order=? AND l.command_id>?)) ORDER BY l.local_order,l.command_id LIMIT ?",
+    )?;
+    // The client store mutex prevents ledger growth during this scan. Each batch advances the
+    // keyset cursor, so one call examines at most the qualifying raw rows present on entry.
+    let mut cursor = (i64::MIN, String::new());
+    let mut candidates = Vec::new();
+    while candidates.len() < NATIVE_RCS_COMMAND_PAGE_SIZE {
+        let rows = query
+            .query_map(
+                params![
+                    active_epoch,
+                    cursor.0,
+                    cursor.0,
+                    cursor.1,
+                    NATIVE_RCS_COMMAND_PAGE_SIZE as i64
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let Some(last) = rows.last() else {
+            break;
+        };
+        cursor = last.clone();
+        let exhausted = rows.len() < NATIVE_RCS_COMMAND_PAGE_SIZE;
+        for (_, command_id) in rows {
+            if let Some(candidate) = candidate(conn, active_epoch, command_id)? {
+                candidates.push(candidate);
+                if candidates.len() == NATIVE_RCS_COMMAND_PAGE_SIZE {
+                    break;
+                }
+            }
+        }
+        if exhausted {
+            break;
+        }
+    }
+    Ok(candidates)
+}
+
+fn candidate(
+    conn: &Connection,
+    active_epoch: u32,
+    command_id: String,
+) -> Result<Option<PendingNativeRcsCommand>, Error> {
+    let command_id = command_id
+        .parse()
+        .map_err(|_| Error::InvalidRequest("invalid command id"))?;
+    let message = match crate::unattempted_rcs_message(conn, Some(active_epoch), command_id) {
+        Ok(message) => message,
+        Err(Error::AlreadyAttempted(_) | Error::InvalidRequest(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(mapping) = rcs_mapping::get(conn, message.record.conversation_id)? else {
+        return Ok(None);
+    };
+    if crate::require_exact_rcs_recipient(&message, &mapping).is_err() {
+        return Ok(None);
+    }
+    let [recipient] = message.recipients.as_slice() else {
+        return Ok(None);
+    };
+    Ok(Some(PendingNativeRcsCommand {
+        command_id,
+        conversation_id: message.record.conversation_id,
+        recipient: recipient.clone(),
+    }))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
