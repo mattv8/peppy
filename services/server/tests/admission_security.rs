@@ -377,6 +377,7 @@ async fn route_authority_inventory_is_complete_and_device_routes_reject_bad_bear
         (Method::GET, "/v1/snapshot/records?high_water=0".to_owned()),
         (Method::GET, "/v1/commands/pending".to_owned()),
         (Method::GET, "/v1/vault/key-profiles".to_owned()),
+        (Method::GET, "/v1/vault/identity".to_owned()),
         (Method::GET, "/v1/attachments/usage".to_owned()),
         (Method::GET, format!("/v1/attachments/{attachment}")),
         (Method::POST, format!("/v1/devices/{device}/revoke")),
@@ -452,6 +453,17 @@ async fn route_authority_inventory_is_complete_and_device_routes_reject_bad_bear
             Method::POST,
             "/v1/vault/key-profiles/1/activate".to_owned(),
             json!({}),
+        ),
+        (
+            Method::POST,
+            "/v1/vault/identity".to_owned(),
+            json!({
+                "protocol_version": 1,
+                "operation_id": attachment,
+                "key_epoch": 1,
+                "profile_fingerprint": "0".repeat(64),
+                "recovery_record": STANDARD.encode([0_u8; 266]),
+            }),
         ),
         (
             Method::POST,
