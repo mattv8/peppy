@@ -59,12 +59,16 @@ func TestRefreshConversationIndexRejectsStaleIncrementalUpdate(t *testing.T) {
 	run := make(chan error, 1)
 	go func() { run <- link.Run() }()
 	fixture.awaitStreamReady(t)
+	awaitStreamOpen(t, link)
 	setTestOwnerVerification(link)
 	result := make(chan error, 1)
 	go func() { result <- link.RefreshConversationIndex() }()
 	select {
-	case <-fixture.listReached:
-	case <-time.After(5 * time.Second):
+	case folder := <-fixture.firstListFolder:
+		if folder != gmproto.ListConversationsRequest_INBOX {
+			t.Fatalf("first refresh folder = %v, want INBOX", folder)
+		}
+	case <-time.After(30 * time.Second):
 		t.Fatal("refresh did not reach first folder")
 	}
 	link.mu.Lock()

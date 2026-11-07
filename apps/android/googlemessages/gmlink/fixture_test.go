@@ -77,22 +77,22 @@ type fixtureKnobs struct {
 // phoneFixture stands in for Google's servers on localhost. It answers config,
 // sign-in, sends and the long poll, and records every request the link makes.
 type phoneFixture struct {
-	server        *httptest.Server
-	auth          *libgm.AuthData
-	rotations     atomic.Int32
-	current       chan []byte
-	pending       [][]byte
-	stop          chan struct{}
-	gate          chan struct{}
-	gateOnce      sync.Once
-	listOnce      sync.Once
-	streamOnce    sync.Once
-	pollOnce      sync.Once
-	listReached   chan struct{}
-	listRelease   chan struct{}
-	pollReached   chan struct{}
-	streamReady   chan struct{}
-	actionReached chan gmproto.ActionType
+	server          *httptest.Server
+	auth            *libgm.AuthData
+	rotations       atomic.Int32
+	current         chan []byte
+	pending         [][]byte
+	stop            chan struct{}
+	gate            chan struct{}
+	gateOnce        sync.Once
+	listOnce        sync.Once
+	streamOnce      sync.Once
+	pollOnce        sync.Once
+	firstListFolder chan gmproto.ListConversationsRequest_Folder
+	listRelease     chan struct{}
+	pollReached     chan struct{}
+	streamReady     chan struct{}
+	actionReached   chan gmproto.ActionType
 
 	mu            sync.Mutex
 	knobs         fixtureKnobs
@@ -111,7 +111,7 @@ type phoneFixture struct {
 // auth is the link's auth: the fixture decrypts its requests and encrypts replies.
 func newPhoneFixture(t *testing.T, auth *libgm.AuthData) *phoneFixture {
 	t.Helper()
-	fixture := &phoneFixture{auth: auth, stop: make(chan struct{}), gate: make(chan struct{}), listReached: make(chan struct{}), listRelease: make(chan struct{}), pollReached: make(chan struct{}), streamReady: make(chan struct{}), actionReached: make(chan gmproto.ActionType, 64)}
+	fixture := &phoneFixture{auth: auth, stop: make(chan struct{}), gate: make(chan struct{}), firstListFolder: make(chan gmproto.ListConversationsRequest_Folder, 1), listRelease: make(chan struct{}), pollReached: make(chan struct{}), streamReady: make(chan struct{}), actionReached: make(chan gmproto.ActionType, 64)}
 	fixture.server = httptest.NewTLSServer(http.HandlerFunc(fixture.serve))
 	installSafetyDialer(t, fixture.server)
 	t.Cleanup(fixture.server.Close)
@@ -371,12 +371,18 @@ func (fixture *phoneFixture) answerListConversations(data *gmproto.OutgoingRPCDa
 	fixture.mu.Lock()
 	fixture.listCalls = append(fixture.listCalls, &request)
 	fixture.mu.Unlock()
-	if knobs.gateList && request.GetFolder() == gmproto.ListConversationsRequest_INBOX {
-		fixture.listOnce.Do(func() { close(fixture.listReached) })
-		select {
-		case <-fixture.listRelease:
-		case <-fixture.stop:
-			return
+	if knobs.gateList {
+		firstRequest := false
+		fixture.listOnce.Do(func() {
+			firstRequest = true
+			fixture.firstListFolder <- request.GetFolder()
+		})
+		if firstRequest {
+			select {
+			case <-fixture.listRelease:
+			case <-fixture.stop:
+				return
+			}
 		}
 	}
 	fixture.mu.Lock()
