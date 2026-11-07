@@ -32,7 +32,6 @@ export function WebhookList({ webhooks, serverOffline, onEdit, onSetPaused, onDe
   const cancelButton = useRef<HTMLButtonElement>(null);
   const confirmButton = useRef<HTMLButtonElement>(null);
   const restoreFocusId = useRef<string | null>(null);
-  const wasDeleting = useRef(false);
   const now = Date.now();
 
   useEffect(() => {
@@ -47,9 +46,8 @@ export function WebhookList({ webhooks, serverOffline, onEdit, onSetPaused, onDe
   }, [confirmingId]);
 
   useEffect(() => {
-    if (wasDeleting.current && !deleting && confirmingId) confirmButton.current?.focus();
-    wasDeleting.current = deleting;
-  }, [deleting, confirmingId]);
+    if (deleteError && confirmingId) confirmButton.current?.focus();
+  }, [deleteError, confirmingId]);
 
   const registerDeleteOpener = (id: string, element: HTMLButtonElement | null) => {
     if (element) deleteOpeners.current.set(id, element);
@@ -154,8 +152,11 @@ function WebhookRow({ webhook, now, serverOffline, pending, pauseError, onEdit, 
           role="switch"
           aria-label={`${webhook.name} active`}
           checked={!webhook.paused}
-          disabled={serverOffline || pending}
-          onChange={onTogglePause}
+          disabled={serverOffline}
+          aria-disabled={pending || undefined}
+          onChange={() => {
+            if (!pending) onTogglePause();
+          }}
         />
         <span />
       </label>
@@ -180,11 +181,12 @@ function WebhookRow({ webhook, now, serverOffline, pending, pauseError, onEdit, 
         <span className="webhook-dot" aria-hidden="true" />
         <span className="webhook-last-text">{delivery.text}</span>
       </span>
-      <div className="webhook-actions">
+      <div className="webhook-actions" data-webhook-actions={webhook.id}>
         <button
           type="button"
           className="webhook-icon-button"
           aria-label={`Edit ${webhook.name}`}
+          disabled={pending}
           onClick={(event) => onEdit(webhook, event.currentTarget)}
         >
           <Pencil size={14} aria-hidden="true" />
@@ -194,7 +196,7 @@ function WebhookRow({ webhook, now, serverOffline, pending, pauseError, onEdit, 
           type="button"
           className="webhook-icon-button"
           aria-label={`Delete ${webhook.name}`}
-          disabled={serverOffline}
+          disabled={serverOffline || pending}
           onClick={onRequestDelete}
         >
           <Trash2 size={14} aria-hidden="true" />
@@ -227,7 +229,7 @@ function WebhookDeleteConfirm({ webhook, deleting, error, cancelRef, confirmRef,
       aria-busy={deleting || undefined}
     >
       <p id={textId} className="webhook-confirm-text">
-        Delete <b>{webhook.name}</b>? It stops immediately; queued retries are dropped.
+        Delete <b>{webhook.name}</b>? It stops immediately; queued deliveries are dropped.
       </p>
       <button ref={cancelRef} type="button" className="secondary-button webhook-compact-button" disabled={deleting} onClick={onCancel}>
         Cancel

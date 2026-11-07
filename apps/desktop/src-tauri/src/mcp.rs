@@ -1,7 +1,7 @@
 //! Private native MCP management bridge. Pairing material never reaches Tauri IPC.
 use crate::{
     error::{BridgeError, BridgeResult},
-    net::MAX_JSON_BYTES,
+    net::{NetError, MAX_JSON_BYTES},
     AppState,
 };
 use peppy_hosted_api::mcp::{
@@ -22,6 +22,35 @@ use tauri::{State, WebviewWindow};
 use uuid::Uuid;
 
 const COMPUTER_ENROLLMENT_PATH: &str = "/v1/enrollment/computers";
+// Webhook list responses can exceed the general JSON limit; the server bounds them at 2 MiB.
+const MAX_WEBHOOK_LIST_BYTES: usize = 2 * 1024 * 1024;
+// Server codes that the webhook settings UI can act on; anything else keeps the generic mapping.
+const WEBHOOK_ERRORS: &[(&str, &str)] = &[
+    ("webhook_url_invalid", "The webhook URL is invalid."),
+    ("webhook_url_insecure", "Webhook URLs must use HTTPS."),
+    (
+        "webhook_url_blocked",
+        "The webhook URL points to a blocked network address.",
+    ),
+    ("webhook_name_invalid", "The webhook name is invalid."),
+    ("webhook_filter_invalid", "The webhook filter is invalid."),
+    ("webhook_limit", "The webhook limit has been reached."),
+    ("webhook_not_found", "This webhook no longer exists."),
+    ("mcp_unavailable", "The MCP server client is unavailable."),
+    (
+        "mcp_device_required",
+        "Enable the Peppy server client before managing webhooks.",
+    ),
+    (
+        "mcp_worker_unavailable",
+        "The Peppy server client is not responding.",
+    ),
+    (
+        "mcp_worker_invalid",
+        "The Peppy server client returned an invalid response.",
+    ),
+    ("owner_required", "Only an owner can manage webhooks."),
+];
 
 struct McpCommand<'a> {
     state: &'a AppState,
@@ -290,9 +319,9 @@ pub async fn webhooks_list(
         .session()
         .await?
         .api
-        .get_json("/v1/mcp/webhooks", MAX_JSON_BYTES)
+        .get_json("/v1/mcp/webhooks", MAX_WEBHOOK_LIST_BYTES)
         .await
-        .map_err(Into::into)
+        .map_err(webhook_error)
 }
 
 #[tauri::command]
@@ -310,7 +339,7 @@ pub async fn webhook_create(
         .api
         .post_json("/v1/mcp/webhooks", &input)
         .await
-        .map_err(Into::into)
+        .map_err(webhook_error)
 }
 
 #[tauri::command]
@@ -330,7 +359,7 @@ pub async fn webhook_update(
         .api
         .put_json(&format!("/v1/mcp/webhooks/{id}"), &input)
         .await
-        .map_err(Into::into)
+        .map_err(webhook_error)
 }
 
 #[tauri::command]
@@ -348,7 +377,7 @@ pub async fn webhook_delete(
         .api
         .delete_discard(&format!("/v1/mcp/webhooks/{id}"))
         .await
-        .map_err(Into::into)
+        .map_err(webhook_error)
 }
 
 #[tauri::command]
@@ -366,7 +395,7 @@ pub async fn webhook_reveal_secret(
         .api
         .post_empty(&format!("/v1/mcp/webhooks/{id}/secret"))
         .await
-        .map_err(Into::into)
+        .map_err(webhook_error)
 }
 
 #[tauri::command]
@@ -384,7 +413,7 @@ pub async fn webhook_rotate_secret(
         .api
         .post_empty(&format!("/v1/mcp/webhooks/{id}/rotate-secret"))
         .await
-        .map_err(Into::into)
+        .map_err(webhook_error)
 }
 
 #[tauri::command]
@@ -402,7 +431,7 @@ pub async fn webhook_test(
         .api
         .post_empty(&format!("/v1/mcp/webhooks/{id}/test"))
         .await
-        .map_err(Into::into)
+        .map_err(webhook_error)
 }
 
 #[tauri::command]
@@ -479,6 +508,22 @@ fn grant_id(value: &str) -> BridgeResult<Uuid> {
 
 fn webhook_id(value: &str) -> BridgeResult<Uuid> {
     grant_id(value)
+}
+
+fn webhook_error(error: NetError) -> BridgeError {
+    match error {
+        NetError::Status {
+            status,
+            code: Some(code),
+        } => match WEBHOOK_ERRORS.iter().find(|(known, _)| *known == code) {
+            Some(&(known, message)) => BridgeError::new(known, message),
+            None => BridgeError::from(NetError::Status {
+                status,
+                code: Some(code),
+            }),
+        },
+        error => error.into(),
+    }
 }
 
 fn validate_webhook_input(input: &WebhookInput) -> BridgeResult<()> {
@@ -586,6 +631,57 @@ mod tests {
         ] {
             assert!(authorization_id(invalid).is_err(), "{invalid}");
         }
+    }
+
+    fn webhook_status(code: &str) -> NetError {
+        NetError::Status {
+            status: 422,
+            code: Some(code.into()),
+        }
+    }
+
+    #[test]
+    fn webhook_errors_preserve_each_known_server_code() {
+        for code in [
+            "webhook_url_invalid",
+            "webhook_url_insecure",
+            "webhook_url_blocked",
+            "webhook_name_invalid",
+            "webhook_filter_invalid",
+            "webhook_limit",
+            "webhook_not_found",
+            "mcp_unavailable",
+            "mcp_device_required",
+            "mcp_worker_unavailable",
+            "mcp_worker_invalid",
+            "owner_required",
+        ] {
+            let mapped = webhook_error(webhook_status(code));
+            assert_eq!(mapped.code, code);
+            assert!(!mapped.message.is_empty());
+            assert!(!mapped.message.contains(code));
+        }
+    }
+
+    #[test]
+    fn webhook_errors_map_unknown_codes_to_the_generic_rejection() {
+        let mapped = webhook_error(webhook_status("webhook_internal_detail"));
+        assert_eq!(mapped.code, "server-rejected");
+    }
+
+    #[test]
+    fn webhook_errors_keep_statusless_and_transport_errors_generic() {
+        assert_eq!(
+            webhook_error(NetError::Status {
+                status: 500,
+                code: None,
+            })
+            .code,
+            "server-rejected"
+        );
+        assert_eq!(webhook_error(NetError::Revoked).code, "revoked");
+        assert_eq!(webhook_error(NetError::Offline).code, "offline");
+        assert_eq!(webhook_error(NetError::TooLarge).code, "response-too-large");
     }
 
     #[test]

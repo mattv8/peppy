@@ -215,7 +215,7 @@ For source development only, omit the two Community overlays:
 docker compose -f docker-compose.yml -f infra/compose/compose.mcp.yml up -d
 ```
 
-The overlay publishes no worker port. The existing server origin exposes `/mcp`; the API reaches the worker only on the private Compose network. The worker runs as UID 10001 with a read-only root filesystem. Its durable `mcp-state` volume holds encrypted client state, while the worker-owned `mcp-control` volume supplies a control token read-only to the API. The worker creates its control token and storage key only in an empty initialized volume. Keep both volumes private. Store the worker state on a local filesystem: its single-node lock does not support network filesystems or HA sharing.
+The overlay publishes no worker port. The existing server origin exposes `/mcp`; the API reaches the worker only on the internal `mcp-api` Compose network. The worker runs as UID 10001 with a read-only root filesystem. Its durable `mcp-state` volume holds encrypted client state, while the worker-owned `mcp-control` volume supplies a control token read-only to the API. The worker creates its control token and storage key only in an empty initialized volume. Keep both volumes private. Store the worker state on a local filesystem: its single-node lock does not support network filesystems or HA sharing.
 
 When backing up MCP, use the same MCP Compose overlays that run the worker. The backup stops the worker and adds the private, `0600` `mcp-state.tar.gz` archive to the backup set; it contains the storage key and must receive the same protection as vault recovery material. It never archives or records `mcp-control`: the worker regenerates that control token in a fresh control volume. Restore with the identical MCP overlays, to a fresh Compose project with no target volumes. Restore recreates only `mcp-state`, leaves the control volume to normal initialization, and does not start MCP; review the recovered deployment, then start it deliberately.
 
@@ -229,7 +229,7 @@ Removing the MCP device or revoking a client grant fences new MCP access. Cleanu
 
 #### Webhooks
 
-An unlocked vault owner can add up to 10 outbound webhooks per vault in desktop or web **Settings → Advanced**. A webhook fires for each inbound SMS or MMS and filters by sender: `all` sends every inbound message, `only` sends messages from the listed contacts or numbers, and `except` sends every message except those. Up to 50 filter entries are allowed per webhook. Delivery runs on the server-resident MCP worker, so no desktop, browser, or phone needs to be online. Webhooks need no extra configuration: they are available whenever Peppy MCP is enabled, and every control is in the settings UI. The MCP overlay attaches the worker to a non-internal `mcp-egress` network for webhook delivery, in addition to `private`; it still publishes no port.
+An unlocked vault owner can add up to 10 outbound webhooks per vault in desktop or web **Settings → Advanced**. A webhook fires for each inbound SMS or MMS and filters by sender: `all` sends every inbound message, `only` sends messages from the listed contacts or numbers, and `except` sends every message except those. Up to 50 filter entries are allowed per webhook. Delivery runs on the server-resident MCP worker, so no desktop, browser, or phone needs to be online. Webhooks need no extra configuration: they are available whenever Peppy MCP is enabled, and every control is in the settings UI. The MCP overlay runs the worker on two networks: `mcp-api`, an internal network shared only with the API, and `mcp-egress`, a non-internal network for webhook delivery. The worker is not on the storage or database network, and it still publishes no port.
 
 Each request carries Standard Webhooks headers:
 
@@ -268,8 +268,9 @@ Delivery semantics:
 - Delivery is at least once. Deduplicate on `webhook-id`.
 - A 2xx response within 10 seconds succeeds. Redirects are not followed; a 3xx response fails.
 - A failed delivery is retried after 5 seconds, 1 minute, 10 minutes, 1 hour, and 6 hours. After the sixth attempt fails, the delivery is dropped and the webhook shows as failed.
-- 5xx responses, timeouts, and connection errors are retried. Other 4xx responses are permanent and are not retried; 408, 425, and 429 are retried.
-- Webhooks never backfill. Messages received before the webhook was created are not sent. Imported history and messages older than 24 hours are skipped.
+- 5xx responses, timeouts, DNS failures, and connection failures are retried. Other 4xx responses are permanent and are not retried; 408, 425, and 429 are retried.
+- Pausing a webhook holds its queued deliveries; they are sent after it is resumed. Changing a webhook's URL or filter discards its queued deliveries. Renaming it keeps them.
+- Webhooks never backfill. Messages received more than five minutes before the webhook was created are not sent. Imported history and messages older than 24 hours are skipped.
 
 Endpoint policy:
 

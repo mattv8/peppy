@@ -90,7 +90,7 @@ describe("WebhookList", () => {
     expect(onSetPaused).toHaveBeenCalledWith(homeAssistant, true);
   });
 
-  it("resumes a paused webhook and disables its switch while the change is pending", async () => {
+  it("resumes a paused webhook and keeps its switch focusable while the change is pending", async () => {
     const pending = deferred<void>();
     const onSetPaused = vi.fn().mockReturnValue(pending.promise);
     renderList({ onSetPaused });
@@ -99,11 +99,14 @@ describe("WebhookList", () => {
     fireEvent.click(toggle);
 
     expect(onSetPaused).toHaveBeenCalledWith(n8n, false);
-    expect(toggle).toBeDisabled();
+    expect(toggle).toBeEnabled();
+    expect(toggle).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("button", { name: "Edit n8n triage" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Delete n8n triage" })).toBeDisabled();
     expect(row(n8n.id)).toHaveAttribute("aria-busy", "true");
 
     pending.resolve();
-    await waitFor(() => expect(toggle).toBeEnabled());
+    await waitFor(() => expect(toggle).not.toHaveAttribute("aria-disabled"));
   });
 
   it("shows a row-level error when the pause change fails", async () => {
@@ -128,7 +131,7 @@ describe("WebhookList", () => {
 
     const confirm = row(zapier.id);
     expect(confirm).toHaveAttribute("data-webhook-confirm");
-    expect(within(confirm).getByText(/queued retries are dropped/i)).toBeInTheDocument();
+    expect(within(confirm).getByText(/queued deliveries are dropped/i)).toBeInTheDocument();
     expect(within(confirm).getByRole("button", { name: "Cancel" })).toHaveFocus();
     expect(onDelete).not.toHaveBeenCalled();
   });
@@ -162,6 +165,18 @@ describe("WebhookList", () => {
 
     const alert = await within(row(zapier.id)).findByRole("alert");
     expect(alert).toHaveTextContent("This webhook no longer exists.");
+    expect(within(row(zapier.id)).getByRole("button", { name: "Delete" })).toHaveFocus();
+  });
+
+  it("refocuses Delete after a delayed deletion failure", async () => {
+    const pending = deferred<void>();
+    renderList({ onDelete: vi.fn().mockReturnValue(pending.promise) });
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete Zapier: Alice & Bob" }));
+    fireEvent.click(within(row(zapier.id)).getByRole("button", { name: "Delete" }));
+    pending.reject({ code: "webhook_not_found", message: "gone" });
+
+    await within(row(zapier.id)).findByRole("alert");
     expect(within(row(zapier.id)).getByRole("button", { name: "Delete" })).toHaveFocus();
   });
 });

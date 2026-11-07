@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { bridge } from "../bridge/bridge";
 import { errorCode } from "../bridge/bridgeErrors";
 import { webhookErrorMessage } from "./webhookDisplay";
@@ -19,24 +19,30 @@ export function useWebhookSecret(webhookId: string | null) {
   /** Increments when a freshly created secret arrives, so the field can take focus once. */
   const [adoptedRevision, setAdoptedRevision] = useState(0);
   const status = useTransientMessage();
+  const generation = useRef(0);
 
-  const attempt = async (action: () => Promise<void>) => {
+  useEffect(() => () => { generation.current += 1; }, []);
+
+  const isCurrent = (requestGeneration: number) => generation.current === requestGeneration;
+
+  const attempt = async (action: (requestGeneration: number) => Promise<void>) => {
+    const requestGeneration = generation.current;
     setBusy(true);
     setError("");
     try {
-      await action();
+      await action(requestGeneration);
     } catch (reason) {
-      setError(webhookErrorMessage(errorCode(reason)));
+      if (isCurrent(requestGeneration)) setError(webhookErrorMessage(errorCode(reason)));
     } finally {
-      setBusy(false);
+      if (isCurrent(requestGeneration)) setBusy(false);
     }
   };
 
-  const loadSecret = async (): Promise<string> => {
+  const loadSecret = async (requestGeneration: number): Promise<string> => {
     if (value !== null) return value;
     if (webhookId === null) throw new Error("Save the webhook first.");
     const fetched = (await bridge.webhook_reveal_secret(webhookId)).secret;
-    setValue(fetched);
+    if (isCurrent(requestGeneration)) setValue(fetched);
     return fetched;
   };
 
@@ -45,20 +51,24 @@ export function useWebhookSecret(webhookId: string | null) {
       setRevealed(false);
       return;
     }
-    void attempt(async () => {
-      await loadSecret();
+    void attempt(async (requestGeneration) => {
+      await loadSecret(requestGeneration);
+      if (!isCurrent(requestGeneration)) return;
       setRevealed(true);
       status.clear();
     });
   };
 
   const copy = () => {
-    void attempt(async () => {
-      const current = await loadSecret();
+    void attempt(async (requestGeneration) => {
+      const current = await loadSecret(requestGeneration);
+      if (!isCurrent(requestGeneration)) return;
       try {
         await navigator.clipboard.writeText(current);
+        if (!isCurrent(requestGeneration)) return;
         status.show(COPIED_MESSAGE, COPIED_DURATION_MS);
       } catch {
+        if (!isCurrent(requestGeneration)) return;
         status.show(COPY_FAILED_MESSAGE);
       }
     });
@@ -73,9 +83,10 @@ export function useWebhookSecret(webhookId: string | null) {
   const cancelRotate = () => setRotateOpen(false);
 
   const confirmRotate = () => {
-    void attempt(async () => {
+    void attempt(async (requestGeneration) => {
       if (webhookId === null) return;
       const next = await bridge.webhook_rotate_secret(webhookId);
+      if (!isCurrent(requestGeneration)) return;
       setValue(next.secret);
       setRevealed(true);
       setRotateOpen(false);

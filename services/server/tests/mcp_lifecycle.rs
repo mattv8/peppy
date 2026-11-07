@@ -340,6 +340,17 @@ async fn webhook_request(
     path: &str,
     body: serde_json::Value,
 ) -> (StatusCode, String) {
+    let (status, _, body) = webhook_response(router, token, method, path, body).await;
+    (status, body)
+}
+
+async fn webhook_response(
+    router: Router,
+    token: &str,
+    method: Method,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, axum::http::HeaderMap, String) {
     let response = router
         .oneshot(
             Request::builder()
@@ -353,8 +364,9 @@ async fn webhook_request(
         .await
         .unwrap();
     let status = response.status();
+    let headers = response.headers().clone();
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    (status, String::from_utf8(body.to_vec()).unwrap())
+    (status, headers, String::from_utf8(body.to_vec()).unwrap())
 }
 
 fn webhook_input() -> serde_json::Value {
@@ -365,6 +377,25 @@ fn webhook_input() -> serde_json::Value {
         "filterMode": "all",
         "filter": [],
         "paused": false,
+    })
+}
+
+fn webhook_view(id: Uuid) -> serde_json::Value {
+    json!({
+        "id": id,
+        "name": "Inbox",
+        "nameIsDerived": false,
+        "url": "https://hooks.example/messages",
+        "events": ["message.received"],
+        "filterMode": "all",
+        "filter": [],
+        "paused": false,
+        "createdAt": "2026-01-01T00:00:00Z",
+        "lastDeliveryState": "never",
+        "lastDeliveryAt": null,
+        "lastStatusCode": null,
+        "lastError": null,
+        "pendingDeliveries": 0,
     })
 }
 
@@ -385,6 +416,32 @@ async fn webhook_routes_require_an_owner() {
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
         assert_eq!(body, r#"{"code":"owner_required"}"#);
     }
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn webhook_routes_do_not_forward_non_owner_requests() {
+    let fixture = Fixture::new().await;
+    sqlx::query("INSERT INTO mcp_devices(vault_id,device_id) VALUES($1,$2)")
+        .bind(fixture.vault)
+        .bind(fixture.device)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let worker = fake_worker().await;
+    let worker_config_lock = worker_config_lock().lock().await;
+    let router = router_for_worker(fixture.pool.clone(), &worker, &worker_config_lock);
+
+    for (method, path, body) in [
+        (Method::GET, "/v1/mcp/webhooks", json!({})),
+        (Method::POST, "/v1/mcp/webhooks", webhook_input()),
+    ] {
+        let (status, body) =
+            webhook_request(router.clone(), &fixture.device_token, method, path, body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+    assert!(worker.bodies("/internal/mcp/webhooks").await.is_empty());
+    drop(worker_config_lock);
     fixture.cleanup().await;
 }
 
@@ -418,6 +475,93 @@ async fn webhook_routes_report_an_absent_mcp_device() {
 }
 
 #[tokio::test]
+async fn webhook_routes_treat_cleanup_pending_devices_as_unavailable() {
+    let fixture = Fixture::new().await;
+    sqlx::query("INSERT INTO mcp_devices(vault_id,device_id,cleanup_pending) VALUES($1,$2,TRUE)")
+        .bind(fixture.vault)
+        .bind(fixture.device)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let worker = fake_worker().await;
+    let worker_config_lock = worker_config_lock().lock().await;
+    let router = router_for_worker(fixture.pool.clone(), &worker, &worker_config_lock);
+
+    let (status, body) = webhook_request(
+        router.clone(),
+        &fixture.owner_token,
+        Method::GET,
+        "/v1/mcp/webhooks",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, r#"{"available":false,"webhooks":[]}"#);
+    let (status, body) = webhook_request(
+        router,
+        &fixture.owner_token,
+        Method::POST,
+        "/v1/mcp/webhooks",
+        webhook_input(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body, r#"{"code":"mcp_device_required"}"#);
+    assert!(worker.bodies("/internal/mcp/webhooks").await.is_empty());
+    drop(worker_config_lock);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn webhook_list_allows_two_mebibytes_but_not_more() {
+    let fixture = Fixture::new().await;
+    sqlx::query("INSERT INTO mcp_devices(vault_id,device_id) VALUES($1,$2)")
+        .bind(fixture.vault)
+        .bind(fixture.device)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let worker = fake_worker().await;
+    let worker_config_lock = worker_config_lock().lock().await;
+    let router = router_for_worker(fixture.pool.clone(), &worker, &worker_config_lock);
+    let view = webhook_view(Uuid::new_v4());
+
+    worker
+        .set_webhook_response(
+            StatusCode::OK,
+            json!({"available": true, "webhooks": vec![view.clone(); 500]}),
+        )
+        .await;
+    let (status, body) = webhook_request(
+        router.clone(),
+        &fixture.owner_token,
+        Method::GET,
+        "/v1/mcp/webhooks",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    worker
+        .set_webhook_response(
+            StatusCode::OK,
+            json!({"available": true, "webhooks": vec![view; 10_000]}),
+        )
+        .await;
+    let (status, body) = webhook_request(
+        router,
+        &fixture.owner_token,
+        Method::GET,
+        "/v1/mcp/webhooks",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body, r#"{"code":"mcp_worker_invalid"}"#);
+    drop(worker_config_lock);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn webhook_routes_forward_live_device_requests_and_worker_errors() {
     let fixture = Fixture::new().await;
     sqlx::query("INSERT INTO mcp_devices(vault_id,device_id) VALUES($1,$2)")
@@ -443,21 +587,120 @@ async fn webhook_routes_forward_live_device_requests_and_worker_errors() {
         }
     }
 
-    let (status, body) = webhook_request(
-        router.clone(),
-        &fixture.owner_token,
-        Method::GET,
-        "/v1/mcp/webhooks",
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    worker.wait_for_bodies("/internal/mcp/webhooks", 1).await;
-    let request = worker.bodies("/internal/mcp/webhooks").await.pop().unwrap();
-    assert_eq!(request["vault_id"], json!(fixture.vault));
-    assert_eq!(request["device_id"], json!(fixture.device));
-    assert_eq!(request["source_origin"], "https://instance.example.test");
-    assert_eq!(request["op"], "list");
+    let webhook_id = Uuid::new_v4();
+    let responses = [
+        (
+            Method::GET,
+            "/v1/mcp/webhooks",
+            json!({"available": true, "webhooks": [webhook_view(webhook_id)]}),
+            "list",
+            None,
+            false,
+        ),
+        (
+            Method::POST,
+            "/v1/mcp/webhooks",
+            json!({"webhook": webhook_view(webhook_id), "secret": "whsec_created"}),
+            "create",
+            None,
+            true,
+        ),
+        (
+            Method::PUT,
+            "/v1/mcp/webhooks/{id}",
+            webhook_view(webhook_id),
+            "update",
+            Some(webhook_id),
+            false,
+        ),
+        (
+            Method::DELETE,
+            "/v1/mcp/webhooks/{id}",
+            json!({}),
+            "delete",
+            Some(webhook_id),
+            false,
+        ),
+        (
+            Method::POST,
+            "/v1/mcp/webhooks/{id}/secret",
+            json!({"id": webhook_id, "secret": "whsec_revealed"}),
+            "reveal_secret",
+            Some(webhook_id),
+            true,
+        ),
+        (
+            Method::POST,
+            "/v1/mcp/webhooks/{id}/rotate-secret",
+            json!({"id": webhook_id, "secret": "whsec_rotated"}),
+            "rotate_secret",
+            Some(webhook_id),
+            true,
+        ),
+        (
+            Method::POST,
+            "/v1/mcp/webhooks/{id}/test",
+            json!({"ok": true, "statusCode": 200, "durationMs": 1, "error": null}),
+            "test",
+            Some(webhook_id),
+            false,
+        ),
+    ];
+    for (method, path, worker_body, op, _, no_store) in &responses {
+        worker
+            .set_webhook_response(StatusCode::OK, worker_body.clone())
+            .await;
+        let path = path.replace("{id}", &webhook_id.to_string());
+        let input = if matches!(*method, Method::POST | Method::PUT)
+            && !path.ends_with("/secret")
+            && !path.ends_with("/rotate-secret")
+            && !path.ends_with("/test")
+        {
+            webhook_input()
+        } else {
+            json!({})
+        };
+        let (status, headers, body) = webhook_response(
+            router.clone(),
+            &fixture.owner_token,
+            method.clone(),
+            &path,
+            input,
+        )
+        .await;
+        assert_eq!(
+            status,
+            if *op == "delete" {
+                StatusCode::NO_CONTENT
+            } else if *op == "create" {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            },
+            "{body}"
+        );
+        assert_eq!(
+            headers
+                .get("cache-control")
+                .is_some_and(|value| value == "no-store"),
+            *no_store
+        );
+        if *op != "delete" {
+            assert!(!body.is_empty(), "{op} must return its typed response");
+        }
+    }
+    worker.wait_for_bodies("/internal/mcp/webhooks", 7).await;
+    let requests = worker.bodies("/internal/mcp/webhooks").await;
+    for ((_, _, _, op, id, _), request) in responses.iter().zip(requests) {
+        assert_eq!(request["vault_id"], json!(fixture.vault));
+        assert_eq!(request["device_id"], json!(fixture.device));
+        assert_eq!(request["source_origin"], "https://instance.example.test");
+        assert_eq!(request["op"], *op);
+        assert_eq!(
+            request.get("id").and_then(serde_json::Value::as_str),
+            (*id).map(|id| id.to_string()).as_deref()
+        );
+    }
 
     worker
         .set_webhook_response(StatusCode::CONFLICT, json!({"code":"webhook_limit"}))

@@ -4,6 +4,8 @@ import { BrowserCoreError, CoreRejectedError } from "./core.js";
 import type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceState, McpDeviceStatus, McpGrantView, McpScope, WebhookCreated, WebhookInput, WebhookList, WebhookSecret, WebhookTestResult, WebhookView } from "@peppy/generated/mcp";
 
 const MAX_JSON_BYTES = 64 * 1024;
+// Webhook list responses can exceed the general limit; the server bounds them at 2 MiB.
+const MAX_WEBHOOK_LIST_BYTES = 2 * 1024 * 1024;
 // Must exceed the server's 15 s long-poll (?wait=15) plus margin for the bounded body read.
 const ENROLLMENT_REQUEST_TIMEOUT_MS = 25_000;
 const DEVICE_NAME = "Peppy Browser";
@@ -172,7 +174,7 @@ export class BrowserEnrollment {
   }
 
   public async webhooksList(): Promise<WebhookList> {
-    return webhookList(await this.request("/v1/mcp/webhooks", "GET", undefined, true));
+    return webhookList(await this.request("/v1/mcp/webhooks", "GET", undefined, true, {}, MAX_WEBHOOK_LIST_BYTES));
   }
 
   public async webhookCreate(input: WebhookInput): Promise<WebhookCreated> {
@@ -878,7 +880,7 @@ export class BrowserEnrollment {
     }
   }
 
-  private async request<T = Record<string, unknown>>(path: string, method: "GET" | "POST" | "PUT" | "DELETE", body?: unknown, authenticated = false, extraHeaders: Record<string, string> = {}): Promise<T> {
+  private async request<T = Record<string, unknown>>(path: string, method: "GET" | "POST" | "PUT" | "DELETE", body?: unknown, authenticated = false, extraHeaders: Record<string, string> = {}, maxResponseBytes = MAX_JSON_BYTES): Promise<T> {
     if (this.signal?.aborted) throw new Error("enrollment-cancelled");
     const token = authenticated ? this.session.tokenForTransport() : undefined;
     const csrfHeader = this.viewValue.mode === "hosted" ? "X-Peppy-CSRF" : "X-Peppy-CSRF-Token";
@@ -907,7 +909,7 @@ export class BrowserEnrollment {
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: controller.signal,
       });
-      return await Promise.race([readResponse<T>(pending, cancelled), cancelled]);
+      return await Promise.race([readResponse<T>(pending, cancelled, maxResponseBytes), cancelled]);
     } finally {
       clearTimeout(timeout);
       this.signal?.removeEventListener("abort", cancel);
@@ -1128,11 +1130,11 @@ function privateRequest(value: unknown): Record<string, unknown> {
   return record(JSON.parse(required(value, "request")) as unknown);
 }
 
-async function readResponse<T>(pending: Promise<Response>, interrupted: Promise<never>): Promise<T> {
+async function readResponse<T>(pending: Promise<Response>, interrupted: Promise<never>, maxBytes: number): Promise<T> {
   const response = await pending;
   if (!response.ok) throw await HttpStatusError.fromResponse(response, interrupted);
   if (response.status === 204) return {} as T;
-  return JSON.parse(await readBoundedText(response, interrupted)) as T;
+  return JSON.parse(await readBoundedText(response, interrupted, maxBytes)) as T;
 }
 
 class HttpStatusError extends Error {
@@ -1158,10 +1160,10 @@ function hostedStage(account: Record<string, unknown>, origin: string): Enrollme
   return { mode: "hosted", stage: "locked", origin };
 }
 
-/** Reads at most MAX_JSON_BYTES. `interrupted` (deadline or local stop) wins over a body that never ends. */
-async function readBoundedText(response: Response, interrupted: Promise<never>): Promise<string> {
+/** Reads at most `limit` bytes (default MAX_JSON_BYTES). `interrupted` (deadline or local stop) wins over a body that never ends. */
+async function readBoundedText(response: Response, interrupted: Promise<never>, limit = MAX_JSON_BYTES): Promise<string> {
   const declaredLength = response.headers.get("content-length");
-  if (declaredLength !== null && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > MAX_JSON_BYTES)) throw new Error("enrollment-response");
+  if (declaredLength !== null && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > limit)) throw new Error("enrollment-response");
   if (response.body === null) throw new Error("enrollment-response");
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -1171,7 +1173,7 @@ async function readBoundedText(response: Response, interrupted: Promise<never>):
       const next = await Promise.race([reader.read(), interrupted]);
       if (next.done) break;
       total += next.value.byteLength;
-      if (total > MAX_JSON_BYTES) throw new Error("enrollment-response");
+      if (total > limit) throw new Error("enrollment-response");
       chunks.push(next.value);
     }
   } catch (error) {

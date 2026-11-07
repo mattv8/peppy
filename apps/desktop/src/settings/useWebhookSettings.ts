@@ -18,6 +18,9 @@ function withWebhook(webhooks: WebhookView[], view: WebhookView): WebhookView[] 
   return webhooks.map((webhook) => (webhook.id === view.id ? view : webhook));
 }
 
+const replaceWebhook = (webhooks: WebhookView[], view: WebhookView) =>
+  webhooks.map((webhook) => (webhook.id === view.id ? view : webhook));
+
 /**
  * Loads the device status and webhook list for an unlocked session. Results from a superseded
  * load or a previous session are dropped, and in-flight mutations never touch a newer session.
@@ -61,19 +64,22 @@ export function useWebhookSettings(sessionKey: string, unlocked: boolean) {
     return status;
   }, []);
 
-  const upsertWebhook = useCallback((view: WebhookView) => {
-    updateList(session.current, (webhooks) => withWebhook(webhooks, view));
+  const beginEdit = useCallback(() => {
+    const generation = session.current;
+    return (view: WebhookView) => updateList(generation, (webhooks) => withWebhook(webhooks, view));
   }, [updateList]);
 
   /** Flips the switch at once; the server's saved view replaces the optimistic one, and a failure restores the original. */
   const setPaused = useCallback(async (webhook: WebhookView, paused: boolean) => {
     const generation = session.current;
-    updateList(generation, (webhooks) => withWebhook(webhooks, { ...webhook, paused }));
+    updateList(generation, (webhooks) => replaceWebhook(webhooks, { ...webhook, paused }));
     try {
       const saved = await bridge.webhook_update(webhook.id, webhookInputFor(webhook, paused));
-      updateList(generation, (webhooks) => withWebhook(webhooks, saved));
+      updateList(generation, (webhooks) => replaceWebhook(webhooks, saved));
     } catch (reason) {
-      updateList(generation, (webhooks) => withWebhook(webhooks, webhook));
+      updateList(generation, (webhooks) => webhooks.map((current) =>
+        current.id === webhook.id ? { ...current, paused: webhook.paused } : current,
+      ));
       throw reason;
     }
   }, [updateList]);
@@ -89,7 +95,7 @@ export function useWebhookSettings(sessionKey: string, unlocked: boolean) {
     loadError,
     reload: load,
     refreshStatus,
-    upsertWebhook,
+    beginEdit,
     setPaused,
     deleteWebhook,
   };

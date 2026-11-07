@@ -95,7 +95,10 @@ pub(crate) fn load(
     let Some(bytes) = custody.load(&record_name(vault_id), &aad(vault_id, device_id))? else {
         return Ok(WebhookState::new(device_id));
     };
-    let state = serde_json::from_slice(&bytes).map_err(|_| RuntimeError::Core)?;
+    let state: WebhookState = serde_json::from_slice(&bytes).map_err(|_| RuntimeError::Core)?;
+    if state.version != 1 {
+        return Err(RuntimeError::Core);
+    }
     Ok(state)
 }
 
@@ -132,5 +135,27 @@ mod tests {
         }
         assert_eq!(state.recent.len(), MAX_RECENT);
         assert_eq!(state.recent.front().map(|item| item.1.as_str()), Some("1"));
+    }
+
+    #[test]
+    fn unsupported_version_is_rejected_without_changing_the_record() {
+        let root = tempfile::tempdir().unwrap();
+        let custody =
+            Custody::bootstrap(root.path().join("custody"), root.path().join("key")).unwrap();
+        let vault_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let mut state = WebhookState::new(device_id);
+        state.version = 2;
+        let bytes = serde_json::to_vec(&state).unwrap();
+        custody
+            .store(&record_name(vault_id), &aad(vault_id, device_id), &bytes)
+            .unwrap();
+
+        assert!(load(&custody, vault_id, device_id).is_err());
+        let persisted = custody
+            .load(&record_name(vault_id), &aad(vault_id, device_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.as_slice(), bytes);
     }
 }

@@ -3,7 +3,7 @@ import { Modal, RecipientChipInput, Send } from "@peppy/desktop-ui";
 import type { WebhookView } from "@peppy/desktop-ui/bridge-contracts";
 import { bridge } from "../bridge/bridge";
 import { errorCode } from "../bridge/bridgeErrors";
-import { searchRecipientSuggestions, type RecipientSource } from "../contacts/recipientSearch";
+import { recipientSuggestionSource, searchRecipientSuggestions, type RecipientSource } from "../contacts/recipientSearch";
 import { WebhookFilterModeControl } from "./WebhookFilterModeControl";
 import { WebhookSecretField } from "./WebhookSecretField";
 import { useWebhookSecret } from "./useWebhookSecret";
@@ -42,6 +42,12 @@ const DISCARD_NOTE = "Unsaved changes. Save, or select Close again to discard th
 const CREATED_SECRET_MESSAGE = "Webhook created. Copy the signing secret into your app.";
 const EMPTY_DRAFT: WebhookDraft = { name: "", url: "", filterMode: "all", filter: [], paused: false };
 
+/** The delivery-relevant parts of a draft: changing them discards a webhook's queued deliveries. */
+function deliveryIdentity(draft: WebhookDraft): string {
+  const { url, filterMode, filter } = toWebhookInput(draft);
+  return JSON.stringify({ url, filterMode, filter });
+}
+
 export function WebhookEditorModal({ webhook, serverOffline, opener, onChanged, onClose }: WebhookEditorModalProps) {
   const [saved, setSaved] = useState<WebhookView | undefined>(webhook);
   const [draft, setDraft] = useState<WebhookDraft>(() => (webhook ? draftFromWebhook(webhook) : EMPTY_DRAFT));
@@ -54,6 +60,7 @@ export function WebhookEditorModal({ webhook, serverOffline, opener, onChanged, 
   /** True from a successful create until the next edit or save. */
   const [created, setCreated] = useState(false);
   const [discardArmed, setDiscardArmed] = useState(false);
+  const [filterPending, setFilterPending] = useState(false);
   const secret = useWebhookSecret(saved?.id ?? null);
   const sources = useRef(new Map<string, RecipientSource>());
   const nameInput = useRef<HTMLInputElement>(null);
@@ -66,13 +73,22 @@ export function WebhookEditorModal({ webhook, serverOffline, opener, onChanged, 
   };
 
   const signature = draftSignature(draft);
+  const currentSignature = useRef(signature);
+  currentSignature.current = signature;
   const dirty = !saved || draftSignature(draftFromWebhook(saved)) !== signature;
   /** A webhook created in this modal; closing it with unsaved edits needs a second confirmation. */
   const createdHere = webhook === undefined && saved !== undefined;
   const problems = webhookDraftErrors(draft);
   const errors: WebhookDraftErrors = { ...(submitted ? problems : {}), ...serverErrors };
-  const canTest = saved !== undefined && !dirty && !testing && !saving && !serverOffline;
+  const canTest = saved !== undefined && !dirty && !testing && !saving && !serverOffline && !filterPending;
   const testNote = !saved ? "Save to test" : dirty ? "Save changes to test" : null;
+  const discardsQueuedDeliveries = saved !== undefined
+    && saved.pendingDeliveries > 0
+    && deliveryIdentity(draft) !== deliveryIdentity(draftFromWebhook(saved));
+  const saveDescribedBy = [
+    discardsQueuedDeliveries ? "webhook-queue-discard-note" : undefined,
+    filterPending ? "webhook-filter-pending" : undefined,
+  ].filter(Boolean).join(" ") || undefined;
 
   useEffect(() => {
     setTestResult(null);
@@ -81,10 +97,14 @@ export function WebhookEditorModal({ webhook, serverOffline, opener, onChanged, 
     setServerErrors({});
   }, [signature]);
 
+  useEffect(() => {
+    if (draft.filterMode === "all") setFilterPending(false);
+  }, [draft.filterMode]);
+
   const patchDraft = (patch: Partial<WebhookDraft>) => setDraft((current) => ({ ...current, ...patch }));
 
   const save = async () => {
-    if (saving || serverOffline) return;
+    if (saving || serverOffline || filterPending) return;
     setSubmitted(true);
     setSaveError("");
     setServerErrors({});
@@ -124,12 +144,14 @@ export function WebhookEditorModal({ webhook, serverOffline, opener, onChanged, 
 
   const runTest = async () => {
     if (!saved || !canTest) return;
+    const testSignature = signature;
     setTesting(true);
     setTestResult(null);
     try {
-      setTestResult(webhookTestResultView(await bridge.webhook_test(saved.id)));
+      const result = await bridge.webhook_test(saved.id);
+      if (testSignature === currentSignature.current) setTestResult(webhookTestResultView(result));
     } catch (reason) {
-      setTestResult({ tone: "error", text: webhookErrorMessage(errorCode(reason)) });
+      if (testSignature === currentSignature.current) setTestResult({ tone: "error", text: webhookErrorMessage(errorCode(reason)) });
     } finally {
       setTesting(false);
     }
@@ -194,7 +216,8 @@ export function WebhookEditorModal({ webhook, serverOffline, opener, onChanged, 
             form={FORM_ID}
             className="primary-button"
             aria-busy={saving || undefined}
-            disabled={saving || serverOffline}
+            aria-describedby={saveDescribedBy}
+            disabled={saving || serverOffline || filterPending}
           >
             {saved ? "Save" : "Create"}
           </button>
@@ -256,8 +279,18 @@ export function WebhookEditorModal({ webhook, serverOffline, opener, onChanged, 
               errorId="webhook-filter-error"
               listLabel="Filtered contacts"
               recipients={filterRecipientChips(draft.filter)}
-              onCommit={(ids) => patchDraft({ filter: filterEntriesFromChipIds(ids, draft.filter, sources.current) })}
-              searchContacts={(query) => searchRecipientSuggestions(query, undefined, sources.current)}
+              onCommit={(ids) => {
+                for (const address of sources.current.keys()) {
+                  if (!ids.includes(address)) sources.current.delete(address);
+                }
+                patchDraft({ filter: filterEntriesFromChipIds(ids, draft.filter, sources.current) });
+              }}
+              onSuggestionChosen={(suggestion) => {
+                const source = recipientSuggestionSource(suggestion);
+                if (source) sources.current.set(source.address, source);
+              }}
+              onPendingChange={setFilterPending}
+              searchContacts={(query) => searchRecipientSuggestions(query)}
               inputLabel="Contacts or numbers"
               placeholder="Add contact or number"
               emptyPlaceholder="Add contact or phone number"
@@ -265,10 +298,17 @@ export function WebhookEditorModal({ webhook, serverOffline, opener, onChanged, 
               hintVisible
               variant="standalone"
               invalid={Boolean(errors.filter)}
-              describedBy={errors.filter ? "webhook-filter-required" : undefined}
+              describedBy={[errors.filter ? "webhook-filter-required" : undefined, filterPending ? "webhook-filter-pending" : undefined].filter(Boolean).join(" ") || undefined}
             />
             {errors.filter && <p id="webhook-filter-required" className="settings-error" role="alert">{errors.filter}</p>}
+            {filterPending && <p id="webhook-filter-pending" className="settings-note">Press Enter to add what you typed, or clear it, before saving.</p>}
           </div>
+        )}
+
+        {discardsQueuedDeliveries && (
+          <p id="webhook-queue-discard-note" className="settings-note">
+            Saving this change discards {saved.pendingDeliveries} queued {saved.pendingDeliveries === 1 ? "delivery" : "deliveries"}.
+          </p>
         )}
 
         <WebhookSecretField

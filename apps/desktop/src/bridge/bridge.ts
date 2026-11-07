@@ -210,6 +210,7 @@ const fixtureWebhooks: WebhookView[] = [
   { id: "44444444-4444-4444-8444-444444444444", name: "n8n triage", nameIsDerived: false, url: "https://n8n.example.com/webhook/triage", events: ["message.received"], filterMode: "except", filter: [{ address: "+12025550125", label: "Mina", contactId: null, bookId: null }], paused: true, createdAt: "2026-11-03T12:00:00Z", lastDeliveryState: "never", lastDeliveryAt: null, lastStatusCode: null, lastError: null, pendingDeliveries: 0 },
 ];
 let fixtureWebhookSequence = 4;
+const fixtureWebhookSecrets = new Map(fixtureWebhooks.map((webhook) => [webhook.id, `whsec_fixture_${webhook.id.replaceAll("-", "")}`]));
 const fixtureWebhook = (input: WebhookInput, id: string): WebhookView => ({ id, name: input.name?.trim() || new URL(input.url).hostname.replace(/^www\./, ""), nameIsDerived: !input.name?.trim(), url: input.url, events: [...input.events], filterMode: input.filterMode, filter: input.filter.map(entry => ({ ...entry })), paused: input.paused, createdAt: "2026-11-07T12:00:00Z", lastDeliveryState: "never", lastDeliveryAt: null, lastStatusCode: null, lastError: null, pendingDeliveries: 0 });
 const fixtureError = (code: string, message: string): BridgeError => ({ code, message });
 const fixtureSearchContacts = [
@@ -481,11 +482,11 @@ export const fixtureBridge: DesktopBridge = {
   mcp_grants: async () => fixtureMcpGrants.map(grant => ({ ...grant })),
   mcp_revoke_grant: async id => { const index = fixtureMcpGrants.findIndex(grant => grant.id === id); if (index >= 0) fixtureMcpGrants.splice(index, 1); },
   webhooks_list: async (): Promise<WebhookList> => ({ available: true, webhooks: fixtureWebhooks.map(webhook => ({ ...webhook, filter: webhook.filter.map(entry => ({ ...entry })) })) }),
-  webhook_create: async (input): Promise<WebhookCreated> => { const id = `00000000-0000-4000-8000-${String(++fixtureWebhookSequence).padStart(12, "0")}`; const webhook = fixtureWebhook(input, id); fixtureWebhooks.push(webhook); return { webhook: { ...webhook }, secret: `whsec_fixture_${id.replaceAll("-", "")}` }; },
+  webhook_create: async (input): Promise<WebhookCreated> => { const id = `00000000-0000-4000-8000-${String(++fixtureWebhookSequence).padStart(12, "0")}`; const webhook = fixtureWebhook(input, id); const secret = `whsec_fixture_${id.replaceAll("-", "")}`; fixtureWebhooks.push(webhook); fixtureWebhookSecrets.set(id, secret); return { webhook: { ...webhook }, secret }; },
   webhook_update: async (id, input) => { const index = fixtureWebhooks.findIndex(webhook => webhook.id === id); if (index < 0) throw fixtureError("webhook_not_found", "Webhook not found."); const current = fixtureWebhooks[index]; const webhook = { ...fixtureWebhook(input, id), createdAt: current.createdAt, lastDeliveryState: current.lastDeliveryState, lastDeliveryAt: current.lastDeliveryAt, lastStatusCode: current.lastStatusCode, lastError: current.lastError, pendingDeliveries: current.pendingDeliveries }; fixtureWebhooks[index] = webhook; return { ...webhook }; },
-  webhook_delete: async id => { const index = fixtureWebhooks.findIndex(webhook => webhook.id === id); if (index < 0) throw fixtureError("webhook_not_found", "Webhook not found."); fixtureWebhooks.splice(index, 1); },
-  webhook_reveal_secret: async id => ({ id, secret: `whsec_fixture_${id.replaceAll("-", "")}` }),
-  webhook_rotate_secret: async id => ({ id, secret: `whsec_rotated_${id.replaceAll("-", "")}` }),
+  webhook_delete: async id => { const index = fixtureWebhooks.findIndex(webhook => webhook.id === id); if (index < 0) throw fixtureError("webhook_not_found", "Webhook not found."); fixtureWebhooks.splice(index, 1); fixtureWebhookSecrets.delete(id); },
+  webhook_reveal_secret: async id => { const secret = fixtureWebhookSecrets.get(id); if (!secret) throw fixtureError("webhook_not_found", "Webhook not found."); return { id, secret }; },
+  webhook_rotate_secret: async id => { if (!fixtureWebhooks.some((webhook) => webhook.id === id)) throw fixtureError("webhook_not_found", "Webhook not found."); const secret = `whsec_fixture_${id.replaceAll("-", "")}_${++fixtureWebhookSequence}`; fixtureWebhookSecrets.set(id, secret); return { id, secret }; },
   webhook_test: async (): Promise<WebhookTestResult> => ({ ok: true, statusCode: 200, durationMs: 142, error: null }),
   mcp_authorization: async () => { throw fixtureError("unsupported", "MCP authorization is unavailable."); },
   mcp_approve_authorization: async () => { throw fixtureError("unsupported", "MCP authorization is unavailable."); },

@@ -456,6 +456,10 @@
     grid-template-columns: 32px minmax(0, 1fr) auto;
   }
 
+  .webhook-row.webhook-row-confirm {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
   .webhook-filter,
   .webhook-last {
     display: none;

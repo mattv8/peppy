@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
@@ -71,7 +71,9 @@ async fn create(
         Some(input),
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(response)).into_response())
+    Ok(no_store(
+        (StatusCode::CREATED, Json(response)).into_response(),
+    ))
 }
 
 async fn update(
@@ -123,7 +125,14 @@ async fn reveal_secret(
         None,
     )
     .await?;
-    Ok(Json(response).into_response())
+    Ok(no_store(Json(response).into_response()))
+}
+
+fn no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn rotate_secret(
@@ -140,7 +149,7 @@ async fn rotate_secret(
         None,
     )
     .await?;
-    Ok(Json(response).into_response())
+    Ok(no_store(Json(response).into_response()))
 }
 
 async fn test(

@@ -20,6 +20,7 @@ const jordan = {
   contactId: "contact-jordan",
   phoneId: "phone-jordan",
 };
+const jordanWork = { ...jordan, bookId: "book-work", label: "work", contactId: "contact-jordan-work", phoneId: "phone-jordan-work" };
 
 function renderEditor(props: Partial<WebhookEditorModalProps> = {}) {
   const onChanged = vi.fn();
@@ -186,6 +187,38 @@ describe("WebhookEditorModal", () => {
       await waitFor(() => expect(bridge.webhook_create).toHaveBeenCalledWith(expect.objectContaining({
         filterMode: "only",
         filter: [{ address: "+12025550199", label: "Jordan Lee", contactId: "contact-jordan", bookId: "book-2" }],
+      })));
+    });
+
+    it("keeps the exact selected contact when suggestions share an address", async () => {
+      vi.mocked(bridge.search_contact_recipients).mockResolvedValue([jordan, jordanWork]);
+      renderEditor();
+      typeInto("Endpoint URL", "https://hooks.example.com/in");
+      fireEvent.click(screen.getByRole("radio", { name: "Only these contacts" }));
+      const chips = screen.getByLabelText("Contacts or numbers");
+
+      fireEvent.change(chips, { target: { value: "Jor" } });
+      const suggestions = await screen.findAllByRole("option", { name: /Jordan Lee/ });
+      fireEvent.mouseDown(suggestions[1]);
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+      await waitFor(() => expect(bridge.webhook_create).toHaveBeenCalledWith(expect.objectContaining({
+        filter: [{ address: "+12025550199", label: "Jordan Lee", contactId: "contact-jordan-work", bookId: "book-work" }],
+      })));
+    });
+
+    it("keeps a typed matching number address-only", async () => {
+      vi.mocked(bridge.search_contact_recipients).mockResolvedValue([jordan]);
+      renderEditor();
+      typeInto("Endpoint URL", "https://hooks.example.com/in");
+      fireEvent.click(screen.getByRole("radio", { name: "Only these contacts" }));
+      const chips = screen.getByLabelText("Contacts or numbers");
+      fireEvent.change(chips, { target: { value: "+1 202 555 0199" } });
+      fireEvent.keyDown(chips, { key: "Enter" });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+      await waitFor(() => expect(bridge.webhook_create).toHaveBeenCalledWith(expect.objectContaining({
+        filter: [{ address: "+12025550199", label: null, contactId: null, bookId: null }],
       })));
     });
 
@@ -474,6 +507,19 @@ describe("WebhookEditorModal", () => {
       expect(testNote()).toHaveTextContent("Save changes to test");
     });
 
+    it("blocks saving and testing while contact text is pending", () => {
+      renderEditor({ webhook: zapier });
+      const chips = screen.getByLabelText("Contacts or numbers");
+      fireEvent.change(chips, { target: { value: "Jordan" } });
+
+      expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Send test" })).toBeDisabled();
+      expect(document.getElementById("webhook-filter-pending")).toHaveTextContent("Press Enter to add what you typed, or clear it, before saving.");
+      expect(chips.getAttribute("aria-describedby")).toMatch(/webhook-filter-pending/);
+      expect(screen.getByRole("button", { name: "Save" })).toHaveAttribute("aria-describedby", "webhook-filter-pending");
+      expect(testNote()).toBeNull();
+    });
+
     it("clears a previous test result as soon as the draft is edited", async () => {
       vi.mocked(bridge.webhook_test).mockResolvedValue({ ok: true, statusCode: 200, durationMs: 142, error: null });
       renderEditor({ webhook: homeAssistant });
@@ -493,6 +539,18 @@ describe("WebhookEditorModal", () => {
 
       expect(await screen.findByRole("status")).toHaveTextContent("200 OK · 142 ms");
       expect(bridge.webhook_test).toHaveBeenCalledWith(homeAssistant.id);
+    });
+
+    it("ignores a test result after the draft changes", async () => {
+      let resolveTest!: (result: { ok: boolean; statusCode: number; durationMs: number; error: null }) => void;
+      vi.mocked(bridge.webhook_test).mockReturnValueOnce(new Promise((resolve) => { resolveTest = resolve; }));
+      renderEditor({ webhook: homeAssistant });
+
+      fireEvent.click(screen.getByRole("button", { name: "Send test" }));
+      typeInto("Name (optional)", "Changed");
+      resolveTest({ ok: true, statusCode: 200, durationMs: 142, error: null });
+
+      await waitFor(() => expect(screen.queryByText("200 OK · 142 ms")).not.toBeInTheDocument());
     });
 
     it("explains a failed test in plain language", async () => {
@@ -520,6 +578,76 @@ describe("WebhookEditorModal", () => {
       fireEvent.click(screen.getByRole("button", { name: "Send test" }));
 
       expect(await screen.findByRole("status")).toHaveTextContent("This webhook no longer exists.");
+    });
+  });
+
+  it("does not copy a revealed secret after unmount", async () => {
+    let resolveReveal!: (value: { id: string; secret: string }) => void;
+    vi.mocked(bridge.webhook_reveal_secret).mockReturnValueOnce(new Promise((resolve) => { resolveReveal = resolve; }));
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const { unmount } = renderEditor({ webhook: homeAssistant });
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy secret" }));
+    unmount();
+    resolveReveal({ id: homeAssistant.id, secret: "whsec_real_secret" });
+
+    await Promise.resolve();
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  describe("queued delivery discard note", () => {
+    const discardNote = () => document.getElementById("webhook-queue-discard-note");
+
+    it("warns when a saved webhook change discards queued deliveries", () => {
+      renderEditor({ webhook: { ...homeAssistant, pendingDeliveries: 1 } });
+      typeInto("Endpoint URL", "https://hooks.example.com/changed");
+
+      expect(discardNote()).toHaveTextContent("Saving this change discards 1 queued delivery.");
+      expect(screen.getByRole("button", { name: "Save" })).toHaveAttribute("aria-describedby", "webhook-queue-discard-note");
+    });
+
+    it("uses plural copy for several queued deliveries", () => {
+      renderEditor({ webhook: { ...homeAssistant, pendingDeliveries: 3 } });
+      typeInto("Endpoint URL", "https://hooks.example.com/changed");
+
+      expect(discardNote()).toHaveTextContent("Saving this change discards 3 queued deliveries.");
+    });
+
+    it("shows for a mode-only change that keeps the same contacts", () => {
+      renderEditor({ webhook: zapier });
+      expect(discardNote()).toBeNull();
+
+      fireEvent.click(screen.getByRole("radio", { name: "Everyone except" }));
+
+      expect(discardNote()).toHaveTextContent("Saving this change discards 1 queued delivery.");
+    });
+
+    it("shows when switching to Anyone, which drops the filter", () => {
+      renderEditor({ webhook: zapier });
+
+      fireEvent.click(screen.getByRole("radio", { name: "Anyone" }));
+
+      expect(discardNote()).toHaveTextContent("Saving this change discards 1 queued delivery.");
+    });
+
+    it("does not show for a rename-only change", () => {
+      renderEditor({ webhook: zapier });
+
+      typeInto("Name (optional)", "Renamed zapier");
+
+      expect(discardNote()).toBeNull();
+      expect(screen.getByRole("button", { name: "Save" })).not.toHaveAttribute("aria-describedby");
+    });
+
+    it("places the note after the filter block and before the signing secret", () => {
+      renderEditor({ webhook: zapier });
+      typeInto("Endpoint URL", "https://hooks.example.com/changed");
+
+      const note = discardNote() as HTMLElement;
+      const secret = screen.getByLabelText("Signing secret");
+      expect(note.compareDocumentPosition(secret) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(screen.getByLabelText("Contacts or numbers").compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     });
   });
 });

@@ -14,11 +14,19 @@ import {
   revokedStatus,
   zapier,
 } from "./webhookTestFixtures";
-import type { WebhookList, WebhookView } from "@peppy/desktop-ui/bridge-contracts";
+import type { WebhookCreated, WebhookList, WebhookView } from "@peppy/desktop-ui/bridge-contracts";
 
 vi.mock("../bridge/bridge", { spy: true });
 
 const readyList = (webhooks: WebhookView[] = [homeAssistant, zapier, n8n]): WebhookList => ({ available: true, webhooks });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
 
 function rowFor(id: string): HTMLElement {
   const element = document.getElementById(`webhook-${id}`);
@@ -112,8 +120,18 @@ describe("WebhookSettings", () => {
       vi.mocked(bridge.webhooks_list).mockResolvedValue({ available: false, webhooks: [] });
       const { container } = renderSettings();
 
-      expect(await screen.findByText("Webhooks are unavailable because this server isn't running the Peppy server client.")).toBeInTheDocument();
+      expect(await screen.findByText("Webhooks aren't available because this server doesn't offer the Peppy server client.")).toBeInTheDocument();
       expect(container.querySelector("#webhooks-needs-server-client")).not.toBeInTheDocument();
+    });
+
+    it("explains when the server client is being removed", async () => {
+      vi.mocked(bridge.mcp_status).mockResolvedValue({ ...readyStatus, device: { ...readyStatus.device!, cleanupPending: true } });
+      renderSettings();
+
+      expect(await screen.findByText("The Peppy server client is being removed. Try again shortly.")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Add webhook" })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+      expect(bridge.webhooks_list).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -180,6 +198,30 @@ describe("WebhookSettings", () => {
 
       await waitFor(() => expect(bridge.webhooks_list).toHaveBeenCalledTimes(2));
       expect(bridge.mcp_status).toHaveBeenCalledTimes(2);
+    });
+
+    it("ignores a save from an earlier session without closing a newer editor", async () => {
+      const save = deferred<WebhookCreated>();
+      vi.mocked(bridge.webhook_create).mockReturnValue(save.promise);
+      const { rerender } = renderSettings();
+
+      fireEvent.click(await screen.findByRole("button", { name: "Add webhook" }));
+      fireEvent.change(screen.getByLabelText("Endpoint URL"), { target: { value: "https://a.example.test/hooks" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+      rerender(<WebhookSettings sessionKey="vault-b" unlocked serverOffline={false} onOpenDevices={vi.fn()} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Add webhook" }));
+      expect(screen.getByRole("dialog", { name: "Add webhook" })).toBeInTheDocument();
+
+      await act(async () => {
+        save.resolve({
+          webhook: { ...homeAssistant, id: "00000000-0000-4000-8000-000000000099", name: "Session A webhook" },
+          secret: "whsec_fixture_session_a",
+        });
+      });
+
+      expect(screen.queryByText("Session A webhook")).not.toBeInTheDocument();
+      expect(screen.getByRole("dialog", { name: "Add webhook" })).toBeInTheDocument();
     });
   });
 

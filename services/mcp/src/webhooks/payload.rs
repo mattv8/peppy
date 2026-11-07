@@ -35,7 +35,7 @@ pub fn message_payload(
             "transport": transport_name(msg.transport),
             "subject": &msg.subject,
             "body": &msg.body,
-            "sent_at": msg.sent_at_ms.map(rfc3339_seconds),
+            "sent_at": msg.sent_at_ms.and_then(rfc3339_seconds_checked),
             "attachments": attachments.iter().map(|attachment| json!({
                 "id": attachment.id,
                 "content_type": attachment.content_type,
@@ -108,6 +108,15 @@ pub(crate) fn rfc3339_seconds(timestamp_ms: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
+fn rfc3339_seconds_checked(timestamp_ms: i64) -> Option<String> {
+    let seconds = timestamp_ms.div_euclid(1_000);
+    let days = seconds.div_euclid(86_400);
+    let (year, _, _) = civil_date(days);
+    (0..=9_999)
+        .contains(&year)
+        .then(|| rfc3339_seconds(timestamp_ms))
+}
+
 fn civil_date(days_since_epoch: i64) -> (i64, u32, u32) {
     let z = days_since_epoch + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -171,6 +180,25 @@ mod tests {
     fn rfc3339_formats_epoch_and_leap_days() {
         assert_eq!(rfc3339_seconds(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339_seconds(1_709_164_800_999), "2024-02-29T00:00:00Z");
+    }
+
+    #[test]
+    fn sent_at_omits_timestamps_outside_rfc3339_four_digit_years() {
+        const LAST_VALID: i64 = 253_402_300_799_000;
+        assert_eq!(
+            rfc3339_seconds_checked(LAST_VALID).as_deref(),
+            Some("9999-12-31T23:59:59Z")
+        );
+        assert_eq!(rfc3339_seconds_checked(LAST_VALID + 1_000), None);
+        assert_eq!(rfc3339_seconds_checked(i64::MAX), None);
+        assert_eq!(rfc3339_seconds_checked(-62_167_219_201_000), None);
+
+        let mut message = message();
+        message.sent_at_ms = Some(i64::MAX);
+        assert_eq!(
+            message_payload(Uuid::nil(), "https://app.peppy.pro", &message, None, &[], 0)["data"]["sent_at"],
+            Value::Null
+        );
     }
 
     #[test]

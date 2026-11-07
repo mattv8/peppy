@@ -36,6 +36,7 @@ type Stage =
   | { kind: "error"; error: WebhookLoadError }
   | { kind: "owner" }
   | { kind: "setup" }
+  | { kind: "removing" }
   | { kind: "unavailable" }
   | { kind: "ready"; device: McpDeviceView; webhooks: WebhookView[] };
 
@@ -47,7 +48,9 @@ function settingsStage(unlocked: boolean, data: WebhookSettingsData | null, load
   if (loadError?.code === OWNER_REQUIRED_CODE) return { kind: "owner" };
   if (loadError) return { kind: "error", error: loadError };
   if (!data) return { kind: "loading" };
+  if (!data.status.available) return { kind: "unavailable" };
   const device = data.status.device;
+  if (device?.cleanupPending) return { kind: "removing" };
   if (!device || isRemovedDevice(device)) return { kind: "setup" };
   if (!data.list.available) return { kind: "unavailable" };
   return { kind: "ready", device, webhooks: data.list.webhooks };
@@ -56,7 +59,7 @@ function settingsStage(unlocked: boolean, data: WebhookSettingsData | null, load
 export function WebhookSettings({ sessionKey, unlocked, serverOffline, onOpenDevices }: WebhookSettingsProps) {
   const settings = useWebhookSettings(sessionKey, unlocked);
   const stage = settingsStage(unlocked, settings.data, settings.loadError);
-  const [editing, setEditing] = useState<WebhookView | "new" | null>(null);
+  const [editing, setEditing] = useState<{ target: WebhookView | "new"; onChanged: (view: WebhookView) => void } | null>(null);
   const notice = useTransientMessage();
   const opener = useRef<HTMLElement | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -78,7 +81,7 @@ export function WebhookSettings({ sessionKey, unlocked, serverOffline, onOpenDev
   const openEditor = (target: WebhookView | "new", trigger: HTMLElement) => {
     opener.current = trigger;
     notice.clear();
-    setEditing(target);
+    setEditing({ target, onChanged: settings.beginEdit() });
   };
 
   const deleteWebhook = async (webhook: WebhookView) => {
@@ -120,7 +123,16 @@ export function WebhookSettings({ sessionKey, unlocked, serverOffline, onOpenDev
           </>
         );
       case "unavailable":
-        return <p id="webhooks-unavailable" className="settings-note">Webhooks are unavailable because this server isn't running the Peppy server client.</p>;
+        return <p id="webhooks-server-unavailable" className="settings-note">Webhooks aren't available because this server doesn't offer the Peppy server client.</p>;
+      case "removing":
+        return (
+          <div id="webhooks-server-client-removing" className="webhooks-error">
+            <p className="settings-note">The Peppy server client is being removed. Try again shortly.</p>
+            <button id="webhooks-removing-retry" type="button" className="secondary-button" onClick={() => void settings.reload()}>
+              Check again
+            </button>
+          </div>
+        );
       case "ready":
         return (
           <WebhookReadyView
@@ -143,11 +155,11 @@ export function WebhookSettings({ sessionKey, unlocked, serverOffline, onOpenDev
       <p id="webhooks-notice" className="settings-note" role="status">{notice.text}</p>
       {editing !== null && createPortal(
         <WebhookEditorModal
-          webhook={editing === "new" ? undefined : editing}
+          webhook={editing.target === "new" ? undefined : editing.target}
           serverOffline={serverOffline}
           opener={opener}
-          onChanged={settings.upsertWebhook}
-          onClose={() => setEditing(null)}
+          onChanged={editing.onChanged}
+          onClose={() => setEditing((current) => current === editing ? null : current)}
         />,
         document.body,
       )}
@@ -164,7 +176,7 @@ type WebhookHeaderProps = {
 
 function WebhookHeader({ headingRef, addDisabled, addTitle, onAdd }: WebhookHeaderProps) {
   return (
-    <header className="webhooks-header">
+    <header id="webhooks-header" className="webhooks-header">
       <div className="webhooks-heading">
         <h3 id="webhooks-heading" ref={headingRef} tabIndex={-1}>Webhooks</h3>
         <p className="settings-note">{INTRO}</p>

@@ -349,6 +349,24 @@ describe("fixture draft saves", () => {
     ({ fixtureBridge } = await import("./bridge"));
   });
 
+  it("keeps fixture webhook secrets consistent across create, reveal, and rotation", async () => {
+    const created = await fixtureBridge.webhook_create({
+      name: "Fixture webhook",
+      url: "https://hooks.example.test/fixture",
+      events: ["message.received"],
+      filterMode: "all",
+      filter: [],
+      paused: false,
+    });
+
+    expect(await fixtureBridge.webhook_reveal_secret(created.webhook.id)).toEqual({ id: created.webhook.id, secret: created.secret });
+    const firstRotation = await fixtureBridge.webhook_rotate_secret(created.webhook.id);
+    expect(await fixtureBridge.webhook_reveal_secret(created.webhook.id)).toEqual(firstRotation);
+    const secondRotation = await fixtureBridge.webhook_rotate_secret(created.webhook.id);
+    expect(secondRotation.secret).not.toBe(firstRotation.secret);
+    expect(await fixtureBridge.webhook_reveal_secret(created.webhook.id)).toEqual(secondRotation);
+  });
+
   it("marks every fixture conversation unread count once", async () => {
     expect(await fixtureBridge.mark_all_read()).toBe("2");
     expect(await fixtureBridge.mark_all_read()).toBe("0");

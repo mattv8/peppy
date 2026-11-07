@@ -299,7 +299,6 @@ export type RecipientChipInputProps = {
   errorId?: string;
   showGroupTag?: boolean;
   id?: string;
-  className?: string;
   inputRef?: Ref<HTMLInputElement>;
   /** Marks the input invalid for an owning form's field error (aria-invalid). */
   invalid?: boolean;
@@ -370,7 +369,6 @@ export function RecipientChipInput({
   errorId,
   showGroupTag = false,
   id,
-  className,
   inputRef: externalInputRef,
   invalid = false,
   describedBy,
@@ -488,11 +486,7 @@ export function RecipientChipInput({
     setValue(formatted);
   };
 
-  const rootClass = [
-    "recipient-chip-input",
-    variant === "standalone" ? "recipient-chip-input--standalone" : undefined,
-    className,
-  ].filter(Boolean).join(" ");
+  const rootClass = ["recipient-chip-input", variant === "standalone" ? "recipient-chip-input--standalone" : undefined].filter(Boolean).join(" ");
   const describedByIds = [resolvedHintId, error ? resolvedErrorId : undefined, describedBy].filter(Boolean).join(" ");
 
   return <div className={rootClass} id={id} data-recipient-chip-input>

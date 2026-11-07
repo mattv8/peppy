@@ -31,14 +31,16 @@ pub fn matches(
     }
 }
 
-/// Phone-like addresses contain only digits and `+ ( ) - . space`, with at least
-/// three digits. Anything else (for example `BANK1`) is an alphanumeric sender ID.
+/// Phone-like addresses contain only digits and `+ ( ) - . space`, with an optional
+/// leading `+`. Anything else (for example `BANK1`) is an alphanumeric sender ID.
 fn phone_digits(value: &str) -> Option<String> {
-    let allowed = value
+    let value = value.trim();
+    let value_without_plus = value.strip_prefix('+').unwrap_or(value);
+    let allowed = value_without_plus
         .chars()
-        .all(|c| c.is_ascii_digit() || "+()-. ".contains(c));
+        .all(|c| c.is_ascii_digit() || "()-. ".contains(c));
     let digits: String = value.chars().filter(char::is_ascii_digit).collect();
-    (allowed && digits.len() >= 3).then_some(digits)
+    (allowed && !digits.is_empty()).then_some(digits)
 }
 
 fn addresses_match(left: &str, right: &str) -> bool {
@@ -82,6 +84,14 @@ mod tests {
             "040404",
             None
         ));
+    }
+
+    #[test]
+    fn matches_one_and_two_digit_phone_like_values_after_trimming() {
+        assert!(matches(FilterMode::Only, &[entry(" 1 ")], "1", None));
+        assert!(matches(FilterMode::Only, &[entry(" +12 ")], "12", None));
+        assert!(!matches(FilterMode::Except, &[entry(" 1 ")], "1", None));
+        assert!(!matches(FilterMode::Except, &[entry(" +12 ")], "12", None));
     }
 
     #[test]

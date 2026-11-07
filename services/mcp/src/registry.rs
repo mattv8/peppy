@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
+    future::Future,
     io,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
@@ -431,7 +432,9 @@ impl RuntimeRegistry {
                             }
                             break;
                         }
-                        run_webhooks(&webhooks, &runtime, vault_id).await;
+                        if !is_stop_requested(&shutdown, &stop_requested) {
+                            run_webhooks_until_stopped(&webhooks, &runtime, vault_id, &mut shutdown, &mut stop_requested).await;
+                        }
                     }
                     _ = interval.tick() => {
                         if !supervise_sync(runtime.clone(), vault_id, &mut shutdown, &mut stop_requested).await {
@@ -440,7 +443,9 @@ impl RuntimeRegistry {
                             }
                             break;
                         }
-                        run_webhooks(&webhooks, &runtime, vault_id).await;
+                        if !is_stop_requested(&shutdown, &stop_requested) {
+                            run_webhooks_until_stopped(&webhooks, &runtime, vault_id, &mut shutdown, &mut stop_requested).await;
+                        }
                     }
                 }
             }
@@ -535,12 +540,61 @@ async fn run_webhooks(
     vault_id: Uuid,
 ) {
     let outcome = tokio::time::timeout(Duration::from_secs(60), async {
-        engine.after_sync(runtime).await?;
-        engine.dispatch_due(runtime).await
+        engine
+            .after_sync(runtime)
+            .await
+            .map_err(|error| ("after_sync", error))?;
+        engine
+            .dispatch_due(runtime)
+            .await
+            .map_err(|error| ("dispatch_due", error))
     })
     .await;
-    if outcome.is_err() || outcome.ok().is_some_and(|result| result.is_err()) {
-        tracing::warn!(category = "webhooks", vault = %short_vault_id(vault_id), "webhook processing failed");
+    match outcome {
+        Err(_) => {
+            tracing::warn!(category = "webhooks", vault = %short_vault_id(vault_id), stage = "webhooks", outcome = "timeout", "webhook processing failed")
+        }
+        Ok(Err((stage, crate::webhooks::engine::WebhookError::Missing))) => {
+            tracing::warn!(category = "webhooks", vault = %short_vault_id(vault_id), stage, outcome = "missing", "webhook processing failed")
+        }
+        Ok(Err((stage, crate::webhooks::engine::WebhookError::Code(code)))) => {
+            tracing::warn!(category = "webhooks", vault = %short_vault_id(vault_id), stage, outcome = code, "webhook processing failed")
+        }
+        Ok(Ok(())) => {}
+    }
+}
+
+fn is_stop_requested(
+    shutdown: &watch::Receiver<bool>,
+    stop_requested: &watch::Receiver<bool>,
+) -> bool {
+    *shutdown.borrow() || *stop_requested.borrow()
+}
+
+async fn run_webhooks_until_stopped(
+    engine: &crate::webhooks::engine::WebhookEngine,
+    runtime: &Runtime,
+    vault_id: Uuid,
+    shutdown: &mut watch::Receiver<bool>,
+    stop_requested: &mut watch::Receiver<bool>,
+) {
+    await_webhook_work(
+        run_webhooks(engine, runtime, vault_id),
+        shutdown,
+        stop_requested,
+    )
+    .await;
+}
+
+async fn await_webhook_work(
+    work: impl Future<Output = ()>,
+    shutdown: &mut watch::Receiver<bool>,
+    stop_requested: &mut watch::Receiver<bool>,
+) {
+    tokio::select! {
+        _ = work => {}
+        _ = shutdown.changed() => {}
+        _ = stop_requested.changed() => {}
     }
 }
 
@@ -717,15 +771,15 @@ mod tests {
     };
 
     use super::{
-        RevokedFence, RuntimeIdentity, RuntimeRegistry, StateLock, outcome_category,
-        persist_identities, short_vault_id, vault_state_dir,
+        RevokedFence, RuntimeIdentity, RuntimeRegistry, StateLock, await_webhook_work,
+        is_stop_requested, outcome_category, persist_identities, short_vault_id, vault_state_dir,
     };
     use crate::{
         config::WorkerConfig,
         runtime::{Runtime, RuntimeError},
     };
     use axum::{Router, extract::State, http::StatusCode, routing::get};
-    use tokio::sync::Notify;
+    use tokio::sync::{Notify, watch};
     use uuid::Uuid;
 
     #[test]
@@ -1208,5 +1262,29 @@ mod tests {
             vault_id,
             device_id: device_b
         }));
+    }
+
+    #[tokio::test]
+    async fn stop_cancels_hanging_webhook_work_promptly() {
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+        let (stop_sender, mut stop) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            await_webhook_work(std::future::pending(), &mut shutdown, &mut stop).await;
+        });
+
+        stop_sender.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("stop did not cancel hanging webhook work")
+            .unwrap();
+    }
+
+    #[test]
+    fn cancellation_after_supervision_skips_webhook_work() {
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        let (_stop_sender, stop) = watch::channel(false);
+        shutdown_sender.send_replace(true);
+
+        assert!(is_stop_requested(&shutdown, &stop));
     }
 }

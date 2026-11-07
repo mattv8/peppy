@@ -111,9 +111,9 @@ describe("webhookDeliveryView", () => {
       .toEqual({ tone: "warning", text: `Retrying · ${label}` });
   });
 
-  it("prefers the status code over a mapped error label", () => {
-    expect(webhookDeliveryView({ ...base, lastDeliveryState: "failed", lastStatusCode: 503, lastError: "timeout" }, NOW).text)
-      .toBe("Failing · 503");
+  it("prefers a mapped error label over the status code", () => {
+    expect(webhookDeliveryView({ ...base, lastDeliveryState: "failed", lastStatusCode: 302, lastError: "redirect_refused" }, NOW).text)
+      .toBe("Failing · redirect refused");
   });
 
   it("falls back to a generic failure label when no cause is recorded", () => {
@@ -218,6 +218,11 @@ describe("webhookTestResultView", () => {
       .toEqual({ tone: "error", text: "The endpoint answered 503." });
   });
 
+  it("prefers a redirect refusal over the response status", () => {
+    expect(webhookTestResultView(result({ ok: false, statusCode: 302, error: "redirect_refused" })))
+      .toEqual({ tone: "error", text: "Redirects aren't followed. Use the final endpoint URL." });
+  });
+
   it("refuses to follow redirects with a clear message", () => {
     expect(webhookTestResultView(result({ ok: false, statusCode: null, error: "redirect_refused" })).text)
       .toBe("Redirects aren't followed. Use the final endpoint URL.");
@@ -226,5 +231,13 @@ describe("webhookTestResultView", () => {
   it("uses generic copy for an unknown failure", () => {
     expect(webhookTestResultView(result({ ok: false, statusCode: null, error: "weird" })).text)
       .toBe("Test failed. Check the endpoint and try again.");
+  });
+
+  it.each([
+    ["dns_failed", "Couldn't find that address. Check the domain in the URL."],
+    ["connect_failed", "Couldn't connect to the endpoint. Check that it's online."],
+    ["busy", "Another delivery is in progress. Try again in a moment."],
+  ])("explains a %s test failure", (error, text) => {
+    expect(webhookTestResultView(result({ ok: false, statusCode: null, error }))).toEqual({ tone: "error", text });
   });
 });

@@ -353,6 +353,18 @@ class ComposeDevelopmentTests(unittest.TestCase):
         self.assertEqual(caddy["entrypoint"], ["/usr/local/bin/peppy-caddy"])
         self.assertEqual(caddy["environment"]["WEB_CLIENT_HOST"], "")
 
+    @unittest.skipUnless(compose, "Docker Compose is unavailable")
+    def test_mcp_overlay_isolates_worker_from_storage_network(self):
+        result = self.render("docker-compose.yml", "infra/compose/compose.mcp.yml")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads(result.stdout)
+        self.assertEqual(set(config["services"]["mcp"]["networks"]), {"mcp-api", "mcp-egress"})
+        self.assertNotIn("private", config["services"]["mcp"]["networks"])
+        self.assertTrue(config["networks"]["mcp-api"]["internal"])
+        self.assertIn("mcp-api", config["services"]["api"]["networks"])
+        self.assertEqual(config["services"]["mcp-state-init"]["network_mode"], "none")
+        self.assertNotIn("networks", config["services"]["mcp-state-init"])
+
     def test_dev_recipes_clean_legacy_services_and_use_one_off_helpers(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

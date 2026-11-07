@@ -17,6 +17,7 @@ const MS_PER_SECOND = 1_000;
 const SECONDS_PER_MINUTE = 60;
 const MINUTES_PER_HOUR = 60;
 const HOURS_PER_DAY = 24;
+const MCP_UNAVAILABLE_MESSAGE = "The Peppy server client isn't reachable right now. Try again in a moment.";
 
 export type StatusTone = "success" | "warning" | "error" | "idle";
 export type StatusView = { tone: StatusTone; text: string };
@@ -33,11 +34,17 @@ const SERVER_ERROR_MESSAGES = new Map<string, string>([
   ["webhook_limit", WEBHOOK_LIMIT_MESSAGE],
   ["webhook_not_found", "This webhook no longer exists."],
   ["mcp_device_required", "Set up the Peppy server client in Devices first."],
+  ["mcp_unavailable", MCP_UNAVAILABLE_MESSAGE],
+  ["mcp_worker_unavailable", MCP_UNAVAILABLE_MESSAGE],
+  ["mcp_worker_invalid", MCP_UNAVAILABLE_MESSAGE],
 ]);
 
 const TEST_FAILURE_MESSAGES = new Map<string, string>([
   ["timeout", "The endpoint didn't answer in time."],
   ["redirect_refused", "Redirects aren't followed. Use the final endpoint URL."],
+  ["dns_failed", "Couldn't find that address. Check the domain in the URL."],
+  ["connect_failed", "Couldn't connect to the endpoint. Check that it's online."],
+  ["busy", "Another delivery is in progress. Try again in a moment."],
 ]);
 
 export function webhookErrorMessage(code?: string): string {
@@ -99,12 +106,14 @@ const FAILURE_CAUSE_LABELS = new Map<string, string>([
   ["blocked_address", "blocked"],
   ["queue_overflow", "queue full"],
   ["webhook_url_invalid", "unreachable"],
+  ["dns_failed", "DNS failed"],
+  ["connect_failed", "unreachable"],
 ]);
 
 /** Short human cause for a failing delivery: the HTTP status when there is one, else a plain label. */
 export function deliveryCause(webhook: Pick<WebhookView, "lastStatusCode" | "lastError">): string {
-  if (webhook.lastStatusCode) return String(webhook.lastStatusCode);
-  return FAILURE_CAUSE_LABELS.get(webhook.lastError ?? "") ?? "error";
+  return FAILURE_CAUSE_LABELS.get(webhook.lastError ?? "")
+    ?? (webhook.lastStatusCode ? String(webhook.lastStatusCode) : "error");
 }
 
 export function webhookDeliveryView(webhook: DeliveryFields, now: number): StatusView {
@@ -149,8 +158,8 @@ export function webhookFieldForCode(code?: string): WebhookField | null {
 }
 
 function webhookTestFailureMessage(result: WebhookTestResult): string {
-  if (result.statusCode !== null) return `The endpoint answered ${result.statusCode}.`;
-  return TEST_FAILURE_MESSAGES.get(result.error ?? "") ?? "Test failed. Check the endpoint and try again.";
+  return TEST_FAILURE_MESSAGES.get(result.error ?? "")
+    ?? (result.statusCode !== null ? `The endpoint answered ${result.statusCode}.` : "Test failed. Check the endpoint and try again.");
 }
 
 export function webhookTestResultView(result: WebhookTestResult): StatusView {

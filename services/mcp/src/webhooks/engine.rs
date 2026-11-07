@@ -1,6 +1,6 @@
 use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
+    collections::HashMap,
+    sync::{Arc, Mutex as StdMutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -10,7 +10,7 @@ use peppy_hosted_api::mcp::{
     WebhookList, WebhookSecret, WebhookTestResult, WebhookView,
 };
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use uuid::Uuid;
 
 use super::store::{self, MAX_QUEUE, MAX_WEBHOOKS, StoredWebhook, WebhookState};
@@ -48,7 +48,8 @@ const MAX_RESPONSE_DRAIN_BYTES: usize = 16 * 1024;
 pub struct WebhookEngine {
     custody: Arc<Custody>,
     config: WorkerConfig,
-    states: Arc<Mutex<HashMap<Uuid, Arc<Mutex<WebhookState>>>>>,
+    states: Arc<StdMutex<HashMap<Uuid, Arc<Mutex<Slot>>>>>,
+    send_gates: Arc<Mutex<HashMap<Uuid, Arc<Semaphore>>>>,
     #[cfg(test)]
     harness: TestHarness,
 }
@@ -59,6 +60,10 @@ pub struct WebhookEngine {
 struct TestHarness {
     now: Option<Arc<std::sync::atomic::AtomicI64>>,
     loopback: bool,
+    unresolved_once: Arc<std::sync::atomic::AtomicBool>,
+    fail_next_save: Arc<std::sync::atomic::AtomicBool>,
+    fail_next_remove: Arc<std::sync::atomic::AtomicBool>,
+    dispatch_waiting: Arc<tokio::sync::Notify>,
 }
 
 /// A vault state bound to the device that looked it up. Every lock re-checks the
@@ -68,6 +73,18 @@ struct TestHarness {
 struct Handle {
     inner: Arc<Mutex<WebhookState>>,
     device: Uuid,
+    vault: Uuid,
+}
+
+enum Slot {
+    Empty,
+    Live {
+        device: Uuid,
+        state: Arc<Mutex<WebhookState>>,
+    },
+    Tombstone {
+        device: Uuid,
+    },
 }
 
 impl Handle {
@@ -91,7 +108,8 @@ impl WebhookEngine {
         Self {
             custody,
             config,
-            states: Arc::new(Mutex::new(HashMap::new())),
+            states: Arc::new(StdMutex::new(HashMap::new())),
+            send_gates: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
             harness: TestHarness::default(),
         }
@@ -106,6 +124,7 @@ impl WebhookEngine {
             harness: TestHarness {
                 now: Some(now),
                 loopback: true,
+                ..TestHarness::default()
             },
             ..Self::new(custody, config)
         }
@@ -129,6 +148,45 @@ impl WebhookEngine {
     fn permit_loopback(&self) -> bool {
         self.harness.loopback
     }
+    #[cfg(test)]
+    fn force_unresolved_once(&self) {
+        self.harness
+            .unresolved_once
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    #[cfg(test)]
+    fn take_forced_unresolved(&self) -> bool {
+        self.harness
+            .unresolved_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+    #[cfg(test)]
+    fn fail_next_save(&self) {
+        self.harness
+            .fail_next_save
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    #[cfg(test)]
+    fn fail_next_remove(&self) {
+        self.harness
+            .fail_next_remove
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    #[cfg(test)]
+    fn dispatch_waiter(&self) -> Arc<tokio::sync::Notify> {
+        self.harness.dispatch_waiting.clone()
+    }
+    #[cfg(not(test))]
+    fn take_forced_unresolved(&self) -> bool {
+        false
+    }
+    async fn send_gate(&self, vault: Uuid) -> Arc<Semaphore> {
+        let mut gates = self.send_gates.lock().await;
+        gates
+            .entry(vault)
+            .or_insert_with(|| Arc::new(Semaphore::new(1)))
+            .clone()
+    }
     /// Binds a cached vault state to the device that asked for it.
     ///
     /// Rules: a live handle serves only its own device; a request from any other
@@ -136,56 +194,107 @@ impl WebhookEngine {
     /// tombstone left by `remove_vault` serves nobody, and only a different device
     /// may replace it with a fresh load.
     async fn state(&self, vault: Uuid, device: Uuid) -> Result<Handle, WebhookError> {
-        let mut states = self.states.lock().await;
-        if let Some(inner) = states.get(&vault) {
-            let (cached_device, revoked) = {
-                let locked = inner.lock().await;
-                (locked.device_id, locked.revoked)
-            };
-            if cached_device == device {
-                return if revoked {
-                    Err(WebhookError::Missing)
-                } else {
-                    Ok(Handle {
-                        inner: inner.clone(),
-                        device,
-                    })
-                };
-            }
-            if !revoked {
+        let slot = {
+            let mut states = self.states.lock().unwrap();
+            states
+                .entry(vault)
+                .or_insert_with(|| Arc::new(Mutex::new(Slot::Empty)))
+                .clone()
+        };
+        let mut slot = slot.lock().await;
+        let inner = match &*slot {
+            Slot::Live {
+                device: bound,
+                state,
+            } if *bound == device => state.clone(),
+            Slot::Live { .. } => {
                 return Err(WebhookError::Missing);
             }
-        }
-        let state = store::load(&self.custody, vault, device)
-            .map_err(|_| WebhookError::Code("mcp_unavailable"))?;
-        let inner = Arc::new(Mutex::new(state));
-        states.insert(vault, inner.clone());
-        Ok(Handle { inner, device })
+            Slot::Tombstone { device: bound } if *bound == device => {
+                return Err(WebhookError::Missing);
+            }
+            Slot::Empty | Slot::Tombstone { .. } => {
+                let state = store::load(&self.custody, vault, device)
+                    .map_err(|_| WebhookError::Code("mcp_unavailable"))?;
+                let inner = Arc::new(Mutex::new(state));
+                *slot = Slot::Live {
+                    device,
+                    state: inner.clone(),
+                };
+                inner
+            }
+        };
+        drop(slot);
+        Ok(Handle {
+            inner,
+            device,
+            vault,
+        })
     }
     /// Single persistence choke point. A revoked handle never writes.
     fn save(&self, vault: Uuid, state: &WebhookState) -> Result<(), WebhookError> {
         if state.revoked {
             return Err(WebhookError::Missing);
         }
+        #[cfg(test)]
+        if self
+            .harness
+            .fail_next_save
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(WebhookError::Code("mcp_unavailable"));
+        }
         store::save(&self.custody, vault, state).map_err(|_| WebhookError::Code("mcp_unavailable"))
+    }
+    fn cloned_state(state: &WebhookState) -> WebhookState {
+        WebhookState {
+            version: state.version,
+            device_id: state.device_id,
+            cursor: state.cursor,
+            cursor_initialized: state.cursor_initialized,
+            source_origin: state.source_origin.clone(),
+            webhooks: state.webhooks.clone(),
+            queue: state.queue.clone(),
+            recent: state.recent.clone(),
+            revoked: state.revoked,
+        }
     }
     /// Revokes the vault's webhook state: fences any cached handle under its mutex
     /// (waiting for in-flight operations to finish), clears it, and deletes the record.
     pub async fn remove_vault(&self, vault: Uuid, device: Uuid) -> Result<(), WebhookError> {
-        let mut states = self.states.lock().await;
-        let handle = states
-            .entry(vault)
-            .or_insert_with(|| Arc::new(Mutex::new(WebhookState::new(device))))
-            .clone();
-        let mut state = handle.lock().await;
-        state.revoked = true;
-        state.device_id = device;
-        state.webhooks.clear();
-        state.queue.clear();
-        state.recent.clear();
-        state.cursor = 0;
-        state.cursor_initialized = false;
-        store::remove(&self.custody, vault).map_err(|_| WebhookError::Code("mcp_unavailable"))
+        let slot = {
+            let mut states = self.states.lock().unwrap();
+            states
+                .entry(vault)
+                .or_insert_with(|| Arc::new(Mutex::new(Slot::Empty)))
+                .clone()
+        };
+        let mut slot = slot.lock().await;
+        if let Slot::Live { state, .. } = &*slot {
+            let mut state = state.lock().await;
+            state.revoked = true;
+            state.device_id = device;
+            state.webhooks.clear();
+            state.queue.clear();
+            state.recent.clear();
+            state.cursor = 0;
+            state.cursor_initialized = false;
+        }
+        #[cfg(test)]
+        let removed = if self
+            .harness
+            .fail_next_remove
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            Err(WebhookError::Code("mcp_unavailable"))
+        } else {
+            store::remove(&self.custody, vault).map_err(|_| WebhookError::Code("mcp_unavailable"))
+        };
+        #[cfg(not(test))]
+        let removed =
+            store::remove(&self.custody, vault).map_err(|_| WebhookError::Code("mcp_unavailable"));
+        *slot = Slot::Tombstone { device };
+        removed
     }
 
     pub async fn list(&self, vault: Uuid, device: Uuid) -> Result<WebhookList, WebhookError> {
@@ -207,17 +316,19 @@ impl WebhookEngine {
     ) -> Result<WebhookCreated, WebhookError> {
         validate(&input, &self.config).await?;
         let vault = runtime.vault_id().0;
+        let latest = runtime
+            .client()
+            .latest_message_local_order()
+            .map_err(|_| WebhookError::Code("mcp_unavailable"))?;
         let state = self.state(vault, runtime.device_id().0).await?;
         let mut state = state.lock().await?;
-        if state.webhooks.len() >= MAX_WEBHOOKS {
+        let mut candidate = Self::cloned_state(&state);
+        if candidate.webhooks.len() >= MAX_WEBHOOKS {
             return Err(WebhookError::Code("webhook_limit"));
         }
-        if !state.cursor_initialized {
-            state.cursor = runtime
-                .client()
-                .latest_message_local_order()
-                .map_err(|_| WebhookError::Code("mcp_unavailable"))?;
-            state.cursor_initialized = true;
+        if !candidate.cursor_initialized {
+            candidate.cursor = latest;
+            candidate.cursor_initialized = true;
         }
         let secret = generate_secret();
         let hook = StoredWebhook {
@@ -236,11 +347,12 @@ impl WebhookEngine {
             last_error: None,
         };
         let result = WebhookCreated {
-            webhook: view(&hook, &state),
+            webhook: view(&hook, &candidate),
             secret,
         };
-        state.webhooks.push(hook);
-        self.save(vault, &state)?;
+        candidate.webhooks.push(hook);
+        self.save(vault, &candidate)?;
+        *state = candidate;
         Ok(result)
     }
     pub async fn update(
@@ -253,11 +365,15 @@ impl WebhookEngine {
         let vault = runtime.vault_id().0;
         let state = self.state(vault, runtime.device_id().0).await?;
         let mut state = state.lock().await?;
-        let hook = state
+        let mut candidate = Self::cloned_state(&state);
+        let hook = candidate
             .webhooks
             .iter_mut()
             .find(|hook| hook.id == id)
             .ok_or(WebhookError::Missing)?;
+        let changed_delivery_target = hook.url != input.url
+            || hook.filter_mode != input.filter_mode
+            || hook.filter != input.filter;
         hook.name = normalized_name(input.name);
         hook.url = input.url;
         hook.events = input.events;
@@ -279,21 +395,28 @@ impl WebhookEngine {
             last_status_code: hook.last_status_code,
             last_error: hook.last_error.clone(),
         };
-        let result = view(&snapshot, &state);
-        self.save(vault, &state)?;
+        if changed_delivery_target {
+            candidate.queue.retain(|delivery| delivery.webhook_id != id);
+        }
+        let result = view(&snapshot, &candidate);
+        self.save(vault, &candidate)?;
+        *state = candidate;
         Ok(result)
     }
     pub async fn delete(&self, runtime: &Runtime, id: Uuid) -> Result<(), WebhookError> {
         let vault = runtime.vault_id().0;
         let state = self.state(vault, runtime.device_id().0).await?;
         let mut state = state.lock().await?;
-        let before = state.webhooks.len();
-        state.webhooks.retain(|hook| hook.id != id);
-        if before == state.webhooks.len() {
+        let mut candidate = Self::cloned_state(&state);
+        let before = candidate.webhooks.len();
+        candidate.webhooks.retain(|hook| hook.id != id);
+        if before == candidate.webhooks.len() {
             return Err(WebhookError::Missing);
         }
-        state.queue.retain(|delivery| delivery.webhook_id != id);
-        self.save(vault, &state)
+        candidate.queue.retain(|delivery| delivery.webhook_id != id);
+        self.save(vault, &candidate)?;
+        *state = candidate;
+        Ok(())
     }
     pub async fn reveal(&self, runtime: &Runtime, id: Uuid) -> Result<WebhookSecret, WebhookError> {
         let state = self
@@ -314,7 +437,8 @@ impl WebhookEngine {
         let vault = runtime.vault_id().0;
         let state = self.state(vault, runtime.device_id().0).await?;
         let mut state = state.lock().await?;
-        let hook = state
+        let mut candidate = Self::cloned_state(&state);
+        let hook = candidate
             .webhooks
             .iter_mut()
             .find(|hook| hook.id == id)
@@ -324,7 +448,8 @@ impl WebhookEngine {
             id,
             secret: hook.secret.clone(),
         };
-        self.save(vault, &state)?;
+        self.save(vault, &candidate)?;
+        *state = candidate;
         Ok(result)
     }
     pub async fn test(
@@ -350,9 +475,21 @@ impl WebhookEngine {
             )
         };
         let body = test_payload(id, &source_origin, self.now()).to_string();
-        Ok(self
+        let gate = self.send_gate(runtime.vault_id().0).await;
+        let Ok(permit) = tokio::time::timeout(Duration::from_secs(3), gate.acquire_owned()).await
+        else {
+            return Ok(WebhookTestResult {
+                ok: false,
+                status_code: None,
+                duration_ms: 0,
+                error: Some("busy".into()),
+            });
+        };
+        let result = self
             .send(&url, &secret, random_delivery_id(), body, &source_origin)
-            .await)
+            .await;
+        drop(permit);
+        Ok(result)
     }
     pub async fn after_sync(&self, runtime: &Runtime) -> Result<(), WebhookError> {
         if matches!(
@@ -363,12 +500,13 @@ impl WebhookEngine {
         }
         let vault = runtime.vault_id().0;
         let state = self.state(vault, runtime.device_id().0).await?;
+        let latest = runtime
+            .client()
+            .latest_message_local_order()
+            .map_err(|_| WebhookError::Code("mcp_unavailable"))?;
         let mut locked = state.lock().await?;
         if !locked.cursor_initialized {
-            locked.cursor = runtime
-                .client()
-                .latest_message_local_order()
-                .map_err(|_| WebhookError::Code("mcp_unavailable"))?;
+            locked.cursor = latest;
             locked.cursor_initialized = true;
             self.save(vault, &locked)?;
             return Ok(());
@@ -377,24 +515,41 @@ impl WebhookEngine {
         let mut contacts = HashMap::new();
         for _ in 0..5 {
             let cursor = state.lock().await?.cursor;
-            let messages = runtime
+            let page = runtime
                 .client()
                 .incoming_messages_after(cursor, 200)
                 .map_err(|_| WebhookError::Code("mcp_unavailable"))?;
+            let messages = page.messages;
             if messages.is_empty() {
+                if page.scanned_through > cursor {
+                    let mut locked = state.lock().await?;
+                    locked.cursor = locked.cursor.max(page.scanned_through);
+                    self.save(vault, &locked)?;
+                }
                 break;
             }
             let (hooks, source_origin) = {
                 let locked = state.lock().await?;
                 (locked.webhooks.clone(), self.source_origin(&locked))
             };
+            if !hooks.iter().any(|hook| !hook.paused) {
+                let mut locked = state.lock().await?;
+                locked.cursor = locked.cursor.max(page.scanned_through);
+                self.save(vault, &locked)?;
+                if messages.len() < 200 {
+                    break;
+                }
+                continue;
+            }
             let now = self.now();
             let mut additions = Vec::new();
             for (order, message) in &messages {
                 let sender = message.sender_address.as_deref().unwrap_or_default();
-                let contact = contacts.entry(sender.to_owned()).or_insert_with(|| {
-                    resolve_contact(runtime, sender, message.source_device_id.0)
-                });
+                let contact = contacts
+                    .entry(contact_cache_key(sender, message.source_device_id.0))
+                    .or_insert_with(|| {
+                        resolve_contact(runtime, sender, message.source_device_id.0)
+                    });
                 let selected = hooks
                     .iter()
                     .filter(|hook| admits(hook, message, sender, contact.as_ref(), now))
@@ -407,8 +562,8 @@ impl WebhookEngine {
                     let message_id = message.record.message_id.to_string();
                     additions.push((
                         *order,
-                        hook.id,
                         message_id.clone(),
+                        hook.clone(),
                         super::store::Delivery {
                             delivery_id: delivery_id(hook.id, &message_id),
                             webhook_id: hook.id,
@@ -431,7 +586,17 @@ impl WebhookEngine {
                 }
             }
             let mut locked = state.lock().await?;
-            for (order, webhook_id, message_id, delivery) in additions {
+            for (order, message_id, snapshot, delivery) in additions {
+                let Some(hook) = locked.webhooks.iter().find(|hook| {
+                    hook.id == snapshot.id
+                        && !hook.paused
+                        && hook.url == snapshot.url
+                        && hook.filter_mode == snapshot.filter_mode
+                        && hook.filter == snapshot.filter
+                }) else {
+                    continue;
+                };
+                let webhook_id = hook.id;
                 if locked.recent.contains(&(webhook_id, message_id.clone())) {
                     continue;
                 }
@@ -444,14 +609,20 @@ impl WebhookEngine {
                 {
                     dropped_hook.last_delivery_state = WebhookDeliveryState::Failed;
                     dropped_hook.last_error = Some("queue_overflow".into());
+                    dropped_hook.last_status_code = None;
+                    dropped_hook.last_delivery_at_ms = Some(self.now());
+                    tracing::warn!(
+                        category = "webhooks",
+                        webhook = %dropped_hook.id,
+                        code = "queue_overflow",
+                        "webhook delivery dropped because the queue is full"
+                    );
                 }
                 locked.queue.push_back(delivery);
                 locked.remember(webhook_id, message_id);
                 locked.cursor = locked.cursor.max(order);
             }
-            if let Some((last, _)) = messages.last() {
-                locked.cursor = *last;
-            }
+            locked.cursor = locked.cursor.max(page.scanned_through);
             self.save(vault, &locked)?;
             if messages.len() < 200 {
                 break;
@@ -474,6 +645,15 @@ impl WebhookEngine {
             let Some(due) = self.next_due(&state).await else {
                 break;
             };
+            #[cfg(test)]
+            self.harness.dispatch_waiting.notify_one();
+            let Ok(permit) = self.send_gate(vault).await.acquire_owned().await else {
+                return Ok(());
+            };
+            if !self.delivery_is_current(&state, &due).await {
+                drop(permit);
+                continue;
+            }
             let result = self
                 .send(
                     &due.url,
@@ -483,6 +663,7 @@ impl WebhookEngine {
                     &due.source_origin,
                 )
                 .await;
+            drop(permit);
             self.record_attempt(vault, &state, &due.delivery_id, result)
                 .await?;
         }
@@ -494,18 +675,25 @@ impl WebhookEngine {
     async fn next_due(&self, state: &Handle) -> Option<DueDelivery> {
         let mut locked = state.lock().await.ok()?;
         let now = self.now();
-        while let Some(index) = due_index(&locked.queue, now) {
-            let item = &locked.queue[index];
+        let mut index = 0;
+        while index < locked.queue.len() {
+            if locked.queue[index].next_attempt_at_ms > now {
+                index += 1;
+                continue;
+            }
             let endpoint = locked
                 .webhooks
                 .iter()
-                .find(|hook| hook.id == item.webhook_id)
-                .map(|hook| (hook.url.clone(), hook.secret.clone()));
+                .find(|hook| hook.id == locked.queue[index].webhook_id);
             match endpoint {
-                Some((url, secret)) => {
+                Some(hook) if hook.paused => index += 1,
+                Some(hook) => {
+                    let url = hook.url.clone();
+                    let secret = hook.secret.clone();
                     let item = &locked.queue[index];
                     return Some(DueDelivery {
                         delivery_id: item.delivery_id.clone(),
+                        webhook_id: hook.id,
                         url,
                         secret,
                         body: item.body.clone(),
@@ -514,10 +702,34 @@ impl WebhookEngine {
                 }
                 None => {
                     locked.queue.remove(index);
+                    if self.save(state.vault, &locked).is_err() {
+                        return None;
+                    }
                 }
             }
         }
         None
+    }
+
+    /// A delivery can wait behind another send while its webhook changes. Check the
+    /// queue and endpoint again after obtaining the permit, before starting HTTP.
+    async fn delivery_is_current(&self, state: &Handle, due: &DueDelivery) -> bool {
+        let Ok(locked) = state.lock().await else {
+            return false;
+        };
+        let Some(hook) = locked
+            .webhooks
+            .iter()
+            .find(|hook| hook.id == due.webhook_id)
+        else {
+            return false;
+        };
+        !hook.paused
+            && hook.url == due.url
+            && hook.secret == due.secret
+            && locked.queue.iter().any(|item| {
+                item.delivery_id == due.delivery_id && item.webhook_id == due.webhook_id
+            })
     }
 
     /// Applies one attempt's outcome, locating the item by delivery id. If the item
@@ -555,6 +767,12 @@ impl WebhookEngine {
                 queue.insert(position, item);
             } else {
                 hook.last_delivery_state = WebhookDeliveryState::Failed;
+                tracing::warn!(
+                    category = "webhooks",
+                    webhook = %hook.id,
+                    code = %result.error.as_deref().unwrap_or("unknown"),
+                    "webhook delivery failed permanently"
+                );
             }
         }
         self.save(vault, &locked)
@@ -570,8 +788,14 @@ impl WebhookEngine {
         };
         let state = self.state(vault, device).await?;
         let mut state = state.lock().await?;
-        state.source_origin = source_origin;
-        self.save(vault, &state)
+        if state.source_origin == source_origin {
+            return Ok(());
+        }
+        let mut candidate = Self::cloned_state(&state);
+        candidate.source_origin = source_origin;
+        self.save(vault, &candidate)?;
+        *state = candidate;
+        Ok(())
     }
     fn source_origin(&self, state: &WebhookState) -> String {
         if state.source_origin.is_empty() {
@@ -626,6 +850,9 @@ impl WebhookEngine {
             Err(error) => return result(false, None, started, error.code()),
         };
         let deny = api_host(&self.config.api_url);
+        if self.take_forced_unresolved() {
+            return result(false, None, started, "dns_failed");
+        }
         let addresses = match egress::resolve_checked_with(
             &parsed,
             &deny.into_iter().collect::<Vec<_>>(),
@@ -634,7 +861,14 @@ impl WebhookEngine {
         .await
         {
             Ok(value) => value,
-            Err(error) => return result(false, None, started, error.code()),
+            Err(error) => {
+                let code = if matches!(error, egress::UrlError::Unresolved) {
+                    "dns_failed"
+                } else {
+                    error.code()
+                };
+                return result(false, None, started, code);
+            }
         };
         let timestamp = self.now() / 1000;
         let signature = match super::signing::sign(secret, &id, timestamp, body.as_bytes()) {
@@ -683,7 +917,16 @@ impl WebhookEngine {
                     result(false, Some(status), started, &format!("http_{status}"))
                 }
             }
-            Err(_) => result(false, None, started, "timeout"),
+            Err(error) => result(
+                false,
+                None,
+                started,
+                if error.is_timeout() {
+                    "timeout"
+                } else {
+                    "connect_failed"
+                },
+            ),
         }
     }
     fn validate_delivery_url(&self, raw: &str) -> Result<url::Url, egress::UrlError> {
@@ -715,15 +958,11 @@ fn api_host(url: &str) -> Option<String> {
 /// One queued delivery snapshotted for an attempt, with its endpoint.
 struct DueDelivery {
     delivery_id: String,
+    webhook_id: Uuid,
     url: String,
     secret: String,
     body: String,
     source_origin: String,
-}
-
-/// Index of the first queued delivery whose attempt is due, in queue order.
-fn due_index(queue: &VecDeque<store::Delivery>, now: i64) -> Option<usize> {
-    queue.iter().position(|item| item.next_attempt_at_ms <= now)
 }
 
 #[derive(Clone)]
@@ -782,6 +1021,10 @@ fn resolve_contact(
     })
 }
 
+fn contact_cache_key(sender: &str, source_device_id: Uuid) -> (String, Uuid) {
+    (sender.to_owned(), source_device_id)
+}
+
 fn attachment_metadata(
     runtime: &Runtime,
     message: &peppy_client_core::MessagePayload,
@@ -814,6 +1057,7 @@ fn admits(
 ) -> bool {
     let time = message
         .sent_at_ms
+        .filter(|time| *time > 0)
         .or(message.ordered_at_ms)
         .unwrap_or_default();
     if hook.paused
@@ -972,6 +1216,7 @@ mod tests {
         location: Option<&'static str>,
         /// Never answers: the request stays open until the sender gives up.
         hang: bool,
+        release: Option<Arc<tokio::sync::Notify>>,
     }
 
     fn reply(status: u16) -> Reply {
@@ -979,6 +1224,7 @@ mod tests {
             status,
             location: None,
             hang: false,
+            release: None,
         }
     }
 
@@ -986,6 +1232,13 @@ mod tests {
         Reply {
             hang: true,
             ..reply(200)
+        }
+    }
+
+    fn hanging_until(release: Arc<tokio::sync::Notify>) -> Reply {
+        Reply {
+            release: Some(release),
+            ..hanging()
         }
     }
 
@@ -1017,7 +1270,11 @@ mod tests {
             .pop_front()
             .unwrap_or_else(|| reply(200));
         if scripted.hang {
-            std::future::pending::<()>().await;
+            if let Some(release) = scripted.release {
+                release.notified().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
         }
         let mut response = StatusCode::from_u16(scripted.status)
             .unwrap()
@@ -1163,6 +1420,7 @@ mod tests {
                 .client()
                 .incoming_messages_after(0, 500)
                 .unwrap()
+                .messages
                 .pop()
                 .unwrap()
                 .1
@@ -1201,6 +1459,24 @@ mod tests {
             label: None,
             contact_id: None,
             book_id: None,
+        }
+    }
+
+    fn input(url: &str) -> WebhookInput {
+        WebhookInput {
+            name: None,
+            url: url.into(),
+            events: vec![WebhookEvent::MessageReceived],
+            filter_mode: WebhookFilterMode::All,
+            filter: Vec::new(),
+            paused: false,
+        }
+    }
+
+    fn code(error: WebhookError) -> &'static str {
+        match error {
+            WebhookError::Code(code) => code,
+            WebhookError::Missing => "missing",
         }
     }
 
@@ -1276,6 +1552,357 @@ mod tests {
             env.with_state(|state| state.source_origin.clone()).await,
             "https://app.example.test"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_state_lookups_share_the_cached_handle() {
+        let env = TestEnv::new(Vec::new()).await;
+        let (first, second) = tokio::join!(
+            env.engine.state(env.vault(), env.device()),
+            env.engine.state(env.vault(), env.device()),
+        );
+
+        assert!(Arc::ptr_eq(&first.unwrap().inner, &second.unwrap().inner));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remove_vault_fences_a_first_load_and_leaves_a_tombstone() {
+        let env = TestEnv::new(Vec::new()).await;
+        let vault = env.vault();
+        let device = env.device();
+        let slot = {
+            let mut states = env.engine.states.lock().unwrap();
+            states
+                .entry(vault)
+                .or_insert_with(|| Arc::new(Mutex::new(Slot::Empty)))
+                .clone()
+        };
+        let held = slot.lock().await;
+        let remover = {
+            let engine = env.engine.clone();
+            tokio::spawn(async move { engine.remove_vault(vault, device).await })
+        };
+        tokio::task::yield_now().await;
+        drop(held);
+        remover.await.unwrap().unwrap();
+        assert!(env.engine.state(vault, device).await.is_err());
+        let reloaded = store::load(&env.engine.custody, vault, device).unwrap();
+        assert!(reloaded.webhooks.is_empty());
+        assert!(reloaded.queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_state_waiter_does_not_block_a_later_lookup() {
+        let env = TestEnv::new(Vec::new()).await;
+        let slot = {
+            let mut states = env.engine.states.lock().unwrap();
+            states
+                .entry(env.vault())
+                .or_insert_with(|| Arc::new(Mutex::new(Slot::Empty)))
+                .clone()
+        };
+        let held = slot.lock().await;
+        {
+            let pending = env.engine.state(env.vault(), env.device());
+            tokio::pin!(pending);
+            tokio::select! {
+                _ = &mut pending => panic!("state lookup must wait for the slot"),
+                _ = tokio::task::yield_now() => {}
+            }
+        }
+        drop(held);
+        assert!(env.engine.state(env.vault(), env.device()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn failed_removal_of_an_empty_slot_still_installs_a_tombstone() {
+        let env = TestEnv::new(Vec::new()).await;
+        env.engine.fail_next_remove();
+        assert_eq!(
+            code(
+                env.engine
+                    .remove_vault(env.vault(), env.device())
+                    .await
+                    .unwrap_err()
+            ),
+            "mcp_unavailable"
+        );
+        assert!(env.engine.state(env.vault(), env.device()).await.is_err());
+        assert!(env.engine.list(env.vault(), env.device()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rotate_save_failure_keeps_the_old_secret_after_reload() {
+        let env = TestEnv::new(Vec::new()).await;
+        let created = env
+            .engine
+            .create(&env.runtime, input("https://1.1.1.1/"))
+            .await
+            .unwrap();
+        env.engine.fail_next_save();
+        assert_eq!(
+            code(
+                env.engine
+                    .rotate(&env.runtime, created.webhook.id)
+                    .await
+                    .unwrap_err()
+            ),
+            "mcp_unavailable"
+        );
+        assert_eq!(
+            env.engine
+                .reveal(&env.runtime, created.webhook.id)
+                .await
+                .unwrap()
+                .secret,
+            created.secret
+        );
+        let fresh = WebhookEngine::new_for_test(
+            env.engine.custody.clone(),
+            env.engine.config.clone(),
+            env.now.clone(),
+        );
+        assert_eq!(
+            fresh
+                .reveal(&env.runtime, created.webhook.id)
+                .await
+                .unwrap()
+                .secret,
+            created.secret
+        );
+    }
+
+    #[tokio::test]
+    async fn create_and_update_reject_invalid_public_inputs() {
+        let env = TestEnv::new(Vec::new()).await;
+        let valid = "https://1.1.1.1/";
+        let mut created = Vec::new();
+        for _ in 0..10 {
+            created.push(env.engine.create(&env.runtime, input(valid)).await.unwrap());
+        }
+        assert_eq!(
+            code(
+                env.engine
+                    .create(&env.runtime, input(valid))
+                    .await
+                    .unwrap_err()
+            ),
+            "webhook_limit"
+        );
+        let id = created[0].webhook.id;
+        let cases = [
+            (
+                "too_many",
+                {
+                    let mut value = input(valid);
+                    value.filter = (0..51).map(|_| entry("x")).collect();
+                    value
+                },
+                "webhook_filter_invalid",
+            ),
+            (
+                "empty_only",
+                {
+                    let mut value = input(valid);
+                    value.filter_mode = WebhookFilterMode::Only;
+                    value
+                },
+                "webhook_filter_invalid",
+            ),
+            (
+                "all_with_filter",
+                {
+                    let mut value = input(valid);
+                    value.filter = vec![entry("x")];
+                    value
+                },
+                "webhook_filter_invalid",
+            ),
+            (
+                "long_name",
+                {
+                    let mut value = input(valid);
+                    value.name = Some("x".repeat(81));
+                    value
+                },
+                "webhook_name_invalid",
+            ),
+            (
+                "long_url",
+                input(&format!("https://1.1.1.1/{}", "x".repeat(2049))),
+                "webhook_url_invalid",
+            ),
+            ("http", input("http://1.1.1.1/"), "webhook_url_insecure"),
+        ];
+        for (_name, value, expected) in cases {
+            assert_eq!(
+                code(
+                    env.engine
+                        .update(&env.runtime, id, value)
+                        .await
+                        .unwrap_err()
+                ),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn paused_delivery_stays_queued_until_resumed() {
+        let (env, _stored) = armed(Vec::new()).await;
+        env.with_state(|state| state.webhooks[0].paused = true)
+            .await;
+        env.dispatch().await;
+        assert!(env.requests().is_empty());
+        assert_eq!(env.queue().await.len(), 1);
+        env.with_state(|state| state.webhooks[0].paused = false)
+            .await;
+        env.dispatch().await;
+        assert_eq!(env.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn target_changes_purge_queued_deliveries_but_rename_does_not() {
+        let env = TestEnv::new(Vec::new()).await;
+        let stored = env
+            .engine
+            .create(&env.runtime, input("https://1.1.1.1/"))
+            .await
+            .unwrap()
+            .webhook;
+        env.with_state(|state| state.queue.push_back(pending_item("rename", stored.id, 0)))
+            .await;
+        let mut renamed = input("https://1.1.1.1/");
+        renamed.name = Some("Renamed".into());
+        env.engine
+            .update(&env.runtime, stored.id, renamed)
+            .await
+            .unwrap();
+        assert_eq!(env.queue().await.len(), 1);
+        let mut filter = input("https://1.1.1.1/");
+        filter.filter_mode = WebhookFilterMode::Only;
+        filter.filter = vec![entry("+15550100001")];
+        env.engine
+            .update(&env.runtime, stored.id, filter)
+            .await
+            .unwrap();
+        assert!(env.queue().await.is_empty());
+        env.with_state(|state| state.queue.push_back(pending_item("url", stored.id, 0)))
+            .await;
+        env.engine
+            .update(&env.runtime, stored.id, input("https://1.0.0.1/"))
+            .await
+            .unwrap();
+        assert!(env.queue().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn orphaned_delivery_removal_is_persisted() {
+        let env = TestEnv::new(Vec::new()).await;
+        let state = env.engine.state(env.vault(), env.device()).await.unwrap();
+        {
+            let mut locked = state.lock().await.unwrap();
+            locked
+                .queue
+                .push_back(pending_item("orphan", Uuid::new_v4(), 0));
+            env.engine.save(env.vault(), &locked).unwrap();
+        }
+        assert!(env.engine.next_due(&state).await.is_none());
+        let fresh = WebhookEngine::new_for_test(
+            env.engine.custody.clone(),
+            env.engine.config.clone(),
+            env.now.clone(),
+        );
+        let reloaded = fresh.state(env.vault(), env.device()).await.unwrap();
+        assert!(reloaded.lock().await.unwrap().queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn overflow_clears_status_and_records_queue_overflow() {
+        let env = TestEnv::new(Vec::new()).await;
+        env.engine.after_sync(&env.runtime).await.unwrap();
+        let stored = env.add_hook(hook(&env.url, env.now())).await;
+        env.with_state(|state| {
+            state.queue.extend(
+                (0..MAX_QUEUE).map(|index| pending_item(&format!("old-{index}"), stored.id, 0)),
+            );
+            state.webhooks[0].last_status_code = Some(200);
+        })
+        .await;
+        env.capture("+15550100080", "overflow", false);
+        env.engine.after_sync(&env.runtime).await.unwrap();
+        let hook = env.hook(stored.id).await;
+        assert_eq!(hook.last_status_code, None);
+        assert_eq!(hook.last_error.as_deref(), Some("queue_overflow"));
+    }
+
+    #[test]
+    fn contact_cache_key_includes_the_source_device() {
+        let sender = "+15550100099";
+        assert_ne!(
+            contact_cache_key(sender, Uuid::new_v4()),
+            contact_cache_key(sender, Uuid::new_v4())
+        );
+    }
+
+    async fn dispatch_after_blocked_test<F>(mutate: F)
+    where
+        F: FnOnce(&mut WebhookState),
+    {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (env, stored) = armed(vec![hanging_until(release.clone())]).await;
+        let test = env.engine.test(&env.runtime, stored.id);
+        tokio::pin!(test);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while env.requests().is_empty() {
+                tokio::select! {
+                    _ = &mut test => panic!("test send finished before reaching receiver"),
+                    _ = tokio::task::yield_now() => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let dispatch = env.engine.dispatch_due(&env.runtime);
+        tokio::pin!(dispatch);
+        let waiting = env.engine.dispatch_waiter();
+        tokio::select! {
+            _ = waiting.notified() => {}
+            result = &mut dispatch => panic!("dispatch completed before waiting for the permit: {result:?}"),
+        }
+        env.with_state(mutate).await;
+        release.notify_one();
+        test.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), &mut dispatch)
+            .await
+            .expect("original dispatch must finish")
+            .unwrap();
+        assert_eq!(
+            env.requests().len(),
+            1,
+            "the old endpoint only saw the test send"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_dispatch_revalidates_pause_delete_url_and_filter_changes() {
+        dispatch_after_blocked_test(|state| state.webhooks[0].paused = true).await;
+        dispatch_after_blocked_test(|state| {
+            state.webhooks.clear();
+            state.queue.clear();
+        })
+        .await;
+        dispatch_after_blocked_test(|state| {
+            state.webhooks[0].url = "https://1.1.1.1/".into();
+            state.queue.clear();
+        })
+        .await;
+        dispatch_after_blocked_test(|state| {
+            state.webhooks[0].filter_mode = WebhookFilterMode::Only;
+            state.webhooks[0].filter = vec![entry("+15550100001")];
+            state.queue.clear();
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1696,6 +2323,17 @@ mod tests {
         let test_op = env.engine.test(&env.runtime, stored.id);
         tokio::pin!(test_op);
 
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while env.requests().is_empty() {
+                tokio::select! {
+                    _ = &mut test_op => panic!("test send finished before reaching the receiver"),
+                    _ = tokio::task::yield_now() => {}
+                }
+            }
+        })
+        .await
+        .expect("receiver must observe the outbound request");
+
         let listed = tokio::select! {
             _ = &mut test_op => panic!("test send finished before the list call"),
             listed = tokio::time::timeout(
@@ -1709,6 +2347,77 @@ mod tests {
             .unwrap();
         assert!(listed.available);
         assert_eq!(listed.webhooks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unresolved_delivery_is_retried_then_delivered() {
+        let (env, stored) = armed(Vec::new()).await;
+        env.engine.force_unresolved_once();
+
+        env.dispatch().await;
+
+        let queued = env.queue().await;
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].attempts, 1);
+        assert_eq!(
+            env.hook(stored.id).await.last_error.as_deref(),
+            Some("dns_failed")
+        );
+
+        env.set_now(queued[0].next_attempt_at_ms);
+        env.dispatch().await;
+
+        assert!(env.queue().await.is_empty());
+        assert_eq!(env.requests().len(), 1);
+        assert_eq!(
+            env.hook(stored.id).await.last_delivery_state,
+            WebhookDeliveryState::Delivered
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_refused_delivery_is_retried() {
+        let (env, stored) = armed(Vec::new()).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        env.with_state(|state| {
+            state.webhooks[0].url = format!("http://{address}/hook");
+        })
+        .await;
+
+        env.dispatch().await;
+
+        assert_eq!(env.queue().await[0].attempts, 1);
+        let hook = env.hook(stored.id).await;
+        assert_eq!(hook.last_delivery_state, WebhookDeliveryState::Retrying);
+        assert_eq!(hook.last_error.as_deref(), Some("connect_failed"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_test_delivery_returns_busy() {
+        let env = TestEnv::new(vec![hanging()]).await;
+        let stored = env.add_hook(hook(&env.url, env.now())).await;
+        let first = env.engine.test(&env.runtime, stored.id);
+        tokio::pin!(first);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while env.requests().is_empty() {
+                tokio::select! {
+                    _ = &mut first => panic!("test send finished before reaching the receiver"),
+                    _ = tokio::task::yield_now() => {}
+                }
+            }
+        })
+        .await
+        .expect("receiver must observe the first outbound request");
+
+        let second = env.engine.test(&env.runtime, stored.id).await.unwrap();
+        assert!(!second.ok);
+        assert_eq!(second.status_code, None);
+        assert_eq!(second.duration_ms, 0);
+        assert_eq!(second.error.as_deref(), Some("busy"));
+        assert_eq!(env.requests().len(), 1);
     }
 
     #[tokio::test]

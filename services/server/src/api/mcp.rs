@@ -928,24 +928,13 @@ async fn worker_request_with_error_mapping(
     body: &serde_json::Value,
     webhook_errors: bool,
 ) -> ApiResult<serde_json::Value> {
-    const PATHS: &[&str] = &[
-        "/internal/mcp/prepare",
-        "/internal/mcp/activate",
-        "/internal/mcp/complete",
-        "/internal/mcp/status",
-        "/internal/mcp/revoke",
-        "/internal/mcp/cancel",
-        "/internal/mcp/call",
-        "/internal/mcp/webhooks",
-    ];
     let Some(max_body) = worker_request_limit(path) else {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "mcp_worker_request_invalid",
         ));
     };
-    if !PATHS.contains(&path) || serde_json::to_vec(body).map_or(true, |body| body.len() > max_body)
-    {
+    if serde_json::to_vec(body).map_or(true, |body| body.len() > max_body) {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "mcp_worker_request_invalid",
@@ -983,14 +972,19 @@ async fn worker_request_with_error_mapping(
             "mcp_worker_unavailable",
         ));
     }
+    let response_limit = if webhook_errors {
+        2 * 1024 * 1024
+    } else {
+        max_body
+    };
     if response
         .content_length()
-        .is_some_and(|length| length > max_body as u64)
+        .is_some_and(|length| length > response_limit as u64)
     {
         return Err(ApiError(StatusCode::BAD_GATEWAY, "mcp_worker_invalid"));
     }
     let status = response.status();
-    let bytes = bounded_response_body(response, max_body).await?;
+    let bytes = bounded_response_body(response, response_limit).await?;
     if (matches!(path, "/internal/mcp/revoke" | "/internal/mcp/cancel") || webhook_errors)
         && status == StatusCode::NO_CONTENT
         && bytes.is_empty()
@@ -1080,7 +1074,7 @@ mod worker_wire_tests {
     use super::*;
 
     #[tokio::test]
-    async fn worker_accepts_only_revoke_empty_204_and_rejects_error_json() {
+    async fn worker_rejects_invalid_responses_and_maps_status_failures_to_unavailable() {
         let temp = tempfile::tempdir().unwrap();
         let token_file = temp.path().join("worker-token");
         std::fs::write(&token_file, "test-worker-control-token").unwrap();
@@ -1136,6 +1130,11 @@ mod worker_wire_tests {
             ("/internal/mcp/revoke", "empty200", StatusCode::BAD_GATEWAY),
             ("/internal/mcp/status", "malformed", StatusCode::BAD_GATEWAY),
             ("/internal/mcp/revoke", "malformed", StatusCode::BAD_GATEWAY),
+            (
+                "/internal/mcp/status",
+                "error",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
             (
                 "/internal/mcp/revoke",
                 "error",

@@ -10,7 +10,7 @@ pub mod store;
 
 // W2b appends `store` and `engine` modules here.
 
-pub use egress::{UrlError, is_blocked_ip, resolve_checked, validate_url};
+pub use egress::{UrlError, resolve_checked, validate_url};
 pub use filter::{FilterEntryRef, FilterMode, matches};
 pub use name::derive_name;
 pub use payload::{AttachmentMeta, delivery_id, message_payload, random_delivery_id, test_payload};

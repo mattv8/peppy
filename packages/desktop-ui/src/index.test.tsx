@@ -702,10 +702,6 @@ describe("desktop UI controls", () => {
     expect(container.querySelector("[data-recipient-chip-input]")).toHaveClass("recipient-chip-input", "recipient-chip-input--standalone");
     unmount();
 
-    const inline = render(<RecipientChipInput recipients={[]} onCommit={() => {}} className="composer-part" />);
-    const root = inline.container.querySelector("[data-recipient-chip-input]");
-    expect(root).toHaveClass("recipient-chip-input", "composer-part");
-    expect(root).not.toHaveClass("recipient-chip-input--standalone");
   });
 
   it("uses a deterministic fallback avatar for conversations without an identity", () => {
