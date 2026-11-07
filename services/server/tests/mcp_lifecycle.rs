@@ -156,6 +156,7 @@ struct WorkerState {
     request_received: Arc<Notify>,
     gate: Option<Gate>,
     revoke_status: Arc<Mutex<StatusCode>>,
+    webhook_response: Arc<Mutex<(StatusCode, serde_json::Value)>>,
 }
 
 struct FakeWorker {
@@ -193,6 +194,10 @@ impl FakeWorker {
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for {expected} requests to {path}"));
     }
+
+    async fn set_webhook_response(&self, status: StatusCode, body: serde_json::Value) {
+        *self.state.webhook_response.lock().await = (status, body);
+    }
 }
 
 async fn fake_worker() -> FakeWorker {
@@ -214,6 +219,10 @@ async fn spawn_fake_worker(gate: Option<Gate>) -> FakeWorker {
         request_received: Arc::new(Notify::new()),
         gate,
         revoke_status: Arc::new(Mutex::new(StatusCode::NO_CONTENT)),
+        webhook_response: Arc::new(Mutex::new((
+            StatusCode::OK,
+            json!({"available":true,"webhooks":[]}),
+        ))),
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -280,6 +289,10 @@ async fn handle_worker_request(State(state): State<WorkerState>, request: AxumRe
         "/internal/mcp/activate" => axum::Json(serde_json::json!({"confirm":{"claim_token":"claim","device_signature":"signature","admission_signature":"admission"}})).into_response(),
         "/internal/mcp/revoke" => (*state.revoke_status.lock().await).into_response(),
         "/internal/mcp/cancel" => StatusCode::NO_CONTENT.into_response(),
+        "/internal/mcp/webhooks" => {
+            let (status, body) = state.webhook_response.lock().await.clone();
+            (status, axum::Json(body)).into_response()
+        }
         _ => axum::Json(serde_json::json!({})).into_response(),
     }
 }
@@ -318,6 +331,149 @@ async fn mcp_request(
         .await
         .unwrap()
         .status()
+}
+
+async fn webhook_request(
+    router: Router,
+    token: &str,
+    method: Method,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, String) {
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+fn webhook_input() -> serde_json::Value {
+    json!({
+        "name": null,
+        "url": "https://hooks.example/messages",
+        "events": ["message.received"],
+        "filterMode": "all",
+        "filter": [],
+        "paused": false,
+    })
+}
+
+#[tokio::test]
+async fn webhook_routes_require_an_owner() {
+    let fixture = Fixture::new().await;
+    let router = router(fixture.pool.clone());
+
+    for (method, body) in [(Method::GET, json!({})), (Method::POST, webhook_input())] {
+        let (status, body) = webhook_request(
+            router.clone(),
+            &fixture.device_token,
+            method,
+            "/v1/mcp/webhooks",
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body, r#"{"code":"owner_required"}"#);
+    }
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn webhook_routes_report_an_absent_mcp_device() {
+    let fixture = Fixture::new().await;
+    let router = router(fixture.pool.clone());
+
+    let (status, body) = webhook_request(
+        router.clone(),
+        &fixture.owner_token,
+        Method::GET,
+        "/v1/mcp/webhooks",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, r#"{"available":false,"webhooks":[]}"#);
+
+    let (status, body) = webhook_request(
+        router,
+        &fixture.owner_token,
+        Method::POST,
+        "/v1/mcp/webhooks",
+        webhook_input(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body, r#"{"code":"mcp_device_required"}"#);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn webhook_routes_forward_live_device_requests_and_worker_errors() {
+    let fixture = Fixture::new().await;
+    sqlx::query("INSERT INTO mcp_devices(vault_id,device_id) VALUES($1,$2)")
+        .bind(fixture.vault)
+        .bind(fixture.device)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let worker = fake_worker().await;
+    let worker_config_lock = worker_config_lock().lock().await;
+    let router = router_for_worker(fixture.pool.clone(), &worker, &worker_config_lock);
+
+    let (status, body) = webhook_request(
+        router.clone(),
+        &fixture.owner_token,
+        Method::GET,
+        "/v1/mcp/webhooks",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    worker.wait_for_bodies("/internal/mcp/webhooks", 1).await;
+    let request = worker.bodies("/internal/mcp/webhooks").await.pop().unwrap();
+    assert_eq!(request["vault_id"], json!(fixture.vault));
+    assert_eq!(request["device_id"], json!(fixture.device));
+    assert_eq!(request["op"], "list");
+
+    worker
+        .set_webhook_response(StatusCode::CONFLICT, json!({"code":"webhook_limit"}))
+        .await;
+    let (status, body) = webhook_request(
+        router.clone(),
+        &fixture.owner_token,
+        Method::POST,
+        "/v1/mcp/webhooks",
+        webhook_input(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body, r#"{"code":"webhook_limit"}"#);
+
+    worker
+        .set_webhook_response(StatusCode::BAD_REQUEST, json!({"code":"unexpected"}))
+        .await;
+    let (status, body) = webhook_request(
+        router,
+        &fixture.owner_token,
+        Method::POST,
+        "/v1/mcp/webhooks",
+        webhook_input(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body, r#"{"code":"mcp_worker_invalid"}"#);
+    drop(worker_config_lock);
+    fixture.cleanup().await;
 }
 
 fn spawn_post(
