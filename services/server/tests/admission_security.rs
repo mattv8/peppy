@@ -599,6 +599,10 @@ async fn route_authority_inventory_is_complete_and_device_routes_reject_bad_bear
             assert_eq!(response[field], "invalid_bearer", "{method} {path}");
         }
     }
+    let webhook_input = json!({
+        "name": null, "url": "https://example.com/hook", "events": ["message.received"],
+        "filterMode": "all", "filter": [], "paused": false,
+    });
     let owner_mcp_routes = [
         (Method::GET, "/v1/mcp/grants".to_owned(), json!({})),
         (
@@ -646,6 +650,37 @@ async fn route_authority_inventory_is_complete_and_device_routes_reject_bad_bear
         (
             Method::POST,
             format!("/v1/mcp/authorizations/{attachment}/deny"),
+            json!({}),
+        ),
+        (Method::GET, "/v1/mcp/webhooks".to_owned(), json!({})),
+        (
+            Method::POST,
+            "/v1/mcp/webhooks".to_owned(),
+            webhook_input.clone(),
+        ),
+        (
+            Method::PUT,
+            format!("/v1/mcp/webhooks/{attachment}"),
+            webhook_input,
+        ),
+        (
+            Method::DELETE,
+            format!("/v1/mcp/webhooks/{attachment}"),
+            json!({}),
+        ),
+        (
+            Method::POST,
+            format!("/v1/mcp/webhooks/{attachment}/secret"),
+            json!({}),
+        ),
+        (
+            Method::POST,
+            format!("/v1/mcp/webhooks/{attachment}/rotate-secret"),
+            json!({}),
+        ),
+        (
+            Method::POST,
+            format!("/v1/mcp/webhooks/{attachment}/test"),
             json!({}),
         ),
     ];
