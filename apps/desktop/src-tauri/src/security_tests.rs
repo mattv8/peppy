@@ -329,6 +329,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
     let purchases = include_str!("purchases.rs");
     let enrollment = include_str!("enrollment.rs");
     let computer_enrollment = include_str!("enrollment/computer.rs");
+    let mcp = include_str!("mcp.rs");
     let history_search = include_str!("search_history.rs");
     let notification_activation = include_str!("notification_activation.rs");
     for command in &commands {
@@ -346,6 +347,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
                     purchases,
                     enrollment,
                     computer_enrollment,
+                    mcp,
                     history_search,
                     notification_activation,
                 ]
@@ -606,6 +608,49 @@ fn device_management_commands_are_registered_for_the_main_window_only() {
             !composer.contains(&allow(command)),
             "composer can call {command}"
         );
+    }
+}
+
+#[test]
+fn mcp_management_commands_are_main_window_only() {
+    let commands = declared_commands();
+    let registered = include_str!("lib.rs");
+    let mcp = include_str!("mcp.rs");
+    let main = permissions(include_str!("../capabilities/default.json"));
+    let composer = permissions(include_str!("../capabilities/composer.json"));
+    let media = permissions(include_str!("../capabilities/media.json"));
+
+    for command in [
+        "mcp_status",
+        "mcp_enable",
+        "mcp_grants",
+        "mcp_revoke_grant",
+        "mcp_authorization",
+        "mcp_approve_authorization",
+        "mcp_deny_authorization",
+    ] {
+        assert!(
+            commands.contains(&command.to_owned()),
+            "{command} is not declared"
+        );
+        assert!(
+            registered.contains(&format!("mcp::{command},")),
+            "{command} is not registered"
+        );
+        assert!(main.contains(&allow(command)), "main lacks {command}");
+        assert!(
+            !composer.contains(&allow(command)),
+            "composer can call {command}"
+        );
+        assert!(!media.contains(&allow(command)), "media can call {command}");
+        let definition = mcp
+            .split(&format!("pub async fn {command}("))
+            .nth(1)
+            .unwrap()
+            .split("\n}")
+            .next()
+            .unwrap();
+        assert!(definition.contains("crate::require_main(window.label())?;"));
     }
 }
 

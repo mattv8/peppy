@@ -49,6 +49,7 @@ mod lifecycle;
 mod login_item;
 mod material_state;
 mod media;
+mod mcp;
 mod net;
 mod notification_activation;
 mod notification_permission;
@@ -5996,6 +5997,13 @@ pub fn run() {
             enrollment::enrollment_status,
             enrollment::enrollment_cancel,
             enrollment::enrollment_sign_out,
+            mcp::mcp_status,
+            mcp::mcp_enable,
+            mcp::mcp_grants,
+            mcp::mcp_revoke_grant,
+            mcp::mcp_authorization,
+            mcp::mcp_approve_authorization,
+            mcp::mcp_deny_authorization,
         );
         handler(invoke)
     });

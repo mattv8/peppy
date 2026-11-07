@@ -985,7 +985,7 @@ async fn post(
     body(call.send().await.map_err(|_| NetError::Offline)?).await
 }
 
-async fn hosted_account_header(
+pub(crate) async fn hosted_account_header(
     state: &AppState,
     hosted: &crate::hosted::HostedState,
 ) -> BridgeResult<Option<Zeroizing<String>>> {
@@ -1241,7 +1241,7 @@ fn vault_secret_unavailable() -> BridgeError {
 }
 
 /// Reads the binding's stored vault secret. An absent or tombstoned value is unavailable.
-fn stored_vault_secret(
+pub(crate) fn stored_vault_secret(
     store: &dyn SecretStore,
     binding_account: &str,
 ) -> BridgeResult<Zeroizing<String>> {
