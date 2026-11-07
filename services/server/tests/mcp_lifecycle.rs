@@ -114,10 +114,20 @@ impl Fixture {
     }
     async fn cleanup(self) {
         self.pool.close().await;
-        sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
-            .execute(&self.admin)
-            .await
-            .unwrap();
+        let drop = format!("DROP SCHEMA {} CASCADE", self.schema);
+        // Parallel fixtures migrate and drop schemas concurrently; Postgres may pick this
+        // DROP as a deadlock victim, which rolls it back cleanly and is safe to retry.
+        for attempt in 1.. {
+            match sqlx::query(&drop).execute(&self.admin).await {
+                Ok(_) => return,
+                Err(sqlx::Error::Database(error))
+                    if error.code().as_deref() == Some("40P01") && attempt < 5 =>
+                {
+                    tokio::time::sleep(Duration::from_millis(50 * attempt)).await;
+                }
+                Err(error) => panic!("drop test schema: {error}"),
+            }
+        }
     }
 }
 
