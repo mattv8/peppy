@@ -287,7 +287,7 @@ fn record(
         "tmpId": tmp_id,
         "rcsReported": reported,
         "e2eeReported": encrypted,
-        "historyToken": "SENTINELcursor7f3",
+        "historyToken": "cursorfixture0001",
     })
     .to_string()
 }
@@ -429,7 +429,7 @@ fn mobile_read_dtos_exclude_rcs_provider_identity_and_cursor() {
         "SENTINELgmsg7f3",
         "SENTINELgconv7f3",
         "SENTINELtmp7f3",
-        "SENTINELcursor7f3",
+        "cursorfixture0001",
     ] {
         assert!(!output.contains(sentinel), "read DTO leaked {sentinel}");
     }

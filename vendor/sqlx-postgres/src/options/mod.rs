@@ -296,7 +296,7 @@ impl PgConnectOptions {
 
     /// Sets the SSL client key as a PEM-encoded byte slice.
     ///
-    /// This should be an ASCII-encoded blob that starts with `-----BEGIN PRIVATE KEY-----`.
+    /// This should be an ASCII-encoded PEM blob holding the PEM-encoded private key.
     ///
     /// # Example
     /// Note: embedding SSL certificates and keys in the binary is not advised.
@@ -305,10 +305,7 @@ impl PgConnectOptions {
     /// ```rust
     /// # use sqlx_postgres::{PgSslMode, PgConnectOptions};
     ///
-    /// const KEY: &[u8] = b"\
-    /// -----BEGIN PRIVATE KEY-----
-    /// <Private key data here.>
-    /// -----END PRIVATE KEY-----";
+    /// const KEY: &[u8] = b"<PEM-encoded private key>";
     ///
     /// let options = PgConnectOptions::new()
     ///     // Providing a CA certificate with less than VerifyCa is pointless
