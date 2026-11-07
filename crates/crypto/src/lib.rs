@@ -28,6 +28,7 @@ pub const ROOT_KEY_BYTES: usize = 32;
 pub const KDF_OPSLIMIT: u64 = 3;
 pub const KDF_MEMLIMIT: usize = 256 * 1024 * 1024;
 pub const STREAM_CHUNK_BYTES: usize = 64 * 1024;
+pub mod vault_identity;
 const VAULT_CHECK: &[u8] = b"peppy-vault-check-v1";
 static SODIUM_READY: OnceLock<Result<(), ()>> = OnceLock::new();
 fn ensure_sodium() -> Result<(), CryptoError> {
@@ -161,6 +162,8 @@ pub enum KeyPurpose {
     LocalWrap,
     /// Tester registry envelopes bound to an authenticated vault profile.
     TesterRegistry,
+    /// Recovery wrappers for the vault's immutable identity anchor.
+    VaultIdentityRecovery,
 }
 impl KeyPurpose {
     fn id(self) -> u64 {
@@ -171,6 +174,7 @@ impl KeyPurpose {
             Self::Compaction => 4,
             Self::LocalWrap => 5,
             Self::TesterRegistry => 6,
+            Self::VaultIdentityRecovery => 7,
         }
     }
 }
