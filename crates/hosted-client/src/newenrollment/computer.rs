@@ -346,7 +346,7 @@ impl EnrollmentClient {
             transfer.public_key(),
         )?;
         let encrypted = client
-            .seal_phone_handoff(transfer, &context)
+            .seal_computer_handoff(transfer, &context)
             .map_err(|_| HostedClientError::KeysUnavailable)?;
         let proof_input = ComputerOwnerProofInput {
             context: &context,

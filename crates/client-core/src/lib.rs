@@ -49,6 +49,7 @@ mod message_origin;
 mod notification_preferences;
 mod sender_blocklist;
 pub use deferred_media::{DeferredMediaRequestReport, DeferredMediaStatus, DeferredOriginal};
+mod mcp_commands;
 mod media_paging;
 mod mms;
 mod mms_backfill;
@@ -70,6 +71,7 @@ pub use gateway_settings::{
     GatewayCapabilities, GatewayHostFacts, GatewayPlatform, GatewayPolicyDecision, GatewaySettings,
 };
 pub use local_search::*;
+pub use mcp_commands::{McpCommand, McpQueuedCommand};
 use media::STREAM_VERSION;
 pub use media::{
     AttachmentInfo, AttachmentState, CipherObject, MediaDescriptor, NativePlaintextFile,
@@ -89,8 +91,8 @@ pub use mms_backfill::{
 };
 use peppy_crypto::FileKey;
 use peppy_crypto::enrollment::{
-    EncryptedHandoff, EnrollmentContext, EnrollmentRole, HandoffRootPackage, TransferKeypair,
-    VerifiedHandoff,
+    EncryptedHandoff, EnrollmentContext, EnrollmentPurpose, EnrollmentRole, HandoffRootPackage,
+    TransferKeypair, VerifiedHandoff,
 };
 use peppy_crypto::{
     CryptoError, EncryptedEnvelope, KeyPurpose, PurposeKey, compaction_hmac, decrypt,
@@ -1848,6 +1850,17 @@ impl Client {
         })
     }
 
+    /// Read-only metadata for the epoch currently pinned by this local client.
+    /// It exposes neither key material nor a capability to activate an epoch.
+    pub fn active_key_profile(&self) -> Result<KeyProfile, Error> {
+        let s = self.lock()?;
+        let epoch = s.active_epoch.ok_or(Error::KeysUnavailable)?;
+        s.keys
+            .get(&epoch)
+            .map(|keys| keys.profile.clone())
+            .ok_or(Error::KeysUnavailable)
+    }
+
     /// Seals browser-local identity plaintext once with a just-imported verified vault epoch. This
     /// returns ciphertext only; neither the root nor the derived LocalWrap key crosses the core
     /// boundary. Passphrase unlocks do not install this one-shot capability.
@@ -1897,6 +1910,40 @@ impl Client {
         sender: &TransferKeypair,
         context: &EnrollmentContext,
     ) -> Result<EncryptedHandoff, Error> {
+        let s = self.lock()?;
+        let epoch = s.active_epoch.ok_or(Error::KeysUnavailable)?;
+        if context.vault_id != s.config.vault_id.0 || context.key_epoch != epoch {
+            return Err(Error::InvalidProfile);
+        }
+        let keys = s.keys.get(&epoch).ok_or(Error::KeysUnavailable)?;
+        if keys.profile.vault_id != context.vault_id
+            || keys.profile.key_epoch != context.key_epoch
+            || profile_fingerprint_bytes(&keys.profile).map_err(|_| Error::Crypto)?
+                != context.fingerprint
+        {
+            return Err(Error::InvalidProfile);
+        }
+        keys.handoff
+            .as_ref()
+            .ok_or(Error::KeysUnavailable)?
+            .seal(sender, &context.recipient_transfer_public_key, context)
+            .map_err(|_| Error::Crypto)
+    }
+
+    /// Seals a computer enrollment handoff only for an ordinary recipient device from the active
+    /// epoch's verified root capability. The enrollment context must come from authenticated local
+    /// enrollment validation, never renderer or server input directly.
+    pub fn seal_computer_handoff(
+        &self,
+        sender: &TransferKeypair,
+        context: &EnrollmentContext,
+    ) -> Result<EncryptedHandoff, Error> {
+        if context.purpose != EnrollmentPurpose::Computer
+            || context.role != EnrollmentRole::Device
+            || context.device_id.is_nil()
+        {
+            return Err(Error::InvalidProfile);
+        }
         let s = self.lock()?;
         let epoch = s.active_epoch.ok_or(Error::KeysUnavailable)?;
         if context.vault_id != s.config.vault_id.0 || context.key_epoch != epoch {
@@ -2551,6 +2598,33 @@ impl Client {
         self.send_compose_draft_impl(draft_id, expected_revision, Some(expected_transport))
     }
 
+    /// Classifies an MCP send without changing local state.
+    pub fn mcp_send_transport(
+        &self,
+        conversation_id: ConversationId,
+        recipients: &[String],
+        attachments: &[AttachmentId],
+    ) -> Result<Transport, Error> {
+        let store = self.lock()?;
+        classify_outgoing_transport(&store.conn, conversation_id, recipients, attachments)
+    }
+
+    /// Returns the recipients used when replying to a stored message.
+    pub fn reply_recipients(&self, message_id: MessageId) -> Result<Vec<String>, Error> {
+        let message = self.message_by_id(message_id)?.ok_or(Error::NotFound)?;
+        match (message.payload.transport, message.payload.direction) {
+            (_, Direction::Outgoing) => Ok(message.payload.recipients),
+            (Transport::Mms, Direction::Incoming) => self
+                .mms_reply_context(message.payload.record.conversation_id)
+                .map(|context| context.recipients),
+            (_, Direction::Incoming) => message
+                .payload
+                .sender_address
+                .map(|sender| vec![sender])
+                .ok_or(Error::NotFound),
+        }
+    }
+
     fn send_compose_draft_impl(
         &self,
         draft_id: DraftId,
@@ -2569,21 +2643,13 @@ impl Client {
             });
         }
         let route = draft.route.ok_or(Error::InvalidRequest("route"))?;
-        // For one-to-one text replies, the latest record defines the current thread transport;
-        // an old legacy picture MMS must not permanently convert a later SMS thread to MMS.
-        let latest_transport: Option<Transport> = tx
-            .query_row(
-                "SELECT payload FROM messages WHERE conversation_id=? ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1",
-                params![draft.conversation_id.to_string()],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .map(|payload| decode::<MessagePayload>(payload.as_bytes()).map(|message| message.transport))
-            .transpose()?;
-        let transport = if draft.attachment_ids.is_empty()
-            && draft.recipients.len() == 1
-            && latest_transport != Some(Transport::Mms)
-        {
+        let transport = classify_outgoing_transport(
+            &tx,
+            draft.conversation_id,
+            &draft.recipients,
+            &draft.attachment_ids,
+        )?;
+        if transport == Transport::Sms {
             validate_outgoing(
                 &OutgoingSms {
                     conversation_id: draft.conversation_id,
@@ -2592,7 +2658,6 @@ impl Client {
                 },
                 &route,
             )?;
-            Transport::Sms
         } else {
             validate_outgoing_mms(
                 &draft.recipients,
@@ -2601,7 +2666,6 @@ impl Client {
                 None,
                 &route,
             )?;
-            Transport::Mms
         };
         if expected_transport.is_some_and(|expected| expected != transport) {
             return Err(Error::InvalidRequest("compose transport changed"));
@@ -2627,6 +2691,30 @@ impl Client {
         )?;
         tx.commit()?;
         Ok(queued)
+    }
+}
+
+/// For one-to-one text replies, the latest record defines the current thread transport; an old
+/// legacy picture MMS must not permanently convert a later SMS thread to MMS.
+fn classify_outgoing_transport(
+    tx: &Connection,
+    conversation_id: ConversationId,
+    recipients: &[String],
+    attachments: &[AttachmentId],
+) -> Result<Transport, Error> {
+    let latest_transport: Option<Transport> = tx
+        .query_row(
+            "SELECT payload FROM messages WHERE conversation_id=? ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1",
+            params![conversation_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|payload| decode::<MessagePayload>(payload.as_bytes()).map(|message| message.transport))
+        .transpose()?;
+    if attachments.is_empty() && recipients.len() == 1 && latest_transport != Some(Transport::Mms) {
+        Ok(Transport::Sms)
+    } else {
+        Ok(Transport::Mms)
     }
 }
 
@@ -5907,6 +5995,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     }
     mms_backfill::initialize(conn)?;
     attachment_retention::initialize(conn)?;
+    mcp_commands::initialize(conn)?;
     media_cache::initialize(conn)?;
     deferred_media::initialize(conn)?;
     initialize_battery_lookup_indexes(conn)?;
@@ -13725,7 +13814,77 @@ mod tests {
     }
 
     #[test]
-    fn reopened_cache_only_client_cannot_seal_a_phone_handoff() {
+    fn verified_owner_seals_only_matching_computer_contexts() {
+        use peppy_crypto::create_vault_check_header;
+        use peppy_crypto::enrollment::{EnrollmentPurpose, EnrollmentRole, open_handoff};
+        use peppy_crypto::profile_fingerprint_bytes;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let owner_device_id = DeviceId::new();
+        let client = handoff_test_client(&directory, "computer-seal.db", vault_id, owner_device_id);
+        let profile = KeyProfile::new(vault_id.0, 4).unwrap();
+        let root = derive_root_key(HANDOFF_PASSPHRASE, &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        client
+            .unlock(&profile, &header, HANDOFF_PASSPHRASE)
+            .unwrap();
+        let sender = TransferKeypair::generate().unwrap();
+        let recipient = TransferKeypair::generate().unwrap();
+        let context = EnrollmentContext {
+            purpose: EnrollmentPurpose::Computer,
+            canonical_origin: "https://peppy.test".into(),
+            vault_id: vault_id.0,
+            fingerprint: profile_fingerprint_bytes(&profile).unwrap(),
+            key_epoch: 4,
+            enrollment_id: Uuid::new_v4(),
+            server_nonce: [2; 32],
+            owner_transfer_public_key: sender.public_key(),
+            recipient_transfer_public_key: recipient.public_key(),
+            recipient_signing_public_key: [3; 32],
+            device_id: DeviceId::new().0,
+            credential_digest: [4; 32],
+            role: EnrollmentRole::Device,
+        };
+
+        let sealed = client.seal_computer_handoff(&sender, &context).unwrap();
+        let handoff = open_handoff(&recipient, &sender.public_key(), &context, &sealed).unwrap();
+        assert!(handoff.sign_admission_context(&context).is_ok());
+
+        let mut wrong_purpose = context.clone();
+        wrong_purpose.purpose = EnrollmentPurpose::Phone;
+        assert!(matches!(
+            client.seal_computer_handoff(&sender, &wrong_purpose),
+            Err(Error::InvalidProfile)
+        ));
+        let mut wrong_role = context.clone();
+        wrong_role.role = EnrollmentRole::Gateway;
+        assert!(matches!(
+            client.seal_computer_handoff(&sender, &wrong_role),
+            Err(Error::InvalidProfile)
+        ));
+        let mut wrong_vault = context.clone();
+        wrong_vault.vault_id = Uuid::new_v4();
+        assert!(matches!(
+            client.seal_computer_handoff(&sender, &wrong_vault),
+            Err(Error::InvalidProfile)
+        ));
+        let mut wrong_profile = context.clone();
+        wrong_profile.fingerprint[0] ^= 1;
+        assert!(matches!(
+            client.seal_computer_handoff(&sender, &wrong_profile),
+            Err(Error::InvalidProfile)
+        ));
+        let mut missing_recipient = context.clone();
+        missing_recipient.device_id = Uuid::nil();
+        assert!(matches!(
+            client.seal_computer_handoff(&sender, &missing_recipient),
+            Err(Error::InvalidProfile)
+        ));
+    }
+
+    #[test]
+    fn reopened_cache_only_client_cannot_seal_phone_or_computer_handoffs() {
         use peppy_crypto::create_vault_check_header;
         use peppy_crypto::enrollment::{EnrollmentPurpose, EnrollmentRole};
         use peppy_crypto::profile_fingerprint_bytes;
@@ -13765,6 +13924,15 @@ mod tests {
 
         assert!(matches!(
             cache_only.seal_phone_handoff(&sender, &context),
+            Err(Error::KeysUnavailable)
+        ));
+        let computer_context = EnrollmentContext {
+            purpose: EnrollmentPurpose::Computer,
+            role: EnrollmentRole::Device,
+            ..context
+        };
+        assert!(matches!(
+            cache_only.seal_computer_handoff(&sender, &computer_context),
             Err(Error::KeysUnavailable)
         ));
     }
