@@ -1208,7 +1208,7 @@ async fn ticket_validation_and_stalled_publish_share_the_original_budget() {
     let hooks = LiveTicketTestHooks {
         operation_budget: Some(Duration::from_millis(350)),
         recheck_interval: Some(Duration::from_secs(5)),
-        after_sample: Some(validation_gate.clone()),
+        after_validation: Some(validation_gate.clone()),
         ..LiveTicketTestHooks::default()
     };
     let mut options = LiveTestOptions::new(backend.clone(), true);
