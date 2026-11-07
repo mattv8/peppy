@@ -2532,11 +2532,13 @@ async fn commit_forwarded_after_scaled_lease_expiry_is_inert_and_rejected() {
 
     let database_url = std::env::var("TEST_DATABASE_URL").unwrap();
     let proxy = DelayedCommitProxy::start(&database_url).await;
+    let before_commit = LiveTicketTestGate::new(2);
     let lease_duration = Duration::from_millis(700);
     let hooks = LiveTicketTestHooks {
         recheck_operation_budget: Some(Duration::from_millis(250)),
         recheck_interval: Some(Duration::from_millis(100)),
         lease_duration: Some(lease_duration),
+        before_commit: Some(before_commit.clone()),
         ..LiveTicketTestHooks::default()
     };
     let mut options = LiveTestOptions::new(FakeLiveBackend::immediate(), true);
@@ -2551,7 +2553,10 @@ async fn commit_forwarded_after_scaled_lease_expiry_is_inert_and_rejected() {
         .unwrap();
     let session_hash = Sha256::digest(session_bytes).to_vec();
     let ticket = issue_ticket(&server, session_id.clone()).await;
-    let (mut socket, _) = server.connect_with_ticket(&session_id, &ticket).await;
+    let connect = spawn_ticket_connect(&server, session_id.clone(), ticket);
+    bounded(before_commit.wait_for_entries(1)).await;
+    before_commit.release_one();
+    let mut socket = bounded(connect).await.unwrap().unwrap();
     expect_strict_hello(&mut socket).await;
     let (incarnation, connection_id): (i64, i64) = sqlx::query_as(
         "SELECT session_incarnation,active_connection_id FROM live_ticket_sessions WHERE session_id_hash=$1",
@@ -2561,7 +2566,9 @@ async fn commit_forwarded_after_scaled_lease_expiry_is_inert_and_rejected() {
     .await
     .unwrap();
 
+    bounded(before_commit.wait_for_entries(2)).await;
     proxy.arm();
+    before_commit.release_one();
     bounded(proxy.wait_for_commit()).await;
     let sampled_at = hooks
         .sampled_at

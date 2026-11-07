@@ -68,6 +68,41 @@ pub(crate) enum TicketDbWorkError {
 
 #[cfg(test)]
 #[derive(Default)]
+struct CancellationProbe {
+    cancelled: std::sync::atomic::AtomicUsize,
+    changed: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl CancellationProbe {
+    fn record(self: &Arc<Self>, mut receiver: watch::Receiver<bool>) {
+        let probe = self.clone();
+        tokio::spawn(async move {
+            while !*receiver.borrow_and_update() {
+                if receiver.changed().await.is_err() {
+                    return;
+                }
+            }
+            probe
+                .cancelled
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            probe.changed.notify_waiters();
+        });
+    }
+
+    async fn wait_for(&self, expected: usize) {
+        loop {
+            let changed = self.changed.notified();
+            if self.cancelled.load(std::sync::atomic::Ordering::SeqCst) >= expected {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
 struct CheckoutWaitProbe {
     entered: std::sync::atomic::AtomicUsize,
     changed: tokio::sync::Notify,
@@ -99,6 +134,8 @@ pub(crate) struct TicketDbWorkRegistry {
     devices: Arc<Mutex<HashMap<TenantDevice, std::sync::Weak<Semaphore>>>>,
     #[cfg(test)]
     checkout_waits: Arc<CheckoutWaitProbe>,
+    #[cfg(test)]
+    cancellations: Arc<CancellationProbe>,
 }
 
 impl Default for TicketDbWorkRegistry {
@@ -114,6 +151,8 @@ impl TicketDbWorkRegistry {
             devices: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
             checkout_waits: Arc::new(CheckoutWaitProbe::default()),
+            #[cfg(test)]
+            cancellations: Arc::new(CancellationProbe::default()),
         }
     }
 
@@ -127,6 +166,11 @@ impl TicketDbWorkRegistry {
         self.checkout_waits
             .entered
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_cancellations(&self, expected: usize) {
+        self.cancellations.wait_for(expected).await;
     }
 
     #[cfg(test)]
@@ -152,6 +196,8 @@ impl TicketDbWorkRegistry {
             .clone()
             .try_acquire_owned()
             .map_err(|_| TicketDbWorkError::Capacity)?;
+        #[cfg(test)]
+        self.cancellations.record(cancellation.clone());
         let registry = self.clone();
         let outcome_cancellation = cancellation.clone();
         let (result, receiver) = oneshot::channel();

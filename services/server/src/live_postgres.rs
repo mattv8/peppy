@@ -246,24 +246,43 @@ fn apply_control(state: &Inner, control: LiveControl) {
 }
 
 async fn setup_listener(pool: &PgPool, timeout: Duration) -> Result<PgListener, sqlx::Error> {
-    within_setup_deadline(timeout, async {
-        let mut listener = PgListener::connect_with(pool).await?;
-        listener.discard_on_drop();
-        listener.eager_reconnect(false);
-        listener.listen(LIVE_NOTIFY_CHANNEL).await?;
-        listener.listen(LIVE_CONTROL_NOTIFY_CHANNEL).await?;
-        Ok(listener)
-    })
-    .await
+    within_setup_deadline(timeout, connect_listener(pool)).await
+}
+
+#[cfg(test)]
+async fn setup_listener_before(
+    pool: &PgPool,
+    expiration: impl Future<Output = ()>,
+) -> Result<PgListener, sqlx::Error> {
+    within_setup_expiration(expiration, connect_listener(pool)).await
+}
+
+async fn connect_listener(pool: &PgPool) -> Result<PgListener, sqlx::Error> {
+    let mut listener = PgListener::connect_with(pool).await?;
+    listener.discard_on_drop();
+    listener.eager_reconnect(false);
+    listener.listen(LIVE_NOTIFY_CHANNEL).await?;
+    listener.listen(LIVE_CONTROL_NOTIFY_CHANNEL).await?;
+    Ok(listener)
 }
 
 async fn within_setup_deadline<T>(
     timeout: Duration,
     setup: impl Future<Output = Result<T, sqlx::Error>>,
 ) -> Result<T, sqlx::Error> {
-    tokio::time::timeout(timeout, setup)
-        .await
-        .map_err(|_| sqlx::Error::PoolTimedOut)?
+    within_setup_expiration(tokio::time::sleep(timeout), setup).await
+}
+
+async fn within_setup_expiration<T>(
+    expiration: impl Future<Output = ()>,
+    setup: impl Future<Output = Result<T, sqlx::Error>>,
+) -> Result<T, sqlx::Error> {
+    tokio::pin!(expiration);
+    tokio::select! {
+        biased;
+        () = &mut expiration => Err(sqlx::Error::PoolTimedOut),
+        result = setup => result,
+    }
 }
 
 fn set_ready(state: &Inner, ready: bool) {
@@ -522,7 +541,9 @@ mod tests {
         assert!(listen_sent.notified().now_or_never().is_none());
     }
 
-    async fn stalled_listen_proxy(database_url: &str) -> (String, oneshot::Receiver<()>) {
+    async fn stalled_listen_proxy(
+        database_url: &str,
+    ) -> (String, Arc<Signal>, oneshot::Receiver<()>) {
         let upstream = Url::parse(database_url).unwrap();
         let upstream_address = format!(
             "{}:{}",
@@ -535,15 +556,18 @@ mod tests {
         proxy_url.set_host(Some("127.0.0.1")).unwrap();
         proxy_url.set_port(Some(proxy_address.port())).unwrap();
         let (disposed_tx, disposed_rx) = oneshot::channel();
+        let listen_sent = Arc::new(Signal::new());
+        let listen_sent_for_proxy = listen_sent.clone();
+        let listen_stalled = Arc::new(Signal::new());
+        let listen_stalled_for_proxy = listen_stalled.clone();
 
         tokio::spawn(async move {
             let (client, _) = listener.accept().await.unwrap();
             let upstream = TcpStream::connect(upstream_address).await.unwrap();
             let (mut client_read, mut client_write) = client.into_split();
             let (mut upstream_read, mut upstream_write) = upstream.into_split();
-            let listen_sent = Arc::new(Signal::new());
             let listen_forwarded = Arc::new(AtomicBool::new(false));
-            let listen_sent_for_client = listen_sent.clone();
+            let listen_sent_for_client = listen_sent_for_proxy.clone();
             let listen_forwarded_for_client = listen_forwarded.clone();
             let client_done = tokio::spawn(async move {
                 let length = client_read.read_u32().await? as usize;
@@ -573,7 +597,8 @@ mod tests {
                 let length = upstream_read.read_u32().await.unwrap() as usize;
                 let mut body = vec![0; length - 4];
                 upstream_read.read_exact(&mut body).await.unwrap();
-                if kind == b'Z' && listen_sent.notified().now_or_never().is_some() {
+                if kind == b'Z' && listen_sent_for_proxy.notified().now_or_never().is_some() {
+                    listen_stalled_for_proxy.notify_one();
                     await_expected_client_disconnect(client_done, &listen_forwarded).await;
                     let _ = disposed_tx.send(());
                     return;
@@ -592,14 +617,14 @@ mod tests {
             }
         });
 
-        (proxy_url.into(), disposed_rx)
+        (proxy_url.into(), listen_stalled, disposed_rx)
     }
 
     #[tokio::test]
     async fn timed_out_listen_setup_discards_its_stalled_pool_connection() {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL is required for PostgreSQL live relay tests");
-        let (proxy_url, disposed) = stalled_listen_proxy(&database_url).await;
+        let (proxy_url, listen_stalled, disposed) = stalled_listen_proxy(&database_url).await;
         let options = sqlx::postgres::PgConnectOptions::from_str(&proxy_url)
             .unwrap()
             .ssl_mode(sqlx::postgres::PgSslMode::Disable);
@@ -610,8 +635,20 @@ mod tests {
 
         // Spend the short deadline on the stalled LISTEN, not cold authentication.
         sqlx::query("SELECT 1").execute(&pool).await.unwrap();
+        let listener_pool = pool.clone();
+        let (expire_setup, expiration) = oneshot::channel();
+        let setup = tokio::spawn(async move {
+            setup_listener_before(&listener_pool, async move {
+                expiration.await.expect("test deadline sender remains open");
+            })
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), listen_stalled.notified())
+            .await
+            .expect("proxy must stall LISTEN before setup cancellation");
+        expire_setup.send(()).unwrap();
         assert!(matches!(
-            setup_listener(&pool, Duration::from_millis(100)).await,
+            setup.await.unwrap(),
             Err(sqlx::Error::PoolTimedOut)
         ));
         tokio::time::timeout(Duration::from_secs(1), disposed)
