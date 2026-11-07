@@ -53,7 +53,9 @@ mod material_state;
 mod media;
 mod net;
 mod notification_activation;
+mod notification_icon;
 mod notification_permission;
+mod notification_persistence;
 mod notifications;
 mod origin;
 mod purchases;
@@ -716,13 +718,13 @@ impl AppState {
         true
     }
 
-    async fn close_session_preserving_heads(&self, preserve_heads: bool) {
+    async fn close_session_preserving_heads(&self, preserve_heads: bool) -> bool {
         let _opening = self.session_open_lock.lock().await;
-        let _ = self.retire_session_preserving_heads(preserve_heads).await;
+        self.retire_session_preserving_heads(preserve_heads).await
     }
 
     async fn close_session(&self) {
-        self.close_session_preserving_heads(false).await;
+        let _ = self.close_session_preserving_heads(false).await;
     }
 
     /// The session for the active binding, opened on demand. A session for any other binding is
@@ -775,6 +777,12 @@ impl AppState {
         let retiring = {
             let mut current = self.session.lock().await;
             if let Some(existing) = current.as_ref() {
+                if existing.binding == binding && existing.is_revoked() {
+                    return Err(BridgeError::new(
+                        "revoked",
+                        "This device credential has been revoked.",
+                    ));
+                }
                 if existing.binding == binding && !existing.cancel.is_cancelled() {
                     return Ok(Some(existing.clone()));
                 }
@@ -1003,6 +1011,58 @@ fn locked_snapshot(checking: bool, storage_available: bool) -> Snapshot {
     snapshot
 }
 
+fn revoked_snapshot(origin: Option<String>) -> Snapshot {
+    let mut snapshot = empty_snapshot(origin);
+    snapshot.connection.state = "error";
+    snapshot.connection.error_code = Some("revoked");
+    snapshot
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SnapshotFinalization {
+    Locked,
+    Revoked,
+    Empty,
+    Publish,
+}
+
+async fn finalize_snapshot(
+    state: &AppState,
+    session: &Arc<Session>,
+) -> BridgeResult<SnapshotFinalization> {
+    if state.app_locked.load(Ordering::Acquire) {
+        return Ok(SnapshotFinalization::Locked);
+    }
+    let current = state.session.lock().await;
+    if state.app_locked.load(Ordering::Acquire) {
+        return Ok(SnapshotFinalization::Locked);
+    }
+    let _config = state
+        .config_lock
+        .lock()
+        .map_err(|_| BridgeError::host_state())?;
+    let active_binding = load_config(&state.config_path)?.active_binding().cloned();
+    if state.app_locked.load(Ordering::Acquire) {
+        return Ok(SnapshotFinalization::Locked);
+    }
+    let installed = current
+        .as_ref()
+        .is_some_and(|installed| Arc::ptr_eq(installed, session));
+    let cancelled = session.cancel.is_cancelled();
+    let status = session
+        .status
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if installed && active_binding.as_ref() == Some(&session.binding) && status.revoked {
+        return Ok(SnapshotFinalization::Revoked);
+    }
+    if installed && active_binding.as_ref() == Some(&session.binding) && !cancelled {
+        Ok(SnapshotFinalization::Publish)
+    } else {
+        Ok(SnapshotFinalization::Empty)
+    }
+}
+
 struct LoadStateOptions {
     conversation_id: Option<String>,
     history_from_message_id: Option<String>,
@@ -1103,8 +1163,11 @@ async fn load_state(
         ));
     }
     let origin = state.config()?.origin;
-    let Some(session) = state.session_admitted(&operation).await? else {
-        return Ok(empty_snapshot(origin));
+    let session = match state.session_admitted(&operation).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return Ok(empty_snapshot(origin)),
+        Err(error) if error.code == "revoked" => return Ok(revoked_snapshot(origin)),
+        Err(error) => return Err(error),
     };
     session.consume_deferred_follow_up();
     let preferences = {
@@ -1119,20 +1182,22 @@ async fn load_state(
         LoadStateOptions {
             conversation_id,
             history_from_message_id,
-            origin,
+            origin: origin.clone(),
             preferences,
             metadata_only: metadata_only.unwrap_or(false),
         },
     )
     .await?;
-    if state.app_locked.load(Ordering::Acquire) {
-        return Ok(locked_snapshot(
-            state.app_lock_checking.load(Ordering::Acquire),
-            state.app_lock_storage_available.load(Ordering::Acquire),
-        ));
-    }
-    if !session_is_current(&state, &session).await {
-        return Ok(empty_snapshot(state.config()?.origin));
+    match finalize_snapshot(&state, &session).await? {
+        SnapshotFinalization::Locked => {
+            return Ok(locked_snapshot(
+                state.app_lock_checking.load(Ordering::Acquire),
+                state.app_lock_storage_available.load(Ordering::Acquire),
+            ));
+        }
+        SnapshotFinalization::Revoked => return Ok(revoked_snapshot(origin)),
+        SnapshotFinalization::Empty => return Ok(empty_snapshot(state.config()?.origin)),
+        SnapshotFinalization::Publish => {}
     }
     let (pinned_conversation_ids, panel) = heads_runtime::snapshot(&app, window.label());
     snapshot.head.pinned_conversation_ids = Some(pinned_conversation_ids);
@@ -1727,14 +1792,21 @@ async fn activate_import_locked(
         config.remember(&binding);
         config.active = Some(binding.clone());
     })?;
-    state.close_session_preserving_heads(preserve_heads).await;
-    let open_session = match operation {
-        Some(operation) => {
-            state
-                .session_admitted_for_computer(operation, computer_attempt)
-                .await
+    let closed = state.close_session_preserving_heads(preserve_heads).await;
+    let open_session = if !closed {
+        Err(BridgeError::new(
+            "session-draining",
+            "Peppy is still finishing the previous account session.",
+        ))
+    } else {
+        match operation {
+            Some(operation) => {
+                state
+                    .session_admitted_for_computer(operation, computer_attempt)
+                    .await
+            }
+            None => state.session().await,
         }
-        None => state.session().await,
     };
     if let Err(error) = open_session {
         let rollback = previous.clone();
@@ -4883,6 +4955,38 @@ fn get_notification_sound(
     Ok(state.notifications.sound_enabled())
 }
 
+#[derive(serde::Serialize)]
+struct NotificationPersistenceSettings {
+    seconds: Option<u16>,
+    supported: bool,
+}
+
+#[tauri::command]
+fn get_notification_persistence(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> BridgeResult<NotificationPersistenceSettings> {
+    let _operation = admit_update_operation(&state)?;
+    require_main(window.label())?;
+    let persistence = state.notifications.persistence();
+    Ok(NotificationPersistenceSettings {
+        seconds: persistence.seconds,
+        supported: notification_persistence::supported(),
+    })
+}
+
+#[tauri::command]
+async fn set_notification_persistence(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    value: notification_persistence::NotificationPersistence,
+) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
+    require_main(window.label())?;
+    let settings = state.notifications.clone();
+    blocking(move || settings.set_persistence(value)).await
+}
+
 #[tauri::command]
 async fn set_notification_sound(
     window: tauri::WebviewWindow,
@@ -5497,6 +5601,7 @@ pub fn run() {
                     .map_err(|_| "could not protect native app data")?;
             }
             live_typing::install_events(app.handle());
+            notification_icon::recover_at_startup(app.handle());
             let handle = app.handle().clone();
             // State hints only; no payload, no focus or window changes.
             let notifier: Notifier = Arc::new(move || {
@@ -5847,8 +5952,16 @@ pub fn run() {
                                 window.label(),
                                 action,
                             ) {
-                                let _ = window.show();
-                                let _ = window.set_focus();
+                                if tray::composer_conversation(window.label()).is_some() {
+                                    if let Some(webview_window) =
+                                        window.app_handle().get_webview_window(window.label())
+                                    {
+                                        let _ = window_chrome::recover_window(&webview_window);
+                                    }
+                                } else {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
                                 dialogs::inform(
                                     window.app_handle(),
                                     "Could not close window",
@@ -5928,6 +6041,8 @@ pub fn run() {
         set_notification_context,
         request_notification_permission,
         open_notification_settings,
+        get_notification_persistence,
+        set_notification_persistence,
         list_devices,
         revoke_device,
         list_contact_books,

@@ -71,7 +71,21 @@ pub(crate) fn normalized(address: &str, region: Option<&str>) -> Option<String> 
     Some(parsed.format().mode(Mode::E164).to_string())
 }
 
-fn refresh(conn: &mut Connection) -> Result<bool, Error> {
+struct Refresh {
+    visible_ids: Vec<String>,
+    regions: BTreeMap<String, Option<String>>,
+}
+
+fn page_sql(limit: i64) -> String {
+    format!(
+        "SELECT c.book_id,c.id,c.revision,c.body,c.deleted_at FROM contacts c \
+           LEFT JOIN contact_resolution_projection p ON p.book_id=c.book_id AND p.contact_id=c.id \
+         WHERE c.book_id=? AND c.id>? AND (p.revision IS NULL OR p.revision!=c.revision) \
+         ORDER BY c.id LIMIT {limit}"
+    )
+}
+
+fn prepare_refresh(conn: &mut Connection) -> Result<Refresh, Error> {
     let visible_book_ids = contacts::visible_book_ids(conn)?;
     let book_rows: Vec<(String, String, String, String)> = {
         let mut statement = conn.prepare(
@@ -136,75 +150,89 @@ fn refresh(conn: &mut Connection) -> Result<bool, Error> {
             rusqlite::params_from_iter(&visible_ids),
         )?;
     }
+    Ok(Refresh {
+        visible_ids: books.iter().map(|(id, _)| id.clone()).collect(),
+        regions: books
+            .into_iter()
+            .map(|(id, body)| (id, region(&body)))
+            .collect(),
+    })
+}
 
-    let rows: Vec<(String, String, i64, String, Option<i64>)> = {
-        let mut statement = conn.prepare(
-            "SELECT c.book_id,c.id,c.revision,c.body,c.deleted_at FROM contacts c \
-               JOIN contact_books b ON b.id=c.book_id AND b.forgotten=0 \
-             LEFT JOIN contact_resolution_projection p ON p.book_id=c.book_id AND p.contact_id=c.id \
-             WHERE p.revision IS NULL OR p.revision!=c.revision ORDER BY c.book_id,c.id LIMIT ?"
-        )?;
-        statement
-            .query_map([BATCH], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            })?
-            .collect::<Result<_, _>>()?
-    };
+fn refresh_page(
+    conn: &mut Connection,
+    refresh: &Refresh,
+    after: Option<&(String, String)>,
+) -> Result<(bool, Option<(String, String)>), Error> {
+    if refresh.visible_ids.is_empty() {
+        return Ok((false, None));
+    }
+    let mut rows = Vec::new();
+    for book_id in &refresh.visible_ids {
+        let cursor = match after {
+            Some((after_book, _)) if book_id < after_book => continue,
+            Some((after_book, contact_id)) if book_id == after_book => contact_id.as_str(),
+            _ => "",
+        };
+        let remaining = BATCH as usize - rows.len();
+        let mut statement = conn.prepare(&page_sql(remaining as i64))?;
+        rows.extend(
+            statement
+                .query_map(params![book_id, cursor], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })?
+                .collect::<Result<Vec<(String, String, i64, String, Option<i64>)>, _>>()?,
+        );
+        if rows.len() == BATCH as usize {
+            break;
+        }
+    }
     let has_more = rows.len() == BATCH as usize;
+    let next = rows
+        .last()
+        .map(|(book_id, contact_id, ..)| (book_id.clone(), contact_id.clone()));
     let tx = conn.transaction()?;
-    let mut book_regions: BTreeMap<String, Option<String>> = BTreeMap::new();
     for (book_id, contact_id, revision, body, deleted_at) in &rows {
         tx.execute(
             "DELETE FROM contact_address_index WHERE book_id=? AND contact_id=?",
             params![book_id, contact_id],
         )?;
-        if deleted_at.is_none() {
-            let book_region = if let Some(region) = book_regions.get(book_id) {
-                region.clone()
-            } else {
-                let book_body: String = tx.query_row(
-                    "SELECT body FROM contact_books WHERE id=?",
-                    [book_id],
-                    |row| row.get(0),
-                )?;
-                let region = region(&book_body);
-                book_regions.insert(book_id.clone(), region.clone());
-                region
-            };
-            if let Some(phones) = serde_json::from_str::<Value>(body)
+        if deleted_at.is_none()
+            && let Some(phones) = serde_json::from_str::<Value>(body)
                 .ok()
                 .and_then(|v| v.get("phones").cloned())
                 .and_then(|v| v.as_array().cloned())
-            {
-                for phone in phones {
-                    let Some(value) = phone
-                        .get("value")
-                        .and_then(Value::as_str)
-                        .filter(|v| v.len() <= MAX_ADDRESS_BYTES)
-                    else {
-                        continue;
-                    };
-                    tx.execute("INSERT OR IGNORE INTO contact_address_index(key,key_kind,book_id,contact_id) VALUES(?,?,?,?)", params![value, ORIGINAL, book_id, contact_id])?;
-                    if let Some(value) = normalized(value, book_region.as_deref()) {
-                        tx.execute("INSERT OR IGNORE INTO contact_address_index(key,key_kind,book_id,contact_id) VALUES(?,?,?,?)", params![value, E164, book_id, contact_id])?;
-                    }
+        {
+            let book_region = refresh.regions.get(book_id).ok_or(Error::Database)?;
+            for phone in phones {
+                let Some(value) = phone
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .filter(|v| v.len() <= MAX_ADDRESS_BYTES)
+                else {
+                    continue;
+                };
+                tx.execute("INSERT OR IGNORE INTO contact_address_index(key,key_kind,book_id,contact_id) VALUES(?,?,?,?)", params![value, ORIGINAL, book_id, contact_id])?;
+                if let Some(value) = normalized(value, book_region.as_deref()) {
+                    tx.execute("INSERT OR IGNORE INTO contact_address_index(key,key_kind,book_id,contact_id) VALUES(?,?,?,?)", params![value, E164, book_id, contact_id])?;
                 }
             }
         }
         tx.execute("INSERT INTO contact_resolution_projection(book_id,contact_id,revision) VALUES(?,?,?) ON CONFLICT(book_id,contact_id) DO UPDATE SET revision=excluded.revision", params![book_id, contact_id, revision])?;
-        tx.execute(
-            "UPDATE contact_resolution_state SET cursor=? WHERE book_id=?",
-            params![contact_id, book_id],
-        )?;
     }
     tx.commit()?;
-    Ok(has_more)
+    Ok((has_more, next))
+}
+
+fn refresh(conn: &mut Connection) -> Result<bool, Error> {
+    let prepared = prepare_refresh(conn)?;
+    refresh_page(conn, &prepared, None).map(|(has_more, _)| has_more)
 }
 
 #[derive(Clone)]
@@ -412,6 +440,23 @@ pub(crate) fn display_resolver(conn: &Connection) -> Result<DisplayResolver<'_>,
     })
 }
 
+/// Returns a resolver only after the visible contact index is current. If the bounded refresh
+/// cannot finish, callers must fall back to structured identity rather than expose a stale name.
+pub(crate) fn current_display_resolver(
+    conn: &mut Connection,
+) -> Result<Option<DisplayResolver<'_>>, Error> {
+    let prepared = prepare_refresh(conn)?;
+    let mut after = None;
+    for _ in 0..64 {
+        let (has_more, next) = refresh_page(conn, &prepared, after.as_ref())?;
+        if !has_more {
+            return display_resolver(conn).map(Some);
+        }
+        after = next;
+    }
+    Ok(None)
+}
+
 pub(crate) fn resolve(conn: &mut Connection, input: &str) -> Result<String, Error> {
     let input: Value = serde_json::from_str(input).map_err(|_| invalid())?;
     let addresses = input
@@ -456,4 +501,114 @@ pub(crate) fn resolve(conn: &mut Connection, input: &str) -> Result<String, Erro
         json!({"matches": matches, "ambiguous": ambiguous, "more_indexing": more_indexing})
             .to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::StatementStatus;
+
+    fn page_steps(
+        conn: &Connection,
+        books: &[String],
+        after: Option<(String, String)>,
+    ) -> (i32, Vec<(String, String)>) {
+        let mut steps = 0;
+        let mut rows = Vec::new();
+        for book_id in books {
+            let cursor = match &after {
+                Some((after_book, _)) if book_id < after_book => continue,
+                Some((after_book, contact_id)) if book_id == after_book => contact_id.as_str(),
+                _ => "",
+            };
+            let remaining = BATCH as usize - rows.len();
+            let mut statement = conn.prepare(&page_sql(remaining as i64)).unwrap();
+            rows.extend(
+                statement
+                    .query_map(params![book_id, cursor], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<(String, String)>, _>>()
+                    .unwrap(),
+            );
+            steps += statement.get_status(StatementStatus::VmStep);
+            if rows.len() == BATCH as usize {
+                break;
+            }
+        }
+        (steps, rows)
+    }
+
+    fn sweep_steps(contact_count: usize, book_count: usize) -> i32 {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE contacts(book_id TEXT NOT NULL,id TEXT NOT NULL,revision INTEGER NOT NULL,body TEXT NOT NULL,deleted_at INTEGER,PRIMARY KEY(book_id,id));
+             CREATE TABLE contact_resolution_projection(book_id TEXT NOT NULL,contact_id TEXT NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(book_id,contact_id));",
+        )
+        .unwrap();
+        let books = (0..book_count)
+            .map(|index| format!("book-{index:02}"))
+            .collect::<Vec<_>>();
+        for index in 0..contact_count {
+            conn.execute(
+                "INSERT INTO contacts(book_id,id,revision,body,deleted_at) VALUES(?,?,1,'{}',NULL)",
+                params![&books[index % book_count], format!("contact-{index:05}")],
+            )
+            .unwrap();
+        }
+        let mut after = None;
+        let mut steps = 0;
+        loop {
+            let (page_steps, rows) = page_steps(&conn, &books, after);
+            steps += page_steps;
+            let Some((book_id, contact_id)) = rows.last().cloned() else {
+                break;
+            };
+            for (book_id, contact_id) in rows {
+                conn.execute(
+                    "INSERT INTO contact_resolution_projection(book_id,contact_id,revision) VALUES(?,?,1)",
+                    params![book_id, contact_id],
+                )
+                .unwrap();
+            }
+            after = Some((book_id, contact_id));
+        }
+        steps
+    }
+
+    #[test]
+    fn keyset_page_seeks_and_sweep_work_scales_linearly() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE contacts(book_id TEXT NOT NULL,id TEXT NOT NULL,revision INTEGER NOT NULL,body TEXT NOT NULL,deleted_at INTEGER,PRIMARY KEY(book_id,id));
+             CREATE TABLE contact_resolution_projection(book_id TEXT NOT NULL,contact_id TEXT NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(book_id,contact_id));",
+        )
+        .unwrap();
+        let mut statement = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", page_sql(BATCH)))
+            .unwrap();
+        let plan = statement
+            .query_map(params!["book", "contact"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join(" ");
+        assert!(
+            plan.contains("SEARCH c") && plan.contains("book_id") && plan.contains("id>"),
+            "{plan}"
+        );
+
+        let single_2000 = sweep_steps(2000, 1);
+        let single_4000 = sweep_steps(4000, 1);
+        let multi_4000 = sweep_steps(4000, 4);
+        assert!(
+            single_4000 < single_2000 * 28 / 10,
+            "{single_2000} -> {single_4000}"
+        );
+        assert!(
+            multi_4000 < single_2000 * 28 / 10,
+            "{single_2000} -> {multi_4000}"
+        );
+    }
 }

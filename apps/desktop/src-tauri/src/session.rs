@@ -423,6 +423,13 @@ pub fn open_session(
 }
 
 impl Session {
+    pub fn is_revoked(&self) -> bool {
+        self.status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .revoked
+    }
+
     /// Opaque snapshot invalidation hint; this is not an acknowledgement authority or credential.
     pub(crate) fn attachment_retention_session_scope_id(&self) -> String {
         format!(

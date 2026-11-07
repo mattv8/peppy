@@ -993,12 +993,25 @@ export function ConversationList({
             const isOtherActionPending = pendingPinId !== undefined || pendingFolderId !== undefined;
             const folder = c.folder ?? "inbox";
             const canPin = !c.draftOnly && folder !== "spam";
+            const canUnpin = Boolean(onTogglePin && canPin && c.pinned);
+            const hasTrailingPinAction = Boolean(onTogglePin && canPin && !c.pinned);
             return <li key={c.id}>
               <div className={`conversation-row ${selectedId === c.id ? "selected" : ""}`} data-conversation-row={c.id}>
+                {canUnpin && <button
+                  type="button"
+                  className={`conversation-pin conversation-pin-leading ${isPinPending ? "pending" : ""}`}
+                  data-pin-conversation-id={c.id}
+                  aria-label="Unpin conversation"
+                  title={`Unpin ${c.name}`}
+                  disabled={isOtherActionPending}
+                  onClick={() => onTogglePin?.(c.id, false)}
+                >
+                  {isPinPending ? <Loader className="busy-indicator-icon" size={12} aria-hidden /> : <><Pin className="conversation-pin-icon" size={12} aria-hidden /><PinOff className="conversation-unpin-icon" size={12} aria-hidden /></>}
+                </button>}
                 <button data-conversation-id={c.id} className="conversation-select" aria-current={selectedId === c.id ? "location" : undefined} onClick={() => onSelect(c.id)}>
                   <ContactAvatar {...(c.avatar ?? conversationAvatar({ id: c.id, name: c.name }))} size={36} className="avatar" />
                   <span className="conversation-copy">
-                    <b title={c.name} className={isDeleteConfirmation ? "sr-only" : undefined}>{c.pinned && !c.draftOnly && <span className="conversation-pin-marker" role="img" aria-label="Pinned" title="Pinned"><Pin size={12} aria-hidden /></span>}{c.name}</b>
+                    <b title={c.name} className={isDeleteConfirmation ? "sr-only" : undefined}>{canUnpin ? <span className="conversation-pin-marker-placeholder" aria-hidden /> : c.pinned && !c.draftOnly && <span className="conversation-pin-marker" role="img" aria-label="Pinned" title="Pinned"><Pin size={12} aria-hidden /></span>}{c.name}</b>
                     {isDeleteConfirmation ? (
                       <small id={deleteWarningId ?? `delete-draft-warning-${c.id}`} className="conversation-delete-warning" role="status">Deleting this draft permanently removes its text and attachments.</small>
                     ) : <small>{c.preview}</small>}
@@ -1009,20 +1022,20 @@ export function ConversationList({
                     </span>
                   )}
                 </button>
-                {((c.recipientlessDraft && c.draftOnly && onDelete) || onPopout || (onTogglePin && canPin) || (onRequestFolderChange && !c.draftOnly)) && <div data-conversation-actions data-pending-pin={isPinPending || undefined}>
-                  {onTogglePin && canPin && <button
+                {((c.recipientlessDraft && c.draftOnly && onDelete) || onPopout || hasTrailingPinAction || (onRequestFolderChange && !c.draftOnly)) && <div data-conversation-actions data-pending-pin={isPinPending || undefined}>
+                  {hasTrailingPinAction && <button
                     type="button"
                     className={`conversation-pin ${isPinPending ? "pending" : ""}`}
                     data-pin-conversation-id={c.id}
-                    aria-label={`${c.pinned ? "Unpin" : "Pin"} conversation`}
-                    title={`${c.pinned ? "Unpin" : "Pin"} ${c.name}`}
+                    aria-label="Pin conversation"
+                    title={`Pin ${c.name}`}
                     disabled={isOtherActionPending}
                     onClick={(event) => {
                       event.stopPropagation();
-                      onTogglePin(c.id, !c.pinned);
+                      onTogglePin?.(c.id, true);
                     }}
                   >
-                    {isPinPending ? <Loader className="busy-indicator-icon" size={15} aria-hidden /> : c.pinned ? <PinOff size={15} aria-hidden /> : <Pin size={15} aria-hidden />}
+                    {isPinPending ? <Loader className="busy-indicator-icon" size={15} aria-hidden /> : <Pin size={15} aria-hidden />}
                   </button>}
                   {onRequestFolderChange && !c.draftOnly && folderActionsFor(folder).map((kind) => {
                     const action = FOLDER_ACTIONS[kind];

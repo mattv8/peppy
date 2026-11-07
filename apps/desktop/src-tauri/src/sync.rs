@@ -1813,9 +1813,232 @@ mod transport_status_tests {
     use super::*;
     use crate::{
         contacts::tests::mock_server,
+        credentials::{parse_credential, tests::credential_json, tests::TOKEN},
+        secure_store::MemoryStore,
+        tests::noop,
         tests::{fixture_at, open},
+        AppState,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transport_revocation_does_not_reopen_the_same_binding() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = AppState::new(
+            root.path().to_path_buf(),
+            Arc::new(MemoryStore::default()),
+            noop(),
+        );
+        let origin = "http://127.0.0.1:9";
+        let credential = Arc::new(
+            parse_credential(&credential_json(
+                origin,
+                &uuid::Uuid::new_v4().to_string(),
+                &uuid::Uuid::new_v4().to_string(),
+                TOKEN,
+            ))
+            .unwrap(),
+        );
+        crate::activate_import(&state, credential).await.unwrap();
+        let session = state.session().await.unwrap().unwrap();
+        let _ = session
+            .snapshot(
+                None,
+                None,
+                crate::head(),
+                Some(origin.to_owned()),
+                crate::notifications::NotificationPreferences::default(),
+            )
+            .unwrap();
+
+        revoke(&session);
+        assert!(session.is_revoked());
+        assert_eq!(
+            state.config().unwrap().active_binding(),
+            Some(&session.binding),
+        );
+        assert!(state
+            .session
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &session)));
+        state.app_locked.store(false, Ordering::Release);
+
+        assert_eq!(
+            crate::finalize_snapshot(&state, &session).await.unwrap(),
+            crate::SnapshotFinalization::Revoked,
+        );
+        let snapshot = crate::revoked_snapshot(Some(origin.to_owned()));
+        assert_eq!(snapshot.connection.state, "error");
+        assert_eq!(snapshot.connection.error_code, Some("revoked"));
+        assert_eq!(snapshot.encryption.state, "locked");
+        assert!(snapshot.gateways.is_empty());
+        assert!(snapshot.conversations.is_empty());
+        assert!(snapshot.notifications.is_empty());
+        assert!(snapshot.draft.is_none());
+        assert!(snapshot.contact_resolution.is_none());
+        assert!(snapshot.contact_books.is_none());
+        state.app_locked.store(true, Ordering::Release);
+        assert_eq!(
+            crate::finalize_snapshot(&state, &session).await.unwrap(),
+            crate::SnapshotFinalization::Locked,
+        );
+        state.app_locked.store(false, Ordering::Release);
+
+        let error = match state.session().await {
+            Err(error) => error,
+            Ok(_) => panic!("a transport-revoked binding must not reopen"),
+        };
+        assert_eq!(error.code, "revoked");
+        state.config_path = root.path().to_path_buf();
+        assert_eq!(
+            crate::finalize_snapshot(&state, &session)
+                .await
+                .unwrap_err()
+                .code,
+            "host-config",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn same_binding_replacement_retries_after_a_revoked_session_drain_timeout() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = AppState::new(
+            root.path().to_path_buf(),
+            Arc::new(MemoryStore::default()),
+            noop(),
+        );
+        let shutdown_timeout = state.session_drain_timeout;
+        state.session_drain_timeout = Duration::from_millis(10);
+        let origin = "http://127.0.0.1:9";
+        let credential = Arc::new(
+            parse_credential(&credential_json(
+                origin,
+                &uuid::Uuid::new_v4().to_string(),
+                &uuid::Uuid::new_v4().to_string(),
+                TOKEN,
+            ))
+            .unwrap(),
+        );
+        crate::activate_import(&state, credential.clone())
+            .await
+            .unwrap();
+        let old = state.session().await.unwrap().unwrap();
+        revoke(&old);
+        assert!(drain(&old, shutdown_timeout).await);
+        let (release, held) = tokio::sync::oneshot::channel();
+        old.retain_workers(vec![tokio::spawn(async move {
+            let _ = held.await;
+        })]);
+
+        let error = crate::activate_import(&state, credential.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "session-draining");
+        let retained = state.session.lock().await.clone().unwrap();
+        assert!(Arc::ptr_eq(&retained, &old));
+        assert!(retained.is_revoked());
+        state.app_locked.store(false, Ordering::Release);
+        assert_eq!(
+            crate::finalize_snapshot(&state, &old).await.unwrap(),
+            crate::SnapshotFinalization::Revoked,
+        );
+        let snapshot = crate::revoked_snapshot(Some(origin.to_owned()));
+        assert!(snapshot.conversations.is_empty());
+        assert!(snapshot.draft.is_none());
+
+        release.send(()).unwrap();
+        assert!(drain(&old, shutdown_timeout).await);
+        crate::activate_import(&state, credential).await.unwrap();
+        let replacement = state.session().await.unwrap().unwrap();
+        assert!(!Arc::ptr_eq(&replacement, &old));
+        assert!(!replacement.is_revoked());
+        assert_eq!(
+            crate::finalize_snapshot(&state, &old).await.unwrap(),
+            crate::SnapshotFinalization::Empty,
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn finalization_retains_the_installed_slot_while_config_authority_is_held() {
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(
+            root.path().to_path_buf(),
+            Arc::new(MemoryStore::default()),
+            noop(),
+        ));
+        let origin = "http://127.0.0.1:9";
+        let credential = Arc::new(
+            parse_credential(&credential_json(
+                origin,
+                &uuid::Uuid::new_v4().to_string(),
+                &uuid::Uuid::new_v4().to_string(),
+                TOKEN,
+            ))
+            .unwrap(),
+        );
+        crate::activate_import(&state, credential.clone())
+            .await
+            .unwrap();
+        let session = state.session().await.unwrap().unwrap();
+        session.set_status(|status| status.revoked = true);
+        state.app_locked.store(false, Ordering::Release);
+
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let blocking_state = state.clone();
+        let blocker = std::thread::spawn(move || {
+            let _guard = blocking_state.config_lock.lock().unwrap();
+            acquired_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        tokio::task::spawn_blocking(move || acquired_rx.recv().unwrap())
+            .await
+            .unwrap();
+
+        let finalizing = tokio::spawn({
+            let state = state.clone();
+            let session = session.clone();
+            async move { crate::finalize_snapshot(&state, &session).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if state.session.try_lock().is_err() {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("finalization did not retain the installed session slot");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), state.session.lock())
+                .await
+                .is_err()
+        );
+
+        release_tx.send(()).unwrap();
+        tokio::task::spawn_blocking(move || blocker.join().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            finalizing.await.unwrap().unwrap(),
+            crate::SnapshotFinalization::Revoked,
+        );
+
+        crate::activate_import(&state, credential).await.unwrap();
+        assert!(!Arc::ptr_eq(
+            &state.session().await.unwrap().unwrap(),
+            &session,
+        ));
+    }
 
     #[test]
     fn presence_hints_coalesce_without_dropping_the_first_refresh() {

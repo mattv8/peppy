@@ -235,7 +235,7 @@ fn notification_reply_spike_version_43_repairs_and_upgrades() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        49
+        50
     );
     assert!(table_exists(&conn, "conversation_folders"));
     assert!(table_exists(&conn, "sender_blocklists"));
@@ -264,7 +264,7 @@ fn notification_reply_spike_repairs_already_upgraded_database() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        49
+        50
     );
     assert!(table_exists(&conn, "conversation_folders"));
     assert_notification_reply_spike_removed(&conn);
@@ -334,7 +334,7 @@ fn version_45_upgrade_adds_rcs_mapping_schema_without_resetting_preferences() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        49
+        50
     );
     assert_eq!(
         conn.query_row("SELECT v FROM metadata WHERE k='device_id'", [], |row| {
@@ -499,7 +499,7 @@ fn version_47_upgrade_adds_only_capability_tables_and_preserves_rcs_state() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        49
+        50
     );
     assert_rcs_mapping_schema(&conn);
     let after = state_rows(&conn);
@@ -521,10 +521,10 @@ fn version_47_upgrade_adds_only_capability_tables_and_preserves_rcs_state() {
 }
 
 #[test]
-fn version_50_database_is_rejected_without_resetting_preferences() {
+fn version_51_database_is_rejected_without_resetting_preferences() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::new();
-    let config = config(&dir, "gateway-v50-rejected", &vault);
+    let config = config(&dir, "gateway-v51-rejected", &vault);
     let client = open(&config);
     let settings = GatewaySettings {
         mirroring_enabled: true,
@@ -534,7 +534,7 @@ fn version_50_database_is_rejected_without_resetting_preferences() {
     drop(client);
 
     let conn = encrypted_connection(&config);
-    conn.execute("UPDATE schema_meta SET version=50", [])
+    conn.execute("UPDATE schema_meta SET version=51", [])
         .unwrap();
     drop(conn);
 
@@ -548,7 +548,7 @@ fn version_50_database_is_rejected_without_resetting_preferences() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        50
+        51
     );
     assert_eq!(
         conn.query_row(
@@ -809,7 +809,7 @@ fn version_25_upgrade_adds_null_status_time_without_resetting_status() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(version, 49);
+    assert_eq!(version, 50);
     assert_eq!(status, (42, "sent".into(), None));
 }
 

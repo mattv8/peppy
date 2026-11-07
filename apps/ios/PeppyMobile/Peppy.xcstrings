@@ -96,7 +96,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Save edits from other devices"
+            "value": "Changes from your other devices"
           }
         }
       }
@@ -116,7 +116,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Ask me"
+            "value": "Ask me first"
           }
         }
       }
@@ -181,6 +181,486 @@
         }
       }
     },
+    "peppy.toggle_android_sync_needs_attention": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Needs attention"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_checking": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking…"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_all_good_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Everything is working"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_all_good_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connected. Phone history copied."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_off_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SMS sync is off"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_off_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Turn it on to copy texts from this phone."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_progress_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preparing sync"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_progress_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sync is still preparing."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_retrying_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Trying again"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_retrying_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This phone will retry automatically."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_connection_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connection unavailable"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_ready": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ready to sync"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_problems_one": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 problem below."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_problems_many": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d problems below."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_this_phone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This phone"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_check_unlocked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlocked"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_check_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Locked"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_check_receive_ok": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Can receive texts"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_check_receive_bad": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Can't receive texts"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_check_send_ok": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Can send texts"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_check_send_bad": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Can't send texts"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_check_connected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connected"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_texts_use": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Texts use"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_allow": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_sim_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SIM"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_status_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Status"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_refresh": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refresh MMS"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_status_paused_phone_storage": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused: phone storage is full"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_status_older_paused_history_limit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Older MMS paused: message history limit reached"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_status_paused_history_limit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused: message history limit reached"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_status_older_paused_server_storage": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Older MMS paused: server storage is full"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_status_getting_ready": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Getting ready"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_status_copying_older": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copying older MMS…"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_status_copying_count": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copying %1$d MMS…"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_status_up_to_date": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Up to date"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_health_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Locked. Unlock Peppy to see MMS status."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_health_waiting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d waiting"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_health_stuck": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d stuck"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_health_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d couldn't be copied"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_quarantine_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d messages skipped"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_quarantine_explanation": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Messages were skipped because they couldn't be matched safely. Existing messages were kept."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_own_number_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your number"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_own_number_change": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Change number"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_contacts_review": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_contacts_last_checked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last checked"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_contacts_on_last_checked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On. Last checked %1$@."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_contacts_pending_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for your approval"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_contacts_save_to": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save new contacts to"
+          }
+        }
+      }
+    },
     "peppy.toggle_android_sms_review_access": {
       "localizations": {
         "en": {
@@ -237,106 +717,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Role: %1$@"
-          }
-        }
-      }
-    },
-    "peppy.toggle_android_phone_status": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Phone status"
-          }
-        }
-      }
-    },
-    "peppy.toggle_android_device_credential": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Device credential"
-          }
-        }
-      }
-    },
-    "peppy.toggle_android_enrolled": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Enrolled"
-          }
-        }
-      }
-    },
-    "peppy.toggle_android_not_enrolled": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Not enrolled"
-          }
-        }
-      }
-    },
-    "peppy.toggle_android_local_database": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Encrypted local database"
-          }
-        }
-      }
-    },
-    "peppy.toggle_android_database_open": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Open"
-          }
-        }
-      }
-    },
-    "peppy.toggle_android_database_closed": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Not open"
-          }
-        }
-      }
-    },
-    "peppy.toggle_android_vault_keys": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Vault keys"
-          }
-        }
-      }
-    },
-    "peppy.toggle_android_keys_unlocked": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Unlocked"
-          }
-        }
-      }
-    },
-    "peppy.toggle_android_keys_locked": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Locked — unlock to sync"
           }
         }
       }
@@ -406,7 +786,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "1 contact change needs attention in details."
+            "value": "1 contact change needs your approval."
           }
         }
       }
@@ -416,7 +796,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "%1$d contact changes need attention in details."
+            "value": "%1$d contact changes need your approval."
           }
         }
       }
@@ -966,7 +1346,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Encrypted copies use your configured server."
+            "value": "On. Your texts are copied to your other devices."
           }
         }
       }
@@ -1026,7 +1406,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Downloaded MMS available from your messaging provider."
+            "value": "Photos and group texts your messaging app has downloaded."
           }
         }
       }
@@ -2091,22 +2471,12 @@
         }
       }
     },
-    "peppy.toggle_android_contacts_hide_details": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hide contact sync details"
-          }
-        }
-      }
-    },
     "peppy.toggle_android_contacts_auto_policy": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Small changes apply automatically. Deleting more than 10 contacts or 5% in 24 hours asks for approval here."
+            "value": "Small changes are saved automatically. Deleting more than 10 contacts, or 5% of them, in 24 hours asks you first."
           }
         }
       }
@@ -2116,7 +2486,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop edits are not accepted."
+            "value": "Changes from your other devices are not saved to this phone."
           }
         }
       }
@@ -2126,7 +2496,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Every desktop edit waits for approval on this phone."
+            "value": "Every change waits for your approval on this phone."
           }
         }
       }
@@ -3006,7 +3376,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Contacts read on this phone"
+            "value": "Contacts on this phone"
           }
         }
       }
@@ -3167,6 +3537,46 @@
           "stringUnit": {
             "state": "translated",
             "value": "Less"
+          }
+        }
+      }
+    },
+    "peppy.system_banner_opens_sync_details": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opens sync details"
+          }
+        }
+      }
+    },
+    "peppy.sync_stopped_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sync stopped"
+          }
+        }
+      }
+    },
+    "peppy.sync_stopped_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Set up this phone again to keep syncing."
+          }
+        }
+      }
+    },
+    "peppy.sync_stopped_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Details"
           }
         }
       }
@@ -4876,7 +5286,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Phone message sync"
+            "value": "SMS"
           }
         }
       }
@@ -4896,7 +5306,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Read phone messages"
+            "value": "Read texts on this phone"
           }
         }
       }
@@ -4906,7 +5316,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "History status"
+            "value": "Older texts"
           }
         }
       }
@@ -4956,7 +5366,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Waiting for phone message access"
+            "value": "Needs permission to read texts"
           }
         }
       }
@@ -4976,7 +5386,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Waiting for vault access"
+            "value": "Waiting for unlock"
           }
         }
       }
@@ -4986,7 +5396,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Waiting to read phone history"
+            "value": "Getting ready"
           }
         }
       }
@@ -4996,7 +5406,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Reading phone history…"
+            "value": "Copying older texts…"
           }
         }
       }
@@ -5006,7 +5416,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Paused — vault recovery capacity reached"
+            "value": "Paused: message history limit reached"
           }
         }
       }
@@ -5016,7 +5426,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Phone history captured"
+            "value": "All copied"
           }
         }
       }
@@ -5026,7 +5436,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Phone messages unavailable — will retry"
+            "value": "Can't read texts right now. Trying again."
           }
         }
       }
@@ -5036,7 +5446,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Some messages need reconciliation"
+            "value": "Some texts could not be copied yet"
           }
         }
       }
@@ -5046,7 +5456,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Captured messages sync when your vault connection is available."
+            "value": "Copied texts sync when your phone is connected."
           }
         }
       }
@@ -5056,7 +5466,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "History import is paused to keep vault recovery available. Existing messages remain on your phone."
+            "value": "Older texts stopped copying because the message history limit was reached. Texts on your phone are not affected."
           }
         }
       }
@@ -5236,7 +5646,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Wait for Wi-Fi for original media and history"
+            "value": "Wait for Wi-Fi for photos and older messages"
           }
         }
       }
@@ -5336,17 +5746,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Device sync not unlocked"
-          }
-        }
-      }
-    },
-    "peppy.carrier_not_encrypted": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Carrier SMS/MMS not end-to-end encrypted"
+            "value": "Locked. Unlock Peppy to sync."
           }
         }
       }

@@ -949,6 +949,7 @@ mod tests {
                 "mirroredBanners": true,
                 "preview": "full",
                 "muteWithHeads": true,
+                "showSource": false,
             })
         );
     }
@@ -963,6 +964,7 @@ mod tests {
         .unwrap();
 
         assert!(parsed.mute_with_heads);
+        assert!(!parsed.show_source);
         assert!(!parsed.mirrored_banners);
         assert_eq!(parsed.preview, Preview::Hidden);
     }

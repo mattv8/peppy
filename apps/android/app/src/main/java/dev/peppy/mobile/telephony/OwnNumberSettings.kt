@@ -11,6 +11,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.KeyboardOptions
@@ -38,11 +40,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import dev.peppy.mobile.R
-import dev.peppy.mobile.StatusRow
 import dev.peppy.mobile.gateway.NativeGateway
 import dev.peppy.mobile.granted
 import dev.peppy.mobile.mms.ownAddressError
 import dev.peppy.mobile.ui.ConsentSheet
+import dev.peppy.mobile.ui.DetailsStatusRow as StatusRow
 import dev.peppy.mobile.ui.InfoButton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -79,7 +81,12 @@ private fun Context.findActivity(): Activity? {
 }
 
 @Composable
-internal fun OwnNumberSettings(context: Context, databaseOpen: Boolean, route: SimRoute?) {
+internal fun OwnNumberSettings(
+    context: Context,
+    databaseOpen: Boolean,
+    route: SimRoute?,
+    trailingAction: (@Composable () -> Unit)? = null,
+) {
     var detection by remember(route, databaseOpen) { mutableStateOf<OwnNumberDetection?>(null) }
     var saved by remember(route, databaseOpen) { mutableStateOf<String?>(null) }
     var draft by remember(route) { mutableStateOf("") }
@@ -164,11 +171,11 @@ internal fun OwnNumberSettings(context: Context, databaseOpen: Boolean, route: S
     ) {
         when (state) {
             OwnNumberUiState.Loading -> {
-                StatusRow("mms-own-number-row", "This SIM's number", "Checking…")
+                StatusRow("mms-own-number-row", stringResource(R.string.peppy_toggle_android_own_number_label), "Checking…")
+                trailingAction?.invoke()
             }
             is OwnNumberUiState.Detected -> {
-                StatusRow("mms-own-number-row", "This SIM's number", state.saved ?: state.number)
-                StatusRow("mms-own-number-source", "Source", if (state.saved == null || state.saved == state.number) "From carrier" else "Entered manually")
+                StatusRow("mms-own-number-row", stringResource(R.string.peppy_toggle_android_own_number_label), state.saved ?: state.number)
                 ManualEntryControls(
                     saved = state.saved ?: state.number,
                     editing = editing,
@@ -181,11 +188,11 @@ internal fun OwnNumberSettings(context: Context, databaseOpen: Boolean, route: S
                     onDraftChanged = { draft = it },
                     onCancel = { editing = false; draft = "" },
                     onSave = { saveManual() },
+                    trailingAction = trailingAction,
                 )
             }
             is OwnNumberUiState.NoAccess -> {
-                StatusRow("mms-own-number-row", "This SIM's number", state.saved ?: "Not detected")
-                StatusRow("mms-own-number-source", "Source", "Permission needed")
+                StatusRow("mms-own-number-row", stringResource(R.string.peppy_toggle_android_own_number_label), state.saved ?: "Not detected")
                 Text("Needed only so replies to group MMS threads exclude this phone.", style = MaterialTheme.typography.bodySmall)
                 OutlinedButton(
                     onClick = {
@@ -210,13 +217,13 @@ internal fun OwnNumberSettings(context: Context, databaseOpen: Boolean, route: S
                     onCancel = { editing = false; draft = "" },
                     onSave = { saveManual() },
                     outlined = false,
+                    trailingAction = trailingAction,
                 )
             }
             is OwnNumberUiState.Manual -> {
                 if (state.saved == null) OwnNumberStatusWithHelp("Not set")
                 else {
-                    StatusRow("mms-own-number-row", "This SIM's number", state.saved)
-                    StatusRow("mms-own-number-source", "Source", "Entered manually")
+                    StatusRow("mms-own-number-row", stringResource(R.string.peppy_toggle_android_own_number_label), state.saved)
                 }
                 ManualEntryControls(
                     saved = state.saved,
@@ -230,9 +237,13 @@ internal fun OwnNumberSettings(context: Context, databaseOpen: Boolean, route: S
                     onDraftChanged = { draft = it },
                     onCancel = { editing = false; draft = "" },
                     onSave = { saveManual() },
+                    trailingAction = trailingAction,
                 )
             }
-            OwnNumberUiState.Unavailable -> StatusRow("mms-own-number-row", "This SIM's number", "Unavailable")
+            OwnNumberUiState.Unavailable -> {
+                StatusRow("mms-own-number-row", stringResource(R.string.peppy_toggle_android_own_number_label), "Unavailable")
+                trailingAction?.invoke()
+            }
         }
         message?.let { Text(it, Modifier.testTag("mms-own-number-message"), style = MaterialTheme.typography.bodySmall) }
     }
@@ -248,12 +259,12 @@ internal fun OwnNumberSettings(context: Context, databaseOpen: Boolean, route: S
 
 @Composable
 private fun OwnNumberStatusWithHelp(value: String) {
-    Row(Modifier.fillMaxWidth().testTag("mms-own-number-row"), horizontalArrangement = Arrangement.SpaceBetween) {
+    Column(Modifier.fillMaxWidth().testTag("mms-own-number-row"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-            Text("This SIM's number", style = MaterialTheme.typography.bodyMedium)
+            Text(stringResource(R.string.peppy_toggle_android_own_number_label), style = MaterialTheme.typography.bodyMedium)
             InfoButton(
-                topic = "This SIM's number",
-                title = "This SIM's number",
+                topic = stringResource(R.string.peppy_toggle_android_own_number_label),
+                title = stringResource(R.string.peppy_toggle_android_own_number_label),
                 body = stringResource(R.string.peppy_help_android_own_number),
                 tag = "info-own-number",
             )
@@ -263,6 +274,7 @@ private fun OwnNumberStatusWithHelp(value: String) {
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun ManualEntryControls(
     saved: String?,
     editing: Boolean,
@@ -272,13 +284,24 @@ private fun ManualEntryControls(
     onCancel: () -> Unit,
     onSave: () -> Unit,
     outlined: Boolean = true,
+    trailingAction: (@Composable () -> Unit)? = null,
 ) {
     if (!editing) {
         val modifier = Modifier.testTag(if (saved == null) "mms-own-number-enter-button" else "mms-own-number-change-button")
-        if (outlined) {
-            OutlinedButton(onClick = onEdit, modifier = modifier) { Text(if (saved == null) "Enter number" else "Change") }
-        } else {
-            TextButton(onClick = onEdit, modifier = modifier) { Text(if (saved == null) "Enter number" else "Change") }
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (outlined) {
+                OutlinedButton(onClick = onEdit, modifier = modifier) {
+                    Text(if (saved == null) "Enter number" else stringResource(R.string.peppy_toggle_android_own_number_change))
+                }
+            } else {
+                TextButton(onClick = onEdit, modifier = modifier) {
+                    Text(if (saved == null) "Enter number" else stringResource(R.string.peppy_toggle_android_own_number_change))
+                }
+            }
+            trailingAction?.invoke()
         }
     } else {
         OutlinedTextField(
@@ -293,5 +316,6 @@ private fun ManualEntryControls(
             Button(onClick = onSave, enabled = draft.isNotBlank(), modifier = Modifier.testTag("mms-own-number-save")) { Text("Save") }
             TextButton(onClick = onCancel, modifier = Modifier.testTag("mms-own-number-cancel")) { Text("Cancel") }
         }
+        trailingAction?.invoke()
     }
 }

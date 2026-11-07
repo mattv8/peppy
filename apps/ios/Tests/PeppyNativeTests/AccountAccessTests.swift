@@ -156,6 +156,24 @@ import Testing
         #expect(SystemRibbonResolver.presentation(serverOffline: false, notice: model.visibleNotice(for: Self.identity, now: clock.now), now: clock.now) == nil)
     }
 
+    @Test func immediateCancellationReplacesAScheduledEndingWithoutASnoozeKey() async {
+        let clock = TestClock(Self.start)
+        let model = Self.makeModel(defaults: Self.makeDefaults(), clock: clock)
+        let deadline = Int64(Self.start.timeIntervalSince1970 + 5 * Self.day)
+        let ending = ScriptedFetch(.success((200, Self.accessBody(access: "read_write", state: "ending_scheduled", reason: "canceled", deadline: deadline))))
+        await model.refresh(identity: Self.identity, trustedOrigins: Self.trusted, fetch: ending.fetch)
+        #expect(model.visibleNotice(for: Self.identity, now: clock.now)?.kind == .endingScheduled)
+
+        let canceled = Self.readOnly(reason: "canceled")
+        let shown = await Self.presentation(model, clock: clock, fetch: canceled)
+        #expect(shown?.source == .account(.readOnlyCanceled))
+        #expect(shown?.severity == .error)
+        #expect(shown?.titleKey == "peppy.account_read_only_canceled_title")
+        #expect(shown?.bodyKey == "peppy.account_read_only_canceled_body")
+        #expect(shown?.action?.labelKey == "peppy.account_read_only_canceled_action")
+        #expect(shown?.snoozeKey == nil)
+    }
+
     @Test func serverOfflinePreemptsTheAccountNotice() async {
         let clock = TestClock(Self.start)
         let model = Self.makeModel(defaults: Self.makeDefaults(), clock: clock)

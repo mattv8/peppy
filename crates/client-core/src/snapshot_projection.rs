@@ -44,9 +44,10 @@
 //! live apply ignores them by quarantine.
 use crate::{
     AppFilter, Client, Ctx, Cursor, EnvelopePurpose, Error, MAX_SNAPSHOT_PAGE_BYTES,
-    NotificationTarget, NotificationWire, Opened, PrivatePayload, contact_media, contacts,
-    conversation_folders, conversation_pinning, conversation_tones, notification_preferences,
-    notifications, open_payload, parse_wire, rcs_receive, take_within_budget, to_i64,
+    NotificationTarget, NotificationWire, Opened, PrivatePayload, add_column_if_missing,
+    contact_media, contacts, conversation_folders, conversation_pinning, conversation_tones,
+    notification_preferences, notifications, open_payload, parse_wire, rcs_receive,
+    take_within_budget, to_i64,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
@@ -124,7 +125,7 @@ CREATE TABLE IF NOT EXISTS projection_conversation_tones(generation INTEGER NOT 
     logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL, PRIMARY KEY(generation,seed));
 CREATE TABLE IF NOT EXISTS projection_notification_preferences(generation INTEGER PRIMARY KEY,
     message_banners INTEGER NOT NULL, mirrored_banners INTEGER NOT NULL, preview TEXT NOT NULL,
-    mute_with_heads INTEGER NOT NULL, source_sequence INTEGER NOT NULL, producer_device_id TEXT NOT NULL,
+    mute_with_heads INTEGER NOT NULL, show_source INTEGER NOT NULL DEFAULT 0, source_sequence INTEGER NOT NULL, producer_device_id TEXT NOT NULL,
     logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS projection_rcs_message_status(generation INTEGER NOT NULL, message_id TEXT NOT NULL,
     status_rank INTEGER NOT NULL CHECK(status_rank BETWEEN 0 AND 5), rcs_reported INTEGER NOT NULL CHECK(rcs_reported IN (0,1)), PRIMARY KEY(generation,message_id));
@@ -133,6 +134,11 @@ CREATE TABLE IF NOT EXISTS projection_rcs_conversation_metadata(generation INTEG
     logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL, producer_device_id TEXT NOT NULL,
     source_sequence INTEGER NOT NULL, PRIMARY KEY(generation,conversation_id));
 ",
+    )?;
+    add_column_if_missing(
+        conn,
+        "projection_notification_preferences",
+        "show_source INTEGER NOT NULL DEFAULT 0",
     )?;
     // One transaction, so a crash cannot create the table without invalidating its
     // predecessors (or the reverse).
@@ -831,7 +837,7 @@ pub(super) fn reduce(
             {
                 return Ok(false);
             }
-            conn.execute("INSERT INTO projection_notification_preferences(generation,message_banners,mirrored_banners,preview,mute_with_heads,source_sequence,producer_device_id,logical_revision,writer_device_id) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(generation) DO UPDATE SET message_banners=excluded.message_banners,mirrored_banners=excluded.mirrored_banners,preview=excluded.preview,mute_with_heads=excluded.mute_with_heads,source_sequence=excluded.source_sequence,producer_device_id=excluded.producer_device_id,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id WHERE excluded.logical_revision>projection_notification_preferences.logical_revision OR (excluded.logical_revision=projection_notification_preferences.logical_revision AND excluded.writer_device_id>projection_notification_preferences.writer_device_id)", params![generation, preferences.message_banners, preferences.mirrored_banners, notification_preferences::preview_code(preferences.preview), preferences.mute_with_heads, sequence, producer, to_i64(logical_revision)?, writer_device_id])?;
+            conn.execute("INSERT INTO projection_notification_preferences(generation,message_banners,mirrored_banners,preview,mute_with_heads,show_source,source_sequence,producer_device_id,logical_revision,writer_device_id) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(generation) DO UPDATE SET message_banners=excluded.message_banners,mirrored_banners=excluded.mirrored_banners,preview=excluded.preview,mute_with_heads=excluded.mute_with_heads,show_source=excluded.show_source,source_sequence=excluded.source_sequence,producer_device_id=excluded.producer_device_id,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id WHERE excluded.logical_revision>projection_notification_preferences.logical_revision OR (excluded.logical_revision=projection_notification_preferences.logical_revision AND excluded.writer_device_id>projection_notification_preferences.writer_device_id)", params![generation, preferences.message_banners, preferences.mirrored_banners, notification_preferences::preview_code(preferences.preview), preferences.mute_with_heads, preferences.show_source, sequence, producer, to_i64(logical_revision)?, writer_device_id])?;
             Ok(true)
         }
         // Edit requests/results, dismissals and unknown kinds carry no staged state.
@@ -1227,13 +1233,14 @@ fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Res
     }
     // Preferences have no deletion semantics: a snapshot that omits them cannot prove an older
     // value was removed (for example, a pre-compaction event is absent from retained records).
-    type StagedNotificationPreferences = (bool, bool, String, bool, i64, String, i64, String);
-    let staged: Option<StagedNotificationPreferences> = conn.query_row("SELECT message_banners,mirrored_banners,preview,mute_with_heads,source_sequence,producer_device_id,logical_revision,writer_device_id FROM projection_notification_preferences WHERE generation=?", params![generation], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?))).optional()?;
+    type StagedNotificationPreferences = (bool, bool, String, bool, bool, i64, String, i64, String);
+    let staged: Option<StagedNotificationPreferences> = conn.query_row("SELECT message_banners,mirrored_banners,preview,mute_with_heads,show_source,source_sequence,producer_device_id,logical_revision,writer_device_id FROM projection_notification_preferences WHERE generation=?", params![generation], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?))).optional()?;
     if let Some((
         message_banners,
         mirrored_banners,
         preview,
         mute_with_heads,
+        show_source,
         sequence,
         producer,
         revision,
@@ -1247,6 +1254,11 @@ fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Res
                 mirrored_banners,
                 preview: notification_preferences::preview_from_code(&preview)?,
                 mute_with_heads,
+                show_source: if preview == "full" {
+                    false
+                } else {
+                    show_source
+                },
             },
             u64::try_from(revision).map_err(|_| Error::Database)?,
             &writer,

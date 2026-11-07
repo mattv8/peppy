@@ -61,6 +61,18 @@ class NotificationExtractionTest {
         assertNull(NotificationExtraction.extract(context, sbn(Notification.Builder(context, "test").build())))
     }
 
+    @Test fun syntheticTestCaptureUsesNeutralGenericUserVisibleFields() {
+        val capture = NotificationTestCapture.syntheticCapture("one")
+        assertEquals(NotificationTestCapture.SYNTHETIC_KEY, capture.notificationKey)
+        assertEquals("${NotificationTestCapture.SYNTHETIC_KEY}:one", capture.instance)
+        assertEquals("", capture.appName)
+        assertEquals("New notification", capture.title)
+        assertEquals("", capture.text)
+        assertNull(capture.category)
+        assertTrue(capture.dismissible)
+        assertFalse(listOf(capture.appName, capture.title, capture.text).any { it.contains("Peppy", ignoreCase = true) })
+    }
+
     @Test fun masterDefaultsOff() {
         context.getSharedPreferences("peppy-notification-mirroring", Context.MODE_PRIVATE).edit().clear().commit()
         assertTrue(!NotificationMirrorPreferences.enabled(context))

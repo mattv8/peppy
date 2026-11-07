@@ -301,7 +301,7 @@ describe("ConversationList interactions", () => {
     expect(screen.getByRole("button", { name: "Confirm delete draft for Draft two" })).toHaveAccessibleDescription(warning);
   });
 
-  it("requests the desired pin state without selecting the conversation", () => {
+  it("uses the leading unpin action without selecting the conversation", () => {
     const onSelect = vi.fn();
     const onTogglePin = vi.fn();
     render(<ConversationList conversations={[{ ...threads[0], pinned: true }]} selectedId="" onSelect={onSelect} onTogglePin={onTogglePin} />);
@@ -309,34 +309,55 @@ describe("ConversationList interactions", () => {
     const unpin = screen.getByRole("button", { name: "Unpin conversation" });
     fireEvent.click(unpin);
 
+    expect(onTogglePin).toHaveBeenCalledOnce();
     expect(onTogglePin).toHaveBeenCalledWith("conv-a", false);
     expect(onSelect).not.toHaveBeenCalled();
-    expect(screen.getByRole("img", { name: "Pinned" })).toBeInTheDocument();
-    expect(unpin.querySelector(".lucide-pin-off")).toBeInTheDocument();
+    expect(unpin).toHaveAttribute("data-pin-conversation-id", "conv-a");
+    expect(unpin).toHaveAttribute("title", "Unpin Aurora");
+    expect(unpin.closest(".conversation-select")).toBeNull();
+    expect(document.querySelector("button button")).toBeNull();
+    expect(document.querySelectorAll("[data-pin-conversation-id='conv-a']")).toHaveLength(1);
+    const select = document.querySelector<HTMLButtonElement>("[data-conversation-id='conv-a']")!;
+    expect(unpin.compareDocumentPosition(select) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(document.querySelector("[data-conversation-actions] .conversation-pin")).not.toBeInTheDocument();
+    expect(document.querySelector("[data-conversation-actions]")).not.toBeInTheDocument();
+    expect(unpin.querySelectorAll("svg[aria-hidden='true']")).toHaveLength(2);
+    fireEvent.click(select);
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith("conv-a");
   });
 
-  it("uses a Pin action for unpinned conversations and keeps a pending action visible", () => {
+  it("uses a trailing Pin action for unpinned conversations and keeps a pending leading unpin action visible", () => {
     const { rerender } = render(<ConversationList conversations={threads} selectedId="" onSelect={() => {}} onTogglePin={() => {}} />);
 
-    expect(document.querySelector("[data-pin-conversation-id='conv-a'] .lucide-pin")).toBeInTheDocument();
-
-    rerender(<ConversationList conversations={threads} selectedId="" onSelect={() => {}} onTogglePin={() => {}} pendingPinId="conv-a" />);
-
     const pin = document.querySelector<HTMLButtonElement>("[data-pin-conversation-id='conv-a']")!;
-    expect(pin).toBeDisabled();
-    expect(pin).toHaveClass("pending");
-    expect(pin.querySelector(".busy-indicator-icon")).toBeInTheDocument();
-    expect(pin.closest("[data-conversation-actions]")).toHaveAttribute("data-pending-pin", "true");
+    expect(pin.closest("[data-conversation-actions]")).toBeInTheDocument();
+    expect(pin.querySelector(".lucide-pin")).toBeInTheDocument();
+    expect(pin).toHaveAccessibleName("Pin conversation");
+
+    rerender(<ConversationList conversations={[{ ...threads[0], pinned: true }, ...threads.slice(1)]} selectedId="" onSelect={() => {}} onTogglePin={() => {}} pendingPinId="conv-a" />);
+
+    const unpin = document.querySelector<HTMLButtonElement>("[data-pin-conversation-id='conv-a']")!;
+    expect(unpin).toBeDisabled();
+    expect(unpin).toHaveClass("pending");
+    expect(unpin.querySelector(".busy-indicator-icon")).toBeInTheDocument();
+    expect(unpin.closest("[data-conversation-actions]")).toBeNull();
     const otherPin = document.querySelector<HTMLButtonElement>("[data-pin-conversation-id='conv-b']")!;
     expect(otherPin).toBeDisabled();
     expect(otherPin).not.toHaveClass("pending");
     expect(otherPin.closest("[data-conversation-actions]")).not.toHaveAttribute("data-pending-pin");
   });
 
+  it("keeps a passive pinned marker when unpinning is unavailable", () => {
+    render(<ConversationList conversations={[{ ...threads[0], pinned: true }]} selectedId="" onSelect={() => {}} />);
+
+    expect(screen.getByRole("img", { name: "Pinned" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Unpin conversation" })).not.toBeInTheDocument();
+  });
+
   it("does not offer pinning for draft-only conversations", () => {
     render(<ConversationList conversations={[{ ...drafts[0], pinned: true }]} selectedId="draft-a" onSelect={() => {}} onTogglePin={() => {}} />);
 
-    expect(screen.queryByRole("button", { name: /Pin / })).not.toBeInTheDocument();
+    expect(document.querySelector("[data-pin-conversation-id]")).not.toBeInTheDocument();
     expect(screen.queryByRole("img", { name: "Pinned" })).not.toBeInTheDocument();
   });
 
@@ -346,6 +367,32 @@ describe("ConversationList interactions", () => {
     { id: "spam-c", name: "Spam C", preview: "", unread: 0, folder: "spam" as const },
   ];
   const folderButtons = (rowId: string) => Array.from(document.querySelectorAll<HTMLButtonElement>(`[data-conversation-row='${rowId}'] .conversation-folder-action`));
+
+  it("keeps pinned spam passive while allowing archived conversations to unpin", () => {
+    render(<ConversationList conversations={folderRows.map((row) => ({ ...row, pinned: true }))} selectedId="" onSelect={() => {}} onTogglePin={() => {}} />);
+
+    expect(document.querySelector("[data-pin-conversation-id='spam-c']")).not.toBeInTheDocument();
+    const spamRow = document.querySelector("[data-conversation-row='spam-c']")!;
+    expect(within(spamRow as HTMLElement).getByRole("img", { name: "Pinned" })).toBeInTheDocument();
+    expect(document.querySelector("[data-pin-conversation-id='archived-b']")).toHaveAccessibleName("Unpin conversation");
+  });
+
+  it.each([
+    { pendingPinId: "another-row" },
+    { pendingFolderId: "another-row" },
+    { pendingFolderId: "conv-a" },
+  ])("blocks leading unpin requests while any pin or folder action is pending: %j", (pending) => {
+    const onTogglePin = vi.fn();
+    const onSelect = vi.fn();
+    render(<ConversationList conversations={[{ ...threads[0], pinned: true }]} selectedId="" onSelect={onSelect} onTogglePin={onTogglePin} {...pending} />);
+
+    const unpin = screen.getByRole("button", { name: "Unpin conversation" });
+    expect(unpin).toBeDisabled();
+    expect(unpin).not.toHaveClass("pending");
+    fireEvent.click(unpin);
+    expect(onTogglePin).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
 
   it("offers the folder actions each folder calls for", () => {
     render(<ConversationList conversations={folderRows} selectedId="" onSelect={() => {}} onRequestFolderChange={() => {}} />);

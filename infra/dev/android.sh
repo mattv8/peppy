@@ -101,14 +101,21 @@ adb_serial() {
 }
 apk() { printf '%s/%s\n' "$ARTIFACTS" "$1"; }
 apk_for_adb() { if is_wsl; then wslpath -w "$(apk "$1")"; else apk "$1"; fi; }
+development_dotenv() { python3 "$ROOT/infra/dev/dev_tls.py" dotenv-path || die "could not resolve the development .env path"; }
+verify_apk_trust() {
+    # Only the debug variant embeds the development CA; a sideload APK can never satisfy this check.
+    [[ $ANDROID_BUILD_VARIANT == debug ]] || return 0
+    python3 "$ROOT/infra/dev/dev_tls.py" verify-apk "$1" || die "refusing to install $1; rebuild it so it trusts the current development CA"
+}
 prepare_debug_tls() {
-    local enabled
-    enabled=$(python3 "$ROOT/infra/dev/dev_tls.py" enabled "$ROOT/.env") || die "could not resolve DEBUG"
+    local enabled dotenv
+    dotenv=$(development_dotenv)
+    enabled=$(python3 "$ROOT/infra/dev/dev_tls.py" enabled "$dotenv") || die "could not resolve DEBUG"
     case $enabled in true|false) ;; *) die "invalid DEBUG result: $enabled" ;; esac
     DEBUG=$enabled
     export DEBUG
     if [[ $enabled == true ]]; then
-        python3 "$ROOT/infra/dev/dev_tls.py" prepare "$ROOT/.env"
+        python3 "$ROOT/infra/dev/dev_tls.py" prepare "$dotenv"
         PEPPY_DEV_TLS_CERT=$(python3 "$ROOT/infra/dev/dev_tls.py" ca-path)
         export PEPPY_DEV_TLS_CERT
     else
@@ -116,10 +123,11 @@ prepare_debug_tls() {
     fi
 }
 ensure_debug_loopback() {
-    local serial=$1 require_http_health=${2:-false} server host port certificate
+    local serial=$1 require_http_health=${2:-false} server host port certificate dotenv
     prepare_debug_tls
+    dotenv=$(development_dotenv)
     if [[ -n ${PEPPY_DEBUG_SERVER:-} ]]; then server=$PEPPY_DEBUG_SERVER
-    else server=$(python3 "$ROOT/infra/dev/dev_port.py" smoke-url "$ROOT/.env"); fi
+    else server=$(python3 "$ROOT/infra/dev/dev_port.py" smoke-url "$dotenv"); fi
     if [[ ! $server =~ ^(http|https)://(127\.0\.0\.1|localhost):([0-9]{1,5})$ ]]; then
         die "PEPPY_DEBUG_SERVER must be a loopback http or https URL with an explicit port"
     fi
@@ -141,11 +149,12 @@ ensure_debug_loopback() {
     adb -s "$serial" reverse "tcp:$port" "tcp:$port"
 }
 container_run() {
-    local cmd=$1
+    local cmd=$1 dotenv
     local -a compose_run=(compose --profile android run --build --rm)
     command -v docker >/dev/null || die "docker is required for android-$cmd"
     docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required for android-$cmd"
-    test -f "$ROOT/.env" || die "missing .env; run bash infra/dev/dev.sh dev-setup first"
+    dotenv=$(development_dotenv)
+    test -f "$dotenv" || die "missing .env; run bash infra/dev/dev.sh dev-setup first"
     mkdir -p "$ARTIFACTS"; chmod 0700 "$ARTIFACTS"
     if [[ -n ${PEPPY_ANDROID_CONTAINER_ARTIFACTS:-} ]]; then
         compose_run+=(-v "$ARTIFACTS:$PEPPY_ANDROID_CONTAINER_ARTIFACTS")
@@ -176,7 +185,7 @@ prepare_sdk() {
     require_license_approval
     SDKMANAGER=${SDKMANAGER:-sdkmanager}
     accept_licenses
-    run_sdkmanager "platforms;android-36" "build-tools;35.0.0" "platform-tools" "ndk;27.2.12479018"
+    run_sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "platform-tools" "ndk;27.2.12479018"
 }
 find_sdkmanager() {
     local candidate
@@ -445,7 +454,7 @@ ensure_supported_abi() {
     [[ $abi == arm64-v8a || $abi == x86_64 ]] || die "emulator ABI '$abi' is unsupported; select an arm64-v8a or x86_64 AVD"
     printf '%s\n' "$abi"
 }
-deploy() { local serial apk_name; serial=$(adb_serial); apk_name=$(android_apk_name); test -f "$(apk "$apk_name")" || die "APK missing; run android-build first"; ensure_supported_abi "$serial" >/dev/null; ensure_debug_loopback "$serial"; adb -s "$serial" install -r "$(apk_for_adb "$apk_name")"; }
+deploy() { local serial apk_name; serial=$(adb_serial); apk_name=$(android_apk_name); test -f "$(apk "$apk_name")" || die "APK missing; run android-build first"; ensure_supported_abi "$serial" >/dev/null; ensure_debug_loopback "$serial"; verify_apk_trust "$(apk "$apk_name")"; adb -s "$serial" install -r "$(apk_for_adb "$apk_name")"; }
 open() {
     local serial output_file output status
     serial=$(adb_serial)
@@ -474,6 +483,7 @@ smoke() {
     if ! test -f "$(apk "$apk_name")" || ! test -f "$(apk "$test_apk_name")"; then die "APK(s) missing; run 'bash infra/dev/android.sh test' to build test APKs first"; fi
     ensure_supported_abi "$serial" >/dev/null
     ensure_debug_loopback "$serial"
+    verify_apk_trust "$(apk "$apk_name")"
     adb -s "$serial" install -r "$(apk_for_adb "$apk_name")"
     adb -s "$serial" install -r "$(apk_for_adb "$test_apk_name")"
     local output_file
@@ -491,9 +501,10 @@ validate_pinned_emulator() {
     [[ $current_abi == "$expected_abi" ]] || die "selected emulator ABI changed from $expected_abi to $current_abi"
 }
 run_fast() {
-    local serial abi configured_abi
+    local serial abi configured_abi dotenv
     require_license_approval
-    test -f "$ROOT/.env" || die "missing .env; run bash infra/dev/dev.sh dev-setup first"
+    dotenv=$(development_dotenv)
+    test -f "$dotenv" || die "missing .env; run bash infra/dev/dev.sh dev-setup first"
     validate_build_options build
     configured_abi=$PEPPY_ANDROID_ABI
     serial=$(adb_serial)

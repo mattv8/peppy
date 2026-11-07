@@ -253,28 +253,22 @@ public class AdbConnection implements Closeable {
                             // Get the stream object corresponding to the packet
                             AdbStream waitingStream = mOpenedStreams.get(msg.arg1);
                             if (waitingStream == null) {
+                                if (msg.command != AdbProtocol.A_CLSE) {
+                                    sendPacket(AdbProtocol.generateClose(msg.arg1, msg.arg0));
+                                }
                                 continue;
                             }
 
-                            synchronized (waitingStream) {
-                                if (msg.command == AdbProtocol.A_OKAY) {
-                                    // We're ready for writes
-                                    waitingStream.updateRemoteId(msg.arg0);
-                                    waitingStream.readyForWrite();
-
-                                    // Notify an open/write
-                                    waitingStream.notify();
-                                } else if (msg.command == AdbProtocol.A_WRTE) {
-                                    // Got some data from our partner
-                                    waitingStream.addPayload(msg.payload);
-
-                                    // Tell it we're ready for more
-                                    waitingStream.sendReady();
-                                } else { // if (msg.command == AdbProtocol.A_CLSE) {
-                                    mOpenedStreams.remove(msg.arg1);
-                                    // Notify readers and writers
-                                    waitingStream.notifyClose(true);
+                            if (msg.command == AdbProtocol.A_OKAY) {
+                                if (!waitingStream.acknowledgeOpen(msg.arg0)) {
+                                    sendPacket(AdbProtocol.generateClose(msg.arg1, msg.arg0));
                                 }
+                            } else if (msg.command == AdbProtocol.A_WRTE) {
+                                waitingStream.addPayload(msg.payload);
+                                waitingStream.sendReady();
+                            } else { // if (msg.command == AdbProtocol.A_CLSE) {
+                                mOpenedStreams.remove(msg.arg1);
+                                waitingStream.notifyClose(true);
                             }
                             break;
                         }
@@ -505,21 +499,38 @@ public class AdbConnection implements Closeable {
 
         waitForConnection(Long.MAX_VALUE, TimeUnit.MILLISECONDS);
 
-        // Add this stream to this list of half-open streams
         AdbStream stream = new AdbStream(this, localId);
+        byte[] openPacket = AdbProtocol.generateOpen(localId, Objects.requireNonNull(destination));
         mOpenedStreams.put(localId, stream);
-
-        // Send OPEN
-        sendPacket(AdbProtocol.generateOpen(localId, Objects.requireNonNull(destination)));
-
-        // Wait for the connection thread to receive the OKAY
-        synchronized (stream) {
-            stream.wait();
+        boolean openTransmitted = false;
+        try {
+            sendPacket(openPacket);
+            openTransmitted = true;
+            synchronized (stream) {
+                while (!stream.isOpenAcknowledged() && !stream.isClosed()) {
+                    stream.wait();
+                }
+            }
+        } catch (IOException | InterruptedException | RuntimeException | Error exception) {
+            mOpenedStreams.remove(localId);
+            IOException failure = exception instanceof IOException
+                    ? (IOException) exception : new IOException(exception);
+            stream.notifyFailure(failure);
+            if (openTransmitted && stream.isOpenAcknowledged()) {
+                try {
+                    sendPacket(AdbProtocol.generateClose(localId, stream.getRemoteId()));
+                } catch (IOException ignored) {
+                }
+            }
+            throw exception;
         }
 
-        // Check if the OPEN request was rejected
-        if (stream.isClosed()) {
+        if (!stream.isOpenAcknowledged()) {
             mOpenedStreams.remove(localId);
+            IOException failure = stream.getFailure();
+            if (failure != null) {
+                throw failure;
+            }
             throw new ConnectException("Stream open actively rejected by remote peer.");
         }
 
@@ -564,11 +575,9 @@ public class AdbConnection implements Closeable {
      */
     private void cleanupStreams() {
         // Close all streams on this connection
+        IOException failure = new IOException("Connection failed", mConnectionException);
         for (AdbStream s : mOpenedStreams.values()) {
-            try {
-                s.close();
-            } catch (IOException ignored) {
-            }
+            s.notifyFailure(failure);
         }
         mOpenedStreams.clear();
     }

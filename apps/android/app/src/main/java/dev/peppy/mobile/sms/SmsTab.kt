@@ -7,14 +7,21 @@ import android.content.ContextWrapper
 import android.content.Intent
 import android.os.PowerManager
 import android.provider.Settings
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -28,23 +35,27 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import dev.peppy.mobile.GatewayWork
 import dev.peppy.mobile.R
 import dev.peppy.mobile.SMS_PERMISSIONS
 import dev.peppy.mobile.Section
-import dev.peppy.mobile.StatusRow
 import dev.peppy.mobile.account.AccountAccessState
 import dev.peppy.mobile.enrollment.ConsentEffect
 import dev.peppy.mobile.enrollment.ConsentGatedToggle
 import dev.peppy.mobile.enrollment.ConsentPhase
 import dev.peppy.mobile.gateway.GatewayPolicyHost
 import dev.peppy.mobile.gateway.GatewayStatus
-import dev.peppy.mobile.gateway.SyncPhase
+import dev.peppy.mobile.gateway.ServerReachability
+import dev.peppy.mobile.gateway.ServerReachabilityState
 import dev.peppy.mobile.granted
 import dev.peppy.mobile.mms.MmsSettings
 import dev.peppy.mobile.mms.RestrictedMessageAccess
@@ -60,9 +71,13 @@ import dev.peppy.mobile.phoneread.PhoneReadSettings
 import dev.peppy.mobile.syncMessage
 import dev.peppy.mobile.telephony.SimRoutes
 import dev.peppy.mobile.ui.ConsentSheet
+import dev.peppy.mobile.ui.DetailsNavigationRow
+import dev.peppy.mobile.ui.DetailsPageHeader
+import dev.peppy.mobile.ui.DetailsStatusRow as StatusRow
 import dev.peppy.mobile.ui.HeroBanner
 import dev.peppy.mobile.ui.ScreenBody
 import dev.peppy.mobile.ui.SettingToggleRow
+import dev.peppy.mobile.ui.theme.PeppyTokens
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -105,10 +120,31 @@ internal fun SmsTab(
     var detailsOpen by remember { mutableStateOf(false) }
     var history by remember { mutableStateOf(SmsHistoryState.WAITING_FOR_VAULT) }
     var advancedFeatures by remember { mutableStateOf<AdvancedFeatureState?>(null) }
+    val accountReadOnly by AccountAccessState.readOnly.collectAsState()
     val deniedHint = stringResource(R.string.peppy_toggle_android_sms_denied_hint)
     val guardFailedHint = stringResource(R.string.peppy_toggle_android_sms_guard_failed)
     val allGranted = SMS_PERMISSIONS.all { granted(context, it) }
     val readGranted = granted(context, Manifest.permission.READ_SMS)
+    val reachability by ServerReachabilityState.state.collectAsState()
+    val health = gatewayStatus?.let {
+        syncHealth(
+            it,
+            granted(context, Manifest.permission.RECEIVE_SMS),
+            granted(context, Manifest.permission.SEND_SMS),
+            readGranted,
+            accountReadOnly,
+            policy == true,
+            history,
+            reachability,
+        )
+    }
+    val syncDetailsRequested by SyncDetailsRequests.state.collectAsState()
+    LaunchedEffect(syncDetailsRequested) {
+        if (syncDetailsRequested) {
+            SyncDetailsRequests.consume()
+            detailsOpen = true
+        }
+    }
     val policyAction = remember(context) {
         SmsCapturePolicyAction(
             writeAndRead = { enabled ->
@@ -222,29 +258,51 @@ internal fun SmsTab(
     }
 
     if (detailsOpen) {
-        BackHandler { detailsOpen = false }
         dev.peppy.mobile.ui.ScreenBody("sms-details-screen") {
-            TextButton(onClick = { detailsOpen = false }, modifier = Modifier.testTag("sms-details-back")) { Text(stringResource(R.string.peppy_back)) }
+            DetailsPageHeader(stringResource(R.string.peppy_toggle_android_sync_details), "sms-details") { detailsOpen = false }
+            SyncSummary(health)
             gatewayStatus?.let {
-                val accountReadOnly by AccountAccessState.readOnly.collectAsState()
-                Section("status-section", stringResource(R.string.peppy_toggle_android_phone_status), showDivider = false) {
-                    StatusRow("status-credential", stringResource(R.string.peppy_toggle_android_device_credential), stringResource(if (it.enrolled) R.string.peppy_toggle_android_enrolled else R.string.peppy_toggle_android_not_enrolled))
-                    StatusRow("status-database", stringResource(R.string.peppy_toggle_android_local_database), stringResource(if (it.databaseOpen) R.string.peppy_toggle_android_database_open else R.string.peppy_toggle_android_database_closed))
-                    StatusRow("status-vault-keys", stringResource(R.string.peppy_toggle_android_vault_keys), stringResource(if (it.sharedKeysReady) R.string.peppy_toggle_android_keys_unlocked else R.string.peppy_toggle_android_keys_locked))
-                    StatusRow("status-receive", stringResource(R.string.peppy_toggle_android_receive_sms), stringResource(if (granted(context, Manifest.permission.RECEIVE_SMS)) R.string.peppy_sms_history_allowed else R.string.peppy_sms_history_not_allowed))
-                    StatusRow("status-send", stringResource(R.string.peppy_toggle_android_send_sms), if (accountReadOnly) stringResource(R.string.peppy_account_send_paused_status) else stringResource(if (granted(context, Manifest.permission.SEND_SMS)) R.string.peppy_sms_history_allowed else R.string.peppy_sms_history_not_allowed))
+                val currentHealth = requireNotNull(health)
+                Section("status-section", stringResource(R.string.peppy_toggle_android_this_phone), showDivider = false) {
+                    CheckRow("status-unlocked", currentHealth.unlocked, stringResource(if (currentHealth.unlocked) R.string.peppy_toggle_android_check_unlocked else R.string.peppy_toggle_android_check_locked))
+                    if (currentHealth.smsSyncOn) {
+                        CheckRow(
+                            "status-receive",
+                            currentHealth.receiveAllowed,
+                            stringResource(if (currentHealth.receiveAllowed) R.string.peppy_toggle_android_check_receive_ok else R.string.peppy_toggle_android_check_receive_bad),
+                            action = if (currentHealth.receiveAllowed) null else {
+                                { TextButton(onClick = ::beginEnable, modifier = Modifier.heightIn(min = 48.dp).testTag("status-receive-allow")) { Text(stringResource(R.string.peppy_toggle_android_allow)) } }
+                            },
+                        )
+                        CheckRow(
+                            "status-send",
+                            !accountReadOnly && currentHealth.sendAllowed,
+                            if (accountReadOnly) stringResource(R.string.peppy_account_send_paused_status) else stringResource(if (currentHealth.sendAllowed) R.string.peppy_toggle_android_check_send_ok else R.string.peppy_toggle_android_check_send_bad),
+                            action = if (!accountReadOnly && !currentHealth.sendAllowed) {
+                                { TextButton(onClick = ::beginEnable, modifier = Modifier.heightIn(min = 48.dp).testTag("status-send-allow")) { Text(stringResource(R.string.peppy_toggle_android_allow)) } }
+                            } else null,
+                        )
+                    }
+                    CheckRow(
+                        "sms-gateway-sync-status",
+                        currentHealth.connected,
+                        when {
+                            currentHealth.stopped || currentHealth.softRejected -> syncMessage(it)
+                            else -> when (currentHealth.reachability) {
+                                ServerReachability.AVAILABLE -> stringResource(R.string.peppy_toggle_android_check_connected)
+                                ServerReachability.UNKNOWN -> stringResource(R.string.peppy_toggle_android_sync_checking)
+                                ServerReachability.UNAVAILABLE -> stringResource(R.string.peppy_toggle_android_sync_connection_unavailable)
+                            }
+                        },
+                    )
                     StatusRow("status-sim", stringResource(R.string.peppy_toggle_android_sim_route), stringResource(if (SimRoutes.current().isEmpty()) R.string.peppy_toggle_android_sim_missing else R.string.peppy_toggle_android_sim_default))
                 }
-                StatusRow(
-                    "sms-gateway-sync-status",
-                    stringResource(R.string.peppy_remote_messaging_status_label),
-                    syncMessage(it),
-                )
             }
+            SmsSettings(context, history, policy == true, ::beginEnable)
+            MmsSettings(context, refresh, databaseOpen, onChanged, detailsOnly = true)
             if (restrictedSetupAvailable(context)) AdvancedFeaturesSection(context, refresh, onChanged)
             GoogleMessagesLink.Entry(onChanged)
-            MmsSettings(context, refresh, databaseOpen, onChanged, detailsOnly = true)
-            SmsSettings(context, history)
+            resultHint?.let { Text(it, Modifier.testTag("sms-action-error")) }
         }
     } else Column(Modifier.testTag("sms-tab-screen")) {
         HeroBanner(
@@ -253,16 +311,7 @@ internal fun SmsTab(
             "sms-hero",
         )
         dev.peppy.mobile.ui.ScreenBody("sms-tab-body") {
-        Text(stringResource(R.string.peppy_carrier_not_encrypted), Modifier.testTag("sms-carrier-notice"))
-        TextButton(onClick = {
-            try {
-                context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://peppy.pro/privacy")))
-            } catch (_: ActivityNotFoundException) {
-                resultHint = context.getString(R.string.peppy_toggle_android_link_unavailable)
-            }
-        }, Modifier.testTag("sms-privacy-policy")) { Text(stringResource(R.string.peppy_privacy_policy)) }
-        Text(stringResource(R.string.peppy_privacy_policy_scope), Modifier.testTag("sms-privacy-scope"))
-        Section("sms-section", stringResource(R.string.peppy_sms)) {
+        Column(Modifier.fillMaxWidth().testTag("sms-section"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             val actualCapture = policy == true && readGranted
             val subtitle = when {
                 policy == null -> null
@@ -292,10 +341,6 @@ internal fun SmsTab(
          Section("battery-section", stringResource(R.string.peppy_toggle_android_background_sync), showDivider = false) {
              BatteryOptimizationRow(context)
          }
-        val attention = history == SmsHistoryState.PAUSED || history == SmsHistoryState.UNAVAILABLE || history == SmsHistoryState.PENDING ||
-            gatewayStatus?.let { !it.databaseOpen || !it.sharedKeysReady || it.syncPhase != SyncPhase.LIVE || it.outboxRejection != null || it.softRejection != null } == true
-        if (attention) Text(stringResource(smsHistoryLabel(history)), Modifier.testTag("sms-details-attention"))
-        gatewayStatus?.takeIf { attention }?.let { Text(syncMessage(it), Modifier.testTag("sms-gateway-attention")) }
         advancedFeatures?.let { features ->
             if (restrictedSetupAvailable(context) && showNewFeatureHint(features.access.first, features.access.second, features.seen)) {
                 TextButton(onClick = { detailsOpen = true }, modifier = Modifier.fillMaxWidth().testTag("sms-advanced-features-summary")) {
@@ -306,7 +351,7 @@ internal fun SmsTab(
                 }
             }
         }
-        OutlinedButton(onClick = { detailsOpen = true }, modifier = Modifier.testTag("sms-details-row")) { Text(stringResource(R.string.peppy_toggle_android_sync_details)) }
+         DetailsNavigationRow("sms-details-row", stringResource(R.string.peppy_toggle_android_sync_details), if (health?.actionNeeded == true) stringResource(R.string.peppy_toggle_android_sync_needs_attention) else null) { detailsOpen = true }
         }
     }
     if (consent.phase == ConsentPhase.DISCLOSURE) ConsentSheet(
@@ -348,6 +393,86 @@ internal fun SmsTab(
         showPrivacyPolicy = false,
         dismissLabel = stringResource(R.string.peppy_toggle_android_keep_on),
     )
+}
+
+@Composable
+private fun SyncSummary(health: SyncHealth?) {
+    val colors = if (isSystemInDarkTheme()) PeppyTokens.Dark else PeppyTokens.Light
+    Surface(
+        modifier = Modifier.fillMaxWidth().testTag("sms-sync-summary").semantics(mergeDescendants = true) {},
+        shape = RoundedCornerShape(12.dp),
+        color = when (health?.summaryState) {
+            SyncSummaryState.ATTENTION -> colors.warningSurface
+            SyncSummaryState.HEALTHY -> colors.success.copy(alpha = 0.12f)
+            else -> MaterialTheme.colorScheme.surfaceVariant
+        },
+    ) {
+        Box(Modifier.padding(12.dp)) {
+            if (health == null) {
+                Text(stringResource(R.string.peppy_toggle_android_sync_checking))
+            } else {
+                val problem = health.summaryState == SyncSummaryState.ATTENTION
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val state = health.summaryState
+                    Text(
+                        if (problem) "⚠" else if (state == SyncSummaryState.HEALTHY) "✓" else "•",
+                        color = if (problem) colors.warningText else if (state == SyncSummaryState.HEALTHY) colors.success else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Column {
+                        Text(
+                            stringResource(
+                                when (state) {
+                                    SyncSummaryState.ATTENTION -> R.string.peppy_toggle_android_sync_needs_attention
+                                    SyncSummaryState.HEALTHY -> R.string.peppy_toggle_android_sync_all_good_title
+                                    SyncSummaryState.OFF -> R.string.peppy_toggle_android_sync_off_title
+                                    SyncSummaryState.RETRYING -> R.string.peppy_toggle_android_sync_retrying_title
+                                    SyncSummaryState.CHECKING -> R.string.peppy_toggle_android_sync_checking
+                                    SyncSummaryState.PROGRESS -> R.string.peppy_toggle_android_sync_progress_title
+                                },
+                            ),
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        Text(
+                            if (problem && health.problemCount == 1) stringResource(R.string.peppy_toggle_android_sync_problems_one)
+                            else if (problem) stringResource(R.string.peppy_toggle_android_sync_problems_many, health.problemCount)
+                            else stringResource(
+                                when (state) {
+                                    SyncSummaryState.HEALTHY -> R.string.peppy_toggle_android_sync_all_good_body
+                                    SyncSummaryState.OFF -> R.string.peppy_toggle_android_sync_off_body
+                                    SyncSummaryState.RETRYING -> R.string.peppy_toggle_android_sync_retrying_body
+                                    SyncSummaryState.CHECKING -> R.string.peppy_toggle_android_sync_checking
+                                    SyncSummaryState.PROGRESS -> R.string.peppy_toggle_android_sync_progress_body
+                                    SyncSummaryState.ATTENTION -> error("Attention has a problem count")
+                                },
+                            ),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CheckRow(
+    tag: String,
+    ok: Boolean,
+    label: String,
+    action: (@Composable () -> Unit)? = null,
+) {
+    val colors = if (isSystemInDarkTheme()) PeppyTokens.Dark else PeppyTokens.Light
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 40.dp).testTag(tag),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(if (ok) "✓" else "⚠", color = if (ok) colors.success else colors.warningText)
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyMedium)
+        }
+        action?.invoke()
+    }
 }
 
 @Composable

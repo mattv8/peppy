@@ -115,7 +115,7 @@ Install JDK 17, the repository-pinned Rust toolchain, `pkg-config`, and host `li
 rustup target add aarch64-linux-android x86_64-linux-android
 ```
 
-Install Android SDK command-line tools and make available `platforms;android-36`, `build-tools;35.0.0`, `platform-tools`, and `ndk;27.2.12479018`. The SDK resolves from `ANDROID_SDK_ROOT`, then `ANDROID_HOME`, then `~/Library/Android/sdk`; set either SDK variable to use another location.
+Install Android SDK command-line tools and make available `platforms;android-37.0`, `build-tools;36.0.0`, `platform-tools`, and `ndk;27.2.12479018`. The SDK resolves from `ANDROID_SDK_ROOT`, then `ANDROID_HOME`, then `~/Library/Android/sdk`; set either SDK variable to use another location.
 
 #### JDK 17 discovery
 

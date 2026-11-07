@@ -1,7 +1,9 @@
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppLockScreen, AppLockSettings } from "./AppLock";
+
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("AppLockScreen", () => {
   it("shows a disabled unlock action while checking secure storage", () => {

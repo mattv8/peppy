@@ -60,13 +60,7 @@ internal object NotificationTestCapture {
                 }) {
                 return NotificationTestCaptureResult.ALREADY_QUEUED
             }
-            val outcome = client.captureNotification(
-                NativeNotificationCapture(
-                    SYNTHETIC_KEY, "$SYNTHETIC_KEY:$id", "dev.peppy.mobile.synthetic",
-                    "Peppy test", "Peppy test notification", "This is a safe test record.", "peppy_test",
-                    System.currentTimeMillis(), true, null,
-                ),
-            )
+            val outcome = client.captureNotification(syntheticCapture(id))
             if (outcome == NativeNotificationCaptureOutcome.CAPTURED) {
                 enqueue()
                 NotificationTestCaptureResult.CAPTURED
@@ -91,6 +85,13 @@ internal object NotificationTestCapture {
         }
         return completed
     }
+
+    /** Neutral user-visible fields: unknown app name renders generically and the body stays empty. */
+    internal fun syntheticCapture(id: String): NativeNotificationCapture = NativeNotificationCapture(
+        SYNTHETIC_KEY, "$SYNTHETIC_KEY:$id", "dev.peppy.mobile.synthetic",
+        "", "New notification", "", null,
+        System.currentTimeMillis(), true, null,
+    )
 
     const val SYNTHETIC_KEY = "peppy-synthetic-test"
 }

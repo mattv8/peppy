@@ -95,6 +95,14 @@ describe("RCS conversation route", () => {
     expect(document.getElementById("sms-counter")).toBeInTheDocument();
   });
 
+  it("omits the badge and shows the recovery title for a revoked connection with a stale RCS route", async () => {
+    snapshot = { ...snapshot, connection: { state: "error", origin: "https://example.test", errorCode: "revoked" } };
+    render(<App />);
+
+    await waitFor(() => expect(document.querySelector("[data-header-title]")?.textContent).toBe("Set up Peppy"));
+    expectNoBadge();
+  });
+
   it("omits the badge while the app is locked", async () => {
     vi.spyOn(bridge, "get_app_lock_status").mockResolvedValue({ enabled: true, locked: true, storageAvailable: true, pending: false });
     render(<App />);

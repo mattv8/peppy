@@ -120,12 +120,14 @@ class DemoTests(unittest.TestCase):
     def test_host_forwards_cargo_timeout_to_isolated_runner(self):
         calls = []
         original_checked, original_cleanup, original_root, original_prepare = demo.checked, demo.subprocess.run, demo.ROOT, demo.dev_tls.prepare
+        original_config_root = demo.dev_tls.config_root
         with tempfile.TemporaryDirectory() as directory:
             try:
                 demo.ROOT = Path(directory)
                 demo.checked = lambda command, **kwargs: calls.append((command, kwargs))
                 demo.subprocess.run = lambda *args, **kwargs: None
                 demo.dev_tls.prepare = lambda _dotenv: None
+                demo.dev_tls.config_root = lambda: Path(directory)
                 previous = os.environ.get("PEPPY_DEMO_CARGO_TIMEOUT")
                 os.environ["PEPPY_DEMO_CARGO_TIMEOUT"] = "17"
                 demo.run_host_demo()
@@ -135,6 +137,7 @@ class DemoTests(unittest.TestCase):
                 else:
                     os.environ["PEPPY_DEMO_CARGO_TIMEOUT"] = previous
                 demo.checked, demo.subprocess.run, demo.ROOT, demo.dev_tls.prepare = original_checked, original_cleanup, original_root, original_prepare
+                demo.dev_tls.config_root = original_config_root
         up, kwargs = next(call for call in calls if "--exit-code-from" in call[0])
         self.assertEqual(kwargs["env"]["PEPPY_DEMO_CARGO_TIMEOUT"], "17")
         self.assertIn("PEPPY_DEMO_RUN", kwargs["env"])
@@ -143,15 +146,18 @@ class DemoTests(unittest.TestCase):
     def test_host_demo_uses_isolated_tls_compose_services(self):
         calls = []
         original_checked, original_cleanup, original_root, original_prepare = demo.checked, demo.subprocess.run, demo.ROOT, demo.dev_tls.prepare
+        original_config_root = demo.dev_tls.config_root
         with tempfile.TemporaryDirectory() as directory:
             try:
                 demo.ROOT = Path(directory)
                 demo.checked = lambda command, **kwargs: calls.append(command)
                 demo.subprocess.run = lambda *args, **kwargs: None
                 demo.dev_tls.prepare = lambda _dotenv: None
+                demo.dev_tls.config_root = lambda: Path(directory)
                 demo.run_host_demo()
             finally:
                 demo.checked, demo.subprocess.run, demo.ROOT, demo.dev_tls.prepare = original_checked, original_cleanup, original_root, original_prepare
+                demo.dev_tls.config_root = original_config_root
         up = next(command for command in calls if "--exit-code-from" in command)
         self.assertEqual(up[-2:], ["dev", "caddy"])
         self.assertIn("infra/compose/compose.demo-tls.yml", " ".join(str(value) for value in up))
@@ -185,10 +191,12 @@ class DemoTests(unittest.TestCase):
         for failing in (False, True):
             calls = []
             original_checked, original_cleanup, original_root, original_prepare = demo.checked, demo.subprocess.run, demo.ROOT, demo.dev_tls.prepare
+            original_config_root = demo.dev_tls.config_root
             with tempfile.TemporaryDirectory() as directory:
                 try:
                     demo.ROOT = Path(directory)
                     demo.dev_tls.prepare = lambda _dotenv: None
+                    demo.dev_tls.config_root = lambda: Path(directory)
                     def checked(command, **kwargs):
                         calls.append(command)
                         if failing and command[-2:] == ["build", "dev"]:
@@ -202,6 +210,7 @@ class DemoTests(unittest.TestCase):
                         demo.run_host_demo()
                 finally:
                     demo.checked, demo.subprocess.run, demo.ROOT, demo.dev_tls.prepare = original_checked, original_cleanup, original_root, original_prepare
+                    demo.dev_tls.config_root = original_config_root
             down = next(command for command in calls if command[-3:] == ["down", "--volumes", "--remove-orphans"])
             self.assertIn("--project-name", down)
             self.assertTrue(down[down.index("--project-name") + 1].startswith("peppy-demo-"))
@@ -223,12 +232,14 @@ class DemoTests(unittest.TestCase):
     def test_host_demo_installs_interrupt_handlers_for_cleanup(self):
         handlers, calls = {}, []
         original_checked, original_cleanup, original_root, original_signal, original_prepare = demo.checked, demo.subprocess.run, demo.ROOT, demo.signal.signal, demo.dev_tls.prepare
+        original_config_root = demo.dev_tls.config_root
         with tempfile.TemporaryDirectory() as directory:
             try:
                 demo.ROOT = Path(directory)
                 demo.checked = lambda command, **kwargs: calls.append(command)
                 demo.subprocess.run = lambda *args, **kwargs: None
                 demo.dev_tls.prepare = lambda _dotenv: None
+                demo.dev_tls.config_root = lambda: Path(directory)
                 def signal_stub(signum, handler):
                     handlers.setdefault(signum, handler)
                     return demo.signal.SIG_DFL
@@ -236,6 +247,7 @@ class DemoTests(unittest.TestCase):
                 demo.run_host_demo()
             finally:
                 demo.checked, demo.subprocess.run, demo.ROOT, demo.signal.signal, demo.dev_tls.prepare = original_checked, original_cleanup, original_root, original_signal, original_prepare
+                demo.dev_tls.config_root = original_config_root
         self.assertIn(demo.signal.SIGHUP, handlers)
         with self.assertRaises(KeyboardInterrupt):
             handlers[demo.signal.SIGHUP](demo.signal.SIGHUP, None)

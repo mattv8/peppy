@@ -25,26 +25,30 @@ type TonePickerProps = {
   describedBy?: string;
   renderTrigger?(props: ButtonHTMLAttributes<HTMLButtonElement> & { ref: Ref<HTMLButtonElement> }): ReactElement;
   disabledReason?: string;
+  label?: string;
+  defaultLabel?: string;
+  swatchColor?(index: number | null): string;
 };
 
-const optionLabel = (index: number | undefined) => TONE_PRESETS.find((preset) => preset.index === index)?.label ?? (index === undefined ? "Automatic" : `Color ${index + 1}`);
+const optionLabel = (index: number | undefined, defaultLabel: string) => TONE_PRESETS.find((preset) => preset.index === index)?.label ?? (index === undefined ? defaultLabel : `Color ${index + 1}`);
 
-export function TonePicker({ id, seed, value, automaticIndex, disabled = false, pending = false, error, onSelect, variant = "icon", describedBy, renderTrigger, disabledReason = "Unlock Peppy to change colors." }: TonePickerProps) {
+export function TonePicker({ id, seed, value, automaticIndex, disabled = false, pending = false, error, onSelect, variant = "icon", describedBy, renderTrigger, disabledReason = "Unlock Peppy to change colors.", label = "Conversation color", defaultLabel = "Automatic", swatchColor }: TonePickerProps) {
   const wrapper = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
   const [focusIndex, setFocusIndex] = useState(0);
   const [position, setPosition] = useState<CSSProperties>();
   const [announcement, setAnnouncement] = useState("");
+  const [requestVersion, setRequestVersion] = useState(0);
   const requested = useRef<number | null | undefined>(undefined);
-  const wasPending = useRef(false);
   const previousSeed = useRef(seed);
-  const options = [{ index: null, label: "Automatic" }, ...TONE_PRESETS, ...(value !== undefined && !TONE_PRESETS.some((preset) => preset.index === value) ? [{ index: value, label: optionLabel(value) }] : [])];
+  const options = [{ index: null, label: defaultLabel }, ...TONE_PRESETS, ...(value !== undefined && !TONE_PRESETS.some((preset) => preset.index === value) ? [{ index: value, label: optionLabel(value, defaultLabel) }] : [])];
   const checkedIndex = Math.max(0, options.findIndex((option) => option.index === (value ?? null)));
 
   useEffect(() => {
     if (previousSeed.current === seed) return;
     previousSeed.current = seed;
+    requested.current = undefined;
     setOpen(false);
     setFocusIndex(0);
   }, [seed]);
@@ -74,16 +78,18 @@ export function TonePicker({ id, seed, value, automaticIndex, disabled = false, 
     return () => { window.removeEventListener("resize", place); window.removeEventListener("scroll", place, true); };
   }, [open, variant]);
   useEffect(() => {
-    if (wasPending.current && !pending && !error && requested.current === (value ?? null)) {
-      const active = document.activeElement;
-      const restoreFocus = active instanceof Node && wrapper.current?.contains(active);
-      setOpen(false);
-      setAnnouncement(`Conversation color set to ${optionLabel(value)}`);
-      if (restoreFocus) requestAnimationFrame(() => trigger.current?.focus());
+    if (requested.current === undefined || pending) return;
+    if (error || requested.current !== (value ?? null)) {
       requested.current = undefined;
+      return;
     }
-    wasPending.current = pending;
-  }, [error, pending, value]);
+    const active = document.activeElement;
+    const restoreFocus = active instanceof Node && wrapper.current?.contains(active);
+    setOpen(false);
+    setAnnouncement(`${label} set to ${optionLabel(value, defaultLabel)}`);
+    if (restoreFocus) requestAnimationFrame(() => trigger.current?.focus());
+    requested.current = undefined;
+  }, [defaultLabel, error, label, pending, requestVersion, value]);
 
   const close = (restoreFocus: boolean) => {
     setOpen(false);
@@ -94,6 +100,7 @@ export function TonePicker({ id, seed, value, automaticIndex, disabled = false, 
     if (index === (value ?? null)) return close(true);
     requested.current = index;
     onSelect(index);
+    setRequestVersion((version) => version + 1);
   };
   const onOptionKeyDown = (event: KeyboardEvent<HTMLButtonElement>, position: number) => {
     let next = position;
@@ -110,21 +117,21 @@ export function TonePicker({ id, seed, value, automaticIndex, disabled = false, 
     setFocusIndex(next);
     wrapper.current?.querySelector<HTMLButtonElement>(`[data-tone-option-index="${next}"]`)?.focus();
   };
-  const selectedLabel = optionLabel(value);
-  const effectiveIndex = value ?? automaticIndex;
+  const selectedLabel = optionLabel(value, defaultLabel);
+  const colorFor = swatchColor ?? ((index: number | null) => `var(--peppy-avatar-${index ?? automaticIndex})`);
 
-  const triggerProps = { id: `${id}-trigger`, ref: trigger, type: "button" as const, "aria-haspopup": "dialog" as const, "aria-expanded": open, "aria-controls": `${id}-panel`, "aria-describedby": describedBy, "aria-label": variant === "field" ? `Conversation color: ${selectedLabel}` : undefined, "aria-disabled": disabled || pending || undefined, disabled: false, title: disabled ? disabledReason : undefined, className: `tone-picker-trigger tone-picker-${variant}`, onClick: () => { if (!disabled && !pending) setOpen((current) => !current); } };
+  const triggerProps = { id: `${id}-trigger`, ref: trigger, type: "button" as const, "aria-haspopup": "dialog" as const, "aria-expanded": open, "aria-controls": `${id}-panel`, "aria-describedby": describedBy, "aria-label": variant === "field" ? `${label}: ${selectedLabel}` : undefined, "aria-disabled": disabled || pending || undefined, disabled: false, title: disabled ? disabledReason : undefined, className: `tone-picker-trigger tone-picker-${variant}`, onClick: () => { if (!disabled && !pending) setOpen((current) => !current); } };
   return <div id={id} ref={wrapper} data-tone-picker data-state={open ? "open" : "closed"} data-tone-pending={pending || undefined} data-tone-error={error ? true : undefined} onBlur={(event) => { if (open && event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget)) setOpen(false); }}>
     {renderTrigger ? renderTrigger(triggerProps) : <button {...triggerProps}>
-      {variant === "icon" ? <><Palette size={16} aria-hidden /><span aria-hidden data-tone-picker-dot style={{ background: `var(--peppy-avatar-${effectiveIndex})` }} /></> : <><span aria-hidden data-tone-picker-swatch style={{ background: `var(--peppy-avatar-${effectiveIndex})` }} /> <span>{selectedLabel}</span><ChevronDown size={16} aria-hidden /></>}
-      {variant === "icon" && <span className="sr-only">Change conversation color</span>}
+      {variant === "icon" ? <><Palette size={16} aria-hidden /><span aria-hidden data-tone-picker-dot style={{ background: colorFor(value ?? null) }} /></> : <><span aria-hidden data-tone-picker-swatch style={{ background: colorFor(value ?? null) }} /> <span>{selectedLabel}</span><ChevronDown size={16} aria-hidden /></>}
+      {variant === "icon" && <span className="sr-only">Change {label.toLowerCase()}</span>}
     </button>}
     <span className="sr-only" role="status">{pending ? "Saving…" : announcement}</span>
-    <div id={`${id}-panel`} style={position} data-tone-picker-panel role="dialog" aria-label="Conversation color" hidden={!open}>
-      <div id={`${id}-group`} role="radiogroup" aria-label="Conversation color" aria-describedby={`${id}-status`} aria-busy={pending}>
-        <span id={`${id}-heading`}>Conversation color</span>
-        <ToneOption option={options[0]} automaticIndex={automaticIndex} position={0} selected={checkedIndex === 0} focused={focusIndex === 0} pending={pending} onClick={select} onKeyDown={onOptionKeyDown} />
-        <div data-tone-picker-grid>{options.slice(1).map((option, offset) => <ToneOption key={option.index} option={option} automaticIndex={automaticIndex} position={offset + 1} selected={checkedIndex === offset + 1} focused={focusIndex === offset + 1} pending={pending} onClick={select} onKeyDown={onOptionKeyDown} />)}</div>
+    <div id={`${id}-panel`} style={position} data-tone-picker-panel role="dialog" aria-label={label} hidden={!open}>
+      <div id={`${id}-group`} role="radiogroup" aria-label={label} aria-describedby={`${id}-status`} aria-busy={pending}>
+        <span id={`${id}-heading`}>{label}</span>
+        <ToneOption option={options[0]} position={0} selected={checkedIndex === 0} focused={focusIndex === 0} pending={pending} swatchColor={colorFor} onClick={select} onKeyDown={onOptionKeyDown} />
+        <div data-tone-picker-grid>{options.slice(1).map((option, offset) => <ToneOption key={option.index} option={option} position={offset + 1} selected={checkedIndex === offset + 1} focused={focusIndex === offset + 1} pending={pending} swatchColor={colorFor} onClick={select} onKeyDown={onOptionKeyDown} />)}</div>
       </div>
       <p id={`${id}-status`}>{pending ? "Saving…" : ""}</p>
       {error && <p role="alert" data-tone-error>{error}</p>}
@@ -132,9 +139,8 @@ export function TonePicker({ id, seed, value, automaticIndex, disabled = false, 
   </div>;
 }
 
-function ToneOption({ option, automaticIndex, position, selected, focused, pending, onClick, onKeyDown }: { option: { index: number | null; label: string }; automaticIndex: number; position: number; selected: boolean; focused: boolean; pending: boolean; onClick(index: number | null): void; onKeyDown(event: KeyboardEvent<HTMLButtonElement>, position: number): void }) {
-  const swatchIndex = option.index ?? automaticIndex;
-  return <button type="button" role="radio" data-tone-option={option.index ?? "auto"} data-tone-option-index={position} aria-label={option.label} title={option.label} aria-checked={selected} aria-disabled={pending || undefined} tabIndex={focused ? 0 : -1} onClick={() => onClick(option.index)} onKeyDown={(event) => onKeyDown(event, position)} style={{ "--tone-swatch": `var(--peppy-avatar-${swatchIndex})` } as CSSProperties}>{option.index === null && <span>Automatic</span>}{selected && <Check size={14} aria-hidden />}</button>;
+function ToneOption({ option, position, selected, focused, pending, swatchColor, onClick, onKeyDown }: { option: { index: number | null; label: string }; position: number; selected: boolean; focused: boolean; pending: boolean; swatchColor(index: number | null): string; onClick(index: number | null): void; onKeyDown(event: KeyboardEvent<HTMLButtonElement>, position: number): void }) {
+  return <button type="button" role="radio" data-tone-option={option.index ?? "auto"} data-tone-option-index={position} aria-label={option.label} title={option.label} aria-checked={selected} aria-disabled={pending || undefined} tabIndex={focused ? 0 : -1} onClick={() => onClick(option.index)} onKeyDown={(event) => onKeyDown(event, position)} style={{ "--tone-swatch": swatchColor(option.index) } as CSSProperties}>{option.index === null && <span>{option.label}</span>}{selected && <Check size={14} aria-hidden />}</button>;
 }
 
 export type { TonePickerProps };

@@ -80,7 +80,7 @@ describe("InlineMedia duration metadata", () => {
     expect(video).toHaveAttribute("data-inline-media");
     expect(video).toHaveAttribute("data-media-kind", "video");
     expect(video).toHaveAttribute("data-attachment-id", "video-1");
-    expect(video).toHaveFocus();
+    await waitFor(() => expect(video).toHaveFocus());
 
     rerender(<InlineMedia attachment={videoAttachment({ remoteState: "removed_by_storage_policy", localAvailable: false })} requestOriginal={vi.fn()} checkOriginal={vi.fn()} />);
     const removed = screen.getByRole("status");

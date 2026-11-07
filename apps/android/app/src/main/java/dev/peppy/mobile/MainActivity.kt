@@ -121,6 +121,11 @@ import dev.peppy.mobile.security.rememberDeviceAuthenticator
 import dev.peppy.mobile.security.revealOwnerVaultSecret
 import dev.peppy.mobile.sms.SmsCaptureLifecycle
 import dev.peppy.mobile.sms.SmsTab
+import dev.peppy.mobile.sms.SyncDetailsRequests
+import dev.peppy.mobile.sms.StoppedSyncDetailsDialog
+import dev.peppy.mobile.sms.SyncDetailsRoute
+import dev.peppy.mobile.sms.syncDetailsRoute
+import dev.peppy.mobile.sms.syncStopped
 import dev.peppy.mobile.ui.InfoButton
 import dev.peppy.mobile.ui.ScreenBody
 import dev.peppy.mobile.ui.SystemRibbonHost
@@ -241,18 +246,18 @@ internal fun unlockMessage(result: UnlockResult): String = when (result) {
 @Composable
 internal fun syncMessage(status: GatewayStatus): String = when {
     status.syncPhase == SyncPhase.RECOVERY_REQUIRED -> when (status.recoveryReason) {
-        RecoveryReason.PRODUCER_CONFLICT -> "Stopped: the server reports this device's updates conflict with an earlier install. Pair this phone again as a new device."
-        RecoveryReason.DATABASE_MISSING -> "Stopped: this phone's encrypted message database is missing, so it cannot safely continue. Nothing will be sent. Pair this phone again as a new device."
-        else -> "Stopped: this credential was already used by an earlier install. Pair this phone again as a new device."
+        RecoveryReason.PRODUCER_CONFLICT -> "Sync stopped. This phone's updates conflict with an earlier install. Set it up again as a new device."
+        RecoveryReason.DATABASE_MISSING -> "Sync stopped. This phone's message storage is missing, so nothing will be sent. Set it up again as a new device."
+        else -> "Sync stopped. This phone's sign-in was already used by an earlier install. Set it up again as a new device."
     }
-    status.outboxRejection != null -> "Stopped: the server permanently rejected a queued update (${status.outboxRejection}). Sending and uploads are paused; pair this phone again."
-    status.softRejection != null -> "Uploads paused after a server error (${status.softRejection.code}); retrying automatically" +
+    status.outboxRejection != null -> "Sync stopped. The server refused an update (${status.outboxRejection}). Sending and uploads are paused. Set this phone up again."
+    status.softRejection != null -> "Server error (${status.softRejection.code}). Trying again automatically" +
         (System.currentTimeMillis() - status.softRejection.firstSeenMs).let { ageMs ->
             if (ageMs < 3_600_000L) "." else " (since ~${(ageMs + 1_800_000L) / 3_600_000L} h)."
         }
     !status.sharedKeysReady -> stringResource(R.string.peppy_not_unlocked)
-    status.syncPhase == SyncPhase.LIVE -> "Live"
-    else -> "Importing vault history (no texts are sent until this finishes)"
+    status.syncPhase == SyncPhase.LIVE -> stringResource(R.string.peppy_toggle_android_sync_ready)
+    else -> "Getting ready. Your texts will show on your other devices when this finishes."
 }
 
 internal data class SubscriptionSelection(
@@ -348,7 +353,9 @@ private fun CompanionScreen(activity: ComponentActivity) {
     }
     var appFiltersOpen by remember { mutableStateOf(false) }
     var smsDetailsOpen by remember { mutableStateOf(false) }
+    var contactsDetailsOpen by remember { mutableStateOf(false) }
     var accountDetailsOpen by remember { mutableStateOf(false) }
+    var stoppedSyncDetailsOpen by remember { mutableStateOf(false) }
     val accountTabRequested by AccountTabRequests.state.collectAsState()
     LaunchedEffect(accountTabRequested) {
         if (accountTabRequested) {
@@ -356,6 +363,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
             settingsOpen = false
             appFiltersOpen = false
             smsDetailsOpen = false
+            contactsDetailsOpen = false
             accountDetailsOpen = false
             destination = "account"
         }
@@ -422,6 +430,13 @@ private fun CompanionScreen(activity: ComponentActivity) {
 
     LaunchedEffect(status?.enrolled) {
         if (status?.enrolled != true) appFiltersOpen = false
+    }
+    LaunchedEffect(status?.enrolled, status?.origin, syncStopped(status)) {
+        if (status?.enrolled != true || !syncStopped(status)) stoppedSyncDetailsOpen = false
+    }
+
+    status?.takeIf { stoppedSyncDetailsOpen && it.enrolled && syncStopped(it) }?.let {
+        StoppedSyncDetailsDialog(it, onDismiss = { stoppedSyncDetailsOpen = false })
     }
 
     if (addPhoneOpen && ownerPhoneActions != null) {
@@ -490,7 +505,22 @@ private fun CompanionScreen(activity: ComponentActivity) {
 
     if (appFiltersOpen && !settingsOpen && !subscriptionOpen && status?.enrolled == true) {
         Column(Modifier.fillMaxSize()) {
-            val ribbonVisible = SystemRibbonHost(enrolled = true, unlocked = status?.sharedKeysReady == true) { subscriptionOpen = true }
+            val ribbonVisible = SystemRibbonHost(
+                enrolled = true,
+                unlocked = status?.sharedKeysReady == true,
+                syncStopped = syncStopped(status),
+                onOpenSyncDetails = {
+                    settingsOpen = false
+                    subscriptionOpen = false
+                    appFiltersOpen = false
+                    destination = "sms"
+                    when (syncDetailsRoute(requireNotNull(status))) {
+                        SyncDetailsRoute.SMS -> SyncDetailsRequests.request()
+                        SyncDetailsRoute.STOPPED_DETAILS -> stoppedSyncDetailsOpen = true
+                    }
+                },
+                onOpenSubscription = { subscriptionOpen = true },
+            )
             Box(Modifier.weight(1f).belowSystemRibbon(ribbonVisible)) {
                 NotificationAppFiltersScreen(onBack = {
                     appFiltersOpen = false
@@ -506,7 +536,22 @@ private fun CompanionScreen(activity: ComponentActivity) {
     }
 
     Column(Modifier.fillMaxSize()) {
-        val ribbonVisible = SystemRibbonHost(enrolled = status?.enrolled == true, unlocked = status?.sharedKeysReady == true) { subscriptionOpen = true }
+        val ribbonVisible = SystemRibbonHost(
+            enrolled = status?.enrolled == true,
+            unlocked = status?.sharedKeysReady == true,
+            syncStopped = syncStopped(status),
+            onOpenSyncDetails = {
+                settingsOpen = false
+                subscriptionOpen = false
+                appFiltersOpen = false
+                destination = "sms"
+                when (syncDetailsRoute(requireNotNull(status))) {
+                    SyncDetailsRoute.SMS -> SyncDetailsRequests.request()
+                    SyncDetailsRoute.STOPPED_DETAILS -> stoppedSyncDetailsOpen = true
+                }
+            },
+            onOpenSubscription = { subscriptionOpen = true },
+        )
         Scaffold(
             modifier = Modifier.weight(1f).belowSystemRibbon(ribbonVisible),
             topBar = {
@@ -520,7 +565,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
                 )
             },
             bottomBar = {
-                if (status?.enrolled == true && status?.sharedKeysReady == true && !settingsOpen && !subscriptionOpen && !smsDetailsOpen && !accountDetailsOpen) NavigationBar(Modifier.testTag("bottom-navigation")) {
+                if (status?.enrolled == true && status?.sharedKeysReady == true && !settingsOpen && !subscriptionOpen && !smsDetailsOpen && !contactsDetailsOpen && !accountDetailsOpen) NavigationBar(Modifier.testTag("bottom-navigation")) {
                     listOf("mirroring" to R.string.peppy_mirroring, "sms" to R.string.peppy_sms, "contacts" to R.string.peppy_permissions_contacts, "account" to R.string.peppy_account).forEach { (route, labelRes) ->
                         val label = stringResource(labelRes)
                         val icon = when (route) { "mirroring" -> Icons.Default.Notifications; "sms" -> Icons.Default.Sms; "contacts" -> Icons.Default.Contacts; else -> Icons.Default.Person }
@@ -531,6 +576,9 @@ private fun CompanionScreen(activity: ComponentActivity) {
         ) { innerPadding ->
             Column(Modifier.fillMaxSize().padding(innerPadding)) {
                 val scrollState = rememberScrollState()
+                LaunchedEffect(destination) { scrollState.scrollTo(0) }
+                LaunchedEffect(contactsDetailsOpen) { scrollState.scrollTo(0) }
+                LaunchedEffect(smsDetailsOpen) { scrollState.scrollTo(0) }
                 Column(
                     Modifier.fillMaxSize().verticalScroll(scrollState).then(
                         if (status?.enrolled == true && status?.sharedKeysReady == true) Modifier else Modifier.padding(24.dp),
@@ -566,8 +614,8 @@ private fun CompanionScreen(activity: ComponentActivity) {
                                 }
                             },
                             signInError = when (subscriptionRouteState.feedback) {
-                                SubscriptionRouteFeedback.STORAGE -> context.getString(R.string.peppy_play_session_storage_failed)
-                                SubscriptionRouteFeedback.SIGN_IN -> context.getString(R.string.peppy_production_signin_failed)
+                                SubscriptionRouteFeedback.STORAGE -> stringResource(R.string.peppy_play_session_storage_failed)
+                                SubscriptionRouteFeedback.SIGN_IN -> stringResource(R.string.peppy_production_signin_failed)
                                 null -> null
                             },
                         )
@@ -644,6 +692,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
                     context = context,
                     refresh = refresh,
                     onChanged = { refresh++ },
+                    onDetailsChanged = { contactsDetailsOpen = it },
                 )
             }
             if (!subscriptionOpen && !settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "account") GatewayAccountSettings(onChanged = { refresh++ }, onOpenSettings = { settingsOpen = true }, onOpenSubscription = { subscriptionOpen = true }, onAddPhone = {

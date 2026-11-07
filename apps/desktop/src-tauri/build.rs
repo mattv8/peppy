@@ -81,6 +81,8 @@ const COMMANDS: &[&str] = &[
     "open_login_items",
     "get_notification_sound",
     "set_notification_sound",
+    "get_notification_persistence",
+    "set_notification_persistence",
     "popout_conversation",
     "acknowledge_lifecycle",
     "hosted_account",

@@ -82,6 +82,31 @@ chmod +x "$target/debug/peppy-server"
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(sentinel.read_text(), 'do not overwrite')
 
+    def test_build_refreshes_old_source_mtime_without_changing_retained_cache(self):
+        source_payload = self.source / 'payload'
+        source_mtime = 100
+        cache_mtime = 200
+        os.utime(source_payload, (source_mtime, source_mtime))
+        workspace = Path(self.env['PEPPY_WORKSPACE'])
+        fingerprint = workspace / 'target/fingerprint'
+        fingerprint.parent.mkdir(parents=True)
+        fingerprint.write_text('retained build cache')
+        os.utime(fingerprint, (cache_mtime, cache_mtime))
+
+        result = self.run_runner(
+            'build', 'server', env=self.env | {'CARGO_TARGET_DIR': 'target'},
+            timeout=RUNNER_TIMEOUT,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        copied_payload = workspace / 'payload'
+        self.assertEqual(copied_payload.read_text(), 'one')
+        self.assertGreater(copied_payload.stat().st_mtime, cache_mtime)
+        self.assertEqual(fingerprint.read_text(), 'retained build cache')
+        self.assertEqual(fingerprint.stat().st_mtime, cache_mtime)
+        self.assertEqual(source_payload.read_text(), 'one')
+        self.assertEqual(source_payload.stat().st_mtime, source_mtime)
+
     def test_serve_builds_migrates_then_serves_from_relative_target_runtime_copy(self):
         result = self.run_runner('serve', env=self.env | {'CARGO_TARGET_DIR': 'custom-target'})
         self.assertEqual(result.returncode, 0, result.stderr)

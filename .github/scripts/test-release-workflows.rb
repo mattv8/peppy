@@ -10,6 +10,7 @@ require 'yaml'
 root = File.expand_path('..', __dir__)
 load_workflow = ->(name) { YAML.load_file(File.join(root, 'workflows', name)) }
 assert = ->(condition, message) { abort(message) unless condition }
+immutable_action_ref = ->(uses, action) { uses.is_a?(String) && uses.match?(/\A#{Regexp.escape(action)}@[0-9a-f]{40}\z/) }
 
 ci = load_workflow.call('ci.yml')
 ci_jobs = ci.fetch('jobs')
@@ -30,6 +31,7 @@ assert.call(google_messages_gate && google_messages_gate.fetch('env') == { 'GOOG
   assert.call(status.success? == expected, "Google Messages Go gate mishandled #{result} with required=#{required}")
 end
 assert.call(ci_jobs.fetch('desktop').fetch('timeout-minutes') == 60, 'public CI desktop must allow 60 minutes uniformly for native cold-cache builds')
+assert.call(ci_jobs.fetch('android').fetch('timeout-minutes') == 45, 'public CI Android must allow 45 minutes for uncached native builds before Gradle lint and packaging')
 ci_text = File.read(File.join(root, 'workflows', 'ci.yml'))
 assert.call(ci_jobs.key?('notify-hosted-production'), 'public CI must dispatch verified hosted production evidence')
 assert.call(!ci_text.include?('create-github-app-token'), 'public CI must not mint an App token')
@@ -439,8 +441,8 @@ verify_step = publisher_steps.find { |step| step['run'] == 'bash infra/release/v
 assert.call(!verify_step.nil?, 'publisher must independently verify staged Android signatures')
 assert.call(verify_step.fetch('env').fetch('PEPPY_ANDROID_SIGNING_CERT_SHA256') == "${{ inputs.trusted_update_build && vars.PEPPY_ANDROID_SIGNING_CERT_SHA256 || '' }}", 'publisher must use the protected certificate fingerprint')
 assert.call(verify_step.fetch('env').fetch('VERSION') == '${{ inputs.version }}', 'publisher Android verification must receive the release version')
-publisher_java = publisher_steps.find { |step| step['uses'] == 'actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3' }
-assert.call(!publisher_java.nil?, 'publisher must select JDK 17 before Android signature verification')
+publisher_java = publisher_steps.find { |step| immutable_action_ref.call(step['uses'], 'actions/setup-java') }
+assert.call(!publisher_java.nil?, 'publisher must select JDK 17 via an immutable setup-java commit SHA before Android signature verification')
 assert.call(publisher_java.fetch('with') == { 'distribution' => 'temurin', 'java-version' => '17' }, 'publisher must use pinned Temurin JDK 17')
 assert.call(publisher_steps.index(publisher_java) < publisher_steps.index(verify_step), 'publisher JDK setup must precede Android signature verification')
 publisher_stage = publisher_steps.find { |step| step['run'] == 'infra/release/stage-assets.sh --group android "$VERSION" "$CHANNEL" dist/download dist/release' }
@@ -504,7 +506,7 @@ end
 release_tooling = ci_jobs.fetch('release-tooling')
 assert.call(release_tooling.fetch('timeout-minutes') == 20, 'release tooling needs Android fixture installation headroom')
 release_tooling_steps = release_tooling.fetch('steps')
-release_tooling_java = release_tooling_steps.find { |step| step['uses'] == 'actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3' }
+release_tooling_java = release_tooling_steps.find { |step| immutable_action_ref.call(step['uses'], 'actions/setup-java') }
 release_tooling_sdk = release_tooling_steps.find { |step| step['name'] == 'Install Android signing test SDK tools' }
 assert.call(!release_tooling_java.nil? && release_tooling_java.fetch('with') == { 'distribution' => 'temurin', 'java-version' => '17' }, 'release tooling must install Temurin JDK 17')
 assert.call(!release_tooling_sdk.nil? && release_tooling_sdk.fetch('run').include?('platforms;android-35') && release_tooling_sdk.fetch('run').include?('build-tools;35.0.0'), 'release tooling must install the Android signing test SDK platform and build tools')

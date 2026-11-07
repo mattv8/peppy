@@ -68,14 +68,15 @@ select:focus-visible {
 [data-tone-picker-panel] [role="radiogroup"] > span { display: block; margin-bottom: 4px; color: var(--peppy-text-secondary); font-size: 11px; font-weight: 700; }
 [data-tone-option] { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 1px solid color-mix(in srgb, var(--peppy-text-primary) 18%, transparent); border-radius: 50%; background: var(--tone-swatch); color: var(--peppy-avatar-glyph); }
 [data-tone-option="auto"] { display: flex; justify-content: flex-start; gap: 6px; width: 100%; margin-bottom: 8px; padding: 0 6px; border-radius: var(--peppy-control-radius); background: var(--tone-swatch); }
+[data-tone-option="auto"] svg { margin-left: auto; }
 [data-tone-option][aria-checked="true"] { box-shadow: 0 0 0 2px var(--peppy-text-primary), 0 0 0 4px var(--peppy-glass-surface); }
 [data-tone-option]:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 3px; }
-[data-tone-option]:hover { box-shadow: 0 0 0 2px var(--peppy-surface-hover); }
+[data-tone-option]:not([aria-checked="true"]):hover { box-shadow: 0 0 0 2px var(--peppy-surface-hover); }
 [data-tone-option][aria-disabled="true"] { opacity: .6; cursor: progress; }
 [data-tone-picker-panel] p:empty { margin: 0; }
 [data-tone-picker-grid] { display: grid; grid-template-columns: repeat(6, 28px); justify-content: space-between; gap: 8px; }
 @media (max-width: 600px) { [data-tone-picker-grid] { grid-template-columns: repeat(6, 32px); } [data-tone-picker-grid] [data-tone-option] { width: 32px; height: 32px; } [data-tone-option="auto"] { height: 32px; } }
-@media (forced-colors: active) { [data-tone-picker-panel] { border-color: CanvasText; background: Canvas; box-shadow: none; } [data-tone-option] { forced-color-adjust: none; } [data-tone-option][aria-checked="true"] { outline-color: Highlight; } }
+@media (forced-colors: active) { [data-tone-picker-panel] { border-color: CanvasText; background: Canvas; box-shadow: none; } [data-tone-option], [data-tone-picker-swatch], [data-tone-picker-dot] { forced-color-adjust: none; } [data-tone-option][aria-checked="true"] { outline-color: Highlight; } }
 .titlebar {
   container: titlebar / inline-size;
   position: relative;
@@ -540,6 +541,13 @@ select:focus-visible {
   text-align: left;
 }
 .conversation-select { display: flex; width: 100%; min-width: 0; height: 100%; align-items: center; gap: 8px; padding: 8px; border: 0; background: transparent; color: inherit; text-align: left; }
+.conversation-pin.conversation-pin-leading { position: absolute; z-index: 1; top: 6px; left: 46px; display: grid; width: 24px; height: 24px; padding: 4px 0 0 2px; place-items: center; color: var(--peppy-accent); pointer-events: auto; }
+.conversation-pin-leading .conversation-unpin-icon { display: none; }
+@media (hover: hover) and (pointer: fine) {
+  .conversation-pin-leading:not(:disabled):hover .conversation-pin-icon { display: none; }
+  .conversation-pin-leading:not(:disabled):hover .conversation-unpin-icon { display: block; }
+  .conversation-pin-leading:not(:disabled):hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
+}
 [data-conversation-actions] { position: absolute; inset-block: 0; right: 6px; display: flex; align-items: center; gap: 2px; background: var(--conversation-row-surface); opacity: 0; pointer-events: none; transition: opacity var(--peppy-duration-fast) var(--peppy-ease-out); }
 [data-conversation-actions]::before { position: absolute; top: 0; right: 100%; width: 24px; height: 100%; background: linear-gradient(to right, transparent, var(--conversation-row-surface)); content: ""; opacity: 0; pointer-events: none; transition: opacity var(--peppy-duration-fast) var(--peppy-ease-out); }
 .conversation-pin, .conversation-popout, .conversation-folder-action, .conversation-delete { width: 28px; height: 28px; flex: 0 0 28px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--peppy-text-secondary); pointer-events: none; }
@@ -548,7 +556,7 @@ select:focus-visible {
 .conversation-row:hover [data-conversation-actions] > button, .conversation-row:has(:focus-visible) [data-conversation-actions] > button, .conversation-row:has(.conversation-pin.pending) [data-conversation-actions] > button, .conversation-row:has(.conversation-folder-action.pending) [data-conversation-actions] > button, .conversation-row:has(.conversation-folder-action[aria-expanded="true"]) [data-conversation-actions] > button, .conversation-row:has(.conversation-delete.confirming) [data-conversation-actions] > button, .conversation-row:has(.conversation-delete:disabled) [data-conversation-actions] > button { pointer-events: auto; }
 .conversation-row:hover [data-conversation-actions]::before, .conversation-row:has(:focus-visible) [data-conversation-actions]::before, .conversation-row:has(.conversation-pin.pending) [data-conversation-actions]::before, .conversation-row:has(.conversation-folder-action.pending) [data-conversation-actions]::before, .conversation-row:has(.conversation-folder-action[aria-expanded="true"]) [data-conversation-actions]::before, .conversation-row:has(.conversation-delete.confirming) [data-conversation-actions]::before { opacity: 1; }
 .conversation-select:focus-visible, .conversation-pin:focus-visible, .conversation-popout:focus-visible, .conversation-folder-action:focus-visible, .conversation-delete:focus-visible { outline-offset: -2px; }
-.conversation-pin:hover, .conversation-popout:hover, .conversation-folder-action:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
+.conversation-pin:not(.conversation-pin-leading):hover, .conversation-popout:hover, .conversation-folder-action:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
 .conversation-folder-action[aria-expanded="true"] { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
 .conversation-pin:disabled:not(.pending), .conversation-folder-action:disabled:not(.pending) { opacity: .4; }
 .conversation-delete { color: var(--peppy-text-secondary); }
@@ -561,6 +569,12 @@ select:focus-visible {
 .conversation-row:has(.conversation-delete.confirming) .unread { opacity: 0; }
 .conversation-copy .conversation-delete-warning { position: absolute; z-index: 1; inset-inline: 8px 32px; top: 50%; display: block; overflow: visible; padding: 0; background: var(--conversation-row-surface); color: var(--peppy-warning-text); font-size: 12px; line-height: 14px; text-overflow: clip; transform: translateY(-50%); white-space: normal; }
 @media (hover: none), (pointer: coarse) {
+  .conversation-pin.conversation-pin-leading { top: 6px; left: 48px; width: 44px; height: 44px; padding: 8px 0 0 5px; place-items: start; }
+  .conversation-row:has(.conversation-pin-leading) { height: auto; min-height: 56px; flex-wrap: wrap; }
+  .conversation-row:has(.conversation-pin-leading) .conversation-select { height: 56px; flex: 1 0 160px; }
+  .conversation-row:has(.conversation-pin-leading) [data-conversation-actions] { margin-left: auto; }
+  .conversation-row:has(.conversation-pin-leading) .conversation-pin-marker-placeholder { margin-right: 26px; }
+  .conversation-row:has(.conversation-pin-leading) .conversation-copy small { padding-left: 40px; }
   .conversation-select { width: auto; min-width: 0; flex: 1; }
   [data-conversation-actions] { position: static; flex: none; background: transparent; opacity: 1; }
   [data-conversation-actions]::before { display: none; }
@@ -611,6 +625,12 @@ select:focus-visible {
   font-size: 12px;
 }
 .conversation-pin-marker { display: inline-grid; width: 14px; height: 14px; margin-right: 4px; vertical-align: -2px; place-items: center; color: var(--peppy-accent); }
+.conversation-pin-marker-placeholder { display: inline-block; width: 14px; height: 14px; margin-right: 4px; vertical-align: -2px; }
+@media (forced-colors: active) {
+  .conversation-pin.conversation-pin-leading { color: ButtonText; }
+  .conversation-pin.conversation-pin-leading:disabled { color: GrayText; }
+  .conversation-pin.conversation-pin-leading:focus-visible { outline-color: Highlight; }
+}
 .unread {
   min-width: 18px;
   padding: 2px 5px;
