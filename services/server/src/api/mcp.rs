@@ -221,6 +221,7 @@ async fn revoke_worker_device(worker: &McpWorkerClient, vault_id: Uuid, device_i
 
 mod oauth;
 mod protocol;
+mod webhooks;
 
 pub(super) fn routes() -> Router<ApiState> {
     Router::new()
@@ -230,6 +231,7 @@ pub(super) fn routes() -> Router<ApiState> {
         .route("/v1/mcp/device/complete", post(complete))
         .route("/v1/mcp/grants", get(grants))
         .route("/v1/mcp/grants/{grant_id}/revoke", post(revoke_grant))
+        .merge(webhooks::routes())
         .merge(oauth::routes())
         .merge(protocol::routes())
 }
@@ -901,29 +903,38 @@ pub(super) async fn worker_request(
     worker_request_with(worker, path, body).await
 }
 
+pub(super) async fn webhook_worker_request(
+    state: &ApiState,
+    body: &serde_json::Value,
+) -> ApiResult<serde_json::Value> {
+    let worker = state
+        .mcp_worker
+        .as_ref()
+        .ok_or(ApiError(StatusCode::CONFLICT, "mcp_device_required"))?;
+    worker_request_with_error_mapping(worker, "/internal/mcp/webhooks", body, true).await
+}
+
 async fn worker_request_with(
     worker: &McpWorkerClient,
     path: &str,
     body: &serde_json::Value,
 ) -> ApiResult<serde_json::Value> {
-    const PATHS: &[&str] = &[
-        "/internal/mcp/prepare",
-        "/internal/mcp/activate",
-        "/internal/mcp/complete",
-        "/internal/mcp/status",
-        "/internal/mcp/revoke",
-        "/internal/mcp/cancel",
-        "/internal/mcp/call",
-    ];
-    const MAX_CONTROL_BODY: usize = 64 * 1024;
-    const MAX_CALL_BODY: usize = 4 * 1024 * 1024;
-    let max_body = if path == "/internal/mcp/call" {
-        MAX_CALL_BODY
-    } else {
-        MAX_CONTROL_BODY
+    worker_request_with_error_mapping(worker, path, body, false).await
+}
+
+async fn worker_request_with_error_mapping(
+    worker: &McpWorkerClient,
+    path: &str,
+    body: &serde_json::Value,
+    webhook_errors: bool,
+) -> ApiResult<serde_json::Value> {
+    let Some(max_body) = worker_request_limit(path) else {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "mcp_worker_request_invalid",
+        ));
     };
-    if !PATHS.contains(&path) || serde_json::to_vec(body).map_or(true, |body| body.len() > max_body)
-    {
+    if serde_json::to_vec(body).map_or(true, |body| body.len() > max_body) {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "mcp_worker_request_invalid",
@@ -940,11 +951,7 @@ async fn worker_request_with(
         .url
         .join(path.trim_start_matches('/'))
         .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "mcp_unavailable"))?;
-    let timeout = if matches!(path, "/internal/mcp/call" | "/internal/mcp/complete") {
-        Duration::from_secs(30)
-    } else {
-        Duration::from_secs(5)
-    };
+    let timeout = worker_request_timeout(path).expect("allowlisted path has a timeout");
     let response = worker
         .client
         .post(url)
@@ -955,28 +962,30 @@ async fn worker_request_with(
         .await
         .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "mcp_worker_unavailable"))?;
     if !response.status().is_success() {
+        if webhook_errors {
+            let status = response.status();
+            let body = bounded_response_body(response, 4 * 1024).await?;
+            return Err(webhook_worker_error(status, &body));
+        }
         return Err(ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "mcp_worker_unavailable",
         ));
     }
+    let response_limit = if webhook_errors {
+        2 * 1024 * 1024
+    } else {
+        max_body
+    };
     if response
         .content_length()
-        .is_some_and(|length| length > max_body as u64)
+        .is_some_and(|length| length > response_limit as u64)
     {
         return Err(ApiError(StatusCode::BAD_GATEWAY, "mcp_worker_invalid"));
     }
     let status = response.status();
-    let mut stream = response.bytes_stream();
-    let mut bytes = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "mcp_worker_invalid"))?;
-        if bytes.len().saturating_add(chunk.len()) > max_body {
-            return Err(ApiError(StatusCode::BAD_GATEWAY, "mcp_worker_invalid"));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    if matches!(path, "/internal/mcp/revoke" | "/internal/mcp/cancel")
+    let bytes = bounded_response_body(response, response_limit).await?;
+    if (matches!(path, "/internal/mcp/revoke" | "/internal/mcp/cancel") || webhook_errors)
         && status == StatusCode::NO_CONTENT
         && bytes.is_empty()
     {
@@ -986,12 +995,86 @@ async fn worker_request_with(
         .map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "mcp_worker_invalid"))
 }
 
+fn worker_request_limit(path: &str) -> Option<usize> {
+    match path {
+        "/internal/mcp/call" => Some(4 * 1024 * 1024),
+        "/internal/mcp/prepare"
+        | "/internal/mcp/activate"
+        | "/internal/mcp/complete"
+        | "/internal/mcp/status"
+        | "/internal/mcp/revoke"
+        | "/internal/mcp/cancel"
+        | "/internal/mcp/webhooks" => Some(64 * 1024),
+        _ => None,
+    }
+}
+
+fn worker_request_timeout(path: &str) -> Option<Duration> {
+    match path {
+        "/internal/mcp/call" | "/internal/mcp/complete" => Some(Duration::from_secs(30)),
+        "/internal/mcp/webhooks" => Some(Duration::from_secs(20)),
+        "/internal/mcp/prepare"
+        | "/internal/mcp/activate"
+        | "/internal/mcp/status"
+        | "/internal/mcp/revoke"
+        | "/internal/mcp/cancel" => Some(Duration::from_secs(5)),
+        _ => None,
+    }
+}
+
+async fn bounded_response_body(response: reqwest::Response, limit: usize) -> ApiResult<Vec<u8>> {
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "mcp_worker_invalid"))?;
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err(ApiError(StatusCode::BAD_GATEWAY, "mcp_worker_invalid"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn webhook_worker_error(status: StatusCode, body: &[u8]) -> ApiError {
+    #[derive(Deserialize)]
+    struct WorkerError {
+        code: String,
+    }
+
+    let Ok(WorkerError { code }) = serde_json::from_slice(body) else {
+        return ApiError(StatusCode::BAD_GATEWAY, "mcp_worker_invalid");
+    };
+    let allowed_code = match code.as_str() {
+        "webhook_url_invalid" => "webhook_url_invalid",
+        "webhook_url_insecure" => "webhook_url_insecure",
+        "webhook_url_blocked" => "webhook_url_blocked",
+        "webhook_name_invalid" => "webhook_name_invalid",
+        "webhook_filter_invalid" => "webhook_filter_invalid",
+        "webhook_limit" => "webhook_limit",
+        "webhook_not_found" => "webhook_not_found",
+        "mcp_unavailable" => "mcp_unavailable",
+        "mcp_device_required" => "mcp_device_required",
+        _ => return ApiError(StatusCode::BAD_GATEWAY, "mcp_worker_invalid"),
+    };
+    if matches!(
+        status,
+        StatusCode::BAD_REQUEST
+            | StatusCode::NOT_FOUND
+            | StatusCode::CONFLICT
+            | StatusCode::SERVICE_UNAVAILABLE
+    ) {
+        ApiError(status, allowed_code)
+    } else {
+        ApiError(StatusCode::BAD_GATEWAY, "mcp_worker_invalid")
+    }
+}
+
 #[cfg(test)]
 mod worker_wire_tests {
     use super::*;
 
     #[tokio::test]
-    async fn worker_accepts_only_revoke_empty_204_and_rejects_error_json() {
+    async fn worker_rejects_invalid_responses_and_maps_status_failures_to_unavailable() {
         let temp = tempfile::tempdir().unwrap();
         let token_file = temp.path().join("worker-token");
         std::fs::write(&token_file, "test-worker-control-token").unwrap();
@@ -1006,10 +1089,12 @@ mod worker_wire_tests {
                     "empty204" => StatusCode::NO_CONTENT,
                     "empty200" => StatusCode::OK,
                     "error" => StatusCode::BAD_REQUEST,
+                    "webhookError" => StatusCode::CONFLICT,
                     _ => StatusCode::OK,
                 };
                 let body = match body["response"].as_str().unwrap() {
                     "error" => "{\"error\":\"rejected\"}",
+                    "webhookError" => "{\"code\":\"webhook_limit\"}",
                     "malformed" => "not json",
                     _ => "",
                 };
@@ -1030,11 +1115,26 @@ mod worker_wire_tests {
         .await
         .unwrap();
         assert_eq!(response, serde_json::Value::Null);
+        let error = worker_request_with_error_mapping(
+            &worker,
+            "/internal/mcp/webhooks",
+            &serde_json::json!({"response":"webhookError"}),
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(error.1, "webhook_limit");
         for (path, response, expected) in [
             ("/internal/mcp/status", "empty204", StatusCode::BAD_GATEWAY),
             ("/internal/mcp/revoke", "empty200", StatusCode::BAD_GATEWAY),
             ("/internal/mcp/status", "malformed", StatusCode::BAD_GATEWAY),
             ("/internal/mcp/revoke", "malformed", StatusCode::BAD_GATEWAY),
+            (
+                "/internal/mcp/status",
+                "error",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
             (
                 "/internal/mcp/revoke",
                 "error",
@@ -1048,5 +1148,61 @@ mod worker_wire_tests {
             assert_eq!(error.0, expected, "{path} {response}");
         }
         server.abort();
+    }
+
+    #[test]
+    fn webhook_worker_errors_pass_through_only_allowlisted_codes() {
+        for (code, status) in [
+            ("webhook_url_invalid", StatusCode::BAD_REQUEST),
+            ("webhook_url_insecure", StatusCode::BAD_REQUEST),
+            ("webhook_url_blocked", StatusCode::BAD_REQUEST),
+            ("webhook_name_invalid", StatusCode::BAD_REQUEST),
+            ("webhook_filter_invalid", StatusCode::BAD_REQUEST),
+            ("webhook_limit", StatusCode::CONFLICT),
+            ("webhook_not_found", StatusCode::NOT_FOUND),
+            ("mcp_unavailable", StatusCode::SERVICE_UNAVAILABLE),
+            ("mcp_device_required", StatusCode::CONFLICT),
+        ] {
+            let error = webhook_worker_error(status, format!(r#"{{"code":"{code}"}}"#).as_bytes());
+            assert_eq!(error.0, status, "{code}");
+            assert_eq!(error.1, code);
+        }
+
+        for (status, body) in [
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"code":"unexpected"}"#.as_slice(),
+            ),
+            (StatusCode::BAD_REQUEST, b"not json".as_slice()),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                br#"{"code":"webhook_limit"}"#.as_slice(),
+            ),
+        ] {
+            let error = webhook_worker_error(status, body);
+            assert_eq!(error.0, StatusCode::BAD_GATEWAY);
+            assert_eq!(error.1, "mcp_worker_invalid");
+        }
+    }
+
+    #[test]
+    fn worker_request_configuration_allows_webhooks_with_control_limits() {
+        assert_eq!(
+            worker_request_limit("/internal/mcp/webhooks"),
+            Some(64 * 1024)
+        );
+        assert_eq!(
+            worker_request_timeout("/internal/mcp/webhooks"),
+            Some(Duration::from_secs(20))
+        );
+        assert_eq!(
+            worker_request_limit("/internal/mcp/call"),
+            Some(4 * 1024 * 1024)
+        );
+        assert_eq!(
+            worker_request_timeout("/internal/mcp/status"),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(worker_request_limit("/internal/mcp/not-a-route"), None);
     }
 }

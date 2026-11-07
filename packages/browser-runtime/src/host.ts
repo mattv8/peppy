@@ -14,7 +14,7 @@ import { AccountAccessDriver } from "./account-access.js";
 import { DraftTransport } from "./drafts.js";
 import type { AccountAccessResult } from "@peppy/generated/account-access";
 import type { AttachmentRetentionStatusResult } from "@peppy/generated/attachment-retention";
-import type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceStatus, McpGrantView, McpScope } from "@peppy/generated/mcp";
+import type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceStatus, McpGrantView, McpScope, WebhookCreated, WebhookEvent, WebhookFilterEntry, WebhookFilterMode, WebhookInput, WebhookList, WebhookSecret, WebhookTestResult, WebhookView } from "@peppy/generated/mcp";
 
 const MAX_RPC_BYTES = 1024 * 1024;
 const MAX_CONTACT_ADDRESSES = 500;
@@ -23,6 +23,16 @@ const MAX_PREVIEWS_PER_HISTORY_PAGE = 12;
 const MAX_ATTACHMENT_RETENTION_STATES_PER_PROJECTION = 100;
 const MAX_INLINE_MEDIA_BYTES = 32 * 1024 * 1024;
 const MAX_MEDIA_SYNC_ATTACHMENTS = 32;
+const MAX_WEBHOOK_INPUT_BYTES = 64 * 1024;
+const MAX_WEBHOOK_FILTER_ENTRIES = 50;
+const MAX_WEBHOOK_URL_BYTES = 2048;
+const MAX_WEBHOOK_NAME_BYTES = 320;
+const MAX_WEBHOOK_ADDRESS_BYTES = 64;
+const MAX_WEBHOOK_FIELD_BYTES = 128;
+const WEBHOOK_INPUT_KEYS = ["name", "url", "events", "filterMode", "filter", "paused"];
+const WEBHOOK_FILTER_ENTRY_KEYS = ["address", "label", "contactId", "bookId"];
+const WEBHOOK_EVENTS: readonly WebhookEvent[] = ["message.received"];
+const WEBHOOK_FILTER_MODES: readonly WebhookFilterMode[] = ["all", "only", "except"];
 const OWNER_NAME = "peppy-browser-v1";
 const SEARCH_INDEX_DELAY_MS = 1_000;
 const SEARCH_INDEX_MAX_RETRIES = 3;
@@ -105,6 +115,13 @@ export interface BrowserNetwork {
   mcpEnable(): Promise<McpDeviceStatus>;
   mcpGrants(): Promise<McpGrantView[]>;
   mcpRevokeGrant(id: string): Promise<void>;
+  webhooksList(): Promise<WebhookList>;
+  webhookCreate(input: WebhookInput): Promise<WebhookCreated>;
+  webhookUpdate(id: string, input: WebhookInput): Promise<WebhookView>;
+  webhookDelete(id: string): Promise<void>;
+  webhookRevealSecret(id: string): Promise<WebhookSecret>;
+  webhookRotateSecret(id: string): Promise<WebhookSecret>;
+  webhookTest(id: string): Promise<WebhookTestResult>;
   mcpAuthorization(id: string): Promise<McpAuthorizationView>;
   mcpApproveAuthorization(id: string, scopes: McpScope[]): Promise<McpAuthorizationDecision>;
   mcpDenyAuthorization(id: string): Promise<McpAuthorizationDecision>;
@@ -1083,10 +1100,10 @@ export class BrowserWorkerHost {
       if (response.ok && request.command === "revoke_device") this.changed();
       return;
     }
-    if (request.command.startsWith("mcp_")) {
+    if (request.command.startsWith("mcp_") || request.command === "webhooks_list" || request.command.startsWith("webhook_")) {
       const response = await this.mcpManagement(request);
       port.postMessage(response);
-      if (response.ok && !["mcp_status", "mcp_grants", "mcp_authorization"].includes(request.command)) this.changed();
+      if (response.ok && !["mcp_status", "mcp_grants", "mcp_authorization", "webhooks_list", "webhook_reveal_secret", "webhook_test"].includes(request.command)) this.changed();
       return;
     }
     if (request.command === "advance_search_index") {
@@ -1498,6 +1515,13 @@ export class BrowserWorkerHost {
         await network.mcpRevokeGrant(requiredDeviceId(request.args.id));
         return { id: request.id, ok: true, value: undefined };
       }
+      if (request.command === "webhooks_list" && Object.keys(request.args).length === 0) return { id: request.id, ok: true, value: await network.webhooksList() };
+      if (request.command === "webhook_create" && exactKeys(request.args, ["input"])) return { id: request.id, ok: true, value: await network.webhookCreate(webhookInput(request.args.input)) };
+      if (request.command === "webhook_update" && exactKeys(request.args, ["id", "input"])) return { id: request.id, ok: true, value: await network.webhookUpdate(requiredDeviceId(request.args.id), webhookInput(request.args.input)) };
+      if (request.command === "webhook_delete" && exactKeys(request.args, ["id"])) { await network.webhookDelete(requiredDeviceId(request.args.id)); return { id: request.id, ok: true, value: undefined }; }
+      if (request.command === "webhook_reveal_secret" && exactKeys(request.args, ["id"])) return { id: request.id, ok: true, value: await network.webhookRevealSecret(requiredDeviceId(request.args.id)) };
+      if (request.command === "webhook_rotate_secret" && exactKeys(request.args, ["id"])) return { id: request.id, ok: true, value: await network.webhookRotateSecret(requiredDeviceId(request.args.id)) };
+      if (request.command === "webhook_test" && exactKeys(request.args, ["id"])) return { id: request.id, ok: true, value: await network.webhookTest(requiredDeviceId(request.args.id)) };
       if (request.command === "mcp_authorization") return { id: request.id, ok: true, value: await network.mcpAuthorization(requiredMcpAuthorizationId(request.args.id)) };
       if (request.command === "mcp_approve_authorization") return { id: request.id, ok: true, value: await network.mcpApproveAuthorization(requiredMcpAuthorizationId(request.args.id), requiredMcpScopes(request.args.scopes)) };
       if (request.command === "mcp_deny_authorization") return { id: request.id, ok: true, value: await network.mcpDenyAuthorization(requiredMcpAuthorizationId(request.args.id)) };
@@ -1611,6 +1635,72 @@ function requiredMcpScopes(value: unknown): McpScope[] {
   });
   if (new Set(scopes).size !== scopes.length) throw new TransportError("invalid");
   return scopes;
+}
+
+function exactKeys(value: Record<string, unknown>, keys: string[]): boolean {
+  const actual = Object.keys(value);
+  return actual.length === keys.length && keys.every(key => Object.hasOwn(value, key));
+}
+
+function webhookInput(value: unknown): WebhookInput {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw { code: "invalid-request" };
+  const input = value as Record<string, unknown>;
+  if (!exactKeys(input, WEBHOOK_INPUT_KEYS) || utf8ByteLength(JSON.stringify(input)) > MAX_WEBHOOK_INPUT_BYTES) throw { code: "invalid-request" };
+  return {
+    name: nullableBoundedString(input.name, MAX_WEBHOOK_NAME_BYTES),
+    url: boundedString(input.url, MAX_WEBHOOK_URL_BYTES),
+    events: webhookEvents(input.events),
+    filterMode: enumValue(input.filterMode, WEBHOOK_FILTER_MODES),
+    filter: webhookFilter(input.filter),
+    paused: booleanValue(input.paused),
+  };
+}
+
+function webhookEvents(value: unknown): WebhookEvent[] {
+  if (!Array.isArray(value) || value.length === 0) throw { code: "invalid-request" };
+  const events = value.map(event => enumValue(event, WEBHOOK_EVENTS));
+  if (new Set(events).size !== events.length) throw { code: "invalid-request" };
+  return events;
+}
+
+function webhookFilter(value: unknown): WebhookFilterEntry[] {
+  if (!Array.isArray(value) || value.length > MAX_WEBHOOK_FILTER_ENTRIES) throw { code: "invalid-request" };
+  return value.map(entry => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) throw { code: "invalid-request" };
+    const row = entry as Record<string, unknown>;
+    if (!exactKeys(row, WEBHOOK_FILTER_ENTRY_KEYS)) throw { code: "invalid-request" };
+    return {
+      address: boundedString(row.address, MAX_WEBHOOK_ADDRESS_BYTES),
+      label: nullableBoundedString(row.label, MAX_WEBHOOK_FIELD_BYTES),
+      contactId: nullableBoundedString(row.contactId, MAX_WEBHOOK_FIELD_BYTES),
+      bookId: nullableBoundedString(row.bookId, MAX_WEBHOOK_FIELD_BYTES),
+    };
+  });
+}
+
+function enumValue<T extends string>(value: unknown, allowed: readonly T[]): T {
+  if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) throw { code: "invalid-request" };
+  return value as T;
+}
+
+function booleanValue(value: unknown): boolean {
+  if (typeof value !== "boolean") throw { code: "invalid-request" };
+  return value;
+}
+
+function boundedString(value: unknown, maxBytes: number): string {
+  if (typeof value !== "string" || value.length === 0 || utf8ByteLength(value) > maxBytes) throw { code: "invalid-request" };
+  return value;
+}
+
+function nullableBoundedString(value: unknown, maxBytes: number): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string" || utf8ByteLength(value) > maxBytes) throw { code: "invalid-request" };
+  return value;
+}
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
 }
 
 function notificationContext(args: Record<string, unknown>): BannerContext | undefined {
@@ -1824,8 +1914,15 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
        async revokeDevice(deviceId) { if (!publicTransport) throw new TransportError("invalid"); await publicTransport.discard(`/v1/devices/${deviceId}/revoke`, { method: "POST" }); },
        async mcpStatus() { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpStatus(); },
        async mcpEnable() { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpEnable(); },
-       async mcpGrants() { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpGrants(); },
-       async mcpRevokeGrant(id) { if (!enrollment) throw new TransportError("invalid"); await enrollment.mcpRevokeGrant(id); },
+        async mcpGrants() { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpGrants(); },
+        async mcpRevokeGrant(id) { if (!enrollment) throw new TransportError("invalid"); await enrollment.mcpRevokeGrant(id); },
+        async webhooksList() { if (!enrollment) throw new TransportError("invalid"); return enrollment.webhooksList(); },
+        async webhookCreate(input) { if (!enrollment) throw new TransportError("invalid"); return enrollment.webhookCreate(input); },
+        async webhookUpdate(id, input) { if (!enrollment) throw new TransportError("invalid"); return enrollment.webhookUpdate(id, input); },
+        async webhookDelete(id) { if (!enrollment) throw new TransportError("invalid"); await enrollment.webhookDelete(id); },
+        async webhookRevealSecret(id) { if (!enrollment) throw new TransportError("invalid"); return enrollment.webhookRevealSecret(id); },
+        async webhookRotateSecret(id) { if (!enrollment) throw new TransportError("invalid"); return enrollment.webhookRotateSecret(id); },
+        async webhookTest(id) { if (!enrollment) throw new TransportError("invalid"); return enrollment.webhookTest(id); },
        async mcpAuthorization(id) { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpAuthorization(id); },
        async mcpApproveAuthorization(id, scopes) { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpApproveAuthorization(id, scopes); },
        async mcpDenyAuthorization(id) { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpDenyAuthorization(id); },

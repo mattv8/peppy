@@ -28,23 +28,25 @@ pub enum ConfigError {
 
 impl WorkerConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
-        let public_api_url =
-            std::env::var("PUBLIC_API_URL").map_err(|_| ConfigError::InvalidPublicApiUrl)?;
+        Self::from_getter(|name| std::env::var(name).ok())
+    }
+
+    fn from_getter(get: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        let public_api_url = get("PUBLIC_API_URL").ok_or(ConfigError::InvalidPublicApiUrl)?;
         let public_api_url = canonical_public_api_url(&public_api_url)?;
-        let state_dir = std::env::var_os("PEPPY_MCP_STATE_DIR")
+        let state_dir = get("PEPPY_MCP_STATE_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/var/lib/peppy-mcp"));
-        let api_url =
-            std::env::var("PEPPY_MCP_API_URL").map_err(|_| ConfigError::InvalidPrivateApiUrl)?;
+        let api_url = get("PEPPY_MCP_API_URL").ok_or(ConfigError::InvalidPrivateApiUrl)?;
         let api_url = canonical_private_api_url(&api_url)?;
-        let key_file = std::env::var_os("PEPPY_MCP_KEY_FILE")
+        let key_file = get("PEPPY_MCP_KEY_FILE")
             .map(PathBuf::from)
             .unwrap_or_else(|| state_dir.join("storage-key"));
-        let worker_token_file = std::env::var_os("PEPPY_MCP_WORKER_TOKEN_FILE")
+        let worker_token_file = get("PEPPY_MCP_WORKER_TOKEN_FILE")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/run/peppy-mcp/control-token"));
-        let bind_addr = std::env::var("PEPPY_MCP_BIND_ADDR")
-            .unwrap_or_else(|_| "0.0.0.0:8091".into())
+        let bind_addr = get("PEPPY_MCP_BIND_ADDR")
+            .unwrap_or_else(|| "0.0.0.0:8091".into())
             .parse()
             .map_err(|_| ConfigError::InvalidBindAddress)?;
         Ok(Self {
@@ -58,7 +60,7 @@ impl WorkerConfig {
     }
 }
 
-fn canonical_public_api_url(value: &str) -> Result<String, ConfigError> {
+pub(crate) fn canonical_public_api_url(value: &str) -> Result<String, ConfigError> {
     let parsed = url::Url::parse(value).map_err(|_| ConfigError::InvalidPublicApiUrl)?;
     let loopback = match parsed.host() {
         Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
@@ -138,5 +140,16 @@ mod tests {
                 "accepted {value}"
             );
         }
+    }
+
+    #[test]
+    fn worker_configuration_does_not_read_webhook_environment() {
+        let config = WorkerConfig::from_getter(|name| match name {
+            "PUBLIC_API_URL" => Some("https://api.example.test".into()),
+            "PEPPY_MCP_API_URL" => Some("http://api:8080".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(config.public_api_url, "https://api.example.test");
     }
 }

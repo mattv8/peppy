@@ -560,6 +560,13 @@ export class BrowserBridge implements DesktopBridge {
   public mcp_enable(): Promise<import("@peppy/desktop-ui/bridge-contracts").McpDeviceStatus> { return this.call("mcp_enable"); }
   public mcp_grants(): Promise<import("@peppy/desktop-ui/bridge-contracts").McpGrantView[]> { return this.call("mcp_grants"); }
   public mcp_revoke_grant(id: string): Promise<void> { return this.call("mcp_revoke_grant", { id }); }
+  public webhooks_list(): Promise<import("@peppy/desktop-ui/bridge-contracts").WebhookList> { return this.call("webhooks_list"); }
+  public webhook_create(input: import("@peppy/desktop-ui/bridge-contracts").WebhookInput): Promise<import("@peppy/desktop-ui/bridge-contracts").WebhookCreated> { return this.call("webhook_create", { input }); }
+  public webhook_update(id: string, input: import("@peppy/desktop-ui/bridge-contracts").WebhookInput): Promise<import("@peppy/desktop-ui/bridge-contracts").WebhookView> { return this.call("webhook_update", { id, input }); }
+  public webhook_delete(id: string): Promise<void> { return this.call("webhook_delete", { id }); }
+  public webhook_reveal_secret(id: string): Promise<import("@peppy/desktop-ui/bridge-contracts").WebhookSecret> { return this.call("webhook_reveal_secret", { id }); }
+  public webhook_rotate_secret(id: string): Promise<import("@peppy/desktop-ui/bridge-contracts").WebhookSecret> { return this.call("webhook_rotate_secret", { id }); }
+  public webhook_test(id: string): Promise<import("@peppy/desktop-ui/bridge-contracts").WebhookTestResult> { return this.call("webhook_test", { id }); }
   public mcp_authorization(id: string): Promise<import("@peppy/desktop-ui/bridge-contracts").McpAuthorizationView> { return this.call("mcp_authorization", { id }); }
   public mcp_approve_authorization(id: string, scopes: import("@peppy/desktop-ui/bridge-contracts").McpScope[]): Promise<import("@peppy/desktop-ui/bridge-contracts").McpAuthorizationDecision> { return this.call("mcp_approve_authorization", { id, scopes }); }
   public mcp_deny_authorization(id: string): Promise<import("@peppy/desktop-ui/bridge-contracts").McpAuthorizationDecision> { return this.call("mcp_deny_authorization", { id }); }

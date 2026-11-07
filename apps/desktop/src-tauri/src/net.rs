@@ -311,6 +311,17 @@ impl Api {
         .map(|_| ())
     }
 
+    /// `DELETE` without a body; any 2xx is success and the bounded body is discarded.
+    pub async fn delete_discard(&self, path: &str) -> Result<(), NetError> {
+        read_bounded(
+            self.execute(self.retention_mutation(self.http.delete(self.url(path))))
+                .await?,
+            MAX_JSON_BYTES,
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// Sends a generated retention request and returns its bounded body even on a non-success
     /// status so the retention codec can distinguish the one terminal removal response.
     pub async fn retention_request(

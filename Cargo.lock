@@ -2248,6 +2248,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "hmac 0.12.1",
  "image",
  "libc",
  "libsodium-rs",

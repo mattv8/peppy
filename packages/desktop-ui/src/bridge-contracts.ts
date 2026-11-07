@@ -20,7 +20,7 @@ import type {
   AttachmentRetentionStatusResult,
 } from "@peppy/generated/attachment-retention";
 import type { AccountAccessResult } from "@peppy/generated/account-access";
-import type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceStatus, McpGrantView, McpScope } from "@peppy/generated/mcp";
+import type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceStatus, McpGrantView, McpScope, WebhookCreated, WebhookInput, WebhookList, WebhookSecret, WebhookTestResult, WebhookView } from "@peppy/generated/mcp";
 export type {
   HistorySearchAttemptInput,
   HistorySearchReason,
@@ -42,7 +42,7 @@ export type {
   AttachmentRetentionStatusResult,
 } from "@peppy/generated/attachment-retention";
 export type { AccountAccessResult, AccountNoticeDto, AccountNoticeKindDto, AccountNoticeSeverityDto } from "@peppy/generated/account-access";
-export type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceState, McpDeviceStatus, McpDeviceView, McpGrantView, McpScope } from "@peppy/generated/mcp";
+export type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceState, McpDeviceStatus, McpDeviceView, McpGrantView, McpScope, WebhookCreated, WebhookDeliveryState, WebhookEvent, WebhookFilterEntry, WebhookFilterMode, WebhookInput, WebhookList, WebhookSecret, WebhookTestResult, WebhookView } from "@peppy/generated/mcp";
 
 export type ConnectionState = "connected" | "offline" | "missing-native-host" | "error";
 export type MessageStatus = "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown";
@@ -283,6 +283,13 @@ export interface DesktopBridge {
   mcp_enable(): Promise<McpDeviceStatus>;
   mcp_grants(): Promise<McpGrantView[]>;
   mcp_revoke_grant(id: string): Promise<void>;
+  webhooks_list(): Promise<WebhookList>;
+  webhook_create(input: WebhookInput): Promise<WebhookCreated>;
+  webhook_update(id: string, input: WebhookInput): Promise<WebhookView>;
+  webhook_delete(id: string): Promise<void>;
+  webhook_reveal_secret(id: string): Promise<WebhookSecret>;
+  webhook_rotate_secret(id: string): Promise<WebhookSecret>;
+  webhook_test(id: string): Promise<WebhookTestResult>;
   mcp_authorization(id: string): Promise<McpAuthorizationView>;
   mcp_approve_authorization(id: string, scopes: McpScope[]): Promise<McpAuthorizationDecision>;
   mcp_deny_authorization(id: string): Promise<McpAuthorizationDecision>;

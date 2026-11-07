@@ -743,6 +743,12 @@ pub struct MessagePage {
     pub messages: Vec<Message>,
     pub has_more: bool,
 }
+/// A bounded incoming-message scan and the durable order through which it examined rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IncomingPage {
+    pub messages: Vec<(i64, MessagePayload)>,
+    pub scanned_through: i64,
+}
 /// Exclusive, durable newest-first media-page anchor. Attachment position disambiguates a MMS.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaCursor {
@@ -3666,6 +3672,49 @@ impl Client {
             .optional()?
             .map(|row| message_from_row(&s.conn, row))
             .transpose()
+    }
+
+    /// Highest `messages.local_order` (insertion order, AUTOINCREMENT), or 0 when empty.
+    pub fn latest_message_local_order(&self) -> Result<i64, Error> {
+        let store = self.lock()?;
+        store
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(local_order), 0) FROM messages",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Error::from)
+    }
+
+    /// Bounded rows after `after`, returning incoming messages and the last examined order.
+    pub fn incoming_messages_after(&self, after: i64, limit: usize) -> Result<IncomingPage, Error> {
+        let store = self.lock()?;
+        let limit = limit.clamp(1, MAX_HISTORY_PAGE);
+        // Scan a bounded interleave so outgoing-only tails advance webhook cursors.
+        let scan_limit = i64::try_from(limit.saturating_mul(5)).map_err(|_| Error::Database)?;
+        let mut query = store.conn.prepare(
+            "SELECT local_order,payload FROM messages WHERE local_order>?1 ORDER BY local_order LIMIT ?2",
+        )?;
+        let mut scanned_through = after;
+        let mut messages = Vec::new();
+        for row in query.query_map(params![after, scan_limit], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (local_order, payload) = row?;
+            scanned_through = local_order;
+            let payload: MessagePayload = decode(payload.as_bytes())?;
+            if payload.direction == Direction::Incoming {
+                messages.push((local_order, payload));
+                if messages.len() == limit {
+                    break;
+                }
+            }
+        }
+        Ok(IncomingPage {
+            messages,
+            scanned_through,
+        })
     }
 
     /// Returns one validated, decrypted message by its durable ID.
@@ -10070,6 +10119,183 @@ mod tests {
     use serde_json::json;
     use std::time::Instant;
     use uuid::Uuid;
+
+    fn webhook_test_client() -> (tempfile::TempDir, Client) {
+        let directory = tempfile::tempdir().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("webhooks.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[1; 32]).unwrap(),
+        )
+        .unwrap();
+        (directory, client)
+    }
+
+    fn webhook_test_message(sequence: u64, direction: Direction) -> MessagePayload {
+        MessagePayload {
+            record: MessageRecord {
+                message_id: MessageId::new(),
+                conversation_id: ConversationId::new(),
+                source_sequence: SourceSequence(sequence),
+                attachments: Vec::new(),
+            },
+            source_device_id: DeviceId::new(),
+            provider_message_id: None,
+            sender_address: None,
+            recipients: Vec::new(),
+            subject: None,
+            body: format!("message {sequence}"),
+            transport: Transport::Sms,
+            direction,
+            imported: false,
+            sent_at_ms: None,
+            ordered_at_ms: None,
+            mms_context: None,
+        }
+    }
+
+    fn insert_webhook_test_message(client: &Client, sequence: u64, direction: Direction) {
+        let store = client.lock().unwrap();
+        assert_eq!(
+            insert_message(&store.conn, &webhook_test_message(sequence, direction)).unwrap(),
+            Inserted::New
+        );
+    }
+
+    #[test]
+    fn latest_message_local_order_is_zero_for_an_empty_database() {
+        let (_directory, client) = webhook_test_client();
+
+        assert_eq!(client.latest_message_local_order().unwrap(), 0);
+        let page = client.incoming_messages_after(0, 20).unwrap();
+        assert!(page.messages.is_empty());
+        assert_eq!(page.scanned_through, 0);
+    }
+
+    #[test]
+    fn incoming_messages_are_ordered_exclude_outgoing_and_use_an_exclusive_cursor() {
+        let (_directory, client) = webhook_test_client();
+        insert_webhook_test_message(&client, 1, Direction::Incoming);
+        insert_webhook_test_message(&client, 2, Direction::Outgoing);
+        insert_webhook_test_message(&client, 3, Direction::Incoming);
+
+        assert_eq!(client.latest_message_local_order().unwrap(), 3);
+        let messages = client.incoming_messages_after(1, 20).unwrap();
+        assert_eq!(
+            messages
+                .messages
+                .iter()
+                .map(|(local_order, payload)| (*local_order, payload.body.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(3, "message 3")]
+        );
+        assert_eq!(
+            client
+                .incoming_messages_after(0, 20)
+                .unwrap()
+                .messages
+                .iter()
+                .map(|(local_order, _)| *local_order)
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+    }
+
+    #[test]
+    fn incoming_messages_limit_is_bounded() {
+        let (_directory, client) = webhook_test_client();
+        for sequence in 1..=3 {
+            insert_webhook_test_message(&client, sequence, Direction::Incoming);
+        }
+
+        assert_eq!(
+            client.incoming_messages_after(0, 0).unwrap().messages.len(),
+            1
+        );
+        assert_eq!(
+            client.incoming_messages_after(0, 2).unwrap().messages.len(),
+            2
+        );
+    }
+
+    #[test]
+    fn incoming_messages_after_a_full_page_returns_each_message_once() {
+        let (_directory, client) = webhook_test_client();
+        for sequence in 1..=201 {
+            insert_webhook_test_message(&client, sequence, Direction::Incoming);
+        }
+
+        let first = client.incoming_messages_after(0, 200).unwrap();
+        let second = client
+            .incoming_messages_after(first.scanned_through, 200)
+            .unwrap();
+
+        assert_eq!(first.messages.len(), 200);
+        assert_eq!(first.scanned_through, 200);
+        assert_eq!(second.messages.len(), 1);
+        assert_eq!(second.scanned_through, 201);
+        assert_eq!(
+            first
+                .messages
+                .iter()
+                .chain(&second.messages)
+                .map(|(local_order, _)| *local_order)
+                .collect::<Vec<_>>(),
+            (1..=201).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn incoming_messages_stop_at_the_last_returned_message() {
+        let (_directory, client) = webhook_test_client();
+        for (sequence, direction) in [
+            (1, Direction::Incoming),
+            (2, Direction::Outgoing),
+            (3, Direction::Incoming),
+            (4, Direction::Outgoing),
+            (5, Direction::Incoming),
+        ] {
+            insert_webhook_test_message(&client, sequence, direction);
+        }
+
+        let first = client.incoming_messages_after(0, 2).unwrap();
+        let second = client
+            .incoming_messages_after(first.scanned_through, 2)
+            .unwrap();
+
+        assert_eq!(first.scanned_through, 3);
+        assert_eq!(
+            first
+                .messages
+                .iter()
+                .map(|(local_order, _)| *local_order)
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert_eq!(second.scanned_through, 5);
+        assert_eq!(
+            second
+                .messages
+                .iter()
+                .map(|(local_order, _)| *local_order)
+                .collect::<Vec<_>>(),
+            vec![5]
+        );
+    }
+
+    #[test]
+    fn incoming_messages_scan_through_an_outgoing_only_tail() {
+        let (_directory, client) = webhook_test_client();
+        insert_webhook_test_message(&client, 1, Direction::Incoming);
+        insert_webhook_test_message(&client, 2, Direction::Outgoing);
+
+        let page = client.incoming_messages_after(1, 20).unwrap();
+        assert!(page.messages.is_empty());
+        assert_eq!(page.scanned_through, 2);
+    }
 
     #[test]
     fn malformed_scan_payload_kinds_remain_strict_known_events() {
