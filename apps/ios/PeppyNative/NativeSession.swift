@@ -96,7 +96,8 @@ public struct GoogleMessagesLinkPresentation: Equatable, Sendable {
         currentDeviceID: String?,
         status: NativeRcsLinkStatus?
     ) -> Self? {
-        guard device.role == "gateway", !device.revoked, device.id != currentDeviceID else { return nil }
+        guard device.role == "gateway" || device.role == "owner",
+              !device.revoked, device.id != currentDeviceID else { return nil }
         return presentation(for: status)
     }
 }
@@ -964,7 +965,7 @@ public actor NativeSession {
         let nowMs = Int64(Date().timeIntervalSince1970 * 1_000)
 
         var values: [String: GoogleMessagesLinkPresentation] = [:]
-        for device in devices where device.role == "gateway" && !device.revoked && device.id != currentDeviceID {
+        for device in devices where (device.role == "gateway" || device.role == "owner") && !device.revoked && device.id != currentDeviceID {
             let status = try? client.rcsLinkStatus(gatewayDeviceId: device.id, nowMs: nowMs)
             if let presentation = GoogleMessagesLinkPresentation.presentation(
                 for: device,

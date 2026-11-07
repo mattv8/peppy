@@ -1720,6 +1720,16 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   useEffect(() => {
     void bridge.set_typing_sharing?.({ enabled: readShareTyping() }).catch(() => undefined);
   }, [bridge.set_typing_sharing, typingLinkAvailable]);
+  useEffect(() => {
+    const syncShareTyping = (event: StorageEvent) => {
+      if (event.key !== "peppy.layout.v1") return;
+      const enabled = readShareTyping();
+      setShareTyping(enabled);
+      void bridge.set_typing_sharing?.({ enabled }).catch(() => undefined);
+    };
+    window.addEventListener("storage", syncShareTyping);
+    return () => window.removeEventListener("storage", syncShareTyping);
+  }, [bridge.set_typing_sharing]);
   const [groupSenderAvatars, setGroupSenderAvatars] = useState(readGroupSenderAvatars);
   const [showReactions, setShowReactions] = useShowReactions();
   const [pendingReactionId, setPendingReactionId] = useState<string>();
@@ -3335,15 +3345,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const unavailableReason = effectivePendingRecipient ? pendingRecipientReason : problem;
   const draftHydrated = Boolean(slotKey && store.isHydrated(slotKey));
   const composerReadOnly = Boolean(slotKey && !draftHydrated && !isLocalDraftKey(slotKey));
-  const latestIncomingMessageId = active?.messages.reduce<string | undefined>((latest, message) => message.sender === "other" ? message.id : latest, undefined);
-  const typing = useTypingDisplay(
-    bridge,
-    active?.id,
-    rcsRoute.current,
-    Boolean(content.text.trim()),
-    latestIncomingMessageId,
-    snapshot?.connection.state === "connected",
-    (active?.participants?.length ?? 0) <= 1,
+  const conversationSurfaceVisible = Boolean(composerConversation) || activeView === "conversations";
+  const latestIncomingMessageId = useMemo(
+    () => active?.messages.reduce<string | undefined>((latest, message) => message.sender === "other" ? message.id : latest, undefined),
+    [active?.messages],
   );
   const typingSender = useTypingSender({
     bridge,
@@ -3352,7 +3357,18 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     existing: Boolean(active && slotKey && !isLocalDraftKey(slotKey) && !active.draftOnly),
     sendSupported: Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending,
     readOnly: composerReadOnly,
+    visible: conversationSurfaceVisible,
+    sharingEnabled: shareTyping,
   });
+  const typing = useTypingDisplay(
+    bridge,
+    active?.id,
+    rcsRoute.current && conversationSurfaceVisible,
+    typingSender.state === "active",
+    latestIncomingMessageId,
+    snapshot?.connection.state === "connected",
+    (active?.participants?.length ?? 0) <= 1,
+  );
 
   const edit = (patch: Partial<DraftContent>) => {
     if (!slotKey || deletingId === slotKey) return;
@@ -4480,7 +4496,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         attachments={attachments}
         sendSupported={Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending}
         hideSmsCounter={rcsRoute.current}
-        typingSlot={<><TypingIndicator visible={typing.visible} scope={(active?.participants?.length ?? 0) > 1 ? "group" : "direct"} label={(active?.participants?.length ?? 0) > 1 ? peppyCopy.typing_indicator_group : peppyCopy.typing_indicator_direct} /><TypingAnnouncer text={typing.announcement ? peppyCopy.typing_announce_direct : ""} /></>}
+        typingSlot={<><TypingIndicator visible={typing.visible} scope={(active?.participants?.length ?? 0) > 1 ? "group" : "direct"} label={(active?.participants?.length ?? 0) > 1 ? peppyCopy.typing_indicator_group : peppyCopy.typing_indicator_direct} /><TypingAnnouncer text={typing.announcement ? (active?.participants?.length ?? 0) > 1 ? peppyCopy.typing_indicator_group : peppyCopy.typing_announce_direct : ""} /></>}
         typingSendState={typingSender.state}
         unavailableReason={sending ? "sending…" : draftSubscriptionError ? "draft updates unavailable; retry setup" : composerReadOnly ? "draft is loading" : composerUnavailableReason}
         readOnly={composerReadOnly}

@@ -209,7 +209,7 @@ async fn refresh_vault(session: &Arc<Session>) -> BridgeResult<()> {
     )
     .await?;
     let (profile, _) = vault_header(&vault)?;
-    session.set_status(|status| {
+    session.set_security_status(|status| {
         status.vault = Some(VaultSummary {
             epoch: profile.key_epoch,
             fingerprint: vault.profile_fingerprint.clone(),

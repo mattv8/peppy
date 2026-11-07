@@ -213,15 +213,43 @@ impl JsonSchema for EphemeralSignalV2 {
         "EphemeralSignalV2".into()
     }
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        serde_json::from_value(serde_json::json!({"oneOf":[v2_header_schema("typing",7200),v2_header_schema("challenge",684),v2_header_schema("session_ack",684)]})).expect("valid v2 header schema")
+        serde_json::from_value(serde_json::json!({"oneOf":[v2_header_schema("typing",7200,false),v2_header_schema("challenge",684,true),v2_header_schema("session_ack",684,true)]})).expect("valid v2 header schema")
     }
 }
 
 const CANONICAL_UUID_PATTERN: &str =
     "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+const CANONICAL_SESSION_ID_PATTERN: &str = "^[A-Za-z0-9_-]{21}[AQgw]$";
+const CANONICAL_NONCE_PATTERN: &str = "^[A-Za-z0-9+/]{21}[AQgw]==$";
+const CANONICAL_STANDARD_BASE64_PATTERN: &str =
+    "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$";
+const CANONICAL_U64_PATTERN: &str = "^(?:0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|1844674407370955[0][0-9]{3}|18446744073709551[0-5][0-9]{2}|184467440737095516[0][0-9]|1844674407370955161[0-4]|18446744073709551615)$";
 
-fn v2_header_schema(kind: &str, ciphertext_max_length: usize) -> serde_json::Value {
-    serde_json::json!({"type":"object","additionalProperties":false,"properties":{"protocol_version":{"const":2},"kind":{"const":kind},"sender_device_id":{"type":"string","pattern":CANONICAL_UUID_PATTERN},"key_epoch":{"type":"integer","format":"uint32","minimum":1},"session_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"},"sent_at_ms":{"type":"string","pattern":"^(0|[1-9][0-9]*)$"},"expires_at_ms":{"type":"string","pattern":"^(0|[1-9][0-9]*)$"},"sequence":{"type":"string","pattern":"^[1-9][0-9]*$"},"ciphertext_b64":{"type":"string","maxLength":ciphertext_max_length}},"required":["protocol_version","kind","sender_device_id","key_epoch","session_id","sent_at_ms","expires_at_ms","sequence","ciphertext_b64"]})
+fn canonical_u64_schema(nonzero: bool) -> serde_json::Value {
+    let mut schema = serde_json::json!({"type":"string","pattern":CANONICAL_U64_PATTERN});
+    if nonzero {
+        schema["not"] = serde_json::json!({"const":"0"});
+    }
+    schema
+}
+
+fn canonical_standard_base64_schema(
+    max_length: usize,
+    requires_padding_at_max_length: bool,
+) -> serde_json::Value {
+    let mut schema = serde_json::json!({"type":"string","minLength":4,"maxLength":max_length,"pattern":CANONICAL_STANDARD_BASE64_PATTERN});
+    if requires_padding_at_max_length {
+        schema["not"] = serde_json::json!({"pattern":format!("^[A-Za-z0-9+/]{{{max_length}}}$")});
+    }
+    schema
+}
+
+fn v2_header_schema(
+    kind: &str,
+    ciphertext_max_length: usize,
+    requires_padding_at_max_length: bool,
+) -> serde_json::Value {
+    serde_json::json!({"type":"object","additionalProperties":false,"properties":{"protocol_version":{"const":2},"kind":{"const":kind},"sender_device_id":{"type":"string","pattern":CANONICAL_UUID_PATTERN},"key_epoch":{"type":"integer","format":"uint32","minimum":1},"session_id":{"type":"string","pattern":CANONICAL_SESSION_ID_PATTERN},"sent_at_ms":canonical_u64_schema(false),"expires_at_ms":canonical_u64_schema(false),"sequence":canonical_u64_schema(true),"ciphertext_b64":canonical_standard_base64_schema(ciphertext_max_length,requires_padding_at_max_length)},"required":["protocol_version","kind","sender_device_id","key_epoch","session_id","sent_at_ms","expires_at_ms","sequence","ciphertext_b64"]})
 }
 
 fn typing_plaintext_schema(origin: &str, includes_gateway: bool) -> serde_json::Value {
@@ -386,10 +414,10 @@ impl JsonSchema for EphemeralSignalV1 {
                 "kind": { "const": "typing" },
                 "sender_device_id": { "type": "string", "format": "uuid" },
                 "key_epoch": { "type": "integer", "format": "uint32", "minimum": 1 },
-                "sent_at_ms": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
-                "expires_at_ms": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
-                "sequence": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
-                "ciphertext_b64": { "type": "string", "maxLength": 7600 }
+                "sent_at_ms": canonical_u64_schema(false),
+                "expires_at_ms": canonical_u64_schema(false),
+                "sequence": canonical_u64_schema(false),
+                "ciphertext_b64": canonical_standard_base64_schema(7600, false)
             },
             "required": ["protocol_version", "kind", "sender_device_id", "key_epoch", "sent_at_ms", "expires_at_ms", "sequence", "ciphertext_b64"]
         })
@@ -625,7 +653,7 @@ impl JsonSchema for ChallengePlaintextV2 {
         "ChallengePlaintextV2".into()
     }
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        json_schema!({"type":"object","additionalProperties":false,"properties":{"version":{"const":2},"challenger_device_id":{"type":"string","pattern":CANONICAL_UUID_PATTERN},"challenger_session_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"},"responder_device_id":{"type":"string","pattern":CANONICAL_UUID_PATTERN},"nonce_b64":{"type":"string","pattern":"^[A-Za-z0-9+/]{22}==$"}},"required":["version","challenger_device_id","challenger_session_id","responder_device_id","nonce_b64"]})
+        json_schema!({"type":"object","additionalProperties":false,"properties":{"version":{"const":2},"challenger_device_id":{"type":"string","pattern":CANONICAL_UUID_PATTERN},"challenger_session_id":{"type":"string","pattern":CANONICAL_SESSION_ID_PATTERN},"responder_device_id":{"type":"string","pattern":CANONICAL_UUID_PATTERN},"nonce_b64":{"type":"string","pattern":CANONICAL_NONCE_PATTERN}},"required":["version","challenger_device_id","challenger_session_id","responder_device_id","nonce_b64"]})
     }
 }
 
@@ -691,7 +719,7 @@ impl JsonSchema for SessionAckPlaintextV2 {
         "SessionAckPlaintextV2".into()
     }
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        json_schema!({"type":"object","additionalProperties":false,"properties":{"version":{"const":2},"responder_device_id":{"type":"string","pattern":CANONICAL_UUID_PATTERN},"responder_session_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"},"challenger_device_id":{"type":"string","pattern":CANONICAL_UUID_PATTERN},"challenger_session_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{22}$"},"echoed_nonce_b64":{"type":"string","pattern":"^[A-Za-z0-9+/]{22}==$"},"sequence_floor":{"type":"string","pattern":"^[1-9][0-9]*$"}},"required":["version","responder_device_id","responder_session_id","challenger_device_id","challenger_session_id","echoed_nonce_b64","sequence_floor"]})
+        json_schema!({"type":"object","additionalProperties":false,"properties":{"version":{"const":2},"responder_device_id":{"type":"string","pattern":CANONICAL_UUID_PATTERN},"responder_session_id":{"type":"string","pattern":CANONICAL_SESSION_ID_PATTERN},"challenger_device_id":{"type":"string","pattern":CANONICAL_UUID_PATTERN},"challenger_session_id":{"type":"string","pattern":CANONICAL_SESSION_ID_PATTERN},"echoed_nonce_b64":{"type":"string","pattern":CANONICAL_NONCE_PATTERN},"sequence_floor":canonical_u64_schema(true)},"required":["version","responder_device_id","responder_session_id","challenger_device_id","challenger_session_id","echoed_nonce_b64","sequence_floor"]})
     }
 }
 
@@ -714,9 +742,7 @@ impl EphemeralSignalV1 {
         {
             return Err(EphemeralSignalError::InvalidTtl);
         }
-        let ciphertext = STANDARD
-            .decode(&self.ciphertext_b64)
-            .map_err(|_| EphemeralSignalError::CiphertextTooLarge)?;
+        let ciphertext = decode_standard(&self.ciphertext_b64)?;
         if ciphertext.is_empty() || ciphertext.len() > MAX_EPHEMERAL_CIPHERTEXT_BYTES {
             return Err(EphemeralSignalError::CiphertextTooLarge);
         }

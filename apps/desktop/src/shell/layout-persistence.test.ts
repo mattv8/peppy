@@ -102,6 +102,26 @@ describe("layout persistence", () => {
     expect(readShareTyping()).toBe(false);
   });
 
+  it("retains an observed disabled typing preference when storage becomes unreadable", () => {
+    persistLayoutPatch({ shareTyping: false });
+    expect(readShareTyping()).toBe(false);
+    vi.stubGlobal("localStorage", {
+      getItem: () => {
+        throw new Error("unavailable");
+      },
+    });
+
+    expect(readShareTyping()).toBe(false);
+  });
+
+  it.each(["{", "null", "[]", '{"shareTyping":"false"}', '{"shareTyping":null}'])("retains an observed opt-out for malformed typing preference %s", (stored) => {
+    persistLayoutPatch({ shareTyping: false });
+    expect(readShareTyping()).toBe(false);
+    localStorage.setItem(LAYOUT_KEY, stored);
+
+    expect(readShareTyping()).toBe(false);
+  });
+
   it("merges compact timestamp preferences with existing layout keys", () => {
     localStorage.setItem(LAYOUT_KEY, JSON.stringify({ sibling: "kept" }));
 

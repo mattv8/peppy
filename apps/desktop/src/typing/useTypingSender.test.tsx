@@ -14,6 +14,8 @@ function renderSender(overrides: Partial<Parameters<typeof useTypingSender>[0]> 
     existing: true,
     sendSupported: true,
     readOnly: false,
+    visible: true,
+    sharingEnabled: true,
     ...overrides,
   };
   return { sendTyping, ...renderHook((next) => useTypingSender(next), { initialProps: props }) };
@@ -100,7 +102,7 @@ describe("useTypingSender", () => {
   ])("stops on %s", (_reason, next) => {
     const { result, rerender, sendTyping } = renderSender();
     act(() => result.current.noteInput("message"));
-    rerender({ bridge: { send_typing: sendTyping } as unknown as DesktopBridge, conversationId: "conversation-1", current: true, existing: true, sendSupported: true, readOnly: false, ...next });
+    rerender({ bridge: { send_typing: sendTyping } as unknown as DesktopBridge, conversationId: "conversation-1", current: true, existing: true, sendSupported: true, readOnly: false, visible: true, sharingEnabled: true, ...next });
     expect(sendTyping).toHaveBeenLastCalledWith({ conversationId: "conversation-1", state: "stopped" });
   });
 
@@ -163,5 +165,63 @@ describe("useTypingSender", () => {
     expect(result.current.state).toBe("idle");
     act(() => result.current.noteInput(" "));
     expect(result.current.state).toBe("idle");
+  });
+
+  it.each([3_200, 4_000, 5_999])("restarts immediately when input resumes after %i ms", (elapsed) => {
+    vi.useFakeTimers();
+    const { result, sendTyping } = renderSender();
+
+    act(() => result.current.noteInput("message"));
+    act(() => vi.advanceTimersByTime(elapsed));
+    act(() => result.current.noteInput("message"));
+    act(() => result.current.noteInput("message again"));
+
+    expect(sendTyping).toHaveBeenCalledTimes(2);
+    expect(sendTyping).toHaveBeenLastCalledWith({ conversationId: "conversation-1", state: "started" });
+    act(() => vi.advanceTimersByTime(3_199));
+    expect(sendTyping).toHaveBeenCalledTimes(2);
+    act(() => vi.advanceTimersByTime(2_801));
+    expect(sendTyping).toHaveBeenLastCalledWith({ conversationId: "conversation-1", state: "stopped" });
+  });
+
+  it("does not bypass the refresh interval for repeated input", () => {
+    vi.useFakeTimers();
+    const { result, sendTyping } = renderSender();
+    act(() => result.current.noteInput("message"));
+    act(() => vi.advanceTimersByTime(3_199));
+    act(() => result.current.noteInput("message again"));
+    expect(sendTyping).toHaveBeenCalledTimes(1);
+    act(() => vi.advanceTimersByTime(1));
+    expect(sendTyping).toHaveBeenCalledTimes(2);
+    act(() => result.current.noteInput("at refresh boundary"));
+    expect(sendTyping).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["visible", "sharingEnabled"] as const)("stops once on %s loss and requires input after restoration", (property) => {
+    vi.useFakeTimers();
+    const { result, rerender, sendTyping, unmount } = renderSender();
+    const props = { bridge: { send_typing: sendTyping } as unknown as DesktopBridge, conversationId: "conversation-1", current: true, existing: true, sendSupported: true, readOnly: false, visible: true, sharingEnabled: true };
+    act(() => result.current.noteInput("message"));
+    rerender({ ...props, [property]: false });
+    act(() => result.current.noteInput("while unavailable"));
+    act(() => vi.advanceTimersByTime(10_000));
+    rerender(props);
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(sendTyping).toHaveBeenCalledTimes(2);
+    expect(sendTyping).toHaveBeenLastCalledWith({ conversationId: "conversation-1", state: "stopped" });
+    unmount();
+    expect(sendTyping).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops once when the composer surface is hidden", () => {
+    const { result, rerender, sendTyping, unmount } = renderSender();
+    act(() => result.current.noteInput("message"));
+
+    rerender({ bridge: { send_typing: sendTyping } as unknown as DesktopBridge, conversationId: "conversation-1", current: true, existing: true, sendSupported: true, readOnly: false, visible: false, sharingEnabled: true });
+    act(() => document.dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
+    unmount();
+
+    expect(sendTyping).toHaveBeenCalledTimes(2);
+    expect(sendTyping).toHaveBeenLastCalledWith({ conversationId: "conversation-1", state: "stopped" });
   });
 });

@@ -664,6 +664,15 @@ impl Session {
         (self.notifier)();
     }
 
+    pub(crate) fn set_mismatch(&self, mismatch: bool) {
+        let changed = self.live_typing.mutate_admission_authority(|| {
+            self.mismatch.swap(mismatch, Ordering::AcqRel) != mismatch
+        });
+        if changed {
+            self.live_context_wake.notify_one();
+        }
+    }
+
     /// Reads the committed replay frontiers for the next sanitized snapshot.
     pub fn replay_progress(&self) -> BridgeResult<ReplayProgress> {
         self.client.replay_progress().map_err(core_error)
@@ -1827,6 +1836,14 @@ impl Session {
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner()),
         );
+    }
+
+    pub(crate) fn set_security_status(&self, update: impl FnOnce(&mut NetStatus)) {
+        self.live_typing.mutate_admission_authority(|| {
+            self.set_status(update);
+            true
+        });
+        self.live_context_wake.notify_one();
     }
 }
 

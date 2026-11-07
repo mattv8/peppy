@@ -1454,7 +1454,7 @@ export function Composer({
           <Paperclip size={16} aria-hidden />
         </button>
         {gatewaySlot}
-        <div className="composer-toolbar-spacer">{typingSlot}</div>
+        <div id="composer-typing-slot" className="composer-toolbar-spacer">{typingSlot}</div>
         {!hideSmsCounter && counter && (
           <span id="sms-counter" aria-live="polite" aria-label="SMS character count">
             {counter}

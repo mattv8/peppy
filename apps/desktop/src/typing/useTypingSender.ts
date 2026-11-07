@@ -12,6 +12,8 @@ type TypingSenderInput = {
   existing: boolean;
   sendSupported: boolean;
   readOnly: boolean;
+  visible: boolean;
+  sharingEnabled: boolean;
 };
 
 export function useTypingSender(input: TypingSenderInput) {
@@ -20,6 +22,7 @@ export function useTypingSender(input: TypingSenderInput) {
   const refreshTimer = useRef<number | undefined>(undefined);
   const idleTimer = useRef<number | undefined>(undefined);
   const lastInputAt = useRef(0);
+  const lastStartAt = useRef(0);
   const inputRef = useRef(input);
   inputRef.current = input;
 
@@ -40,8 +43,13 @@ export function useTypingSender(input: TypingSenderInput) {
   };
 
   const canSend = () => {
-    const { bridge, conversationId, current, existing, sendSupported, readOnly } = inputRef.current;
-    return Boolean(bridge.send_typing && conversationId && current && existing && sendSupported && !readOnly && readShareTyping() && document.visibilityState === "visible");
+    const { bridge, conversationId, current, existing, sendSupported, readOnly, visible, sharingEnabled } = inputRef.current;
+    return Boolean(bridge.send_typing && conversationId && current && existing && sendSupported && !readOnly && visible && sharingEnabled && readShareTyping() && document.visibilityState === "visible");
+  };
+
+  const start = (conversationId: string) => {
+    lastStartAt.current = Date.now();
+    void inputRef.current.bridge.send_typing?.({ conversationId, state: "started" }).catch(() => undefined);
   };
 
   const refresh = () => {
@@ -52,7 +60,7 @@ export function useTypingSender(input: TypingSenderInput) {
       refreshTimer.current = undefined;
       return;
     }
-    void inputRef.current.bridge.send_typing?.({ conversationId, state: "started" }).catch(() => undefined);
+    start(conversationId);
   };
 
   const noteInput = (text: string) => {
@@ -64,9 +72,10 @@ export function useTypingSender(input: TypingSenderInput) {
     if (!activeConversationId.current) {
       activeConversationId.current = conversationId;
       setState("active");
-      void inputRef.current.bridge.send_typing?.({ conversationId, state: "started" }).catch(() => undefined);
+      start(conversationId);
       refreshTimer.current = window.setInterval(refresh, REFRESH_MS);
     } else if (refreshTimer.current === undefined) {
+      if (Date.now() - lastStartAt.current >= REFRESH_MS) start(conversationId);
       refreshTimer.current = window.setInterval(refresh, REFRESH_MS);
     }
     if (idleTimer.current !== undefined) window.clearTimeout(idleTimer.current);
@@ -96,7 +105,7 @@ export function useTypingSender(input: TypingSenderInput) {
       document.removeEventListener("focusout", stopOnComposerBlur);
       stop();
     };
-  }, [input.conversationId, input.current, input.existing, input.sendSupported, input.readOnly, input.bridge]);
+  }, [input.conversationId, input.current, input.existing, input.sendSupported, input.readOnly, input.visible, input.sharingEnabled, input.bridge]);
 
   return { noteInput, noteSend: stop, state };
 }

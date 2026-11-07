@@ -97,8 +97,27 @@ describe("typing sharing", () => {
     openSettings();
     const setting = await screen.findByRole<HTMLInputElement>("checkbox", { name: /Show others/ });
     fireEvent.click(setting);
-    await waitFor(() => expect(setting).not.toBeChecked());
     expect(await screen.findByRole("alert")).toHaveAttribute("id", "settings-share-typing-error");
+    expect(setting).toBeChecked();
+    expect(JSON.parse(localStorage.getItem("peppy.layout.v1")!).shareTyping).toBe(true);
+    expect(setSharing).toHaveBeenCalledTimes(1);
+  });
+
+  it("submits each local sharing toggle to the host exactly once", async () => {
+    const setSharing = vi.spyOn(bridge, "set_typing_sharing").mockResolvedValue();
+    render(<App />);
+    await screen.findByRole("textbox", { name: "Message" });
+    openSettings();
+    const setting = await screen.findByRole<HTMLInputElement>("checkbox", { name: /Show others/ });
+    setSharing.mockClear();
+
+    fireEvent.click(setting);
+    await waitFor(() => expect(setting).not.toBeChecked());
+    expect(setSharing).toHaveBeenCalledExactlyOnceWith({ enabled: false });
+    setSharing.mockClear();
+    fireEvent.click(setting);
+    await waitFor(() => expect(setting).toBeChecked());
+    expect(setSharing).toHaveBeenCalledExactlyOnceWith({ enabled: true });
   });
 
   it("renders a current chat typing indicator from the bridge", async () => {
@@ -112,6 +131,28 @@ describe("typing sharing", () => {
     await waitFor(() => expect(document.getElementById("conversation-rcs-badge")).toBeInTheDocument());
     act(() => receive({ conversationId: snapshot.activeConversationId!, state: "started" }));
     expect(document.getElementById("typing-indicator")).toHaveAttribute("data-typing-visible", "true");
+  });
+
+  it.each([false, true])("uses actual local activity, not a restored draft, for announcements (active=%s)", async (active) => {
+    snapshot.draft!.text = "restored draft";
+    let receive: (signal: { conversationId: string; state: "started" | "stopped"; expiresAtMs?: string }) => void = () => undefined;
+    vi.spyOn(bridge, "subscribe_typing").mockImplementation(listener => {
+      receive = listener;
+      return () => undefined;
+    });
+    vi.spyOn(bridge, "send_typing").mockResolvedValue();
+    render(<App />);
+    const textarea = await screen.findByRole("textbox", { name: "Message" });
+    await waitFor(() => expect(textarea).toHaveValue("restored draft"));
+    await waitFor(() => expect(document.getElementById("conversation-rcs-badge")).toBeInTheDocument());
+    expect(document.getElementById("shared-composer")).toHaveAttribute("data-typing-send", "idle");
+    if (active) fireEvent.change(textarea, { target: { value: "restored draft edited" } });
+
+    act(() => receive({ conversationId: snapshot.activeConversationId!, state: "started" }));
+
+    expect(document.getElementById("typing-indicator")).toHaveAttribute("data-typing-visible", "true");
+    if (active) expect(document.getElementById("typing-announcer")).toBeEmptyDOMElement();
+    else expect(document.getElementById("typing-announcer")).not.toBeEmptyDOMElement();
   });
 
   it("sends typing only for the current RCS conversation and stops after sharing is disabled", async () => {
@@ -134,12 +175,33 @@ describe("typing sharing", () => {
     expect(sendTyping).not.toHaveBeenCalled();
   });
 
-  it("suppresses typing when another window disables sharing or the route is not current", async () => {
+  it.each(["settings", "contacts", "notifications"])("stops active typing when switching to %s without a blur", async (view) => {
     const sendTyping = vi.spyOn(bridge, "send_typing").mockResolvedValue();
     render(<App />);
     const textarea = await screen.findByRole("textbox", { name: "Message" });
+    sendTyping.mockClear();
+    fireEvent.change(textarea, { target: { value: "hello" } });
+
+    fireEvent.click(document.querySelector<HTMLButtonElement>(`[data-rail-item="${view}"]`)!);
+
+    await waitFor(() => expect(sendTyping).toHaveBeenLastCalledWith({ conversationId: snapshot.activeConversationId, state: "stopped" }));
+    expect(sendTyping).toHaveBeenCalledTimes(2);
+    fireEvent.click(document.querySelector<HTMLButtonElement>('[data-rail-item="conversations"]')!);
+    await screen.findByRole("textbox", { name: "Message" });
+    expect(sendTyping).toHaveBeenCalledTimes(2);
+    cleanup();
+    expect(sendTyping).toHaveBeenCalledTimes(2);
+  });
+
+  it("suppresses typing when another window disables sharing or the route is not current", async () => {
+    const sendTyping = vi.spyOn(bridge, "send_typing").mockResolvedValue();
+    const setSharing = vi.spyOn(bridge, "set_typing_sharing").mockResolvedValue();
+    render(<App />);
+    const textarea = await screen.findByRole("textbox", { name: "Message" });
+    setSharing.mockClear();
     localStorage.setItem("peppy.layout.v1", JSON.stringify({ shareTyping: false }));
-    window.dispatchEvent(new StorageEvent("storage", { key: "peppy.layout.v1" }));
+    act(() => window.dispatchEvent(new StorageEvent("storage", { key: "peppy.layout.v1" })));
+    expect(setSharing).toHaveBeenCalledExactlyOnceWith({ enabled: false });
     fireEvent.change(textarea, { target: { value: "hello" } });
     expect(sendTyping).not.toHaveBeenCalled();
     cleanup();

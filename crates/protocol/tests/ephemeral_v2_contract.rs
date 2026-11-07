@@ -125,6 +125,32 @@ fn v2_per_kind_ciphertext_caps_and_aad_bind_every_header_field() {
 }
 
 #[test]
+fn control_ciphertext_schema_matches_runtime_at_the_encoded_size_boundary() {
+    let schema: serde_json::Value =
+        serde_json::from_str(&peppy_protocol::generate_contracts().openapi).unwrap();
+    for kind in [
+        EphemeralSignalV2Kind::Challenge,
+        EphemeralSignalV2Kind::SessionAck,
+    ] {
+        for (length, valid) in [(511, true), (512, true), (513, false)] {
+            let mut frame = signal(kind);
+            frame.ciphertext_b64 = STANDARD.encode(vec![0_u8; length]);
+            let wire = serde_json::to_value(&frame).unwrap();
+            assert_eq!(
+                schema_validates(&schema, "EphemeralSignalV2", &wire),
+                valid,
+                "{kind:?} schema length {length}"
+            );
+            assert_eq!(
+                serde_json::from_value::<EphemeralSignalV2>(wire).is_ok(),
+                valid,
+                "{kind:?} runtime length {length}"
+            );
+        }
+    }
+}
+
+#[test]
 fn v2_hello_has_fixed_literals_and_strict_limits() {
     assert_eq!(
         serde_json::to_string(&LiveHelloV2::new()).unwrap(),
@@ -353,4 +379,102 @@ fn v2_maximum_notify_payloads_use_the_real_relay_wrapper() {
         .len();
         assert_eq!(bytes, expected, "{kind:?}");
     }
+}
+
+#[test]
+fn emitted_v2_scalar_schemas_match_runtime_canonical_boundaries() {
+    let schema: serde_json::Value =
+        serde_json::from_str(&peppy_protocol::generate_contracts().openapi).unwrap();
+    let valid_signal = serde_json::to_value(signal(EphemeralSignalV2Kind::Typing)).unwrap();
+    assert!(schema_validates(
+        &schema,
+        "EphemeralSignalV2",
+        &valid_signal
+    ));
+    assert!(serde_json::from_value::<EphemeralSignalV2>(valid_signal.clone()).is_ok());
+    let mut maximum_signal = valid_signal.clone();
+    maximum_signal["sent_at_ms"] = serde_json::json!((u64::MAX - 1).to_string());
+    maximum_signal["expires_at_ms"] = serde_json::json!(u64::MAX.to_string());
+    maximum_signal["sequence"] = serde_json::json!(u64::MAX.to_string());
+    assert!(schema_validates(
+        &schema,
+        "EphemeralSignalV2",
+        &maximum_signal
+    ));
+    assert!(serde_json::from_value::<EphemeralSignalV2>(maximum_signal).is_ok());
+    for (field, value) in [
+        ("session_id", serde_json::json!("AAAAAAAAAAAAAAAAAAAAAB")),
+        ("sent_at_ms", serde_json::json!("18446744073709551616")),
+        ("ciphertext_b64", serde_json::json!("AB==")),
+    ] {
+        let mut invalid = valid_signal.clone();
+        invalid[field] = value;
+        assert!(
+            !schema_validates(&schema, "EphemeralSignalV2", &invalid),
+            "{field}"
+        );
+        assert!(
+            serde_json::from_value::<EphemeralSignalV2>(invalid).is_err(),
+            "{field}"
+        );
+    }
+
+    let valid_challenge = serde_json::json!({
+        "version": 2, "challenger_device_id":"00000000-0000-0000-0000-000000000001",
+        "challenger_session_id":URL_SAFE_NO_PAD.encode([7_u8; 16]),
+        "responder_device_id":"00000000-0000-0000-0000-000000000002", "nonce_b64":STANDARD.encode([8_u8; 16]),
+    });
+    assert!(schema_validates(
+        &schema,
+        "ChallengePlaintextV2",
+        &valid_challenge
+    ));
+    assert!(serde_json::from_value::<ChallengePlaintextV2>(valid_challenge.clone()).is_ok());
+    let mut invalid_nonce = valid_challenge.clone();
+    invalid_nonce["nonce_b64"] = serde_json::json!("AB==");
+    assert!(!schema_validates(
+        &schema,
+        "ChallengePlaintextV2",
+        &invalid_nonce
+    ));
+    assert!(serde_json::from_value::<ChallengePlaintextV2>(invalid_nonce).is_err());
+
+    let valid_ack = serde_json::json!({
+        "version":2,"responder_device_id":"00000000-0000-0000-0000-000000000001",
+        "responder_session_id":URL_SAFE_NO_PAD.encode([7_u8; 16]),
+        "challenger_device_id":"00000000-0000-0000-0000-000000000002",
+        "challenger_session_id":URL_SAFE_NO_PAD.encode([7_u8; 16]),
+        "echoed_nonce_b64":STANDARD.encode([8_u8; 16]),"sequence_floor":"1",
+    });
+    assert!(schema_validates(
+        &schema,
+        "SessionAckPlaintextV2",
+        &valid_ack
+    ));
+    assert!(serde_json::from_value::<SessionAckPlaintextV2>(valid_ack.clone()).is_ok());
+    for (field, value) in [
+        (
+            "responder_session_id",
+            serde_json::json!("AAAAAAAAAAAAAAAAAAAAAB"),
+        ),
+        ("echoed_nonce_b64", serde_json::json!("AB==")),
+        ("sequence_floor", serde_json::json!("18446744073709551616")),
+    ] {
+        let mut invalid = valid_ack.clone();
+        invalid[field] = value;
+        assert!(
+            !schema_validates(&schema, "SessionAckPlaintextV2", &invalid),
+            "{field}"
+        );
+        assert!(
+            serde_json::from_value::<SessionAckPlaintextV2>(invalid).is_err(),
+            "{field}"
+        );
+    }
+}
+
+fn schema_validates(schema: &serde_json::Value, name: &str, instance: &serde_json::Value) -> bool {
+    jsonschema::validator_for(&schema["components"]["schemas"][name])
+        .unwrap()
+        .is_valid(instance)
 }

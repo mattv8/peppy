@@ -394,6 +394,58 @@ fn disabled_sharing_preserves_outbound_clock_and_sequence_state() {
 }
 
 #[test]
+fn disabled_sharing_seals_only_the_stop_for_an_admitted_start() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "v2-sharing-stop", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    publish_eligible(&client, config.device_id, conversation);
+    enable(
+        &client,
+        config.device_id,
+        LiveClock {
+            wall_ms: 1_000,
+            mono_ms: 1_000,
+        },
+    );
+    assert!(
+        seal(
+            &client,
+            conversation,
+            config.device_id,
+            TypingStateV2::Started,
+            1_001,
+            1_001,
+        )
+        .is_some()
+    );
+
+    client.set_typing_sharing(false).unwrap();
+    assert_eq!(
+        seal(
+            &client,
+            conversation,
+            config.device_id,
+            TypingStateV2::Started,
+            1_002,
+            1_002,
+        ),
+        None
+    );
+    let stopped = seal(
+        &client,
+        conversation,
+        config.device_id,
+        TypingStateV2::Stopped,
+        1_003,
+        1_003,
+    )
+    .unwrap();
+    assert_eq!(stopped.signal.sequence, "2");
+}
+
+#[test]
 fn google_contact_typing_displays_only_for_the_current_gateway() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();

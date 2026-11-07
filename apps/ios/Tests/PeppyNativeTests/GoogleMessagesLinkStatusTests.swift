@@ -68,6 +68,24 @@ import Testing
         #expect(current.expired(at: 1_001).expiresAtMs == nil)
     }
 
+    @Test func presentsRemoteOwnerPhoneWithLinkEvidence() {
+        let ownerPhone = DeviceRosterItem(id: gatewayID, role: "owner", revoked: false, keyEpoch: 1)
+
+        #expect(GoogleMessagesLinkPresentation.presentation(for: ownerPhone, currentDeviceID: nil, status: status(.linked))?.status == .connected)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: ownerPhone, currentDeviceID: nil, status: status(.needsRelink))?.status == .needsRelink)
+    }
+
+    @Test func excludesRevokedSelfAndOwnerWithoutLinkEvidence() {
+        let ownerPhone = DeviceRosterItem(id: gatewayID, role: "owner", revoked: false, keyEpoch: 1)
+        let revokedOwner = DeviceRosterItem(id: gatewayID, role: "owner", revoked: true, keyEpoch: 1)
+
+        #expect(GoogleMessagesLinkPresentation.presentation(for: revokedOwner, currentDeviceID: nil, status: status(.linked)) == nil)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: ownerPhone, currentDeviceID: gatewayID, status: status(.linked)) == nil)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: ownerPhone, currentDeviceID: nil, status: nil) == nil)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: ownerPhone, currentDeviceID: nil, status: status(.unlinked)) == nil)
+        #expect(GoogleMessagesLinkPresentation.presentation(for: ownerPhone, currentDeviceID: nil, status: status(.unavailable)) == nil)
+    }
+
     @Test func discardsAStatusReadAfterLockOrIdentityChange() {
         let request = GoogleMessagesLinkStatusRequest(
             identityKey: "origin|vault|device",

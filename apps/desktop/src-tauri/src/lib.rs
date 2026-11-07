@@ -44,8 +44,6 @@ mod heads_runtime;
 mod activation_session_tests;
 #[cfg(test)]
 mod draft_command_tests;
-#[cfg(test)]
-mod rcs_snapshot_tests;
 mod hosted;
 mod lifecycle;
 #[allow(dead_code)]
@@ -59,6 +57,8 @@ mod notification_permission;
 mod notifications;
 mod origin;
 mod purchases;
+#[cfg(test)]
+mod rcs_snapshot_tests;
 mod recents;
 #[cfg(test)]
 mod recents_command_tests;
@@ -2048,12 +2048,12 @@ async fn unlock_with(
     blocking(move || {
         match s.client.unlock(&profile, &header, &passphrase) {
             Err(peppy_client_core::Error::InvalidProfile) => {
-                s.mismatch.store(true, Ordering::Relaxed);
+                s.set_mismatch(true);
                 return Err(core_error(peppy_client_core::Error::InvalidProfile));
             }
             other => other.map_err(core_error)?,
         }
-        s.mismatch.store(false, Ordering::Relaxed);
+        s.set_mismatch(false);
         // The server reports this epoch as current; local work must be sealed under it.
         if s.client
             .key_status()
@@ -2075,7 +2075,7 @@ async fn unlock_with(
     .await?;
     let binding = session.binding.clone();
     state.update_config(|config| config.add_cached_epoch(&binding, epoch))?;
-    session.set_status(|status| status.vault = Some(VaultSummary { epoch, fingerprint }));
+    session.set_security_status(|status| status.vault = Some(VaultSummary { epoch, fingerprint }));
     // The renderer refreshes only on state events; the claim path notifies before this unlock.
     session.notify();
     session.request_work();

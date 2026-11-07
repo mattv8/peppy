@@ -678,6 +678,15 @@ describe("desktop UI controls", () => {
     expect(document.getElementById("shared-composer")).toHaveAttribute("data-typing-send", "active");
   });
 
+  it("keeps typing content in the toolbar typing slot", () => {
+    render(<Composer draft="" attachments={[]} sendSupported onDraftChange={() => {}} onSend={() => {}} typingSlot={<span id="typing-indicator" />} />);
+
+    const slot = document.getElementById("composer-typing-slot");
+    expect(slot).toBeInTheDocument();
+    expect(slot).toHaveClass("composer-toolbar-spacer");
+    expect(slot).toContainElement(document.getElementById("typing-indicator"));
+  });
+
   it("allows attachment-only sends and explains why sending is unavailable", () => {
     const sent = vi.fn();
     const { rerender } = render(

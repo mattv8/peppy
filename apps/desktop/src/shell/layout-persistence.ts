@@ -1,6 +1,7 @@
 import type { NavigationPosition, PopoutMode, RecipientPosition } from "@peppy/desktop-ui";
 
 const LAYOUT_KEY = "peppy.layout.v1";
+let knownShareTyping: boolean | undefined;
 
 type LayoutPatch = {
   listWidth?: number;
@@ -35,7 +36,16 @@ export function readCompactTimestamps(): boolean {
 }
 
 export function readShareTyping(): boolean {
-  return readLayoutBoolean("shareTyping");
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "{}");
+    if (typeof stored !== "object" || stored === null || Array.isArray(stored)) return knownShareTyping ?? true;
+    const value = (stored as StoredLayout).shareTyping;
+    if (typeof value === "boolean") knownShareTyping = value;
+    else if (value === undefined) knownShareTyping = true;
+    return knownShareTyping ?? true;
+  } catch {
+    return knownShareTyping ?? true;
+  }
 }
 
 export function readGroupSenderAvatars(): boolean {
@@ -69,7 +79,9 @@ function updateLayout(update: (layout: StoredLayout) => StoredLayout): boolean {
 }
 
 export function persistLayoutPatch(patch: LayoutPatch = {}): boolean {
-  return updateLayout((layout) => ({ ...layout, ...patch }));
+  const persisted = updateLayout((layout) => ({ ...layout, ...patch }));
+  if (persisted && typeof patch.shareTyping === "boolean") knownShareTyping = patch.shareTyping;
+  return persisted;
 }
 
 export function persistRecipientPosition(position: RecipientPosition): void {

@@ -71,6 +71,6 @@ fn message_window_keeps_sms_rows_on_the_rcs_aware_projection() {
     assert_eq!(window.messages.len(), 1);
     let message = &window.messages[0];
     assert_eq!(message.id, captured.message_id.to_string());
-    assert_eq!(message.transport.as_deref(), Some("sms"));
+    assert_eq!(message.transport, Some("sms"));
     assert!(message.status.is_none());
 }

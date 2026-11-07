@@ -203,7 +203,7 @@ pub(crate) fn seal(
     if !store.ephemeral_v2.enabled {
         return Err(LiveError::Disabled);
     }
-    if !store.ephemeral_v2.sharing_enabled {
+    if !store.ephemeral_v2.sharing_enabled && state == TypingStateV2::Started {
         return Ok(None);
     }
     let mut clock_candidate = store
