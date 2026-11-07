@@ -19,6 +19,7 @@ object LinkRuntime {
     private val changeCounter = MutableStateFlow(0L)
     private var cachedHandle: LinkHandle? = null
     private var closingHandle: LinkHandle? = null
+    private var receiveCoordinator: RcsReceiveCoordinator? = null
     private var handleGeneration = 0L
     private var pairingGeneration = 0L
 
@@ -43,10 +44,12 @@ object LinkRuntime {
                             return@synchronized LinkOpenResult.Unreadable(filterReasonCode(error.message))
                         }
                         try {
-                            val handle = engine.open(state, host(store, nextHandleGeneration()))
+                            val coordinator = RcsReceiveCoordinator(context.applicationContext)
+                            val handle = engine.open(state, host(store, nextHandleGeneration(), coordinator))
                             synchronized(this) {
                                 handleGeneration += 1
                                 cachedHandle = handle
+                                receiveCoordinator = coordinator
                             }
                             LinkOpenResult.Open(handle)
                         } catch (error: Exception) {
@@ -68,6 +71,7 @@ object LinkRuntime {
             val handle = synchronized(this) {
                 val current = cachedHandle
                 cachedHandle = null
+                receiveCoordinator = null
                 handleGeneration += 1
                 emoji.value = null
                 pairingInProgress.set(false)
@@ -137,9 +141,11 @@ object LinkRuntime {
                 if (!engine.available) return@synchronized null
                 val store = store(context)
                 val state = runCatching { store.read() }.getOrNull() ?: return@synchronized null
-                val handle = runCatching { engine.open(state, host(store, nextHandleGeneration())) }.getOrNull() ?: return@synchronized null
+                val coordinator = RcsReceiveCoordinator(context.applicationContext)
+                val handle = runCatching { engine.open(state, host(store, nextHandleGeneration(), coordinator)) }.getOrNull() ?: return@synchronized null
                 handleGeneration += 1
                 cachedHandle = handle
+                receiveCoordinator = coordinator
                 LinkHandleLease(handle, handleGeneration)
             }
         }
@@ -164,6 +170,14 @@ object LinkRuntime {
         }
     }
 
+    internal fun resumeRcsReceive(lease: LinkHandleLease, cancelled: AtomicBoolean) {
+        val coordinator = synchronized(this) {
+            if (!ownsLease(lease)) return
+            receiveCoordinator
+        } ?: return
+        coordinator.resume(lease.handle, cancelled) { ownsLease(lease) }
+    }
+
     /** Calls native work on the exact captured owner, never a handle opened after retirement. */
     internal fun <T> withCapturedLinkOperation(lease: LinkHandleLease, operation: (LinkHandle) -> T): T? = synchronized(nativeOperationLock) {
         if (!ownsLease(lease)) return@synchronized null
@@ -174,6 +188,7 @@ object LinkRuntime {
     internal fun detachHandleForServiceStop(lease: LinkHandleLease): LinkHandle? = synchronized(this) {
         if (lease.generation != handleGeneration || lease.handle !== cachedHandle) null else {
             cachedHandle = null
+            receiveCoordinator = null
             closingHandle = lease.handle
             handleGeneration += 1
             lease.handle
@@ -231,6 +246,7 @@ object LinkRuntime {
             val captured = synchronized(this) {
                 val current = cachedHandle
                 cachedHandle = null
+                receiveCoordinator = null
                 handleGeneration += 1
                 emoji.value = null
                 changeCounter.value = 0
@@ -245,7 +261,7 @@ object LinkRuntime {
         LinkRuntimeTestHooks.storeFactory?.invoke(context.applicationContext)
             ?: LinkStateStoreAdapter(LinkStateStore(context.applicationContext.noBackupFilesDir))
 
-    private fun host(store: LinkStateStorage, generation: Long) = object : LinkHost {
+    private fun host(store: LinkStateStorage, generation: Long, receiveCoordinator: RcsReceiveCoordinator) = object : LinkHost {
         override fun persistState(state: ByteArray) = store.write(state)
 
         override fun event(kind: String, code: String, value: Long) = eventOwned(kind, code, value, -1, -1)
@@ -265,7 +281,7 @@ object LinkRuntime {
         override fun rcsEventOwned(recordJson: String, ownerGeneration: Long, ownerRevision: Long, streamEpoch: Long) {
             callbackExecutor().execute {
                 if (!acceptsStreamCallback(generation, ownerGeneration, ownerRevision, streamEpoch)) return@execute
-                (LinkRuntimeTestHooks.rcsReceiveSink ?: NoOpRcsReceiveSink).receive(recordJson)
+                (LinkRuntimeTestHooks.rcsReceiveSink ?: receiveCoordinator).receive(recordJson)
             }
         }
 
@@ -292,6 +308,7 @@ object LinkRuntime {
     private fun recordEvent(kind: String, code: String, value: Long) {
         LinkRuntimeEventSink.record(kind, code, value)
     }
+
 
     private fun signalChange() {
         changeCounter.value += 1

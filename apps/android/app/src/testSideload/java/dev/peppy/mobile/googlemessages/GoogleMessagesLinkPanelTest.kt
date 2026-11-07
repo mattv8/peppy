@@ -98,6 +98,45 @@ class GoogleMessagesLinkPanelTest {
         compose.onNodeWithTag("google-messages-link-battery-row").fetchSemanticsNode()
     }
 
+    @Test fun `linked typing sharing defaults on and writes each toggle once`() {
+        val host = FakePanelHost(FakeHandle("linked"))
+        showPanel(host)
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-typing-row").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("google-messages-link-typing-row").performClick()
+        compose.waitUntil { host.typingWrites == listOf(false) }
+        compose.onNodeWithTag("google-messages-link-typing-row").performClick()
+        compose.waitUntil { host.typingWrites == listOf(false, true) }
+    }
+
+    @Test fun `typing sharing failure keeps the last confirmed value and exposes help`() {
+        val host = FakePanelHost(FakeHandle("linked")).apply { typingWriteSucceeds = false }
+        showPanel(host)
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-typing-row").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("google-messages-link-typing-row").performClick()
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-typing-error").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("google-messages-link-typing-row").assert(SemanticsMatcher.expectValue(SemanticsProperties.ToggleableState, androidx.compose.ui.state.ToggleableState.On))
+        compose.onNodeWithTag("info-typing-share").performClick()
+        compose.onNodeWithTag("info-typing-share-dialog").fetchSemanticsNode()
+        compose.onNodeWithText(ApplicationProvider.getApplicationContext<android.content.Context>().getString(R.string.peppy_typing_share_hint)).assertIsDisplayed()
+    }
+
+    @Test fun `typing sharing info is a separately focusable contextual action`() {
+        val host = FakePanelHost(FakeHandle("linked"))
+        showPanel(host, readinessTag = "info-typing-share")
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val infoDescription = context.getString(
+            R.string.peppy_help_android_more_about,
+            context.getString(R.string.peppy_typing_share_label),
+        )
+
+        val infoNode = compose.onNodeWithTag("info-typing-share")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.ContentDescription, listOf(infoDescription)))
+            .assert(SemanticsMatcher.keyIsDefined(SemanticsActions.OnClick))
+            .fetchSemanticsNode()
+        val toggleNode = compose.onNodeWithTag("google-messages-link-typing-row").fetchSemanticsNode()
+        assertTrue("Info action must have its own merged semantics node", infoNode.id != toggleNode.id)
+    }
+
     @Test fun `repair state offers owner actions`() {
         panel("needs_relink") {
             compose.onNodeWithTag("google-messages-link-relink").fetchSemanticsNode()
@@ -750,9 +789,8 @@ class GoogleMessagesLinkPanelTest {
             unlinkAction = { unlinkEntered.countDown(); awaitIgnoringInterrupts(releaseUnlink) }
         }
         val host = FakePanelHost(handle, notificationsGranted = false)
-        showPanel(host)
-        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-check-now").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("google-messages-link-notifications-allow").performClick()
+        showPanel(host, readinessTag = "google-messages-link-check-now")
+        compose.onNodeWithTag("google-messages-link-notifications-allow").performScrollTo().performClick()
         host.completePermissionRequest(granted = false)
         compose.waitUntil { host.permissionRequests == 1 }
         val application = ApplicationProvider.getApplicationContext<android.app.Application>()
@@ -781,9 +819,8 @@ class GoogleMessagesLinkPanelTest {
             relinkAction = { relinkEntered.countDown(); awaitIgnoringInterrupts(releaseRelink) }
         }
         val host = FakePanelHost(handle, notificationsGranted = false)
-        showPanel(host)
-        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notifications-allow").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("google-messages-link-notifications-allow").performClick()
+        showPanel(host, readinessTag = "google-messages-link-notifications-allow")
+        compose.onNodeWithTag("google-messages-link-notifications-allow").performScrollTo().performClick()
         host.completePermissionRequest(granted = false)
         compose.waitUntil { host.permissionRequests == 1 }
 
@@ -849,7 +886,11 @@ class GoogleMessagesLinkPanelTest {
         compose.onNodeWithTag(confirmTag).performSemanticsAction(SemanticsActions.OnClick)
     }
 
-    private fun panel(state: String, assertion: () -> Unit) {
+    private fun panel(
+        state: String,
+        readinessTag: String = "google-messages-link-status",
+        assertion: () -> Unit,
+    ) {
         GoogleMessagesLinkTestHooks.available = true
         LinkRuntimeTestHooks.engine = object : LinkEngine {
             override val available = true
@@ -866,14 +907,23 @@ class GoogleMessagesLinkPanelTest {
         }
         LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
         compose.setContent { PeppyTheme { GoogleMessagesLinkPanel {} } }
-        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-status").fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil { compose.onAllNodesWithTag(readinessTag).fetchSemanticsNodes().isNotEmpty() }
         assertion()
     }
 
 
-    private fun showPanel(host: FakePanelHost) {
+    private fun showPanel(host: FakePanelHost, readinessTag: String? = null) {
         GoogleMessagesLinkTestHooks.available = true
-        compose.setContent { PeppyTheme { GoogleMessagesLinkPanel(host) {} } }
+        compose.setContent {
+            PeppyTheme {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    GoogleMessagesLinkPanel(host) {}
+                }
+            }
+        }
+        readinessTag?.let { tag ->
+            compose.waitUntil { compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty() }
+        }
     }
 
     private open class FakeHandle(var state: String) : LinkHandle {
@@ -921,6 +971,9 @@ class GoogleMessagesLinkPanelTest {
         val observedStates = mutableListOf<String>()
         var recordPreStartResult = true
         var recordUnlinkedResult = true
+        var typingSharingValue = true
+        var typingWriteSucceeds = true
+        val typingWrites = mutableListOf<Boolean>()
         var onRecordUnlinked: () -> Unit = {}
         val ownerUnlinkEvents = mutableListOf<String>()
         val relinkCalls get() = handle.relinkCalls
@@ -962,6 +1015,12 @@ class GoogleMessagesLinkPanelTest {
         override fun requestNotificationPermission() { permissionRequests++ }
         override fun launchSignIn(onResult: (String?) -> Unit) { signInLaunches++ }
         override fun startService() { serviceStarts++ }
+        override fun typingSharing() = typingSharingValue
+        override fun setTypingSharing(enabled: Boolean): Boolean {
+            typingWrites += enabled
+            if (typingWriteSucceeds) typingSharingValue = enabled
+            return typingWriteSucceeds
+        }
 
         fun completePermissionRequest(granted: Boolean = notificationsGranted) {
             notificationsGranted = granted

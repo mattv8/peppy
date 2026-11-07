@@ -19,8 +19,12 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import dev.peppy.mobile.MainActivity
 import dev.peppy.mobile.R
+import dev.peppy.mobile.gateway.NativeGateway
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import uniffi.peppy_mobile_bindings.gatewayPendingNativeRcsCommands
+import uniffi.peppy_mobile_bindings.rcsCanonicalizerRevision
 
 internal data class ServiceTestHooks(
     val elapsedRealtime: () -> Long = SystemClock::elapsedRealtime,
@@ -31,10 +35,20 @@ internal data class ServiceTestHooks(
     val afterStatusRead: () -> Unit = {},
     val beforeRun: () -> Unit = {},
     val workerFinished: () -> Unit = {},
+    val receiveSweepExecutor: Executor = DEFAULT_RCS_RECEIVE_EXECUTOR,
+    val receiveSweep: (LinkHandleLease, AtomicBoolean) -> Unit = LinkRuntime::resumeRcsReceive,
 )
 
 private val DEFAULT_NOTIFICATION_EXECUTOR = Executors.newSingleThreadExecutor()
 private val DEFAULT_CLOSE_EXECUTOR = Executors.newSingleThreadExecutor()
+private val DEFAULT_RCS_RECEIVE_EXECUTOR = Executors.newSingleThreadExecutor()
+
+private data class ReceiveSweepRequest(
+    val serviceGeneration: Long,
+    val runGeneration: Long,
+    val lease: LinkHandleLease,
+    val cancelled: AtomicBoolean,
+)
 
 class GoogleMessagesLinkService : Service() {
     private val lock = Any()
@@ -48,11 +62,31 @@ class GoogleMessagesLinkService : Service() {
     private var lastStartId = 0
     @Volatile private var cancelled = false
     private var lastNotification: String? = null
+    private lateinit var nativeRcsSendWork: RcsNativeSendWork
+    private var eligibilityPublisher: RcsEligibilityPublisher? = null
+    private val receiveSweepLock = Any()
+    private var receiveRunGeneration = 0L
+    private var receiveRunLease: LinkHandleLease? = null
+    private var pendingReceiveSweep: ReceiveSweepRequest? = null
+    private var runningReceiveSweep: ReceiveSweepRequest? = null
+    private var receiveSweepDrainScheduled = false
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel(this)
         lifecycleGeneration = replaceActive(this)
+        nativeRcsSendWork = RcsNativeSendWork(
+            enabled = { nativeRcsSendExecutorEnabledForTest ?: NATIVE_RCS_SEND_EXECUTOR_ENABLED },
+            candidates = {
+                NativeGateway.open(applicationContext)
+                    ?.let(::gatewayPendingNativeRcsCommands)
+                    .orEmpty()
+                    .map { RcsNativeCommand(it.commandId, it.conversationId, it.recipient) }
+            },
+            execute = ::runNativeRcsSend,
+            current = { isCurrent(lifecycleGeneration) },
+            executor = NATIVE_RCS_SEND_EXECUTOR,
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -63,16 +97,42 @@ class GoogleMessagesLinkService : Service() {
             requestedGeneration += 1
             if (worker == null || worker?.isAlive != true) startWorkerLocked(requestedGeneration)
         }
+        nativeRcsSendWork.start()
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        nativeRcsSendWork.stop()
         cancelWorker()
         clearActive(this)
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun runNativeRcsSend(command: RcsNativeCommand) {
+        val lease = LinkRuntime.handleLease(this) ?: return
+        val clock = RcsNativeClock(System::currentTimeMillis)
+        RcsNativeSendCoordinator(
+            RcsNativeGoAdapter(lease),
+            RcsNativeCoreAdapter(applicationContext, clock),
+            RcsNativeAndroidRouteReader(applicationContext, clock),
+            clock,
+            rcsCanonicalizerRevision().toInt(),
+            RcsNativeAndroidRouteChangeRevoker(applicationContext),
+        ).execute(command)
+        publishNativeRcsEligibility(command.conversationId)
+    }
+
+    private fun publishNativeRcsEligibility(conversationId: String) {
+        if (!(nativeRcsSendExecutorEnabledForTest ?: NATIVE_RCS_SEND_EXECUTOR_ENABLED)) return
+        val client = NativeGateway.open(applicationContext) ?: return
+        val publisher = eligibilityPublisher ?: RcsEligibilityPublisher(
+            GeneratedRcsEligibilityPublisherPort(client),
+            current = { isCurrent(lifecycleGeneration) },
+        ).also { eligibilityPublisher = it }
+        publisher.publish(listOf(conversationId))
+    }
 
     private fun startWorkerLocked(generation: Long) {
         cancelled = false
@@ -136,6 +196,87 @@ class GoogleMessagesLinkService : Service() {
         }
     }
 
+    private fun beginReceiveRun(lease: LinkHandleLease): Long = synchronized(receiveSweepLock) {
+        receiveRunGeneration += 1
+        receiveRunLease = lease
+        pendingReceiveSweep?.cancelled?.set(true)
+        pendingReceiveSweep = null
+        runningReceiveSweep?.cancelled?.set(true)
+        receiveRunGeneration
+    }
+
+    private fun finishReceiveRun(lease: LinkHandleLease, runGeneration: Long) = synchronized(receiveSweepLock) {
+        if (receiveRunGeneration != runGeneration || receiveRunLease != lease) return@synchronized
+        pendingReceiveSweep?.cancelled?.set(true)
+        pendingReceiveSweep = null
+        runningReceiveSweep?.cancelled?.set(true)
+        receiveRunLease = null
+    }
+
+    private fun requestReceiveSweepAfterReady() {
+        if (!(nativeRcsSendExecutorEnabledForTest ?: NATIVE_RCS_SEND_EXECUTOR_ENABLED)) return
+        val schedule = synchronized(receiveSweepLock) {
+            val lease = receiveRunLease ?: return@synchronized false
+            if (!isCurrent(lifecycleGeneration) || !LinkRuntime.ownsObservationLease(lease)) return@synchronized false
+            pendingReceiveSweep?.cancelled?.set(true)
+            runningReceiveSweep?.cancelled?.set(true)
+            pendingReceiveSweep = ReceiveSweepRequest(
+                lifecycleGeneration,
+                receiveRunGeneration,
+                lease,
+                AtomicBoolean(false),
+            )
+            if (receiveSweepDrainScheduled) false else {
+                receiveSweepDrainScheduled = true
+                true
+            }
+        }
+        if (!schedule) return
+        try {
+            testHooks.receiveSweepExecutor.execute(::drainReceiveSweeps)
+        } catch (error: RuntimeException) {
+            synchronized(receiveSweepLock) {
+                pendingReceiveSweep?.cancelled?.set(true)
+                pendingReceiveSweep = null
+                receiveSweepDrainScheduled = false
+            }
+            throw error
+        }
+    }
+
+    private fun drainReceiveSweeps() {
+        while (true) {
+            val request = synchronized(receiveSweepLock) {
+                val next = pendingReceiveSweep
+                if (next == null) {
+                    runningReceiveSweep = null
+                    receiveSweepDrainScheduled = false
+                    return
+                }
+                pendingReceiveSweep = null
+                runningReceiveSweep = next
+                next
+            }
+            if (receiveSweepCurrent(request)) {
+                testHooks.receiveSweep(request.lease, request.cancelled)
+            }
+            synchronized(receiveSweepLock) {
+                if (runningReceiveSweep === request) runningReceiveSweep = null
+            }
+        }
+    }
+
+    private fun receiveSweepCurrent(request: ReceiveSweepRequest): Boolean {
+        if (request.cancelled.get() || !isCurrent(request.serviceGeneration)) return false
+        if (!LinkRuntime.ownsObservationLease(request.lease)) return false
+        return synchronized(receiveSweepLock) {
+            !request.cancelled.get() &&
+                receiveRunGeneration == request.runGeneration &&
+                receiveRunLease == request.lease &&
+                runningReceiveSweep === request
+        }
+    }
+
     private fun runWithRetry(lease: LinkHandleLease) {
         val handle = lease.handle
         while (isCurrent(lifecycleGeneration)) {
@@ -145,7 +286,9 @@ class GoogleMessagesLinkService : Service() {
             if (beforeRun.state != "linked") return
             publishStatus(beforeRun)
             testHooks.beforeRun()
+            val runGeneration = beginReceiveRun(lease)
             val failure = runCatching { handle.run() }.exceptionOrNull()
+            finishReceiveRun(lease, runGeneration)
             if (filterReasonCode(failure?.message) == "event_overflow") {
                 LinkRuntimeEventSink.record("link", "event_overflow", 0)
             }
@@ -171,6 +314,13 @@ class GoogleMessagesLinkService : Service() {
 
     private fun cancelWorker() {
         cancelled = true
+        synchronized(receiveSweepLock) {
+            receiveRunGeneration += 1
+            receiveRunLease = null
+            pendingReceiveSweep?.cancelled?.set(true)
+            pendingReceiveSweep = null
+            runningReceiveSweep?.cancelled?.set(true)
+        }
         val captured = synchronized(lock) {
             leaseReservation += 1
             worker?.interrupt()
@@ -275,6 +425,7 @@ class GoogleMessagesLinkService : Service() {
         @Volatile private var serviceGeneration = 0L
         private val activeLock = Any()
         internal var testHooks = ServiceTestHooks()
+        @Volatile internal var nativeRcsSendExecutorEnabledForTest: Boolean? = null
 
         fun createNotificationChannel(context: Context) {
             context.getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL_ID, context.getString(R.string.peppy_google_messages_link_notif_channel_name), NotificationManager.IMPORTANCE_LOW).apply {
@@ -290,7 +441,10 @@ class GoogleMessagesLinkService : Service() {
         fun cancelAttention(context: Context) { NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID) }
         internal fun onLinkEvent(kind: String, code: String) {
             active?.let { service ->
-                if (kind == "conn" && code == "ready") service.backoff.reset()
+                if (kind == "conn" && code == "ready") {
+                    service.backoff.reset()
+                    service.requestReceiveSweepAfterReady()
+                }
                 service.refreshNotificationAfterEvent()
             }
         }
@@ -307,5 +461,7 @@ class GoogleMessagesLinkService : Service() {
             (Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) &&
                 NotificationManagerCompat.from(context).areNotificationsEnabled()
         private const val SERVICE_STOP_JOIN_MS = 2_000L
+        private const val NATIVE_RCS_SEND_EXECUTOR_ENABLED = false
+        private val NATIVE_RCS_SEND_EXECUTOR = Executors.newSingleThreadExecutor()
     }
 }

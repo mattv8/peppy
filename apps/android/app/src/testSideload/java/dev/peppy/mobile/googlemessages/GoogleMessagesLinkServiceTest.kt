@@ -1,5 +1,6 @@
 package dev.peppy.mobile.googlemessages
 
+import androidx.test.core.app.ApplicationProvider
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
@@ -15,6 +16,11 @@ import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import uniffi.peppy_mobile_bindings.NativeRcsContextExpectation
+import uniffi.peppy_mobile_bindings.NativeRcsIngestOutcome
+import uniffi.peppy_mobile_bindings.NativeRcsObservationProvenance
+import uniffi.peppy_mobile_bindings.NativeRcsReceiveContext
+import uniffi.peppy_mobile_bindings.NativeRcsReceiveOwner
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -33,6 +39,157 @@ class GoogleMessagesLinkServiceTest {
         LinkRuntimeTestHooks.eventRecorder = null
         LinkCoreBridge.resetForTest()
         GoogleMessagesLinkService.testHooks = ServiceTestHooks()
+        GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = null
+    }
+
+
+    @Test fun `restart sweep does not run before ready`() {
+        val handle = BlockingRunHandle()
+        val executor = QueueExecutor()
+        val sweeps = AtomicInteger()
+        GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            receiveSweepExecutor = executor,
+            receiveSweep = { _, _ -> sweeps.incrementAndGet() },
+        )
+        installEngine(handle)
+
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+        executor.runAll()
+
+        assertEquals(0, sweeps.get())
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `restart sweep fetches and checkpoints once when the owned run reports ready`() {
+        val handle = ReadyGapHandle()
+        val core = ReadySweepCore()
+        val coordinator = RcsReceiveCoordinator(
+            ApplicationProvider.getApplicationContext(),
+            core,
+            enabled = { true },
+        )
+        GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            receiveSweepExecutor = Executor(Runnable::run),
+            receiveSweep = { lease, cancelled -> coordinator.resume(lease.handle, cancelled) },
+        )
+        installEngine(handle)
+
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+        assertEquals(0, handle.gapRequests.get())
+        assertEquals(0, core.checkpoints.get())
+
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+
+        assertEquals(1, handle.gapRequests.get())
+        assertEquals(1, core.checkpoints.get())
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `restart sweep runs again after reconnect ready`() {
+        val handle = ReconnectRunHandle()
+        val executor = QueueExecutor()
+        val sweeps = AtomicInteger()
+        GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            sleeper = {},
+            receiveSweepExecutor = executor,
+            receiveSweep = { _, _ -> sweeps.incrementAndGet() },
+        )
+        installEngine(handle)
+
+        val controller = startService()
+        assertTrue(handle.firstRunEntered.await(1, TimeUnit.SECONDS))
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+        executor.runAll()
+        handle.allowFirstRunReturn.countDown()
+        assertTrue(handle.secondRunEntered.await(1, TimeUnit.SECONDS))
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+        executor.runAll()
+
+        assertEquals(2, sweeps.get())
+        handle.allowSecondRunReturn.countDown()
+        controller.destroy()
+    }
+
+    @Test fun `stale run generation sweep is suppressed after reconnect`() {
+        val handle = ReconnectRunHandle()
+        val executor = QueueExecutor()
+        val sweeps = AtomicInteger()
+        GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            sleeper = {},
+            receiveSweepExecutor = executor,
+            receiveSweep = { _, _ -> sweeps.incrementAndGet() },
+        )
+        installEngine(handle)
+
+        val controller = startService()
+        assertTrue(handle.firstRunEntered.await(1, TimeUnit.SECONDS))
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+        handle.allowFirstRunReturn.countDown()
+        assertTrue(handle.secondRunEntered.await(1, TimeUnit.SECONDS))
+        executor.runAll()
+        assertEquals(0, sweeps.get())
+
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+        executor.runAll()
+        assertEquals(1, sweeps.get())
+        handle.allowSecondRunReturn.countDown()
+        controller.destroy()
+    }
+
+    @Test fun `overlapping ready wakes remain single flight and coalesce a followup`() {
+        val handle = BlockingRunHandle()
+        val active = AtomicInteger()
+        val maximumActive = AtomicInteger()
+        val sweeps = AtomicInteger()
+        GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            receiveSweepExecutor = Executor(Runnable::run),
+            receiveSweep = { _, _ ->
+                val nowActive = active.incrementAndGet()
+                maximumActive.updateAndGet { maxOf(it, nowActive) }
+                if (sweeps.incrementAndGet() == 1) GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+                active.decrementAndGet()
+            },
+        )
+        installEngine(handle)
+
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+
+        assertEquals(2, sweeps.get())
+        assertEquals(1, maximumActive.get())
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `ready event has no restart sweep effect while the native gate is off`() {
+        val handle = BlockingRunHandle()
+        val executor = QueueExecutor()
+        val sweeps = AtomicInteger()
+        GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = false
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            receiveSweepExecutor = executor,
+            receiveSweep = { _, _ -> sweeps.incrementAndGet() },
+        )
+        installEngine(handle)
+
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+        executor.runAll()
+
+        assertEquals(0, sweeps.get())
+        controller.destroy()
+        handle.allowRunReturn.countDown()
     }
 
     @Test
@@ -471,6 +628,71 @@ class GoogleMessagesLinkServiceTest {
                 // Cancellation closes the native handle and interrupts the Java wrapper wait.
             }
             if (closed) throw Exception("link_closed")
+        }
+    }
+
+    private class ReadyGapHandle : StatusHandle(LINKED_STATUS) {
+        val runEntered = CountDownLatch(1)
+        val allowRunReturn = CountDownLatch(1)
+        val gapRequests = AtomicInteger()
+
+        override fun run() {
+            runEntered.countDown()
+            allowRunReturn.await()
+        }
+
+        override fun fetchRcsGap(googleConversationId: String, pageToken: String): String {
+            gapRequests.incrementAndGet()
+            return """{"code":"ok","records":[],"signals":[],"next_cursor":"next","has_more":false}"""
+        }
+    }
+
+    private class ReadySweepCore : RcsReceiveCore {
+        val checkpoints = AtomicInteger()
+        private val context = NativeRcsReceiveContext(
+            "core-conversation",
+            "google-conversation",
+            7u,
+            11u,
+            NativeRcsReceiveOwner.LINK,
+            "initial",
+            NativeRcsContextExpectation(7u, 13u, 17u, 19u),
+        )
+
+        override fun context(googleId: String) = context
+        override fun contexts() = listOf(context)
+        override fun ingest(
+            context: NativeRcsReceiveContext,
+            record: String,
+            provenance: NativeRcsObservationProvenance,
+        ) = NativeRcsIngestOutcome("inserted", null, null)
+        override fun checkpoint(context: NativeRcsReceiveContext, token: String): String {
+            checkpoints.incrementAndGet()
+            return "recorded"
+        }
+        override fun invalidate(context: NativeRcsReceiveContext, googleId: String) = Unit
+    }
+
+    private class ReconnectRunHandle : StatusHandle(LINKED_STATUS) {
+        val firstRunEntered = CountDownLatch(1)
+        val secondRunEntered = CountDownLatch(1)
+        val allowFirstRunReturn = CountDownLatch(1)
+        val allowSecondRunReturn = CountDownLatch(1)
+        private val runCalls = AtomicInteger()
+
+        override fun run() {
+            when (runCalls.incrementAndGet()) {
+                1 -> {
+                    firstRunEntered.countDown()
+                    allowFirstRunReturn.await()
+                    throw Exception("temporary")
+                }
+                2 -> {
+                    secondRunEntered.countDown()
+                    allowSecondRunReturn.await()
+                    throw Exception("run_refused")
+                }
+            }
         }
     }
 

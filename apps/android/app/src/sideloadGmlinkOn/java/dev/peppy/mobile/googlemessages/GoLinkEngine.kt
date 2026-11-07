@@ -25,6 +25,7 @@ private class GoLinkHandle(private val link: Link) : LinkHandle {
     override fun bindNativeRcsFacts(ticketId: String, factsJson: String): String = link.bindNativeRcsFacts(ticketId, factsJson)
     override fun commitNativeRcs(ticketId: String, commitJson: String): String = link.commitNativeRcs(ticketId, commitJson)
     override fun revokeNativeSend(ticketId: String): String = link.revokeNativeSend(ticketId)
+    override fun fetchRcsGap(googleConversationId: String, pageToken: String): String = link.fetchRcsGap(googleConversationId, pageToken)
 }
 
 private object GoLinkEngine : LinkEngine {

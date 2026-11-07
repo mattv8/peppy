@@ -11,6 +11,7 @@ import android.text.format.DateUtils
 import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -57,8 +58,11 @@ import dev.peppy.mobile.googlemessages.LinkOperationLock
 import dev.peppy.mobile.googlemessages.LinkRuntime
 import dev.peppy.mobile.googlemessages.LinkSignInActivity
 import dev.peppy.mobile.googlemessages.LinkStatus
+import dev.peppy.mobile.googlemessages.TypingSharingPreferences
 import dev.peppy.mobile.ui.ConsentSheet
+import dev.peppy.mobile.ui.InfoButton
 import dev.peppy.mobile.ui.SettingToggleRow
+import dev.peppy.mobile.gateway.NativeGateway
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -91,6 +95,8 @@ internal interface GoogleMessagesLinkPanelHost {
     fun requestNotificationPermission()
     fun launchSignIn(onResult: (String?) -> Unit)
     fun startService()
+    fun typingSharing(): Boolean = true
+    fun setTypingSharing(enabled: Boolean): Boolean = false
 }
 
 private enum class PendingNotificationAction { LINK, RELINK, NOTIFICATIONS_ONLY }
@@ -125,6 +131,9 @@ private fun GoogleMessagesLinkPanelContent(
     var localNotice by rememberSaveable { mutableStateOf<String?>(null) }
     var batteryUnavailable by remember { mutableStateOf(false) }
     var batteryRefresh by remember { mutableIntStateOf(0) }
+    var typingShare by remember { mutableStateOf<Boolean?>(null) }
+    var typingWriteBusy by remember { mutableStateOf(false) }
+    var typingError by remember { mutableStateOf(false) }
     var notificationAsked by rememberSaveable { mutableStateOf(false) }
     var refreshGeneration by remember { mutableIntStateOf(0) }
     var refreshJob by remember { mutableStateOf<Job?>(null) }
@@ -212,6 +221,9 @@ private fun GoogleMessagesLinkPanelContent(
         }
     }
     LaunchedEffect(changes, resume) { reload() }
+    LaunchedEffect(status?.state) {
+        if (status?.state == "linked") typingShare = withContext(Dispatchers.IO) { host.typingSharing() }
+    }
 
     fun refreshAfterAction() { resume++; onChanged() }
     fun launchSignIn() {
@@ -318,6 +330,19 @@ private fun GoogleMessagesLinkPanelContent(
                         if (Build.VERSION.SDK_INT >= 33) {
                             if (notificationAsked) context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName))
                             else { notificationAsked = true; requestNotificationThen(PendingNotificationAction.NOTIFICATIONS_ONLY) }
+                        }
+                    },
+                    typingShare = typingShare,
+                    typingWriteBusy = typingWriteBusy,
+                    typingError = typingError,
+                    onTypingShareChanged = { enabled ->
+                        if (typingShare == null || busy || typingWriteBusy) return@StatusPanel
+                        typingWriteBusy = true
+                        typingError = false
+                        scope.launch {
+                            if (withContext(Dispatchers.IO) { host.setTypingSharing(enabled) }) typingShare = enabled
+                            else typingError = true
+                            typingWriteBusy = false
                         }
                     },
                 )
@@ -431,6 +456,13 @@ private class AndroidGoogleMessagesLinkPanelHost(
     override fun requestNotificationPermission() = requestPermission()
     override fun launchSignIn(onResult: (String?) -> Unit) = launchSignIn.invoke(onResult)
     override fun startService() = GoogleMessagesLinkService.start(context)
+    private val typingSharingPreferences by lazy { TypingSharingPreferences(context) }
+
+    override fun typingSharing() = typingSharingPreferences.enabled()
+    override fun setTypingSharing(enabled: Boolean): Boolean {
+        val client = NativeGateway.open(context) ?: return false
+        return typingSharingPreferences.update(enabled, client::setTypingSharing)
+    }
 }
 
 @Composable private fun Loading() = Column(Modifier.testTag("google-messages-link-loading")) { CircularProgressIndicator(Modifier.clearAndSetSemantics { }); Text(stringResource(R.string.peppy_google_messages_link_loading), Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
@@ -460,7 +492,7 @@ private class AndroidGoogleMessagesLinkPanelHost(
     PanelButton(stringResource(R.string.peppy_google_messages_link_action_reset), !busy, "google-messages-link-reset", onReset)
 }
 
-@Composable private fun StatusPanel(status: LinkStatus, emoji: String?, busy: Boolean, checkResult: Int?, notificationsOff: Boolean, batteryAllowed: Boolean, batteryUnavailable: Boolean, signInBlocked: Boolean, pairingInProgress: Boolean, localNotice: String?, dismissedSeq: Long?, onDismissNotice: () -> Unit, onStart: () -> Unit, onRelink: () -> Unit, onUnlink: () -> Unit, onRemove: () -> Unit, onCheck: () -> Unit, onReconnect: () -> Unit, onBattery: () -> Unit, onAllowNotifications: () -> Unit) {
+@Composable private fun StatusPanel(status: LinkStatus, emoji: String?, busy: Boolean, checkResult: Int?, notificationsOff: Boolean, batteryAllowed: Boolean, batteryUnavailable: Boolean, signInBlocked: Boolean, pairingInProgress: Boolean, localNotice: String?, dismissedSeq: Long?, onDismissNotice: () -> Unit, onStart: () -> Unit, onRelink: () -> Unit, onUnlink: () -> Unit, onRemove: () -> Unit, onCheck: () -> Unit, onReconnect: () -> Unit, onBattery: () -> Unit, onAllowNotifications: () -> Unit, typingShare: Boolean?, typingWriteBusy: Boolean, typingError: Boolean, onTypingShareChanged: (Boolean) -> Unit) {
     val statusText = when (status.state) {
         "unlinked" -> R.string.peppy_google_messages_link_status_unlinked
         "pairing" -> R.string.peppy_google_messages_link_status_pairing
@@ -487,7 +519,7 @@ private class AndroidGoogleMessagesLinkPanelHost(
             }
         }
         "pairing" -> Pairing(emoji, notificationsOff, busy, onAllowNotifications)
-        "linked" -> Linked(status, busy, checkResult, notificationsOff, batteryAllowed, batteryUnavailable, onCheck, onReconnect, onBattery, onAllowNotifications, onUnlink, onRemove)
+        "linked" -> Linked(status, busy, checkResult, notificationsOff, batteryAllowed, batteryUnavailable, onCheck, onReconnect, onBattery, onAllowNotifications, onUnlink, onRemove, typingShare, typingWriteBusy, typingError, onTypingShareChanged)
         "needs_relink" -> {
             Text(stringResource(R.string.peppy_google_messages_link_needs_relink_body), Modifier.testTag("google-messages-link-needs-relink"))
             PanelButton(stringResource(R.string.peppy_google_messages_link_action_relink), !busy && !pairingInProgress, "google-messages-link-relink", onRelink)
@@ -508,7 +540,7 @@ private class AndroidGoogleMessagesLinkPanelHost(
 
 @Composable private fun Pairing(emoji: String?, notificationsOff: Boolean, busy: Boolean, onAllowNotifications: () -> Unit) { if (emoji == null) Text(stringResource(R.string.peppy_google_messages_link_pairing_connecting), Modifier.testTag("google-messages-link-pairing").semantics { liveRegion = LiveRegionMode.Polite }) else Column(Modifier.testTag("google-messages-link-emoji-card").semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Assertive }) { Text(stringResource(R.string.peppy_google_messages_link_pairing_emoji_instruction)); Text(emoji, Modifier.testTag("google-messages-link-emoji"), style = MaterialTheme.typography.displayLarge); Text(stringResource(R.string.peppy_google_messages_link_pairing_emoji_hint)) }; if (notificationsOff) Notifications(busy = busy, onAllow = onAllowNotifications) }
 
-@Composable private fun Linked(status: LinkStatus, busy: Boolean, checkResult: Int?, notificationsOff: Boolean, batteryAllowed: Boolean, batteryUnavailable: Boolean, onCheck: () -> Unit, onReconnect: () -> Unit, onBattery: () -> Unit, onAllowNotifications: () -> Unit, onUnlink: () -> Unit, onRemove: () -> Unit) {
+@Composable private fun Linked(status: LinkStatus, busy: Boolean, checkResult: Int?, notificationsOff: Boolean, batteryAllowed: Boolean, batteryUnavailable: Boolean, onCheck: () -> Unit, onReconnect: () -> Unit, onBattery: () -> Unit, onAllowNotifications: () -> Unit, onUnlink: () -> Unit, onRemove: () -> Unit, typingShare: Boolean?, typingWriteBusy: Boolean, typingError: Boolean, onTypingShareChanged: (Boolean) -> Unit) {
     Text(stringResource(R.string.peppy_google_messages_link_linked_body), Modifier.testTag("google-messages-link-linked"))
     val connection = when {
         !status.running -> R.string.peppy_google_messages_link_connection_not_running
@@ -540,6 +572,24 @@ private class AndroidGoogleMessagesLinkPanelHost(
     if (batteryUnavailable) {
         Text(stringResource(R.string.peppy_toggle_android_battery_unavailable), Modifier.testTag("google-messages-link-battery-unavailable"))
     }
+    Row(Modifier.fillMaxWidth()) {
+        Box(Modifier.weight(1f)) {
+            SettingToggleRow(
+                title = stringResource(R.string.peppy_typing_share_label),
+                checked = typingShare ?: true,
+                enabled = typingShare != null && !busy && !typingWriteBusy,
+                onCheckedChange = onTypingShareChanged,
+                tag = "google-messages-link-typing-row",
+            )
+        }
+        InfoButton(
+            topic = stringResource(R.string.peppy_typing_share_label),
+            title = stringResource(R.string.peppy_typing_share_label),
+            body = stringResource(R.string.peppy_typing_share_hint),
+            tag = "info-typing-share",
+        )
+    }
+    if (typingError) Text(stringResource(R.string.peppy_setting_update_error), Modifier.testTag("google-messages-link-typing-error").semantics { liveRegion = LiveRegionMode.Assertive })
     if (notificationsOff) {
         Notifications(busy, onAllowNotifications)
     }

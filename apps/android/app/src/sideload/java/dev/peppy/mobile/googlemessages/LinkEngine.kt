@@ -37,6 +37,7 @@ interface LinkHandle {
     fun bindNativeRcsFacts(ticketId: String, factsJson: String): String = "{\"code\":\"rejected\"}"
     fun commitNativeRcs(ticketId: String, commitJson: String): String = "{\"code\":\"outcome_unknown\"}"
     fun revokeNativeSend(ticketId: String): String = "{\"code\":\"none\"}"
+    fun fetchRcsGap(googleConversationId: String, pageToken: String): String = "{\"code\":\"gap_unavailable\"}"
 }
 
 data class LinkTypingRequest(
