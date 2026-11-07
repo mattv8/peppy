@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 	"google.golang.org/protobuf/proto"
 )
@@ -22,8 +23,37 @@ func TestNativeRcsContractRustFixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read required Rust fixture %q: %v", path, err)
 	}
-	if _, ok := decodeNativeRcsCommit(string(fixture)); !ok {
+	commit, ok := decodeNativeRcsCommit(string(fixture))
+	if !ok {
 		t.Fatalf("required Rust fixture %q was rejected", path)
+	}
+	if commit.CommandID == "" || commit.TmpID == "" || commit.MappingRevision == 0 || commit.ProofVersion != 2 ||
+		commit.MessageBody == "" || commit.Target.GoogleConversationID == "" || commit.Target.ProofVersion != 2 {
+		t.Fatalf("required Rust fixture %q decoded incomplete commit: %#v", path, commit)
+	}
+}
+
+// Exports the receive projection emitted by Go for the Rust receive-contract consumer.
+func TestNativeRcsExportReceiveRecord(t *testing.T) {
+	path := os.Getenv("PEPPY_RCS_GO_RECEIVE_RECORD_PATH")
+	if path == "" {
+		t.Fatal("PEPPY_RCS_GO_RECEIVE_RECORD_PATH is required")
+	}
+	projection := projectRcsMessage(&libgm.WrappedMessage{Message: &gmproto.Message{
+		MessageID: "synthetic-message", ConversationID: "synthetic-conversation", TmpID: "synthetic-tmp",
+		Timestamp: 1_700_000_000_000_000, Type: rcsMessageType,
+		MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType_OUTGOING_DELIVERED},
+		MessageInfo:   []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MessageContent{MessageContent: &gmproto.MessageContent{Content: "synthetic"}}}},
+	}}, &gmproto.Conversation{ConversationID: "synthetic-conversation", Type: gmproto.ConversationType_RCS})
+	if projection.Code != "ok" || projection.Record == nil {
+		t.Fatalf("receive projection = %#v", projection)
+	}
+	fixture, err := json.Marshal(projection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, fixture, 0600); err != nil {
+		t.Fatal(err)
 	}
 }
 

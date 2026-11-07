@@ -105,6 +105,126 @@ func TestTerminalIngressPersistsBeforeCloseReturns(t *testing.T) {
 	}
 }
 
+func TestConfigSignOutPersistsBeforeCloseReturns(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		configure func(*fixtureKnobs)
+	}{
+		{"unauthorized", func(knobs *fixtureKnobs) { knobs.configStatus = 401 }},
+		{"forbidden", func(knobs *fixtureKnobs) { knobs.configStatus = 403 }},
+		{"redirect", func(knobs *fixtureKnobs) { knobs.configRedirect = true }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			auth := linkedSafetyAuth()
+			fixture := newPhoneFixture(t, auth)
+			fixture.configure(test.configure)
+			host := newSafetyHost()
+			link, err := Open(nil, host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			setSafetyState(link, stateLinked, auth)
+
+			link.persistMu.Lock()
+			runDone := make(chan error, 1)
+			go func() { runDone <- link.Run() }()
+			awaitSafety(t, "in-memory sign-out", func() bool {
+				link.mu.Lock()
+				defer link.mu.Unlock()
+				return link.state == stateSignedOut && link.auth.Browser == nil
+			})
+			closed := make(chan struct{})
+			go func() {
+				link.Close()
+				close(closed)
+			}()
+			awaitSafety(t, "Close state fence", func() bool {
+				link.mu.Lock()
+				defer link.mu.Unlock()
+				return link.closed
+			})
+			link.persistMu.Unlock()
+			if err := awaitSafetyResult(t, runDone, "Run after config sign-out"); err == nil {
+				t.Fatal("Run accepted a terminal config response")
+			}
+			select {
+			case <-closed:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Close did not drain config terminal persistence")
+			}
+
+			states := host.statesSince(0)
+			if len(states) != 1 {
+				t.Fatalf("persisted envelopes = %d, want 1", len(states))
+			}
+			var terminal persistedState
+			if err := json.Unmarshal(states[0], &terminal); err != nil {
+				t.Fatal(err)
+			}
+			if terminal.State != stateSignedOut || len(terminal.Auth) == 0 || string(terminal.Auth) == "null" {
+				t.Fatalf("terminal envelope = state %q auth %s", terminal.State, terminal.Auth)
+			}
+			reopened, err := Open(states[0], newSafetyHost())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			if err := reopened.Run(); err == nil {
+				t.Fatal("reopened terminal envelope accepted Run")
+			}
+		})
+	}
+}
+
+func TestUnlinkPersistsBeforeCloseReturns(t *testing.T) {
+	host := newSafetyHost()
+	link, err := Open(nil, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setSafetyState(link, stateLinked, libgm.NewAuthData())
+
+	link.persistMu.Lock()
+	unlinked := make(chan error, 1)
+	go func() { unlinked <- link.Unlink() }()
+	awaitSafety(t, "in-memory unlink", func() bool {
+		link.mu.Lock()
+		defer link.mu.Unlock()
+		return link.state == stateUnlinked && link.auth.Browser == nil
+	})
+	closed := make(chan struct{})
+	go func() {
+		link.Close()
+		close(closed)
+	}()
+	awaitSafety(t, "Close state fence", func() bool {
+		link.mu.Lock()
+		defer link.mu.Unlock()
+		return link.closed
+	})
+	link.persistMu.Unlock()
+	if err := awaitSafetyResult(t, unlinked, "Unlink after Close"); err != errLinkClosed {
+		t.Fatalf("Unlink error = %v, want %v", err, errLinkClosed)
+	}
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not drain unlink persistence")
+	}
+
+	states := host.statesSince(0)
+	if len(states) != 1 {
+		t.Fatalf("persisted envelopes = %d, want 1", len(states))
+	}
+	var terminal persistedState
+	if err := json.Unmarshal(states[0], &terminal); err != nil {
+		t.Fatal(err)
+	}
+	if terminal.State != stateUnlinked || len(terminal.Auth) == 0 || string(terminal.Auth) == "null" {
+		t.Fatalf("unlink envelope = state %q auth %s", terminal.State, terminal.Auth)
+	}
+}
+
 func TestTerminalPersistenceFailureReportsPersistFailed(t *testing.T) {
 	auth := linkedSafetyAuth()
 	fixture := newPhoneFixture(t, auth)

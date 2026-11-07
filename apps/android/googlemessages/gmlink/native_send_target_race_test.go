@@ -73,25 +73,21 @@ func TestNativeSendTargetSharesDeadlineAcrossRPCLockAndFetch(t *testing.T) {
 			}
 		}()
 
-		started := time.Now()
+		link.mu.Lock()
+		deadline := link.nativeTicket.expiresAt
+		link.ticketNow = func() time.Time { return deadline }
+		link.mu.Unlock()
 		done := make(chan string, 1)
 		go func() {
 			done <- stage2Code(t, targetBinder(t, link).BindNativeRcsTarget(prepared.TicketID, "synthetic-conversation", preparedSnapshotToken(t, prepared)))
 		}()
-		wait := time.NewTimer(2 * time.Second)
-		defer wait.Stop()
-		<-wait.C
 		link.rpcMu.Unlock()
 		locked = false
-		awaitNativeTargetRaceAction(t, phone, gmproto.ActionType_GET_CONVERSATION)
 		if got := awaitNativeTargetRaceResult(t, done); got != "rejected" {
 			t.Fatalf("target bind = %s", got)
 		}
-		if elapsed := time.Since(started); elapsed > 6*time.Second+500*time.Millisecond {
-			t.Fatalf("target bind exceeded shared deadline: %s", elapsed)
-		}
-		if phone.countAction("SEND_MESSAGE") != 0 {
-			t.Fatal("deadline rejection sent a message")
+		if phone.countAction("GET_CONVERSATION") != 0 || phone.countAction("SEND_MESSAGE") != 0 {
+			t.Fatal("expired shared deadline reached transport")
 		}
 	})
 
@@ -109,9 +105,6 @@ func TestNativeSendTargetSharesDeadlineAcrossRPCLockAndFetch(t *testing.T) {
 		go func() {
 			done <- stage2Code(t, targetBinder(t, link).BindNativeRcsTarget(prepared.TicketID, "synthetic-conversation", preparedSnapshotToken(t, prepared)))
 		}()
-		wait := time.NewTimer(3 * time.Second)
-		defer wait.Stop()
-		<-wait.C
 		link.mu.Lock()
 		deadline := link.nativeTicket.expiresAt
 		link.ticketNow = func() time.Time { return deadline }

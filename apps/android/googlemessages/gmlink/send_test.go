@@ -51,7 +51,7 @@ func preparedRcsFixtureWithPhone(t *testing.T) (*Link, *phoneFixture, func(), st
 	done := startSafetyRun(t, link)
 	awaitStreamOpen(t, link)
 	setTestOwnerVerification(link)
-	link.projectEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{SIMParticipant: &gmproto.SIMParticipant{ID: "synthetic-outgoing"}, SIMData: &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}}, RCSChats: &gmproto.RCSChats{Enabled: true}}}}})
+	link.queueEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{SIMParticipant: &gmproto.SIMParticipant{ID: "synthetic-outgoing"}, SIMData: &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}}, RCSChats: &gmproto.RCSChats{Enabled: true}}}}})
 	if err := link.RefreshConversationIndex(); err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +482,7 @@ func TestPrepareRcsBindsOneTicketToTheCurrentStage2Target(t *testing.T) {
 	done := startSafetyRun(t, link)
 	awaitStreamOpen(t, link)
 	setTestOwnerVerification(link)
-	link.projectEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{SIMParticipant: &gmproto.SIMParticipant{ID: "synthetic-outgoing"}, SIMData: &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}}, RCSChats: &gmproto.RCSChats{Enabled: true}}}}})
+	link.queueEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{SIMParticipant: &gmproto.SIMParticipant{ID: "synthetic-outgoing"}, SIMData: &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}}, RCSChats: &gmproto.RCSChats{Enabled: true}}}}})
 	if err := link.RefreshConversationIndex(); err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +531,7 @@ func TestLegacySendRcsDoesNotSubmitWithoutPrepareCommit(t *testing.T) {
 	done := startSafetyRun(t, link)
 	awaitStreamOpen(t, link)
 	setTestOwnerVerification(link)
-	link.projectEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{SIMParticipant: &gmproto.SIMParticipant{ID: "synthetic-outgoing"}, SIMData: &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}}, RCSChats: &gmproto.RCSChats{Enabled: true}}}}})
+	link.queueEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{SIMParticipant: &gmproto.SIMParticipant{ID: "synthetic-outgoing"}, SIMData: &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}}, RCSChats: &gmproto.RCSChats{Enabled: true}}}}})
 	if err := link.RefreshConversationIndex(); err != nil {
 		t.Fatal(err)
 	}

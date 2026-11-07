@@ -59,7 +59,12 @@ func TestM4RequestShapesAndActualDrainPath(t *testing.T) {
 	}
 	link, _ := openSafetyLink(t, nil)
 	setTestOwnerVerification(link)
-	link.projectEvent(validGroupConversation())
+	link.queueEvent(validGroupConversation())
+	awaitQueued(t, "group conversation ingress", func() bool {
+		link.mu.Lock()
+		defer link.mu.Unlock()
+		return len(link.conversationEvents) == 1
+	})
 	var events []map[string]string
 	if err := json.Unmarshal([]byte(link.DrainConversationEvents()), &events); err != nil {
 		t.Fatal(err)

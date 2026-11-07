@@ -97,7 +97,7 @@ func validNativeRcsPrepare(request nativeRcsPrepareRequest) bool {
 		return false
 	}
 	binding := request.CarrierBinding
-	return validNativeText(binding.CarrierRouteID) && binding.AndroidSubscriptionID > 0 &&
+	return validNativeText(binding.CarrierRouteID) && binding.AndroidSubscriptionID >= 0 &&
 		validNativeText(binding.OwnNumberRaw) && validOwnNumberSource(binding.OwnNumberSource) && binding.RouteObservedAtMS > 0
 }
 

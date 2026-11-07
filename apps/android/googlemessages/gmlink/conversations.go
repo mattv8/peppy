@@ -194,15 +194,19 @@ func scanConversationPages(ctx context.Context, load conversationPageLoader) ([]
 			for _, conversation := range response.GetConversations() {
 				cloned := cloneConversation(conversation)
 				if cloned == nil || cloned.GetConversationID() == "" {
-					continue
+					return nil, "conversation_lookup_incomplete"
 				}
 				id := cloned.GetConversationID()
-				if _, exists := byID[id]; !exists {
-					if len(byID) >= conversationItemLimit {
+				if existing, exists := byID[id]; exists {
+					if !proto.Equal(existing, cloned) {
 						return nil, "conversation_lookup_incomplete"
 					}
-					order = append(order, id)
+					continue
 				}
+				if len(byID) >= conversationItemLimit {
+					return nil, "conversation_lookup_incomplete"
+				}
+				order = append(order, id)
 				byID[id] = cloned
 			}
 			next := response.GetCursor()
@@ -273,9 +277,6 @@ func (link *Link) applyConversationsLocked(conversations []*gmproto.Conversation
 }
 
 func (link *Link) indexConversationsLocked(conversations []*gmproto.Conversation) {
-	if link.conversationObservedAt == nil {
-		link.conversationObservedAt = make(map[string]time.Time)
-	}
 	for _, source := range conversations {
 		conversation := cloneConversation(source)
 		if conversation == nil || conversation.GetConversationID() == "" {
@@ -283,7 +284,6 @@ func (link *Link) indexConversationsLocked(conversations []*gmproto.Conversation
 		}
 		link.removeConversationLocked(conversation.GetConversationID())
 		link.conversationRecords[conversation.GetConversationID()] = conversation
-		link.conversationObservedAt[conversation.GetConversationID()] = time.Now()
 		others := visibleOtherParticipants(conversation)
 		for _, participant := range conversation.GetParticipants() {
 			if !participant.GetIsVisible() {
@@ -307,7 +307,6 @@ func (link *Link) indexConversationsLocked(conversations []*gmproto.Conversation
 }
 
 func (link *Link) removeConversationLocked(id string) {
-	delete(link.conversationObservedAt, id)
 	for _, target := range link.conversationTargets[id] {
 		summaries := link.conversationCandidates[target]
 		for index := len(summaries) - 1; index >= 0; index-- {
@@ -338,7 +337,6 @@ func (link *Link) replaceConversationIndexForContext(ctx context.Context, genera
 	link.conversationCandidates = make(map[string][]conversationSummary)
 	link.conversationTargets = make(map[string][]string)
 	link.conversationRecords = make(map[string]*gmproto.Conversation)
-	link.conversationObservedAt = make(map[string]time.Time)
 	link.indexConversationsLocked(conversations)
 	link.indexRevision++
 	link.conversationIndexComplete = true
@@ -476,7 +474,6 @@ func (link *Link) invalidateConversationIndexLocked() {
 	link.conversationCandidates = make(map[string][]conversationSummary)
 	link.conversationTargets = make(map[string][]string)
 	link.conversationRecords = make(map[string]*gmproto.Conversation)
-	link.conversationObservedAt = make(map[string]time.Time)
 	link.conversationEvents = []conversationEvent{{Code: "conversation_resync"}}
 	link.pendingConversationEvents = 0
 	link.indexRevision++

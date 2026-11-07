@@ -124,13 +124,10 @@ func (link *Link) projectTypingEventFor(queued queuedEvent, data *gmproto.Typing
 		link.mu.Unlock()
 		return
 	}
-	conversations := make([]*gmproto.Conversation, 0, len(link.conversationRecords))
-	for _, conversation := range link.conversationRecords {
-		conversations = append(conversations, cloneConversation(conversation))
-	}
+	conversation := cloneConversation(link.conversationRecords[data.GetConversationID()])
 	revision := link.stateRevision
 	link.mu.Unlock()
-	projection := projectTypingData(data, false, conversations)
+	projection := projectTypingData(data, false, []*gmproto.Conversation{conversation})
 	if projection.Record == nil {
 		return
 	}
@@ -160,15 +157,34 @@ func (link *Link) SetTyping(intentJSON string) string {
 	if err := json.Unmarshal([]byte(intentJSON), &intent); err != nil {
 		return "typing_invalid"
 	}
+	if intent.RemainingValidityMS == 0 || intent.RemainingValidityMS > uint64(typingRequestTimeout/time.Millisecond) {
+		return "typing_invalid"
+	}
 
-	link.rpcMu.Lock()
-	defer link.rpcMu.Unlock()
-	client, runCtx, generation, streamEpoch, ok := link.activeRuntime()
+	link.mu.Lock()
+	client, runCtx, generation, streamEpoch := link.client, link.runCtx, link.runGeneration, link.streamEpoch
+	ok := !link.closed && link.state == stateLinked && link.running && client != nil && runCtx != nil && generation == link.generation
+	link.mu.Unlock()
 	if !ok || intent.LinkGeneration != generation {
 		return "typing_stale"
 	}
+	validity := time.Duration(intent.RemainingValidityMS) * time.Millisecond
+	remaining := validity - now().Sub(receivedAt)
+	if remaining <= 0 || remaining > validity {
+		return "typing_expired"
+	}
+	ctx, cancel := typingContext(runCtx, remaining)
+	defer cancel()
+	if !link.lockRPC(ctx) {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "typing_deadline"
+		}
+		return "typing_cancelled"
+	}
+	defer link.rpcMu.Unlock()
 	link.mu.Lock()
-	if !link.hasOwnerVerificationLocked() {
+	ok = !link.closed && link.state == stateLinked && link.running && link.client == client && link.runGeneration == generation && link.generation == generation && link.streamEpoch == streamEpoch
+	if !ok || !link.hasOwnerVerificationLocked() {
 		link.mu.Unlock()
 		return "typing_stale"
 	}
@@ -177,30 +193,22 @@ func (link *Link) SetTyping(intentJSON string) string {
 		link.mu.Unlock()
 		return "typing_refused"
 	}
-	conversations := []*gmproto.Conversation{conversation}
-	simPayload := typingSIMPayload(intent.ConversationID, link.conversationRecords, link.settings)
+	simPayload := typingSIMPayload(conversation, link.settings)
 	effect := link.setTyping
 	link.mu.Unlock()
-	arguments, code := typingSetArguments(intent, conversations, simPayload)
+	arguments, code := typingSetArguments(intent, []*gmproto.Conversation{conversation}, simPayload)
 	if code != "ok" {
 		return code
 	}
 	if !link.typingAdmissionCurrent(generation, streamEpoch, intent.ConversationID) {
 		return "typing_stale"
 	}
-	validity := time.Duration(intent.RemainingValidityMS) * time.Millisecond
-	remaining := validity - now().Sub(receivedAt)
-	if remaining <= 0 || remaining > validity {
-		return "typing_expired"
-	}
 	if effect == nil {
 		effect = func(ctx context.Context, conversationID string, payload *gmproto.SIMPayload) error {
 			return client.SetTyping(ctx, conversationID, payload)
 		}
 	}
-	ctx, cancel := typingContext(runCtx, remaining)
 	err := effect(ctx, arguments.ConversationID, arguments.SIMPayload)
-	cancel()
 	if err != nil {
 		switch {
 		case errors.Is(err, context.DeadlineExceeded):
@@ -217,8 +225,7 @@ func (link *Link) SetTyping(intentJSON string) string {
 	return "ok"
 }
 
-func typingSIMPayload(conversationID string, conversations map[string]*gmproto.Conversation, settings *gmproto.Settings) *gmproto.SIMPayload {
-	conversation := conversations[conversationID]
+func typingSIMPayload(conversation *gmproto.Conversation, settings *gmproto.Settings) *gmproto.SIMPayload {
 	if conversation == nil || settings == nil || conversation.GetDefaultOutgoingID() == "" {
 		return nil
 	}

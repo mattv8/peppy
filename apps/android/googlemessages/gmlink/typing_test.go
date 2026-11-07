@@ -250,6 +250,35 @@ func TestSetTypingRequiresCurrentLinkGeneration(t *testing.T) {
 	}
 }
 
+func TestSetTypingCancellationDoesNotWaitForRPCMutex(t *testing.T) {
+	conversation := typingConversation("synthetic-conversation", true)
+	conversation.DefaultOutgoingID = "self-sim"
+	link := typingLink(&ownedRecordHost{}, conversation)
+	link.settings = typingSettings()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	link.runCtx = ctx
+	called := false
+	link.setTyping = func(context.Context, string, *gmproto.SIMPayload) error {
+		called = true
+		return nil
+	}
+	link.rpcMu.Lock()
+	defer link.rpcMu.Unlock()
+	result := make(chan string, 1)
+	go func() {
+		result <- link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","remaining_validity_ms":100,"link_generation":7}`)
+	}()
+	select {
+	case got := <-result:
+		if got != "typing_cancelled" || called {
+			t.Fatalf("result = %q, called = %t", got, called)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled typing request waited for rpc mutex")
+	}
+}
+
 func TestOwnerGenerationMatchesSetTypingFence(t *testing.T) {
 	conversation := typingConversation("synthetic-conversation", true)
 	conversation.DefaultOutgoingID = "self-sim"

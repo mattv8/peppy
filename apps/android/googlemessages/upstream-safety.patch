@@ -484,6 +484,90 @@ diff -ruN a/pkg/libgm/client.go b/pkg/libgm/client.go
  		UnixTimestamp:     timestamp,
  		Signature:         sig,
  		Parameters: &gmproto.RegisterRefreshRequest_Parameters{
+diff -ruN a/pkg/libgm/crypto/aesctr.go b/pkg/libgm/crypto/aesctr.go
+--- pkg/libgm/crypto/aesctr.go	2026-11-07 04:07:00
++++ pkg/libgm/crypto/aesctr.go	2026-11-07 04:07:00
+@@ -8,11 +8,13 @@
+ 	"crypto/sha256"
+ 	"errors"
+ 	"io"
++	"sync"
+ )
+ 
+ type AESCTRHelper struct {
+ 	AESKey  []byte `json:"aes_key"`
+ 	HMACKey []byte `json:"hmac_key"`
++	keyLock sync.RWMutex
+ }
+ 
+ func NewAESCTRHelper() *AESCTRHelper {
+@@ -22,13 +24,30 @@
+ 	}
+ }
+ 
++// SetKeys replaces both request keys as one immutable generation.
++func (c *AESCTRHelper) SetKeys(aesKey, hmacKey []byte) {
++	c.keyLock.Lock()
++	c.AESKey = append(c.AESKey[:0], aesKey...)
++	c.HMACKey = append(c.HMACKey[:0], hmacKey...)
++	c.keyLock.Unlock()
++}
++
++func (c *AESCTRHelper) keys() ([]byte, []byte) {
++	c.keyLock.RLock()
++	aesKey := append([]byte(nil), c.AESKey...)
++	hmacKey := append([]byte(nil), c.HMACKey...)
++	c.keyLock.RUnlock()
++	return aesKey, hmacKey
++}
++
+ func (c *AESCTRHelper) Encrypt(plaintext []byte) ([]byte, error) {
++	aesKey, hmacKey := c.keys()
+ 	iv := make([]byte, aes.BlockSize)
+ 	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+ 		return nil, err
+ 	}
+ 
+-	block, err := aes.NewCipher(c.AESKey)
++	block, err := aes.NewCipher(aesKey)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -39,7 +58,7 @@
+ 
+ 	ciphertext = append(ciphertext, iv...)
+ 
+-	mac := hmac.New(sha256.New, c.HMACKey)
++	mac := hmac.New(sha256.New, hmacKey)
+ 	mac.Write(ciphertext)
+ 	ciphertext = append(ciphertext, mac.Sum(nil)...)
+ 
+@@ -47,6 +66,7 @@
+ }
+ 
+ func (c *AESCTRHelper) Decrypt(encryptedData []byte) ([]byte, error) {
++	aesKey, hmacKey := c.keys()
+ 	if len(encryptedData) < 48 {
+ 		return nil, errors.New("input data is too short")
+ 	}
+@@ -54,7 +74,7 @@
+ 	hmacSignature := encryptedData[len(encryptedData)-32:]
+ 	encryptedDataWithoutHMAC := encryptedData[:len(encryptedData)-32]
+ 
+-	mac := hmac.New(sha256.New, c.HMACKey)
++	mac := hmac.New(sha256.New, hmacKey)
+ 	mac.Write(encryptedDataWithoutHMAC)
+ 	expectedHMAC := mac.Sum(nil)
+ 
+@@ -65,7 +85,7 @@
+ 	iv := encryptedDataWithoutHMAC[len(encryptedDataWithoutHMAC)-16:]
+ 	encryptedDataWithoutHMAC = encryptedDataWithoutHMAC[:len(encryptedDataWithoutHMAC)-16]
+ 
+-	block, err := aes.NewCipher(c.AESKey)
++	block, err := aes.NewCipher(aesKey)
+ 	if err != nil {
+ 		return nil, err
+ 	}
 diff -ruN a/pkg/libgm/event_handler.go b/pkg/libgm/event_handler.go
 --- pkg/libgm/event_handler.go	2026-11-07 04:07:00
 +++ pkg/libgm/event_handler.go	2026-11-07 04:07:00
@@ -1340,9 +1424,12 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  	notRespondingSent, wasFailing, needsCatchUp := dp.client.phone.onLiveness()
  	logEvt := dp.log.Debug().Uint64("ping_id", pingID).Dur("duration", dur)
  	switch {
-@@ -200,6 +202,7 @@
+@@ -198,8 +200,9 @@
+ 		dp.client.triggerEvent(&events.PhoneRespondingAgain{})
+ 	}
  	if needsCatchUp {
- 		go dp.client.requestUpdatesAfterGap(dp.log, "phone started responding to pings again")
+-		go dp.client.requestUpdatesAfterGap(dp.log, "phone started responding to pings again")
++		go dp.client.requestUpdatesAfterGap(dp.ctx, dp.log, "phone started responding to pings again")
  	}
 +	dp.client.emitPingSucceeded(dp.ownerCtx, source)
  	reset.Done()
@@ -1362,8 +1449,43 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  		return
  	case <-timer.C:
  		dp.OnTimeout(ping.id, timeout == shortPingTimeout, reset)
-@@ -420,7 +426,7 @@
- 	err := c.sessionHandler.sendMessageNoResponse(log.WithContext(context.TODO()), SendMessageParams{
+@@ -386,7 +392,7 @@
+ 		}
+ 		if dp.client.shouldDoDataReceiveCheck() {
+ 			dp.log.Warn().Msg("No data received recently, sending extra GET_UPDATES call")
+-			go dp.client.requestUpdatesAfterGap(dp.log, "no data received recently")
++			go dp.client.requestUpdatesAfterGap(dp.ctx, dp.log, "no data received recently")
+ 		}
+ 	}
+ }
+@@ -411,16 +417,30 @@
+ 		c.triggerEvent(&events.PhoneRespondingAgain{})
+ 	}
+ 	if needsCatchUp {
+-		go c.requestUpdatesAfterGap(&c.Logger, "phone started responding again")
++		if ctx := c.catchUpContext(); ctx != nil {
++			go c.requestUpdatesAfterGap(ctx, &c.Logger, "phone started responding again")
++		}
+ 	}
+ }
+ 
+-func (c *Client) requestUpdatesAfterGap(log *zerolog.Logger, reason string) {
++func (c *Client) catchUpContext() context.Context {
++	c.listenLock.Lock()
++	defer c.listenLock.Unlock()
++	if c.runCtx != nil {
++		return c.runCtx
++	}
++	return c.pollCtx
++}
++
++func (c *Client) requestUpdatesAfterGap(ctx context.Context, log *zerolog.Logger, reason string) {
++	if ctx == nil || ctx.Err() != nil {
++		return
++	}
+ 	c.triggerEvent(&events.NoDataReceived{})
+-	err := c.sessionHandler.sendMessageNoResponse(log.WithContext(context.TODO()), SendMessageParams{
++	err := c.sessionHandler.sendMessageNoResponse(log.WithContext(ctx), SendMessageParams{
  		Action:    gmproto.ActionType_GET_UPDATES,
  		OmitTTL:   true,
 -		RequestID: c.sessionHandler.sessionID,
@@ -1371,7 +1493,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  	})
  	if err != nil {
  		log.Err(err).Str("reason", reason).Msg("Failed to send extra GET_UPDATES call")
-@@ -454,15 +460,27 @@
+@@ -454,15 +474,27 @@
  }
  
  func (c *Client) doLongPoll(ctx context.Context, loggedIn, background bool, onFirstConnect func()) bool {
@@ -1403,7 +1525,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  	ctx = log.WithContext(ctx)
  	log.Debug().Str("listen_uuid", listenReqID).Msg("Long polling starting")
  
-@@ -476,13 +494,15 @@
+@@ -476,13 +508,15 @@
  			log:               &log,
  			client:            c,
  			ctx:               ctx,
@@ -1421,7 +1543,14 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  		err := c.refreshAuthToken(nil)
  		if err != nil {
  			if isFatalRefreshError(err) {
-@@ -508,11 +528,12 @@
+@@ -504,15 +538,18 @@
+ 				sleepSeconds = errorCount * 2
+ 			}
+ 			log.Err(err).Int("sleep_seconds", sleepSeconds).Msg("Error refreshing auth token, retrying in a while")
+-			time.Sleep(time.Duration(sleepSeconds) * time.Second)
++			if !waitForContext(ctx, time.Duration(sleepSeconds)*time.Second) {
++				return true
++			}
  			continue
  		}
  		log.Trace().Msg("Starting new long-polling request")
@@ -1436,7 +1565,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  				ConfigVersion:    util.ConfigMessage,
  			},
  			Unknown: &gmproto.ReceiveMessagesRequest_UnknownEmptyObject2{
-@@ -523,6 +544,7 @@
+@@ -523,6 +560,7 @@
  		if c.AuthData.HasCookies() {
  			url = util.ReceiveMessagesURLGoogle
  		}
@@ -1444,8 +1573,25 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  		connCtx, cancel := context.WithCancel(ctx)
  		resp, err := c.makeProtobufHTTPRequestContext(connCtx, url, payload, ContentTypePBLite, true)
  		if err != nil {
-@@ -575,12 +597,17 @@
- 			time.Sleep(time.Duration(sleepSeconds) * time.Second)
+@@ -539,7 +577,9 @@
+ 				sleepSeconds = errorCount * 2
+ 			}
+ 			log.Err(err).Int("sleep_seconds", sleepSeconds).Msg("Error making listen request, retrying in a while")
+-			time.Sleep(time.Duration(sleepSeconds) * time.Second)
++			if !waitForContext(ctx, time.Duration(sleepSeconds)*time.Second) {
++				return true
++			}
+ 			continue
+ 		}
+ 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+@@ -572,15 +612,22 @@
+ 				Int("statusCode", resp.StatusCode).
+ 				Int("sleep_seconds", sleepSeconds).
+ 				Msg("Error in long polling, retrying in a while")
+-			time.Sleep(time.Duration(sleepSeconds) * time.Second)
++			if !waitForContext(ctx, time.Duration(sleepSeconds)*time.Second) {
++				return true
++			}
  			continue
  		}
 -		if c.listenID != listenID {
@@ -1463,7 +1609,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  		if errorCount > 0 {
  			errorCount = 0
  			if loggedIn {
-@@ -588,7 +615,6 @@
+@@ -588,21 +635,22 @@
  			}
  		}
  		log.Debug().Int("statusCode", resp.StatusCode).Msg("Long polling opened")
@@ -1471,7 +1617,12 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  		if loggedIn && !disconnectedAt.IsZero() && time.Since(disconnectedAt) > longPollGapCatchUp {
  			// Events the phone sent while the connection was down may not be redelivered.
  			log.Warn().
-@@ -600,9 +626,11 @@
+ 				Time("disconnected_at", disconnectedAt).
+ 				Msg("Long polling was disconnected for a while, requesting updates")
+-			go c.requestUpdatesAfterGap(&log, "long polling was disconnected")
++			go c.requestUpdatesAfterGap(ctx, &log, "long polling was disconnected")
+ 		}
+ 		if onFirstConnect != nil {
  			go onFirstConnect()
  			onFirstConnect = nil
  		}
@@ -1485,7 +1636,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  		if background {
  			return cleanClose
  		}
-@@ -611,9 +639,8 @@
+@@ -611,9 +659,8 @@
  	return true
  }
  
@@ -1496,7 +1647,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  	reader := bufio.NewReader(rc)
  	buf := make([]byte, 32*1024)
  	var accumulatedData []byte
-@@ -671,7 +698,7 @@
+@@ -671,7 +718,7 @@
  		lastRead = time.Now()
  		if err != nil {
  			var logEvt *zerolog.Event
@@ -1505,7 +1656,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  				logEvt = log.Trace()
  			} else {
  				logEvt = log.Warn()
-@@ -701,12 +728,13 @@
+@@ -701,12 +748,13 @@
  		msg := &gmproto.LongPollingPayload{}
  		err = pblite.Unmarshal(currentBlock, msg)
  		if err != nil {
@@ -1520,7 +1671,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  			receivedEvents = true
  			onRead()
  		case msg.GetAck() != nil:
-@@ -715,7 +743,9 @@
+@@ -715,7 +763,9 @@
  				level = zerolog.DebugLevel
  			}
  			log.WithLevel(level).Int32("count", msg.GetAck().GetCount()).Msg("Got startup ack count message")
@@ -1530,7 +1681,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  		case msg.GetStartRead() != nil:
  			log.Trace().Msg("Got startRead message")
  		case msg.GetHeartbeat() != nil:
-@@ -728,18 +758,97 @@
+@@ -728,18 +778,97 @@
  	}
  }
  
@@ -1801,7 +1952,15 @@ diff -ruN a/pkg/libgm/pair.go b/pkg/libgm/pair.go
 diff -ruN a/pkg/libgm/pair_google.go b/pkg/libgm/pair_google.go
 --- pkg/libgm/pair_google.go	2026-11-07 04:07:00
 +++ pkg/libgm/pair_google.go	2026-11-07 04:07:00
-@@ -102,8 +102,10 @@
+@@ -31,7 +31,6 @@
+ 	"slices"
+ 	"strconv"
+ 	"strings"
+-	"sync"
+ 	"time"
+ 
+ 	"github.com/google/uuid"
+@@ -102,8 +101,10 @@
  	device := resp.GetDeviceData().GetDeviceWrapper().GetDevice()
  	lowercaseDevice := proto.Clone(device).(*gmproto.Device)
  	lowercaseDevice.SourceID = strings.ToLower(device.SourceID)
@@ -1812,6 +1971,14 @@ diff -ruN a/pkg/libgm/pair_google.go b/pkg/libgm/pair_google.go
  	return resp, nil
  }
  
+@@ -283,6 +284,7 @@
+ 	ErrPairingCancelled   = errors.New("user cancelled pairing on phone")
+ 	ErrPairingTimeout     = errors.New("pairing timed out")
+ 	ErrPairingInitTimeout = errors.New("client init timed out")
++	ErrPairingPollFailed  = errors.New("pairing long poll ended before connecting")
+ 	ErrHadMultipleDevices = errors.New("had multiple primary-looking devices")
+ 	ErrPhoneNotFound      = errors.New("previously paired phone not found for gaia pairing")
+ 	ErrPhoneInactive      = errors.New("phone hasn't been seen recently")
 @@ -381,27 +383,21 @@
  	if err != nil {
  		return "", nil, fmt.Errorf("failed to prepare gaia pairing: %w", err)
@@ -1848,17 +2015,56 @@ diff -ruN a/pkg/libgm/pair_google.go b/pkg/libgm/pair_google.go
  	zerolog.Ctx(ctx).Debug().
  		Str("dest_reg_uuid", destRegDev.RegID).
  		Uint64("dest_reg_unknown_int", destRegDev.UnknownInt).
-@@ -412,7 +408,9 @@
+@@ -412,11 +408,25 @@
  	if err != nil {
  		return "", nil, fmt.Errorf("failed to parse destination UUID: %w", err)
  	}
 +	c.AuthData.stateLock.Lock()
  	c.AuthData.DestRegID = destRegUUID
+-	var longPollConnectWait sync.WaitGroup
+-	longPollConnectWait.Add(1)
+-	go c.doLongPoll(bgCtx, false, false, longPollConnectWait.Done)
+-	longPollConnectWait.Wait()
 +	c.AuthData.stateLock.Unlock()
- 	var longPollConnectWait sync.WaitGroup
- 	longPollConnectWait.Add(1)
- 	go c.doLongPoll(bgCtx, false, false, longPollConnectWait.Done)
-@@ -509,8 +507,10 @@
++	firstConnect := make(chan bool, 1)
++	go func() {
++		c.doLongPoll(bgCtx, false, false, func() { firstConnect <- true })
++		select {
++		case firstConnect <- false:
++		default:
++		}
++	}()
++	select {
++	case connected := <-firstConnect:
++		if !connected {
++			return "", nil, ErrPairingPollFailed
++		}
++	case <-ctx.Done():
++		return "", nil, ctx.Err()
++	}
+ 	ps := NewPairingSession(*destRegDev)
+ 	clientInit, _, err := ps.PreparePayloads()
+ 	if err != nil {
+@@ -491,8 +501,7 @@
+ 	ukey2ServerKey := doHKDF(ps.NextKey, encryptionKeyInfo, []byte("server"))
+ 	switch ps.ServerInit.GetConfirmedKeyDerivationVersion() {
+ 	case 0:
+-		c.AuthData.RequestCrypto.AESKey = ukey2ClientKey
+-		c.AuthData.RequestCrypto.HMACKey = ukey2ServerKey
++		c.AuthData.RequestCrypto.SetKeys(ukey2ClientKey, ukey2ServerKey)
+ 	case 1:
+ 		concattedUkeys := make([]byte, 3*32)
+ 		copy(concattedUkeys[0:32], encryptionKeyInfo)
+@@ -504,13 +513,17 @@
+ 			copy(concattedUkeys[64:96], ukey2ClientKey)
+ 		}
+ 		concattedHash := sha256.Sum256(concattedUkeys)
+-		c.AuthData.RequestCrypto.AESKey = doHKDF(concattedHash[:], []byte("Ditto salt 1"), []byte("Ditto info 1"))
+-		c.AuthData.RequestCrypto.HMACKey = doHKDF(concattedHash[:], []byte("Ditto salt 2"), []byte("Ditto info 2"))
++		c.AuthData.RequestCrypto.SetKeys(
++			doHKDF(concattedHash[:], []byte("Ditto salt 1"), []byte("Ditto info 1")),
++			doHKDF(concattedHash[:], []byte("Ditto salt 2"), []byte("Ditto info 2")),
++		)
  	default:
  		return "", fmt.Errorf("unsupported key derivation version %d", ps.ServerInit.GetConfirmedKeyDerivationVersion())
  	}

@@ -254,10 +254,11 @@ func TestStopDuringRunNoRace(t *testing.T) {
 
 			// Stop ends one Run without poisoning the link: a later Run keeps running until stopped.
 			again := startSafetyRun(t, link)
+			awaitSafety(t, "second Run readiness", func() bool { return strings.Contains(link.Status(), `"running":true`) })
 			select {
 			case err := <-again:
-				t.Fatalf("second Run returned right after an earlier Stop: %v", err)
-			case <-time.After(200 * time.Millisecond):
+				t.Fatalf("second Run returned after reaching readiness: %v", err)
+			default:
 			}
 			link.Stop()
 			if err := awaitSafetyResult(t, again, "second Run"); err != nil {

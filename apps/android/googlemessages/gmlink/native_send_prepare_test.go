@@ -66,6 +66,26 @@ func TestNativeSendPrepareRejectsInvalidAndBusyOrExpiredSlots(t *testing.T) {
 	}
 }
 
+func TestNativeSendPrepareValidatesAndroidSubscriptionID(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		id   string
+		want string
+	}{
+		{name: "zero", id: "0", want: "prepared"},
+		{name: "negative", id: "-1", want: "invalid_request"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			link, cleanup, request := nativePrepareFixture(t)
+			defer cleanup()
+			request = strings.Replace(request, `"android_subscription_id":1`, `"android_subscription_id":`+test.id, 1)
+			if got := stage2Code(t, link.PrepareNativeRcs(request)); got != test.want {
+				t.Fatalf("subscription ID %s code=%q, want %q", test.id, got, test.want)
+			}
+		})
+	}
+}
+
 func TestNativeSendRevokePreservesSuccessorAndMarksInflight(t *testing.T) {
 	link, cleanup, _ := nativePrepareFixture(t)
 	defer cleanup()
@@ -338,7 +358,7 @@ func TestNativeSendPrepareInvalidAuthorityLeavesNoTicket(t *testing.T) {
 	invalid := []string{
 		`{"command_id":"00000000-0000-4000-8000-000000000000","canonicalizer_revision":1,"identity_region":"US","carrier_binding":{"carrier_route_id":"","android_subscription_id":1,"own_number_raw":"+12025550101","own_number_source":"SubscriptionManagerPhoneNumber","route_observed_at_ms":1}}`,
 		`{"command_id":"00000000-0000-4000-8000-000000000000","canonicalizer_revision":1,"identity_region":"US","carrier_binding":{"carrier_route_id":"route","android_subscription_id":1,"own_number_raw":"","own_number_source":"SubscriptionManagerPhoneNumber","route_observed_at_ms":1}}`,
-		`{"command_id":"00000000-0000-4000-8000-000000000000","canonicalizer_revision":1,"identity_region":"US","carrier_binding":{"carrier_route_id":"route","android_subscription_id":0,"own_number_raw":"+12025550101","own_number_source":"SubscriptionManagerPhoneNumber","route_observed_at_ms":1}}`,
+		`{"command_id":"00000000-0000-4000-8000-000000000000","canonicalizer_revision":1,"identity_region":"US","carrier_binding":{"carrier_route_id":"route","android_subscription_id":-1,"own_number_raw":"+12025550101","own_number_source":"SubscriptionManagerPhoneNumber","route_observed_at_ms":1}}`,
 		`{"command_id":"00000000-0000-4000-8000-000000000000","canonicalizer_revision":1,"identity_region":"US","carrier_binding":{"carrier_route_id":"route","android_subscription_id":1,"own_number_raw":"+12025550101","own_number_source":"Other","route_observed_at_ms":1}}`,
 		`{"command_id":"00000000-0000-4000-8000-000000000000","canonicalizer_revision":1,"identity_region":"US","carrier_binding":{"carrier_route_id":"route","android_subscription_id":1,"own_number_raw":"+12025550101","own_number_source":"SubscriptionManagerPhoneNumber","route_observed_at_ms":0}}`,
 	}

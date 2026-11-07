@@ -30,7 +30,6 @@ func nativeTargetFixture(t *testing.T) (*Link, *phoneFixture, func(), nativeRcsP
 	link.mu.Lock()
 	link.pairingEvidenceID = uuid.NewString()
 	link.settings.SIMCards[0].SIMData.InternationalPhoneNumber = "+12025550101"
-	link.conversationObservedAt["synthetic-conversation"] = time.Now().Add(-time.Hour)
 	link.mu.Unlock()
 	request, _ := json.Marshal(map[string]any{
 		"command_id": uuid.NewString(), "canonicalizer_revision": 1, "identity_region": "US",

@@ -686,6 +686,30 @@ func TestFetchRcsGapHonorsCancellation(t *testing.T) {
 	}
 }
 
+func TestFetchRcsGapCancellationDoesNotWaitForRPCMutex(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	called := false
+	link := fetchGapTestLink(func(context.Context, string, int64, *gmproto.Cursor) (*gmproto.ListMessagesResponse, error) {
+		called = true
+		return nil, nil
+	})
+	link.runCtx = ctx
+	link.rpcMu.Lock()
+	defer link.rpcMu.Unlock()
+	result := make(chan string, 1)
+	go func() { result <- link.FetchRcsGap("conversation-1", "") }()
+	select {
+	case encoded := <-result:
+		got := decodeGapResult(t, encoded)
+		if got.Code != "gap_cancelled" || called {
+			t.Fatalf("result = %#v, called = %t", got, called)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled gap fetch waited for rpc mutex")
+	}
+}
+
 func TestFetchRcsGapDropsPageAfterGenerationChanges(t *testing.T) {
 	var link *Link
 	link = fetchGapTestLink(func(context.Context, string, int64, *gmproto.Cursor) (*gmproto.ListMessagesResponse, error) {

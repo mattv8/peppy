@@ -138,7 +138,8 @@ func TestConcurrentPairSecondRefused(t *testing.T) {
 }
 
 func TestGaiaLoggedOutNeedsRelink(t *testing.T) {
-	link, err := Open(nil, &testHost{})
+	host := &testHost{}
+	link, err := Open(nil, host)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,14 +147,21 @@ func TestGaiaLoggedOutNeedsRelink(t *testing.T) {
 	link.mu.Lock()
 	link.state = stateLinked
 	link.mu.Unlock()
-	link.projectEvent(&events.GaiaLoggedOut{})
+	link.queueEvent(&events.GaiaLoggedOut{})
+	awaitSafety(t, "terminal ingress", func() bool { return strings.Contains(link.Status(), `"state":"needs_relink"`) })
 	if !strings.Contains(link.Status(), `"state":"needs_relink"`) {
 		t.Fatalf("status=%s", link.Status())
 	}
+	awaitSafety(t, "durable relink stop code", func() bool {
+		host.mu.Lock()
+		defer host.mu.Unlock()
+		return len(host.states) > 0 && strings.Contains(string(host.states[len(host.states)-1]), `"stop_code":"relink_needed"`)
+	})
 }
 
 func TestListenFatalAuthErrorSignsOut(t *testing.T) {
-	link, err := Open(nil, &testHost{})
+	host := &testHost{}
+	link, err := Open(nil, host)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,10 +169,16 @@ func TestListenFatalAuthErrorSignsOut(t *testing.T) {
 	link.mu.Lock()
 	link.state = stateLinked
 	link.mu.Unlock()
-	link.projectEvent(&events.ListenFatalError{Error: events.ErrInvalidCredentials})
+	link.queueEvent(&events.ListenFatalError{Error: events.ErrInvalidCredentials})
+	awaitSafety(t, "terminal ingress", func() bool { return strings.Contains(link.Status(), `"state":"signed_out"`) })
 	if !strings.Contains(link.Status(), `"state":"signed_out"`) {
 		t.Fatalf("status=%s", link.Status())
 	}
+	awaitSafety(t, "durable sign-out stop code", func() bool {
+		host.mu.Lock()
+		defer host.mu.Unlock()
+		return len(host.states) > 0 && strings.Contains(string(host.states[len(host.states)-1]), `"stop_code":"signed_out"`)
+	})
 }
 
 func TestFakeAccountChangeIgnored(t *testing.T) {
@@ -176,14 +190,20 @@ func TestFakeAccountChangeIgnored(t *testing.T) {
 	link.mu.Lock()
 	link.state = stateLinked
 	link.mu.Unlock()
-	link.projectEvent(&events.AccountChange{IsFake: true})
+	link.queueEvent(&events.AccountChange{IsFake: true})
+	awaitSafety(t, "fake account event consumption", func() bool {
+		link.mu.Lock()
+		defer link.mu.Unlock()
+		return len(link.changes) == 0
+	})
 	if !strings.Contains(link.Status(), `"state":"linked"`) {
 		t.Fatalf("status=%s", link.Status())
 	}
 }
 
 func TestRealAccountChangeSignsOut(t *testing.T) {
-	link, err := Open(nil, &testHost{})
+	host := &testHost{}
+	link, err := Open(nil, host)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,10 +211,16 @@ func TestRealAccountChangeSignsOut(t *testing.T) {
 	link.mu.Lock()
 	link.state = stateLinked
 	link.mu.Unlock()
-	link.projectEvent(&events.AccountChange{})
+	link.queueEvent(&events.AccountChange{})
+	awaitSafety(t, "terminal ingress", func() bool { return strings.Contains(link.Status(), `"state":"signed_out"`) })
 	if !strings.Contains(link.Status(), `"state":"signed_out"`) {
 		t.Fatalf("status=%s", link.Status())
 	}
+	awaitSafety(t, "durable sign-out stop code", func() bool {
+		host.mu.Lock()
+		defer host.mu.Unlock()
+		return len(host.states) > 0 && strings.Contains(string(host.states[len(host.states)-1]), `"stop_code":"signed_out"`)
+	})
 }
 
 func TestRelinkOnlyFromNeedsRelinkAndUsesExistingCookies(t *testing.T) {

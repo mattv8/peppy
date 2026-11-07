@@ -99,7 +99,6 @@ type Link struct {
 	settings                     *gmproto.Settings
 	settingsAt                   time.Time
 	settingsStreamEpoch          uint64
-	conversationObservedAt       map[string]time.Time
 	nativeTicket                 *nativeRcsTicket
 	nativeInFlight               *nativeRcsInFlight
 	settingsVersion              uint64
@@ -133,7 +132,9 @@ type terminalCompletion struct {
 	state         persistedState
 	kind          string
 	code          string
+	err           error
 	done          chan struct{}
+	outputQueued  chan struct{}
 	runWaited     chan struct{}
 }
 
@@ -178,7 +179,7 @@ func Open(state []byte, host Host) (*Link, error) {
 		return nil, err
 	}
 	zerolog.SetGlobalLevel(zerolog.Disabled)
-	link := &Link{host: host, state: decoded.State, stopCode: decoded.StopCode, pairingEvidenceID: decoded.PairingEvidenceID, runIncarnationID: uuid.NewString(), seq: decoded.Seq, changes: make(chan any, 64), conversationCandidates: make(map[string][]conversationSummary), conversationTargets: make(map[string][]string), conversationRecords: make(map[string]*gmproto.Conversation), conversationObservedAt: make(map[string]time.Time)}
+	link := &Link{host: host, state: decoded.State, stopCode: decoded.StopCode, pairingEvidenceID: decoded.PairingEvidenceID, runIncarnationID: uuid.NewString(), seq: decoded.Seq, changes: make(chan any, 64), conversationCandidates: make(map[string][]conversationSummary), conversationTargets: make(map[string][]string), conversationRecords: make(map[string]*gmproto.Conversation)}
 	if len(decoded.Auth) > 0 && string(decoded.Auth) != "null" {
 		link.auth = libgm.NewAuthData()
 		if err := json.Unmarshal(decoded.Auth, link.auth); err != nil {
@@ -798,6 +799,7 @@ func (link *Link) Unlink() error {
 		link.mu.Unlock()
 		return errors.New("unlink_cancelled")
 	}
+	link.stateRevision++
 	link.state, link.pairingFrom, link.pairingEvidenceID, link.auth = stateUnlinked, "", "", libgm.NewAuthData()
 	link.healthy, link.responding, link.lastOKMS = false, false, 0
 	if err != nil {
@@ -805,9 +807,23 @@ func (link *Link) Unlink() error {
 	} else {
 		link.stopCode = ""
 	}
+	completion := link.newTerminalCompletionLocked(owner, stateUnlinked, link.stopCode)
+	if completion != nil {
+		completion.kind = ""
+	}
 	link.mu.Unlock()
-	if persistErr := link.persistIfGeneration(owner); persistErr != nil {
-		link.stopFatalFor(owner, "persist_failed", false)
+	if completion == nil {
+		link.mu.Lock()
+		if link.unlinkOwner == owner {
+			link.unlinking = false
+			link.unlinkOwner = 0
+		}
+		link.mu.Unlock()
+		return errPersistFailed
+	}
+	go link.completeTerminal(completion)
+	<-completion.done
+	if completion.err != nil {
 		link.mu.Lock()
 		if link.unlinkOwner == owner {
 			link.unlinking = false
@@ -1152,7 +1168,7 @@ func cloneQueuedEvent(event any) any {
 	return event
 }
 
-// relevantEvent reports whether projectEvent handles the event.
+// relevantEvent reports whether the queued-event consumer handles the event.
 func relevantEvent(event any) bool {
 	switch event.(type) {
 	case *events.AuthTokenRefreshed, *events.GaiaLoggedOut, *events.ListenFatalError, *events.AccountChange,
@@ -1239,6 +1255,10 @@ func (link *Link) commitTerminalLocked(owner uint64, event any) *terminalComplet
 		link.auth = libgm.NewAuthData()
 	}
 	link.revokeLocked()
+	return link.newTerminalCompletionLocked(owner, state, code)
+}
+
+func (link *Link) newTerminalCompletionLocked(owner uint64, state, code string) *terminalCompletion {
 	auth, err := json.Marshal(link.auth)
 	if err != nil {
 		return nil
@@ -1263,10 +1283,11 @@ func (link *Link) commitTerminalLocked(owner uint64, event any) *terminalComplet
 			PairingEvidenceID: link.pairingEvidenceID,
 			Auth:              auth,
 		},
-		kind:      "link",
-		code:      code,
-		done:      make(chan struct{}),
-		runWaited: runWaited,
+		kind:         "link",
+		code:         code,
+		done:         make(chan struct{}),
+		outputQueued: make(chan struct{}),
+		runWaited:    runWaited,
 	}
 	link.pendingCompletion = completion
 	link.completionWG.Add(1)
@@ -1292,6 +1313,7 @@ func (link *Link) completeTerminal(completion *terminalCompletion) {
 	link.persistMu.Unlock()
 
 	link.mu.Lock()
+	completion.err = err
 	current := link.pendingCompletion == completion && link.stateRevision == completion.revision && link.state == completion.state.State && link.stopCode == completion.state.StopCode
 	runFailure := persistCurrent && err != nil && completion.runGeneration != 0 && link.runGeneration == completion.runGeneration && (current || link.closed)
 	failureCurrent := persistCurrent && err != nil && current && !link.closed
@@ -1305,15 +1327,17 @@ func (link *Link) completeTerminal(completion *terminalCompletion) {
 	close(completion.done)
 	link.completionWG.Done()
 	if failureCurrent {
+		close(completion.outputQueued)
 		link.stopFatalFor(completion.generation, "persist_failed", false)
 		return
 	}
-	if persistCurrent && current && err == nil && link.completionOutputReady != nil {
+	if persistCurrent && current && err == nil && completion.kind != "" && link.completionOutputReady != nil {
 		link.completionOutputReady()
 	}
-	if persistCurrent && current && err == nil {
+	if persistCurrent && current && err == nil && completion.kind != "" {
 		link.enqueueOutput(hostOutput{kind: completion.kind, code: completion.code, generation: completion.generation, revision: completion.revision, requireRevision: true})
 	}
+	close(completion.outputQueued)
 }
 
 func (link *Link) projectQueuedEvent(queued queuedEvent) {
@@ -1365,15 +1389,6 @@ func (link *Link) projectQueuedEvent(queued queuedEvent) {
 	}
 }
 
-func (link *Link) invalidateDirectEvidence(clearOwner bool) {
-	link.mu.Lock()
-	link.invalidateEvidenceLocked()
-	if clearOwner {
-		link.ownerVerification = nil
-	}
-	link.mu.Unlock()
-}
-
 func (link *Link) setRespondingFor(generation uint64, responding bool) bool {
 	link.mu.Lock()
 	defer link.mu.Unlock()
@@ -1382,66 +1397,6 @@ func (link *Link) setRespondingFor(generation uint64, responding bool) bool {
 	}
 	link.responding = responding
 	return true
-}
-
-func (link *Link) projectEvent(event any) {
-	switch value := event.(type) {
-	case *events.AuthTokenRefreshed:
-		if err := link.persist(); err != nil {
-			link.stopFatal("persist_failed", false)
-		}
-	case *events.GaiaLoggedOut:
-		link.transition(stateNeedsRelink, "relink_needed")
-	case *events.ListenFatalError:
-		if isFatalAuthError(value.Error) {
-			link.signOutIf("signed_out", activeState)
-		} else {
-			link.transition(stateNeedsRelink, "relink_needed")
-		}
-	case *events.AccountChange:
-		if !value.IsFake {
-			link.signOutIf("signed_out", activeState)
-		}
-	case *events.ListenTemporaryError:
-		link.invalidateDirectEvidence(true)
-		link.emit("conn", "temporary_error", 0)
-	case *events.StreamGap:
-		link.invalidateDirectEvidence(true)
-		link.emit("conn", "temporary_error", 0)
-	case *events.ListenRecovered:
-		link.emit("conn", "recovered", 0)
-	case *events.PhoneNotResponding:
-		link.mu.Lock()
-		link.responding = false
-		link.invalidateEvidenceLocked()
-		link.ownerVerification = nil
-		link.mu.Unlock()
-		link.emit("conn", "phone_not_responding", 0)
-	case *events.PhoneRespondingAgain:
-		link.mu.Lock()
-		link.responding = true
-		link.mu.Unlock()
-		link.emit("conn", "phone_responding", 0)
-	case *events.NoDataReceived:
-		link.invalidateDirectEvidence(true)
-		link.emit("conn", "no_data", 0)
-	case *events.ActiveSessionSet:
-		link.invalidateDirectEvidence(true)
-		link.emit("session", "active_session_set", 0)
-	case *gmproto.UserAlertEvent:
-		if value.GetAlertType() == gmproto.AlertType_BROWSER_ACTIVE {
-			link.emit("browser", "active", 0)
-		} else if value.GetAlertType() == gmproto.AlertType_BROWSER_INACTIVE {
-			link.emit("browser", "inactive", 0)
-		}
-	case *gmproto.Conversation:
-		link.recordConversationEvent(value)
-	case *libgm.WrappedSettings:
-		link.invalidateDirectEvidence(value == nil || value.IsOld || value.Settings == nil || value.Settings.GetSIMCards() == nil)
-		link.recordSettings(value)
-	case *gmproto.Settings:
-		link.invalidateDirectEvidence(true)
-	}
 }
 
 // transportStop receives the transport's stop requests. A /web/config redirect
@@ -1453,15 +1408,6 @@ func (link *Link) transportStopFor(generation uint64, code string) {
 		link.signOutIfFor(generation, code, activeState)
 	case "persist_failed":
 		link.stopFatalFor(generation, code, false)
-	}
-}
-
-func (link *Link) transportStop(code string) {
-	switch code {
-	case "cookie_refused":
-		link.signOutIf(code, activeState)
-	case "persist_failed":
-		link.stopFatal(code, false)
 	}
 }
 
@@ -1507,16 +1453,20 @@ func (link *Link) signOutIfFor(generation uint64, code string, allowed func(stri
 		link.mu.Unlock()
 		return
 	}
+	link.stateRevision++
 	link.state, link.pairingFrom, link.stopCode, link.auth = stateSignedOut, "", code, libgm.NewAuthData()
 	link.healthy, link.responding, link.lastOKMS = false, false, 0
 	link.revokeLocked()
-	retirementGeneration := link.generation
-	link.mu.Unlock()
-	if err := link.persistIfGeneration(retirementGeneration); err != nil {
-		link.stopFatalFor(retirementGeneration, "persist_failed", false)
-		return
+	completion := link.newTerminalCompletionLocked(generation, stateSignedOut, code)
+	if completion != nil {
+		completion.code = "signed_out"
 	}
-	link.emitFor(retirementGeneration, "link", "signed_out", 0)
+	link.mu.Unlock()
+	if completion != nil {
+		go link.completeTerminal(completion)
+		<-completion.done
+		<-completion.outputQueued
+	}
 }
 
 func (link *Link) stopFatalFor(generation uint64, code string, wipe bool) {
@@ -1549,23 +1499,6 @@ func (link *Link) retireFatalLocked(generation uint64, code string, wipe bool) (
 	return retirementGeneration, true
 }
 
-func (link *Link) transition(state, code string) {
-	link.mu.Lock()
-	if link.state != stateLinked || link.unlinking {
-		link.mu.Unlock()
-		return
-	}
-	link.state, link.stopCode, link.healthy, link.responding = state, "", false, false
-	link.revokeLocked()
-	link.mu.Unlock()
-	if err := link.persist(); err != nil {
-		link.stopFatal("persist_failed", false)
-		return
-	}
-	link.emit("link", code, 0)
-	link.Stop()
-}
-
 // activeState is a state a sign-out may leave: linked, or needs relink.
 func activeState(state string) bool {
 	return state == stateLinked || state == stateNeedsRelink
@@ -1574,39 +1507,6 @@ func activeState(state string) bool {
 // pairingState is the state a pair or relink holds while it runs.
 func pairingState(state string) bool {
 	return state == statePairing
-}
-
-// signOutIf wipes the link and signs it out, but only from a state allowed() accepts.
-// The check and the change happen under one lock, so an event cannot act on a state
-// that changed under it.
-func (link *Link) signOutIf(code string, allowed func(state string) bool) {
-	link.mu.Lock()
-	// An unlink in progress owns the state change; events from stopped clients must not undo it.
-	if !allowed(link.state) || link.unlinking {
-		link.mu.Unlock()
-		return
-	}
-	link.state, link.pairingFrom, link.stopCode, link.auth = stateSignedOut, "", code, libgm.NewAuthData()
-	link.healthy, link.responding, link.lastOKMS = false, false, 0
-	link.revokeLocked()
-	link.mu.Unlock()
-	if err := link.persist(); err != nil {
-		link.stopFatal("persist_failed", false)
-		return
-	}
-	link.emit("link", "signed_out", 0)
-	link.Stop()
-}
-
-func (link *Link) stopFatal(code string, wipe bool) {
-	link.mu.Lock()
-	link.stopCode = code
-	if wipe {
-		link.state, link.pairingFrom, link.auth = stateSignedOut, "", libgm.NewAuthData()
-	}
-	link.revokeLocked()
-	link.mu.Unlock()
-	link.emit("link", code, 0)
 }
 
 func (link *Link) recordHealthFor(generation uint64, ok bool, latency int64) {

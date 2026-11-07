@@ -364,15 +364,26 @@ func (link *Link) FetchRcsGap(googleConversationID, pageToken string) string {
 		return encodeRcsPage(rcsPageFailure("invalid_page_token"))
 	}
 
-	link.rpcMu.Lock()
-	defer link.rpcMu.Unlock()
-	client, runCtx, generation, streamEpoch, ok := link.activeRuntime()
+	link.mu.Lock()
+	client, runCtx, generation, streamEpoch := link.client, link.runCtx, link.runGeneration, link.streamEpoch
+	ok = !link.closed && link.state == stateLinked && link.running && client != nil && runCtx != nil && generation == link.generation
+	link.mu.Unlock()
 	if !ok {
 		return encodeRcsPage(rcsPageFailure("gap_unavailable"))
 	}
+	ctx, cancel := context.WithTimeout(runCtx, rcsGapPageTimeout)
+	defer cancel()
+	if !link.lockRPC(ctx) {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return encodeRcsPage(rcsPageFailure("gap_deadline"))
+		}
+		return encodeRcsPage(rcsPageFailure("gap_cancelled"))
+	}
+	defer link.rpcMu.Unlock()
 
 	link.mu.Lock()
-	owned := link.hasOwnerVerificationLocked()
+	ok = !link.closed && link.state == stateLinked && link.running && link.client == client && link.runGeneration == generation && link.generation == generation && link.streamEpoch == streamEpoch
+	owned := ok && link.hasOwnerVerificationLocked()
 	conversation := link.currentSupportedRcsConversationLocked(googleConversationID, generation, streamEpoch)
 	fetch := link.fetchMessages
 	link.mu.Unlock()
@@ -388,9 +399,7 @@ func (link *Link) FetchRcsGap(googleConversationID, pageToken string) string {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(runCtx, rcsGapPageTimeout)
 	page, err := fetch(ctx, googleConversationID, rcsGapPageSize, cursor)
-	cancel()
 	if err != nil {
 		switch {
 		case errors.Is(err, context.DeadlineExceeded):

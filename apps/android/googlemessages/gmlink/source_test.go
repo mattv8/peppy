@@ -124,10 +124,10 @@ func TestEveryEmittedCodeIsListed(t *testing.T) {
 			if okKind && okCode {
 				check(kind, code)
 			}
-		case "transition", "stopFatal", "pairFailure":
+		case "transitionFor", "stopFatalFor", "pairFailure":
 			// These emit on the link kind (transition takes state first, then code).
 			index := 0
-			if calleeName(call) == "transition" {
+			if calleeName(call) == "transitionFor" {
 				index = 1
 			}
 			if code, ok := literalArg(call, index); ok {
@@ -174,17 +174,17 @@ func TestEveryReturnedErrorIsFixedCode(t *testing.T) {
 			if code, ok := literalArg(call, 0); ok {
 				check(code)
 			}
-		case "pairFailure", "stopFatal", "signOut", "signOutIf":
+		case "pairFailure", "stopFatalFor", "signOut", "signOutIfFor":
 			if code, ok := literalArg(call, 0); ok {
 				check(code)
 			}
-		case "transition":
+		case "transitionFor":
 			if code, ok := literalArg(call, 1); ok {
 				check(code)
 			}
 		}
 	})
-	for _, name := range []string{"pairCode", "transportStop"} {
+	for _, name := range []string{"pairCode", "transportStopFor"} {
 		ast.Inspect(funcBody(t, files, name), func(node ast.Node) bool {
 			var values []ast.Expr
 			switch clause := node.(type) {

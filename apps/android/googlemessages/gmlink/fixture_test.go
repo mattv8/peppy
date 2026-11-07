@@ -69,6 +69,7 @@ type fixtureKnobs struct {
 	gateSend       bool
 	gateAction     gmproto.ActionType
 	gateList       bool
+	hangPoll       bool
 	getOverride    *gmproto.Conversation
 	getOverrideSet bool
 }
@@ -86,8 +87,10 @@ type phoneFixture struct {
 	gateOnce      sync.Once
 	listOnce      sync.Once
 	streamOnce    sync.Once
+	pollOnce      sync.Once
 	listReached   chan struct{}
 	listRelease   chan struct{}
+	pollReached   chan struct{}
 	streamReady   chan struct{}
 	actionReached chan gmproto.ActionType
 
@@ -108,7 +111,7 @@ type phoneFixture struct {
 // auth is the link's auth: the fixture decrypts its requests and encrypts replies.
 func newPhoneFixture(t *testing.T, auth *libgm.AuthData) *phoneFixture {
 	t.Helper()
-	fixture := &phoneFixture{auth: auth, stop: make(chan struct{}), gate: make(chan struct{}), listReached: make(chan struct{}), listRelease: make(chan struct{}), streamReady: make(chan struct{}), actionReached: make(chan gmproto.ActionType, 64)}
+	fixture := &phoneFixture{auth: auth, stop: make(chan struct{}), gate: make(chan struct{}), listReached: make(chan struct{}), listRelease: make(chan struct{}), pollReached: make(chan struct{}), streamReady: make(chan struct{}), actionReached: make(chan gmproto.ActionType, 64)}
 	fixture.server = httptest.NewTLSServer(http.HandlerFunc(fixture.serve))
 	installSafetyDialer(t, fixture.server)
 	t.Cleanup(fixture.server.Close)
@@ -260,6 +263,11 @@ func (fixture *phoneFixture) serve(writer http.ResponseWriter, request *http.Req
 		fixture.mu.Lock()
 		fixture.polls++
 		fixture.mu.Unlock()
+		if knobs.hangPoll {
+			fixture.pollOnce.Do(func() { close(fixture.pollReached) })
+			fixture.hold(request)
+			return
+		}
 		fixture.streamLongPoll(writer, request)
 	case strings.HasSuffix(path, fixtureAckSuffix):
 		writeEmptyFixturePBLite(writer)

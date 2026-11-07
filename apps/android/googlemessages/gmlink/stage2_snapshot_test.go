@@ -10,6 +10,7 @@ import (
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/events"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
+	"google.golang.org/protobuf/proto"
 )
 
 func stage2Participant(number string, visible, me bool) *gmproto.Participant {
@@ -87,15 +88,6 @@ func TestRepeatedCursorIsBoundedIncomplete(t *testing.T) {
 }
 
 func TestMultiPageScanPreservesDistinctCandidates(t *testing.T) {
-	link, _ := openSafetyLink(t, nil)
-	link.mu.Lock()
-	link.generation, link.runGeneration, link.streamEpoch = 7, 7, 3
-	link.ownerVerification = &ownerVerification{generation: 7}
-	link.mu.Unlock()
-	revision, ok := link.beginConversationIndexRefreshFor(7, 3)
-	if !ok {
-		t.Fatal("refresh did not start")
-	}
 	calls := make(map[gmproto.ListConversationsRequest_Folder]int)
 	conversations, code := scanConversationPages(context.Background(), func(_ context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
 		folder := request.GetFolder()
@@ -106,21 +98,75 @@ func TestMultiPageScanPreservesDistinctCandidates(t *testing.T) {
 		if calls[folder] == 1 {
 			return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{stage2Conversation("first", stage2Participant("first-target", true, false))}, Cursor: &gmproto.Cursor{LastItemID: "next"}}, nil
 		}
-		return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{
-			stage2Conversation("second", stage2Participant("second-target", true, false)),
-			stage2Conversation("first", stage2Participant("updated-target", true, false)),
-		}}, nil
+		return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{stage2Conversation("second", stage2Participant("second-target", true, false))}}, nil
 	})
-	if code != "" || !link.replaceConversationIndexFor(7, 3, revision, conversations) {
-		t.Fatalf("scan code = %s", code)
+	if code != "" || len(conversations) != 2 || conversations[0].GetConversationID() != "first" || conversations[1].GetConversationID() != "second" {
+		t.Fatalf("scan code = %q, conversations = %+v", code, conversations)
 	}
-	link.mu.Lock()
-	updated := append([]conversationSummary(nil), link.conversationCandidates["updated-target"]...)
-	second := append([]conversationSummary(nil), link.conversationCandidates["second-target"]...)
-	_, stale := link.conversationCandidates["first-target"]
-	link.mu.Unlock()
-	if len(updated) != 1 || updated[0].id != "first" || len(second) != 1 || second[0].id != "second" || stale {
-		t.Fatalf("multi-page candidates not preserved: updated=%+v second=%+v stale=%t", updated, second, stale)
+}
+
+func TestScanConversationPagesRejectsAmbiguousCandidates(t *testing.T) {
+	first := stage2Conversation("first", stage2Participant("first-target", true, false))
+	for _, test := range []struct {
+		name string
+		load conversationPageLoader
+	}{
+		{
+			name: "missing id",
+			load: func(_ context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+				if request.GetFolder() == gmproto.ListConversationsRequest_INBOX {
+					return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{{}}}, nil
+				}
+				return &gmproto.ListConversationsResponse{}, nil
+			},
+		},
+		{
+			name: "conflicting later page",
+			load: func(_ context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+				if request.GetFolder() != gmproto.ListConversationsRequest_INBOX {
+					return &gmproto.ListConversationsResponse{}, nil
+				}
+				if request.GetCursor() == nil {
+					return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{first}, Cursor: &gmproto.Cursor{LastItemID: "next"}}, nil
+				}
+				return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{stage2Conversation("first", stage2Participant("changed-target", true, false))}}, nil
+			},
+		},
+		{
+			name: "conflicting folder",
+			load: func(_ context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+				switch request.GetFolder() {
+				case gmproto.ListConversationsRequest_INBOX:
+					return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{first}}, nil
+				case gmproto.ListConversationsRequest_ARCHIVE:
+					return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{stage2Conversation("first", stage2Participant("changed-target", true, false))}}, nil
+				default:
+					return &gmproto.ListConversationsResponse{}, nil
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			conversations, code := scanConversationPages(context.Background(), test.load)
+			if code != "conversation_lookup_incomplete" || conversations != nil {
+				t.Fatalf("scan code = %q, conversations = %+v", code, conversations)
+			}
+		})
+	}
+}
+
+func TestScanConversationPagesAcceptsIdenticalDuplicates(t *testing.T) {
+	conversation := stage2Conversation("first", stage2Participant("first-target", true, false))
+	conversations, code := scanConversationPages(context.Background(), func(_ context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+		switch request.GetFolder() {
+		case gmproto.ListConversationsRequest_INBOX, gmproto.ListConversationsRequest_ARCHIVE:
+			return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{conversation}}, nil
+		default:
+			return &gmproto.ListConversationsResponse{}, nil
+		}
+	})
+	if code != "" || len(conversations) != 1 || !proto.Equal(conversations[0], conversation) {
+		t.Fatalf("scan code = %q, conversations = %+v", code, conversations)
 	}
 }
 
@@ -284,7 +330,7 @@ func TestDirectGapSignalsInvalidateCompleteSnapshot(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			link, _ := openSafetyLink(t, nil)
 			stage2SeedCompleteIndex(t, link)
-			link.projectEvent(event)
+			link.queueEvent(event)
 			link.mu.Lock()
 			complete := link.conversationIndexComplete
 			link.mu.Unlock()
