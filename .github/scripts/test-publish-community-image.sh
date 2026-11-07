@@ -76,13 +76,17 @@ if [[ ${1:-} == verify && ${2:-} == --key && ${3:-} == env://COSIGN_PUBLIC_KEY &
   [[ ${VERIFY_FAIL:-false} != true ]]
   exit
 fi
-if [[ ${1:-} == sign && ${2:-} == --yes && ${3:-} == --key && ${4:-} == env://COSIGN_PRIVATE_KEY && $# -eq 5 ]]; then exit 0; fi
+if [[ ${1:-} == sign && ${2:-} == --timeout && ${3:-} == 2m && ${4:-} == --yes && ${5:-} == --key && ${6:-} == env://COSIGN_PRIVATE_KEY && $# -eq 7 ]]; then
+  count=$(cat "$SIGN_STATE_FILE" 2>/dev/null || echo 0); count=$((count + 1)); echo "$count" > "$SIGN_STATE_FILE"
+  if (( count <= ${SIGN_FAIL_TIMES:-0} )); then echo 'sign failed' >&2; exit 1; fi
+  exit 0
+fi
 printf 'unexpected cosign arguments:' >&2; printf ' %q' "$@" >&2; printf '\n' >&2; exit 64
 MOCK
 chmod +x "$root/bin/docker" "$root/bin/cosign"
-reset_case() { : > "$root/log"; : > "$root/output"; rm -f "$root/build_state"; rm -rf "$root/registry"; mkdir "$root/registry"; }
+reset_case() { : > "$root/log"; : > "$root/output"; rm -f "$root/build_state" "$root/sign_count"; rm -rf "$root/registry"; mkdir "$root/registry"; }
 run_publisher() {
-  env -u HARBOR_USERNAME -u HARBOR_PASSWORD PATH="$root/bin:$PATH" LOG="$root/log" GITHUB_OUTPUT="$root/output" BUILD_STATE_FILE="$root/build_state" REGISTRY_STATE_DIR="$root/registry" GITHUB_REPOSITORY=test/peppy IMAGE="${IMAGE:-hub.docker.visnovsky.us/library/peppy-server}" CONTEXT=. DOCKERFILE=infra/docker/server.Dockerfile TAG="${TAG:-staging}" SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa COSIGN_PRIVATE_KEY=x COSIGN_PASSWORD=x COSIGN_PUBLIC_KEY=x infra/release/publish-image.sh
+  env -u HARBOR_USERNAME -u HARBOR_PASSWORD PATH="$root/bin:$PATH" LOG="$root/log" GITHUB_OUTPUT="$root/output" BUILD_STATE_FILE="$root/build_state" SIGN_STATE_FILE="$root/sign_count" REGISTRY_STATE_DIR="$root/registry" GITHUB_REPOSITORY=test/peppy IMAGE="${IMAGE:-hub.docker.visnovsky.us/library/peppy-server}" CONTEXT=. DOCKERFILE=infra/docker/server.Dockerfile TAG="${TAG:-staging}" SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa COSIGN_PRIVATE_KEY=x COSIGN_PASSWORD=x COSIGN_PUBLIC_KEY=x infra/release/publish-image.sh
 }
 assert_no_mutation() {
   if grep -Eq 'docker buildx build|docker buildx imagetools create|cosign sign' "$root/log"; then echo 'unexpected registry mutation' >&2; cat "$root/log" >&2; exit 1; fi
@@ -110,7 +114,7 @@ if [[ -s "$root/output" ]]; then echo 'digest output must remain empty after min
 reset_case
 INSPECT_MODE=missing run_publisher
 grep -Fq 'docker buildx build --push' "$root/log"
-grep -Fq 'cosign sign --yes --key env://COSIGN_PRIVATE_KEY hub.docker.visnovsky.us/library/peppy-server@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$root/log"
+grep -Fq 'cosign sign --timeout 2m --yes --key env://COSIGN_PRIVATE_KEY hub.docker.visnovsky.us/library/peppy-server@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$root/log"
 sign_line=$(grep -n 'cosign sign' "$root/log" | cut -d: -f1); promote_line=$(grep -n 'docker buildx imagetools create' "$root/log" | head -1 | cut -d: -f1); ((sign_line < promote_line))
 grep -Fq 'docker buildx imagetools inspect --format \{\{json\ .Manifest.Digest\}\} hub.docker.visnovsky.us/library/peppy-server:staging' "$root/log"
 grep -Fq 'digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$root/output"
@@ -141,4 +145,21 @@ grep -Fq 'docker buildx imagetools create --prefer-index=false --tag hub.docker.
 reset_case
 if TAG=1.2.3 INSPECT_MODE=exists VERSION_INSPECT_MODE=uncertain run_publisher >/dev/null 2>"$root/stderr"; then echo 'uncertain stable tag inspection should fail' >&2; exit 1; fi
 grep -Fq 'refusing to promote' "$root/stderr"; assert_no_mutation
+reset_case
+INSPECT_MODE=missing SIGN_FAIL_TIMES=2 PUBLISH_SIGN_RETRY_DELAYS="0 0 0" run_publisher >/dev/null 2>"$root/stderr"
+[[ $(grep -c 'cosign sign' "$root/log") -eq 3 ]] || { echo 'expected exactly three sign attempts after two failures' >&2; cat "$root/log" >&2; exit 1; }
+sign_line=$(grep -n 'cosign sign' "$root/log" | tail -1 | cut -d: -f1); promote_line=$(grep -n 'docker buildx imagetools create' "$root/log" | head -1 | cut -d: -f1); ((sign_line < promote_line))
+grep -Fq 'digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$root/output"
+reset_case
+if INSPECT_MODE=missing SIGN_FAIL_TIMES=99 PUBLISH_SIGN_RETRY_DELAYS="0 0 0" run_publisher >/dev/null 2>"$root/stderr"; then echo 'always-failing sign should fail closed' >&2; exit 1; fi
+[[ $(grep -c 'cosign sign' "$root/log") -eq 4 ]] || { echo 'expected attempts == max (4) for three delays' >&2; cat "$root/log" >&2; exit 1; }
+grep -Fq 'cosign sign failed after 4 attempts' "$root/stderr"
+if grep -Fq 'docker buildx imagetools create' "$root/log"; then echo 'unsigned image must not be promoted' >&2; exit 1; fi
+if [[ -s "$root/output" ]]; then echo 'digest output must remain empty after failed signing' >&2; exit 1; fi
+for delays in "0 x" "-1" "1.5" "" "301" $'0\n0'; do
+  reset_case
+  if INSPECT_MODE=missing PUBLISH_SIGN_RETRY_DELAYS="$delays" run_publisher >/dev/null 2>"$root/stderr"; then echo "invalid retry delays '$delays' should be rejected" >&2; exit 1; fi
+  grep -Fq 'PUBLISH_SIGN_RETRY_DELAYS must be' "$root/stderr"
+  if [[ -s "$root/log" ]]; then echo "invalid retry delays '$delays' must reject before any registry call" >&2; cat "$root/log" >&2; exit 1; fi
+done
 echo 'community image publisher tests passed'
