@@ -58,6 +58,7 @@ func TestRcsProjectionProjectsOnlyApprovedTextFields(t *testing.T) {
 		MessageID:      "message-1",
 		ConversationID: "conversation-1",
 		Timestamp:      1735689600123456,
+		Type:           rcsMessageType,
 		TmpID:          "tmp-1",
 		MessageStatus:  &gmproto.MessageStatus{Status: gmproto.MessageStatusType_OUTGOING_DELIVERED},
 		MessageInfo: []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MessageContent{
@@ -98,7 +99,7 @@ func TestRcsProjectionProjectsOnlyApprovedTextFields(t *testing.T) {
 func TestRcsProjectionRejectsUnsupportedAndUnknownMessages(t *testing.T) {
 	conversation := &gmproto.Conversation{ConversationID: "conversation-1", Type: gmproto.ConversationType_RCS}
 	media := &libgm.WrappedMessage{Message: &gmproto.Message{
-		MessageID: "message-1", ConversationID: "conversation-1", Timestamp: 1234,
+		MessageID: "message-1", ConversationID: "conversation-1", Timestamp: 1234, Type: rcsMessageType,
 		MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType_INCOMING_COMPLETE},
 		MessageInfo:   []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MediaContent{MediaContent: &gmproto.MediaContent{}}}},
 	}}
@@ -109,7 +110,7 @@ func TestRcsProjectionRejectsUnsupportedAndUnknownMessages(t *testing.T) {
 	}
 
 	unknown := &libgm.WrappedMessage{Message: &gmproto.Message{
-		MessageID: "message-1", ConversationID: "conversation-1", Timestamp: 1234,
+		MessageID: "message-1", ConversationID: "conversation-1", Timestamp: 1234, Type: rcsMessageType,
 		MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType(999)},
 		MessageInfo:   []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MessageContent{MessageContent: &gmproto.MessageContent{Content: "synthetic body"}}}},
 	}}
@@ -127,6 +128,52 @@ func TestRcsProjectionRejectsUnsupportedAndUnknownMessages(t *testing.T) {
 	missingConversationID.ConversationID = ""
 	if got := projectRcsMessage(missingConversationID, conversation); got.Code != "identity_missing" || got.Record != nil {
 		t.Fatalf("missing conversation id projection = %#v", got)
+	}
+}
+
+func TestRcsProjectionRequiresMessageLevelRcsEvidence(t *testing.T) {
+	conversation := &gmproto.Conversation{ConversationID: "conversation-1", Type: gmproto.ConversationType_RCS}
+	for _, test := range []struct {
+		name     string
+		message  int64
+		accepted bool
+	}{
+		{name: "rcs", message: 4, accepted: true},
+		{name: "sms", message: 1},
+		{name: "downloaded mms", message: 2},
+		{name: "undownloaded mms", message: 3},
+		{name: "unknown", message: 99},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			message := textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE)
+			message.Type = test.message
+			got := projectRcsMessage(message, conversation)
+			if test.accepted {
+				if got.Code != "ok" || got.Record == nil {
+					t.Fatalf("projection = %#v", got)
+				}
+				return
+			}
+			if got.Code != "message_unproven" || got.Record != nil {
+				t.Fatalf("projection = %#v", got)
+			}
+		})
+	}
+}
+
+func TestRcsProjectionKeepsIncomingStatusesIncoming(t *testing.T) {
+	conversation := &gmproto.Conversation{ConversationID: "conversation-1", Type: gmproto.ConversationType_RCS}
+	for _, status := range []gmproto.MessageStatusType{
+		gmproto.MessageStatusType_INCOMING_COMPLETE,
+		gmproto.MessageStatusType_INCOMING_DELIVERED,
+		gmproto.MessageStatusType_INCOMING_DISPLAYED,
+	} {
+		t.Run(status.String(), func(t *testing.T) {
+			got := projectRcsMessage(textMessage(status), conversation)
+			if got.Code != "ok" || got.Record == nil || got.Record.Direction != "incoming" || got.Record.Status != "sent" {
+				t.Fatalf("projection = %#v", got)
+			}
+		})
 	}
 }
 
@@ -189,7 +236,7 @@ func TestRcsProjectionEmitsContentFreeProtocolSwitchSignal(t *testing.T) {
 func TestFetchRcsGapProjectsOnlyMessagesWithOpaquePageToken(t *testing.T) {
 	page := &gmproto.ListMessagesResponse{
 		Messages: []*gmproto.Message{{
-			MessageID: "message-1", ConversationID: "conversation-1", Timestamp: 1234,
+			MessageID: "message-1", ConversationID: "conversation-1", Timestamp: 1234, Type: rcsMessageType,
 			MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType_INCOMING_COMPLETE},
 			MessageInfo:   []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MessageContent{MessageContent: &gmproto.MessageContent{Content: "synthetic body"}}}},
 		}},
@@ -241,7 +288,13 @@ func TestFetchRcsGapKeepsProtocolSwitchSignalsAndText(t *testing.T) {
 		{"text", gmproto.MessageStatusType_TOMBSTONE_PROTOCOL_SWITCH_TO_TEXT},
 		{"rcs", gmproto.MessageStatusType_TOMBSTONE_PROTOCOL_SWITCH_TO_RCS},
 		{"encrypted rcs", gmproto.MessageStatusType_TOMBSTONE_PROTOCOL_SWITCH_TO_ENCRYPTED_RCS},
+		{"encrypted rcs info", gmproto.MessageStatusType_TOMBSTONE_PROTOCOL_SWITCH_TO_ENCRYPTED_RCS_INFO},
+		{"group rcs to encrypted", gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_GROUP_PROTOCOL_SWITCH_RCS_TO_E2EE},
+		{"group encrypted to rcs", gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_GROUP_PROTOCOL_SWITCH_E2EE_TO_RCS},
+		{"text to encrypted", gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_TEXT_TO_E2EE},
 		{"encrypted text", gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_TEXT},
+		{"rcs to encrypted", gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_RCS_TO_E2EE},
+		{"encrypted to rcs", gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_RCS},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -260,6 +313,33 @@ func TestFetchRcsGapKeepsProtocolSwitchSignalsAndText(t *testing.T) {
 	}
 }
 
+func TestRcsPageContinuesPastKnownInformationalTombstones(t *testing.T) {
+	conversation := &gmproto.Conversation{ConversationID: "conversation-1", Type: gmproto.ConversationType_RCS}
+	first := textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE).Message
+	first.MessageID = "first"
+	tombstone := &gmproto.Message{ConversationID: "conversation-1", MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType_TOMBSTONE_PARTICIPANT_JOINED}}
+	last := textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE).Message
+	last.MessageID = "last"
+	got := projectRcsPage(&gmproto.ListMessagesResponse{
+		Messages: []*gmproto.Message{first, tombstone, last},
+		Cursor:   &gmproto.Cursor{LastItemID: "page-id", LastItemTimestamp: 1234},
+	}, conversation)
+	if got.Code != "ok" || len(got.Records) != 2 || got.Records[0].GoogleMessageID != "first" || got.Records[1].GoogleMessageID != "last" || got.NextCursor != opaquePageToken(&gmproto.Cursor{LastItemID: "page-id", LastItemTimestamp: 1234}) {
+		t.Fatalf("page = %#v", got)
+	}
+}
+
+func TestRcsPageAdvancesCursorForKnownInformationalTombstones(t *testing.T) {
+	conversation := &gmproto.Conversation{ConversationID: "conversation-1", Type: gmproto.ConversationType_RCS}
+	got := projectRcsPage(&gmproto.ListMessagesResponse{
+		Messages: []*gmproto.Message{{ConversationID: "conversation-1", MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType_TOMBSTONE_PARTICIPANT_LEFT}}},
+		Cursor:   &gmproto.Cursor{LastItemID: "page-id", LastItemTimestamp: 1234},
+	}, conversation)
+	if got.Code != "ok" || len(got.Records) != 0 || len(got.Signals) != 0 || !got.HasMore || got.NextCursor != opaquePageToken(&gmproto.Cursor{LastItemID: "page-id", LastItemTimestamp: 1234}) {
+		t.Fatalf("page = %#v", got)
+	}
+}
+
 func protocolSwitchMessage(status gmproto.MessageStatusType) *libgm.WrappedMessage {
 	return &libgm.WrappedMessage{Message: &gmproto.Message{
 		ConversationID: "conversation-1",
@@ -269,7 +349,7 @@ func protocolSwitchMessage(status gmproto.MessageStatusType) *libgm.WrappedMessa
 
 func textMessage(status gmproto.MessageStatusType) *libgm.WrappedMessage {
 	return &libgm.WrappedMessage{Message: &gmproto.Message{
-		MessageID: "message-1", ConversationID: "conversation-1", Timestamp: 1735689600123456,
+		MessageID: "message-1", ConversationID: "conversation-1", Timestamp: 1735689600123456, Type: rcsMessageType,
 		MessageStatus: &gmproto.MessageStatus{Status: status},
 		MessageInfo:   []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MessageContent{MessageContent: &gmproto.MessageContent{Content: "synthetic body"}}}},
 	}}
@@ -364,7 +444,7 @@ func TestLinkProjectsUnsupportedAndTombstoneWithoutContent(t *testing.T) {
 	host := &ownedRecordHost{}
 	link := receiveWiringLink(host)
 	media := &libgm.WrappedMessage{Message: &gmproto.Message{
-		MessageID: "media", ConversationID: "conversation-1", Timestamp: 1,
+		MessageID: "media", ConversationID: "conversation-1", Timestamp: 1, Type: rcsMessageType,
 		MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType_INCOMING_COMPLETE},
 		MessageInfo:   []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MediaContent{MediaContent: &gmproto.MediaContent{}}}},
 	}}
@@ -375,6 +455,61 @@ func TestLinkProjectsUnsupportedAndTombstoneWithoutContent(t *testing.T) {
 	}
 	if len(host.rcsRecords) != 2 || host.rcsRecords[0] != `{"code":"unsupported_message"}` || host.rcsRecords[1] != `{"code":"protocol_switch","google_conversation_id":"conversation-1"}` {
 		t.Fatalf("records = %v", host.rcsRecords)
+	}
+}
+
+func TestLinkDropsKnownInformationalTombstones(t *testing.T) {
+	host := &ownedRecordHost{}
+	link := receiveWiringLink(host)
+	link.queueEventFor(7, protocolSwitchMessage(gmproto.MessageStatusType_TOMBSTONE_PARTICIPANT_JOINED))
+	drainQueuedEvents(link)
+	if len(host.rcsRecords) != 0 {
+		t.Fatalf("records = %v", host.rcsRecords)
+	}
+}
+
+func TestCarrierTransitionTombstonesRemainLiveAndHistoryControlSignals(t *testing.T) {
+	transitions := []struct {
+		name   string
+		status gmproto.MessageStatusType
+		value  int32
+	}{
+		{name: "switch to group mms", status: gmproto.MessageStatusType_TOMBSTONE_SWITCH_TO_GROUP_MMS, value: 208},
+		{name: "switch to broadcast sms", status: gmproto.MessageStatusType_TOMBSTONE_SWITCH_TO_BROADCAST_SMS, value: 209},
+		{name: "group encrypted to mms", status: gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_GROUP_PROTOCOL_SWITCH_E2EE_TO_MMS, value: 252},
+	}
+	conversation := &gmproto.Conversation{ConversationID: "conversation-1", Type: gmproto.ConversationType_RCS}
+	for _, transition := range transitions {
+		t.Run(transition.name, func(t *testing.T) {
+			if int32(transition.status) != transition.value {
+				t.Fatalf("enum value = %d, want %d", transition.status, transition.value)
+			}
+			t.Run("live ingress", func(t *testing.T) {
+				host := &ownedRecordHost{}
+				link := receiveWiringLink(host)
+				link.queueEventFor(7, textMessage(transition.status))
+				drainQueuedEvents(link)
+				if len(host.rcsRecords) != 1 {
+					t.Fatalf("live control records = %v, want exactly one", host.rcsRecords)
+				}
+				if got := host.rcsRecords[0]; got != `{"code":"protocol_switch","google_conversation_id":"conversation-1"}` {
+					t.Fatalf("live record = %s", got)
+				}
+			})
+
+			t.Run("history", func(t *testing.T) {
+				page := projectRcsPage(&gmproto.ListMessagesResponse{
+					Messages: []*gmproto.Message{textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE).Message, textMessage(transition.status).Message},
+					Cursor:   &gmproto.Cursor{LastItemID: "page-id", LastItemTimestamp: 1234},
+				}, conversation)
+				if page.Code != "ok" || len(page.Records) != 1 || len(page.Signals) != 1 || page.Signals[0] != (rcsPageSignal{Code: "protocol_switch", GoogleConversationID: "conversation-1"}) {
+					t.Fatalf("history page = %#v", page)
+				}
+				if !page.HasMore || page.NextCursor != opaquePageToken(&gmproto.Cursor{LastItemID: "page-id", LastItemTimestamp: 1234}) {
+					t.Fatalf("history cursor = %#v", page)
+				}
+			})
+		})
 	}
 }
 

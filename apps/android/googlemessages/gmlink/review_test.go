@@ -109,9 +109,7 @@ func TestFreshPairAccountMismatchRestoresPrevious(t *testing.T) {
 
 			expectErrorCode(t, err, "account_mismatch")
 			expectStatus(t, link, `"state":"`+previous+`"`, `"stop_code":"account_mismatch"`)
-			if !host.hasEvent("link", "account_mismatch") {
-				t.Fatal("account_mismatch was not reported to the host")
-			}
+			host.awaitEvent(t, "link", "account_mismatch")
 			if n := fixture.countAction("UNPAIR_GAIA_PAIRING"); n != 0 {
 				t.Fatalf("a fresh pair mismatch sent %d unpair requests, want none", n)
 			}

@@ -44,6 +44,8 @@ type rcsPageSignal struct {
 	GoogleConversationID string `json:"google_conversation_id"`
 }
 
+const rcsMessageType int64 = 4
+
 func projectRcsControlSignal(message *gmproto.Message) (rcsProjection, bool) {
 	code := protocolSwitchCode(message.GetMessageStatus().GetStatus())
 	if code == "" {
@@ -63,11 +65,17 @@ func projectRcsMessage(wrapped *libgm.WrappedMessage, conversation *gmproto.Conv
 	if signal, ok := projectRcsControlSignal(message); ok {
 		return signal
 	}
+	if knownInformationalTombstone(message.GetMessageStatus().GetStatus()) {
+		return rcsProjection{Code: "informational_tombstone"}
+	}
 	if message.GetMessageID() == "" || message.GetConversationID() == "" {
 		return rcsProjection{Code: "identity_missing"}
 	}
 	if conversation == nil || conversation.GetConversationID() != message.GetConversationID() || conversation.GetType() != gmproto.ConversationType_RCS {
 		return rcsProjection{Code: "conversation_unproven"}
+	}
+	if message.GetType() != rcsMessageType {
+		return rcsProjection{Code: "message_unproven"}
 	}
 	direction, status, ok := projectRcsStatus(message.GetMessageStatus().GetStatus())
 	if !ok {
@@ -122,6 +130,9 @@ func projectRcsPage(page *gmproto.ListMessagesResponse, conversation *gmproto.Co
 			result.Signals = append(result.Signals, rcsPageSignal{Code: projection.Code, GoogleConversationID: projection.GoogleConversationID})
 			continue
 		}
+		if projection.Code == "informational_tombstone" {
+			continue
+		}
 		if projection.Code != "ok" {
 			return rcsPageFailure(projection.Code)
 		}
@@ -140,7 +151,9 @@ func textBody(infos []*gmproto.MessageInfo) (string, bool) {
 
 func projectRcsStatus(status gmproto.MessageStatusType) (direction, projection string, ok bool) {
 	switch status {
-	case gmproto.MessageStatusType_INCOMING_COMPLETE:
+	case gmproto.MessageStatusType_INCOMING_COMPLETE,
+		gmproto.MessageStatusType_INCOMING_DELIVERED,
+		gmproto.MessageStatusType_INCOMING_DISPLAYED:
 		return "incoming", "sent", true
 	case gmproto.MessageStatusType_OUTGOING_SENDING:
 		return "outgoing", "sending", true
@@ -183,10 +196,94 @@ func protocolSwitchCode(status gmproto.MessageStatusType) string {
 	case gmproto.MessageStatusType_TOMBSTONE_PROTOCOL_SWITCH_TO_TEXT,
 		gmproto.MessageStatusType_TOMBSTONE_PROTOCOL_SWITCH_TO_RCS,
 		gmproto.MessageStatusType_TOMBSTONE_PROTOCOL_SWITCH_TO_ENCRYPTED_RCS,
-		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_TEXT:
+		gmproto.MessageStatusType_TOMBSTONE_SWITCH_TO_GROUP_MMS,
+		gmproto.MessageStatusType_TOMBSTONE_SWITCH_TO_BROADCAST_SMS,
+		gmproto.MessageStatusType_TOMBSTONE_PROTOCOL_SWITCH_TO_ENCRYPTED_RCS_INFO,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_GROUP_PROTOCOL_SWITCH_RCS_TO_E2EE,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_GROUP_PROTOCOL_SWITCH_E2EE_TO_RCS,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_TEXT_TO_E2EE,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_TEXT,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_RCS_TO_E2EE,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_RCS,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_GROUP_PROTOCOL_SWITCH_E2EE_TO_MMS:
 		return "protocol_switch"
 	default:
 		return ""
+	}
+}
+
+func knownInformationalTombstone(status gmproto.MessageStatusType) bool {
+	switch status {
+	case gmproto.MessageStatusType_TOMBSTONE_PARTICIPANT_JOINED,
+		gmproto.MessageStatusType_TOMBSTONE_PARTICIPANT_LEFT,
+		gmproto.MessageStatusType_TOMBSTONE_SELF_LEFT,
+		gmproto.MessageStatusType_TOMBSTONE_RCS_GROUP_CREATED,
+		gmproto.MessageStatusType_TOMBSTONE_MMS_GROUP_CREATED,
+		gmproto.MessageStatusType_TOMBSTONE_SMS_BROADCAST_CREATED,
+		gmproto.MessageStatusType_TOMBSTONE_ONE_ON_ONE_SMS_CREATED,
+		gmproto.MessageStatusType_TOMBSTONE_ONE_ON_ONE_RCS_CREATED,
+		gmproto.MessageStatusType_TOMBSTONE_SHOW_LINK_PREVIEWS,
+		gmproto.MessageStatusType_TOMBSTONE_GROUP_RENAMED_LOCAL,
+		gmproto.MessageStatusType_TOMBSTONE_VERIFIED_SMS_APPLICABLE,
+		gmproto.MessageStatusType_TOMBSTONE_ENCRYPTED_ONE_ON_ONE_RCS_CREATED,
+		gmproto.MessageStatusType_TOMBSTONE_GROUP_RENAMED_GLOBAL,
+		gmproto.MessageStatusType_TOMBSTONE_GROUP_NAME_CLEARED_GLOBAL,
+		gmproto.MessageStatusType_TOMBSTONE_SELF_REMOVED_FROM_GROUP,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PARTICIPANT_REMOVED_FROM_GROUP,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_SMS_NORM_PARTICIPANT_UPGRADED,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_RCS_NORM_PARTICIPANT_UPGRADED,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_ENCRYPTED_RCS_NORM_PARTICIPANT_UPGRADED,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_ENCRYPTED_GROUP_PARTICIPANT_JOINED,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_ENCRYPTED_GROUP_PARTICIPANT_JOINED_INFO,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_ENCRYPTED_GROUP_PARTICIPANT_LEFT,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_ENCRYPTED_GROUP_SELF_LEFT,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_ENCRYPTED_GROUP_CREATED,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_SELF_REMOVED_FROM_ENCRYPTED_GROUP,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PARTICIPANT_REMOVED_FROM_ENCRYPTED_GROUP,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_SUGGESTION_SHORTCUT_STAR_TOOLSTONE,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_SATELLITE_EDUCATION,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_RBM_SIM_SWITCH,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_RBM_PRIVACY_NOTICE,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PENPAL_CONVERSATION_NOTICE,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_MEET_OTHER_PARTICIPANT_REACHABLE,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_MISSED_VIDEO_CALL,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PARTICIPANT_THEME_CHANGE,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_SATELLITE_END_OF_EMERGENCY_SUCCESS_HELP_STILL_NEEDED,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_SATELLITE_END_OF_EMERGENCY_SUCCESS_HELP_NO_LONGER_NEEDED,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_SATELLITE_END_OF_EMERGENCY_FAILURE_HELP_STILL_NEEDED,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_SATELLITE_END_OF_EMERGENCY_FAILURE_HELP_NO_LONGER_NEEDED,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_SATELLITE_END_OF_EMERGENCY_UNEXPECTED_END,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_SATELLITE_MESSAGING_TOOLSTONE,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PENPAL_PROACTIVE_MESSAGE_NOTICE,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_SUGGESTION_POSSIBLE_SCAM_TOOLSTONE,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_CHATBOT_UNSUBSCRIBE_SENT,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_CHATBOT_SUBSCRIBE_SENT,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_CHATBOT_UNSUBSCRIBE_CONFIRMED,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_CHATBOT_SUBSCRIBE_CONFIRMED,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_ACTIVE_SELF_IDENTITY_CHANGED,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_GROUP_ICON_CHANGED_GLOBAL,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_GROUP_ICON_CLEARED_GLOBAL,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_CHATBOT_UNSUBSCRIBE_ERROR,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_CHATBOT_SUBSCRIBE_ERROR,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_EMERGENCY_CONVERSATION_CREATED,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_SENSITIVE_CONTENT_WARNING_TOOLSTONE,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_CHATBOT_UNSUBSCRIBE_CONFIRMED_NO_LINK,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_CHATBOT_SUBSCRIBE_CONFIRMED_NO_LINK,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_EMERGENCY_QUESTIONNAIRE,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_CHATBOT_UNSUBSCRIBE_SENT_NO_LINK,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_CHATBOT_SUBSCRIBE_SENT_NO_LINK,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_RCS_GROUP_JOINED_BY_LINK,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_INVITE_LINK_ENABLED,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_INVITE_LINK_DISABLED,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_INVITE_LINK_RESET_MANUALLY,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_INVITE_LINK_RESET_AUTOMATICALLY,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_MLS,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_RCS_GROUP_SELF_CREATED,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_CUSTOM_CARD,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_RBM_INCOMING_CONVERSATION_CREATED:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -202,6 +299,9 @@ func opaquePageToken(cursor *gmproto.Cursor) string {
 
 func (link *Link) projectRcsEventFor(queued queuedEvent, wrapped *libgm.WrappedMessage) {
 	if wrapped == nil || wrapped.Message == nil {
+		return
+	}
+	if knownInformationalTombstone(wrapped.Message.GetMessageStatus().GetStatus()) {
 		return
 	}
 	signal, isControlSignal := projectRcsControlSignal(wrapped.Message)

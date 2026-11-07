@@ -121,29 +121,32 @@ type queuedEvent struct {
 }
 
 type terminalCompletion struct {
-	generation uint64
-	revision   uint64
-	state      persistedState
-	kind       string
-	code       string
-	done       chan struct{}
+	generation    uint64
+	runGeneration uint64
+	revision      uint64
+	state         persistedState
+	kind          string
+	code          string
+	done          chan struct{}
+	runWaited     chan struct{}
 }
 
 type hostOutput struct {
-	kind              string
-	code              string
-	value             int64
-	emoji             string
-	rcsRecord         string
-	typingRecord      string
-	generation        uint64
-	streamEpoch       uint64
-	revision          uint64
-	requireGeneration bool
-	requirePair       bool
-	requireRevision   bool
-	requireStream     bool
-	done              chan struct{}
+	kind               string
+	code               string
+	value              int64
+	emoji              string
+	rcsRecord          string
+	typingRecord       string
+	generation         uint64
+	streamEpoch        uint64
+	revision           uint64
+	requireGeneration  bool
+	requirePair        bool
+	requireRevision    bool
+	requireStream      bool
+	requireStreamEpoch bool
+	done               chan struct{}
 }
 
 var openLink atomic.Pointer[Link]
@@ -461,7 +464,7 @@ func (link *Link) Run() error {
 			return errors.New("cookie_refused")
 		}
 		if runCtx.Err() != nil {
-			return link.runErrorFor(generation)
+			return link.runResultFor(generation)
 		}
 		link.emitFor(generation, "conn", "temporary_error", 0)
 		return errors.New("run_retryable")
@@ -481,7 +484,7 @@ func (link *Link) Run() error {
 	// The long poll takes the run context, so Stop ends it.
 	if err := client.Connect(runCtx); err != nil {
 		if runCtx.Err() != nil {
-			return link.runErrorFor(generation)
+			return link.runResultFor(generation)
 		}
 		if isFatalAuthError(err) {
 			link.signOutIfFor(generation, "signed_out", activeState)
@@ -493,20 +496,42 @@ func (link *Link) Run() error {
 	link.mu.Lock()
 	if link.generation != generation || link.client != client || link.runGeneration != generation {
 		link.mu.Unlock()
-		return link.runErrorFor(generation)
+		return link.runResultFor(generation)
 	}
 	link.healthy = true
 	link.mu.Unlock()
 	link.emitFor(generation, "conn", "ready", 0)
 	<-runCtx.Done()
+	return link.runResultFor(generation)
+}
+
+func (link *Link) runResultFor(generation uint64) error {
+	link.mu.Lock()
+	completion := link.pendingCompletion
+	if completion == nil || completion.runGeneration != generation {
+		link.mu.Unlock()
+		return link.runErrorFor(generation)
+	}
+	done := completion.done
+	if completion.runWaited != nil {
+		close(completion.runWaited)
+	}
+	link.mu.Unlock()
+	<-done
 	return link.runErrorFor(generation)
 }
 
 func (link *Link) runErrorFor(generation uint64) error {
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	if link.runGeneration == generation && link.runExitCode == "event_overflow" {
+	if link.runGeneration != generation {
+		return nil
+	}
+	switch link.runExitCode {
+	case "event_overflow":
 		return errors.New("event_overflow")
+	case "persist_failed":
+		return errPersistFailed
 	}
 	return nil
 }
@@ -1122,7 +1147,7 @@ func relevantEvent(event any) bool {
 	switch event.(type) {
 	case *events.AuthTokenRefreshed, *events.GaiaLoggedOut, *events.ListenFatalError, *events.AccountChange,
 		*events.ListenTemporaryError, *events.ListenRecovered, *events.PhoneNotResponding,
-		*events.PhoneRespondingAgain, *events.NoDataReceived, *events.ActiveSessionSet, *gmproto.UserAlertEvent,
+		*events.PhoneRespondingAgain, *events.PhonePingSucceeded, *events.NoDataReceived, *events.ActiveSessionSet, *gmproto.UserAlertEvent,
 		*gmproto.Conversation, *libgm.WrappedMessage, *gmproto.TypingData, *libgm.WrappedSettings, *gmproto.Settings, *events.StreamGap,
 		*libgm.StreamRetired, *libgm.ContinuityLost:
 		return true
@@ -1208,9 +1233,18 @@ func (link *Link) commitTerminalLocked(owner uint64, event any) *terminalComplet
 	if err != nil {
 		return nil
 	}
+	runGeneration := uint64(0)
+	if link.runGeneration == owner {
+		runGeneration = owner
+	}
+	var runWaited chan struct{}
+	if runGeneration != 0 {
+		runWaited = make(chan struct{})
+	}
 	completion := &terminalCompletion{
-		generation: link.generation,
-		revision:   link.stateRevision,
+		generation:    link.generation,
+		runGeneration: runGeneration,
+		revision:      link.stateRevision,
 		state: persistedState{
 			Version:     stateVersion,
 			State:       state,
@@ -1218,9 +1252,10 @@ func (link *Link) commitTerminalLocked(owner uint64, event any) *terminalComplet
 			StopCode:    code,
 			Auth:        auth,
 		},
-		kind: "link",
-		code: code,
-		done: make(chan struct{}),
+		kind:      "link",
+		code:      code,
+		done:      make(chan struct{}),
+		runWaited: runWaited,
 	}
 	link.pendingCompletion = completion
 	link.completionWG.Add(1)
@@ -1230,32 +1265,42 @@ func (link *Link) commitTerminalLocked(owner uint64, event any) *terminalComplet
 func (link *Link) completeTerminal(completion *terminalCompletion) {
 	link.persistMu.Lock()
 	link.mu.Lock()
-	current := !link.closed && link.stateRevision == completion.revision && link.pendingCompletion == completion
+	persistCurrent := link.pendingCompletion == completion && link.state == completion.state.State && link.stopCode == completion.state.StopCode && (link.stateRevision == completion.revision || link.closed)
 	var encoded []byte
 	var err error
-	if current {
+	if persistCurrent {
 		link.seq++
 		state := completion.state
 		state.Seq = link.seq
 		encoded, err = json.Marshal(state)
 	}
 	link.mu.Unlock()
-	if current && err == nil {
+	if persistCurrent && err == nil {
 		err = link.host.PersistState(encoded)
 	}
 	link.persistMu.Unlock()
 
 	link.mu.Lock()
+	current := link.pendingCompletion == completion && link.stateRevision == completion.revision && link.state == completion.state.State && link.stopCode == completion.state.StopCode
+	runFailure := persistCurrent && err != nil && completion.runGeneration != 0 && link.runGeneration == completion.runGeneration && (current || link.closed)
+	failureCurrent := persistCurrent && err != nil && current && !link.closed
+	if runFailure {
+		link.runExitCode = "persist_failed"
+	}
 	if link.pendingCompletion == completion {
 		link.pendingCompletion = nil
 	}
 	link.mu.Unlock()
 	close(completion.done)
 	link.completionWG.Done()
-	if current && err == nil && link.completionOutputReady != nil {
+	if failureCurrent {
+		link.stopFatalFor(completion.generation, "persist_failed", false)
+		return
+	}
+	if persistCurrent && current && err == nil && link.completionOutputReady != nil {
 		link.completionOutputReady()
 	}
-	if current && err == nil {
+	if persistCurrent && current && err == nil {
 		link.enqueueOutput(hostOutput{kind: completion.kind, code: completion.code, generation: completion.generation, revision: completion.revision, requireRevision: true})
 	}
 }
@@ -1290,6 +1335,8 @@ func (link *Link) projectQueuedEvent(queued queuedEvent) {
 		if link.setRespondingFor(queued.generation, true) {
 			link.emitFor(queued.generation, "conn", "phone_responding", 0)
 		}
+	case *events.PhonePingSucceeded:
+		link.recordPingHealthFor(queued)
 	case *events.ListenTemporaryError, *events.StreamGap, *libgm.StreamRetired, *libgm.ContinuityLost:
 		link.emitFor(queued.generation, "conn", "temporary_error", 0)
 	case *events.ListenRecovered:
@@ -1572,6 +1619,21 @@ func (link *Link) recordHealthFor(generation uint64, ok bool, latency int64) {
 	}
 }
 
+func (link *Link) recordPingHealthFor(queued queuedEvent) {
+	link.mu.Lock()
+	if link.closed || queued.generation != link.generation || link.runGeneration != queued.generation || !link.streamOpen || link.streamSource != queued.streamSource || link.streamEpoch != queued.streamEpoch {
+		link.mu.Unlock()
+		return
+	}
+	link.responding = true
+	link.healthy = true
+	link.lastOKMS = time.Now().UnixMilli()
+	revision := link.stateRevision
+	streamEpoch := link.streamEpoch
+	link.mu.Unlock()
+	link.enqueueOutput(hostOutput{kind: "health", code: "ok", generation: queued.generation, revision: revision, streamEpoch: streamEpoch, requireGeneration: true, requireRevision: true, requireStreamEpoch: true})
+}
+
 // persist writes the envelope. It writes nothing once the link is closed.
 func (link *Link) persistIfGeneration(generation uint64) error {
 	link.persistMu.Lock()
@@ -1699,6 +1761,9 @@ func (link *Link) outputAdmitted(output hostOutput) bool {
 	}
 	if output.requireStream {
 		admitted = admitted && link.streamEpoch == output.streamEpoch && link.hasOwnerVerificationLocked()
+	}
+	if output.requireStreamEpoch {
+		admitted = admitted && link.streamEpoch == output.streamEpoch
 	}
 	return admitted
 }
