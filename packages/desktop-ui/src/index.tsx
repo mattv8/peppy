@@ -1295,6 +1295,8 @@ export function RecipientPicker({
   );
 }
 
+export const COMPOSER_TEXTAREA_ID = "composer-textarea";
+
 export function Composer({
   draft,
   attachments,
@@ -1429,7 +1431,7 @@ export function Composer({
         </label>
         <textarea
           ref={textareaRef}
-          id="composer-textarea"
+          id={COMPOSER_TEXTAREA_ID}
           aria-label="Message"
           value={draft}
           readOnly={readOnly}

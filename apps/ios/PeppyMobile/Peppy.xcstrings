@@ -4446,7 +4446,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Link Peppy to Google Messages on this phone. This only sets up the link. Peppy does not send or read messages with it."
+            "value": "Link Peppy to Google Messages on this phone. Peppy can then use Google Messages for chats that support it. Peppy does not become your messaging app."
           }
         }
       }
@@ -4506,7 +4506,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Peppy keeps a connection to Google Messages open on this phone. It does not send or read messages."
+            "value": "Peppy keeps a connection to Google Messages open on this phone, so it can use Google Messages for chats that support it. Your Google sign-in stays on this phone."
           }
         }
       }
@@ -4886,7 +4886,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This does not send or read messages, and Peppy does not become your messaging app."
+            "value": "Linking lets Peppy use Google Messages on this phone for chats that support it. Peppy may send and receive messages in those chats through Google Messages. They pass through Google as they do in Google Messages, and Peppy syncs them to your other Peppy devices like your other messages. Peppy does not become your messaging app."
           }
         }
       }

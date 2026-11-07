@@ -35,6 +35,26 @@ describe("browser UI bridge", () => {
     await expect(renewHostedSession()).rejects.toThrow("unavailable in the browser");
   });
 
+  it("does not expose typing controls without browser typing capabilities", async () => {
+    const browserBridge = { load_state: async () => await desktopBridge.fixtureBridge.load_state(), subscribe: () => () => undefined, subscribe_lifecycle: () => () => undefined, subscribe_lifecycle_finished: () => () => undefined, set_notification_context: async () => undefined, mark_seen: async () => undefined } satisfies Partial<DesktopBridge>;
+    const partialBrowserBridge = browserBridge as DesktopBridge;
+    const previousBridge = uiBridge.bridge;
+    const previousDesktopBridge = desktopBridge.bridge;
+    uiBridge.installBrowserBridge(partialBrowserBridge);
+    installDesktopBrowserBridge(partialBrowserBridge);
+    try {
+      render(<App hostKind="browser" />);
+      await waitFor(() => expect(document.getElementById("shared-composer")).toBeInTheDocument());
+      document.querySelector<HTMLButtonElement>('[data-rail-item="settings"]')?.click();
+      await waitFor(() => expect(document.getElementById("settings-view")).toBeInTheDocument());
+      expect(document.getElementById("settings-share-typing")).not.toBeInTheDocument();
+      expect(document.getElementById("typing-indicator")).toBeNull();
+    } finally {
+      uiBridge.installBrowserBridge(previousBridge);
+      desktopBridge.installBrowserBridge(previousDesktopBridge);
+    }
+  });
+
   it("passes reported RCS fields from a browser bridge snapshot to the shared renderer", async () => {
     const snapshot: DesktopSnapshot = {
       version: "1",

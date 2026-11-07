@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { DesktopBridge } from "@peppy/desktop-ui/bridge-contracts";
+import { COMPOSER_TEXTAREA_ID } from "@peppy/desktop-ui";
 import { readShareTyping } from "../shell/layout-persistence";
 
 const REFRESH_MS = 3_200;
@@ -44,6 +45,7 @@ export function useTypingSender(input: TypingSenderInput) {
 
   const canSend = () => {
     const { bridge, conversationId, current, existing, sendSupported, readOnly, visible, sharingEnabled } = inputRef.current;
+    // Recheck persisted sharing because another window may have changed it.
     return Boolean(bridge.send_typing && conversationId && current && existing && sendSupported && !readOnly && visible && sharingEnabled && readShareTyping() && document.visibilityState === "visible");
   };
 
@@ -90,7 +92,7 @@ export function useTypingSender(input: TypingSenderInput) {
       if (event.key === "peppy.layout.v1" && !readShareTyping()) stop();
     };
     const stopOnComposerBlur = (event: FocusEvent) => {
-      if ((event.target as HTMLElement | null)?.id === "composer-textarea") stop();
+      if ((event.target as HTMLElement | null)?.id === COMPOSER_TEXTAREA_ID) stop();
     };
     window.addEventListener("blur", stop);
     window.addEventListener("pagehide", stop);

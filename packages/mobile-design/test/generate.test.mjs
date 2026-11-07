@@ -373,6 +373,12 @@ test("Google Messages link copy avoids protocol and maturity claims", () => {
   }
 });
 
+test("Google Messages link copy does not deny sending or reading", () => {
+  for (const key of ["google_messages_link_unlinked_body", "google_messages_link_linked_body", "google_messages_link_consent_p_scope"]) {
+    assert.doesNotMatch(catalog[key], /(does not|doesn't|cannot) send or read|not send or read/i, `${key} must not deny sending or reading`);
+  }
+});
+
 test("RCS-adjacent shared copy stays neutral about link availability", () => {
   const keys = [
     "mms_restricted_help",

@@ -9,7 +9,7 @@ const rule = (selector: string) => {
   return [...css.matchAll(new RegExp(`(^|\\s|,|})${escaped}\\s*\\{([^}]*)\\}`, "gm"))].map((match) => match[2]).join(";");
 };
 
-describe("RCS message and header CSS", () => {
+describe("RCS message and header CSS contracts", () => {
   it("lays the route hint on its own line with no UA margin", () => {
     expect(css).toMatch(/\.message-meta \[data-message-route-hint\] \{ margin: 0; flex: 1 0 100%; \}/);
   });

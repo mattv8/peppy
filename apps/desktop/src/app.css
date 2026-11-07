@@ -80,6 +80,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   color: var(--peppy-text-primary);
 }
 .settings-check { display: flex; gap: 6px; align-items: center; font-size: 12px; }
+.settings-check-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .head-panel-shell { width: 100%; min-width: 0; }
 #head-panel-header { position: relative; z-index: 2; display: flex; min-height: 36px; align-items: center; gap: 6px; padding: 0 8px; background: var(--peppy-accent); color: var(--peppy-accent-text); }
 #head-panel-header::before { position: absolute; top: -7px; left: 20px; width: 14px; height: 14px; content: ""; background: var(--peppy-accent); transform: rotate(45deg); }

@@ -142,6 +142,7 @@ import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, re
 import { RcsBadge } from "./rcs/RcsBadge";
 import { ConversationRcsNotice } from "./rcs/ConversationRcsNotice";
 import { RcsMessageMeta } from "./rcs/RcsMessageMeta";
+import { rcsSendBlock } from "./rcs/rcsRoute";
 import { useRcsRoute } from "./rcs/useRcsRoute";
 import { TypingAnnouncer, TypingIndicator } from "./typing/TypingIndicator";
 import { useTypingDisplay } from "./typing/useTypingDisplay";
@@ -265,6 +266,11 @@ const STATUS_LABEL: Record<MessageStatus, string> = {
 };
 
 const TIMELESS_OUTGOING_STATUSES = new Set<MessageStatus>(["queued-local", "server-accepted"]);
+
+function rcsComposerReason(block: ReturnType<typeof rcsSendBlock>): string | undefined {
+  if (block.kind === "unproven") return peppyCopy.rcs_composer_reason_unproven;
+  return block.kind === "link" ? peppyCopy.rcs_composer_reason_link : undefined;
+}
 
 type MessageTime = {
   displayedTime?: string;
@@ -663,13 +669,13 @@ function MessageMeta({ message, hideTime = false }: { message: MessageView; hide
   if (!showTextStatus && !showTime && !showCompactStatus && !deliveryConfirmed && !phoneHistory && !read) return null;
   return <div className="message-meta" data-message-meta={message.id} data-status={message.status} aria-live={rcsMessage ? "off" : undefined}>
     {showTextStatus && <span className="message-meta-status">{["failed-before-submit", "failed-confirmed"].includes(message.status!) ? <X size={10} aria-hidden /> : message.status === "unknown" ? <TriangleAlert size={10} aria-hidden /> : statusIcon}{statusLabel}</span>}
-    {read && <RcsMessageMeta messageId={message.id} status={message.status} />}
+    {read && <RcsMessageMeta messageId={message.id} status={message.status} statusLabel={STATUS_LABEL[message.status!]} />}
     {(showTextStatus || read) && showTime && <span className="message-meta-separator" aria-hidden>·</span>}
     {showTime && <time dateTime={isoTime}>{formattedTime}</time>}
     {showCompactStatus && <span className="message-meta-status" role="img" aria-label={statusLabel} title={statusLabel}>{statusIcon}</span>}
     {deliveryConfirmed && <span className="message-meta-status" role="img" aria-label={deliveryLabel} title={deliveryLabel}><CheckCheck size={10} aria-hidden /></span>}
     {phoneHistory && <span className="message-meta-status" role="img" aria-label="From phone history" title="From phone history" data-message-phone-icon={message.id}><Smartphone size={10} aria-hidden /></span>}
-    {rcsMessage && !read && <RcsMessageMeta messageId={message.id} status={message.status} rcsReported={message.rcsReported} />}
+    {rcsMessage && !read && <RcsMessageMeta messageId={message.id} status={message.status} rcsReported={message.rcsReported} statusLabel={message.status ? STATUS_LABEL[message.status] : ""} />}
   </div>;
 }
 
@@ -1746,6 +1752,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [shareTyping, setShareTyping] = useState(readShareTyping);
   const [typingShareError, setTypingShareError] = useState(false);
   const typingShareRequest = useRef(0);
+  const confirmedTypingShare = useRef(shareTyping);
   const typingLinkAvailable = Boolean(snapshot?.rcsStatus?.gateways.some((gateway) => gateway.state !== "unlinked"));
   useEffect(() => {
     void bridge.set_typing_sharing?.({ enabled: readShareTyping() }).catch(() => undefined);
@@ -2109,19 +2116,20 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     persistLayout({ compactTimestamps: enabled });
   };
   const changeTypingShare = (enabled: boolean) => {
-    const previous = shareTyping;
     const request = ++typingShareRequest.current;
     setShareTyping(enabled);
     setTypingShareError(false);
     if (!persistLayout({ shareTyping: enabled })) {
-      setShareTyping(previous);
+      setShareTyping(confirmedTypingShare.current);
       setTypingShareError(true);
       return;
     }
-    void bridge.set_typing_sharing?.({ enabled }).catch(() => {
+    void bridge.set_typing_sharing?.({ enabled }).then(() => {
+      confirmedTypingShare.current = enabled;
+    }).catch(() => {
       if (request !== typingShareRequest.current) return;
-      persistLayout({ shareTyping: previous });
-      setShareTyping(previous);
+      persistLayout({ shareTyping: confirmedTypingShare.current });
+      setShareTyping(confirmedTypingShare.current);
       setTypingShareError(true);
     });
     if (!enabled) typingSender.noteSend();
@@ -3362,6 +3370,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     gatewayId: route.kind === "route" ? route.gateway.id : undefined,
     locked: Boolean(appLock?.locked),
   });
+  const rcsBlock = rcsRoute.block;
   const mmsRequired = requiresMms(content, active);
   const routeRecipients = recipientCount(content, active);
   const estimateBytes = draftEstimateBytes(content, attachmentViews);
@@ -3373,7 +3382,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   );
   const pendingRecipientReason = "finish adding the recipient before sending";
   const effectivePendingRecipient = pendingRecipient && isNewConversation;
-  const unavailableReason = effectivePendingRecipient ? pendingRecipientReason : problem;
+  const rcsBlockReason = rcsComposerReason(rcsBlock);
+  const unavailableReason = effectivePendingRecipient ? pendingRecipientReason : problem ?? rcsBlockReason;
   const draftHydrated = Boolean(slotKey && store.isHydrated(slotKey));
   const composerReadOnly = Boolean(slotKey && !draftHydrated && !isLocalDraftKey(slotKey));
   const conversationSurfaceVisible = Boolean(composerConversation) || activeView === "conversations";
@@ -3391,15 +3401,16 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     visible: conversationSurfaceVisible,
     sharingEnabled: shareTyping,
   });
-  const typing = useTypingDisplay(
+  const isGroup = (active?.participants?.length ?? 0) > 1;
+  const typing = useTypingDisplay({
     bridge,
-    active?.id,
-    rcsRoute.current && conversationSurfaceVisible,
-    typingSender.state === "active",
-    latestIncomingMessageId,
-    snapshot?.connection.state === "connected",
-    (active?.participants?.length ?? 0) <= 1,
-  );
+    conversationId: active?.id,
+    current: rcsRoute.current && conversationSurfaceVisible,
+    localUserTyping: typingSender.state === "active",
+    incomingMessageId: latestIncomingMessageId,
+    connected: snapshot?.connection.state === "connected",
+    direct: !isGroup,
+  });
 
   const edit = (patch: Partial<DraftContent>) => {
     if (!slotKey || deletingId === slotKey) return;
@@ -3701,6 +3712,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       );
       if (blocked || chosen.kind !== "route")
         return setComposerNotice(current.key, `Not sent: ${blocked ?? "choose a phone and SIM"}.`);
+      const rcsBlocked = rcsSendBlock({ snapshot: latestSnapshot ?? undefined, activeConversationId: current.conversationId, gatewayId: chosen.gateway.id, nowMs: Date.now(), locked: Boolean(appLockRef.current?.locked) });
+      if (rcsBlocked.kind !== "none") {
+        const reason = rcsComposerReason(rcsBlocked)!;
+        return setComposerNotice(current.key, `Not sent: ${reason}.`);
+      }
       const sendContent = { ...current.content, recipientIds: [...current.content.recipientIds], attachmentIds: [...current.content.attachmentIds] };
       const restoreUnsent = async () => {
         const next = store.get(current.key)?.content ?? blankContent();
@@ -4526,8 +4542,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         draft={content.text}
         attachments={attachments}
         sendSupported={Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending}
-        hideSmsCounter={rcsRoute.current}
-        typingSlot={<><TypingIndicator visible={typing.visible} scope={(active?.participants?.length ?? 0) > 1 ? "group" : "direct"} label={(active?.participants?.length ?? 0) > 1 ? peppyCopy.typing_indicator_group : peppyCopy.typing_indicator_direct} /><TypingAnnouncer text={typing.announcement ? (active?.participants?.length ?? 0) > 1 ? peppyCopy.typing_indicator_group : peppyCopy.typing_announce_direct : ""} /></>}
+        hideSmsCounter={rcsRoute.current || rcsBlock.kind !== "none"}
+        typingSlot={<><TypingIndicator visible={typing.visible} scope={isGroup ? "group" : "direct"} label={isGroup ? peppyCopy.typing_indicator_group : peppyCopy.typing_indicator_direct} /><TypingAnnouncer text={typing.announcement ? isGroup ? peppyCopy.typing_indicator_group : peppyCopy.typing_announce_direct : ""} /></>}
         typingSendState={typingSender.state}
         unavailableReason={sending ? "sending…" : draftSubscriptionError ? "draft updates unavailable; retry setup" : composerReadOnly ? "draft is loading" : composerUnavailableReason}
         readOnly={composerReadOnly}
@@ -4545,6 +4561,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             <span id="unavailable-hint" hidden={!unavailableReason}>
               Sending unavailable: {composerUnavailableReason}
             </span>
+            <div id="composer-route-notice" role="status" data-route-block={rcsBlock.kind === "link" ? `link-${rcsBlock.help}` : rcsBlock.kind}>
+              {rcsBlock.kind !== "none" && <p id="composer-route-help">{rcsBlock.kind === "unproven" ? peppyCopy.rcs_composer_help_unproven : rcsBlock.help === "relink" ? peppyCopy.rcs_composer_help_relink : peppyCopy.rcs_composer_help_phone} {peppyCopy.rcs_composer_draft_kept}</p>}
+            </div>
             {mmsLimitShown && route.kind === "route" && (
               <span className="mms-limit" data-mms-limit-source={route.gateway.mmsLimitSource ?? "fallback"}>
                 {fileSize(estimateBytes)} used · {fileSize(route.gateway.mmsMaxBytes ?? 300 * 1024)} limit ({route.gateway.mmsLimitSource === "carrier" ? "carrier" : "fallback"}) · up to {Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)} recipients
@@ -5154,7 +5173,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               canRevealVaultSecret={!browserHost && snapshot?.deviceRole === "owner" && snapshot.connection.state === "connected"}
                serverOffline={serverOffline}
                accountReadOnly={accountReadOnly}
-               typingShare={snapshot?.rcsStatus?.gateways.some((gateway) => gateway.state !== "unlinked") && typeof (bridge as Record<string, unknown>).send_typing === "function" ? shareTyping : undefined}
+               typingShare={typingLinkAvailable && bridge.send_typing ? shareTyping : undefined}
                typingShareError={typingShareError}
                onTypingShare={changeTypingShare}
                 requestedSection={notificationSettingsRequested ? "notifications" : undefined}

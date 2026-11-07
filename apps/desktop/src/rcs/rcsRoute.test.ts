@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DesktopSnapshot } from "../bridge/bridge";
-import { currentRcsRoute } from "./rcsRoute";
+import { currentRcsRoute, knownRcsChat, rcsSendBlock } from "./rcsRoute";
 
 function snapshot(): DesktopSnapshot {
   return {
@@ -71,5 +71,35 @@ describe("currentRcsRoute", () => {
     value.rcsStatus!.gateways[0].expiresAtMs = "140";
     value.rcsStatus!.gateways[0].observedAtMs = "999999";
     expect(currentRcsRoute({ snapshot: value, activeConversationId: "conversation-a", gatewayId: "gateway-a", nowMs: 139, locked: false })).toEqual({ current: true, expiresAtMs: 140 });
+  });
+});
+
+describe("rcsSendBlock", () => {
+  const input = (value: DesktopSnapshot) => ({ snapshot: value, activeConversationId: "conversation-a", gatewayId: "gateway-a", nowMs: 149, locked: false });
+
+  it("recognizes only existing route evidence", () => {
+    const conversation = snapshot().conversations[0];
+    expect(knownRcsChat(conversation)).toBe(false);
+    conversation.rcsEncryption = true;
+    expect(knownRcsChat(conversation)).toBe(true);
+    conversation.rcsEncryption = undefined;
+    conversation.rcsHistoryGap = true;
+    expect(knownRcsChat(conversation)).toBe(true);
+    conversation.rcsHistoryGap = undefined;
+    conversation.messages.push({ id: "rcs", revision: "1", sender: "other", body: "", timestamp: "1", attachments: [], transport: "rcs" });
+    expect(knownRcsChat(conversation)).toBe(true);
+  });
+
+  it.each([
+    ["unproven eligibility", (value: DesktopSnapshot) => { value.conversations[0].rcsEncryption = true; value.rcsStatus!.eligibilities[0].eligibility = "unknown"; }, { kind: "unproven" }],
+    ["relink", (value: DesktopSnapshot) => { value.conversations[0].rcsEncryption = true; value.rcsStatus!.gateways[0].state = "needs_relink"; }, { kind: "link", help: "relink" }],
+    ["phone", (value: DesktopSnapshot) => { value.conversations[0].rcsEncryption = true; value.rcsStatus!.gateways[0].phoneResponsive = false; }, { kind: "link", help: "phone" }],
+    ["plain SMS", (_value: DesktopSnapshot) => {}, { kind: "none" }],
+    ["unlinked", (value: DesktopSnapshot) => { value.conversations[0].rcsEncryption = true; value.rcsStatus!.gateways[0].state = "unlinked"; }, { kind: "none" }],
+    ["group", (value: DesktopSnapshot) => { value.conversations[0].rcsEncryption = true; value.conversations[0].participants = ["one", "two"]; }, { kind: "none" }],
+  ])("returns %o for %s", (_label, change, expected) => {
+    const value = snapshot();
+    change(value);
+    expect(rcsSendBlock(input(value))).toEqual(expected);
   });
 });

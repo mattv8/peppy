@@ -50,7 +50,12 @@ describe("PrivacySettings", () => {
     rerender(<PrivacySettings browserHost={false} typingShare={{ enabled: true, onChange }} />);
     const control = document.querySelector<HTMLInputElement>("#settings-share-typing")!;
     expect(control).toBeChecked();
-    expect(control).toHaveAttribute("aria-describedby", "settings-share-typing-hint");
+    expect(screen.queryByText(peppyCopy.typing_share_hint)).not.toBeInTheDocument();
+    const info = screen.getByRole("button", { name: peppyCopy.typing_share_info_label });
+    fireEvent.click(info);
+    expect(screen.getByRole("dialog", { name: peppyCopy.typing_share_info_label })).toHaveTextContent(peppyCopy.typing_share_hint);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(info).toHaveFocus();
     fireEvent.click(control);
     expect(onChange).toHaveBeenCalledWith(false);
   });

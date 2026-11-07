@@ -7,7 +7,7 @@ function display(overrides: { conversationId?: string; current?: boolean; local?
   let receive: (signal: TypingSignal) => void = () => undefined;
   const unsubscribe = vi.fn();
   const bridge = { subscribe_typing: overrides.subscribe === false ? undefined : vi.fn(listener => { receive = listener; return unsubscribe; }) } as unknown as DesktopBridge;
-  const hook = renderHook(({ conversationId = "chat-1", current = true, local = false, incomingMessageId, connected = true, direct = true }) => useTypingDisplay(bridge, conversationId, current, local, incomingMessageId, connected, direct), { initialProps: overrides });
+  const hook = renderHook(({ conversationId = "chat-1", current = true, local = false, incomingMessageId, connected = true, direct = true }) => useTypingDisplay({ bridge, conversationId, current, localUserTyping: local, incomingMessageId, connected, direct }), { initialProps: overrides });
   return { ...hook, receive: (signal: TypingSignal) => act(() => receive(signal)), unsubscribe };
 }
 

@@ -5,17 +5,27 @@ const MAX_DISPLAY_MS = 15_000;
 const ANNOUNCEMENT_DURATION_MS = 5_000;
 export const TYPING_ANNOUNCE_COOLDOWN_MS = 30_000;
 
-export function useTypingDisplay(bridge: DesktopBridge, conversationId: string | undefined, current: boolean, localUserTyping = false, incomingMessageId?: string, connected = true, direct = true) {
+type TypingDisplayOptions = {
+  bridge: DesktopBridge;
+  conversationId?: string;
+  current: boolean;
+  localUserTyping?: boolean;
+  incomingMessageId?: string;
+  connected?: boolean;
+  direct?: boolean;
+};
+
+export function useTypingDisplay({ bridge, conversationId, current, localUserTyping = false, incomingMessageId, connected = true, direct = true }: TypingDisplayOptions) {
   const [state, setState] = useState({ visible: false, announcement: false });
   const announcements = useRef(new Map<string, number>());
   const localTypingRef = useRef(localUserTyping);
   localTypingRef.current = localUserTyping;
   useEffect(() => {
-    if (!connected || (direct && incomingMessageId)) setState({ visible: false, announcement: false });
+    if (!connected || (direct && incomingMessageId)) setState((previous) => previous.visible || previous.announcement ? { visible: false, announcement: false } : previous);
   }, [connected, direct, incomingMessageId]);
   useEffect(() => {
     if (!connected || !current || !conversationId || !bridge.subscribe_typing) {
-      setState({ visible: false, announcement: false });
+      setState((previous) => previous.visible || previous.announcement ? { visible: false, announcement: false } : previous);
       return;
     }
     let displayTimer: number | undefined;
@@ -25,7 +35,7 @@ export function useTypingDisplay(bridge: DesktopBridge, conversationId: string |
       if (announcementTimer !== undefined) window.clearTimeout(announcementTimer);
       displayTimer = undefined;
       announcementTimer = undefined;
-      setState({ visible: false, announcement: false });
+      setState((previous) => previous.visible || previous.announcement ? { visible: false, announcement: false } : previous);
     };
     const receive = (signal: TypingSignal) => {
       if (signal.conversationId !== conversationId) return;

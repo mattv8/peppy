@@ -103,6 +103,20 @@ describe("typing sharing", () => {
     expect(setSharing).toHaveBeenCalledTimes(1);
   });
 
+  it("reverts consecutive rejected writes to the last core-confirmed value", async () => {
+    const setSharing = vi.spyOn(bridge, "set_typing_sharing").mockResolvedValue();
+    render(<App />);
+    await screen.findByRole("textbox", { name: "Message" });
+    openSettings();
+    const setting = await screen.findByRole<HTMLInputElement>("checkbox", { name: /Show others/ });
+    setSharing.mockRejectedValueOnce(new Error("rejected"));
+    fireEvent.click(setting);
+    await waitFor(() => expect(setting).toBeChecked());
+    setSharing.mockRejectedValueOnce(new Error("rejected"));
+    fireEvent.click(setting);
+    await waitFor(() => expect(setting).toBeChecked());
+  });
+
   it("submits each local sharing toggle to the host exactly once", async () => {
     const setSharing = vi.spyOn(bridge, "set_typing_sharing").mockResolvedValue();
     render(<App />);

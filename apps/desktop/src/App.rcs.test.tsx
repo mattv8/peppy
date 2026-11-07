@@ -34,6 +34,7 @@ const currentSnapshot = async () => {
 };
 
 beforeEach(async () => {
+  window.history.replaceState({}, "", "/");
   vi.restoreAllMocks();
   const values = new Map<string, string>();
   Object.defineProperty(window, "localStorage", {
@@ -158,6 +159,76 @@ describe("RCS conversation route", () => {
     render(<App />);
     await screen.findByRole("textbox", { name: "Message" });
     expectNoBadge();
+  });
+
+  it("blocks an unproven known RCS chat without clearing its draft or attachment", async () => {
+    const sendDraft = vi.spyOn(bridge, "send_draft");
+    const attachmentId = snapshot.conversations[0].messages[0].attachments[0]?.id;
+    snapshot = {
+      ...snapshot,
+      conversations: snapshot.conversations.map((conversation) => conversation.id === snapshot.activeConversationId ? { ...conversation, rcsEncryption: true } : conversation),
+      draft: { ...snapshot.draft!, text: "Keep this draft", attachmentIds: attachmentId ? [attachmentId] : [] },
+      rcsStatus: { ...snapshot.rcsStatus!, eligibilities: [{ ...snapshot.rcsStatus!.eligibilities[0], eligibility: "unknown" }] },
+    };
+    render(<App />);
+
+    const textarea = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+    const send = screen.getByRole("button", { name: "Send" });
+    const reason = peppyCopy.rcs_composer_reason_unproven;
+    expect(send).toBeDisabled();
+    expect(textarea).toHaveValue("Keep this draft");
+    expect(document.getElementById("unavailable-hint")).toHaveTextContent(`Sending unavailable: ${reason}`);
+    expect(document.getElementById("composer-route-notice")).toHaveAttribute("role", "status");
+    expect(document.getElementById("composer-route-help")).toHaveTextContent(peppyCopy.rcs_composer_draft_kept);
+    expect(document.getElementById("sms-counter")).toBeNull();
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(sendDraft).not.toHaveBeenCalled();
+  });
+
+  it("keeps a carrier problem ahead of the RCS block reason", async () => {
+    snapshot = {
+      ...snapshot,
+      conversations: snapshot.conversations.map((conversation) => conversation.id === snapshot.activeConversationId ? { ...conversation, rcsEncryption: true } : conversation),
+      rcsStatus: { ...snapshot.rcsStatus!, eligibilities: [{ ...snapshot.rcsStatus!.eligibilities[0], eligibility: "unknown" }] },
+      gateways: [{ ...snapshot.gateways[0], availability: "offline" }],
+    };
+    render(<App />);
+
+    await screen.findByRole("textbox", { name: "Message" });
+    expect(document.getElementById("unavailable-hint")).not.toHaveTextContent(peppyCopy.rcs_composer_reason_unproven);
+  });
+
+  it("keeps the draft when a route becomes blocked while sending", async () => {
+    const sendDraft = vi.spyOn(bridge, "send_draft");
+    let notify: () => void = () => {};
+    vi.mocked(bridge.subscribe).mockImplementation((listener) => {
+      notify = listener;
+      return () => undefined;
+    });
+    let releaseSave: (() => void) | undefined;
+    const savePending = new Promise<void>((resolve) => { releaseSave = resolve; });
+    vi.spyOn(bridge, "save_draft").mockImplementation(async (input) => {
+      await savePending;
+      return { ...input, id: "draft-current", revision: "2" };
+    });
+    render(<App />);
+
+    const textarea = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+    fireEvent.change(textarea, { target: { value: "Keep this draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    snapshot = {
+      ...snapshot,
+      conversations: snapshot.conversations.map((conversation) => conversation.id === snapshot.activeConversationId ? { ...conversation, rcsEncryption: true } : conversation),
+      rcsStatus: { ...snapshot.rcsStatus!, eligibilities: [{ ...snapshot.rcsStatus!.eligibilities[0], eligibility: "unknown" }] },
+    };
+    await act(async () => {
+      notify();
+      releaseSave?.();
+    });
+
+    await waitFor(() => expect(document.getElementById("composer-status-row")).toHaveTextContent(`Not sent: ${peppyCopy.rcs_composer_reason_unproven}.`));
+    expect(textarea).toHaveValue("Keep this draft");
+    expect(sendDraft).not.toHaveBeenCalled();
   });
 });
 
