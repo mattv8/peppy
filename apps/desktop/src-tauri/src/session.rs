@@ -672,9 +672,7 @@ impl Session {
     }
 
     pub(crate) fn set_mismatch(&self, mismatch: bool) {
-        let changed = self.live_typing.mutate_admission_authority(|| {
-            self.mismatch.swap(mismatch, Ordering::AcqRel) != mismatch
-        });
+        let changed = self.mismatch.swap(mismatch, Ordering::AcqRel) != mismatch;
         if changed {
             self.live_context_wake.notify_one();
         }
@@ -1846,10 +1844,7 @@ impl Session {
     }
 
     pub(crate) fn set_security_status(&self, update: impl FnOnce(&mut NetStatus)) {
-        self.live_typing.mutate_admission_authority(|| {
-            self.set_status(update);
-            true
-        });
+        self.set_status(update);
         self.live_context_wake.notify_one();
     }
 }

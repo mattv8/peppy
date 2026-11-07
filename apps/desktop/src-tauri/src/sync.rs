@@ -273,6 +273,7 @@ pub(crate) fn apply_gateway_refresh(
         status.revoked_device_ids = revoked_device_ids;
         changed
     };
+    session.live_typing.refresh_gateways();
     if changed {
         session.persist_gateways(&views);
         session.notify();

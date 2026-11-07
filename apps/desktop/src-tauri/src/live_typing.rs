@@ -6,18 +6,16 @@ use peppy_client_core::{
 use peppy_desktop_api::rcs_status::{
     snapshot_at, RcsEligibilityState, RcsGatewayState, RcsStatusSnapshot, SnapshotAccess,
 };
-use peppy_protocol::LiveHelloV2;
+use peppy_protocol::{LiveHelloV2, TypingOriginV2, TypingStateV2};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     pin::Pin,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex, OnceLock,
-    },
+    sync::{atomic::Ordering, Arc, Mutex, OnceLock},
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, oneshot, watch},
     time::{sleep, timeout, Instant},
 };
 use tokio_tungstenite::{
@@ -40,138 +38,84 @@ pub(crate) fn install_events(app: &tauri::AppHandle) {
 }
 
 pub(crate) struct LiveTypingHost {
-    outbound: Mutex<Option<mpsc::Sender<OutboundFrame>>>,
-    sharing: Mutex<bool>,
-    admission: Mutex<()>,
-    sharing_epoch: std::sync::atomic::AtomicU64,
-    authority_epoch: std::sync::atomic::AtomicU64,
-    retirement_requested: AtomicBool,
+    sender: Mutex<Option<mpsc::Sender<Cmd>>>,
     started: Instant,
+    #[cfg(test)]
+    suspend_clock: Mutex<Option<Arc<TestSuspendClock>>>,
+}
+
+#[cfg(test)]
+struct TestSuspendClock {
+    base_mono: Instant,
+    base_wall: SystemTime,
+    elapsed: Mutex<Duration>,
+    samples: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl TestSuspendClock {
+    fn new() -> Self {
+        Self {
+            base_mono: Instant::now(),
+            base_wall: SystemTime::now(),
+            elapsed: Mutex::new(Duration::ZERO),
+            samples: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn set(&self, elapsed: Duration) {
+        *self
+            .elapsed
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = elapsed;
+    }
+
+    fn now(&self) -> (Instant, SystemTime) {
+        self.samples.fetch_add(1, Ordering::AcqRel);
+        let elapsed = *self
+            .elapsed
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        (self.base_mono + elapsed, self.base_wall + elapsed)
+    }
+
+    fn sample_count(&self) -> usize {
+        self.samples.load(Ordering::Acquire)
+    }
 }
 
 impl Default for LiveTypingHost {
     fn default() -> Self {
         Self {
-            outbound: Mutex::new(None),
-            sharing: Mutex::new(true),
-            admission: Mutex::new(()),
-            sharing_epoch: std::sync::atomic::AtomicU64::new(0),
-            authority_epoch: std::sync::atomic::AtomicU64::new(0),
-            retirement_requested: AtomicBool::new(false),
+            sender: Mutex::new(None),
             started: Instant::now(),
+            #[cfg(test)]
+            suspend_clock: Mutex::new(None),
         }
     }
 }
 
 impl LiveTypingHost {
-    fn attach(&self) -> mpsc::Receiver<OutboundFrame> {
-        let (sender, receiver) = mpsc::channel(2);
+    fn install(&self, sender: mpsc::Sender<Cmd>) {
         *self
-            .outbound
+            .sender
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = Some(sender);
-        receiver
     }
 
-    fn detach(&self) {
-        self.outbound
+    fn commands(&self) -> Option<mpsc::Sender<Cmd>> {
+        self.sender
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .take();
+            .clone()
     }
 
-    fn send_with(
-        &self,
-        state: Option<peppy_protocol::TypingStateV2>,
-        frame: impl FnOnce() -> Option<String>,
-    ) -> bool {
-        let outbound = self
-            .outbound
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let Some(sender) = outbound.as_ref() else {
-            return false;
-        };
-        let sharing_epoch = self.sharing_epoch.load(Ordering::Acquire);
-        let authority_epoch = self.authority_epoch.load(Ordering::Acquire);
-        frame().is_some_and(|frame| {
-            sender
-                .try_send(OutboundFrame {
-                    frame,
-                    state,
-                    sharing_epoch,
-                    authority_epoch,
-                })
-                .is_ok()
-        })
-    }
-
-    fn sharing(&self) -> bool {
-        *self
-            .sharing
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-    }
-
-    fn set_sharing(&self, client: &Client, enabled: bool) -> Result<(), LiveError> {
-        let _admission = self
-            .admission
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let mut sharing = self
-            .sharing
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        *sharing = enabled;
-        let result = client.set_typing_sharing(enabled);
-        if !enabled {
-            self.sharing_epoch.fetch_add(1, Ordering::AcqRel);
+    /// Gateway status changed; the actor re-derives its context. A full queue is harmless because
+    /// every authority boundary re-derives the context before it admits or publishes anything.
+    pub(crate) fn refresh_gateways(&self) {
+        if let Some(sender) = self.commands() {
+            let _ = sender.try_send(Cmd::GatewayRefresh);
         }
-        result
-    }
-
-    fn apply_sharing_with(
-        &self,
-        client: &Client,
-        before_apply: impl FnOnce(),
-    ) -> Result<(), LiveError> {
-        let sharing = self
-            .sharing
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        before_apply();
-        client.set_typing_sharing(*sharing)
-    }
-
-    fn apply_sharing(&self, client: &Client) -> Result<(), LiveError> {
-        self.apply_sharing_with(client, || {})
-    }
-
-    fn request_retirement(&self) {
-        self.retirement_requested.store(true, Ordering::Release);
-    }
-
-    fn take_retirement(&self) -> bool {
-        self.retirement_requested.swap(false, Ordering::AcqRel)
-    }
-
-    fn accepts_outbound(&self, outbound: &OutboundFrame) -> bool {
-        outbound.state != Some(peppy_protocol::TypingStateV2::Started)
-            || (self.sharing()
-                && outbound.sharing_epoch == self.sharing_epoch.load(Ordering::Acquire))
-                && outbound.authority_epoch == self.authority_epoch.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn mutate_admission_authority(&self, update: impl FnOnce() -> bool) -> bool {
-        let _admission = self
-            .admission
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let changed = update();
-        if changed {
-            self.authority_epoch.fetch_add(1, Ordering::AcqRel);
-        }
-        changed
     }
 
     fn clock(&self) -> LiveClock {
@@ -185,13 +129,27 @@ impl LiveTypingHost {
             .try_into()
             .unwrap_or(u64::MAX)
     }
-}
 
-struct OutboundFrame {
-    frame: String,
-    state: Option<peppy_protocol::TypingStateV2>,
-    sharing_epoch: u64,
-    authority_epoch: u64,
+    fn suspend_now(&self) -> (Instant, SystemTime) {
+        #[cfg(test)]
+        if let Some(clock) = self
+            .suspend_clock
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+        {
+            return clock.now();
+        }
+        (Instant::now(), SystemTime::now())
+    }
+
+    #[cfg(test)]
+    fn install_suspend_clock(&self, clock: Arc<TestSuspendClock>) {
+        *self
+            .suspend_clock
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(clock);
+    }
 }
 
 pub(crate) type GatewayDeviceId = DeviceId;
@@ -337,17 +295,23 @@ impl LiveTypingState {
 }
 
 const LIVE_MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
+#[cfg(not(test))]
+const LIVE_SUSPEND_TICK: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const LIVE_SUSPEND_TICK: Duration = Duration::from_millis(20);
+const LIVE_SUSPEND_SKEW: Duration = Duration::from_secs(5);
 const LIVE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LIVE_HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const LIVE_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const LIVE_MAX_FRAME: usize = 64 * 1024;
-const INBOUND_QUEUE_LIMIT: usize = 64;
+const COMMAND_QUEUE_LIMIT: usize = 32;
+const SEALED_QUEUE_LIMIT: usize = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TypingDisplayState {
     pub conversation_id: ConversationId,
-    pub state: peppy_protocol::TypingStateV2,
+    pub state: TypingStateV2,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<String>,
     #[serde(skip)]
@@ -362,31 +326,17 @@ pub(crate) struct TypingDisplayState {
 
 #[derive(Default)]
 struct InboundTyping {
-    frames: VecDeque<String>,
-    queue_drops: u64,
-    gateway_intent_drops: u64,
     displays: HashMap<ConversationId, TypingDisplayState>,
     peers: HashMap<DeviceId, (u64, u64)>,
     sequences: HashMap<(DeviceId, ConversationId), u64>,
     events: Vec<TypingDisplayState>,
+    gateway_intent_drops: u64,
 }
+
 impl InboundTyping {
-    fn push(&mut self, frame: String) -> bool {
-        if self.frames.len() == INBOUND_QUEUE_LIMIT {
-            self.queue_drops += 1;
-            false
-        } else {
-            self.frames.push_back(frame);
-            true
-        }
-    }
-    fn take(&mut self) -> Option<String> {
-        self.frames.pop_front()
-    }
     fn clear(&mut self) {
-        self.frames.clear();
         for (_, mut display) in self.displays.drain() {
-            display.state = peppy_protocol::TypingStateV2::Stopped;
+            display.state = TypingStateV2::Stopped;
             display.expires_at_ms = None;
             display.deadline_mono = 0;
             self.events.push(display);
@@ -394,6 +344,7 @@ impl InboundTyping {
         self.peers.clear();
         self.sequences.clear();
     }
+
     fn next_deadline(&self) -> Option<u64> {
         self.displays
             .values()
@@ -411,13 +362,14 @@ impl InboundTyping {
             .collect::<Vec<_>>();
         for conversation_id in expired {
             if let Some(mut display) = self.displays.remove(&conversation_id) {
-                display.state = peppy_protocol::TypingStateV2::Stopped;
+                display.state = TypingStateV2::Stopped;
                 display.expires_at_ms = None;
                 display.deadline_mono = 0;
                 self.events.push(display);
             }
         }
     }
+
     fn publish(
         &mut self,
         outcome: LiveOutcome,
@@ -466,7 +418,7 @@ impl InboundTyping {
                 let display = TypingDisplayState {
                     conversation_id,
                     state,
-                    expires_at_ms: (state == peppy_protocol::TypingStateV2::Started).then(|| {
+                    expires_at_ms: (state == TypingStateV2::Started).then(|| {
                         u64::try_from(clock.wall_ms)
                             .unwrap_or(0)
                             .saturating_add(deadline_mono.saturating_sub(clock.mono_ms))
@@ -477,7 +429,7 @@ impl InboundTyping {
                     session_token,
                     generation: outcome.generation,
                 };
-                if state == peppy_protocol::TypingStateV2::Started {
+                if state == TypingStateV2::Started {
                     self.displays.insert(conversation_id, display.clone());
                 } else {
                     self.displays.remove(&conversation_id);
@@ -488,6 +440,7 @@ impl InboundTyping {
         }
         reply
     }
+
     fn drain_events(&mut self) -> impl Iterator<Item = TypingDisplayState> + '_ {
         self.events.drain(..)
     }
@@ -500,11 +453,16 @@ impl InboundTyping {
         {
             return false;
         }
-        self.peers.insert(
+        let prior_token = self.peers.insert(
             update.peer_device_id,
             (update.current_session_token, update.validation_revision),
         );
-        if let Some(replaced_token) = update.replaced_session_token {
+        let retired_token = update.replaced_session_token.or_else(|| {
+            prior_token
+                .map(|(token, _)| token)
+                .filter(|token| *token != update.current_session_token)
+        });
+        if let Some(replaced_token) = retired_token {
             let replaced = self
                 .displays
                 .iter()
@@ -516,7 +474,7 @@ impl InboundTyping {
                 .collect::<Vec<_>>();
             for conversation_id in replaced {
                 if let Some(mut display) = self.displays.remove(&conversation_id) {
-                    display.state = peppy_protocol::TypingStateV2::Stopped;
+                    display.state = TypingStateV2::Stopped;
                     display.expires_at_ms = None;
                     display.deadline_mono = 0;
                     self.events.push(display);
@@ -553,7 +511,7 @@ fn drain_publishable_events(
     inbound
         .drain_events()
         .filter(|event| {
-            event.state == peppy_protocol::TypingStateV2::Stopped
+            event.state == TypingStateV2::Stopped
                 || (!cancelled
                     && Some(event.generation) == generation
                     && event.deadline_mono > mono_ms)
@@ -593,105 +551,373 @@ fn emit_events(
     }
 }
 
-fn request_retirement_on_clock(error: LiveError, session: &Session) -> bool {
-    if error != LiveError::Clock {
-        return false;
-    }
-    session.live_typing.request_retirement();
-    session.live_context_wake.notify_one();
-    true
+/// Commands are the only way into typing state. Every reply is awaited under cancellation, and the
+/// actor never awaits anything the supervisor or Tauri command holds.
+enum Cmd {
+    SendTyping {
+        conversation_id: ConversationId,
+        state: TypingStateV2,
+        reply: oneshot::Sender<bool>,
+    },
+    SetSharing {
+        enabled: bool,
+        reply: oneshot::Sender<Result<(), ()>>,
+    },
+    GatewayRefresh,
+    Reevaluate,
+    SocketUp,
+    SocketDown,
+    Retire,
+    InboundFrame {
+        json: String,
+        reply: oneshot::Sender<InboundOutcome>,
+    },
+    ConfirmTransmit {
+        mark: SealMark,
+        reply: oneshot::Sender<Admission>,
+    },
+    SuspendTick {
+        reply: oneshot::Sender<bool>,
+    },
+    Expire,
+    Shutdown,
+    #[cfg(test)]
+    QueueSealedForTest {
+        json: String,
+        reply: oneshot::Sender<bool>,
+    },
 }
 
-fn send_typing_for_session(
-    session: &Session,
-    conversation_id: ConversationId,
-    state: peppy_protocol::TypingStateV2,
-    clock: LiveClock,
-) -> bool {
-    let gateway = {
-        let status = session
+/// The authority a sealed frame was produced under, checked again at the final boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SealMark {
+    seq: u64,
+    sharing_epoch: u64,
+    state: TypingStateV2,
+}
+
+struct SealedFrame {
+    json: String,
+    mark: SealMark,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Admission {
+    Transmit,
+    Rejected,
+    Suspended,
+}
+
+#[derive(Default)]
+struct InboundOutcome {
+    wire: Option<String>,
+    suspended: bool,
+}
+
+type Published = (u64, Option<u64>);
+
+struct TypingActor {
+    session: Arc<Session>,
+    state: LiveTypingState,
+    inbound: InboundTyping,
+    sharing: bool,
+    sharing_epoch: u64,
+    enabled_seq: u64,
+    retired: bool,
+    socket_up: bool,
+    anchor: (Instant, SystemTime),
+    sealed: mpsc::Sender<SealedFrame>,
+    published: watch::Sender<Published>,
+}
+
+impl TypingActor {
+    fn new(
+        session: Arc<Session>,
+        sealed: mpsc::Sender<SealedFrame>,
+        published: watch::Sender<Published>,
+    ) -> Self {
+        let anchor = session.live_typing.suspend_now();
+        Self {
+            session,
+            state: LiveTypingState::default(),
+            inbound: InboundTyping::default(),
+            sharing: true,
+            sharing_epoch: 0,
+            enabled_seq: 0,
+            retired: false,
+            socket_up: false,
+            anchor,
+            sealed,
+            published,
+        }
+    }
+
+    fn run(mut self, mut commands: mpsc::Receiver<Cmd>) {
+        while let Some(cmd) = commands.blocking_recv() {
+            if matches!(cmd, Cmd::Shutdown) {
+                break;
+            }
+            self.handle(cmd);
+        }
+        self.handle(Cmd::Retire);
+    }
+
+    fn handle(&mut self, cmd: Cmd) {
+        match cmd {
+            Cmd::SendTyping {
+                conversation_id,
+                state,
+                reply,
+            } => {
+                let _ = reply.send(self.send_typing(conversation_id, state));
+            }
+            Cmd::SetSharing { enabled, reply } => {
+                let _ = reply.send(self.set_sharing(enabled));
+            }
+            Cmd::GatewayRefresh | Cmd::Reevaluate => self.reevaluate(),
+            Cmd::SocketUp => {
+                // A new connection starts a new suspend window; backoff time between sockets is
+                // not observed by the periodic tick and must not read as a suspend gap.
+                self.anchor = self.session.live_typing.suspend_now();
+                self.socket_up = true;
+                self.retired = false;
+                self.reevaluate();
+            }
+            Cmd::SocketDown => {
+                self.socket_up = false;
+                self.retire();
+            }
+            Cmd::Retire => self.retire(),
+            Cmd::InboundFrame { json, reply } => {
+                let _ = reply.send(self.inbound_frame(&json));
+            }
+            Cmd::ConfirmTransmit { mark, reply } => {
+                let _ = reply.send(self.confirm_transmit(mark));
+            }
+            Cmd::SuspendTick { reply } => {
+                let _ = reply.send(self.observe_suspend());
+            }
+            Cmd::Expire => self.expire(),
+            #[cfg(test)]
+            Cmd::QueueSealedForTest { json, reply } => {
+                let mark = SealMark {
+                    seq: self.enabled_seq,
+                    sharing_epoch: self.sharing_epoch,
+                    state: TypingStateV2::Stopped,
+                };
+                let _ = reply.send(self.sealed.try_send(SealedFrame { json, mark }).is_ok());
+            }
+            Cmd::Shutdown => {}
+        }
+        self.publish();
+    }
+
+    fn send_typing(&mut self, conversation_id: ConversationId, state: TypingStateV2) -> bool {
+        self.reevaluate();
+        if state == TypingStateV2::Started && !self.sharing {
+            return false;
+        }
+        let Some(gateway) = self.resolve_target(conversation_id) else {
+            return false;
+        };
+        let clock = self.session.live_typing.clock();
+        match self.session.client.seal_typing_signal_v2(
+            conversation_id,
+            gateway,
+            TypingOriginV2::VaultDevice,
+            state,
+            clock,
+        ) {
+            Ok(Some(outbound)) => {
+                let json = serde_json::to_string(&outbound.signal).ok();
+                self.queue(outbound.generation, json, state)
+            }
+            Ok(None) | Err(LiveError::Disabled | LiveError::InvalidContext) => false,
+            Err(LiveError::Clock) => {
+                self.retire();
+                false
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn queue(
+        &self,
+        generation: LiveEnableGeneration,
+        json: Option<String>,
+        state: TypingStateV2,
+    ) -> bool {
+        if Some(generation) != self.state.generation() {
+            return false;
+        }
+        let Some(json) = json else {
+            return false;
+        };
+        let mark = SealMark {
+            seq: self.enabled_seq,
+            sharing_epoch: self.sharing_epoch,
+            state,
+        };
+        self.sealed.try_send(SealedFrame { json, mark }).is_ok()
+    }
+
+    fn resolve_target(&self, conversation_id: ConversationId) -> Option<DeviceId> {
+        let status = self
+            .session
             .status
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         resolve_typing_target(
             &status,
-            snapshot_inputs(session, &status, clock.wall_ms),
+            snapshot_inputs(&self.session, &status, wall_ms()),
             conversation_id,
         )
-    };
-    let Some(gateway) = gateway else {
-        return false;
-    };
-    session.live_typing.send_with(Some(state), || {
-        match session.client.seal_typing_signal_v2(
-            conversation_id,
-            gateway,
-            peppy_protocol::TypingOriginV2::VaultDevice,
-            state,
-            clock,
-        ) {
-            Ok(Some(outbound)) => serde_json::to_string(&outbound.signal).ok(),
-            Err(error) if request_retirement_on_clock(error, session) => None,
-            Ok(None) | Err(_) => None,
+    }
+
+    fn set_sharing(&mut self, enabled: bool) -> Result<(), ()> {
+        match self.session.client.set_typing_sharing(enabled) {
+            Ok(()) | Err(LiveError::Disabled) => {
+                if !enabled {
+                    self.sharing_epoch += 1;
+                }
+                self.sharing = enabled;
+                Ok(())
+            }
+            Err(_) => Err(()),
         }
-    })
-}
-
-#[tauri::command]
-pub(crate) async fn send_typing(
-    window: tauri::WebviewWindow,
-    app_state: tauri::State<'_, AppState>,
-    conversation_id: String,
-    state: peppy_protocol::TypingStateV2,
-) -> BridgeResult<()> {
-    crate::require_main_or_composer(window.label())?;
-    let session = app_state.require_session().await?;
-    let Ok(conversation_id) = conversation_id.parse::<ConversationId>() else {
-        return Ok(());
-    };
-    if window.label() != crate::tray::MAIN
-        && crate::effective_composer_conversation(
-            &app_state,
-            window.label(),
-            &session,
-            Some(&conversation_id.to_string()),
-        )? != Some(conversation_id)
-    {
-        return Ok(());
     }
-    let _ = send_typing_for_session(
-        &session,
-        conversation_id,
-        state,
-        session.live_typing.clock(),
-    );
-    Ok(())
-}
 
-#[tauri::command]
-pub(crate) async fn set_typing_sharing(
-    window: tauri::WebviewWindow,
-    app_state: tauri::State<'_, AppState>,
-    enabled: bool,
-) -> BridgeResult<()> {
-    crate::require_main_or_composer(window.label())?;
-    let session = app_state.require_session().await?;
-    let _ = session.live_typing.set_sharing(&session.client, enabled);
-    session.live_context_wake.notify_one();
-    Ok(())
-}
-
-fn apply_enable_context(
-    state: &mut LiveTypingState,
-    session: &Session,
-    context: Option<LiveEnableContext>,
-    clock: LiveClock,
-) -> Result<Option<LiveEnableGeneration>, LiveError> {
-    let generation = state.apply(&session.client, context, clock)?;
-    if generation.is_some() {
-        session.live_typing.apply_sharing(&session.client)?;
+    fn reevaluate(&mut self) {
+        if self.retired || !self.socket_up || self.session.cancel.is_cancelled() {
+            if self.state.generation().is_some() {
+                self.retire();
+            }
+            return;
+        }
+        let context = live_enable_context(&self.session);
+        if context == self.state.context {
+            return;
+        }
+        let previous = self.state.generation();
+        if self.apply_context(context).is_err() {
+            self.disable_core();
+        }
+        if self.state.generation() != previous {
+            self.incarnation_changed();
+        }
+        self.emit();
     }
-    Ok(generation)
+
+    fn apply_context(&mut self, context: Option<LiveEnableContext>) -> Result<(), LiveError> {
+        self.state.apply(
+            &self.session.client,
+            context,
+            self.session.live_typing.clock(),
+        )?;
+        if self.state.generation().is_some() {
+            self.session.client.set_typing_sharing(self.sharing)?;
+        }
+        Ok(())
+    }
+
+    fn disable_core(&mut self) {
+        let _ = self.session.client.disable_live_typing();
+        self.state = LiveTypingState::default();
+    }
+
+    fn incarnation_changed(&mut self) {
+        self.enabled_seq += 1;
+        self.inbound.clear();
+    }
+
+    fn retire(&mut self) {
+        self.retired = true;
+        self.disable_core();
+        self.incarnation_changed();
+        self.emit();
+    }
+
+    fn observe_suspend(&mut self) -> bool {
+        let now = self.session.live_typing.suspend_now();
+        let suspended = suspend_detected(self.anchor, now);
+        self.anchor = now;
+        if suspended {
+            self.retire();
+        }
+        suspended
+    }
+
+    fn confirm_transmit(&mut self, mark: SealMark) -> Admission {
+        self.reevaluate();
+        if self.observe_suspend() {
+            return Admission::Suspended;
+        }
+        let admitted = !self.retired
+            && !self.session.cancel.is_cancelled()
+            && mark.seq == self.enabled_seq
+            && (mark.state != TypingStateV2::Started
+                || (self.sharing && mark.sharing_epoch == self.sharing_epoch));
+        if admitted {
+            Admission::Transmit
+        } else {
+            Admission::Rejected
+        }
+    }
+
+    fn inbound_frame(&mut self, json: &str) -> InboundOutcome {
+        self.reevaluate();
+        let clock = self.session.live_typing.clock();
+        match self.session.client.open_typing_signal_v2_json(json, clock) {
+            Ok(outcome) => self.publish_inbound(outcome, clock),
+            Err(LiveError::Clock) => {
+                self.retire();
+                InboundOutcome::default()
+            }
+            Err(_) => InboundOutcome::default(),
+        }
+    }
+
+    /// Publication is decided after the core open, so the suspend recheck and retirement order
+    /// are the final boundary for this frame.
+    fn publish_inbound(&mut self, mut outcome: LiveOutcome, clock: LiveClock) -> InboundOutcome {
+        let suspended = self.observe_suspend();
+        if suspended || self.retired || self.session.cancel.is_cancelled() {
+            withhold_started(&mut outcome);
+        }
+        let wire = self
+            .inbound
+            .publish(outcome, self.state.generation(), clock);
+        self.inbound.expire(clock.mono_ms);
+        self.emit();
+        InboundOutcome { wire, suspended }
+    }
+
+    fn expire(&mut self) {
+        self.inbound.expire(self.session.live_typing.mono_ms());
+        self.emit();
+    }
+
+    fn emit(&mut self) {
+        let generation = self.state.generation();
+        emit_events(&mut self.inbound, &self.session, generation);
+    }
+
+    fn publish(&self) {
+        self.published
+            .send_replace((self.enabled_seq, self.inbound.next_deadline()));
+    }
+}
+
+fn withhold_started(outcome: &mut LiveOutcome) {
+    if matches!(
+        outcome.action,
+        Some(LiveAction::Display {
+            state: TypingStateV2::Started,
+            ..
+        })
+    ) {
+        outcome.action = None;
+    }
 }
 
 fn live_enable_context(session: &Session) -> Option<LiveEnableContext> {
@@ -725,74 +951,174 @@ fn snapshot_inputs<'a>(
     }
 }
 
-fn apply_pending_retirement(
-    state: &mut LiveTypingState,
-    inbound: &mut InboundTyping,
-    session: &Session,
-    outbound: &mut Option<mpsc::Receiver<OutboundFrame>>,
-) -> bool {
-    if !session.live_typing.take_retirement() {
-        return false;
+#[tauri::command]
+pub(crate) async fn send_typing(
+    window: tauri::WebviewWindow,
+    app_state: tauri::State<'_, AppState>,
+    conversation_id: String,
+    state: TypingStateV2,
+) -> BridgeResult<()> {
+    crate::require_main_or_composer(window.label())?;
+    let session = app_state.require_session().await?;
+    let Ok(conversation_id) = conversation_id.parse::<ConversationId>() else {
+        return Ok(());
+    };
+    if window.label() != crate::tray::MAIN
+        && crate::effective_composer_conversation(
+            &app_state,
+            window.label(),
+            &session,
+            Some(&conversation_id.to_string()),
+        )? != Some(conversation_id)
+    {
+        return Ok(());
     }
-    session.live_typing.detach();
-    disable(state, session);
-    inbound.clear();
-    emit_events(inbound, session, state.generation());
-    *outbound = None;
-    true
+    request_send_typing(&session, conversation_id, state).await;
+    Ok(())
 }
 
-fn reevaluate_context(
-    state: &mut LiveTypingState,
-    inbound: &mut InboundTyping,
+async fn request_send_typing(
     session: &Session,
-    outbound: &mut Option<mpsc::Receiver<OutboundFrame>>,
-) {
-    if apply_pending_retirement(state, inbound, session, outbound) {
-        return;
-    }
-    let previous_generation = state.generation();
-    let generation = apply_enable_context(
+    conversation_id: ConversationId,
+    state: TypingStateV2,
+) -> bool {
+    let Some(commands) = session.live_typing.commands() else {
+        return false;
+    };
+    ask(session, &commands, |reply| Cmd::SendTyping {
+        conversation_id,
         state,
-        session,
-        live_enable_context(session),
-        session.live_typing.clock(),
+        reply,
+    })
+    .await
+    .unwrap_or(false)
+}
+
+async fn request_sharing(session: &Session, enabled: bool) -> bool {
+    let Some(commands) = session.live_typing.commands() else {
+        return false;
+    };
+    matches!(
+        ask(session, &commands, |reply| Cmd::SetSharing {
+            enabled,
+            reply
+        })
+        .await,
+        Some(Ok(()))
     )
-    .unwrap_or_else(|_| {
-        disable(state, session);
-        None
-    });
-    if generation == previous_generation {
-        return;
+}
+
+#[tauri::command]
+pub(crate) async fn set_typing_sharing(
+    window: tauri::WebviewWindow,
+    app_state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> BridgeResult<()> {
+    crate::require_main_or_composer(window.label())?;
+    let session = app_state.require_session().await?;
+    if !request_sharing(&session, enabled).await {
+        return Err(sharing_failed());
     }
-    session.live_typing.detach();
-    inbound.clear();
-    emit_events(inbound, session, state.generation());
-    *outbound = generation.map(|_| session.live_typing.attach());
+    session.live_context_wake.notify_one();
+    Ok(())
+}
+
+fn sharing_failed() -> crate::error::BridgeError {
+    crate::error::BridgeError::new(
+        "typing-sharing-failed",
+        "Typing sharing could not be updated.",
+    )
+}
+
+type LiveSocket = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Sends one command and returns its reply. `None` means the session was cancelled or the actor is
+/// gone; callers treat it as a cancelled operation.
+async fn ask<T>(
+    session: &Session,
+    commands: &mpsc::Sender<Cmd>,
+    build: impl FnOnce(oneshot::Sender<T>) -> Cmd,
+) -> Option<T> {
+    let (reply, received) = oneshot::channel();
+    if !send_cmd(session, commands, build(reply)).await {
+        return None;
+    }
+    tokio::select! {
+        _ = session.cancel.cancelled() => None,
+        value = received => value.ok(),
+    }
+}
+
+async fn send_cmd(session: &Session, commands: &mpsc::Sender<Cmd>, cmd: Cmd) -> bool {
+    tokio::select! {
+        _ = session.cancel.cancelled() => false,
+        sent = commands.send(cmd) => sent.is_ok(),
+    }
 }
 
 pub(crate) fn start(session: Arc<Session>) {
-    session.track_worker(tokio::spawn(supervise(session.clone())));
+    let (commands, command_rx) = mpsc::channel(COMMAND_QUEUE_LIMIT);
+    let (sealed_tx, sealed_rx) = mpsc::channel(SEALED_QUEUE_LIMIT);
+    let (published_tx, published_rx) = watch::channel((0, None));
+    let actor = TypingActor::new(session.clone(), sealed_tx, published_tx);
+    let Ok(thread) = thread::Builder::new()
+        .name("live-typing-actor".into())
+        .spawn(move || actor.run(command_rx))
+    else {
+        return;
+    };
+    session.live_typing.install(commands.clone());
+    session.track_worker(tokio::spawn(shutdown_actor(
+        session.clone(),
+        commands.clone(),
+        thread,
+    )));
+    session.track_worker(tokio::spawn(supervise(
+        session.clone(),
+        commands,
+        sealed_rx,
+        published_rx,
+    )));
 }
 
-async fn supervise(session: Arc<Session>) {
-    let mut state = LiveTypingState::default();
-    let mut inbound = InboundTyping::default();
+/// Joins the actor thread once the session is cancelled. The join runs as a tracked worker, so
+/// session drain and its deadline cover the actor exactly as they cover the other workers.
+async fn shutdown_actor(
+    session: Arc<Session>,
+    commands: mpsc::Sender<Cmd>,
+    thread: thread::JoinHandle<()>,
+) {
+    session.cancel.cancelled().await;
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = commands.blocking_send(Cmd::Shutdown);
+        let _ = thread.join();
+    })
+    .await;
+}
+
+async fn supervise(
+    session: Arc<Session>,
+    commands: mpsc::Sender<Cmd>,
+    mut sealed: mpsc::Receiver<SealedFrame>,
+    published: watch::Receiver<Published>,
+) {
     let mut retry = LiveRetry::default();
     let mut probed = false;
     loop {
-        let result = connect(&session).await;
-        let mut socket = match result {
+        let mut socket = match connect(&session).await {
             Ok(socket) => socket,
             Err(()) => {
                 if !probed {
                     probed = true;
-                    let _ = session
-                        .api
-                        .get_json::<serde_json::Value>("/v1/live", 1024)
-                        .await;
+                    let probe = session.api.get_json::<serde_json::Value>("/v1/live", 1024);
+                    tokio::select! {
+                        _ = session.cancel.cancelled() => return,
+                        _ = probe => {}
+                    }
                 }
-                disable(&mut state, &session);
+                if !send_cmd(&session, &commands, Cmd::SocketDown).await {
+                    return;
+                }
                 let retry_delay = retry.after_failure();
                 if !wait_or_cancel(&session, live_backoff_delay(retry_delay)).await {
                     return;
@@ -801,7 +1127,9 @@ async fn supervise(session: Arc<Session>) {
             }
         };
         if !server_hello(&mut socket, &session).await {
-            disable(&mut state, &session);
+            if !send_cmd(&session, &commands, Cmd::SocketDown).await {
+                return;
+            }
             let retry_delay = retry.after_failure();
             if !wait_or_cancel(&session, live_backoff_delay(retry_delay)).await {
                 return;
@@ -810,96 +1138,14 @@ async fn supervise(session: Arc<Session>) {
         }
         probed = false;
         let connected_at = Instant::now();
-        let mut outbound = None;
-        reevaluate_context(&mut state, &mut inbound, &session, &mut outbound);
-        'socket: loop {
-            let elapsed_mono = session.live_typing.mono_ms();
-            let expiry_delay = inbound
-                .next_deadline()
-                .map(|deadline| Duration::from_millis(deadline.saturating_sub(elapsed_mono)));
-            tokio::select! {
-                _ = session.cancel.cancelled() => {
-                    session.live_typing.detach();
-                    disable(&mut state, &session);
-                    inbound.clear();
-                    emit_events(&mut inbound, &session, state.generation());
-                    let _ = bounded_close(&mut socket, &session.cancel).await;
-                    return;
-                }
-                _ = session.live_context_wake.notified() => {
-                    reevaluate_context(&mut state, &mut inbound, &session, &mut outbound);
-                }
-                frame = async {
-                    match outbound.as_mut() {
-                        Some(receiver) => receiver.recv().await,
-                        None => std::future::pending().await,
-                    }
-                } => match frame {
-                    Some(frame) => {
-                        match admit_outbound_send(&mut socket, &session, &state, &frame).await {
-                            OutboundAdmission::Sent => {}
-                            OutboundAdmission::Rejected => {
-                                reevaluate_context(&mut state, &mut inbound, &session, &mut outbound);
-                            }
-                            OutboundAdmission::Failed => break 'socket,
-                        }
-                    }
-                    None => break,
-                },
-                _ = async {
-                    match expiry_delay {
-                        Some(delay) => sleep(delay).await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    inbound.expire(session.live_typing.mono_ms());
-                    emit_events(&mut inbound, &session, state.generation());
-                }
-                frame = socket.next() => match frame {
-                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
-                    Some(Ok(Message::Text(frame))) => {
-                        inbound.push(frame.to_string());
-                        while let Some(frame) = inbound.take() {
-                            let reply = match process_inbound_frame(
-                                &session.client,
-                                &mut inbound,
-                                &frame,
-                                state.generation(),
-                                session.live_typing.clock(),
-                            ) {
-                                Ok(reply) => reply,
-                                Err(error) if request_retirement_on_clock(error, &session) => {
-                                    apply_pending_retirement(
-                                        &mut state,
-                                        &mut inbound,
-                                        &session,
-                                        &mut outbound,
-                                    );
-                                    None
-                                }
-                                Err(_) => None,
-                            };
-                            inbound.expire(session.live_typing.mono_ms());
-                            emit_events(&mut inbound, &session, state.generation());
-                            if let Some(reply) = reply {
-                                if !bounded_send(
-                                    &mut socket,
-                                    &session.cancel,
-                                    Message::Text(reply.into()),
-                                ).await {
-                                    break 'socket;
-                                }
-                            }
-                        }
-                    }
-                    Some(Ok(_)) => {}
-                }
-            }
+        if !send_cmd(&session, &commands, Cmd::SocketUp).await {
+            return;
         }
-        session.live_typing.detach();
-        disable(&mut state, &session);
-        inbound.clear();
-        emit_events(&mut inbound, &session, state.generation());
+        let end = run_socket(&session, &commands, &mut sealed, &published, &mut socket).await;
+        drop(socket);
+        if end == SocketEnd::Cancelled || !send_cmd(&session, &commands, Cmd::SocketDown).await {
+            return;
+        }
         let retry_delay = retry.after_connection(connected_at.elapsed());
         if !wait_or_cancel(&session, live_backoff_delay(retry_delay)).await {
             return;
@@ -907,82 +1153,134 @@ async fn supervise(session: Arc<Session>) {
     }
 }
 
-enum OutboundAdmission {
-    Sent,
-    Rejected,
-    Failed,
+#[derive(Debug, PartialEq, Eq)]
+enum SocketEnd {
+    Cancelled,
+    Lost,
 }
 
-async fn admit_outbound_send<S>(
-    socket: &mut S,
+async fn run_socket(
     session: &Session,
-    state: &LiveTypingState,
-    frame: &OutboundFrame,
-) -> OutboundAdmission
-where
-    S: Sink<Message> + Unpin,
-{
-    admit_outbound_send_with_hooks(socket, session, state, frame, || {}, || {}).await
-}
-
-async fn admit_outbound_send_with_hooks<S, R, A>(
-    socket: &mut S,
-    session: &Session,
-    state: &LiveTypingState,
-    frame: &OutboundFrame,
-    after_ready: R,
-    before_admission: A,
-) -> OutboundAdmission
-where
-    S: Sink<Message> + Unpin,
-    R: FnOnce(),
-    A: FnOnce(),
-{
-    let ready = tokio::select! {
-        _ = session.cancel.cancelled() => return OutboundAdmission::Failed,
-        result = timeout(LIVE_IO_TIMEOUT, futures_util::future::poll_fn(|cx| Pin::new(&mut *socket).poll_ready(cx))) => result,
-    };
-    if !matches!(ready, Ok(Ok(()))) {
-        return OutboundAdmission::Failed;
-    }
-    after_ready();
-    let admission = session
-        .live_typing
-        .admission
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    if frame.state == Some(peppy_protocol::TypingStateV2::Started)
-        && (live_enable_context(session) != state.context
-            || !session.live_typing.accepts_outbound(frame))
-    {
-        return OutboundAdmission::Rejected;
-    }
-    before_admission();
-    let started =
-        Sink::start_send(Pin::new(socket), Message::Text(frame.frame.clone().into())).is_ok();
-    drop(admission);
-    if !started {
-        return OutboundAdmission::Failed;
-    }
-    tokio::select! {
-        _ = session.cancel.cancelled() => OutboundAdmission::Sent,
-        result = timeout(LIVE_IO_TIMEOUT, socket.flush()) => {
-            if result.is_ok_and(|result| result.is_ok()) { OutboundAdmission::Sent } else { OutboundAdmission::Failed }
+    commands: &mpsc::Sender<Cmd>,
+    sealed: &mut mpsc::Receiver<SealedFrame>,
+    published: &watch::Receiver<Published>,
+    socket: &mut LiveSocket,
+) -> SocketEnd {
+    // The periodic deadline is retained across socket traffic so a busy connection cannot defer
+    // suspend detection indefinitely.
+    let mut suspend_tick = tokio::time::interval(LIVE_SUSPEND_TICK);
+    suspend_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let deadline = published.borrow().1;
+        let expiry_delay = deadline.map(|deadline| {
+            Duration::from_millis(deadline.saturating_sub(session.live_typing.mono_ms()))
+        });
+        tokio::select! {
+            _ = session.cancel.cancelled() => return SocketEnd::Cancelled,
+            _ = session.live_context_wake.notified() => {
+                if !send_cmd(session, commands, Cmd::Reevaluate).await {
+                    return SocketEnd::Cancelled;
+                }
+            }
+            _ = suspend_tick.tick() => {
+                match ask(session, commands, |reply| Cmd::SuspendTick { reply }).await {
+                    Some(false) => {}
+                    Some(true) => return SocketEnd::Lost,
+                    None => return SocketEnd::Cancelled,
+                }
+            }
+            _ = async {
+                match expiry_delay {
+                    Some(delay) => sleep(delay).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if !send_cmd(session, commands, Cmd::Expire).await {
+                    return SocketEnd::Cancelled;
+                }
+            }
+            frame = sealed.recv() => {
+                let Some(frame) = frame else {
+                    return SocketEnd::Cancelled;
+                };
+                match transmit(session, commands, socket, frame).await {
+                    Transmit::Sent | Transmit::Dropped => {}
+                    Transmit::Lost => return SocketEnd::Lost,
+                    Transmit::Cancelled => return SocketEnd::Cancelled,
+                }
+            }
+            frame = socket.next() => match frame {
+                Some(Ok(Message::Text(frame))) => {
+                    let Some(outcome) = ask(session, commands, |reply| Cmd::InboundFrame {
+                        json: frame.to_string(),
+                        reply,
+                    })
+                    .await
+                    else {
+                        return SocketEnd::Cancelled;
+                    };
+                    if outcome.suspended {
+                        return SocketEnd::Lost;
+                    }
+                    if let Some(reply) = outcome.wire {
+                        if !bounded_send(socket, &session.cancel, Message::Text(reply.into())).await {
+                            return SocketEnd::Lost;
+                        }
+                    }
+                }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return SocketEnd::Lost,
+                Some(Ok(_)) => {}
+            }
         }
     }
 }
 
-fn process_inbound_frame(
-    client: &Client,
-    inbound: &mut InboundTyping,
-    frame_json: &str,
-    generation: Option<LiveEnableGeneration>,
-    clock: LiveClock,
-) -> Result<Option<String>, LiveError> {
-    let outcome = client.open_typing_signal_v2_json(frame_json, clock)?;
-    let reply = inbound.publish(outcome, generation, clock);
-    inbound.expire(clock.mono_ms);
-    Ok(reply)
+#[derive(Debug, PartialEq, Eq)]
+enum Transmit {
+    Sent,
+    Dropped,
+    Lost,
+    Cancelled,
+}
+
+/// The final boundary: readiness is awaited first, then the actor confirms the frame's authority
+/// (and the suspend clock) before the frame is handed to the socket.
+async fn transmit<S>(
+    session: &Session,
+    commands: &mpsc::Sender<Cmd>,
+    socket: &mut S,
+    frame: SealedFrame,
+) -> Transmit
+where
+    S: Sink<Message> + Unpin,
+{
+    let ready = tokio::select! {
+        _ = session.cancel.cancelled() => return Transmit::Cancelled,
+        result = timeout(LIVE_IO_TIMEOUT, futures_util::future::poll_fn(|cx| Pin::new(&mut *socket).poll_ready(cx))) => result,
+    };
+    if !matches!(ready, Ok(Ok(()))) {
+        return Transmit::Lost;
+    }
+    match ask(session, commands, |reply| Cmd::ConfirmTransmit {
+        mark: frame.mark,
+        reply,
+    })
+    .await
+    {
+        Some(Admission::Transmit) => {}
+        Some(Admission::Rejected) => return Transmit::Dropped,
+        Some(Admission::Suspended) => return Transmit::Lost,
+        None => return Transmit::Cancelled,
+    }
+    if Sink::start_send(Pin::new(&mut *socket), Message::Text(frame.json.into())).is_err() {
+        return Transmit::Lost;
+    }
+    tokio::select! {
+        _ = session.cancel.cancelled() => Transmit::Cancelled,
+        result = timeout(LIVE_IO_TIMEOUT, socket.flush()) => {
+            if matches!(result, Ok(Ok(()))) { Transmit::Sent } else { Transmit::Lost }
+        }
+    }
 }
 
 async fn bounded_send<S>(
@@ -999,25 +1297,10 @@ where
     }
 }
 
-async fn bounded_close<S>(
-    socket: &mut WebSocketStream<S>,
-    cancel: &tokio_util::sync::CancellationToken,
-) -> bool
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    tokio::select! {
-        _ = cancel.cancelled() => false,
-        result = timeout(LIVE_IO_TIMEOUT, socket.close(None)) => matches!(result, Ok(Ok(()))),
-    }
-}
-
-async fn connect(
-    session: &Session,
-) -> Result<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, ()> {
+async fn connect(session: &Session) -> Result<LiveSocket, ()> {
     let request = live_request(session.api.origin(), session.api.bearer())?;
     let connector = crate::tls::websocket_connector(session.api.origin()).map_err(|_| ())?;
-    timeout(
+    let connecting = timeout(
         LIVE_CONNECT_TIMEOUT,
         tokio_tungstenite::connect_async_tls_with_config(
             request,
@@ -1029,11 +1312,11 @@ async fn connect(
             true,
             connector,
         ),
-    )
-    .await
-    .map_err(|_| ())?
-    .map(|(socket, _)| socket)
-    .map_err(|_| ())
+    );
+    tokio::select! {
+        _ = session.cancel.cancelled() => Err(()),
+        result = connecting => result.map_err(|_| ())?.map(|(socket, _)| socket).map_err(|_| ()),
+    }
 }
 
 fn live_request(origin: &str, token: &str) -> Result<tungstenite::http::Request<()>, ()> {
@@ -1050,10 +1333,7 @@ fn live_request(origin: &str, token: &str) -> Result<tungstenite::http::Request<
     Ok(request)
 }
 
-async fn server_hello(
-    socket: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    session: &Session,
-) -> bool {
+async fn server_hello(socket: &mut LiveSocket, session: &Session) -> bool {
     server_hello_with_timeout(socket, &session.cancel, LIVE_HELLO_TIMEOUT).await
 }
 
@@ -1087,8 +1367,13 @@ fn wall_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn disable(state: &mut LiveTypingState, session: &Session) {
-    let _ = state.apply(&session.client, None, session.live_typing.clock());
+fn suspend_detected(previous: (Instant, SystemTime), now: (Instant, SystemTime)) -> bool {
+    let monotonic_elapsed = now.0.duration_since(previous.0);
+    let Ok(wall_elapsed) = now.1.duration_since(previous.1) else {
+        return true;
+    };
+    wall_elapsed > monotonic_elapsed.saturating_add(LIVE_SUSPEND_SKEW)
+        || monotonic_elapsed > LIVE_SUSPEND_TICK.saturating_add(LIVE_SUSPEND_SKEW)
 }
 
 async fn wait_or_cancel(session: &Session, delay: Duration) -> bool {
@@ -1136,6 +1421,20 @@ fn next_live_backoff(backoff: Duration, stable: bool) -> Duration {
 }
 
 #[cfg(test)]
+fn process_inbound_frame(
+    client: &Client,
+    inbound: &mut InboundTyping,
+    frame_json: &str,
+    generation: Option<LiveEnableGeneration>,
+    clock: LiveClock,
+) -> Result<Option<String>, LiveError> {
+    let outcome = client.open_typing_signal_v2_json(frame_json, clock)?;
+    let reply = inbound.publish(outcome, generation, clock);
+    inbound.expire(clock.mono_ms);
+    Ok(reply)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
@@ -1143,18 +1442,12 @@ mod tests {
         sync::apply_gateway_refresh,
         tests::{fixture_at, gateway, open, PHRASE},
     };
-    use futures_util::task::AtomicWaker;
     use peppy_client_core::{
         RcsCapabilityState, RcsEligibility, RcsEligibilityProjection, RcsLinkStatusEvent,
     };
     use peppy_desktop_api::{
         gateways::{CapabilitiesResponse, DevicesResponse},
         RcsConversationEligibility, RcsGatewayStatus,
-    };
-    use std::{
-        convert::Infallible,
-        sync::atomic::AtomicUsize,
-        task::{Context, Poll},
     };
     use tokio::net::TcpListener;
 
@@ -1235,6 +1528,92 @@ mod tests {
             .unwrap();
         install_gateway(&session, &fixture.binding.device_id);
         (fixture, session, conversation_id)
+    }
+
+    fn real_supervisor_session(
+        origin: &str,
+    ) -> (crate::tests::Fixture, Arc<Session>, ConversationId) {
+        let (fixture, session, conversation_id) = session_with_linked_eligible_gateway_at(origin);
+        let gateway_device_id: DeviceId = fixture.binding.device_id.parse().unwrap();
+        let now_ms = wall_ms();
+        session
+            .client
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id,
+                    state: RcsCapabilityState::Linked,
+                    availability: true,
+                    health: true,
+                    phone_responsive: true,
+                    observed_at_ms: now_ms,
+                    capability_revision: 2,
+                    feature_bits: 1,
+                    linked_since_ms: Some(now_ms),
+                },
+                &[RcsEligibilityProjection {
+                    conversation_id,
+                    eligibility: RcsEligibility::Eligible,
+                    feature_bits: 1,
+                    mapping_revision: 2,
+                    observed_at_ms: now_ms,
+                    gateway_device_id,
+                }],
+                now_ms,
+            )
+            .unwrap();
+        roster_refresh(&session, &fixture.binding.device_id, false);
+        install_gateway(&session, &fixture.binding.device_id);
+        (fixture, Arc::new(session), conversation_id)
+    }
+
+    /// Drives one actor synchronously: no thread, no socket, the test owns the message order.
+    struct Harness {
+        actor: TypingActor,
+        sealed: mpsc::Receiver<SealedFrame>,
+    }
+
+    fn harness(session: &Arc<Session>) -> Harness {
+        let (sealed_tx, sealed) = mpsc::channel(SEALED_QUEUE_LIMIT);
+        let (published_tx, _published) = watch::channel((0, None));
+        Harness {
+            actor: TypingActor::new(session.clone(), sealed_tx, published_tx),
+            sealed,
+        }
+    }
+
+    impl Harness {
+        fn send(&mut self, cmd: Cmd) {
+            self.actor.handle(cmd);
+        }
+
+        fn call<T>(&mut self, build: impl FnOnce(oneshot::Sender<T>) -> Cmd) -> T {
+            let (reply, mut received) = oneshot::channel();
+            self.actor.handle(build(reply));
+            received.try_recv().expect("actor replied to the command")
+        }
+
+        fn send_typing(&mut self, conversation_id: ConversationId, state: TypingStateV2) -> bool {
+            self.call(|reply| Cmd::SendTyping {
+                conversation_id,
+                state,
+                reply,
+            })
+        }
+
+        fn sharing(&mut self, enabled: bool) -> Result<(), ()> {
+            self.call(|reply| Cmd::SetSharing { enabled, reply })
+        }
+
+        fn confirm(&mut self, mark: SealMark) -> Admission {
+            self.call(|reply| Cmd::ConfirmTransmit { mark, reply })
+        }
+
+        fn next_mark(&mut self) -> SealMark {
+            self.sealed
+                .try_recv()
+                .expect("a sealed frame was queued")
+                .mark
+        }
     }
 
     #[test]
@@ -1318,23 +1697,24 @@ mod tests {
     }
 
     #[test]
-    fn inbound_queue_drops_new_frames_after_sixty_four() {
-        let mut inbound = InboundTyping::default();
-        for _ in 0..INBOUND_QUEUE_LIMIT {
-            assert!(inbound.push("{}".into()));
-        }
-        assert!(!inbound.push("{}".into()));
-        assert_eq!(inbound.frames.len(), INBOUND_QUEUE_LIMIT);
-        assert_eq!(inbound.queue_drops, 1);
-    }
-
-    #[test]
     fn disable_clears_inbound_display_state() {
+        let peer = DeviceId::new();
+        let conversation = ConversationId::new();
         let mut inbound = InboundTyping::default();
-        inbound.frames.push_back("frame".into());
+        inbound.update_peer(PeerSessionUpdate {
+            peer_device_id: peer,
+            replaced_session_token: None,
+            current_session_token: 1,
+            validation_revision: 1,
+        });
+        inbound.publish(
+            display_outcome(peer, conversation, 1, 1, 1, 10),
+            Some(LiveEnableGeneration(1)),
+            clock(),
+        );
         inbound.clear();
-        assert!(inbound.frames.is_empty());
         assert!(inbound.displays.is_empty());
+        assert!(inbound.peers.is_empty());
     }
 
     fn display_outcome(
@@ -1345,6 +1725,27 @@ mod tests {
         sequence: u64,
         deadline: u64,
     ) -> LiveOutcome {
+        display_outcome_with_state(
+            peer,
+            conversation,
+            generation,
+            token,
+            sequence,
+            deadline,
+            TypingStateV2::Started,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn display_outcome_with_state(
+        peer: DeviceId,
+        conversation: ConversationId,
+        generation: u64,
+        token: u64,
+        sequence: u64,
+        deadline: u64,
+        state: TypingStateV2,
+    ) -> LiveOutcome {
         LiveOutcome {
             generation: LiveEnableGeneration(generation),
             session_update: None,
@@ -1354,7 +1755,7 @@ mod tests {
                 session_token: token,
                 sequence,
                 conversation_id: conversation,
-                state: peppy_protocol::TypingStateV2::Started,
+                state,
                 deadline_mono: deadline,
             }),
         }
@@ -1487,7 +1888,7 @@ mod tests {
         assert!(!inbound.displays.contains_key(&conversation));
         let stopped = inbound.drain_events().next().unwrap();
         assert_eq!(stopped.conversation_id, conversation);
-        assert_eq!(stopped.state, peppy_protocol::TypingStateV2::Stopped);
+        assert_eq!(stopped.state, TypingStateV2::Stopped);
 
         assert!(!inbound.update_peer(PeerSessionUpdate {
             peer_device_id: peer,
@@ -1496,6 +1897,65 @@ mod tests {
             validation_revision: 3,
         }));
         assert_eq!(inbound.peers[&peer], (2, 3));
+    }
+
+    #[test]
+    fn pruned_peer_install_without_a_replaced_token_clears_fences_for_a_lower_sequence() {
+        let peer = DeviceId::new();
+        let conversation = ConversationId::new();
+        let mut inbound = InboundTyping::default();
+        assert!(inbound.update_peer(PeerSessionUpdate {
+            peer_device_id: peer,
+            replaced_session_token: None,
+            current_session_token: 1,
+            validation_revision: 1,
+        }));
+        inbound.publish(
+            display_outcome(peer, conversation, 1, 1, 9, 20),
+            Some(LiveEnableGeneration(1)),
+            clock(),
+        );
+        inbound.events.clear();
+
+        assert!(inbound.update_peer(PeerSessionUpdate {
+            peer_device_id: peer,
+            replaced_session_token: None,
+            current_session_token: 2,
+            validation_revision: 2,
+        }));
+        inbound.publish(
+            display_outcome(peer, conversation, 1, 2, 1, 20),
+            Some(LiveEnableGeneration(1)),
+            clock(),
+        );
+
+        assert_eq!(inbound.displays[&conversation].session_token, 2);
+        assert_eq!(inbound.sequences.len(), 1);
+        assert_eq!(inbound.peers.len(), 1);
+    }
+
+    #[test]
+    fn repeated_pruned_peer_installs_keep_host_fences_bounded() {
+        let peer = DeviceId::new();
+        let mut inbound = InboundTyping::default();
+        for revision in 1..=256 {
+            assert!(inbound.update_peer(PeerSessionUpdate {
+                peer_device_id: peer,
+                replaced_session_token: None,
+                current_session_token: revision,
+                validation_revision: revision,
+            }));
+            let conversation = ConversationId::new();
+            inbound.publish(
+                display_outcome(peer, conversation, 1, revision, 1, 20),
+                Some(LiveEnableGeneration(1)),
+                clock(),
+            );
+        }
+
+        assert_eq!(inbound.peers.len(), 1);
+        assert_eq!(inbound.sequences.len(), 1);
+        assert_eq!(inbound.displays.len(), 1);
     }
 
     #[test]
@@ -1591,7 +2051,7 @@ mod tests {
                 session_token: 1,
                 sequence: 2,
                 conversation_id: conversation,
-                state: peppy_protocol::TypingStateV2::Started,
+                state: TypingStateV2::Started,
                 deadline_mono: 11,
             }),
         };
@@ -1774,16 +2234,6 @@ mod tests {
         assert!(inbound.displays.contains_key(&conversation));
     }
 
-    fn enable_test_session(session: &Session, fixture: &crate::tests::Fixture) {
-        roster_refresh(session, &fixture.binding.device_id, false);
-        install_gateway(session, &fixture.binding.device_id);
-        let context = {
-            let status = session.status.lock().unwrap();
-            enable_context(&status, inputs(session))
-        };
-        apply_enable_context(&mut LiveTypingState::default(), session, context, clock()).unwrap();
-    }
-
     #[test]
     fn host_clock_uses_one_monotonic_origin() {
         let fixture = fixture_at("http://127.0.0.1:9");
@@ -1796,676 +2246,44 @@ mod tests {
     }
 
     #[test]
-    fn open_clock_error_is_retired_by_the_serial_supervisor_path() {
-        let (fixture, session, _) = session_with_linked_eligible_gateway();
-        roster_refresh(&session, &fixture.binding.device_id, false);
-        install_gateway(&session, &fixture.binding.device_id);
-        let mut state = LiveTypingState::default();
-        let mut inbound = InboundTyping::default();
-        let context = {
-            let status = session.status.lock().unwrap();
-            enable_context(&status, inputs(&session))
-        };
-        apply_enable_context(&mut state, &session, context, clock()).unwrap();
-        let mut outbound = Some(session.live_typing.attach());
-        assert!(state.generation().is_some());
+    fn suspend_detector_retires_on_wall_or_monotonic_gap() {
+        let mono = Instant::now();
+        let wall = SystemTime::now();
+        assert!(suspend_detected(
+            (mono, wall),
+            (
+                mono + LIVE_SUSPEND_TICK,
+                wall + LIVE_SUSPEND_TICK + LIVE_SUSPEND_SKEW + Duration::from_millis(1)
+            ),
+        ));
+        assert!(suspend_detected(
+            (mono, wall),
+            (
+                mono + LIVE_SUSPEND_TICK + LIVE_SUSPEND_SKEW + Duration::from_millis(1),
+                wall + LIVE_SUSPEND_TICK
+            ),
+        ));
+        assert!(!suspend_detected(
+            (mono, wall),
+            (mono + LIVE_SUSPEND_TICK, wall + LIVE_SUSPEND_TICK),
+        ));
+    }
 
-        let error = process_inbound_frame(
-            &session.client,
-            &mut inbound,
-            "{}",
-            state.generation(),
-            LiveClock {
-                wall_ms: NOW_MS - 1,
-                mono_ms: 0,
-            },
-        )
-        .unwrap_err();
-        assert!(request_retirement_on_clock(error, &session));
-        apply_pending_retirement(&mut state, &mut inbound, &session, &mut outbound);
-
-        assert_eq!(state.generation(), None);
+    #[test]
+    fn socket_up_enables_and_socket_down_retires_with_a_new_generation_on_reconnect() {
+        let (_, session, _) = real_supervisor_session("http://127.0.0.1:9");
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+        let first = h.actor.state.generation();
+        assert!(first.is_some());
+        h.send(Cmd::SocketDown);
+        assert_eq!(h.actor.state.generation(), None);
         assert_eq!(
             session.client.set_typing_sharing(true),
             Err(LiveError::Disabled)
         );
-    }
-
-    #[test]
-    fn sharing_toggle_serializes_after_enable_reapply() {
-        let (fixture, session, _) = session_with_linked_eligible_gateway();
-        enable_test_session(&session, &fixture);
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-
-        std::thread::scope(|scope| {
-            let session_ref = &session;
-            let toggle = scope.spawn(move || {
-                started_rx.recv().unwrap();
-                session_ref
-                    .live_typing
-                    .set_sharing(&session_ref.client, false)
-                    .unwrap();
-            });
-            session
-                .live_typing
-                .apply_sharing_with(&session.client, || {
-                    started_tx.send(()).unwrap();
-                    std::thread::sleep(Duration::from_millis(20));
-                })
-                .unwrap();
-            toggle.join().unwrap();
-        });
-
-        assert!(!session.live_typing.sharing());
-        assert!(session
-            .client
-            .seal_typing_signal_v2(
-                ConversationId::new(),
-                fixture.binding.device_id.parse().unwrap(),
-                peppy_protocol::TypingOriginV2::VaultDevice,
-                peppy_protocol::TypingStateV2::Started,
-                clock(),
-            )
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn sharing_off_produces_no_outbound_frame() {
-        let (fixture, session, conversation) = session_with_linked_eligible_gateway();
-        let _ = session.live_typing.set_sharing(&session.client, false);
-        enable_test_session(&session, &fixture);
-        let mut outbound = session.live_typing.attach();
-
-        assert!(!send_typing_for_session(
-            &session,
-            conversation,
-            peppy_protocol::TypingStateV2::Started,
-            clock(),
-        ));
-        assert!(matches!(
-            outbound.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
-    }
-
-    #[tokio::test]
-    async fn sharing_disable_rejects_a_barrier_queued_start_but_delivers_a_queued_stop() {
-        let (fixture, session, conversation) = session_with_linked_eligible_gateway();
-        roster_refresh(&session, &fixture.binding.device_id, false);
-        install_gateway(&session, &fixture.binding.device_id);
-        let context = {
-            let status = session.status.lock().unwrap();
-            enable_context(&status, inputs(&session))
-        };
-        let mut state = LiveTypingState::default();
-        apply_enable_context(&mut state, &session, context, clock()).unwrap();
-        let mut outbound = Some(session.live_typing.attach());
-        let barrier = Arc::new(tokio::sync::Barrier::new(2));
-        let queued = barrier.clone();
-        let observer = tokio::spawn(async move { queued.wait().await });
-
-        assert!(send_typing_for_session(
-            &session,
-            conversation,
-            peppy_protocol::TypingStateV2::Started,
-            clock(),
-        ));
-        barrier.wait().await;
-        observer.await.unwrap();
-        session
-            .live_typing
-            .set_sharing(&session.client, false)
-            .unwrap();
-        assert!(send_typing_for_session(
-            &session,
-            conversation,
-            peppy_protocol::TypingStateV2::Stopped,
-            clock(),
-        ));
-        let now_ms = wall_ms();
-        session
-            .client
-            .publish_rcs_capability(
-                &RcsLinkStatusEvent {
-                    gateway_device_id: fixture.binding.device_id.parse().unwrap(),
-                    state: RcsCapabilityState::Linked,
-                    availability: true,
-                    health: true,
-                    phone_responsive: true,
-                    observed_at_ms: now_ms,
-                    capability_revision: 2,
-                    feature_bits: 1,
-                    linked_since_ms: Some(now_ms),
-                },
-                &[RcsEligibilityProjection {
-                    conversation_id: conversation,
-                    eligibility: RcsEligibility::Eligible,
-                    feature_bits: 1,
-                    mapping_revision: 2,
-                    observed_at_ms: now_ms,
-                    gateway_device_id: fixture.binding.device_id.parse().unwrap(),
-                }],
-                now_ms,
-            )
-            .unwrap();
-        reevaluate_context(
-            &mut state,
-            &mut InboundTyping::default(),
-            &session,
-            &mut outbound,
-        );
-
-        let start = outbound.as_mut().unwrap().try_recv().unwrap();
-        let stop = outbound.as_mut().unwrap().try_recv().unwrap();
-        assert!(!session.live_typing.accepts_outbound(&start));
-        assert!(session.live_typing.accepts_outbound(&stop));
-    }
-
-    #[test]
-    fn start_keeps_the_sharing_epoch_captured_before_its_seal() {
-        let (fixture, session, _) = session_with_linked_eligible_gateway();
-        roster_refresh(&session, &fixture.binding.device_id, false);
-        install_gateway(&session, &fixture.binding.device_id);
-        enable_test_session(&session, &fixture);
-        let mut outbound = session.live_typing.attach();
-        let barrier = Arc::new(std::sync::Barrier::new(2));
-
-        std::thread::scope(|scope| {
-            let toggler = barrier.clone();
-            let session_ref = &session;
-            scope.spawn(move || {
-                toggler.wait();
-                session_ref
-                    .live_typing
-                    .set_sharing(&session_ref.client, false)
-                    .unwrap();
-                session_ref
-                    .live_typing
-                    .set_sharing(&session_ref.client, true)
-                    .unwrap();
-                toggler.wait();
-            });
-            assert!(session.live_typing.send_with(
-                Some(peppy_protocol::TypingStateV2::Started),
-                || {
-                    barrier.wait();
-                    barrier.wait();
-                    Some("sealed-start".into())
-                },
-            ));
-        });
-
-        assert!(!session
-            .live_typing
-            .accepts_outbound(&outbound.try_recv().unwrap()));
-    }
-
-    #[test]
-    fn send_without_an_eligible_target_produces_no_frame() {
-        let fixture = fixture_at("http://127.0.0.1:9");
-        let session = open(&fixture, &fixture.binding, &[]);
-        session
-            .client
-            .unlock(&fixture.profile, &fixture.header, PHRASE)
-            .unwrap();
-        let mut outbound = session.live_typing.attach();
-
-        assert!(!send_typing_for_session(
-            &session,
-            ConversationId::new(),
-            peppy_protocol::TypingStateV2::Started,
-            clock(),
-        ));
-        assert!(matches!(
-            outbound.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
-    }
-
-    #[test]
-    fn disconnected_send_is_dropped_without_replay() {
-        let (fixture, session, conversation) = session_with_linked_eligible_gateway();
-        enable_test_session(&session, &fixture);
-
-        assert!(!send_typing_for_session(
-            &session,
-            conversation,
-            peppy_protocol::TypingStateV2::Started,
-            clock(),
-        ));
-        let mut outbound = session.live_typing.attach();
-        assert!(matches!(
-            outbound.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
-        assert!(send_typing_for_session(
-            &session,
-            conversation,
-            peppy_protocol::TypingStateV2::Started,
-            clock(),
-        ));
-        assert!(outbound.try_recv().is_ok());
-    }
-
-    async fn wait_for_live_enabled(session: &Session, expected: bool) {
-        timeout(Duration::from_secs(1), async {
-            loop {
-                let enabled = session.client.set_typing_sharing(true).is_ok();
-                if enabled == expected {
-                    return;
-                }
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("timed out waiting for live typing enabled={expected}"));
-    }
-
-    #[tokio::test]
-    async fn stalled_transport_io_yields_to_cancel_and_drains() {
-        let (stream, _peer_that_stops_reading) = tokio::io::duplex(1);
-        let socket =
-            WebSocketStream::from_raw_socket(stream, tungstenite::protocol::Role::Client, None)
-                .await;
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let task_cancel = cancel.clone();
-        let task = tokio::spawn(async move {
-            let mut socket = socket;
-            let sent = bounded_send(
-                &mut socket,
-                &task_cancel,
-                Message::Text("x".repeat(LIVE_MAX_FRAME).into()),
-            )
-            .await;
-            let closed = bounded_close(&mut socket, &task_cancel).await;
-            (sent, closed)
-        });
-
-        sleep(Duration::from_millis(10)).await;
-        cancel.cancel();
-        let (sent, closed) = timeout(Duration::from_millis(200), task)
-            .await
-            .expect("stalled transport did not drain after cancellation")
-            .unwrap();
-        assert!(!sent);
-        assert!(!closed);
-    }
-
-    fn real_supervisor_session(
-        origin: &str,
-    ) -> (crate::tests::Fixture, Arc<Session>, ConversationId) {
-        let (fixture, session, conversation_id) = session_with_linked_eligible_gateway_at(origin);
-        let gateway_device_id: DeviceId = fixture.binding.device_id.parse().unwrap();
-        let now_ms = wall_ms();
-        session
-            .client
-            .publish_rcs_capability(
-                &RcsLinkStatusEvent {
-                    gateway_device_id,
-                    state: RcsCapabilityState::Linked,
-                    availability: true,
-                    health: true,
-                    phone_responsive: true,
-                    observed_at_ms: now_ms,
-                    capability_revision: 2,
-                    feature_bits: 1,
-                    linked_since_ms: Some(now_ms),
-                },
-                &[RcsEligibilityProjection {
-                    conversation_id,
-                    eligibility: RcsEligibility::Eligible,
-                    feature_bits: 1,
-                    mapping_revision: 2,
-                    observed_at_ms: now_ms,
-                    gateway_device_id,
-                }],
-                now_ms,
-            )
-            .unwrap();
-        roster_refresh(&session, &fixture.binding.device_id, false);
-        install_gateway(&session, &fixture.binding.device_id);
-        (fixture, Arc::new(session), conversation_id)
-    }
-
-    async fn accept_live_peer(listener: &TcpListener) -> WebSocketStream<tokio::net::TcpStream> {
-        let (stream, _) = listener.accept().await.unwrap();
-        tokio_tungstenite::accept_async(stream).await.unwrap()
-    }
-
-    async fn send_server_hello(socket: &mut WebSocketStream<tokio::net::TcpStream>) {
-        socket
-            .send(Message::Text(
-                serde_json::to_string(&LiveHelloV2::new()).unwrap().into(),
-            ))
-            .await
-            .unwrap();
-    }
-
-    async fn queued_start_is_not_sent_after_security_ready_event(
-        invalidate: impl FnOnce(&Session),
-    ) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let origin = format!("http://{}", listener.local_addr().unwrap());
-        let (fixture, session, conversation) = real_supervisor_session(&origin);
-        let supervisor = tokio::spawn(supervise(session.clone()));
-        let mut peer = accept_live_peer(&listener).await;
-        send_server_hello(&mut peer).await;
-        wait_for_live_enabled(&session, true).await;
-        assert!(send_typing_for_session(
-            &session,
-            conversation,
-            peppy_protocol::TypingStateV2::Started,
-            session.live_typing.clock(),
-        ));
-
-        invalidate(&session);
-        assert!(timeout(Duration::from_millis(250), peer.next())
-            .await
-            .is_err());
-        wait_for_live_enabled(&session, false).await;
-        session.cancel.cancel();
-        supervisor.await.unwrap();
-        drop(fixture);
-    }
-
-    #[tokio::test]
-    async fn mismatch_ready_event_retires_a_queued_start_before_socket_send() {
-        queued_start_is_not_sent_after_security_ready_event(|session| session.set_mismatch(true))
-            .await;
-    }
-
-    #[tokio::test]
-    async fn server_ahead_ready_event_retires_a_queued_start_before_socket_send() {
-        queued_start_is_not_sent_after_security_ready_event(|session| {
-            let active_epoch = session.client.key_status().unwrap().active_epoch.unwrap();
-            session.set_status(|status| {
-                status.vault = Some(crate::session::VaultSummary {
-                    epoch: active_epoch + 1,
-                    fingerprint: "synthetic-fingerprint".into(),
-                });
-            });
-            session.notify();
-        })
-        .await;
-    }
-
-    struct SinkGate {
-        open: AtomicBool,
-        polls: AtomicUsize,
-        waker: AtomicWaker,
-    }
-
-    impl SinkGate {
-        fn new(open: bool) -> Arc<Self> {
-            Arc::new(Self {
-                open: AtomicBool::new(open),
-                polls: AtomicUsize::new(0),
-                waker: AtomicWaker::new(),
-            })
-        }
-
-        fn poll(&self, cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
-            self.polls.fetch_add(1, Ordering::AcqRel);
-            if self.open.load(Ordering::Acquire) {
-                return Poll::Ready(Ok(()));
-            }
-            self.waker.register(cx.waker());
-            if self.open.load(Ordering::Acquire) {
-                Poll::Ready(Ok(()))
-            } else {
-                Poll::Pending
-            }
-        }
-
-        async fn wait_until_polled(&self) {
-            while self.polls.load(Ordering::Acquire) == 0 {
-                tokio::task::yield_now().await;
-            }
-        }
-
-        fn open(&self) {
-            self.open.store(true, Ordering::Release);
-            self.waker.wake();
-        }
-    }
-
-    struct RecordingSink {
-        ready: Arc<SinkGate>,
-        flush: Arc<SinkGate>,
-        accepted: Vec<Message>,
-    }
-
-    impl RecordingSink {
-        fn new(ready: Arc<SinkGate>, flush: Arc<SinkGate>) -> Self {
-            Self {
-                ready,
-                flush,
-                accepted: Vec::new(),
-            }
-        }
-    }
-
-    impl Sink<Message> for RecordingSink {
-        type Error = Infallible;
-
-        fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-            self.ready.poll(cx)
-        }
-
-        fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
-            self.accepted.push(item);
-            Ok(())
-        }
-
-        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-            self.flush.poll(cx)
-        }
-
-        fn poll_close(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-    }
-
-    fn admission_state(session: &Session) -> LiveTypingState {
-        let context = live_enable_context(session);
-        assert!(context.is_some());
-        let mut state = LiveTypingState::default();
-        state
-            .apply(&session.client, context, session.live_typing.clock())
-            .unwrap();
-        state
-    }
-
-    fn queue_typing_frame(
-        session: &Session,
-        outbound: &mut mpsc::Receiver<OutboundFrame>,
-        conversation: ConversationId,
-        state: peppy_protocol::TypingStateV2,
-    ) -> OutboundFrame {
-        assert!(send_typing_for_session(
-            session,
-            conversation,
-            state,
-            session.live_typing.clock(),
-        ));
-        outbound.try_recv().unwrap()
-    }
-
-    enum AdmissionInvalidation {
-        AuthorityEpoch,
-        Mismatch,
-        ServerAhead,
-        SharingOff,
-    }
-
-    async fn assert_invalidation_wins_before_sink_admission(invalidation: AdmissionInvalidation) {
-        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
-        let state = admission_state(&session);
-        let mut outbound = session.live_typing.attach();
-        let frame = queue_typing_frame(
-            &session,
-            &mut outbound,
-            conversation,
-            peppy_protocol::TypingStateV2::Started,
-        );
-        let ready = SinkGate::new(true);
-        let flush = SinkGate::new(true);
-        let mut sink = RecordingSink::new(ready, flush);
-
-        let outcome = admit_outbound_send_with_hooks(
-            &mut sink,
-            &session,
-            &state,
-            &frame,
-            || match invalidation {
-                AdmissionInvalidation::AuthorityEpoch => session.set_security_status(|_| {}),
-                AdmissionInvalidation::Mismatch => session.set_mismatch(true),
-                AdmissionInvalidation::ServerAhead => {
-                    let active_epoch = session.client.key_status().unwrap().active_epoch.unwrap();
-                    session.set_security_status(|status| {
-                        status.vault = Some(crate::session::VaultSummary {
-                            epoch: active_epoch + 1,
-                            fingerprint: "synthetic-fingerprint".into(),
-                        });
-                    });
-                }
-                AdmissionInvalidation::SharingOff => {
-                    session
-                        .live_typing
-                        .set_sharing(&session.client, false)
-                        .unwrap();
-                }
-            },
-            || {},
-        )
-        .await;
-        assert!(matches!(outcome, OutboundAdmission::Rejected));
-        assert!(sink.accepted.is_empty());
-    }
-
-    #[tokio::test]
-    async fn authority_epoch_completion_before_admission_rejects_queued_start() {
-        assert_invalidation_wins_before_sink_admission(AdmissionInvalidation::AuthorityEpoch).await;
-    }
-
-    #[tokio::test]
-    async fn mismatch_completion_before_admission_rejects_queued_start() {
-        assert_invalidation_wins_before_sink_admission(AdmissionInvalidation::Mismatch).await;
-    }
-
-    #[tokio::test]
-    async fn server_ahead_completion_before_admission_rejects_queued_start() {
-        assert_invalidation_wins_before_sink_admission(AdmissionInvalidation::ServerAhead).await;
-    }
-
-    #[tokio::test]
-    async fn sharing_off_completion_before_admission_rejects_queued_start() {
-        assert_invalidation_wins_before_sink_admission(AdmissionInvalidation::SharingOff).await;
-    }
-
-    #[tokio::test]
-    async fn final_validation_to_start_send_is_covered_by_the_admission_fence() {
-        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
-        let state = admission_state(&session);
-        let mut outbound = session.live_typing.attach();
-        let frame = queue_typing_frame(
-            &session,
-            &mut outbound,
-            conversation,
-            peppy_protocol::TypingStateV2::Started,
-        );
-        let ready = SinkGate::new(true);
-        let flush = SinkGate::new(true);
-        let mut sink = RecordingSink::new(ready, flush);
-        let checked = AtomicBool::new(false);
-
-        let outcome = admit_outbound_send_with_hooks(
-            &mut sink,
-            &session,
-            &state,
-            &frame,
-            || {},
-            || {
-                assert!(session.live_typing.admission.try_lock().is_err());
-                checked.store(true, Ordering::Release);
-            },
-        )
-        .await;
-
-        assert!(checked.load(Ordering::Acquire));
-        assert!(matches!(outcome, OutboundAdmission::Sent));
-        assert_eq!(sink.accepted.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn admitted_start_is_not_recalled_and_flush_holds_no_admission_lock() {
-        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
-        let state = admission_state(&session);
-        let mut outbound = session.live_typing.attach();
-        let frame = queue_typing_frame(
-            &session,
-            &mut outbound,
-            conversation,
-            peppy_protocol::TypingStateV2::Started,
-        );
-        let ready = SinkGate::new(true);
-        let flush = SinkGate::new(false);
-        let mut sink = RecordingSink::new(ready, flush.clone());
-
-        let admission = admit_outbound_send(&mut sink, &session, &state, &frame);
-        let invalidate = async {
-            flush.wait_until_polled().await;
-            session.set_mismatch(true);
-            flush.open();
-        };
-        let (outcome, ()) = timeout(Duration::from_secs(1), async {
-            tokio::join!(admission, invalidate)
-        })
-        .await
-        .expect("security setter was blocked by async sink flush");
-
-        assert!(matches!(outcome, OutboundAdmission::Sent));
-        assert_eq!(sink.accepted.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn valid_start_and_queued_stop_use_the_real_admission_path() {
-        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
-        let state = admission_state(&session);
-        let mut outbound = session.live_typing.attach();
-        let start = queue_typing_frame(
-            &session,
-            &mut outbound,
-            conversation,
-            peppy_protocol::TypingStateV2::Started,
-        );
-        let ready = SinkGate::new(true);
-        let flush = SinkGate::new(true);
-        let mut sink = RecordingSink::new(ready, flush);
-
-        assert!(matches!(
-            admit_outbound_send(&mut sink, &session, &state, &start).await,
-            OutboundAdmission::Sent
-        ));
-        session
-            .live_typing
-            .set_sharing(&session.client, false)
-            .unwrap();
-        let stop = queue_typing_frame(
-            &session,
-            &mut outbound,
-            conversation,
-            peppy_protocol::TypingStateV2::Stopped,
-        );
-        assert!(matches!(
-            admit_outbound_send(&mut sink, &session, &state, &stop).await,
-            OutboundAdmission::Sent
-        ));
-        assert_eq!(sink.accepted.len(), 2);
+        h.send(Cmd::SocketUp);
+        assert_ne!(first, h.actor.state.generation());
     }
 
     #[test]
@@ -2527,12 +2345,552 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ineligible_conversation_has_no_target() {
+        let (_, session, _) = session_with_linked_eligible_gateway();
+        let status = session.status.lock().unwrap();
+        assert!(resolve_typing_target(&status, inputs(&session), ConversationId::new()).is_none());
+    }
+
+    #[test]
+    fn ambiguous_gateways_have_no_target() {
+        let conversation_id = ConversationId::new();
+        let gateway_a = DeviceId::new();
+        let gateway_b = DeviceId::new();
+        let snapshot = RcsStatusSnapshot {
+            gateways: vec![gateway_status(gateway_a), gateway_status(gateway_b)],
+            eligibilities: vec![
+                eligibility(conversation_id, gateway_a),
+                eligibility(conversation_id, gateway_b),
+            ],
+        };
+        assert!(typing_target(&snapshot, conversation_id).is_none());
+    }
+
+    #[test]
+    fn gateway_refresh_roster_enables_live_typing() {
+        let (fixture, session, _) = session_with_linked_eligible_gateway();
+        roster_refresh(&session, &fixture.binding.device_id, false);
+        install_gateway(&session, &fixture.binding.device_id);
+        let status = session.status.lock().unwrap();
+        let context = enable_context(&status, inputs(&session)).unwrap();
+        assert_eq!(
+            context.local_executor,
+            peppy_client_core::LiveExecutor::None
+        );
+        assert_eq!(context.trusted_roster.len(), 1);
+        let generation = LiveTypingState::default()
+            .apply(&session.client, Some(context), clock())
+            .unwrap();
+        assert!(generation.is_some());
+    }
+
+    #[test]
+    fn revocation_disables_live_typing() {
+        let (fixture, session, _) = session_with_linked_eligible_gateway();
+        roster_refresh(&session, &fixture.binding.device_id, false);
+        install_gateway(&session, &fixture.binding.device_id);
+        let mut state = LiveTypingState::default();
+        let context = {
+            let status = session.status.lock().unwrap();
+            enable_context(&status, inputs(&session))
+        };
+        state.apply(&session.client, context, clock()).unwrap();
+        roster_refresh(&session, &fixture.binding.device_id, true);
+        let context = {
+            let status = session.status.lock().unwrap();
+            enable_context(&status, inputs(&session))
+        };
+        state.apply(&session.client, context, clock()).unwrap();
+        assert_eq!(state.generation(), None);
+        assert_eq!(
+            session.client.set_typing_sharing(true),
+            Err(LiveError::Disabled)
+        );
+    }
+
+    #[test]
+    fn roster_change_creates_a_new_generation() {
+        let (fixture, session, _) = session_with_linked_eligible_gateway();
+        roster_refresh(&session, &fixture.binding.device_id, false);
+        install_gateway(&session, &fixture.binding.device_id);
+        let mut state = LiveTypingState::default();
+        let first = {
+            let status = session.status.lock().unwrap();
+            state.apply(
+                &session.client,
+                enable_context(&status, inputs(&session)),
+                clock(),
+            )
+        }
+        .unwrap()
+        .unwrap();
+        session.set_status(|status| status.rcs_live_roster.push(DeviceId::new().to_string()));
+        let second = {
+            let status = session.status.lock().unwrap();
+            state.apply(
+                &session.client,
+                enable_context(&status, inputs(&session)),
+                clock(),
+            )
+        }
+        .unwrap()
+        .unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn sealed_start_is_rejected_after_gateway_revocation() {
+        let (fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+        assert!(h.send_typing(conversation, TypingStateV2::Started));
+        let mark = h.next_mark();
+
+        roster_refresh(&session, &fixture.binding.device_id, true);
+        h.send(Cmd::GatewayRefresh);
+
+        assert_eq!(h.confirm(mark), Admission::Rejected);
+        assert_eq!(
+            session.client.set_typing_sharing(true),
+            Err(LiveError::Disabled)
+        );
+    }
+
+    #[test]
+    fn gateway_refresh_replaces_the_incarnation_and_bumps_the_sequence() {
+        let (_fixture, session, _) = real_supervisor_session("http://127.0.0.1:9");
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+        let first = h.actor.state.generation();
+        let first_seq = h.actor.enabled_seq;
+
+        session.set_status(|status| status.rcs_live_roster.push(DeviceId::new().to_string()));
+        h.send(Cmd::GatewayRefresh);
+
+        assert!(h.actor.state.generation().is_some());
+        assert_ne!(first, h.actor.state.generation());
+        assert!(h.actor.enabled_seq > first_seq);
+        let outcome = h.call(|reply| Cmd::InboundFrame {
+            json: "{}".into(),
+            reply,
+        });
+        assert!(outcome.wire.is_none());
+        assert!(!outcome.suspended);
+    }
+
+    #[test]
+    fn gateway_round_trip_converges_core_and_host_generations() {
+        let (fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let gateway_id = fixture.binding.device_id.clone();
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+        let first = h.actor.state.generation();
+
+        session.set_status(|status| {
+            status.rcs_live_roster = vec![DeviceId::new().to_string()];
+        });
+        h.send(Cmd::GatewayRefresh);
+        assert_eq!(h.actor.state.generation(), None);
+        assert_eq!(
+            session.client.set_typing_sharing(true),
+            Err(LiveError::Disabled)
+        );
+
+        session.set_status(|status| status.rcs_live_roster = vec![gateway_id]);
+        h.send(Cmd::GatewayRefresh);
+        assert!(h.actor.state.generation().is_some());
+        assert_ne!(first, h.actor.state.generation());
+
+        assert!(h.send_typing(conversation, TypingStateV2::Started));
+        let mark = h.next_mark();
+        assert_eq!(mark.seq, h.actor.enabled_seq);
+        assert_eq!(h.confirm(mark), Admission::Transmit);
+    }
+
+    #[test]
+    fn pre_off_stop_is_admitted_and_post_off_frames_seal_nothing() {
+        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+        assert!(h.send_typing(conversation, TypingStateV2::Started));
+        let start = h.next_mark();
+        assert!(h.send_typing(conversation, TypingStateV2::Stopped));
+        let stop = h.next_mark();
+
+        assert_eq!(h.sharing(false), Ok(()));
+        assert_eq!(h.confirm(stop), Admission::Transmit);
+        assert_eq!(h.confirm(start), Admission::Rejected);
+        assert!(!h.send_typing(conversation, TypingStateV2::Started));
+        assert!(!h.send_typing(conversation, TypingStateV2::Stopped));
+        assert!(h.sealed.try_recv().is_err());
+    }
+
+    #[test]
+    fn off_then_on_does_not_admit_a_start_sealed_before_the_off() {
+        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+        assert!(h.send_typing(conversation, TypingStateV2::Started));
+        let start = h.next_mark();
+
+        assert_eq!(h.sharing(false), Ok(()));
+        assert_eq!(h.sharing(true), Ok(()));
+
+        assert_eq!(h.confirm(start), Admission::Rejected);
+    }
+
+    #[test]
+    fn sharing_update_while_disabled_commits_the_preference() {
+        let (_fixture, session, _) = real_supervisor_session("http://127.0.0.1:9");
+        let mut h = harness(&session);
+        assert_eq!(h.sharing(false), Ok(()));
+        assert!(!h.actor.sharing);
+        assert_eq!(h.actor.sharing_epoch, 1);
+        assert_eq!(h.sharing(true), Ok(()));
+        assert!(h.actor.sharing);
+    }
+
+    #[test]
+    fn sharing_update_with_a_store_error_commits_nothing() {
+        let (_fixture, session, _) = real_supervisor_session("http://127.0.0.1:9");
+        let mut h = harness(&session);
+        let client = session.client.clone();
+        let poisoned = std::thread::spawn(move || {
+            let _store = client.hold_store_lock_for_test().unwrap();
+            panic!("poisons the synthetic store for this test");
+        })
+        .join();
+        assert!(poisoned.is_err());
+
+        assert_eq!(h.sharing(false), Err(()));
+        assert!(h.actor.sharing);
+        assert_eq!(h.actor.sharing_epoch, 0);
+    }
+
+    #[test]
+    fn clock_gap_before_confirm_retires_and_rejects_the_queued_start() {
+        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let clock = Arc::new(TestSuspendClock::new());
+        session.live_typing.install_suspend_clock(clock.clone());
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+        assert!(h.send_typing(conversation, TypingStateV2::Started));
+        let mark = h.next_mark();
+
+        clock.set(LIVE_SUSPEND_TICK + LIVE_SUSPEND_SKEW + Duration::from_secs(2));
+
+        assert_eq!(h.confirm(mark), Admission::Suspended);
+        assert_eq!(
+            session.client.set_typing_sharing(true),
+            Err(LiveError::Disabled)
+        );
+    }
+
+    #[test]
+    fn clock_gap_before_inbound_withholds_started_and_retires_the_display() {
+        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let suspend = Arc::new(TestSuspendClock::new());
+        session.live_typing.install_suspend_clock(suspend.clone());
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+        let generation = h.actor.state.generation().unwrap().0;
+        let peer = DeviceId::new();
+        h.actor.inbound.update_peer(PeerSessionUpdate {
+            peer_device_id: peer,
+            replaced_session_token: None,
+            current_session_token: 1,
+            validation_revision: 1,
+        });
+        let first = h.actor.publish_inbound(
+            display_outcome(peer, conversation, generation, 1, 1, 20_000),
+            clock(),
+        );
+        assert!(!first.suspended);
+        assert!(h.actor.inbound.displays.contains_key(&conversation));
+
+        suspend.set(LIVE_SUSPEND_TICK + LIVE_SUSPEND_SKEW + Duration::from_secs(2));
+        let started = h.actor.publish_inbound(
+            display_outcome(peer, conversation, generation, 1, 2, 20_000),
+            clock(),
+        );
+        assert!(started.suspended);
+        assert!(!h.actor.inbound.displays.contains_key(&conversation));
+        assert_eq!(
+            session.client.set_typing_sharing(true),
+            Err(LiveError::Disabled)
+        );
+    }
+
+    #[test]
+    fn mismatch_before_confirm_rejects_a_queued_start() {
+        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+        assert!(h.send_typing(conversation, TypingStateV2::Started));
+        let mark = h.next_mark();
+
+        session.set_mismatch(true);
+
+        assert_eq!(h.confirm(mark), Admission::Rejected);
+    }
+
+    #[test]
+    fn server_ahead_status_before_confirm_rejects_a_queued_start() {
+        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+        assert!(h.send_typing(conversation, TypingStateV2::Started));
+        let mark = h.next_mark();
+        let active_epoch = session.client.key_status().unwrap().active_epoch.unwrap();
+
+        session.set_security_status(|status| {
+            status.vault = Some(crate::session::VaultSummary {
+                epoch: active_epoch + 1,
+                fingerprint: "synthetic-fingerprint".into(),
+            });
+        });
+
+        assert_eq!(h.confirm(mark), Admission::Rejected);
+    }
+
+    #[test]
+    fn cancellation_before_confirm_rejects_queued_frames() {
+        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+        assert!(h.send_typing(conversation, TypingStateV2::Started));
+        let start = h.next_mark();
+        assert!(h.send_typing(conversation, TypingStateV2::Stopped));
+        let stop = h.next_mark();
+
+        session.cancel.cancel();
+
+        assert_eq!(h.confirm(start), Admission::Rejected);
+        assert_eq!(h.confirm(stop), Admission::Rejected);
+    }
+
+    #[test]
+    fn valid_start_and_queued_stop_are_admitted_in_order() {
+        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+        assert!(h.send_typing(conversation, TypingStateV2::Started));
+        let start = h.next_mark();
+        assert_eq!(h.confirm(start), Admission::Transmit);
+        assert!(h.send_typing(conversation, TypingStateV2::Stopped));
+        let stop = h.next_mark();
+        assert_eq!(h.confirm(stop), Admission::Transmit);
+    }
+
+    #[test]
+    fn send_without_an_eligible_target_produces_no_frame() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, PHRASE)
+            .unwrap();
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+
+        assert!(!h.send_typing(ConversationId::new(), TypingStateV2::Started));
+        assert!(h.sealed.try_recv().is_err());
+    }
+
+    #[test]
+    fn disconnected_send_is_dropped_without_replay() {
+        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let mut h = harness(&session);
+
+        assert!(!h.send_typing(conversation, TypingStateV2::Started));
+        assert!(h.sealed.try_recv().is_err());
+        h.send(Cmd::SocketUp);
+        assert!(h.send_typing(conversation, TypingStateV2::Started));
+        assert!(h.sealed.try_recv().is_ok());
+    }
+
+    async fn wait_for_live_enabled(session: &Session, expected: bool) {
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let enabled = session.client.set_typing_sharing(true).is_ok();
+                if enabled == expected {
+                    return;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for live typing enabled={expected}"));
+    }
+
+    #[tokio::test]
+    async fn stalled_transport_io_yields_to_cancel_and_drains() {
+        let (stream, _peer_that_stops_reading) = tokio::io::duplex(1);
+        let socket =
+            WebSocketStream::from_raw_socket(stream, tungstenite::protocol::Role::Client, None)
+                .await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            let mut socket = socket;
+            bounded_send(
+                &mut socket,
+                &task_cancel,
+                Message::Text("x".repeat(LIVE_MAX_FRAME).into()),
+            )
+            .await
+        });
+
+        sleep(Duration::from_millis(10)).await;
+        cancel.cancel();
+        let sent = timeout(Duration::from_millis(200), task)
+            .await
+            .expect("stalled transport did not drain after cancellation")
+            .unwrap();
+        assert!(!sent);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn store_contention_keeps_runtime_and_cancellation_live_without_publication() {
+        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        start(session.clone());
+        let store_client = session.client.clone();
+        let (held, reached) = std::sync::mpsc::channel();
+        let (release, unblock) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let store_lock = store_client.hold_store_lock_for_test().unwrap();
+            held.send(()).unwrap();
+            let _ = unblock.recv_timeout(Duration::from_secs(5));
+            drop(store_lock);
+        });
+        reached.recv().unwrap();
+
+        let sending_session = session.clone();
+        let sending = tokio::spawn(async move {
+            request_send_typing(&sending_session, conversation, TypingStateV2::Started).await
+        });
+
+        let heartbeat_started = Instant::now();
+        timeout(Duration::from_millis(30), async {
+            for _ in 0..3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Store contention blocked the current-thread runtime");
+        assert!(heartbeat_started.elapsed() < Duration::from_millis(100));
+
+        session.cancel.cancel();
+        let sent = timeout(Duration::from_millis(200), sending)
+            .await
+            .expect("typing command ignored cancellation while the Store was held")
+            .unwrap();
+        assert!(!sent);
+        let _ = release.send(());
+        holder.join().unwrap();
+        assert!(crate::sync::drain(&session, Duration::from_secs(5)).await);
+    }
+
+    async fn accept_live_peer(listener: &TcpListener) -> WebSocketStream<tokio::net::TcpStream> {
+        let (stream, _) = listener.accept().await.unwrap();
+        tokio_tungstenite::accept_async(stream).await.unwrap()
+    }
+
+    async fn send_server_hello(socket: &mut WebSocketStream<tokio::net::TcpStream>) {
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&LiveHelloV2::new()).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+    }
+
+    async fn started_with_test_suspend_clock() -> (
+        Arc<Session>,
+        ConversationId,
+        Arc<TestSuspendClock>,
+        WebSocketStream<tokio::net::TcpStream>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (_fixture, session, conversation) = real_supervisor_session(&origin);
+        let clock = Arc::new(TestSuspendClock::new());
+        session.live_typing.install_suspend_clock(clock.clone());
+        start(session.clone());
+        let mut peer = accept_live_peer(&listener).await;
+        send_server_hello(&mut peer).await;
+        wait_for_live_enabled(&session, true).await;
+        (session, conversation, clock, peer)
+    }
+
+    async fn send_frequent_traffic(
+        peer: &mut WebSocketStream<tokio::net::TcpStream>,
+        clock: &TestSuspendClock,
+    ) {
+        for second in 1..=10 {
+            clock.set(Duration::from_secs(second));
+            peer.send(Message::Ping(Vec::new().into())).await.unwrap();
+            sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn frequent_socket_traffic_does_not_defer_or_trigger_suspend_retirement() {
+        let (session, _, clock, mut peer) = started_with_test_suspend_clock().await;
+
+        send_frequent_traffic(&mut peer, &clock).await;
+
+        assert!(
+            clock.sample_count() >= 3,
+            "socket traffic deferred periodic suspend observations"
+        );
+        assert!(session.client.set_typing_sharing(true).is_ok());
+        assert!(crate::sync::drain(&session, Duration::from_secs(5)).await);
+    }
+
+    #[tokio::test]
+    async fn idle_after_frequent_traffic_does_not_false_retire_a_consistent_clock() {
+        let (session, _, clock, mut peer) = started_with_test_suspend_clock().await;
+        send_frequent_traffic(&mut peer, &clock).await;
+
+        clock.set(Duration::from_secs(12));
+        sleep(LIVE_SUSPEND_TICK + Duration::from_millis(5)).await;
+
+        assert!(session.client.set_typing_sharing(true).is_ok());
+        assert!(crate::sync::drain(&session, Duration::from_secs(5)).await);
+    }
+
+    #[tokio::test]
+    async fn suspend_gap_retires_before_a_ready_outbound_frame_is_transmitted() {
+        let (session, conversation, clock, mut peer) = started_with_test_suspend_clock().await;
+        clock.set(Duration::from_secs(1));
+        sleep(LIVE_SUSPEND_TICK + Duration::from_millis(2)).await;
+        clock.set(LIVE_SUSPEND_TICK + LIVE_SUSPEND_SKEW + Duration::from_secs(2));
+
+        assert!(request_send_typing(&session, conversation, TypingStateV2::Started).await);
+
+        match timeout(Duration::from_millis(100), peer.next()).await {
+            Err(_) => {}
+            Ok(Some(Ok(Message::Text(_)))) => panic!("post-resume frame crossed the suspend fence"),
+            Ok(_) => {}
+        }
+        timeout(Duration::from_millis(100), async {
+            while session.client.set_typing_sharing(true).is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("suspend gap did not retire the live generation");
+        assert!(crate::sync::drain(&session, Duration::from_secs(5)).await);
+    }
+
     #[tokio::test]
     async fn supervisor_negotiation_failures_escalate_backoff_without_resetting() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let (_, session, _) = real_supervisor_session(&origin);
-        let supervisor = tokio::spawn(supervise(session.clone()));
+        start(session.clone());
         let mut peer = accept_live_peer(&listener).await;
         let mut observed_delays = Vec::new();
 
@@ -2563,8 +2921,7 @@ mod tests {
 
         send_server_hello(&mut peer).await;
         wait_for_live_enabled(&session, true).await;
-        session.cancel.cancel();
-        supervisor.await.unwrap();
+        assert!(crate::sync::drain(&session, Duration::from_secs(5)).await);
     }
 
     #[tokio::test]
@@ -2572,7 +2929,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let (_, session, _) = real_supervisor_session(&origin);
-        let supervisor = tokio::spawn(supervise(session.clone()));
+        start(session.clone());
         let mut peer = accept_live_peer(&listener).await;
         send_server_hello(&mut peer).await;
 
@@ -2587,8 +2944,7 @@ mod tests {
             "the first unstable reconnect did not use the initial backoff"
         );
         drop(stream);
-        session.cancel.cancel();
-        supervisor.await.unwrap();
+        assert!(crate::sync::drain(&session, Duration::from_secs(5)).await);
     }
 
     #[tokio::test]
@@ -2597,7 +2953,7 @@ mod tests {
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let (fixture, session, conversation_id) = real_supervisor_session(&origin);
         let gateway: DeviceId = fixture.binding.device_id.parse().unwrap();
-        let supervisor = tokio::spawn(supervise(session.clone()));
+        start(session.clone());
 
         let mut first_peer = accept_live_peer(&listener).await;
         send_server_hello(&mut first_peer).await;
@@ -2636,8 +2992,19 @@ mod tests {
             .generation;
         assert_ne!(first_generation, second_generation);
 
-        session.cancel.cancel();
-        supervisor.await.unwrap();
+        assert!(crate::sync::drain(&session, Duration::from_secs(5)).await);
+    }
+
+    async fn queue_sealed_for_test(session: &Session, json: String) -> bool {
+        let Some(commands) = session.live_typing.commands() else {
+            return false;
+        };
+        ask(session, &commands, |reply| Cmd::QueueSealedForTest {
+            json,
+            reply,
+        })
+        .await
+        .unwrap_or(false)
     }
 
     #[tokio::test]
@@ -2645,7 +3012,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let (fixture, session, conversation_id) = real_supervisor_session(&origin);
-        session.track_worker(tokio::spawn(supervise(session.clone())));
+        start(session.clone());
 
         let mut stalled_peer = accept_live_peer(&listener).await;
         send_server_hello(&mut stalled_peer).await;
@@ -2667,20 +3034,14 @@ mod tests {
         let accepted = timeout(Duration::from_secs(5), async {
             let mut accepted = 0usize;
             loop {
-                if session
-                    .live_typing
-                    .send_with(None, || Some(payload.clone()))
-                {
+                if queue_sealed_for_test(&session, payload.clone()).await {
                     accepted += 1;
                     assert!(accepted < 1_024, "TCP peer never applied backpressure");
                     tokio::task::yield_now().await;
                     continue;
                 }
                 sleep(Duration::from_millis(100)).await;
-                if session
-                    .live_typing
-                    .send_with(None, || Some(payload.clone()))
-                {
+                if queue_sealed_for_test(&session, payload.clone()).await {
                     accepted += 1;
                     continue;
                 }
@@ -2749,7 +3110,7 @@ mod tests {
                 .unwrap();
             while socket.next().await.is_some() {}
         });
-        let supervisor = tokio::spawn(supervise(session.clone()));
+        start(session.clone());
 
         wait_for_live_enabled(&session, true).await;
         roster_refresh(&session, &fixture.binding.device_id, true);
@@ -2759,9 +3120,8 @@ mod tests {
         session.notify();
         wait_for_live_enabled(&session, true).await;
 
-        session.cancel.cancel();
-        supervisor.await.unwrap();
-        server.await.unwrap();
+        assert!(crate::sync::drain(&session, Duration::from_secs(5)).await);
+        server.abort();
     }
 
     #[tokio::test]
@@ -2773,119 +3133,6 @@ mod tests {
             session.client.set_typing_sharing(true),
             Err(LiveError::Disabled)
         );
-    }
-
-    #[test]
-    fn socket_drop_disables_and_reconnect_reenables_with_new_generation() {
-        let (fixture, session, _) = session_with_linked_eligible_gateway();
-        roster_refresh(&session, &fixture.binding.device_id, false);
-        install_gateway(&session, &fixture.binding.device_id);
-        let context = {
-            let status = session.status.lock().unwrap();
-            enable_context(&status, inputs(&session))
-        };
-        let mut state = LiveTypingState::default();
-        let first = state
-            .apply(&session.client, context.clone(), clock())
-            .unwrap();
-        disable(&mut state, &session);
-        assert_eq!(state.generation(), None);
-        let second = state.apply(&session.client, context, clock()).unwrap();
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn gateway_refresh_roster_enables_live_typing() {
-        let (fixture, session, _) = session_with_linked_eligible_gateway();
-        roster_refresh(&session, &fixture.binding.device_id, false);
-        install_gateway(&session, &fixture.binding.device_id);
-        let status = session.status.lock().unwrap();
-        let context = enable_context(&status, inputs(&session)).unwrap();
-        assert_eq!(
-            context.local_executor,
-            peppy_client_core::LiveExecutor::None
-        );
-        assert_eq!(context.trusted_roster.len(), 1);
-        let generation = LiveTypingState::default()
-            .apply(&session.client, Some(context), clock())
-            .unwrap();
-        assert!(generation.is_some());
-    }
-
-    #[test]
-    fn revocation_disables_live_typing() {
-        let (fixture, session, _) = session_with_linked_eligible_gateway();
-        roster_refresh(&session, &fixture.binding.device_id, false);
-        install_gateway(&session, &fixture.binding.device_id);
-        let mut state = LiveTypingState::default();
-        let context = {
-            let status = session.status.lock().unwrap();
-            enable_context(&status, inputs(&session))
-        };
-        state.apply(&session.client, context, clock()).unwrap();
-        roster_refresh(&session, &fixture.binding.device_id, true);
-        let context = {
-            let status = session.status.lock().unwrap();
-            enable_context(&status, inputs(&session))
-        };
-        state.apply(&session.client, context, clock()).unwrap();
-        assert_eq!(state.generation(), None);
-        assert_eq!(
-            session.client.set_typing_sharing(true),
-            Err(LiveError::Disabled)
-        );
-    }
-
-    #[test]
-    fn ineligible_conversation_has_no_target() {
-        let (_, session, _) = session_with_linked_eligible_gateway();
-        let status = session.status.lock().unwrap();
-        assert!(resolve_typing_target(&status, inputs(&session), ConversationId::new()).is_none());
-    }
-
-    #[test]
-    fn ambiguous_gateways_have_no_target() {
-        let conversation_id = ConversationId::new();
-        let gateway_a = DeviceId::new();
-        let gateway_b = DeviceId::new();
-        let snapshot = RcsStatusSnapshot {
-            gateways: vec![gateway_status(gateway_a), gateway_status(gateway_b)],
-            eligibilities: vec![
-                eligibility(conversation_id, gateway_a),
-                eligibility(conversation_id, gateway_b),
-            ],
-        };
-        assert!(typing_target(&snapshot, conversation_id).is_none());
-    }
-
-    #[test]
-    fn roster_change_creates_a_new_generation() {
-        let (fixture, session, _) = session_with_linked_eligible_gateway();
-        roster_refresh(&session, &fixture.binding.device_id, false);
-        install_gateway(&session, &fixture.binding.device_id);
-        let mut state = LiveTypingState::default();
-        let first = {
-            let status = session.status.lock().unwrap();
-            state.apply(
-                &session.client,
-                enable_context(&status, inputs(&session)),
-                clock(),
-            )
-        }
-        .unwrap()
-        .unwrap();
-        session.set_status(|status| status.rcs_live_roster.push(DeviceId::new().to_string()));
-        let second = {
-            let status = session.status.lock().unwrap();
-            state.apply(
-                &session.client,
-                enable_context(&status, inputs(&session)),
-                clock(),
-            )
-        }
-        .unwrap()
-        .unwrap();
-        assert_ne!(first, second);
     }
 
     fn gateway_status(gateway_id: DeviceId) -> RcsGatewayStatus {
