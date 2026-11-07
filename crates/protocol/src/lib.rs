@@ -3,6 +3,7 @@ mod ephemeral;
 mod generate;
 mod membership;
 mod v1;
+mod vault_identity;
 
 pub use envelope::{
     COMPACTION_KEY_BYTES, CompactionMetadata, CompactionReference, Envelope, EnvelopeError,
@@ -25,4 +26,9 @@ pub use membership::{
     MembershipBootstrapV1, MembershipChallengeV1, MembershipControlError, MembershipControlV1,
     MembershipDeviceV1, MembershipHintV1, MembershipResponseV1, MembershipRoleV1,
     MembershipVersionV1,
+};
+pub use vault_identity::{
+    EstablishVaultIdentityV1, VAULT_IDENTITY_PROTOCOL_VERSION,
+    VAULT_IDENTITY_RECOVERY_RECORD_BYTES, VaultIdentityError, VaultIdentityRecoveryRecordV1,
+    VaultIdentityStatusV1,
 };

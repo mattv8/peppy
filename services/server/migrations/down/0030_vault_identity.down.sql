@@ -1,0 +1,2 @@
+DROP TABLE vault_identity_establishments;
+DROP FUNCTION peppy_vault_identity_establishment_guard();

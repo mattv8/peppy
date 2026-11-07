@@ -23,6 +23,7 @@ pub const TENANT_TABLES: &[&str] = &[
     "attachments",
     "public_attachment_copies",
     "vault_key_profiles",
+    "vault_identity_establishments",
     "compacted_records",
     "attachment_record_references",
     "record_compaction",
@@ -44,6 +45,7 @@ pub const TENANT_TABLES: &[&str] = &[
 ];
 
 const MEMBERSHIP_VERSION_TABLE: &str = "membership_versions";
+const VAULT_IDENTITY_TABLE: &str = "vault_identity_establishments";
 
 const CONTROL_PLANE_TABLES: &[&str] = &[
     "vault_owners",
@@ -107,6 +109,21 @@ fn tenant_table_names() -> Vec<String> {
         .collect()
 }
 
+fn full_dml_tenant_tables() -> Vec<&'static str> {
+    TENANT_TABLES
+        .iter()
+        .copied()
+        .filter(|table| *table != VAULT_IDENTITY_TABLE)
+        .collect()
+}
+
+fn full_dml_tenant_table_names() -> Vec<String> {
+    full_dml_tenant_tables()
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
 async fn current_schema(pool: &PgPool) -> Result<String, RlsError> {
     sqlx::query_scalar("SELECT current_schema()")
         .fetch_one(pool)
@@ -133,10 +150,12 @@ pub async fn grant_runtime_privileges(pool: &PgPool, role: &str) -> Result<(), R
     let role = quoted_role(role)?;
     let schema = current_schema(pool).await?;
     let schema_identifier = quoted_identifier(&schema);
-    let tenant_tables = qualified_tables(&schema, TENANT_TABLES);
+    let full_dml_tenant_tables = full_dml_tenant_tables();
+    let tenant_tables = qualified_tables(&schema, &full_dml_tenant_tables);
     let admission_tables = qualified_tables(&schema, ADMISSION_TABLES);
     let control_plane_tables = qualified_tables(&schema, CONTROL_PLANE_TABLES);
     let membership_version_table = qualified_tables(&schema, &[MEMBERSHIP_VERSION_TABLE]);
+    let vault_identity_table = qualified_tables(&schema, &[VAULT_IDENTITY_TABLE]);
     sqlx::raw_sql(&format!(
         "GRANT USAGE ON SCHEMA {schema_identifier} TO {role}"
     ))
@@ -154,6 +173,11 @@ pub async fn grant_runtime_privileges(pool: &PgPool, role: &str) -> Result<(), R
     .await?;
     sqlx::raw_sql(&format!(
         "GRANT SELECT ON TABLE {membership_version_table} TO {role}; REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE {membership_version_table} FROM {role}"
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::raw_sql(&format!(
+        "GRANT SELECT, INSERT ON TABLE {vault_identity_table} TO {role}; REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE {vault_identity_table} FROM {role}"
     ))
     .execute(pool)
     .await?;
@@ -207,10 +231,12 @@ pub async fn grant_maintenance_privileges(pool: &PgPool, role: &str) -> Result<(
     let role = quoted_role(role)?;
     let schema = current_schema(pool).await?;
     let schema_identifier = quoted_identifier(&schema);
-    let tenant_tables = qualified_tables(&schema, TENANT_TABLES);
+    let full_dml_tenant_tables = full_dml_tenant_tables();
+    let tenant_tables = qualified_tables(&schema, &full_dml_tenant_tables);
     let admission_tables = qualified_tables(&schema, ADMISSION_TABLES);
     let control_plane_tables = qualified_tables(&schema, CONTROL_PLANE_TABLES);
     let membership_version_table = qualified_tables(&schema, &[MEMBERSHIP_VERSION_TABLE]);
+    let vault_identity_table = qualified_tables(&schema, &[VAULT_IDENTITY_TABLE]);
     sqlx::raw_sql(&format!(
         "GRANT USAGE ON SCHEMA {schema_identifier} TO {role}"
     ))
@@ -218,6 +244,11 @@ pub async fn grant_maintenance_privileges(pool: &PgPool, role: &str) -> Result<(
     .await?;
     sqlx::raw_sql(&format!(
         "GRANT SELECT ON TABLE {membership_version_table} TO {role}; REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE {membership_version_table} FROM {role}"
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::raw_sql(&format!(
+        "GRANT SELECT ON TABLE {vault_identity_table} TO {role}; REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE {vault_identity_table} FROM {role}"
     ))
     .execute(pool)
     .await?;
@@ -280,6 +311,7 @@ pub async fn validate_runtime_role(pool: &PgPool, community: bool) -> Result<(),
     validate_rls_schema(pool, community).await?;
     validate_live_ticket_runtime_capabilities(pool).await?;
     validate_membership_version_runtime_privileges(pool).await?;
+    validate_vault_identity_runtime_privileges(pool).await?;
     validate_admission_runtime_privileges(pool).await?;
     if community {
         validate_community_privileges(pool).await?;
@@ -298,6 +330,22 @@ async fn validate_membership_version_runtime_privileges(pool: &PgPool) -> Result
     if !safe {
         return Err(RlsError::UnsafeRuntimeRole(
             "membership version grant is missing or unsafe",
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_vault_identity_runtime_privileges(pool: &PgPool) -> Result<(), RlsError> {
+    let safe: bool = sqlx::query_scalar(
+        "SELECT relrowsecurity AND NOT relforcerowsecurity AND has_table_privilege(current_user, oid, 'SELECT') AND has_table_privilege(current_user, oid, 'INSERT') AND NOT has_table_privilege(current_user, oid, 'UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = $1",
+    )
+    .bind(VAULT_IDENTITY_TABLE)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false);
+    if !safe {
+        return Err(RlsError::UnsafeRuntimeRole(
+            "vault identity grant is missing or unsafe",
         ));
     }
     Ok(())
@@ -446,8 +494,8 @@ async fn validate_community_privileges(pool: &PgPool) -> Result<(), RlsError> {
     let tenant_dml: bool = sqlx::query_scalar(
         "SELECT count(*) = $2 AND COALESCE(bool_and(has_table_privilege(current_user, oid, 'SELECT') AND has_table_privilege(current_user, oid, 'INSERT') AND has_table_privilege(current_user, oid, 'UPDATE') AND has_table_privilege(current_user, oid, 'DELETE') AND NOT has_table_privilege(current_user, oid, 'TRUNCATE') AND NOT has_table_privilege(current_user, oid, 'REFERENCES') AND NOT has_table_privilege(current_user, oid, 'TRIGGER')), false) FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = ANY($1)",
     )
-    .bind(tenant_table_names())
-    .bind(TENANT_TABLES.len() as i64)
+    .bind(full_dml_tenant_table_names())
+    .bind(full_dml_tenant_tables().len() as i64)
     .fetch_one(pool)
     .await?;
     if !tenant_dml {
@@ -532,14 +580,15 @@ pub async fn validate_maintenance_role(pool: &PgPool) -> Result<(), RlsError> {
     let tenant_dml: bool = sqlx::query_scalar(
         "SELECT count(*) = $2 AND COALESCE(bool_and(has_table_privilege(current_user, oid, 'SELECT') AND has_table_privilege(current_user, oid, 'INSERT') AND has_table_privilege(current_user, oid, 'UPDATE') AND has_table_privilege(current_user, oid, 'DELETE') AND NOT has_table_privilege(current_user, oid, 'TRUNCATE, TRIGGER')), false) FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = ANY($1)",
     )
-    .bind(tenant_table_names())
-    .bind(TENANT_TABLES.len() as i64)
+    .bind(full_dml_tenant_table_names())
+    .bind(full_dml_tenant_tables().len() as i64)
     .fetch_one(pool)
     .await?;
     if !tenant_dml {
         return Err(RlsError::UnsafeMaintenanceRole("requires tenant DML"));
     }
     validate_membership_version_maintenance_privileges(pool).await?;
+    validate_vault_identity_maintenance_privileges(pool).await?;
     let control_plane_sweep: bool = sqlx::query_scalar(
         "SELECT count(*) = $2 AND COALESCE(bool_and(has_table_privilege(current_user, oid, 'SELECT') AND has_table_privilege(current_user, oid, 'DELETE')), false) FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = ANY($1)",
     )
@@ -569,9 +618,24 @@ async fn validate_membership_version_maintenance_privileges(pool: &PgPool) -> Re
     Ok(())
 }
 
+async fn validate_vault_identity_maintenance_privileges(pool: &PgPool) -> Result<(), RlsError> {
+    let safe: bool = sqlx::query_scalar(
+        "SELECT has_table_privilege(current_user, $1, 'SELECT') AND NOT has_table_privilege(current_user, $1, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')",
+    )
+    .bind(VAULT_IDENTITY_TABLE)
+    .fetch_one(pool)
+    .await?;
+    if !safe {
+        return Err(RlsError::UnsafeMaintenanceRole(
+            "vault identity grant is unsafe",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::role_identifier;
+    use super::{TENANT_TABLES, VAULT_IDENTITY_TABLE, full_dml_tenant_tables, role_identifier};
 
     #[test]
     fn role_identifiers_are_strictly_validated() {
@@ -579,6 +643,12 @@ mod tests {
         for invalid in ["", "1runtime", "runtime;DROP ROLE x", "runtime-role"] {
             assert!(role_identifier(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn vault_identity_is_rls_scoped_but_excluded_from_full_dml() {
+        assert!(TENANT_TABLES.contains(&VAULT_IDENTITY_TABLE));
+        assert!(!full_dml_tenant_tables().contains(&VAULT_IDENTITY_TABLE));
     }
 }
 

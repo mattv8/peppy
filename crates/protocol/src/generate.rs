@@ -1,8 +1,8 @@
 use crate::{
-    ChallengePlaintextV2, Envelope, EphemeralSignalV1, EphemeralSignalV2, LiveHelloV1, LiveHelloV2,
-    MembershipBootstrapV1, MembershipChallengeV1, MembershipControlV1, MembershipDeviceV1,
-    MembershipHintV1, MembershipResponseV1, PairingQrRecord, SessionAckPlaintextV2,
-    TypingPlaintextV2,
+    ChallengePlaintextV2, Envelope, EphemeralSignalV1, EphemeralSignalV2, EstablishVaultIdentityV1,
+    LiveHelloV1, LiveHelloV2, MembershipBootstrapV1, MembershipChallengeV1, MembershipControlV1,
+    MembershipDeviceV1, MembershipHintV1, MembershipResponseV1, PairingQrRecord,
+    SessionAckPlaintextV2, TypingPlaintextV2, VaultIdentityStatusV1,
 };
 use schemars::schema_for;
 use serde_json::{Map, Value, json};
@@ -42,6 +42,10 @@ pub fn generate_contracts() -> GeneratedContracts {
         .expect("membership hint schema serializes");
     let membership_control = serde_json::to_value(schema_for!(MembershipControlV1))
         .expect("membership control schema serializes");
+    let vault_identity_establish = serde_json::to_value(schema_for!(EstablishVaultIdentityV1))
+        .expect("vault identity establish schema serializes");
+    let vault_identity_status = serde_json::to_value(schema_for!(VaultIdentityStatusV1))
+        .expect("vault identity status schema serializes");
     let mut components = BTreeMap::new();
     components.extend(extract_components("Envelope", envelope));
     components.extend(extract_components("PairingQrRecord", pairing));
@@ -77,6 +81,14 @@ pub fn generate_contracts() -> GeneratedContracts {
     components.extend(extract_components(
         "MembershipControlV1",
         membership_control,
+    ));
+    components.extend(extract_components(
+        "EstablishVaultIdentityV1",
+        vault_identity_establish,
+    ));
+    components.extend(extract_components(
+        "VaultIdentityStatusV1",
+        vault_identity_status,
     ));
     components.insert(
         "LiveFrameV1".into(),

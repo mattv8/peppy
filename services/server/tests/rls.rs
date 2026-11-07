@@ -5,11 +5,20 @@ use axum::{
     body::Body,
     http::{Method, Request, Response, StatusCode},
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use http_body_util::BodyExt;
 use libsodium_rs::crypto_sign;
-use peppy_crypto::KeyProfile;
-use peppy_server::{ServerBuilder, config::Config, rls};
+use peppy_crypto::{
+    KeyProfile, create_vault_check_header, derive_root_key,
+    vault_identity::{
+        VaultIdentityAnchor, VaultIdentityRecoveryRecord, derive_vault_identity_recovery_key,
+    },
+};
+use peppy_protocol::VAULT_IDENTITY_PROTOCOL_VERSION;
+use peppy_server::{ServerBuilder, api::create_owner, config::Config, rls};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, PgPool, postgres::PgPoolOptions};
@@ -599,6 +608,112 @@ async fn community_runtime_is_rls_scoped_and_control_plane_http_flows_work() {
 }
 
 #[tokio::test]
+async fn vault_identity_routes_use_the_runtime_role_and_survive_vault_cascade() {
+    let fixture = Fixture::new().await;
+    rls::validate_runtime_role(&fixture.runtime, true)
+        .await
+        .unwrap();
+    rls::validate_maintenance_role(&fixture.maintenance)
+        .await
+        .unwrap();
+    let runtime_privileges: (bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT has_table_privilege($1, 'vault_identity_establishments', 'SELECT'), has_table_privilege($1, 'vault_identity_establishments', 'INSERT'), has_table_privilege($1, 'vault_identity_establishments', 'UPDATE'), has_table_privilege($1, 'vault_identity_establishments', 'DELETE')",
+    )
+    .bind(&fixture.runtime_role)
+    .fetch_one(&fixture.migration)
+    .await
+    .unwrap();
+    assert_eq!(runtime_privileges, (true, true, false, false));
+    let maintenance_privileges: (bool, bool, bool) = sqlx::query_as(
+        "SELECT has_table_privilege($1, 'vault_identity_establishments', 'SELECT'), has_table_privilege($1, 'vault_identity_establishments', 'INSERT'), has_table_privilege($1, 'vault_identity_establishments', 'DELETE')",
+    )
+    .bind(&fixture.maintenance_role)
+    .fetch_one(&fixture.migration)
+    .await
+    .unwrap();
+    assert_eq!(maintenance_privileges, (true, false, false));
+
+    let vault = Uuid::new_v4();
+    let profile = KeyProfile::new(vault, 1).unwrap();
+    let root = derive_root_key(ADMIN_PASSWORD, &profile).unwrap();
+    let header = create_vault_check_header(&root, profile.clone()).unwrap();
+    let owner = create_owner(
+        &fixture.migration,
+        serde_json::to_value(&profile).unwrap(),
+        serde_json::to_vec(&header).unwrap(),
+        profile.fingerprint().unwrap(),
+        1,
+    )
+    .await
+    .unwrap();
+    let operation = Uuid::new_v4();
+    let recovery_key = derive_vault_identity_recovery_key(&root, &profile).unwrap();
+    let anchor = VaultIdentityAnchor::generate(vault, operation, owner.device_id).unwrap();
+    let recovery = VaultIdentityRecoveryRecord::wrap(&anchor, &recovery_key, &profile).unwrap();
+    let request = json!({
+        "protocol_version": VAULT_IDENTITY_PROTOCOL_VERSION,
+        "operation_id": operation,
+        "key_epoch": 1,
+        "profile_fingerprint": profile.fingerprint().unwrap(),
+        "recovery_record": STANDARD.encode(recovery.encode()),
+    });
+    let app = fixture.app().await;
+
+    let establish = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/vault/identity")
+                .header("authorization", format!("Bearer {}", owner.device_token))
+                .header("content-type", "application/json")
+                .body(Body::from(request.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(establish.status(), StatusCode::CREATED);
+
+    let get = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/vault/identity")
+                .header("authorization", format!("Bearer {}", owner.device_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(
+        response_body(get).await["operation_id"],
+        operation.to_string()
+    );
+
+    let delete = app
+        .oneshot(
+            Request::delete("/v1/vault")
+                .header("authorization", format!("Bearer {}", owner.device_token))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"vault_id": vault}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM vault_identity_establishments WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&fixture.migration)
+            .await
+            .unwrap();
+    assert_eq!(
+        remaining, 0,
+        "vault cascade removes the established identity"
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn live_ticket_resolver_and_consume_are_runtime_scoped() {
     let fixture = Fixture::new().await;
     let vault_a = Uuid::new_v4();
@@ -722,6 +837,53 @@ async fn live_ticket_resolver_and_consume_are_runtime_scoped() {
 #[tokio::test]
 async fn startup_validation_rejects_grant_policy_and_execute_drift() {
     let fixture = Fixture::new().await;
+
+    sqlx::query(&format!(
+        "GRANT UPDATE ON vault_identity_establishments TO {}",
+        fixture.runtime_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    assert!(
+        rls::validate_runtime_role(&fixture.runtime, true)
+            .await
+            .is_err()
+    );
+    rls::grant_runtime_privileges(&fixture.migration, &fixture.runtime_role)
+        .await
+        .unwrap();
+    sqlx::query(&format!(
+        "REVOKE INSERT ON vault_identity_establishments FROM {}",
+        fixture.runtime_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    assert!(
+        rls::validate_runtime_role(&fixture.runtime, true)
+            .await
+            .is_err()
+    );
+    rls::grant_runtime_privileges(&fixture.migration, &fixture.runtime_role)
+        .await
+        .unwrap();
+
+    sqlx::query(&format!(
+        "GRANT INSERT ON vault_identity_establishments TO {}",
+        fixture.maintenance_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    assert!(
+        rls::validate_maintenance_role(&fixture.maintenance)
+            .await
+            .is_err()
+    );
+    rls::grant_maintenance_privileges(&fixture.migration, &fixture.maintenance_role)
+        .await
+        .unwrap();
 
     sqlx::query("CREATE TABLE unexpected_runtime_table(id integer)")
         .execute(&fixture.migration)

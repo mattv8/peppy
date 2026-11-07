@@ -411,6 +411,45 @@
         ],
         "title": "EphemeralSignalV2"
       },
+      "EstablishVaultIdentityV1": {
+        "additionalProperties": false,
+        "properties": {
+          "key_epoch": {
+            "format": "uint32",
+            "maximum": 4294967295,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "operation_id": {
+            "format": "uuid",
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "type": "string"
+          },
+          "profile_fingerprint": {
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": 1
+          },
+          "recovery_record": {
+            "$ref": "#/components/schemas/VaultIdentityRecoveryRecordV1"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "operation_id",
+          "key_epoch",
+          "profile_fingerprint",
+          "recovery_record"
+        ],
+        "title": "EstablishVaultIdentityV1",
+        "type": "object"
+      },
       "GatewayRoute": {
         "oneOf": [
           {
@@ -1092,6 +1131,80 @@
           }
         ],
         "title": "TypingPlaintextV2"
+      },
+      "VaultIdentityRecoveryRecordV1": {
+        "contentEncoding": "base64",
+        "maxLength": 356,
+        "minLength": 356,
+        "not": {
+          "pattern": "^[A-Za-z0-9+/]{356}$"
+        },
+        "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$",
+        "type": "string",
+        "x-peppy-canonical-base64-bytes": 266
+      },
+      "VaultIdentityStatusV1": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "protocol_version": {
+                "const": 1
+              },
+              "state": {
+                "const": "absent"
+              }
+            },
+            "required": [
+              "state",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "key_epoch": {
+                "format": "uint32",
+                "maximum": 4294967295,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "operation_id": {
+                "format": "uuid",
+                "not": {
+                  "const": "00000000-0000-0000-0000-000000000000"
+                },
+                "type": "string"
+              },
+              "profile_fingerprint": {
+                "maxLength": 64,
+                "minLength": 64,
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "protocol_version": {
+                "const": 1
+              },
+              "recovery_record": {
+                "$ref": "#/components/schemas/VaultIdentityRecoveryRecordV1"
+              },
+              "state": {
+                "const": "established"
+              }
+            },
+            "required": [
+              "state",
+              "protocol_version",
+              "operation_id",
+              "key_epoch",
+              "profile_fingerprint",
+              "recovery_record"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "VaultIdentityStatusV1"
       }
     }
   },

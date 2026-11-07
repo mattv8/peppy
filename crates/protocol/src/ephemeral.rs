@@ -233,7 +233,7 @@ fn canonical_u64_schema(nonzero: bool) -> serde_json::Value {
     schema
 }
 
-fn canonical_standard_base64_schema(
+pub(crate) fn canonical_standard_base64_schema(
     max_length: usize,
     requires_padding_at_max_length: bool,
 ) -> serde_json::Value {

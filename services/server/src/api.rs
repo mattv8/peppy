@@ -4,6 +4,7 @@ mod attachments;
 mod instance;
 mod key_profiles;
 mod sync;
+mod vault_identity;
 
 pub use sync::{DrainStats, TransportOptions, compact_records, drain_outbox, prune_replay_log};
 
@@ -861,6 +862,10 @@ fn build_router_with_live_backend(
         .route(
             "/v1/vault/key-profiles/{key_epoch}/activate",
             post(key_profiles::activate),
+        )
+        .route(
+            "/v1/vault/identity",
+            get(vault_identity::get).post(vault_identity::establish),
         )
         .route("/v1/vault", delete(delete_vault))
         .route("/v1/commands/{command_id}/receipts", post(receipt))
@@ -2031,7 +2036,7 @@ pub(super) async fn auth_with_mode(s: &ApiState, headers: &HeaderMap) -> ApiResu
 /// Re-check the exact bearer credential after serializing on the vault row.
 /// The initial HTTP authentication can otherwise become stale while waiting for
 /// a concurrent revocation/delete transaction to release that lock.
-async fn revalidate_principal(
+pub(super) async fn revalidate_principal(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     principal: &Principal,
 ) -> ApiResult<String> {
@@ -2044,7 +2049,7 @@ async fn revalidate_principal(
         .map_err(|error| database_unavailable(&error, "principal_revalidate"))?
         .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid_bearer"))
 }
-fn owner(p: &Principal) -> ApiResult<()> {
+pub(super) fn owner(p: &Principal) -> ApiResult<()> {
     if p.role == "owner" {
         Ok(())
     } else {
