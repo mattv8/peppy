@@ -35,7 +35,7 @@ jobs:
             echo "version must match X.Y.Z or X.Y.Z-prerelease" >&2
             exit 1
           fi
-          for image in peppy-server peppy-push-relay; do
+          for image in peppy-server peppy-push-relay peppy-mcp; do
             dockerfile="infra/docker/${image#peppy-}.Dockerfile"
             if [[ "$image" == peppy-server ]]; then dockerfile=infra/docker/server.Dockerfile; fi
             docker_args=(
@@ -70,3 +70,5 @@ jobs:
               command -v ldd >/dev/null
               ! ldd /usr/local/bin/peppy-push-relay | grep "not found"
             '
+      - name: Check MCP image
+        run: bash infra/docker/test-mcp-image.sh peppy-mcp:ci

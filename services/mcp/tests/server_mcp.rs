@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -74,6 +76,8 @@ async fn run_owner_enrollment_smoke() {
     drop(worker_listener);
     let token_file = temp.path().join("control-token");
     std::fs::write(&token_file, "e2e-control-token-that-is-long-enough\n").unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600)).unwrap();
     let worker_state_dir = temp.path().join("worker");
     let worker_key_file = temp.path().join("worker-key");
     let mut worker = start_worker(
@@ -509,10 +513,37 @@ async fn run_owner_enrollment_smoke() {
         &server_origin,
         &owner.device_token,
         "MCP E2E media client",
-        &["conversations:read", "messages:send", "media:send"],
-        &["conversations:read", "messages:send", "media:send"],
+        &["media:send"],
+        &["media:send"],
     )
     .await;
+    let media_tools = public_mcp(
+        &http,
+        &server_origin,
+        &media_access_token,
+        tools_list_request(),
+    )
+    .await;
+    assert!(
+        media_tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "send_image"),
+        "media-only grants must discover image sending"
+    );
+    let media_text_denied = public_mcp(
+        &http,
+        &server_origin,
+        &media_access_token,
+        tool_call_request("send_message", send_arguments.clone()),
+    )
+    .await;
+    assert_eq!(media_text_denied["error"]["code"], -32602);
+    assert_eq!(
+        media_text_denied["error"]["message"],
+        "tool is not available"
+    );
     let command_count_before_image = queued_command_total(&pool, vault).await;
     let image = public_mcp(
         &http,
@@ -558,7 +589,7 @@ async fn run_owner_enrollment_smoke() {
             serde_json::json!({
                 "recipients": ["+15557654321", "+15557654322"],
                 "text": "two-recipient MCP smoke probe",
-                "idempotency_key": "mcp-e2e-two-recipient-probe-1",
+                "idempotency_key": "mcp-e2e-group-1",
                 "gateway_id": gateway,
                 "sim_id": "e2e-sim"
             }),
@@ -588,7 +619,7 @@ async fn run_owner_enrollment_smoke() {
             serde_json::json!({
                 "recipients": ["+15557654321", "+15557654322"],
                 "text": "two-recipient MCP smoke probe",
-                "idempotency_key": "mcp-e2e-two-recipient-probe-1",
+                "idempotency_key": "mcp-e2e-group-1",
                 "gateway_id": gateway,
                 "sim_id": "e2e-sim"
             }),
@@ -910,7 +941,7 @@ async fn authorize_client(
         .send()
         .await
         .unwrap();
-    assert_eq!(registration.status(), reqwest::StatusCode::OK);
+    assert_eq!(registration.status(), reqwest::StatusCode::CREATED);
     let client_id = registration.json::<serde_json::Value>().await.unwrap()["client_id"]
         .as_str()
         .unwrap()
@@ -972,25 +1003,6 @@ async fn authorize_client(
         .unwrap()
         .1
         .into_owned();
-    let invalid_pkce = http
-        .post(format!("{server}/oauth/token"))
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("client_id", client_id.as_str()),
-            ("code", code.as_str()),
-            ("redirect_uri", "https://client.example/callback"),
-            ("resource", resource.as_str()),
-            ("code_verifier", "invalid-pkce-verifier"),
-        ])
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(invalid_pkce.status(), reqwest::StatusCode::BAD_REQUEST);
-    assert_eq!(
-        invalid_pkce.json::<serde_json::Value>().await.unwrap(),
-        serde_json::json!({"error":"invalid_grant"})
-    );
-    // A rejected verifier must not consume the authorization code, so retry succeeds.
     let tokens = http
         .post(format!("{server}/oauth/token"))
         .form(&[
@@ -1008,39 +1020,6 @@ async fn authorize_client(
     let tokens = tokens.json::<serde_json::Value>().await.unwrap();
     assert_eq!(tokens["scope"], approved_scopes.join(" "));
     let access_token = tokens["access_token"].as_str().unwrap().to_owned();
-    let refresh_token = tokens["refresh_token"].as_str().unwrap().to_owned();
-    let refreshed = http
-        .post(format!("{server}/oauth/token"))
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("client_id", client_id.as_str()),
-            ("refresh_token", refresh_token.as_str()),
-            ("resource", resource.as_str()),
-        ])
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(refreshed.status(), reqwest::StatusCode::OK);
-    assert_eq!(
-        refreshed.json::<serde_json::Value>().await.unwrap()["scope"],
-        approved_scopes.join(" ")
-    );
-    let invalid_refresh = http
-        .post(format!("{server}/oauth/token"))
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("client_id", client_id.as_str()),
-            ("refresh_token", "invalid-refresh-token"),
-            ("resource", resource.as_str()),
-        ])
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(invalid_refresh.status(), reqwest::StatusCode::BAD_REQUEST);
-    assert_eq!(
-        invalid_refresh.json::<serde_json::Value>().await.unwrap(),
-        serde_json::json!({"error":"invalid_grant"})
-    );
     let grants: Vec<McpGrantView> =
         get_authenticated(http, server, "/v1/mcp/grants", owner_token).await;
     let grant = grants

@@ -115,3 +115,38 @@ fn process_lock_prevents_token_initialization() {
     assert!(!root.path().join("control/control-token").exists());
     assert!(!root.path().join("keys/storage-key").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn startup_refuses_unsafe_existing_secrets_and_missing_kek_with_state() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let control = root.path().join("control");
+    let keys = root.path().join("keys");
+    fs::create_dir(&state).unwrap();
+    fs::create_dir(&control).unwrap();
+    fs::create_dir(&keys).unwrap();
+    let token = control.join("control-token");
+    fs::write(&token, "existing-control-token-value-that-is-long-enough").unwrap();
+    fs::set_permissions(&token, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        !spawn_worker(root.path(), "127.0.0.1:0")
+            .0
+            .wait()
+            .unwrap()
+            .success()
+    );
+
+    fs::remove_file(token).unwrap();
+    fs::create_dir(state.join("vaults")).unwrap();
+    assert!(
+        !spawn_worker(root.path(), "127.0.0.1:0")
+            .0
+            .wait()
+            .unwrap()
+            .success()
+    );
+    assert!(!keys.join("storage-key").exists());
+}

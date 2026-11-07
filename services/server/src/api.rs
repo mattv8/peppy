@@ -474,6 +474,7 @@ impl Maintenance {
     pub(crate) fn start(self) {
         sync::spawn_maintenance(self.db.clone(), &self.committed, self.storage, self.options);
         spawn_instance_maintenance(self.db.clone());
+        mcp::spawn_oauth_maintenance(self.db.clone());
         mcp::spawn_cleanup_maintenance(self.db.clone(), self.mcp_worker.clone());
         if let Some(relay_url) = self.relay_url {
             spawn_wake_maintenance(self.db, &self.committed, relay_url);

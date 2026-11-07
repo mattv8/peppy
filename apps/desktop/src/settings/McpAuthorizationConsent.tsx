@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Modal } from "@peppy/desktop-ui";
 import type { McpDeviceStatus, McpScope } from "@peppy/desktop-ui/bridge-contracts";
 import { bridge } from "../bridge/bridge";
-import { errorCode } from "../bridge/bridgeErrors";
+import { mcpErrorMessage, mcpServerErrorCode } from "./mcpDisplay";
 import { consentScopeLabels } from "./mcpScopes";
 import "./device-settings.css";
 
@@ -14,7 +14,7 @@ type McpAuthorizationConsentProps = {
   onClose(): void;
 };
 
-const isExpiredAuthorization = (reason: unknown) => errorCode(reason) === "mcp_authorization_not_found";
+const isExpiredAuthorization = (reason: unknown) => mcpServerErrorCode(reason) === "mcp_authorization_not_found";
 
 export function McpAuthorizationConsent({ authorizationId, browserHost, sessionKey, focusFallback, onClose }: McpAuthorizationConsentProps) {
   const [request, setRequest] = useState<Awaited<ReturnType<typeof bridge.mcp_authorization>> | null>(null);
@@ -42,7 +42,7 @@ export function McpAuthorizationConsent({ authorizationId, browserHost, sessionK
     }).catch(reason => {
       if (mounted.current && generation.current === requestGeneration) {
         setExpired(isExpiredAuthorization(reason));
-        setError(reason instanceof Error ? reason.message : "This authorization request is unavailable.");
+        setError(mcpErrorMessage(reason, "This authorization request is unavailable."));
       }
     });
     return () => { mounted.current = false; };
@@ -68,7 +68,7 @@ export function McpAuthorizationConsent({ authorizationId, browserHost, sessionK
     } catch (reason) {
       if (mounted.current && generation.current === decisionGeneration) {
         setExpired(isExpiredAuthorization(reason));
-        setError(reason instanceof Error ? reason.message : "The authorization decision could not be completed.");
+        setError(mcpErrorMessage(reason, approve ? "Couldn't approve this request. Try again." : "Couldn't deny this request. Try again."));
       }
     } finally {
       if (mounted.current && generation.current === decisionGeneration) setPending(false);
@@ -81,19 +81,28 @@ export function McpAuthorizationConsent({ authorizationId, browserHost, sessionK
     setPending(true);
     const navigationGeneration = generation.current;
     try { await redirect(redirectUrl); if (mounted.current && generation.current === navigationGeneration) onClose(); }
-    catch (reason) { if (mounted.current && generation.current === navigationGeneration) setError(reason instanceof Error ? reason.message : "The validated redirect could not be opened."); }
+    catch (reason) { if (mounted.current && generation.current === navigationGeneration) setError(mcpErrorMessage(reason, "The validated redirect could not be opened.")); }
     finally { if (mounted.current && generation.current === navigationGeneration) setPending(false); }
   };
   const ready = request !== null && status !== null;
   const zeroScopes = ready && selected.length === 0;
   const state = redirectUrl ? "redirect" : expired ? "expired" : error ? "error" : ready ? "ready" : "loading";
-  return <Modal id="mcp-authorization-consent" title="Authorize MCP client" busy={pending} opener={opener} focusFallback={focusFallback} onDismiss={() => !pending && onClose()} actions={expired || (!ready && !error) ? <button type="button" className="secondary-button" onClick={onClose}>Close</button> : !ready ? <><button type="button" className="secondary-button" onClick={onClose}>Close</button><button type="button" className="primary-button" onClick={() => { setError(""); setRetryVersion(version => version + 1); }}>Retry</button></> : redirectUrl ? <><button type="button" className="secondary-button" onClick={onClose}>Close</button><button type="button" className="primary-button" disabled={pending} onClick={() => void retryNavigation()}>Retry opening redirect</button></> : <><button type="button" className="secondary-button" disabled={pending} onClick={() => void decide(false)}>Deny access</button><button type="button" className="primary-button" aria-describedby={zeroScopes ? "mcp-scope-required" : undefined} disabled={pending || zeroScopes} onClick={() => void decide(true)}>Approve access</button></>}>
+  const close = <button id="mcp-authorization-close" type="button" className="secondary-button" onClick={onClose}>Close</button>;
+  let actions = close;
+  if (!expired && ready && !redirectUrl) {
+    actions = <><button id="mcp-authorization-deny" type="button" className="secondary-button" disabled={pending} onClick={() => void decide(false)}>Deny access</button><button id="mcp-authorization-approve" type="button" className="primary-button" aria-describedby={zeroScopes ? "mcp-scope-required" : undefined} disabled={pending || zeroScopes} onClick={() => void decide(true)}>Approve access</button></>;
+  } else if (!expired && ready && redirectUrl) {
+    actions = <>{close}<button id="mcp-authorization-retry-redirect" type="button" className="primary-button" disabled={pending} onClick={() => void retryNavigation()}>Retry opening redirect</button></>;
+  } else if (!expired && error) {
+    actions = <>{close}<button id="mcp-authorization-retry" type="button" className="primary-button" onClick={() => { setError(""); setRetryVersion(version => version + 1); }}>Retry</button></>;
+  }
+  return <Modal id="mcp-authorization-consent" title="Authorize MCP client" busy={pending} opener={opener} focusFallback={focusFallback} onDismiss={() => !pending && onClose()} actions={actions}>
     <div id="mcp-authorization-body" data-mcp-authorization-state={state}>
       {!ready && !error && <p id="mcp-authorization-loading" role="status">Loading authorization request…</p>}
-      {expired && <><p role="alert">This authorization request expired or was already used.</p><p>Start the connection again in your AI client.</p></>}
-      {!ready && error && !expired && <p role="alert">{error}</p>}
+      {expired && <><p id="mcp-authorization-expired" role="alert">This authorization request expired or was already used.</p><p>Start the connection again in your AI client.</p></>}
+      {!ready && error && !expired && <p id="mcp-authorization-error" role="alert">{error}</p>}
       {ready && !expired && <>
-        {error && <p role="alert">{error}</p>}
+        {error && <p id="mcp-authorization-error" role="alert">{error}</p>}
         <p id="mcp-authorization-client"><strong>{request.clientName}</strong> requests access to vault {status.vaultId} on {status.serverOrigin}.</p>
         <small id="mcp-authorization-name-note" className="settings-note">Name provided by the requesting app.</small>
         <dl id="mcp-authorization-identity"><div><dt>Returns to</dt><dd><span data-mcp-redirect-origin>{request.redirectOrigin}</span>{request.redirectIsLoopback && <span data-mcp-redirect-local>on this computer</span>}</dd></div><div><dt>Resource</dt><dd>{request.resource}</dd></div></dl>

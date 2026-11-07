@@ -171,6 +171,40 @@ mod tests {
         }
     }
 
+    fn pending_remote_attachment(
+        client: &Client,
+        directory: &std::path::Path,
+    ) -> (AttachmentId, std::path::PathBuf, std::path::PathBuf) {
+        let source = directory.join("image.bin");
+        std::fs::write(&source, b"prepared image").unwrap();
+        let attachment = client
+            .prepare_attachment(&source, "image/png", "image.png")
+            .unwrap();
+        let (cipher_path, downloaded) = {
+            let store = client.lock().unwrap();
+            let cipher_path = crate::media::cipher_path(&store.media_dir, attachment.attachment_id);
+            let downloaded = directory.join("downloaded.ciphertext");
+            std::fs::copy(&cipher_path, &downloaded).unwrap();
+            (cipher_path, downloaded)
+        };
+        client
+            .mark_attachment_uploaded(attachment.attachment_id, &Uuid::new_v4().to_string())
+            .unwrap();
+        client
+            .lock()
+            .unwrap()
+            .conn
+            .execute(
+                "UPDATE attachments SET state=? WHERE attachment_id=?",
+                params![
+                    AttachmentState::PendingDownload.code(),
+                    attachment.attachment_id.to_string()
+                ],
+            )
+            .unwrap();
+        (attachment.attachment_id, cipher_path, downloaded)
+    }
+
     #[test]
     fn retry_replays_one_command_and_conflicting_input_is_rejected_without_mutation() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -261,6 +295,313 @@ mod tests {
         let first = client.queue_mcp_command(command.clone()).unwrap();
         assert_eq!(client.queue_mcp_command(command).unwrap(), first);
         assert_eq!(client.pending_outbox_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn discard_keeps_the_attachment_recoverable_when_ciphertext_unlink_fails() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let client = opened(dir.path().join("mcp.db"), VaultId::new(), DeviceId::new());
+        let source = dir.path().join("image.bin");
+        std::fs::write(&source, b"prepared image").unwrap();
+        let attachment = client
+            .prepare_attachment(&source, "image/png", "image.png")
+            .unwrap();
+        let cipher_path = {
+            let store = client.lock().unwrap();
+            crate::media::cipher_path(&store.media_dir, attachment.attachment_id)
+        };
+        std::fs::remove_file(&cipher_path).unwrap();
+        std::fs::create_dir(&cipher_path).unwrap();
+
+        assert_eq!(
+            client.discard_unreferenced_attachment(attachment.attachment_id),
+            Err(Error::Storage)
+        );
+        assert!(client.attachment_info(attachment.attachment_id).is_ok());
+
+        std::fs::remove_dir(&cipher_path).unwrap();
+        assert!(
+            client
+                .discard_unreferenced_attachment(attachment.attachment_id)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn discard_delete_failure_leaves_a_non_reusable_cleanup_intent_after_reopen() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("mcp.db");
+        let vault = VaultId::new();
+        let device = DeviceId::new();
+        let client = opened(path.clone(), vault, device);
+        let source = dir.path().join("image.bin");
+        std::fs::write(&source, b"prepared image").unwrap();
+        let attachment = client
+            .prepare_attachment(&source, "image/png", "image.png")
+            .unwrap();
+        let downloaded = dir.path().join("downloaded.ciphertext");
+        let cipher_path = {
+            let store = client.lock().unwrap();
+            let path = crate::media::cipher_path(&store.media_dir, attachment.attachment_id);
+            std::fs::copy(&path, &downloaded).unwrap();
+            path
+        };
+        client
+            .mark_attachment_uploaded(attachment.attachment_id, &Uuid::new_v4().to_string())
+            .unwrap();
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute_batch(&format!(
+                    "CREATE TRIGGER fail_discard_delete BEFORE DELETE ON attachments WHEN OLD.attachment_id='{}' BEGIN SELECT RAISE(ABORT, 'forced delete failure'); END;",
+                    attachment.attachment_id
+                ))
+                .unwrap();
+        }
+        assert_eq!(
+            client.discard_unreferenced_attachment(attachment.attachment_id),
+            Err(Error::Database)
+        );
+        let cache = client.export_native_key_cache(1).unwrap();
+        drop(client);
+
+        let client = Client::open(
+            ClientConfig {
+                database_path: path,
+                vault_id: vault,
+                device_id: device,
+            },
+            DatabaseKey::new(&[9; 32]).unwrap(),
+        )
+        .unwrap();
+        client.import_native_key_cache(&cache).unwrap();
+        assert_eq!(
+            client
+                .attachment_info(attachment.attachment_id)
+                .unwrap()
+                .state,
+            AttachmentState::PendingDownload
+        );
+        assert!(
+            client
+                .open_native_plaintext(attachment.attachment_id)
+                .is_err()
+        );
+        {
+            let store = client.lock().unwrap();
+            let inventory: (i64, i64) = store
+                .conn
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM attachments WHERE attachment_id=?), (SELECT COUNT(*) FROM attachment_cleanup_intents WHERE attachment_id=?)",
+                    params![attachment.attachment_id.to_string(), attachment.attachment_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(inventory, (1, 1));
+        }
+        assert!(client.pending_downloads().unwrap().is_empty());
+        assert!(matches!(
+            client.request_attachment_download(attachment.attachment_id),
+            Err(Error::InvalidMedia)
+        ));
+        assert!(matches!(
+            client.install_downloaded_attachment(attachment.attachment_id, &downloaded),
+            Err(Error::InvalidMedia)
+        ));
+        assert!(!cipher_path.exists());
+        let mut reuse = command(
+            Uuid::new_v4(),
+            "discarded-attachment",
+            "retry",
+            route(),
+            ConversationId::new(),
+        );
+        reuse.attachment_ids = vec![attachment.attachment_id];
+        reuse.expected_transport = Transport::Mms;
+        reuse.recipients.push("15557654321".into());
+        assert!(matches!(
+            client.queue_mcp_command(reuse),
+            Err(Error::InvalidRequest(_))
+        ));
+        assert_eq!(client.pending_outbox_count().unwrap(), 0);
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute_batch("DROP TRIGGER fail_discard_delete")
+                .unwrap();
+        }
+        assert!(
+            client
+                .discard_unreferenced_attachment(attachment.attachment_id)
+                .unwrap()
+        );
+        let store = client.lock().unwrap();
+        let inventory: (i64, i64) = store
+            .conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM attachments WHERE attachment_id=?), (SELECT COUNT(*) FROM attachment_cleanup_intents WHERE attachment_id=?)",
+                params![attachment.attachment_id.to_string(), attachment.attachment_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(inventory, (0, 0));
+    }
+
+    #[test]
+    fn version_45_reopen_adds_cleanup_intents_without_losing_attachment_or_message() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("mcp.db");
+        let vault = VaultId::new();
+        let device = DeviceId::new();
+        let client = opened(path.clone(), vault, device);
+        let source = dir.path().join("image.bin");
+        std::fs::write(&source, b"prepared image").unwrap();
+        let attachment = client
+            .prepare_attachment(&source, "image/png", "image.png")
+            .unwrap();
+        client
+            .queue_mcp_command(command(
+                Uuid::new_v4(),
+                "schema-45",
+                "preserve this message",
+                route(),
+                ConversationId::new(),
+            ))
+            .unwrap();
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "DROP TABLE attachment_cleanup_intents;
+                     UPDATE schema_meta SET version=45;",
+                )
+                .unwrap();
+        }
+        drop(client);
+
+        let reopened = Client::open(
+            ClientConfig {
+                database_path: path,
+                vault_id: vault,
+                device_id: device,
+            },
+            DatabaseKey::new(&[9; 32]).unwrap(),
+        )
+        .unwrap();
+        let store = reopened.lock().unwrap();
+        let state: String = store
+            .conn
+            .query_row(
+                "SELECT state FROM attachments WHERE attachment_id=?",
+                params![attachment.attachment_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let inventory: (i64, i64, i64) = store
+            .conn
+            .query_row(
+                "SELECT (SELECT version FROM schema_meta), (SELECT COUNT(*) FROM messages), (SELECT COUNT(*) FROM attachment_cleanup_intents)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, AttachmentState::PendingUpload.code());
+        assert_eq!(inventory, (46, 1, 0));
+    }
+
+    #[test]
+    fn paused_install_cannot_promote_after_discard_delete_aborts() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client = opened(
+            directory.path().join("mcp.db"),
+            VaultId::new(),
+            DeviceId::new(),
+        );
+        let (attachment_id, cipher_path, downloaded) =
+            pending_remote_attachment(&client, directory.path());
+        let pause = crate::media::pause_install_before_promotion(attachment_id);
+        let installer = client.clone();
+        let installing = std::thread::spawn(move || {
+            installer.install_downloaded_attachment(attachment_id, &downloaded)
+        });
+        pause.wait_until_entered();
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute_batch(&format!(
+                    "CREATE TRIGGER fail_discard_delete BEFORE DELETE ON attachments WHEN OLD.attachment_id='{}' BEGIN SELECT RAISE(ABORT, 'forced delete failure'); END;",
+                    attachment_id
+                ))
+                .unwrap();
+        }
+        assert_eq!(
+            client.discard_unreferenced_attachment(attachment_id),
+            Err(Error::Database)
+        );
+        pause.resume();
+        assert_eq!(installing.join().unwrap(), Err(Error::InvalidMedia));
+        assert!(!cipher_path.exists());
+    }
+
+    #[test]
+    fn paused_install_cannot_publish_an_orphan_after_successful_discard() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client = opened(
+            directory.path().join("mcp.db"),
+            VaultId::new(),
+            DeviceId::new(),
+        );
+        let (attachment_id, cipher_path, downloaded) =
+            pending_remote_attachment(&client, directory.path());
+        let pause = crate::media::pause_install_before_promotion(attachment_id);
+        let installer = client.clone();
+        let installing = std::thread::spawn(move || {
+            installer.install_downloaded_attachment(attachment_id, &downloaded)
+        });
+        pause.wait_until_entered();
+        assert!(
+            client
+                .discard_unreferenced_attachment(attachment_id)
+                .unwrap()
+        );
+        pause.resume();
+        assert_eq!(installing.join().unwrap(), Err(Error::InvalidMedia));
+        assert!(!cipher_path.exists());
+        assert_eq!(client.attachment_info(attachment_id), Err(Error::NotFound));
+    }
+
+    #[test]
+    fn paused_installer_adopts_available_media_without_removing_ciphertext() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client = opened(
+            directory.path().join("mcp.db"),
+            VaultId::new(),
+            DeviceId::new(),
+        );
+        let (attachment_id, cipher_path, downloaded) =
+            pending_remote_attachment(&client, directory.path());
+        let pause = crate::media::pause_install_before_promotion(attachment_id);
+        let installer = client.clone();
+        let installing = std::thread::spawn(move || {
+            installer.install_downloaded_attachment(attachment_id, &downloaded)
+        });
+        pause.wait_until_entered();
+        assert!(
+            client
+                .install_downloaded_attachment(
+                    attachment_id,
+                    &directory.path().join("downloaded.ciphertext")
+                )
+                .is_ok()
+        );
+        pause.resume();
+        assert_eq!(installing.join().unwrap(), Ok(()));
+        assert!(cipher_path.exists());
+        assert!(client.open_native_plaintext(attachment_id).is_ok());
     }
 
     #[test]

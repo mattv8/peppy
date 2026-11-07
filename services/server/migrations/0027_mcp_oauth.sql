@@ -24,6 +24,8 @@ CREATE TABLE mcp_oauth_authorizations (
   UNIQUE (id, vault_id)
 );
 CREATE INDEX mcp_oauth_authorizations_pending_idx ON mcp_oauth_authorizations(expires_at) WHERE decided_at IS NULL AND denied_at IS NULL;
+CREATE INDEX mcp_oauth_authorizations_expires_idx ON mcp_oauth_authorizations(expires_at);
+CREATE INDEX mcp_oauth_authorizations_client_idx ON mcp_oauth_authorizations(client_id);
 
 CREATE TABLE mcp_oauth_codes (
   digest bytea PRIMARY KEY CHECK (octet_length(digest) = 32),
@@ -54,6 +56,14 @@ CREATE TABLE mcp_oauth_tokens (
   FOREIGN KEY (vault_id, device_id) REFERENCES mcp_devices(vault_id, device_id) ON DELETE CASCADE
 );
 CREATE INDEX mcp_oauth_tokens_live_idx ON mcp_oauth_tokens(digest) WHERE revoked_at IS NULL;
+CREATE INDEX mcp_oauth_tokens_family_live_idx ON mcp_oauth_tokens(family_id) WHERE revoked_at IS NULL;
+CREATE INDEX mcp_oauth_tokens_grant_idx ON mcp_oauth_tokens(grant_id);
+CREATE INDEX mcp_oauth_tokens_client_expires_idx ON mcp_oauth_tokens(client_id, expires_at);
+CREATE INDEX mcp_oauth_tokens_expires_idx ON mcp_oauth_tokens(expires_at);
+CREATE INDEX mcp_oauth_codes_grant_idx ON mcp_oauth_codes(grant_id);
+CREATE INDEX mcp_oauth_codes_expires_idx ON mcp_oauth_codes(expires_at);
+CREATE INDEX mcp_oauth_codes_client_idx ON mcp_oauth_codes(client_id);
+CREATE INDEX mcp_oauth_clients_created_idx ON mcp_oauth_clients(created_at);
 
 ALTER TABLE mcp_oauth_codes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mcp_oauth_tokens ENABLE ROW LEVEL SECURITY;
@@ -101,7 +111,7 @@ BEGIN
     SET search_path TO pg_catalog, public, pg_temp
     AS $body$
       SELECT c.vault_id FROM %I.mcp_oauth_codes c
-      WHERE octet_length($1)=32 AND c.digest=$1 AND c.expires_at > now() AND c.used_at IS NULL
+       WHERE octet_length($1)=32 AND c.digest=$1 AND c.expires_at > now() AND c.used_at IS NULL
     $body$ $function$, schema_name, schema_name);
   EXECUTE format($function$
     CREATE FUNCTION %I.mcp_resolve_refresh_token(bytea)
@@ -117,15 +127,41 @@ BEGIN
     RETURNS void LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO pg_catalog, public, pg_temp
     AS $body$
+    DECLARE
+      sweep_now timestamptz := clock_timestamp();
+      code_cutoff timestamptz := sweep_now - interval '1 day';
+      token_cutoff timestamptz := sweep_now - interval '7 days';
+      candidate record;
     BEGIN
       DELETE FROM %I.mcp_oauth_authorizations WHERE id IN (
-        SELECT id FROM %I.mcp_oauth_authorizations WHERE expires_at <= now() ORDER BY expires_at LIMIT 256
+        SELECT id FROM %I.mcp_oauth_authorizations WHERE expires_at <= sweep_now ORDER BY expires_at LIMIT 512
       );
-      DELETE FROM %I.mcp_oauth_clients c
-      WHERE c.created_at < now() - interval '24 hours'
-        AND NOT EXISTS (SELECT 1 FROM %I.mcp_oauth_authorizations a WHERE a.client_id=c.client_id AND a.expires_at > now())
-        AND NOT EXISTS (SELECT 1 FROM %I.mcp_oauth_tokens t WHERE t.client_id=c.client_id AND t.expires_at > now() AND t.revoked_at IS NULL);
-    END $body$ $function$, schema_name, schema_name, schema_name, schema_name, schema_name, schema_name);
+      DELETE FROM %I.mcp_oauth_codes WHERE digest IN (
+        SELECT digest FROM %I.mcp_oauth_codes
+        WHERE expires_at <= code_cutoff
+        ORDER BY expires_at LIMIT 512
+      );
+      DELETE FROM %I.mcp_oauth_tokens WHERE digest IN (
+        SELECT digest FROM %I.mcp_oauth_tokens
+        WHERE expires_at <= token_cutoff
+        ORDER BY expires_at LIMIT 512
+      );
+      FOR candidate IN
+        SELECT c.client_id FROM %I.mcp_oauth_clients c
+        WHERE c.created_at < sweep_now - interval '24 hours'
+          AND NOT EXISTS (SELECT 1 FROM %I.mcp_oauth_authorizations a WHERE a.client_id=c.client_id)
+          AND NOT EXISTS (SELECT 1 FROM %I.mcp_oauth_codes code WHERE code.client_id=c.client_id)
+          AND NOT EXISTS (SELECT 1 FROM %I.mcp_oauth_tokens token WHERE token.client_id=c.client_id)
+        ORDER BY c.created_at LIMIT 512 FOR UPDATE SKIP LOCKED
+      LOOP
+        IF NOT EXISTS (SELECT 1 FROM %I.mcp_oauth_authorizations a WHERE a.client_id=candidate.client_id)
+          AND NOT EXISTS (SELECT 1 FROM %I.mcp_oauth_codes code WHERE code.client_id=candidate.client_id)
+          AND NOT EXISTS (SELECT 1 FROM %I.mcp_oauth_tokens token WHERE token.client_id=candidate.client_id)
+        THEN
+          DELETE FROM %I.mcp_oauth_clients WHERE client_id=candidate.client_id;
+        END IF;
+      END LOOP;
+    END $body$ $function$, schema_name, schema_name, schema_name, schema_name, schema_name, schema_name, schema_name, schema_name, schema_name, schema_name, schema_name, schema_name, schema_name, schema_name, schema_name);
   EXECUTE format('REVOKE ALL ON FUNCTION %I.mcp_resolve_access_token(bytea) FROM PUBLIC', schema_name);
   EXECUTE format('REVOKE ALL ON FUNCTION %I.mcp_resolve_code(bytea) FROM PUBLIC', schema_name);
   EXECUTE format('REVOKE ALL ON FUNCTION %I.mcp_resolve_refresh_token(bytea) FROM PUBLIC', schema_name);

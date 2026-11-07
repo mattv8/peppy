@@ -16,7 +16,6 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum McpDeviceState {
-    Pending,
     Online,
     Offline,
     NeedsApproval,
@@ -26,7 +25,6 @@ pub enum McpDeviceState {
 impl fmt::Display for McpDeviceState {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::Pending => "pending",
             Self::Online => "online",
             Self::Offline => "offline",
             Self::NeedsApproval => "needs_approval",
@@ -53,6 +51,69 @@ impl fmt::Display for McpScope {
             Self::MediaSend => "media:send",
         })
     }
+}
+
+impl McpScope {
+    pub const ALL: [Self; 3] = [Self::ConversationsRead, Self::MessagesSend, Self::MediaSend];
+
+    pub fn is_valid_set(scopes: &[Self]) -> bool {
+        !scopes.is_empty()
+            && scopes.len() <= Self::ALL.len()
+            && scopes
+                .iter()
+                .enumerate()
+                .all(|(index, scope)| !scopes[..index].contains(scope))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct McpToolScopes {
+    pub name: &'static str,
+    pub required_scopes: &'static [McpScope],
+}
+
+pub const MCP_TOOL_SCOPES: &[McpToolScopes] = &[
+    McpToolScopes {
+        name: "list_conversations",
+        required_scopes: &[McpScope::ConversationsRead],
+    },
+    McpToolScopes {
+        name: "get_messages",
+        required_scopes: &[McpScope::ConversationsRead],
+    },
+    McpToolScopes {
+        name: "get_attachment",
+        required_scopes: &[McpScope::ConversationsRead],
+    },
+    McpToolScopes {
+        name: "list_contacts",
+        required_scopes: &[McpScope::ConversationsRead],
+    },
+    McpToolScopes {
+        name: "send_message",
+        required_scopes: &[McpScope::MessagesSend],
+    },
+    McpToolScopes {
+        name: "send_reaction_text",
+        required_scopes: &[McpScope::MessagesSend],
+    },
+    McpToolScopes {
+        name: "send_image",
+        required_scopes: &[McpScope::MediaSend],
+    },
+];
+
+pub fn mcp_tool_scopes(name: &str) -> Option<&'static [McpScope]> {
+    MCP_TOOL_SCOPES
+        .iter()
+        .find(|tool| tool.name == name)
+        .map(|tool| tool.required_scopes)
+}
+
+pub fn mcp_scopes_allow(granted: &[McpScope], required: &[McpScope]) -> bool {
+    McpScope::is_valid_set(granted)
+        && McpScope::is_valid_set(required)
+        && required.iter().all(|scope| granted.contains(scope))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -112,6 +173,22 @@ pub struct McpEnrollmentPreparation {
     pub pairing: ComputerPairingQr,
 }
 
+/// Private host transport only. Never serialize this through shared renderer contracts.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpHostActivationRequest {
+    pub operation_id: Uuid,
+    pub status: ComputerEnrollmentStatus,
+}
+
+/// Private host transport only. Never serialize this through shared renderer contracts.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpHostCompletionRequest {
+    pub operation_id: Uuid,
+    pub admission: AdmissionComplete,
+}
+
 /// Trusted server-to-worker control wire. It is intentionally snake_case and
 /// must never be exposed to renderers or public OAuth clients.
 #[derive(Clone, Serialize, Deserialize)]
@@ -165,6 +242,18 @@ pub struct McpWorkerCompleteRequest {
 #[serde(deny_unknown_fields)]
 pub struct McpWorkerStatusRequest {
     pub vault_id: Uuid,
+    pub device_id: Uuid,
+}
+
+/// Trusted worker-to-host status wire. It is intentionally snake_case and
+/// identifies the device whose runtime state was observed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpWorkerStatusResponse {
+    pub vault_id: Uuid,
+    pub device_id: Uuid,
+    pub state: McpDeviceState,
+    pub last_synced_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -186,7 +275,10 @@ pub struct McpWorkerCallRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::{McpDeviceState, McpDeviceStatus, McpScope};
+    use super::{
+        MCP_TOOL_SCOPES, McpDeviceState, McpDeviceStatus, McpScope, McpWorkerStatusRequest,
+        McpWorkerStatusResponse, mcp_scopes_allow, mcp_tool_scopes,
+    };
     use uuid::Uuid;
 
     #[test]
@@ -209,7 +301,75 @@ mod tests {
                 "device": null,
             })
         );
-        assert_eq!(McpDeviceState::Pending.to_string(), "pending");
+        assert_eq!(McpDeviceState::Online.to_string(), "online");
         assert_eq!(McpScope::MessagesSend.to_string(), "messages:send");
+    }
+
+    #[test]
+    fn tool_scopes_are_unique_and_require_complete_valid_sets() {
+        assert_eq!(MCP_TOOL_SCOPES.len(), 7);
+        assert!(MCP_TOOL_SCOPES.iter().enumerate().all(|(index, tool)| {
+            MCP_TOOL_SCOPES[..index]
+                .iter()
+                .all(|prior| prior.name != tool.name)
+                && McpScope::is_valid_set(tool.required_scopes)
+        }));
+        assert_eq!(
+            mcp_tool_scopes("send_image"),
+            Some(&[McpScope::MediaSend][..])
+        );
+        assert!(mcp_scopes_allow(
+            &[McpScope::ConversationsRead, McpScope::MediaSend],
+            mcp_tool_scopes("send_image").unwrap(),
+        ));
+        assert!(!mcp_scopes_allow(
+            &[McpScope::MessagesSend],
+            mcp_tool_scopes("send_image").unwrap(),
+        ));
+        assert!(!McpScope::is_valid_set(&[
+            McpScope::ConversationsRead,
+            McpScope::MediaSend,
+            McpScope::ConversationsRead,
+        ]));
+    }
+
+    #[test]
+    fn worker_status_requests_are_bound_to_a_device() {
+        let vault_id = Uuid::nil();
+        let device_id = Uuid::new_v4();
+        assert!(
+            serde_json::from_value::<McpWorkerStatusRequest>(serde_json::json!({
+                "vault_id": vault_id,
+                "device_id": device_id,
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<McpWorkerStatusRequest>(serde_json::json!({
+                "vault_id": vault_id,
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn worker_status_responses_identify_the_observed_device() {
+        let vault_id = Uuid::nil();
+        let device_id = Uuid::new_v4();
+        let response = McpWorkerStatusResponse {
+            vault_id,
+            device_id,
+            state: McpDeviceState::Online,
+            last_synced_at: None,
+        };
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            serde_json::json!({
+                "vault_id": vault_id,
+                "device_id": device_id,
+                "state": "online",
+                "last_synced_at": null,
+            })
+        );
     }
 }

@@ -2,7 +2,7 @@ use std::{path::PathBuf, sync::Arc, time::SystemTime};
 
 use peppy_client_core::{Client, ClientConfig, DatabaseKey, NativeKeyCache};
 use peppy_domain::{DeviceId, VaultId};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
@@ -11,6 +11,8 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::custody::{Custody, CustodyError};
 
 const RECORD_NAME: &str = "runtime";
+const MAX_CONTROL_RESPONSE_BYTES: usize = 8 * 1024 * 1024 + 64 * 1024;
+const MAX_RETENTION_PREPARATION_PASSES: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeState {
@@ -46,6 +48,24 @@ struct StoredRuntime {
     database_key: Vec<u8>,
     device_credential: String,
     key_cache: Vec<u8>,
+    completion: Option<CompletionBinding>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct CompletionBinding {
+    pub operation_id: Uuid,
+    pub admission: [u8; 32],
+}
+
+/// Approved restart material for one vault/device binding, handed to
+/// `Runtime::persist_approved` as a single unit.
+pub(crate) struct ApprovedBinding {
+    pub vault_id: VaultId,
+    pub device_id: DeviceId,
+    pub database_key: [u8; 32],
+    pub device_credential: String,
+    pub key_cache: NativeKeyCache,
+    pub completion: CompletionBinding,
 }
 
 impl Drop for StoredRuntime {
@@ -69,6 +89,8 @@ pub struct Runtime {
     last_synced_at: Arc<Mutex<Option<SystemTime>>>,
     work: Mutex<()>,
     sync_notify: Arc<Notify>,
+    #[cfg(test)]
+    panic_next_sync: std::sync::atomic::AtomicBool,
 }
 
 impl Runtime {
@@ -101,6 +123,8 @@ impl Runtime {
             last_synced_at: Arc::new(Mutex::new(None)),
             work: Mutex::new(()),
             sync_notify: Arc::new(Notify::new()),
+            #[cfg(test)]
+            panic_next_sync: std::sync::atomic::AtomicBool::new(false),
         }
     }
     /// Deletes only artifacts owned by this vault state directory. It is usable
@@ -120,6 +144,7 @@ impl Runtime {
             .map_err(|_| RuntimeError::Custody(CustodyError::Invalid))?;
         remove_dir_if_present(&state_dir.join("custody"))
             .map_err(|_| RuntimeError::Custody(CustodyError::Invalid))?;
+        sync_directory(state_dir).map_err(|_| RuntimeError::Custody(CustodyError::Invalid))?;
         Ok(())
     }
     /// Opens only a complete already-approved binding. Any absent, altered, or
@@ -132,7 +157,43 @@ impl Runtime {
         expected_vault: VaultId,
         expected_device: DeviceId,
     ) -> Result<Self, RuntimeError> {
-        let custody = Custody::open(state_dir.join("custody"), key_file)?;
+        Self::open_existing_with_completion(
+            state_dir,
+            key_file,
+            api_url,
+            expected_vault,
+            expected_device,
+            None,
+        )
+    }
+
+    pub(crate) fn open_completed_existing(
+        state_dir: PathBuf,
+        key_file: PathBuf,
+        api_url: String,
+        expected_vault: VaultId,
+        expected_device: DeviceId,
+        completion: CompletionBinding,
+    ) -> Result<Self, RuntimeError> {
+        Self::open_existing_with_completion(
+            state_dir,
+            key_file,
+            api_url,
+            expected_vault,
+            expected_device,
+            Some(completion),
+        )
+    }
+
+    fn open_existing_with_completion(
+        state_dir: PathBuf,
+        key_file: PathBuf,
+        api_url: String,
+        expected_vault: VaultId,
+        expected_device: DeviceId,
+        completion: Option<CompletionBinding>,
+    ) -> Result<Self, RuntimeError> {
+        let custody = Custody::open_existing(state_dir.join("custody"), key_file)?;
         let aad = runtime_aad(expected_vault, expected_device);
         let Some(bytes) = custody.load(RECORD_NAME, &aad)? else {
             return Err(RuntimeError::NeedsApproval);
@@ -144,6 +205,9 @@ impl Runtime {
             || stored.database_key.len() != 32
             || stored.device_credential.is_empty()
             || stored.key_cache.is_empty()
+            || completion
+                .as_ref()
+                .is_some_and(|expected| stored.completion.as_ref() != Some(expected))
         {
             return Err(RuntimeError::NeedsApproval);
         }
@@ -173,33 +237,40 @@ impl Runtime {
             last_synced_at: Arc::new(Mutex::new(None)),
             work: Mutex::new(()),
             sync_notify: Arc::new(Notify::new()),
+            #[cfg(test)]
+            panic_next_sync: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
     /// Durably writes all restart material as one encrypted custody record only
     /// after client-core has installed the verified handoff and exported its
     /// bound purpose-key cache.
-    pub fn persist_approved(
+    pub(crate) fn persist_approved(
         state_dir: PathBuf,
         key_file: PathBuf,
-        vault_id: VaultId,
-        device_id: DeviceId,
-        database_key: [u8; 32],
-        device_credential: String,
-        key_cache: NativeKeyCache,
+        approved: ApprovedBinding,
     ) -> Result<(), RuntimeError> {
+        let ApprovedBinding {
+            vault_id,
+            device_id,
+            database_key,
+            device_credential,
+            key_cache,
+            completion,
+        } = approved;
         if device_credential.is_empty() {
             return Err(RuntimeError::NeedsApproval);
         }
-        let custody = Custody::open(state_dir.join("custody"), key_file)?;
+        let custody = Custody::open_existing(state_dir.join("custody"), key_file)?;
         let record = StoredRuntime {
             vault_id: vault_id.0,
             device_id: device_id.0,
             database_key: database_key.to_vec(),
             device_credential,
             key_cache: key_cache.native_storage_bytes().to_vec(),
+            completion: Some(completion),
         };
-        let bytes = serde_json::to_vec(&record).map_err(|_| RuntimeError::Core)?;
+        let bytes = Zeroizing::new(serde_json::to_vec(&record).map_err(|_| RuntimeError::Core)?);
         custody.store(RECORD_NAME, &runtime_aad(vault_id, device_id), &bytes)?;
         Ok(())
     }
@@ -244,22 +315,12 @@ impl Runtime {
             self.mark_offline().await;
             return Err(RuntimeError::Sync);
         }
-        let roster: serde_json::Value = response.json().await.map_err(|_| RuntimeError::Sync)?;
+        let roster: RosterResponse = read_bounded_json(response).await?;
         let device_is_live = roster
-            .get("devices")
-            .and_then(serde_json::Value::as_array)
-            .and_then(|devices| {
-                devices.iter().find(|device| {
-                    device.get("device_id").and_then(serde_json::Value::as_str)
-                        == Some(&self.device_id.0.to_string())
-                })
-            })
-            .is_some_and(|device| {
-                !device
-                    .get("revoked")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(true)
-            });
+            .devices
+            .iter()
+            .find(|device| device.device_id == self.device_id.0)
+            .is_some_and(|device| !device.revoked);
         if device_is_live {
             Ok(())
         } else {
@@ -285,26 +346,18 @@ impl Runtime {
             self.mark_offline().await;
             return Err(RuntimeError::Sync);
         }
-        let header: serde_json::Value = response.json().await.map_err(|_| RuntimeError::Sync)?;
+        let header: VaultResponse = read_bounded_json(response).await?;
         let profile = self
             .client
             .active_key_profile()
             .map_err(|_| RuntimeError::NeedsApproval)?;
-        let vault_id = self.vault_id.0.to_string();
-        let device_id = self.device_id.0.to_string();
         let fingerprint = profile
             .fingerprint()
             .map_err(|_| RuntimeError::NeedsApproval)?;
-        let matches = header.get("vault_id").and_then(serde_json::Value::as_str)
-            == Some(vault_id.as_str())
-            && header.get("device_id").and_then(serde_json::Value::as_str)
-                == Some(device_id.as_str())
-            && header.get("key_epoch").and_then(serde_json::Value::as_u64)
-                == Some(profile.key_epoch as u64)
-            && header
-                .get("profile_fingerprint")
-                .and_then(serde_json::Value::as_str)
-                == Some(fingerprint.as_str());
+        let matches = header.vault_id == self.vault_id.0
+            && header.device_id == self.device_id.0
+            && header.key_epoch == profile.key_epoch as u64
+            && header.profile_fingerprint == fingerprint;
         if matches {
             Ok(())
         } else {
@@ -317,34 +370,28 @@ impl Runtime {
     /// The active roster identity is validated before capability data is used.
     pub async fn gateway_views(&self) -> Result<Vec<peppy_desktop_api::GatewayView>, RuntimeError> {
         let http = self.transport.client();
-        let devices = http
-            .get(format!("{}/v1/devices", self.transport.origin()))
-            .bearer_auth(self.credential.as_str())
-            .send()
-            .await
-            .map_err(|_| RuntimeError::Sync)?
-            .error_for_status()
-            .map_err(|_| RuntimeError::Sync)?
-            .json::<peppy_desktop_api::gateways::DevicesResponse>()
-            .await
-            .map_err(|_| RuntimeError::Sync)?;
+        let devices: peppy_desktop_api::gateways::DevicesResponse = read_bounded_json(
+            http.get(format!("{}/v1/devices", self.transport.origin()))
+                .bearer_auth(self.credential.as_str())
+                .send()
+                .await
+                .map_err(|_| RuntimeError::Sync)?,
+        )
+        .await?;
         if peppy_desktop_api::gateways::extract_device_role(&devices, &self.device_id.0.to_string())
             .is_none()
         {
             *self.state.lock().await = RuntimeState::Revoked;
             return Err(RuntimeError::NotLive);
         }
-        let capabilities = http
-            .get(format!("{}/v1/capabilities", self.transport.origin()))
-            .bearer_auth(self.credential.as_str())
-            .send()
-            .await
-            .map_err(|_| RuntimeError::Sync)?
-            .error_for_status()
-            .map_err(|_| RuntimeError::Sync)?
-            .json::<peppy_desktop_api::gateways::CapabilitiesResponse>()
-            .await
-            .map_err(|_| RuntimeError::Sync)?;
+        let capabilities: peppy_desktop_api::gateways::CapabilitiesResponse = read_bounded_json(
+            http.get(format!("{}/v1/capabilities", self.transport.origin()))
+                .bearer_auth(self.credential.as_str())
+                .send()
+                .await
+                .map_err(|_| RuntimeError::Sync)?,
+        )
+        .await?;
         Ok(peppy_desktop_api::gateways::gateway_views(
             &devices,
             &capabilities,
@@ -363,7 +410,7 @@ impl Runtime {
         *self.last_synced_at.lock().await
     }
 
-    async fn mark_offline(&self) {
+    pub(crate) async fn mark_offline(&self) {
         let mut state = self.state.lock().await;
         if !matches!(*state, RuntimeState::NeedsApproval | RuntimeState::Revoked) {
             *state = RuntimeState::Offline;
@@ -373,6 +420,19 @@ impl Runtime {
     /// Runs replay, retained-history snapshot recovery, and byte-identical
     /// outbox publishing through the existing gateway host loop.
     pub async fn sync_once(&self) -> Result<usize, RuntimeError> {
+        Ok(self.sync_once_report().await?.applied)
+    }
+
+    pub(crate) async fn sync_once_report(
+        &self,
+    ) -> Result<peppy_gateway_simulator::SyncReport, RuntimeError> {
+        #[cfg(test)]
+        if self
+            .panic_next_sync
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            panic!("test sync panic");
+        }
         let _work = self.work.lock().await;
         match self.state().await {
             RuntimeState::Revoked => return Err(RuntimeError::NotLive),
@@ -386,14 +446,21 @@ impl Runtime {
             self.mark_offline().await;
             return Err(error);
         }
-        let applied = match peppy_gateway_simulator::sync_http_with_transport(
+        let retention_protocol = match self.negotiate_retention_and_compaction().await {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                self.mark_offline().await;
+                return Err(error);
+            }
+        };
+        let report = match peppy_gateway_simulator::sync_http_with_transport_report(
             &self.client,
             &self.transport,
             &self.credential,
         )
         .await
         {
-            Ok(applied) => applied,
+            Ok(report) => report,
             Err(_) => {
                 self.mark_offline().await;
                 return Err(RuntimeError::Sync);
@@ -411,10 +478,11 @@ impl Runtime {
             self.mark_offline().await;
             return Err(RuntimeError::Sync);
         }
-        if let Err(error) = peppy_gateway_simulator::upload_media_with_transport(
+        if let Err(error) = peppy_gateway_simulator::upload_media_with_transport_retention(
             &self.client,
             &self.transport,
             &self.credential,
+            retention_protocol,
         )
         .await
             && !matches!(error, peppy_gateway_simulator::SimulatorError::Rejected(_))
@@ -422,10 +490,11 @@ impl Runtime {
             self.mark_offline().await;
             return Err(RuntimeError::Sync);
         }
-        if let Err(error) = peppy_gateway_simulator::upload_pending_with_transport(
+        if let Err(error) = peppy_gateway_simulator::upload_pending_with_transport_retention(
             &self.client,
             &self.transport,
             &self.credential,
+            retention_protocol,
         )
         .await
         {
@@ -444,7 +513,216 @@ impl Runtime {
         }
         *self.state.lock().await = RuntimeState::Online;
         *self.last_synced_at.lock().await = Some(SystemTime::now());
-        Ok(applied)
+        Ok(report)
+    }
+
+    async fn negotiate_retention_and_compaction(&self) -> Result<bool, RuntimeError> {
+        let capability = peppy_hosted_api::attachments::RetentionCapabilityRequest {
+            protocol_version: peppy_hosted_api::attachments::RetentionCapabilityRequest::VERSION,
+            cleanup_ready: false,
+        };
+        let response = self
+            .transport
+            .client()
+            .post(format!(
+                "{}/v1/attachments/retention/capability",
+                self.transport.origin()
+            ))
+            .bearer_auth(self.credential.as_str())
+            .json(&capability)
+            .send()
+            .await
+            .map_err(|_| RuntimeError::Sync)?;
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED
+        ) {
+            self.client
+                .configure_attachment_retention_protocol(false)
+                .map_err(|_| RuntimeError::Core)?;
+        } else if response.status().is_success() {
+            self.client
+                .configure_attachment_retention_protocol(true)
+                .map_err(|_| RuntimeError::Core)?;
+            if !self.reconcile_retention().await? {
+                return Ok(false);
+            }
+        } else if response.status().as_u16() == 401 {
+            *self.state.lock().await = RuntimeState::Revoked;
+            return Err(RuntimeError::NotLive);
+        } else if response.status().as_u16() != 403 {
+            return Err(RuntimeError::Sync);
+        }
+        let compaction = self
+            .transport
+            .client()
+            .post(format!(
+                "{}/v1/compaction/capability",
+                self.transport.origin()
+            ))
+            .bearer_auth(self.credential.as_str())
+            .send()
+            .await
+            .map_err(|_| RuntimeError::Sync)?;
+        if compaction.status().as_u16() == 401 {
+            *self.state.lock().await = RuntimeState::Revoked;
+            return Err(RuntimeError::NotLive);
+        }
+        if !compaction.status().is_success() && !matches!(compaction.status().as_u16(), 403..=405) {
+            return Err(RuntimeError::Sync);
+        }
+        self.client
+            .attachment_retention_protocol_enabled()
+            .map_err(|_| RuntimeError::Core)
+    }
+
+    async fn reconcile_retention(&self) -> Result<bool, RuntimeError> {
+        for _ in 0..MAX_RETENTION_PREPARATION_PASSES {
+            let operations = self
+                .client
+                .prepare_attachment_retention_operations(256)
+                .map_err(|_| RuntimeError::Core)?;
+            for operation in operations {
+                let Some(response) = self.send_retention_operation(&operation).await? else {
+                    return Ok(false);
+                };
+                self.client
+                    .apply_attachment_retention_response(&response)
+                    .map_err(|_| RuntimeError::Core)?;
+            }
+            if !self
+                .client
+                .attachment_retention_preparation_pending()
+                .map_err(|_| RuntimeError::Core)?
+            {
+                self.client
+                    .mark_attachment_retention_reconciled()
+                    .map_err(|_| RuntimeError::Core)?;
+                let cleanup_ready = self
+                    .client
+                    .attachment_retention_ready()
+                    .map_err(|_| RuntimeError::Core)?;
+                let request = peppy_hosted_api::attachments::RetentionCapabilityRequest {
+                    protocol_version:
+                        peppy_hosted_api::attachments::RetentionCapabilityRequest::VERSION,
+                    cleanup_ready,
+                };
+                let response = self
+                    .transport
+                    .client()
+                    .post(format!(
+                        "{}/v1/attachments/retention/capability",
+                        self.transport.origin()
+                    ))
+                    .bearer_auth(self.credential.as_str())
+                    .json(&request)
+                    .send()
+                    .await
+                    .map_err(|_| RuntimeError::Sync)?;
+                if response.status().is_success() {
+                    return Ok(cleanup_ready);
+                }
+                if response.status().as_u16() == 403 {
+                    return Ok(false);
+                }
+                return Err(RuntimeError::Sync);
+            }
+        }
+        Err(RuntimeError::Sync)
+    }
+
+    async fn send_retention_operation(
+        &self,
+        operation: &peppy_client_core::PendingAttachmentUseOperation,
+    ) -> Result<Option<peppy_client_core::AttachmentUseResponse>, RuntimeError> {
+        use peppy_client_core::{
+            AttachmentUseKind, AttachmentUseOperationKind, AttachmentUseResponse,
+            AttachmentUseState,
+        };
+        use peppy_hosted_api::attachments::{
+            ATTACHMENT_RETENTION_PROTOCOL_HEADER, ATTACHMENT_RETENTION_PROTOCOL_VERSION,
+            AttachmentUseKind as HostedKind, AttachmentUseResponse as HostedResponse,
+            RegisterAttachmentUseRequest, ReleaseAttachmentUseRequest,
+        };
+        let kind = match operation.kind {
+            AttachmentUseKind::MessageHistory => HostedKind::MessageHistory,
+            AttachmentUseKind::PendingSend => HostedKind::PendingSend,
+            AttachmentUseKind::ContactPhoto => HostedKind::ContactPhoto,
+            AttachmentUseKind::RestoreCritical => HostedKind::RestoreCritical,
+        };
+        let base = format!(
+            "{}/v1/attachments/{}/retention-uses",
+            self.transport.origin(),
+            operation.attachment_id
+        );
+        let response = match operation.operation {
+            AttachmentUseOperationKind::Register => {
+                self.transport
+                    .client()
+                    .post(base)
+                    .header(
+                        ATTACHMENT_RETENTION_PROTOCOL_HEADER,
+                        ATTACHMENT_RETENTION_PROTOCOL_VERSION,
+                    )
+                    .bearer_auth(self.credential.as_str())
+                    .json(&RegisterAttachmentUseRequest {
+                        use_id: operation.use_id,
+                        attachment_id: operation.attachment_id.0,
+                        device_id: operation.device_id.0,
+                        kind,
+                    })
+                    .send()
+                    .await
+            }
+            AttachmentUseOperationKind::Release => {
+                self.transport
+                    .client()
+                    .post(format!("{base}/{}/release", operation.use_id))
+                    .header(
+                        ATTACHMENT_RETENTION_PROTOCOL_HEADER,
+                        ATTACHMENT_RETENTION_PROTOCOL_VERSION,
+                    )
+                    .bearer_auth(self.credential.as_str())
+                    .json(&ReleaseAttachmentUseRequest {
+                        use_id: operation.use_id,
+                        attachment_id: operation.attachment_id.0,
+                        device_id: operation.device_id.0,
+                    })
+                    .send()
+                    .await
+            }
+        }
+        .map_err(|_| RuntimeError::Sync)?;
+        if response.status().as_u16() == 403 {
+            return Ok(None);
+        }
+        let hosted: HostedResponse = read_bounded_json(response).await?;
+        Ok(Some(AttachmentUseResponse {
+            use_id: hosted.use_id,
+            attachment_id: peppy_domain::AttachmentId(hosted.attachment_id),
+            device_id: DeviceId(hosted.device_id),
+            kind: operation.kind,
+            state: match hosted.state {
+                peppy_hosted_api::attachments::AttachmentUseState::Registered => {
+                    AttachmentUseState::Registered
+                }
+                peppy_hosted_api::attachments::AttachmentUseState::Released => {
+                    AttachmentUseState::Released
+                }
+            },
+        }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn panic_next_sync(&self) {
+        self.panic_next_sync
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sync_panic_pending(&self) -> bool {
+        self.panic_next_sync
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Server fencing precedes this call. The durable record is removed only
@@ -472,6 +750,14 @@ fn remove_dir_if_present(path: &std::path::Path) -> std::io::Result<()> {
     }
 }
 
+fn sync_directory(path: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::File::open(path) {
+        Ok(directory) => directory.sync_all(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn remove_owned_scratch(state_dir: &std::path::Path) -> std::io::Result<()> {
     let entries = match std::fs::read_dir(state_dir) {
         Ok(entries) => entries,
@@ -493,6 +779,60 @@ fn remove_owned_scratch(state_dir: &std::path::Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn sweep_owned_scratch(state_dir: &std::path::Path) -> std::io::Result<()> {
+    let vaults = state_dir.join("vaults");
+    let entries = match std::fs::read_dir(vaults) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            remove_owned_scratch(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RosterResponse {
+    devices: Vec<RosterDevice>,
+}
+#[derive(Deserialize)]
+struct RosterDevice {
+    device_id: Uuid,
+    revoked: bool,
+}
+#[derive(Deserialize)]
+struct VaultResponse {
+    vault_id: Uuid,
+    device_id: Uuid,
+    key_epoch: u64,
+    profile_fingerprint: String,
+}
+
+async fn read_bounded_json<T: DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, RuntimeError> {
+    if !response.status().is_success() {
+        return Err(RuntimeError::Sync);
+    }
+    let mut bytes = Vec::new();
+    let mut response = response;
+    while let Some(chunk) = response.chunk().await.map_err(|_| RuntimeError::Sync)? {
+        let next = bytes
+            .len()
+            .checked_add(chunk.len())
+            .ok_or(RuntimeError::Sync)?;
+        if next > MAX_CONTROL_RESPONSE_BYTES {
+            return Err(RuntimeError::Sync);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| RuntimeError::Sync)
 }
 
 fn runtime_aad(vault_id: VaultId, device_id: DeviceId) -> Vec<u8> {
@@ -605,6 +945,10 @@ mod tests {
         StatusCode::OK
     }
 
+    async fn fixture_no_content() -> StatusCode {
+        StatusCode::NO_CONTENT
+    }
+
     async fn fixture_download(State(fixture): State<SharedFixture>) -> (StatusCode, Vec<u8>) {
         let mut fixture = fixture.lock().unwrap();
         fixture.transfers += 1;
@@ -639,6 +983,7 @@ mod tests {
             last_synced_at: Arc::new(Mutex::new(None)),
             work: Mutex::new(()),
             sync_notify: Arc::new(Notify::new()),
+            panic_next_sync: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -673,6 +1018,11 @@ mod tests {
             .route("/v1/attachments/reserve", post(fixture_reserve))
             .route("/v1/attachments/{id}/upload", put(fixture_upload))
             .route("/v1/attachments/{id}/finalize", post(fixture_finalize))
+            .route(
+                "/v1/attachments/retention/capability",
+                post(fixture_no_content),
+            )
+            .route("/v1/compaction/capability", post(fixture_no_content))
             .route("/v1/attachments/{id}", get(fixture_download))
             .with_state(fixture.clone());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -903,6 +1253,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_roster_is_transient_and_does_not_revoke_the_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let runtime = test_runtime(
+            temp.path(),
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/v1/devices",
+                    axum::routing::get(|| async {
+                        axum::Json(serde_json::json!({"devices":"bad"}))
+                    }),
+                ),
+            )
+            .await
+            .unwrap()
+        });
+
+        assert!(matches!(runtime.sync_once().await, Err(RuntimeError::Sync)));
+        assert_eq!(runtime.state().await, RuntimeState::Offline);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn status_reports_exact_wire_states_and_recorded_sync_time() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = test_runtime(temp.path(), "http://127.0.0.1:1".into());
@@ -926,7 +1303,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn profile_mismatch_sync_preserves_needs_approval_and_revocation() {
+    async fn malformed_vault_response_is_transient_and_preserves_revocation() {
         let temp = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let runtime = test_runtime(
@@ -950,17 +1327,11 @@ mod tests {
                 }),
             );
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        assert!(matches!(
-            runtime.sync_once().await,
-            Err(RuntimeError::NeedsApproval)
-        ));
-        assert_eq!(runtime.state().await, RuntimeState::NeedsApproval);
+        assert!(matches!(runtime.sync_once().await, Err(RuntimeError::Sync)));
+        assert_eq!(runtime.state().await, RuntimeState::Offline);
         server.abort();
-        assert!(matches!(
-            runtime.sync_once().await,
-            Err(RuntimeError::NeedsApproval)
-        ));
-        assert_eq!(runtime.state().await, RuntimeState::NeedsApproval);
+        assert!(matches!(runtime.sync_once().await, Err(RuntimeError::Sync)));
+        assert_eq!(runtime.state().await, RuntimeState::Offline);
         *runtime.state.lock().await = RuntimeState::Revoked;
         assert!(runtime.sync_once().await.is_err());
         runtime.mark_offline().await;

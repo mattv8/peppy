@@ -672,7 +672,7 @@ impl BrowserCore {
                     ));
                 }
                 let device_id = self.device_id.ok_or_else(unavailable)?;
-                let enrollment = self.enrollment.as_mut().ok_or_else(unavailable)?;
+                let enrollment = self.mcp_enrollment.as_mut().ok_or_else(unavailable)?;
                 enrollment
                     .configure_computer_owner_device(device_id.0)
                     .map_err(|_| invalid())?;
@@ -684,7 +684,7 @@ impl BrowserCore {
             "_worker_mcp_owner_created" => {
                 let input: McpOwnerCreated =
                     serde_json::from_str(raw.get()).map_err(|_| invalid())?;
-                self.enrollment
+                self.mcp_enrollment
                     .as_mut()
                     .ok_or_else(unavailable)?
                     .accept_computer_created(input.created_json)
@@ -695,12 +695,31 @@ impl BrowserCore {
                 empty_new_enrollment(raw)?;
                 let client = self.client()?.clone();
                 let request = self
-                    .enrollment
+                    .mcp_enrollment
                     .as_mut()
                     .ok_or_else(unavailable)?
                     .approve_computer_enrollment_with_client(true, &client)
                     .map_err(|_| unavailable())?;
                 Ok(json!({"request": request}))
+            }
+            "_worker_mcp_owner_begin" => {
+                let input: ExistingOwnerClient =
+                    serde_json::from_str(raw.get()).map_err(|_| invalid())?;
+                let session = self.identity_session.as_ref().ok_or_else(unavailable)?;
+                let (origin, profile, header) =
+                    session.owner_enrollment_material(self.client()?)?;
+                let origin = browser_enrollment_origin(&origin)?;
+                self.mcp_enrollment = Some(
+                    peppy_hosted_client::newenrollment::EnrollmentClient::for_existing_owner(
+                        origin,
+                        ClientKind::Browser,
+                        input.device_name,
+                        profile,
+                        header,
+                    )
+                    .map_err(|_| invalid())?,
+                );
+                Ok(json!({}))
             }
             _ => Err(unknown_command()),
         }
@@ -1169,6 +1188,30 @@ mod tests {
         );
         assert!(owner_view["sas"].as_str().is_some());
         assert!(owner_view["claimDigest"].as_str().is_some());
+        let mcp_pairing = peppy_hosted_client::newenrollment::EnrollmentClient::new(
+            ORIGIN.into(),
+            ClientKind::Desktop,
+            "Peppy MCP".into(),
+        )
+        .unwrap()
+        .begin_computer_claimant()
+        .unwrap();
+        value(&dispatch(
+            &mut core,
+            "_worker_mcp_owner_begin",
+            r#"{"deviceName":"Owner browser"}"#,
+        ));
+        value(&dispatch(
+            &mut core,
+            "_worker_mcp_owner_create",
+            &json!({"pairingJson": mcp_pairing}).to_string(),
+        ));
+        let preserved_view = value(&dispatch(
+            &mut core,
+            "_worker_enrollment_phone_status",
+            &json!({"statusJson": serde_json::to_string(&claimed).unwrap()}).to_string(),
+        ));
+        assert_eq!(preserved_view["claimDigest"], owner_view["claimDigest"]);
         let approval = value(&dispatch(
             &mut core,
             "_worker_enrollment_approve_phone_invitation",
@@ -1239,7 +1282,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_owner_mcp_create_requires_reconstructing_the_owner_enrollment_facade() {
+    fn mcp_owner_facade_is_scoped_separately_from_browser_enrollment() {
         let root = tempfile::tempdir().unwrap();
         let mut core = BrowserCore::new(root.path().to_owned());
         value(&dispatch(
@@ -1297,17 +1340,24 @@ mod tests {
         )
         .unwrap();
         let pairing_json = claimant.begin_computer_claimant().unwrap();
-        let missing_facade = dispatch(
-            &mut core,
-            "_worker_mcp_owner_create",
-            &json!({"pairingJson": pairing_json}).to_string(),
-        );
-
-        assert_eq!(missing_facade["ok"], false);
-        assert_eq!(missing_facade["error"]["code"], "credentials-required");
         value(&dispatch(
             &mut core,
             "_worker_enrollment_new_owner_from_identity",
+            r#"{"deviceName":"Owner browser"}"#,
+        ));
+        value(&dispatch(
+            &mut core,
+            "_worker_enrollment_create_phone_invitation",
+            r#"{"method":"transfer"}"#,
+        ));
+        value(&dispatch(
+            &mut core,
+            "_worker_enrollment_consume_created_phone_invitation",
+            r#"{"createdJson":"{\"invitation_id\":\"00000000-0000-4000-8000-000000000001\",\"expires_in_seconds\":300}"}"#,
+        ));
+        value(&dispatch(
+            &mut core,
+            "_worker_mcp_owner_begin",
             r#"{"deviceName":"Owner browser"}"#,
         ));
         let created = dispatch(
@@ -1317,6 +1367,38 @@ mod tests {
         );
 
         assert_eq!(created["ok"], true, "{created}");
+        let phone_qr = dispatch(&mut core, "_worker_enrollment_get_phone_qr", "{}");
+        assert_eq!(phone_qr["ok"], true, "{phone_qr}");
+
+        let pairing_json = peppy_hosted_client::newenrollment::EnrollmentClient::new(
+            ORIGIN.into(),
+            ClientKind::Desktop,
+            "Peppy MCP retry".into(),
+        )
+        .unwrap()
+        .begin_computer_claimant()
+        .unwrap();
+        value(&dispatch(
+            &mut core,
+            "_worker_mcp_owner_begin",
+            r#"{"deviceName":"Owner browser"}"#,
+        ));
+        value(&dispatch(
+            &mut core,
+            "_worker_mcp_owner_create",
+            &json!({"pairingJson": pairing_json}).to_string(),
+        ));
+        let phone_qr = dispatch(&mut core, "_worker_enrollment_get_phone_qr", "{}");
+        assert_eq!(phone_qr["ok"], true, "{phone_qr}");
+
+        value(&dispatch(&mut core, "close", "{}"));
+        assert!(core.mcp_enrollment.is_none());
+        let after_close = dispatch(
+            &mut core,
+            "_worker_mcp_owner_create",
+            &json!({"pairingJson": pairing_json}).to_string(),
+        );
+        assert_eq!(after_close["ok"], false);
     }
 
     #[test]

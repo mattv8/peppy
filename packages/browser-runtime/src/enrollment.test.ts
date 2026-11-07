@@ -9,6 +9,7 @@ const deviceId = "00000000-0000-0000-0000-000000000002";
 const invitationId = "00000000-0000-0000-0000-000000000003";
 const replacementInvitationId = "00000000-0000-0000-0000-000000000005";
 const challengeId = "00000000-0000-0000-0000-000000000004";
+const mcpVaultId = "550e8400-e29b-41d4-a716-446655440000";
 const authorizationId = `${"A".repeat(42)}E`;
 const authorizationIds = [..."AEIMQUYcgkosw048"].map(finalCharacter => `${"A".repeat(42)}${finalCharacter}`);
 
@@ -38,6 +39,12 @@ function json(value: unknown, init?: ResponseInit): Response {
 }
 
 function pathOf(input: RequestInfo | URL): string { return new URL(String(input)).pathname; }
+
+function deferredResponse(): { promise: Promise<Response>; resolve(response: Response): void } {
+  let resolve!: (response: Response) => void;
+  const promise = new Promise<Response>(next => { resolve = next; });
+  return { promise, resolve };
+}
 
 class LifecycleCore {
   public state: "none" | "fresh" | "owner" | "owner-draft" | "owner-invitation" = "none";
@@ -104,13 +111,13 @@ function lifecycleFetcher(statuses: Array<Record<string, unknown>> = []) {
 }
 
 describe("BrowserEnrollment", () => {
-  it("relays the canonical confirm activation wire through the private MCP enable sequence", async () => {
+  it("retries a failed create with a fresh owner flow and relays the canonical MCP activation wire", async () => {
     const mcpVaultId = "550e8400-e29b-41d4-a716-446655440000";
     const events: string[] = [];
     const core = {
       invoke: vi.fn(async ({ command }: { command: string }) => {
         events.push(command);
-        if (command === "_worker_enrollment_new_owner_from_identity") return {};
+        if (command === "_worker_mcp_owner_begin") return {};
         if (command === "_worker_identity_metadata") return { vaultId: mcpVaultId };
         if (command === "_worker_mcp_owner_create") return { request: JSON.stringify({ claimant: "private" }) };
         if (command === "_worker_mcp_owner_created") return {};
@@ -121,13 +128,17 @@ describe("BrowserEnrollment", () => {
     const session = new TestSession();
     session.phase = "ready";
     session.identity = { role: "owner" };
+    let computerCreateAttempts = 0;
     const fetcher = vi.fn<typeof fetch>(async (input, init) => {
       const path = pathOf(input);
       events.push(`${init?.method ?? "GET"} ${path}`);
       if (path === "/v1/instance/session" && init?.method === "GET") return json({ csrf_token: "csrf" });
       if (path === "/v1/mcp/device" && init?.method === "GET") return json({ vaultId: mcpVaultId, available: true, serverOrigin: origin, hosted: false, device: null });
       if (path === "/v1/mcp/device/prepare") return json({ operation_id: invitationId, pairing: { invitation_id: invitationId } });
-      if (path === "/v1/enrollment/computers") return json({ server_nonce: "nonce", expires_in_seconds: 60 });
+      if (path === "/v1/enrollment/computers") {
+        if (computerCreateAttempts++ === 0) return json({ code: "database_unavailable" }, { status: 503 });
+        return json({ server_nonce: "nonce", expires_in_seconds: 60 });
+      }
       if (path === `/v1/enrollment/computers/${invitationId}/approve`) return json({ state: "approved" });
       if (path === "/v1/mcp/device/activate") return json({ confirm: { claimant_proof: "private" } });
       if (path === `/v1/enrollment/computers/${invitationId}/confirm`) return json({ vault_id: mcpVaultId, device_id: deviceId, role: "device" });
@@ -136,8 +147,13 @@ describe("BrowserEnrollment", () => {
     });
     const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
 
+    await expect(enrollment.mcpEnable()).rejects.toBeDefined();
+    const [firstEnable, coalescedEnable] = await Promise.all([enrollment.mcpEnable(), enrollment.mcpEnable()]);
+    expect(firstEnable).toMatchObject({ vaultId: mcpVaultId, available: true });
+    expect(coalescedEnable).toMatchObject({ vaultId: mcpVaultId, available: true });
     await expect(enrollment.mcpEnable()).resolves.toMatchObject({ vaultId: mcpVaultId, available: true });
-    const ownerFacadeCall = events.indexOf("_worker_enrollment_new_owner_from_identity");
+    expect(core.invoke.mock.calls.filter(([request]) => request.command === "_worker_mcp_owner_begin")).toHaveLength(3);
+    const ownerFacadeCall = events.indexOf("_worker_mcp_owner_begin");
     const prepareCall = events.indexOf("POST /v1/mcp/device/prepare");
     expect(ownerFacadeCall).toBeGreaterThanOrEqual(0);
     expect(prepareCall).toBeGreaterThanOrEqual(0);
@@ -152,7 +168,7 @@ describe("BrowserEnrollment", () => {
 
   it("does not prepare MCP enrollment when owner facade reconstruction fails", async () => {
     const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
-      if (command === "_worker_enrollment_new_owner_from_identity") throw new Error("credentials-required");
+      if (command === "_worker_mcp_owner_begin") throw new Error("credentials-required");
       throw new Error(`unexpected ${command}`);
     }) };
     const session = new TestSession();
@@ -165,6 +181,314 @@ describe("BrowserEnrollment", () => {
 
     await expect(enrollment.mcpEnable()).rejects.toThrow("credentials-required");
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("blocks a new MCP enable while sign-out is still pending", async () => {
+    let finishDelete!: () => void;
+    const core = { invoke: vi.fn(async () => ({})) };
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    const enrollment = new BrowserEnrollment(core, session, origin, async (_input, init) => {
+      if (init?.method === "DELETE") return await new Promise<Response>(resolve => { finishDelete = () => resolve(json({})); });
+      throw new Error("unexpected request");
+    });
+
+    const signOut = enrollment.signOut();
+    await expect(enrollment.mcpEnable()).rejects.toThrow("enrollment-cancelled");
+    finishDelete();
+    await signOut;
+  });
+
+  it.each([
+    ["a replaced hosted session", (enrollment: BrowserEnrollment) => enrollment.setHostedCsrf("csrf-b")],
+    ["a sign-out", (enrollment: BrowserEnrollment) => enrollment.signOut()],
+  ])("stops an approved MCP attempt before activation after %s", async (_transition, invalidate) => {
+    const approval = deferredResponse();
+    const requestPaths: string[] = [];
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_mcp_owner_begin") return {};
+      if (command === "_worker_identity_metadata") return { vaultId: mcpVaultId };
+      if (command === "_worker_mcp_owner_create") return { request: JSON.stringify({ claimant: "private" }) };
+      if (command === "_worker_mcp_owner_created") return {};
+      if (command === "_worker_mcp_owner_approve") return { request: JSON.stringify({ approval: "private" }) };
+      throw new Error(`unexpected ${command}`);
+    }) };
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    const enrollment = new BrowserEnrollment(core, session, origin, async (input, init) => {
+      const path = pathOf(input);
+      requestPaths.push(path);
+      if (path === "/v1/instance/session" && init?.method === "GET") return json({ csrf_token: "csrf-a" });
+      if (path === "/v1/instance/session" && init?.method === "DELETE") return json({});
+      if (path === "/v1/mcp/device" && init?.method === "GET") return json({ vaultId: mcpVaultId, available: true, serverOrigin: origin, hosted: false, device: null });
+      if (path === "/v1/mcp/device/prepare") return json({ operation_id: invitationId, pairing: { invitation_id: invitationId } });
+      if (path === "/v1/enrollment/computers") return json({});
+      if (path.endsWith("/approve")) return approval.promise;
+      throw new Error(`unexpected ${path}`);
+    });
+
+    await enrollment.discover();
+    const enabling = enrollment.mcpEnable();
+    await vi.waitFor(() => expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_mcp_owner_approve", args: {} }));
+    await invalidate(enrollment);
+    approval.resolve(json({ state: "approved" }));
+
+    await expect(enabling).rejects.toThrow("enrollment-cancelled");
+    expect(requestPaths).not.toContain("/v1/mcp/device/activate");
+    expect(requestPaths).not.toContain(`/v1/enrollment/computers/${invitationId}/confirm`);
+    expect(requestPaths).not.toContain("/v1/mcp/device/complete");
+  });
+
+  it("keeps a newer hosted session when a stale discovery succeeds", async () => {
+    const staleSession = deferredResponse();
+    const preparation = deferredResponse();
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_mcp_owner_begin") return {};
+      if (command === "_worker_identity_metadata") return { vaultId: mcpVaultId };
+      if (command === "_worker_mcp_owner_create") return { request: JSON.stringify({ claimant: "private" }) };
+      if (command === "_worker_mcp_owner_created") return {};
+      if (command === "_worker_mcp_owner_approve") return { request: JSON.stringify({ approval: "private" }) };
+      throw new Error(`unexpected ${command}`);
+    }) };
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    let sessionReads = 0;
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({ mode: "hosted" });
+      if (path === "/hosted/v1/web/app-session" && init?.method === "GET") {
+        sessionReads += 1;
+        return sessionReads === 1 ? staleSession.promise : json({ signed_in: true, csrf_token: "csrf-b" });
+      }
+      if (path === "/v1/mcp/device" && init?.method === "GET") return json({ vaultId: mcpVaultId, available: true, serverOrigin: origin, hosted: true, device: null });
+      if (path === "/v1/mcp/device/prepare") return preparation.promise;
+      if (path === "/v1/enrollment/computers") return json({});
+      if (path.endsWith("/approve")) return json({ state: "approved" });
+      if (path === "/v1/mcp/device/activate") return json({ confirm: {} });
+      if (path.endsWith("/confirm")) return json({});
+      if (path === "/v1/mcp/device/complete") return json({ vaultId: mcpVaultId, available: true, serverOrigin: origin, hosted: true, device: null });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    const discovery = enrollment.discover();
+    await vi.waitFor(() => expect(sessionReads).toBe(1));
+    enrollment.setHostedCsrf("csrf-b");
+    const enabling = enrollment.mcpEnable();
+    await vi.waitFor(() => expect(fetcher.mock.calls.some(([input, init]) => pathOf(input) === "/v1/mcp/device/prepare" && init?.method === "POST")).toBe(true));
+    staleSession.resolve(json({ signed_in: true, csrf_token: "csrf-a" }));
+    await discovery;
+    preparation.resolve(json({ operation_id: invitationId, pairing: { invitation_id: invitationId } }));
+
+    await expect(enabling).resolves.toMatchObject({ vaultId: mcpVaultId, available: true });
+    expect(fetcher.mock.calls.filter(([input]) => pathOf(input) === "/v1/mcp/device/prepare").at(-1)?.[1]?.headers).toMatchObject({ "X-Peppy-CSRF": "csrf-b" });
+  });
+
+  it("keeps a newer hosted session when a stale discovery reports 401", async () => {
+    const staleSession = deferredResponse();
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_mcp_owner_begin") return {};
+      if (command === "_worker_identity_metadata") return { vaultId: mcpVaultId };
+      if (command === "_worker_mcp_owner_create") return { request: JSON.stringify({}) };
+      if (command === "_worker_mcp_owner_created") return {};
+      if (command === "_worker_mcp_owner_approve") return { request: JSON.stringify({}) };
+      throw new Error(`unexpected ${command}`);
+    }) };
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    let sessionReads = 0;
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({ mode: "hosted" });
+      if (path === "/hosted/v1/web/app-session" && init?.method === "GET") return ++sessionReads === 1 ? staleSession.promise : json({ signed_in: true, csrf_token: "csrf-b" });
+      if (path === "/v1/mcp/device" && init?.method === "GET") return json({ vaultId: mcpVaultId, available: true, serverOrigin: origin, hosted: true, device: null });
+      if (path === "/v1/mcp/device/prepare") return json({ operation_id: invitationId, pairing: { invitation_id: invitationId } });
+      if (path === "/v1/enrollment/computers") return json({});
+      if (path.endsWith("/approve")) return json({});
+      if (path === "/v1/mcp/device/activate") return json({ confirm: {} });
+      if (path.endsWith("/confirm")) return json({});
+      if (path === "/v1/mcp/device/complete") return json({ vaultId: mcpVaultId, available: true, serverOrigin: origin, hosted: true, device: null });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    const discovery = enrollment.discover();
+    await vi.waitFor(() => expect(sessionReads).toBe(1));
+    enrollment.setHostedCsrf("csrf-b");
+    const enabling = enrollment.mcpEnable();
+    staleSession.resolve(json({ code: "invalid_session" }, { status: 401 }));
+    await discovery;
+
+    await expect(enabling).resolves.toMatchObject({ vaultId: mcpVaultId, available: true });
+    expect(fetcher.mock.calls.filter(([input]) => pathOf(input) === "/v1/mcp/device/prepare")[0]?.[1]?.headers).toMatchObject({ "X-Peppy-CSRF": "csrf-b" });
+  });
+
+  it.each([
+    ["a hosted signed-out response", "hosted" as const],
+    ["a community 401 response", "community" as const],
+  ])("preserves the newer session and valid view after %s", async (_description, mode) => {
+    const staleSession = deferredResponse();
+    const preparation = deferredResponse();
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_enrollment_new_owner_from_identity" || command === "_worker_mcp_owner_begin" || command === "_worker_mcp_owner_created") return {};
+      if (command === "_worker_enrollment_gateway_presence") return { hasGateway: false };
+      if (command === "_worker_identity_metadata") return { vaultId: mcpVaultId };
+      if (command === "_worker_mcp_owner_create" || command === "_worker_mcp_owner_approve") return { request: JSON.stringify({}) };
+      throw new Error(`unexpected ${command}`);
+    }) };
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    let sessionReads = 0;
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const path = pathOf(input);
+      const sessionPath = mode === "hosted" ? "/hosted/v1/web/app-session" : "/v1/instance/session";
+      if (path === "/hosted/v1/enrollment/config") return mode === "hosted" ? json({ mode }) : json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === sessionPath && init?.method === "GET") {
+        sessionReads += 1;
+        if (sessionReads === 2) return staleSession.promise;
+        const csrf = sessionReads === 1 ? "csrf-a" : "csrf-b";
+        return mode === "hosted" ? json({ signed_in: true, csrf_token: csrf }) : json({ csrf_token: csrf });
+      }
+      if (path === "/v1/mcp/device" && init?.method === "GET") return json({ vaultId: mcpVaultId, available: true, serverOrigin: origin, hosted: mode === "hosted", device: null });
+      if (path === "/v1/mcp/device/prepare") return preparation.promise;
+      if (path === "/v1/enrollment/computers") return json({});
+      if (path.endsWith("/approve")) return json({});
+      if (path === "/v1/mcp/device/activate") return json({ confirm: {} });
+      if (path.endsWith("/confirm")) return json({});
+      if (path === "/v1/mcp/device/complete") return json({ vaultId: mcpVaultId, available: true, serverOrigin: origin, hosted: mode === "hosted", device: null });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ stage: "ready", mode });
+    const staleDiscovery = enrollment.discover();
+    await vi.waitFor(() => expect(sessionReads).toBe(2));
+    enrollment.setHostedCsrf("csrf-b");
+    const enabling = enrollment.mcpEnable();
+    await vi.waitFor(() => expect(fetcher.mock.calls.some(([input]) => pathOf(input) === "/v1/mcp/device/prepare")).toBe(true));
+    staleSession.resolve(mode === "hosted" ? json({ signed_in: false }) : json({ code: "invalid_session" }, { status: 401 }));
+
+    await expect(staleDiscovery).resolves.toMatchObject({ stage: "ready", mode });
+    preparation.resolve(json({ operation_id: invitationId, pairing: { invitation_id: invitationId } }));
+    await expect(enabling).resolves.toMatchObject({ vaultId: mcpVaultId });
+    const expectedHeader = mode === "hosted" ? "X-Peppy-CSRF" : "X-Peppy-CSRF-Token";
+    expect(fetcher.mock.calls.filter(([input]) => pathOf(input) === "/v1/mcp/device/prepare")[0]?.[1]?.headers).toMatchObject({ [expectedHeader]: "csrf-b" });
+  });
+
+  it.each([
+    ["a hosted replacement", "hosted" as const, json({ signed_in: true, csrf_token: "csrf-b" })],
+    ["a hosted loss", "hosted" as const, json({ signed_in: false })],
+    ["a community loss", "community" as const, json({ code: "invalid_session" }, { status: 401 })],
+  ])("stops a pending approved MCP attempt after discovery observes %s", async (_description, mode, observedResponse) => {
+    const approval = deferredResponse();
+    const observedSession = deferredResponse();
+    const requestPaths: string[] = [];
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_enrollment_new_owner_from_identity" || command === "_worker_mcp_owner_begin" || command === "_worker_mcp_owner_created") return {};
+      if (command === "_worker_enrollment_gateway_presence") return { hasGateway: false };
+      if (command === "_worker_identity_metadata") return { vaultId: mcpVaultId };
+      if (command === "_worker_mcp_owner_create") return { request: JSON.stringify({}) };
+      if (command === "_worker_mcp_owner_approve") return { request: JSON.stringify({}) };
+      throw new Error(`unexpected ${command}`);
+    }) };
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    let sessionReads = 0;
+    const enrollment = new BrowserEnrollment(core, session, origin, async (input, init) => {
+      const path = pathOf(input);
+      requestPaths.push(path);
+      const sessionPath = mode === "hosted" ? "/hosted/v1/web/app-session" : "/v1/instance/session";
+      if (path === "/hosted/v1/enrollment/config") return mode === "hosted" ? json({ mode }) : json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === sessionPath && init?.method === "GET") return ++sessionReads === 3 ? observedSession.promise : mode === "hosted" ? json({ signed_in: true, csrf_token: "csrf-a" }) : json({ csrf_token: "csrf-a" });
+      if (path === "/v1/mcp/device" && init?.method === "GET") return json({ vaultId: mcpVaultId, available: true, serverOrigin: origin, hosted: mode === "hosted", device: null });
+      if (path === "/v1/mcp/device/prepare") return json({ operation_id: invitationId, pairing: { invitation_id: invitationId } });
+      if (path === "/v1/enrollment/computers") return json({});
+      if (path.endsWith("/approve")) return approval.promise;
+      throw new Error(`unexpected ${path}`);
+    });
+
+    await enrollment.discover();
+    const enabling = enrollment.mcpEnable();
+    await vi.waitFor(() => expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_mcp_owner_approve", args: {} }));
+    const discovery = enrollment.discover();
+    await vi.waitFor(() => expect(sessionReads).toBe(3));
+    observedSession.resolve(observedResponse);
+    await discovery;
+    approval.resolve(json({}));
+
+    await expect(enabling).rejects.toThrow("enrollment-cancelled");
+    expect(requestPaths).not.toContain("/v1/mcp/device/activate");
+    expect(requestPaths).not.toContain(`/v1/enrollment/computers/${invitationId}/confirm`);
+    expect(requestPaths).not.toContain("/v1/mcp/device/complete");
+  });
+
+  it("keeps MCP enable blocked until every concurrent sign-out settles", async () => {
+    const deletes = [deferredResponse(), deferredResponse()];
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    const core = { invoke: vi.fn(async () => ({})) };
+    let deleteIndex = 0;
+    const enrollment = new BrowserEnrollment(core, session, origin, async (_input, init) => {
+      if (init?.method === "DELETE") return deletes[deleteIndex++]!.promise;
+      throw new Error("unexpected request");
+    });
+
+    const first = enrollment.signOut();
+    const second = enrollment.signOut();
+    deletes[0]!.resolve(json({}));
+    await first;
+    await expect(enrollment.mcpEnable()).rejects.toThrow("enrollment-cancelled");
+    deletes[1]!.resolve(json({ code: "session_expired" }, { status: 401 }));
+    await expect(second).rejects.toBeDefined();
+    await expect(enrollment.mcpEnable()).rejects.toThrow("unexpected request");
+    expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_mcp_owner_begin", args: { deviceName: "Peppy Browser" } });
+  });
+
+  it("does not let a stale enable finalizer clear a newer singleflight", async () => {
+    const firstSession = deferredResponse();
+    const secondPreparation = deferredResponse();
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_mcp_owner_begin") return {};
+      if (command === "_worker_identity_metadata") return { vaultId: mcpVaultId };
+      if (command === "_worker_mcp_owner_create") return { request: JSON.stringify({}) };
+      if (command === "_worker_mcp_owner_created") return {};
+      if (command === "_worker_mcp_owner_approve") return { request: JSON.stringify({}) };
+      throw new Error(`unexpected ${command}`);
+    }) };
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    let sessionReads = 0;
+    const enrollment = new BrowserEnrollment(core, session, origin, async (input, init) => {
+      const path = pathOf(input);
+      if (path === "/v1/instance/session" && init?.method === "GET") return ++sessionReads === 1 ? firstSession.promise : json({ csrf_token: "csrf-b" });
+      if (path === "/v1/mcp/device" && init?.method === "GET") return json({ vaultId: mcpVaultId, available: true, serverOrigin: origin, hosted: false, device: null });
+      if (path === "/v1/mcp/device/prepare") return secondPreparation.promise;
+      throw new Error(`unexpected ${path}`);
+    });
+
+    const first = enrollment.mcpEnable();
+    await vi.waitFor(() => expect(sessionReads).toBe(1));
+    enrollment.setHostedCsrf("csrf-b");
+    const second = enrollment.mcpEnable();
+    await vi.waitFor(() => expect(core.invoke).toHaveBeenCalledTimes(3));
+    firstSession.resolve(json({ csrf_token: "csrf-a" }));
+    await expect(first).rejects.toThrow("enrollment-cancelled");
+    const coalesced = enrollment.mcpEnable();
+
+    expect(core.invoke.mock.calls.filter(([request]) => request.command === "_worker_mcp_owner_begin")).toHaveLength(2);
+    secondPreparation.resolve(json({ operation_id: invitationId, pairing: { invitation_id: invitationId } }));
+    await expect(second).rejects.toThrow("unexpected /v1/enrollment/computers");
+    await expect(coalesced).rejects.toThrow("unexpected /v1/enrollment/computers");
   });
 
   it("rejects MCP enablement without posting when a restored community session expires", async () => {

@@ -125,7 +125,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 45;
+const SCHEMA_VERSION: i64 = 46;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -3935,6 +3935,7 @@ impl Client {
         attachment_id: AttachmentId,
     ) -> Result<bool, Error> {
         let mut guard = self.lock()?;
+        let cipher_path = media::cipher_path(&guard.media_dir, attachment_id);
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -3946,15 +3947,47 @@ impl Client {
         if referenced || contact_media::blocks_discard(&tx, attachment_id)? {
             return Ok(false);
         }
-        let deleted = tx.execute(
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attachments WHERE attachment_id=?)",
+            [attachment_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            tx.commit()?;
+            return Ok(false);
+        }
+        // Commit an explicit cleanup intent before removing ciphertext. If deletion fails after
+        // unlinking, this intent survives reopen and excludes the object from reuse and download.
+        tx.execute(
+            "INSERT INTO attachment_cleanup_intents(attachment_id) VALUES(?) ON CONFLICT(attachment_id) DO NOTHING",
+            params![attachment_id.to_string()],
+        )?;
+        tx.execute(
+            "UPDATE attachments SET state=? WHERE attachment_id=?",
+            params![
+                AttachmentState::PendingDownload.code(),
+                attachment_id.to_string()
+            ],
+        )?;
+        tx.commit()?;
+        match std::fs::remove_file(cipher_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(Error::Storage),
+        }
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
             "DELETE FROM attachments WHERE attachment_id=?",
             params![attachment_id.to_string()],
-        )? != 0;
+        )?;
+        tx.execute(
+            "DELETE FROM attachment_cleanup_intents WHERE attachment_id=?",
+            params![attachment_id.to_string()],
+        )?;
         tx.commit()?;
-        if deleted {
-            let _ = std::fs::remove_file(media::cipher_path(&guard.media_dir, attachment_id));
-        }
-        Ok(deleted)
+        Ok(true)
     }
 
     /// Locally prepared objects referenced by a message or a contact photo and not yet
@@ -4071,7 +4104,7 @@ impl Client {
         let rows: Vec<(String, bool)> = store
             .conn
             .prepare(&format!(
-                "SELECT attachment_id,attachment_id IN (SELECT attachment_id FROM attachment_demand) FROM attachments a WHERE state='pending_download' AND remote_object_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM attachment_remote_state rs WHERE rs.attachment_id=a.attachment_id AND rs.removed_by_storage_policy=1) AND attachment_id NOT IN ({}) AND (attachment_id IN (SELECT attachment_id FROM attachment_demand) OR (NOT EXISTS(SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id) AND (attachment_id IN (SELECT thumbnail_attachment_id FROM message_media_meta WHERE thumbnail_attachment_id IS NOT NULL) OR (plaintext_bytes<={} AND attachment_id NOT IN (SELECT attachment_id FROM message_media_meta))))) ORDER BY rowid",
+                "SELECT attachment_id,attachment_id IN (SELECT attachment_id FROM attachment_demand) FROM attachments a WHERE state='pending_download' AND remote_object_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM attachment_cleanup_intents ci WHERE ci.attachment_id=a.attachment_id) AND NOT EXISTS(SELECT 1 FROM attachment_remote_state rs WHERE rs.attachment_id=a.attachment_id AND rs.removed_by_storage_policy=1) AND attachment_id NOT IN ({}) AND (attachment_id IN (SELECT attachment_id FROM attachment_demand) OR (NOT EXISTS(SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id) AND (attachment_id IN (SELECT thumbnail_attachment_id FROM message_media_meta WHERE thumbnail_attachment_id IS NOT NULL) OR (plaintext_bytes<={} AND attachment_id NOT IN (SELECT attachment_id FROM message_media_meta))))) ORDER BY rowid",
                 contact_media::REJECTED_DOWNLOADS_SQL, EAGER_MEDIA_PLAINTEXT_BYTES
             ))?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -4117,6 +4150,14 @@ impl Client {
         let mut guard = self.lock()?;
         if attachment_row(&guard.conn, attachment_id)?.is_none() {
             return Err(Error::NotFound);
+        }
+        let cleanup_pending: bool = guard.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attachment_cleanup_intents WHERE attachment_id=?)",
+            params![attachment_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if cleanup_pending {
+            return Err(Error::InvalidMedia);
         }
         attachment_retention::ensure_remote_available(&guard.conn, attachment_id)?;
         if media_cache::request_gateway_mms_rehydration(&mut guard, attachment_id)? {
@@ -4198,6 +4239,14 @@ impl Client {
         let (root, vault_id, row, contact_photo) = {
             let s = self.lock()?;
             let row = attachment_row(&s.conn, attachment_id)?.ok_or(Error::NotFound)?;
+            let cleanup_pending: bool = s.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM attachment_cleanup_intents WHERE attachment_id=?)",
+                params![attachment_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if cleanup_pending {
+                return Err(Error::InvalidMedia);
+            }
             attachment_retention::ensure_remote_available(&s.conn, attachment_id)?;
             let contact_photo = contact_media::is_received_photo(&s.conn, attachment_id)?;
             (s.media_dir.clone(), s.config.vault_id, row, contact_photo)
@@ -4205,37 +4254,45 @@ impl Client {
         if row.state != AttachmentState::PendingDownload {
             return Ok(());
         }
-        media::install_into_store(
-            &root,
-            attachment_id,
-            downloaded,
-            &media::Expected {
-                ciphertext_bytes: row.ciphertext_bytes,
-                ciphertext_sha256: &row.ciphertext_sha256,
-                plaintext_bytes: row.plaintext_bytes,
-            },
-            &row.file_key()?,
-            &media::media_aad(vault_id, attachment_id),
-        )?;
+        let expected = media::Expected {
+            ciphertext_bytes: row.ciphertext_bytes,
+            ciphertext_sha256: &row.ciphertext_sha256,
+            plaintext_bytes: row.plaintext_bytes,
+        };
+        let key = row.file_key()?;
+        let aad = media::media_aad(vault_id, attachment_id);
+        let staged = media::stage_download(&root, downloaded, &expected, &key, &aad)?;
         // Contact photos: the descriptor's type/size claims prove nothing about the bytes.
-        // Verify the decrypted content is a bounded 256x256 JPEG before it becomes available
-        // (state stays `pending_download` until then, so no native/web path can open it).
-        if contact_photo {
-            let valid = media::decrypt_to_bytes(
-                &root,
-                attachment_id,
-                &row.file_key()?,
-                &media::media_aad(vault_id, attachment_id),
-                row.plaintext_bytes,
-            )
-            .and_then(|bytes| contact_photos::validate_normalized(&bytes));
-            if let Err(error) = valid {
-                let _ = std::fs::remove_file(media::cipher_path(&root, attachment_id));
-                contact_media::reject_received(&self.lock()?.conn, attachment_id)?;
-                return Err(error);
-            }
+        // Verify the staged content before acquiring the publication lock.
+        if contact_photo
+            && let Err(error) =
+                media::decrypt_staged_to_bytes(&root, &staged, &key, &aad, row.plaintext_bytes)
+                    .and_then(|bytes| contact_photos::validate_normalized(&bytes))
+        {
+            contact_media::reject_received(&self.lock()?.conn, attachment_id)?;
+            return Err(error);
         }
-        self.lock()?.conn.execute(
+        #[cfg(test)]
+        media::pause_before_install_publication(attachment_id);
+        let mut store = self.lock()?;
+        let current = attachment_row(&store.conn, attachment_id)?;
+        let cleanup_pending: bool = store.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attachment_cleanup_intents WHERE attachment_id=?)",
+            params![attachment_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if cleanup_pending || current.is_none() {
+            return Err(Error::InvalidMedia);
+        }
+        if matches!(current, Some(ref current) if current.state == AttachmentState::Available) {
+            return Ok(());
+        }
+        if !matches!(current, Some(ref current) if current.state == AttachmentState::PendingDownload)
+        {
+            return Err(Error::InvalidMedia);
+        }
+        media::publish_staged_download(&root, attachment_id, &staged, &expected)?;
+        store.conn.execute(
             "UPDATE attachments SET state=? WHERE attachment_id=? AND state=?",
             params![
                 AttachmentState::Available.code(),
@@ -4243,7 +4300,6 @@ impl Client {
                 AttachmentState::PendingDownload.code()
             ],
         )?;
-        let mut store = self.lock()?;
         media_cache::record_installed_attachment(&mut store, attachment_id)
     }
 
@@ -5678,6 +5734,9 @@ CREATE TABLE IF NOT EXISTS provider_folder_writes(conversation_id TEXT PRIMARY K
 CREATE TABLE IF NOT EXISTS sender_blocklist_unmapped(number TEXT PRIMARY KEY);
 CREATE INDEX IF NOT EXISTS mms_thread_conversations_thread ON mms_thread_conversations(source_device_id, provider_thread_id);
 ";
+const MIGRATION_46: &str = "
+CREATE TABLE IF NOT EXISTS attachment_cleanup_intents(attachment_id TEXT PRIMARY KEY);
+";
 fn apply_migration_45(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(
         conn,
@@ -5857,6 +5916,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_43)?;
             tx.execute_batch(MIGRATION_44)?;
             apply_migration_45(&tx)?;
+            tx.execute_batch(MIGRATION_46)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -5865,7 +5925,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=44)) => {
+        Some(version @ (4..=45)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -5985,6 +6045,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 44 {
                 apply_migration_45(&tx)?;
+            }
+            if version <= 45 {
+                tx.execute_batch(MIGRATION_46)?;
             }
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;

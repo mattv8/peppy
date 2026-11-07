@@ -9,10 +9,12 @@ use peppy_hosted_api::mcp::{
     McpDeviceState, McpDeviceStatus, McpDeviceView, McpEnrollmentPreparation, McpGrantView,
     McpWorkerActivateRequest, McpWorkerActivateResponse, McpWorkerCompleteRequest,
     McpWorkerPrepareRequest, McpWorkerPrepareResponse, McpWorkerStatusRequest,
+    McpWorkerStatusResponse,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use std::time::Duration;
 use uuid::Uuid;
 
 use super::{
@@ -29,8 +31,32 @@ pub(super) fn spawn_cleanup_maintenance(pool: sqlx::PgPool, worker: Option<McpWo
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
-            if let Err(error) = cleanup_pending_once(&pool, &worker).await {
-                tracing::warn!(%error, category = "cleanup", "mcp cleanup maintenance failed");
+            if cleanup_pending_once(&pool, &worker).await.is_err() {
+                tracing::warn!(
+                    category = "mcp_cleanup",
+                    code = "mcp_cleanup_database",
+                    "MCP cleanup maintenance failed"
+                );
+            }
+        }
+    });
+}
+
+pub(super) fn spawn_oauth_maintenance(pool: sqlx::PgPool) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(3_600));
+        loop {
+            interval.tick().await;
+            if sqlx::query("SELECT mcp_sweep_oauth()")
+                .execute(&pool)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    category = "mcp_oauth",
+                    code = "mcp_oauth_sweep_database",
+                    "MCP OAuth retention sweep failed"
+                );
             }
         }
     });
@@ -48,17 +74,61 @@ pub(super) async fn cleanup_pending_once(
     for candidate in candidates {
         cleanup_operation(pool, worker, candidate.get("vault_id"), candidate.get("id")).await?;
     }
-    let devices = sqlx::query("SELECT vault_id,device_id FROM mcp_devices WHERE cleanup_pending=TRUE ORDER BY created_at LIMIT 32")
+    let devices = sqlx::query("SELECT vault_id,device_id FROM mcp_devices WHERE cleanup_pending=TRUE ORDER BY cleanup_last_attempt_at ASC NULLS FIRST LIMIT 32")
         .fetch_all(pool).await?;
     for device in devices {
         let vault_id: Uuid = device.get("vault_id");
         let device_id: Uuid = device.get("device_id");
+        let mut tx = scope::begin(pool, vault_id).await?;
+        mcp_enable_lock(&mut tx, vault_id).await?;
+        sqlx::query("UPDATE mcp_devices SET cleanup_attempts=cleanup_attempts+1,cleanup_last_attempt_at=clock_timestamp() WHERE vault_id=$1 AND device_id=$2 AND cleanup_pending=TRUE")
+            .bind(vault_id)
+            .bind(device_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         if !revoke_worker_device(worker, vault_id, device_id).await {
+            tracing::warn!(
+                category = "mcp_cleanup",
+                code = "mcp_worker_revoke_failed",
+                "MCP device cleanup will retry"
+            );
             continue;
         }
         let mut tx = scope::begin(pool, vault_id).await?;
         mcp_enable_lock(&mut tx, vault_id).await?;
         sqlx::query("UPDATE mcp_devices SET cleanup_pending=FALSE WHERE vault_id=$1 AND device_id=$2 AND cleanup_pending=TRUE")
+            .bind(vault_id)
+            .bind(device_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+    }
+    let jobs = sqlx::query("SELECT vault_id,worker_device_id FROM mcp_cleanup_jobs ORDER BY last_attempt_at ASC NULLS FIRST LIMIT 32")
+        .fetch_all(pool)
+        .await?;
+    for job in jobs {
+        let vault_id: Uuid = job.get("vault_id");
+        let device_id: Uuid = job.get("worker_device_id");
+        // Keep deletion cleanup serialized with an in-flight completion for this vault. The
+        // operation may already have cascaded, so this deliberately uses an unscoped transaction.
+        let mut tx = pool.begin().await?;
+        mcp_enable_lock(&mut tx, vault_id).await?;
+        sqlx::query("UPDATE mcp_cleanup_jobs SET attempts=attempts+1,last_attempt_at=clock_timestamp() WHERE vault_id=$1 AND worker_device_id=$2")
+            .bind(vault_id)
+            .bind(device_id)
+            .execute(&mut *tx)
+            .await?;
+        if !revoke_worker_device(worker, vault_id, device_id).await {
+            tracing::warn!(
+                category = "mcp_cleanup",
+                code = "mcp_worker_revoke_failed",
+                "MCP deletion cleanup will retry"
+            );
+            tx.commit().await?;
+            continue;
+        }
+        sqlx::query("DELETE FROM mcp_cleanup_jobs WHERE vault_id=$1 AND worker_device_id=$2")
             .bind(vault_id)
             .bind(device_id)
             .execute(&mut *tx)
@@ -103,6 +173,11 @@ async fn cleanup_operation(
     let revoked =
         !may_be_installed || revoke_worker_device(worker, vault_id, worker_device_id).await;
     if !(cancelled && revoked) {
+        tracing::warn!(
+            category = "mcp_cleanup",
+            code = "mcp_worker_cleanup_failed",
+            "MCP operation cleanup will retry"
+        );
         return Ok(());
     }
     let mut tx = scope::begin(pool, vault_id).await?;
@@ -168,8 +243,7 @@ async fn status(
         .await
         .map_err(|error| database_unavailable(&error, "mcp_status_begin"))?;
     let row = sqlx::query(
-        "SELECT d.device_id,d.name,d.revoked_at IS NOT NULL revoked,m.cleanup_pending,\
-         to_char(m.last_synced_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') last_synced_at \
+        "SELECT d.device_id,d.name,d.revoked_at IS NOT NULL revoked,m.cleanup_pending \
          FROM mcp_devices m JOIN devices d ON d.vault_id=m.vault_id AND d.device_id=m.device_id \
          WHERE m.vault_id=$1 ORDER BY m.created_at DESC LIMIT 1",
     )
@@ -181,18 +255,24 @@ async fn status(
         .await
         .map_err(|error| database_unavailable(&error, "mcp_status_commit"))?;
 
-    let worker_state = match state.mcp_worker.as_ref() {
-        Some(_) => worker_request(
+    let worker_state = match (state.mcp_worker.as_ref(), row.as_ref()) {
+        (Some(_), Some(row)) => worker_request(
             &state,
             "/internal/mcp/status",
             &serde_json::to_value(McpWorkerStatusRequest {
                 vault_id: principal.vault,
+                device_id: row.get("device_id"),
             })
             .expect("DTO serializes"),
         )
         .await
-        .ok(),
-        None => None,
+        .ok()
+        .and_then(|value| serde_json::from_value::<McpWorkerStatusResponse>(value).ok())
+        .filter(|response| {
+            response.vault_id == principal.vault
+                && response.device_id == row.get::<Uuid, _>("device_id")
+        }),
+        _ => None,
     };
     let device = row.map(|row| McpDeviceView {
         device_id: row.get("device_id"),
@@ -200,28 +280,19 @@ async fn status(
         state: if row.get("revoked") {
             McpDeviceState::Revoked
         } else {
-            match worker_state
+            worker_state
                 .as_ref()
-                .and_then(|value| value.get("state"))
-                .and_then(serde_json::Value::as_str)
-            {
-                Some("online") => McpDeviceState::Online,
-                Some("needs_approval") => McpDeviceState::NeedsApproval,
-                Some("revoked") => McpDeviceState::Revoked,
-                _ => McpDeviceState::Offline,
-            }
+                .map(|response| response.state)
+                .unwrap_or(McpDeviceState::Offline)
         },
         last_synced_at: worker_state
             .as_ref()
-            .and_then(|value| value.get("last_synced_at"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| row.get("last_synced_at")),
+            .and_then(|response| response.last_synced_at.clone()),
         cleanup_pending: row.get("cleanup_pending"),
     });
     Ok(Json(McpDeviceStatus {
         vault_id: principal.vault,
-        available: state.mcp_worker.is_some(),
+        available: mcp_available(&state),
         server_origin: state
             .instance_origin
             .as_ref()
@@ -282,7 +353,9 @@ async fn revoke_grant(
 ) -> ApiResult<StatusCode> {
     let principal = authenticated(&state, &headers, Operation::Revoke).await?;
     owner(&principal)?;
-    let mut tx = locked_vault(&state, &principal, "mcp_grant_revoke_begin").await?;
+    let mut tx =
+        mcp_advisory_locked_transaction(&state, &principal, "mcp_grant_revoke_begin").await?;
+    lock_vault_row(&mut tx, principal.vault, "mcp_grant_revoke_vault_lock").await?;
     require_current_owner(&mut tx, &principal).await?;
     let result = sqlx::query(
         "UPDATE mcp_grants SET revoked_at=now() WHERE id=$1 AND vault_id=$2 AND revoked_at IS NULL",
@@ -314,8 +387,18 @@ async fn prepare(
         EnrollmentOperation::CreateComputerEnrollment,
     )
     .await?;
-    let mut tx = locked_vault(&state, &principal, "mcp_prepare_lock").await?;
+    let mut tx = mcp_advisory_locked_transaction(&state, &principal, "mcp_prepare_lock").await?;
     require_current_owner(&mut tx, &principal).await?;
+    let live_device: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM mcp_devices m JOIN devices d ON d.vault_id=m.vault_id AND d.device_id=m.device_id WHERE m.vault_id=$1 AND m.cleanup_pending=FALSE AND d.revoked_at IS NULL)",
+    )
+    .bind(principal.vault)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| database_unavailable(&error, "mcp_prepare_device"))?;
+    if live_device {
+        return Err(ApiError(StatusCode::CONFLICT, "mcp_device_conflict"));
+    }
     let active: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM mcp_operations WHERE vault_id=$1 AND owner_device_id=$2 AND state='activated' AND expires_at > clock_timestamp())",
     )
@@ -417,7 +500,7 @@ async fn activate(
     )
     .await?;
     let fingerprint = request_fingerprint(&request.status)?;
-    let mut tx = locked_vault(&state, &principal, "mcp_activate_begin").await?;
+    let mut tx = mcp_advisory_locked_transaction(&state, &principal, "mcp_activate_begin").await?;
     require_current_owner(&mut tx, &principal).await?;
     let operation = sqlx::query("SELECT worker_device_id,state,activation_fingerprint,expires_at <= clock_timestamp() expired FROM mcp_operations WHERE id=$1 AND vault_id=$2 AND owner_device_id=$3")
         .bind(request.operation_id).bind(principal.vault).bind(principal.device).fetch_optional(&mut *tx).await
@@ -493,7 +576,7 @@ async fn complete(
     )
     .await?;
     let fingerprint = request_fingerprint(&request.admission)?;
-    let mut tx = locked_vault(&state, &principal, "mcp_complete_begin").await?;
+    let mut tx = mcp_advisory_locked_transaction(&state, &principal, "mcp_complete_begin").await?;
     require_current_owner(&mut tx, &principal).await?;
     let operation = sqlx::query("SELECT worker_device_id,state,completion_fingerprint,expires_at <= clock_timestamp() expired FROM mcp_operations WHERE id=$1 AND vault_id=$2 AND owner_device_id=$3")
         .bind(request.operation_id).bind(principal.vault).bind(principal.device).fetch_optional(&mut *tx).await.map_err(|error| database_unavailable(&error, "mcp_complete_lookup"))?.ok_or(ApiError(StatusCode::NOT_FOUND, "mcp_operation_not_found"))?;
@@ -522,6 +605,7 @@ async fn complete(
     if operation_state != "activated" {
         return Err(ApiError(StatusCode::CONFLICT, "mcp_operation_invalid"));
     }
+    ensure_no_other_live_mcp_device(&mut tx, &principal, device_id).await?;
     worker_request(
         &state,
         "/internal/mcp/complete",
@@ -589,6 +673,7 @@ async fn finalize_installed_completion(
         return Err(ApiError(StatusCode::CONFLICT, "mcp_operation_invalid"));
     }
     require_current_owner(tx, principal).await?;
+    ensure_no_other_live_mcp_device(tx, principal, device_id).await?;
     let enrolled = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM computer_enrollments c JOIN devices d ON d.vault_id=c.vault_id AND d.device_id=c.recipient_device_id WHERE c.vault_id=$1 AND c.owner_device_id=$2 AND c.recipient_device_id=$3 AND c.state='consumed' AND d.role='device' AND d.revoked_at IS NULL)")
         .bind(principal.vault)
         .bind(principal.device)
@@ -598,6 +683,25 @@ async fn finalize_installed_completion(
         .map_err(|error| database_unavailable(&error, "mcp_complete_device"))?;
     if !enrolled {
         return Err(ApiError(StatusCode::CONFLICT, "mcp_device_not_enrolled"));
+    }
+    Ok(())
+}
+
+async fn ensure_no_other_live_mcp_device(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    principal: &Principal,
+    device_id: Uuid,
+) -> ApiResult<()> {
+    let live_device: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM mcp_devices m JOIN devices d ON d.vault_id=m.vault_id AND d.device_id=m.device_id WHERE m.vault_id=$1 AND m.device_id<>$2 AND m.cleanup_pending=FALSE AND d.revoked_at IS NULL)",
+    )
+    .bind(principal.vault)
+    .bind(device_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| database_unavailable(&error, "mcp_complete_device_conflict"))?;
+    if live_device {
+        return Err(ApiError(StatusCode::CONFLICT, "mcp_device_conflict"));
     }
     Ok(())
 }
@@ -686,8 +790,7 @@ async fn device_status(
         .await
         .map_err(|error| database_unavailable(&error, "mcp_device_status_begin"))?;
     let row = sqlx::query(
-        "SELECT d.name,d.revoked_at IS NOT NULL revoked,m.cleanup_pending,\
-         to_char(m.last_synced_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') last_synced_at \
+        "SELECT d.name,d.revoked_at IS NOT NULL revoked,m.cleanup_pending \
          FROM mcp_devices m JOIN devices d ON d.vault_id=m.vault_id AND d.device_id=m.device_id \
          WHERE m.vault_id=$1 AND m.device_id=$2",
     )
@@ -702,7 +805,7 @@ async fn device_status(
     let row = row.ok_or(ApiError(StatusCode::CONFLICT, "mcp_device_not_enrolled"))?;
     Ok(Json(McpDeviceStatus {
         vault_id: principal.vault,
-        available: state.mcp_worker.is_some(),
+        available: mcp_available(&state),
         server_origin: state
             .instance_origin
             .as_ref()
@@ -717,10 +820,14 @@ async fn device_status(
             } else {
                 McpDeviceState::Offline
             },
-            last_synced_at: row.get("last_synced_at"),
+            last_synced_at: None,
             cleanup_pending: row.get("cleanup_pending"),
         }),
     }))
+}
+
+fn mcp_available(state: &ApiState) -> bool {
+    state.mcp_worker.is_some() && state.instance_origin.is_some()
 }
 
 async fn authorize_custody(
@@ -745,7 +852,7 @@ async fn authorize_custody(
     Ok(())
 }
 
-async fn locked_vault<'a>(
+async fn mcp_advisory_locked_transaction<'a>(
     state: &'a ApiState,
     principal: &Principal,
     operation: &'static str,
@@ -833,11 +940,17 @@ async fn worker_request_with(
         .url
         .join(path.trim_start_matches('/'))
         .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "mcp_unavailable"))?;
+    let timeout = if matches!(path, "/internal/mcp/call" | "/internal/mcp/complete") {
+        Duration::from_secs(30)
+    } else {
+        Duration::from_secs(5)
+    };
     let response = worker
         .client
         .post(url)
         .bearer_auth(token)
         .json(body)
+        .timeout(timeout)
         .send()
         .await
         .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "mcp_worker_unavailable"))?;

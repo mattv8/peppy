@@ -46,6 +46,9 @@ export class BrowserEnrollment {
   private vaultRequestGeneration = 0;
   private vaultRequestStatusPending?: Promise<EnrollmentView>;
   private computerClaimPending?: Promise<EnrollmentView>;
+  private mcpEnablePending?: { generation: number; result: Promise<McpDeviceStatus> };
+  private mcpAttemptGeneration = 0;
+  private signOutsInFlight = 0;
   private computerClaimPreviousView?: EnrollmentView;
   private computerComplete?: string;
   private computerConfirmEndpoint?: string;
@@ -58,14 +61,15 @@ export class BrowserEnrollment {
   public view(): EnrollmentView { return { ...this.viewValue }; }
 
   public async discover(origin = this.origin): Promise<EnrollmentView> {
+    const restoreGeneration = this.mcpAttemptGeneration;
     try {
       this.setupCodeRequired = true;
       const info = await this.discoverInfo();
       const mode = deploymentMode(info.mode);
       if (mode === "community" && typeof info.claimed !== "boolean") throw new Error("enrollment-response");
       this.viewValue = { ...this.viewValue, mode };
-      const signedIn = mode === "hosted" ? await this.hostedSession() : undefined;
-      if (mode === "community" && info.claimed === true) await this.restoreCommunitySession();
+      const signedIn = mode === "hosted" ? await this.hostedSession(restoreGeneration) : undefined;
+      if (mode === "community" && info.claimed === true) await this.restoreCommunitySession(restoreGeneration);
       if (this.session.phase === "locked") {
         this.viewValue = { mode, stage: "locked", origin };
         return this.view();
@@ -99,6 +103,7 @@ export class BrowserEnrollment {
           : { mode, stage: "setup", origin, setupCodeRequired: this.setupCodeRequired };
       }
     } catch (error) {
+      if (restoreGeneration !== this.mcpAttemptGeneration) return this.view();
       this.fail(error);
     }
     return this.view();
@@ -111,24 +116,47 @@ export class BrowserEnrollment {
   }
 
   public async mcpEnable(): Promise<McpDeviceStatus> {
-    if (this.session.phase !== "ready" || this.requireIdentity().role !== "owner") throw new Error("owner_required");
-    await this.initializeExistingOwner(this.origin);
-    await this.restoreCustodySession();
+    const generation = this.mcpAttemptGeneration;
+    if (this.mcpEnablePending?.generation === generation) return this.mcpEnablePending.result;
+    const pending = this.enableMcp(generation);
+    this.mcpEnablePending = { generation, result: pending };
+    return pending.finally(() => {
+      if (this.mcpEnablePending?.result === pending) this.mcpEnablePending = undefined;
+    });
+  }
+
+  private async enableMcp(generation: number): Promise<McpDeviceStatus> {
+    this.assertMcpAttempt(generation);
+    await this.core.invoke({ command: "_worker_mcp_owner_begin", args: { deviceName: DEVICE_NAME } });
+    this.assertMcpAttempt(generation);
+    await this.restoreCustodySession(generation);
+    this.assertMcpAttempt(generation);
     const vaultId = mcpId(required(record(await this.core.invoke({ command: "_worker_identity_metadata", args: {} })), "vaultId"));
+    this.assertMcpAttempt(generation);
     if ((await this.mcpStatus()).vaultId !== vaultId) throw new Error("mcp-response");
+    this.assertMcpAttempt(generation);
     const preparation = record(await this.request("/v1/mcp/device/prepare", "POST", undefined, true));
+    this.assertMcpAttempt(generation);
     const operationId = required(preparation, "operation_id");
     const pairing = record(preparation.pairing);
     const invitationId = required(pairing, "invitation_id");
     const create = record(await this.core.invoke({ command: "_worker_mcp_owner_create", args: { pairingJson: JSON.stringify(pairing) } }));
+    this.assertMcpAttempt(generation);
     const created = await this.request("/v1/enrollment/computers", "POST", JSON.parse(required(create, "request")), true);
+    this.assertMcpAttempt(generation);
     await this.core.invoke({ command: "_worker_mcp_owner_created", args: { createdJson: JSON.stringify(created) } });
+    this.assertMcpAttempt(generation);
     const approval = record(await this.core.invoke({ command: "_worker_mcp_owner_approve", args: {} }));
+    this.assertMcpAttempt(generation);
     const status = await this.request(`/v1/enrollment/computers/${encodeURIComponent(invitationId)}/approve`, "POST", JSON.parse(required(approval, "request")), true);
+    this.assertMcpAttempt(generation);
     const activation = record(await this.request("/v1/mcp/device/activate", "POST", { operation_id: operationId, status }, true));
+    this.assertMcpAttempt(generation);
     const confirmation = record(activation.confirm);
     const admission = await this.request(`/v1/enrollment/computers/${encodeURIComponent(invitationId)}/confirm`, "POST", confirmation, true);
+    this.assertMcpAttempt(generation);
     const result = mcpDeviceStatus(await this.request("/v1/mcp/device/complete", "POST", { operation_id: operationId, admission }, true));
+    this.assertMcpAttempt(generation);
     if (result.vaultId !== vaultId) throw new Error("mcp-response");
     return result;
   }
@@ -500,9 +528,13 @@ export class BrowserEnrollment {
   }
 
   public async signOut(): Promise<void> {
-    await this.request(this.viewValue.mode === "hosted" ? "/hosted/v1/web/app-session" : "/v1/instance/session", "DELETE");
-    this.csrf = undefined;
-    this.viewValue = { ...this.viewValue, stage: "signin" };
+    this.invalidateMcpAttempts();
+    this.signOutsInFlight += 1;
+    try {
+      await this.request(this.viewValue.mode === "hosted" ? "/hosted/v1/web/app-session" : "/v1/instance/session", "DELETE");
+      this.csrf = undefined;
+      this.viewValue = { ...this.viewValue, stage: "signin" };
+    } finally { this.signOutsInFlight -= 1; }
   }
 
   public management(): Promise<InstanceManagement> { return this.managementRequest("/v1/instance/management", "GET"); }
@@ -604,7 +636,12 @@ export class BrowserEnrollment {
   public denyVaultRequest(requestId: string): Promise<void> { return this.request(`/v1/instance/vault-requests/${encodeURIComponent(requestId)}/deny`, "POST").then(() => undefined); }
 
   public setHostedCsrf(csrf: unknown): void {
+    this.setCsrf(csrf, true);
+  }
+
+  private setCsrf(csrf: unknown, invalidateMcpAttempt: boolean): void {
     if (typeof csrf !== "string" || !csrf || csrf.length > 4096) throw new Error("enrollment-response");
+    if (invalidateMcpAttempt && this.csrf !== csrf) this.invalidateMcpAttempts();
     this.csrf = csrf;
   }
 
@@ -633,35 +670,36 @@ export class BrowserEnrollment {
     return this.request("/hosted/v1/web/app-account", "GET");
   }
 
-  private async restoreCommunitySession(): Promise<void> {
+  private async restoreCommunitySession(expectedGeneration: number): Promise<void> {
     try {
       const session = await this.request("/v1/instance/session", "GET");
-      const csrf = session.csrf_token;
-      if (typeof csrf !== "string" || !csrf || csrf.length > 4096) throw new Error("enrollment-response");
-      this.csrf = csrf;
+      this.assertMcpRestore(expectedGeneration);
+      this.observeCsrf(session.csrf_token);
     } catch (error) {
       if (!(error instanceof HttpStatusError) || error.status !== 401) throw error;
-      this.csrf = undefined;
+      this.assertMcpRestore(expectedGeneration);
+      this.observeSessionLoss();
     }
   }
 
-  private async restoreCustodySession(): Promise<void> {
+  private async restoreCustodySession(expectedGeneration: number): Promise<void> {
     if (this.viewValue.mode === "hosted") {
-      if (!await this.hostedSession()) throw new Error("session-expired");
+      if (!await this.hostedSession(expectedGeneration)) throw new Error("session-expired");
       return;
     }
-    await this.restoreCommunitySession();
+    await this.restoreCommunitySession(expectedGeneration);
     if (!this.csrf) throw new Error("session-expired");
   }
 
-  private async hostedSession(): Promise<boolean> {
+  private async hostedSession(expectedGeneration: number): Promise<boolean> {
     const session = await this.request("/hosted/v1/web/app-session", "GET");
+    this.assertMcpRestore(expectedGeneration);
     if (typeof session.signed_in !== "boolean") throw new Error("enrollment-response");
     if (!session.signed_in) {
-      this.csrf = undefined;
+      this.observeSessionLoss();
       return false;
     }
-    this.setHostedCsrf(session.csrf_token);
+    this.observeCsrf(session.csrf_token);
     return true;
   }
 
@@ -683,6 +721,29 @@ export class BrowserEnrollment {
     this.approvedInvitationId = undefined;
     this.ownerClaimDigest = undefined;
     if (this.enrollmentClient?.purpose === "owner") this.enrollmentClient = undefined;
+  }
+
+  private invalidateMcpAttempts(): void { this.mcpAttemptGeneration += 1; }
+
+  private assertMcpRestore(expectedGeneration: number): void {
+    if (expectedGeneration !== this.mcpAttemptGeneration) throw new Error("enrollment-cancelled");
+  }
+
+  private observeCsrf(csrf: unknown): void {
+    if (typeof csrf !== "string" || !csrf || csrf.length > 4096) throw new Error("enrollment-response");
+    if (this.csrf && this.csrf !== csrf) this.invalidateMcpAttempts();
+    this.csrf = csrf;
+  }
+
+  private observeSessionLoss(): void {
+    if (this.csrf) this.invalidateMcpAttempts();
+    this.csrf = undefined;
+  }
+
+  private assertMcpAttempt(generation: number): void {
+    if (generation !== this.mcpAttemptGeneration) throw new Error("enrollment-cancelled");
+    if (this.signOutsInFlight > 0) throw new Error("enrollment-cancelled");
+    if (this.session.phase !== "ready" || this.requireIdentity().role !== "owner") throw new Error("owner_required");
   }
 
   private requireIdentity(): EnrollmentIdentity {
@@ -832,7 +893,7 @@ export class BrowserEnrollment {
 
   private captureSession(response: Record<string, unknown>): void {
     const csrf = response.csrf_token;
-    if (typeof csrf === "string" && csrf) this.csrf = csrf;
+    if (typeof csrf === "string" && csrf) this.setCsrf(csrf, true);
   }
 
   private fail(error: unknown): void {
@@ -927,7 +988,7 @@ function mcpScopes(values: unknown[]): McpScope[] {
 }
 
 function mcpDeviceState(value: string): McpDeviceState {
-  if (value === "pending" || value === "online" || value === "offline" || value === "needs_approval" || value === "revoked") return value;
+  if (value === "online" || value === "offline" || value === "needs_approval" || value === "revoked") return value;
   throw new Error("mcp-response");
 }
 

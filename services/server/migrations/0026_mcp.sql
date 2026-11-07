@@ -2,7 +2,8 @@ CREATE TABLE mcp_devices (
   vault_id uuid NOT NULL REFERENCES vaults(vault_id) ON DELETE CASCADE,
   device_id uuid NOT NULL,
   cleanup_pending boolean NOT NULL DEFAULT false,
-  last_synced_at timestamptz,
+  cleanup_attempts integer NOT NULL DEFAULT 0,
+  cleanup_last_attempt_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (vault_id, device_id),
   FOREIGN KEY (vault_id, device_id) REFERENCES devices(vault_id, device_id) ON DELETE CASCADE

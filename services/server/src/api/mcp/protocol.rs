@@ -8,7 +8,7 @@ use axum::{
     routing::any,
 };
 use http_body_util::{BodyExt, combinators::BoxBody};
-use peppy_hosted_api::mcp::{McpScope, McpWorkerCallRequest};
+use peppy_hosted_api::mcp::{McpScope, McpWorkerCallRequest, mcp_scopes_allow, mcp_tool_scopes};
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     model::{
@@ -137,7 +137,13 @@ impl ServerHandler for McpServer {
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         self.validate_request_principal(&context)?;
-        if self.authorize_tool("list_conversations").await? == ToolAccess::PolicyDenied {
+        let mut policy_decisions = CataloguePolicyDecisions::default();
+        if tool_allowed("list_conversations", &self.principal.scopes)
+            && self
+                .authorize_tool("list_conversations", Some(&mut policy_decisions))
+                .await?
+                == ToolAccess::PolicyDenied
+        {
             return Err(McpError::invalid_request("operation_not_permitted", None));
         }
         let result = self
@@ -152,7 +158,8 @@ impl ServerHandler for McpServer {
         for tool in result.tools {
             if tool_allowed(tool.name.as_ref(), &self.principal.scopes)
                 && matches!(
-                    self.authorize_tool(tool.name.as_ref()).await,
+                    self.authorize_tool(tool.name.as_ref(), Some(&mut policy_decisions))
+                        .await,
                     Ok(ToolAccess::Permitted)
                 )
             {
@@ -172,7 +179,7 @@ impl ServerHandler for McpServer {
         if !tool_allowed(request.name.as_ref(), &self.principal.scopes) {
             return Err(McpError::invalid_params("tool is not available", None));
         }
-        if self.authorize_tool(request.name.as_ref()).await? == ToolAccess::PolicyDenied {
+        if self.authorize_tool(request.name.as_ref(), None).await? == ToolAccess::PolicyDenied {
             return Ok(CallToolResponse::Complete(CallToolResult::error(vec![
                 ContentBlock::text(
                     "operation_not_permitted: this Peppy account does not currently allow this operation.",
@@ -212,7 +219,11 @@ impl McpServer {
     }
 
     /// Unknown names are a protocol error; a policy denial is reported by the caller.
-    async fn authorize_tool(&self, name: &str) -> Result<ToolAccess, McpError> {
+    async fn authorize_tool(
+        &self,
+        name: &str,
+        policy_decisions: Option<&mut CataloguePolicyDecisions>,
+    ) -> Result<ToolAccess, McpError> {
         let operations: &[Operation] = match name {
             "list_conversations" | "get_messages" | "get_attachment" | "list_contacts" => {
                 &[Operation::Read]
@@ -221,13 +232,22 @@ impl McpServer {
             "send_image" => &[Operation::Send, Operation::Upload],
             _ => return Err(McpError::invalid_params("tool is not available", None)),
         };
+        let mut policy_decisions = policy_decisions;
         for operation in operations {
-            if !self
-                .state
-                .policy
-                .authorize(self.principal.access_principal(), *operation)
-                .await
-            {
+            let allowed = match policy_decisions.as_deref_mut() {
+                Some(decisions) => {
+                    decisions
+                        .authorize(&self.state, &self.principal, *operation)
+                        .await
+                }
+                None => {
+                    self.state
+                        .policy
+                        .authorize(self.principal.access_principal(), *operation)
+                        .await
+                }
+            };
+            if !allowed {
                 return Ok(ToolAccess::PolicyDenied);
             }
         }
@@ -256,12 +276,6 @@ impl McpServer {
         )
         .await
         .map_err(|_| McpError::internal_error("MCP worker is unavailable", None))?;
-        if serde_json::to_vec(&result).map_or(true, |value| value.len() > MAX_PUBLIC_BODY_BYTES) {
-            return Err(McpError::internal_error(
-                "MCP worker returned an invalid result",
-                None,
-            ));
-        }
         revalidate_mcp(&self.state, &self.principal)
             .await
             .map_err(|_| McpError::internal_error("authorization is no longer valid", None))?;
@@ -275,20 +289,44 @@ enum ToolAccess {
     PolicyDenied,
 }
 
+#[derive(Default)]
+struct CataloguePolicyDecisions {
+    read: Option<bool>,
+    send: Option<bool>,
+    upload: Option<bool>,
+}
+
+impl CataloguePolicyDecisions {
+    async fn authorize(
+        &mut self,
+        state: &ApiState,
+        principal: &McpPrincipal,
+        operation: Operation,
+    ) -> bool {
+        let decision = match operation {
+            Operation::Read => &mut self.read,
+            Operation::Send => &mut self.send,
+            Operation::Upload => &mut self.upload,
+            _ => unreachable!("MCP tools only use read, send, and upload policy operations"),
+        };
+        if let Some(allowed) = *decision {
+            return allowed;
+        }
+        let allowed = state
+            .policy
+            .authorize(principal.access_principal(), operation)
+            .await;
+        *decision = Some(allowed);
+        allowed
+    }
+}
+
 fn invalid_worker_result(_: impl std::fmt::Display) -> McpError {
     McpError::internal_error("MCP worker returned an invalid result", None)
 }
 
 fn tool_allowed(name: &str, scopes: &[McpScope]) -> bool {
-    let required_scope = match name {
-        "list_conversations" | "get_messages" | "get_attachment" | "list_contacts" => {
-            McpScope::ConversationsRead
-        }
-        "send_message" | "send_reaction_text" => McpScope::MessagesSend,
-        "send_image" => McpScope::MediaSend,
-        _ => return false,
-    };
-    scopes.contains(&required_scope)
+    mcp_tool_scopes(name).is_some_and(|required| mcp_scopes_allow(scopes, required))
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 use std::{
     fs, io,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -37,29 +38,54 @@ pub struct Custody {
 }
 
 impl Custody {
-    pub fn open(root: impl AsRef<Path>, key_path: impl AsRef<Path>) -> Result<Self, CustodyError> {
+    /// Initializes the worker-wide KEK exactly once, before any binding exists.
+    pub fn bootstrap(
+        root: impl AsRef<Path>,
+        key_path: impl AsRef<Path>,
+    ) -> Result<Self, CustodyError> {
         libsodium_rs::ensure_init().map_err(|_| CustodyError::Crypto)?;
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)?;
         set_private_dir(&root)?;
         remove_stale_temps(&root)?;
         let key_path = key_path.as_ref();
-        let key = if key_path.exists() {
-            let bytes = fs::read(key_path)?;
-            bytes.try_into().map_err(|_| CustodyError::Invalid)?
-        } else {
-            if fs::read_dir(&root)?.next().is_some() {
-                return Err(CustodyError::Invalid);
-            }
+        match fs::symlink_metadata(key_path) {
+            Ok(_) => return Self::open_existing(&root, key_path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        if fs::read_dir(&root)?.next().is_some() {
+            return Err(CustodyError::Invalid);
+        }
+        let key = {
             let mut key = [0_u8; xchacha20poly1305::KEYBYTES];
             libsodium_rs::random::fill_bytes(&mut key);
             if let Some(parent) = key_path.parent() {
                 fs::create_dir_all(parent)?;
                 set_private_dir(parent)?;
             }
-            write_private(key_path, &key)?;
+            write_new_private(key_path, &key)?;
             key
         };
+        Ok(Self {
+            root,
+            key: Zeroizing::new(key),
+        })
+    }
+
+    /// Opens custody using the startup-created KEK. Missing or unsafe keys are
+    /// never replaced after startup.
+    pub fn open_existing(
+        root: impl AsRef<Path>,
+        key_path: impl AsRef<Path>,
+    ) -> Result<Self, CustodyError> {
+        libsodium_rs::ensure_init().map_err(|_| CustodyError::Crypto)?;
+        let root = root.as_ref().to_path_buf();
+        fs::create_dir_all(&root)?;
+        set_private_dir(&root)?;
+        remove_stale_temps(&root)?;
+        let bytes = read_private(key_path.as_ref())?;
+        let key = bytes.try_into().map_err(|_| CustodyError::Invalid)?;
         Ok(Self {
             root,
             key: Zeroizing::new(key),
@@ -79,7 +105,8 @@ impl Custody {
                 .encode(<xchacha20poly1305::Nonce as AsRef<[u8]>>::as_ref(&nonce)),
             ciphertext: URL_SAFE_NO_PAD.encode(ciphertext),
         };
-        let encoded = serde_json::to_vec(&record).map_err(|_| CustodyError::Invalid)?;
+        let encoded =
+            Zeroizing::new(serde_json::to_vec(&record).map_err(|_| CustodyError::Invalid)?);
         write_private(&path, &encoded)?;
         Ok(())
     }
@@ -138,6 +165,42 @@ impl Custody {
     }
 }
 
+pub(crate) fn read_private(path: &Path) -> Result<Vec<u8>, io::Error> {
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)?;
+        validate_private_file(&file)?;
+        file
+    };
+    #[cfg(not(unix))]
+    let mut file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+pub(crate) fn validate_private_file(file: &fs::File) -> Result<(), io::Error> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "private file must be owner-owned, regular, and mode 0600",
+        ));
+    }
+    Ok(())
+}
+
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), io::Error> {
     let name = path
         .file_name()
@@ -158,6 +221,25 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), io::Error> {
     #[cfg(not(unix))]
     fs::write(&temporary, bytes)?;
     fs::rename(temporary, path)?;
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn write_new_private(path: &Path, bytes: &[u8]) -> Result<(), io::Error> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path)?;
+    io::Write::write_all(&mut file, bytes)?;
+    file.sync_all()?;
+    #[cfg(unix)]
+    validate_private_file(&file)?;
     if let Some(parent) = path.parent() {
         fs::File::open(parent)?.sync_all()?;
     }
@@ -192,7 +274,7 @@ mod tests {
     fn encrypted_records_reopen_and_bind_to_aad() {
         let directory = tempfile::tempdir().unwrap();
         let key = directory.path().join("worker-kek");
-        let first = Custody::open(directory.path(), &key).unwrap();
+        let first = Custody::bootstrap(directory.path(), &key).unwrap();
         first
             .store("vault", b"vault-a", b"credential and key cache")
             .unwrap();
@@ -203,7 +285,7 @@ mod tests {
                 .any(|item| item == b"credential")
         );
         drop(first);
-        let reopened = Custody::open(directory.path(), &key).unwrap();
+        let reopened = Custody::open_existing(directory.path(), &key).unwrap();
         assert_eq!(
             &*reopened.load("vault", b"vault-a").unwrap().unwrap(),
             b"credential and key cache"
@@ -219,11 +301,48 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let key = directory.path().join("worker-kek");
         fs::write(directory.path().join(".vault.sealed.crash.tmp"), b"partial").unwrap();
-        let custody = Custody::open(directory.path(), &key).unwrap();
+        let custody = Custody::bootstrap(directory.path(), &key).unwrap();
         custody.store("vault", b"aad", b"complete").unwrap();
         assert_eq!(
             &*custody.load("vault", b"aad").unwrap().unwrap(),
             b"complete"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_keys_must_be_private_regular_files_without_symlinks() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let directory = tempfile::tempdir().unwrap();
+        let key = directory.path().join("worker-kek");
+        fs::write(&key, [7; xchacha20poly1305::KEYBYTES]).unwrap();
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(Custody::open_existing(directory.path(), &key).is_err());
+
+        let target = directory.path().join("target");
+        fs::write(&target, [7; xchacha20poly1305::KEYBYTES]).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = directory.path().join("link");
+        symlink(&target, &link).unwrap();
+        assert!(Custody::open_existing(directory.path(), &link).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_file_loading_rejects_a_fifo_without_blocking() {
+        use std::{
+            ffi::CString,
+            time::{Duration, Instant},
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("secret-fifo");
+        let fifo_name = CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+
+        let started = Instant::now();
+        assert!(read_private(&fifo).is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

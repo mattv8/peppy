@@ -4,7 +4,7 @@ import { Modal } from "@peppy/desktop-ui";
 import type { McpDeviceStatus, McpGrantView } from "@peppy/desktop-ui/bridge-contracts";
 import { bridge, type DeviceRosterView } from "../bridge/bridge";
 import { McpDetailsModal } from "./McpDetailsModal";
-import { errorMessage, grantShortId, isRemovedDevice, isStartingState, mcpStateLabel, mcpVaultId } from "./mcpDisplay";
+import { grantShortId, isRemovedDevice, isStartingState, mcpErrorMessage, mcpServerErrorCode, mcpStateLabel, mcpVaultId, unavailableReasonFor } from "./mcpDisplay";
 
 type McpDeviceSettingsProps = {
   roster: DeviceRosterView;
@@ -22,23 +22,25 @@ const POLL_INTERVAL_MS = 5_000;
 const MAX_STATUS_POLLS = 24;
 const STALE_STATUS_MESSAGE = "Couldn't refresh status. Showing the last known status.";
 const COPY_FAILED_MESSAGE = "Couldn't copy. Select the endpoint below.";
-const STILL_WAITING_MESSAGE = "Still waiting. Select Refresh status to check again.";
-const ROW_STILL_WAITING_MESSAGE = "Still waiting. Open Details to check again.";
+const STILL_OFFLINE_MESSAGE = "Still offline. Select Refresh status to check again.";
+const ROW_STILL_OFFLINE_MESSAGE = "Still offline. Open Details to check again.";
+const CLEANUP_STILL_WAITING_MESSAGE = "Cleanup is still running. Select Refresh status to check again.";
+const ROW_CLEANUP_STILL_WAITING_MESSAGE = "Cleanup is still running. Open Details to check again.";
 const CLEANUP_HINT = "Cleanup is running. Status updates automatically.";
-const PENDING_HINT = "Peppy MCP is starting. Status updates automatically.";
+const OFFLINE_HINT = "Peppy MCP is offline. Checking for it to connect.";
 
 /** Appends the bridge's sanitized failure message, never raw or untrusted text. */
 const staleStatusMessage = (reason: unknown) => {
-  const detail = errorMessage(reason, "");
+  const detail = mcpErrorMessage(reason, "");
   return detail ? `${STALE_STATUS_MESSAGE} ${detail}` : STALE_STATUS_MESSAGE;
 };
 
 /** The removed notice owns the announcement, so a removed device shows no separate status text. */
 const statusHintFor = ({ removed, exhausted, cleanupPending, starting, statusNotice }: { removed: boolean; exhausted: boolean; cleanupPending: boolean; starting: boolean; statusNotice: string }) => {
   if (removed) return "";
-  if (exhausted) return STILL_WAITING_MESSAGE;
+  if (exhausted) return cleanupPending ? CLEANUP_STILL_WAITING_MESSAGE : STILL_OFFLINE_MESSAGE;
   if (cleanupPending) return CLEANUP_HINT;
-  if (starting) return PENDING_HINT;
+  if (starting) return OFFLINE_HINT;
   return statusNotice;
 };
 
@@ -46,12 +48,13 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
   const [status, setStatus] = useState<McpDeviceStatus | null>(null);
   const [grants, setGrants] = useState<McpGrantView[]>([]);
   const [error, setError] = useState("");
+  const [enableError, setEnableError] = useState("");
   const [consentOpen, setConsentOpen] = useState(false);
   const [consented, setConsented] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [revokeTarget, setRevokeTarget] = useState<McpGrantView | null>(null);
   const [pending, setPending] = useState(false);
-  const [revoking, setRevoking] = useState(false);
+  const [revokingGrantId, setRevokingGrantId] = useState<string | null>(null);
   const [loadingGrants, setLoadingGrants] = useState(false);
   const [grantError, setGrantError] = useState("");
   const [refreshingStatus, setRefreshingStatus] = useState(false);
@@ -66,6 +69,9 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
   const [pollRun, setPollRun] = useState(0);
   const sequence = useRef(0);
   const statusSequence = useRef(0);
+  const grantRequest = useRef(0);
+  const statusInFlight = useRef<number | null>(null);
+  const pollActiveRef = useRef(false);
   const detailsGeneration = useRef(0);
   const sessionGeneration = useRef(0);
   const statusRef = useRef<McpDeviceStatus | null>(null);
@@ -85,8 +91,8 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
   const statusVaultId = status ? mcpVaultId(status) : null;
   const canEnable = owner && unlocked && !serverOffline && !accountReadOnly && status?.available === true && (!status.device || (status.device.state === "revoked" && !status.device.cleanupPending)) && statusVaultId !== null;
   const canManageGrants = owner && !serverOffline;
-  const polling = Boolean(device && (device.state === "pending" || device.cleanupPending));
-  /** Right after a successful enable, offline or pending is transitional and polls even with details closed. */
+  const polling = Boolean(device?.cleanupPending);
+  /** Right after a successful enable, offline is transitional and polls even with details closed. */
   const settling = enableSettling && isStartingState(device?.state);
   const pollActive = (detailsOpen && polling) || settling;
 
@@ -110,13 +116,15 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
       applyStatus(next);
       setError("");
     } catch (reason) {
-      if (mounted.current && request === sequence.current) setError(errorMessage(reason, "MCP status could not be loaded."));
+      if (mounted.current && request === sequence.current) setError(mcpErrorMessage(reason, "MCP status could not be loaded."));
     }
   }, [applyStatus]);
 
   /** Polls stay silent; only a manual refresh marks the button busy. The sequence drops results that a newer request superseded. */
   const refreshStatus = useCallback(async (isCurrent: () => boolean, manual: boolean) => {
+    if (!manual && statusInFlight.current !== null) return;
     const request = ++statusSequence.current;
+    statusInFlight.current = request;
     if (manual) setRefreshingStatus(true);
     try {
       const next = await bridge.mcp_status();
@@ -129,21 +137,31 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
     } catch (reason) {
       if (isCurrent() && request === statusSequence.current) setStatusError(staleStatusMessage(reason));
     } finally {
+      if (statusInFlight.current === request) statusInFlight.current = null;
       if (manual && isCurrent()) setRefreshingStatus(false);
+      if (pollCount.current >= MAX_STATUS_POLLS && isCurrent() && request === statusSequence.current) setPollingExhausted(true);
     }
   }, [applyStatus]);
 
   const loadGrants = useCallback(async (generation: number) => {
     if (!canManageGrants) return;
+    const request = ++grantRequest.current;
     setLoadingGrants(true);
     setGrantError("");
     try {
       const next = await bridge.mcp_grants();
-      if (isCurrentDetails(generation)) setGrants(next);
+      if (request === grantRequest.current && isCurrentDetails(generation)) {
+        setGrants(next);
+        if (revokeTargetRef.current && !next.some(grant => grant.id === revokeTargetRef.current?.id)) {
+          revokeTargetRef.current = null;
+          setRevokeTarget(null);
+          setRevokeError("");
+        }
+      }
     } catch (reason) {
-      if (isCurrentDetails(generation)) setGrantError(errorMessage(reason, "MCP client grants could not be loaded."));
+      if (request === grantRequest.current && isCurrentDetails(generation)) setGrantError(mcpErrorMessage(reason, "MCP client grants could not be loaded."));
     } finally {
-      if (isCurrentDetails(generation)) setLoadingGrants(false);
+      if (request === grantRequest.current && isCurrentDetails(generation)) setLoadingGrants(false);
     }
   }, [canManageGrants, isCurrentDetails]);
 
@@ -153,10 +171,13 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
   }, [isCurrentDetails, loadGrants, refreshStatus]);
 
   useEffect(() => {
-    context.current = sessionKey;
     mounted.current = true;
-    void load();
     return () => { mounted.current = false; detailsGeneration.current += 1; };
+  }, []);
+
+  useEffect(() => {
+    context.current = sessionKey;
+    void load();
   }, [load, sessionKey, roster.currentDeviceId, refreshToken]);
 
   useEffect(() => () => { sessionGeneration.current += 1; }, []);
@@ -168,6 +189,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
     revokeTargetRef.current = null;
     setConsentOpen(false);
     setConsented(false);
+    setEnableError("");
     setDetailsOpen(false);
     setRevokeTarget(null);
     setGrants([]);
@@ -179,7 +201,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
     setStatusNotice("");
     setGrantNotice("");
     setRevokeError("");
-    setRevoking(false);
+    setRevokingGrantId(null);
     setPollingExhausted(false);
     setEnableSettling(false);
   }, [sessionKey, roster.currentDeviceId]);
@@ -196,16 +218,25 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
       void refreshStatus(() => isCurrentSession(session), false);
       if (pollCount.current === MAX_STATUS_POLLS) {
         clearInterval(interval);
-        if (isCurrentSession(session)) setPollingExhausted(true);
       }
     }, POLL_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [isCurrentSession, pollActive, pollRun, refreshStatus]);
 
+  useEffect(() => {
+    if (pollActive && !pollActiveRef.current) {
+      pollCount.current = 0;
+      setPollingExhausted(false);
+      setPollRun(run => run + 1);
+    }
+    pollActiveRef.current = pollActive;
+  }, [pollActive]);
+
   const enable = async () => {
     if (!canEnable || !consented || pending || !owner || serverOffline || accountReadOnly) return;
     setPending(true);
     const enableContext = sessionKey;
+    const enableSession = sessionGeneration.current;
     try {
       const next = await bridge.mcp_enable();
       if (!mounted.current || context.current !== enableContext) return;
@@ -217,9 +248,10 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
       await onMutation?.();
       setConsentOpen(false);
       setConsented(false);
-      setError("");
+      setEnableError("");
     } catch (reason) {
-      if (mounted.current) setError(errorMessage(reason, "MCP could not be enabled."));
+      if (isCurrentSession(enableSession)) setEnableError(mcpErrorMessage(reason, "MCP could not be enabled."));
+      if (mounted.current) void refreshStatus(() => isCurrentSession(enableSession), false);
     } finally {
       if (mounted.current) setPending(false);
     }
@@ -227,6 +259,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
 
   const openDetails = () => {
     const generation = ++detailsGeneration.current;
+    grantRequest.current += 1;
     pollCount.current = 0;
     setPollRun(run => run + 1);
     setDetailsOpen(true);
@@ -239,8 +272,20 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
     refreshDetails(generation);
   };
 
+  const openConsent = () => {
+    setEnableError("");
+    setConsentOpen(true);
+  };
+
+  const closeConsent = () => {
+    setEnableError("");
+    setConsentOpen(false);
+    setConsented(false);
+  };
+
   const closeDetails = () => {
     detailsGeneration.current += 1;
+    grantRequest.current += 1;
     revokeTargetRef.current = null;
     setDetailsOpen(false);
     setCopyStatus("");
@@ -249,7 +294,6 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
     setGrantNotice("");
     setRevokeError("");
     setRevokeTarget(null);
-    setRefreshingStatus(false);
   };
 
   const copyEndpoint = async () => {
@@ -282,37 +326,54 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
     const target = revokeTargetRef.current;
     if (!target || revokeInFlight.current || !canManageGrants) return;
     const generation = detailsGeneration.current;
+    const session = sessionGeneration.current;
     revokeInFlight.current = true;
-    setRevoking(true);
+    setRevokingGrantId(target.id);
     setRevokeError("");
+    setGrantNotice(`Revoking ${target.clientName} (${grantShortId(target)})…`);
     try {
       await bridge.mcp_revoke_grant(target.id);
-      if (!isCurrentDetails(generation)) return;
+      if (!isCurrentSession(session)) return;
+      grantRequest.current += 1;
+      setLoadingGrants(false);
       setGrants(currentGrants => currentGrants.filter(grant => grant.id !== target.id));
-      if (revokeTargetRef.current?.id === target.id) {
+      if (isCurrentDetails(generation)) setGrantNotice(`Revoked ${target.clientName} (${grantShortId(target)}).`);
+      if (isCurrentDetails(generation) && revokeTargetRef.current?.id === target.id) {
         revokeTargetRef.current = null;
         setRevokeTarget(null);
+        grantsHeading.current?.focus();
       }
-      setGrantNotice(`Revoked ${target.clientName} (${grantShortId(target)}).`);
-      grantsHeading.current?.focus();
     } catch (reason) {
+      if (mcpServerErrorCode(reason) === "mcp_grant_not_found" && isCurrentSession(session)) {
+        grantRequest.current += 1;
+        setLoadingGrants(false);
+        setGrants(currentGrants => currentGrants.filter(grant => grant.id !== target.id));
+        if (isCurrentDetails(generation)) setGrantNotice(`${target.clientName} (${grantShortId(target)}) was already revoked.`);
+        if (isCurrentDetails(generation) && revokeTargetRef.current?.id === target.id) {
+          revokeTargetRef.current = null;
+          setRevokeTarget(null);
+          grantsHeading.current?.focus();
+        }
+        return;
+      }
+      if (isCurrentDetails(generation)) setGrantNotice("");
       if (isCurrentDetails(generation) && revokeTargetRef.current?.id === target.id) {
-        setRevokeError(errorMessage(reason, "The client grant could not be revoked."));
+        setRevokeError(mcpErrorMessage(reason, "The client grant could not be revoked."));
       }
     } finally {
       revokeInFlight.current = false;
-      if (isCurrentDetails(generation)) setRevoking(false);
+      if (isCurrentSession(session)) setRevokingGrantId(null);
     }
   };
 
   if (!status) {
     return (
-      <li data-mcp-device-row={error ? "error" : "loading"}>
+      <li id="mcp-device" data-mcp-device-row={error ? "error" : "loading"}>
         <div data-device-details="mcp">
           {error ? (
             <>
-              <p role="alert">{error}</p>
-              <button type="button" className="secondary-button" onClick={() => void load()}>Retry MCP status</button>
+              <p id="mcp-device-error" className="settings-error" role="alert">{error}</p>
+              <button id="mcp-status-retry" type="button" className="secondary-button" onClick={() => void load()}>Retry MCP status</button>
             </>
           ) : (
             <span>Loading Peppy MCP…</span>
@@ -324,23 +385,9 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
 
   const custodyName = status.hosted ? "Peppy" : "This server";
   const matchedDevice = device ? roster.devices.find(candidate => candidate.id === device.deviceId) : undefined;
-  const unavailableReason = !status.available
-    ? "MCP is not configured on this server."
-    : !statusVaultId
-      ? "MCP cannot be enabled because the authenticated vault context is unavailable."
-      : !unlocked
-        ? "Unlock this vault before enabling Peppy MCP."
-        : !owner
-          ? "Only an owner can enable or manage Peppy MCP."
-          : accountReadOnly
-            ? "MCP enablement is unavailable while this account is read-only."
-            : serverOffline
-              ? "MCP enablement is unavailable while the server is offline."
-              : device?.state === "needs_approval"
-                ? "Approval is needed. Remove and re-enable Peppy MCP to create a new enrolled client."
-                : "";
+  const unavailableReason = unavailableReasonFor({ available: status.available, vaultId: statusVaultId, unlocked, owner, accountReadOnly, serverOffline, state: device?.state });
   const exhausted = pollingExhausted && pollActive;
-  const statusHint = statusHintFor({ removed: isRemovedDevice(device), exhausted, cleanupPending: device?.cleanupPending === true, starting: device?.state === "pending" || settling, statusNotice });
+  const statusHint = statusHintFor({ removed: isRemovedDevice(device), exhausted, cleanupPending: device?.cleanupPending === true, starting: settling, statusNotice });
 
   return (
     <>
@@ -354,21 +401,21 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
           </span>
           {device?.lastSyncedAt && <small>Last sync: {device.lastSyncedAt}</small>}
           {unavailableReason && <small data-mcp-unavailable>{unavailableReason}</small>}
-          {!detailsOpen && pollActive && <small data-mcp-row-notice role="status">{exhausted ? ROW_STILL_WAITING_MESSAGE : statusHint}</small>}
-          {error && <p role="alert">{error}</p>}
+          {!detailsOpen && pollActive && <small id="mcp-row-notice" data-mcp-row-notice role="status">{exhausted ? device?.cleanupPending ? ROW_CLEANUP_STILL_WAITING_MESSAGE : ROW_STILL_OFFLINE_MESSAGE : statusHint}</small>}
+          {error && <p id="mcp-device-error" className="settings-error" role="alert">{error}</p>}
         </div>
         {device ? (
           <span data-mcp-actions>
-            <button ref={detailsOpener} type="button" className="secondary-button" aria-label="Peppy MCP details" onClick={openDetails}>Details</button>
+            <button id="mcp-details-open" ref={detailsOpener} type="button" className="secondary-button" aria-label="Peppy MCP details" onClick={openDetails}>Details</button>
             {matchedDevice && owner && !serverOffline && (
-              <button type="button" className="secondary-button" aria-label="Remove Peppy MCP" onClick={event => onRemove?.(matchedDevice, event.currentTarget)}>Remove</button>
+              <button id="mcp-device-remove" type="button" className="secondary-button" aria-label="Remove Peppy MCP" onClick={event => onRemove?.(matchedDevice, event.currentTarget)}>Remove</button>
             )}
             {canEnable && (
-              <button ref={custodyOpener} type="button" className="secondary-button" aria-label="Review custody consent for Peppy MCP" onClick={() => setConsentOpen(true)}>Re-enable</button>
+              <button id="mcp-custody-review" ref={custodyOpener} type="button" className="secondary-button" aria-label="Review custody consent for Peppy MCP" onClick={openConsent}>Re-enable</button>
             )}
           </span>
         ) : canEnable && (
-          <button ref={custodyOpener} type="button" className="secondary-button" aria-label="Review custody consent for Peppy MCP" onClick={() => setConsentOpen(true)}>Review custody consent</button>
+          <button id="mcp-custody-review" ref={custodyOpener} type="button" className="secondary-button" aria-label="Review custody consent for Peppy MCP" onClick={openConsent}>Review custody consent</button>
         )}
       </li>
       {typeof document !== "undefined" && createPortal(<>
@@ -379,16 +426,17 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
             busy={pending}
             opener={custodyOpener}
             focusFallback={rowRef}
-            onDismiss={() => !pending && (setConsentOpen(false), setConsented(false))}
+            onDismiss={() => !pending && closeConsent()}
             actions={<>
-              <button type="button" className="secondary-button" disabled={pending} onClick={() => { setConsentOpen(false); setConsented(false); }}>Cancel</button>
-              <button type="button" className="primary-button" disabled={!consented || pending} onClick={() => void enable()}>Enable Peppy MCP</button>
+              <button id="mcp-custody-consent-cancel" type="button" className="secondary-button" disabled={pending} onClick={closeConsent}>Cancel</button>
+              <button id="mcp-custody-consent-enable" type="button" className="primary-button" aria-busy={pending || undefined} disabled={!consented || pending || !canEnable} onClick={() => void enable()}>Enable Peppy MCP</button>
             </>}
           >
-            {error && <p role="alert">{error}</p>}
+            {enableError && <p className="settings-error" role="alert">{enableError}</p>}
+            {pending && <p id="mcp-custody-consent-progress" role="status">Setting up Peppy MCP…</p>}
             <p>{custodyName} at {status.serverOrigin} will be able to decrypt vault {statusVaultId} to run its enrolled MCP client. It can send real messages without per-message prompts when you authorize a client.</p>
             <label className="settings-check">
-              <input type="checkbox" checked={consented} disabled={pending} onChange={event => setConsented(event.target.checked)} />
+              <input id="mcp-custody-consent-check" type="checkbox" checked={consented} disabled={pending} onChange={event => setConsented(event.target.checked)} />
               <span>{custodyName} can decrypt this vault for Peppy MCP.</span>
             </label>
           </Modal>
@@ -417,7 +465,8 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
               notice: grantNotice,
               revokeError,
               revokeTargetId: revokeTarget?.id ?? null,
-              revoking,
+               revoking: revokingGrantId !== null,
+               revokingGrantId,
               onRetryLoad: () => void loadGrants(detailsGeneration.current),
               onStartRevoke: startRevoke,
               onCancelRevoke: cancelRevoke,

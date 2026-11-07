@@ -53,6 +53,7 @@ const CONTROL_PLANE_TABLES: &[&str] = &[
     "mcp_oauth_authorizations",
 ];
 const ADMISSION_TABLES: &[&str] = &["instance_admission_windows", "instance_admission_sources"];
+const MCP_MAINTENANCE_TABLES: &[&str] = &["mcp_cleanup_jobs"];
 const TENANT_SCOPE_POLICY_EXPRESSION: &str =
     "((vault_id)::text = NULLIF(current_setting('peppy.vault_id'::text, true), ''::text))";
 const COMMUNITY_RESOLVERS: &[&str] = &[
@@ -197,6 +198,7 @@ pub async fn grant_maintenance_privileges(pool: &PgPool, role: &str) -> Result<(
     let tenant_tables = qualified_tables(&schema, TENANT_TABLES);
     let admission_tables = qualified_tables(&schema, ADMISSION_TABLES);
     let control_plane_tables = qualified_tables(&schema, CONTROL_PLANE_TABLES);
+    let mcp_maintenance_tables = qualified_tables(&schema, MCP_MAINTENANCE_TABLES);
     sqlx::raw_sql(&format!(
         "GRANT USAGE ON SCHEMA {schema_identifier} TO {role}"
     ))
@@ -214,6 +216,16 @@ pub async fn grant_maintenance_privileges(pool: &PgPool, role: &str) -> Result<(
     .await?;
     sqlx::raw_sql(&format!(
         "GRANT SELECT, UPDATE, DELETE ON TABLE {admission_tables} TO {role}"
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::raw_sql(&format!(
+        "GRANT SELECT, UPDATE, DELETE ON TABLE {mcp_maintenance_tables} TO {role}"
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::raw_sql(&format!(
+        "GRANT EXECUTE ON FUNCTION {schema_identifier}.mcp_sweep_oauth() TO {role}"
     ))
     .execute(pool)
     .await?;
@@ -468,6 +480,28 @@ pub async fn validate_maintenance_role(pool: &PgPool) -> Result<(), RlsError> {
     if !control_plane_sweep {
         return Err(RlsError::UnsafeMaintenanceRole(
             "requires global sweep privileges",
+        ));
+    }
+    let mcp_cleanup_dml: bool = sqlx::query_scalar(
+        "SELECT count(*) = $2 AND COALESCE(bool_and(has_table_privilege(current_user, oid, 'SELECT') AND has_table_privilege(current_user, oid, 'UPDATE') AND has_table_privilege(current_user, oid, 'DELETE')), false) FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = ANY($1)",
+    )
+    .bind(MCP_MAINTENANCE_TABLES.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>())
+    .bind(MCP_MAINTENANCE_TABLES.len() as i64)
+    .fetch_one(pool)
+    .await?;
+    if !mcp_cleanup_dml {
+        return Err(RlsError::UnsafeMaintenanceRole(
+            "requires MCP cleanup maintenance privileges",
+        ));
+    }
+    let oauth_sweep_execute: bool = sqlx::query_scalar(
+        "SELECT has_function_privilege(current_user, 'mcp_sweep_oauth()', 'EXECUTE') AND NOT has_function_privilege('public', 'mcp_sweep_oauth()', 'EXECUTE')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !oauth_sweep_execute {
+        return Err(RlsError::UnsafeMaintenanceRole(
+            "requires MCP OAuth sweep execute privilege",
         ));
     }
     validate_admission_maintenance_privileges(pool).await

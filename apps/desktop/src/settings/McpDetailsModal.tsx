@@ -30,6 +30,8 @@ export function McpDetailsModal({ opener, focusFallback, status, device, canReen
   const removed = isRemovedDevice(device);
   const endpointUsable = hasUsableEndpoint(device);
   const closeButton = useRef<HTMLButtonElement>(null);
+  const refreshButton = useRef<HTMLButtonElement>(null);
+  const refreshWasFocused = useRef(false);
 
   /** Refresh unmounts when the device is removed; keep keyboard focus on a control instead of the page body. */
   useEffect(() => {
@@ -38,6 +40,15 @@ export function McpDetailsModal({ opener, focusFallback, status, device, canReen
     if (!active || active === document.body) closeButton.current?.focus();
   }, [removed]);
 
+  useEffect(() => {
+    if (refreshWasFocused.current && !refreshing && document.activeElement === document.body) refreshButton.current?.focus();
+  }, [refreshing]);
+
+  const refresh = () => {
+    refreshWasFocused.current = document.activeElement === refreshButton.current;
+    onRefresh();
+  };
+
   return (
     <Modal
       id="mcp-device-details"
@@ -45,17 +56,17 @@ export function McpDetailsModal({ opener, focusFallback, status, device, canReen
       opener={opener}
       focusFallback={focusFallback}
       onDismiss={onClose}
-      actions={<button ref={closeButton} type="button" className="secondary-button" onClick={onClose}>Close</button>}
+      actions={<button id="mcp-details-close" ref={closeButton} type="button" className="secondary-button" onClick={onClose}>Close</button>}
     >
       <div data-mcp-detail-actions>
-        {endpointUsable && <button type="button" className="secondary-button" onClick={onCopy}>Copy endpoint</button>}
-        {!removed && <button type="button" className="secondary-button" aria-busy={refreshing} disabled={refreshing} onClick={onRefresh}>Refresh status</button>}
+        {endpointUsable && <button id="mcp-copy-endpoint" type="button" className="secondary-button" onClick={onCopy}>Copy endpoint</button>}
+        {!removed && <button id="mcp-refresh-status" ref={refreshButton} type="button" className="secondary-button" aria-busy={refreshing} disabled={refreshing} onClick={refresh}>Refresh status</button>}
       </div>
       <p id="mcp-copy-status" role="status" aria-live="polite">{copyStatus}</p>
       <p id="mcp-status-notice" role="status" aria-live="polite">{statusNotice}</p>
       {removed && <p id="mcp-removed-notice" role="status">{canReenable ? `${REMOVED_NOTICE} ${REENABLE_GUIDANCE}` : REMOVED_NOTICE}</p>}
       {statusError && <p id="mcp-status-stale" role="alert">{statusError}</p>}
-      <dl data-mcp-details>
+      <dl id="mcp-details-summary" data-mcp-details>
         {!removed && (
           <div>
             <dt>Endpoint</dt>

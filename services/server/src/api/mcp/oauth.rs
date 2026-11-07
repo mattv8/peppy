@@ -106,6 +106,9 @@ async fn authorization_server_metadata(
         "token_endpoint": format!("{origin}oauth/token"),
         "registration_endpoint": format!("{origin}oauth/register"),
         "revocation_endpoint": format!("{origin}oauth/revoke"),
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "token_endpoint_auth_methods_supported": ["none"],
         "code_challenge_methods_supported": ["S256"],
         "scopes_supported": scope_names(),
     })))
@@ -136,7 +139,7 @@ async fn register(
         return oauth_error(ApiError(StatusCode::BAD_REQUEST, "invalid_client_metadata"));
     };
     match register_inner(&state, peer, request).await {
-        Ok(value) => no_store((StatusCode::OK, value).into_response()),
+        Ok(value) => no_store((StatusCode::CREATED, value).into_response()),
         Err(error) => oauth_error(error),
     }
 }
@@ -146,22 +149,27 @@ async fn register_inner(
     peer: Option<IpAddr>,
     request: Registration,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let grant_types = request
+        .grant_types
+        .clone()
+        .unwrap_or_else(|| vec!["authorization_code".into(), "refresh_token".into()]);
+    let response_types = request
+        .response_types
+        .clone()
+        .unwrap_or_else(|| vec!["code".into()]);
+    let token_endpoint_auth_method = request
+        .token_endpoint_auth_method
+        .clone()
+        .unwrap_or_else(|| "none".into());
     if request.client_name.trim().is_empty()
         || request.client_name.len() > 128
         || request.redirect_uris.is_empty()
         || request.redirect_uris.len() > 8
         || serde_json::to_vec(&request.extensions).map_or(true, |value| value.len() > 8 * 1024)
-        || request.grant_types.as_ref().is_some_and(|types| {
-            types != &["authorization_code", "refresh_token"] && types != &["authorization_code"]
-        })
-        || request
-            .response_types
-            .as_ref()
-            .is_some_and(|types| types != &["code"])
-        || request
-            .token_endpoint_auth_method
-            .as_deref()
-            .is_some_and(|method| method != "none")
+        || (grant_types != ["authorization_code", "refresh_token"]
+            && grant_types != ["authorization_code"])
+        || response_types != ["code"]
+        || token_endpoint_auth_method != "none"
     {
         return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_client_metadata"));
     }
@@ -212,9 +220,15 @@ async fn register_inner(
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "mcp_oauth_register_commit"))?;
-    Ok(Json(
-        serde_json::json!({"client_id":client_id,"redirect_uris":redirects,"token_endpoint_auth_method":"none"}),
-    ))
+    Ok(Json(serde_json::json!({
+        "client_id": client_id,
+        "client_name": request.client_name.trim(),
+        "redirect_uris": redirects,
+        "scope": scope_strings(&scopes).join(" "),
+        "grant_types": grant_types,
+        "response_types": response_types,
+        "token_endpoint_auth_method": token_endpoint_auth_method,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -389,7 +403,7 @@ async fn approve(
     let principal = authenticated(&state, &headers, Operation::Revoke).await?;
     owner(&principal)?;
     let selected = decision.scopes;
-    if selected.is_empty() || selected.len() > 3 {
+    if !McpScope::is_valid_set(&selected) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_scopes"));
     }
     let mut tx = scope::begin(&state.db, principal.vault)
@@ -499,14 +513,27 @@ struct TokenForm {
 
 async fn token(
     State(state): State<ApiState>,
+    PeerAddress(peer): PeerAddress,
     form: Result<axum::extract::Form<TokenForm>, axum::extract::rejection::FormRejection>,
 ) -> Response {
     let Ok(axum::extract::Form(form)) = form else {
         return oauth_error(ApiError(StatusCode::BAD_REQUEST, "invalid_request"));
     };
     let result = match required(&form.grant_type).map(str::to_owned) {
-        Ok(grant_type) if grant_type == "authorization_code" => exchange_code(&state, form).await,
-        Ok(grant_type) if grant_type == "refresh_token" => refresh(&state, form).await,
+        Ok(grant_type) if grant_type == "authorization_code" => {
+            match oauth_admission(&state, peer, b"mcp-oauth-token", "mcp_oauth_token_limited").await
+            {
+                Ok(()) => exchange_code(&state, form).await,
+                Err(error) => Err(error),
+            }
+        }
+        Ok(grant_type) if grant_type == "refresh_token" => {
+            match oauth_admission(&state, peer, b"mcp-oauth-token", "mcp_oauth_token_limited").await
+            {
+                Ok(()) => refresh(&state, form).await,
+                Err(error) => Err(error),
+            }
+        }
         Ok(_) => Err(ApiError(StatusCode::BAD_REQUEST, "unsupported_grant_type")),
         Err(error) => Err(error),
     };
@@ -533,19 +560,27 @@ async fn exchange_code(state: &ApiState, form: TokenForm) -> ApiResult<serde_jso
         .await
         .map_err(|error| database_unavailable(&error, "mcp_oauth_token_begin"))?;
     let row = sqlx::query(
-        "SELECT c.*,g.scopes,c.used_at IS NOT NULL AS used FROM mcp_oauth_codes c JOIN mcp_grants g ON g.id=c.grant_id WHERE c.digest=$1 FOR UPDATE OF c",
+        "SELECT c.*,g.scopes,c.used_at IS NOT NULL AS used FROM mcp_oauth_codes c JOIN mcp_grants g ON g.id=c.grant_id AND g.revoked_at IS NULL JOIN devices d ON d.vault_id=c.vault_id AND d.device_id=c.device_id AND d.revoked_at IS NULL WHERE c.digest=$1 FOR UPDATE OF c,g,d",
     )
     .bind(digest(code))
     .fetch_optional(&mut *tx)
     .await
     .map_err(|error| database_unavailable(&error, "mcp_oauth_code_lock"))?
     .ok_or(ApiError(StatusCode::BAD_REQUEST, "invalid_grant"))?;
+    let unexpired: bool = sqlx::query_scalar(
+        "SELECT expires_at > clock_timestamp() FROM mcp_oauth_codes WHERE digest=$1",
+    )
+    .bind(digest(code))
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| database_unavailable(&error, "mcp_oauth_code_expiry"))?;
     let expected = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     if row.get::<String, _>("client_id") != client_id
         || redirect_uri != row.get::<String, _>("redirect_uri")
         || row.get::<String, _>("code_challenge") != expected
         || resource != row.get::<String, _>("resource")
         || row.get::<bool, _>("used")
+        || !unexpired
     {
         return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_grant"));
     }
@@ -589,18 +624,25 @@ async fn refresh(state: &ApiState, form: TokenForm) -> ApiResult<serde_json::Val
         .await
         .map_err(|error| database_unavailable(&error, "mcp_oauth_refresh_family_lock"))?;
     let row = sqlx::query(
-        "SELECT t.*,g.scopes,t.used_at IS NOT NULL AS used,t.revoked_at IS NOT NULL AS revoked,t.expires_at > now() AS unexpired FROM mcp_oauth_tokens t JOIN mcp_grants g ON g.id=t.grant_id WHERE t.digest=$1 AND t.token_kind='refresh' FOR UPDATE OF t",
+        "SELECT t.*,g.scopes,t.used_at IS NOT NULL AS used,t.revoked_at IS NOT NULL AS revoked FROM mcp_oauth_tokens t JOIN mcp_grants g ON g.id=t.grant_id AND g.revoked_at IS NULL JOIN devices d ON d.vault_id=t.vault_id AND d.device_id=t.device_id AND d.revoked_at IS NULL WHERE t.digest=$1 AND t.token_kind='refresh' FOR UPDATE OF t,g,d",
     )
     .bind(digest(token))
     .fetch_optional(&mut *tx)
     .await
     .map_err(|error| database_unavailable(&error, "mcp_oauth_refresh_lock"))?
     .ok_or(ApiError(StatusCode::BAD_REQUEST, "invalid_grant"))?;
+    let unexpired: bool = sqlx::query_scalar(
+        "SELECT expires_at > clock_timestamp() FROM mcp_oauth_tokens WHERE digest=$1",
+    )
+    .bind(digest(token))
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| database_unavailable(&error, "mcp_oauth_refresh_expiry"))?;
     if row.get::<String, _>("client_id") != client_id
         || row.get::<String, _>("resource") != resource
         || row.get::<bool, _>("used")
         || row.get::<bool, _>("revoked")
-        || !row.get::<bool, _>("unexpired")
+        || !unexpired
     {
         sqlx::query("UPDATE mcp_oauth_tokens SET revoked_at=now() WHERE family_id=$1 AND revoked_at IS NULL").bind(row.get::<Uuid,_>("family_id")).execute(&mut *tx).await.map_err(|error| database_unavailable(&error, "mcp_oauth_refresh_revoke"))?;
         tx.commit()
@@ -632,7 +674,7 @@ async fn issue_tokens(
         (&access, "access", ACCESS_TTL_SECONDS),
         (&refresh, "refresh", REFRESH_TTL_SECONDS),
     ] {
-        sqlx::query("INSERT INTO mcp_oauth_tokens(digest,token_kind,family_id,vault_id,device_id,grant_id,client_id,resource,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,now()+($9::text||' seconds')::interval)")
+        sqlx::query("INSERT INTO mcp_oauth_tokens(digest,token_kind,family_id,vault_id,device_id,grant_id,client_id,resource,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp()+($9::text||' seconds')::interval)")
             .bind(digest(secret)).bind(kind).bind(family).bind(row.get::<Uuid,_>("vault_id")).bind(row.get::<Uuid,_>("device_id")).bind(row.get::<Uuid,_>("grant_id")).bind(row.get::<String,_>("client_id")).bind(row.get::<String,_>("resource")).bind(ttl).execute(&mut **tx).await.map_err(|error| database_unavailable(&error, "mcp_oauth_issue"))?;
     }
     let scope = scope_strings(&scopes_from_strings(row.get("scopes"))?).join(" ");
@@ -649,12 +691,24 @@ struct RevokeForm {
 
 async fn revoke(
     State(state): State<ApiState>,
+    PeerAddress(peer): PeerAddress,
     form: Result<axum::extract::Form<RevokeForm>, axum::extract::rejection::FormRejection>,
 ) -> Response {
     let Ok(axum::extract::Form(form)) = form else {
         return oauth_error(ApiError(StatusCode::BAD_REQUEST, "invalid_request"));
     };
-    match revoke_inner(&state, form).await {
+    let result = match oauth_admission(
+        &state,
+        peer,
+        b"mcp-oauth-revoke",
+        "mcp_oauth_revoke_limited",
+    )
+    .await
+    {
+        Ok(()) => revoke_inner(&state, form).await,
+        Err(error) => Err(error),
+    };
+    match result {
         Ok(response) => response,
         Err(error) => oauth_error(error),
     }
@@ -674,6 +728,23 @@ async fn revoke_inner(state: &ApiState, form: RevokeForm) -> ApiResult<Response>
     let mut tx = scope::begin(&state.db, vault)
         .await
         .map_err(|error| database_unavailable(&error, "mcp_oauth_revoke_begin"))?;
+    let Some((_token_client, token_kind, family_id)) = sqlx::query_as::<_, (String, String, Uuid)>(
+        "SELECT client_id,token_kind,family_id FROM mcp_oauth_tokens WHERE digest=$1",
+    )
+    .bind(&digest)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| database_unavailable(&error, "mcp_oauth_revoke_lock"))?
+    else {
+        return Ok(no_store(StatusCode::OK.into_response()));
+    };
+    if token_kind == "refresh" {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(family_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| database_unavailable(&error, "mcp_oauth_revoke_family_lock"))?;
+    }
     let Some(token_client) = sqlx::query_scalar::<_, String>(
         "SELECT client_id FROM mcp_oauth_tokens WHERE digest=$1 FOR UPDATE",
     )
@@ -687,13 +758,21 @@ async fn revoke_inner(state: &ApiState, form: RevokeForm) -> ApiResult<Response>
     if token_client != client_id {
         return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_client"));
     }
-    sqlx::query(
-        "UPDATE mcp_oauth_tokens SET revoked_at=now() WHERE digest=$1 AND revoked_at IS NULL",
-    )
-    .bind(digest)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| database_unavailable(&error, "mcp_oauth_revoke"))?;
+    if token_kind == "refresh" {
+        sqlx::query("UPDATE mcp_oauth_tokens SET revoked_at=now() WHERE family_id=$1 AND revoked_at IS NULL")
+            .bind(family_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| database_unavailable(&error, "mcp_oauth_revoke"))?;
+    } else {
+        sqlx::query(
+            "UPDATE mcp_oauth_tokens SET revoked_at=now() WHERE digest=$1 AND revoked_at IS NULL",
+        )
+        .bind(&digest)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "mcp_oauth_revoke"))?;
+    }
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "mcp_oauth_revoke_commit"))?;
@@ -716,7 +795,7 @@ pub(super) async fn authenticate_mcp(
             .bind(digest(bearer))
             .fetch_optional(&state.db)
             .await
-            .map_err(|_| bearer_error(state, StatusCode::UNAUTHORIZED, "invalid_token"))?
+            .map_err(|error| bearer_database_error(state, &error, "mcp_oauth_access_resolve"))?
             .ok_or_else(|| bearer_error(state, StatusCode::UNAUTHORIZED, "invalid_token"))?;
     let principal = McpPrincipal {
         vault_id: row.get("vault_id"),
@@ -752,9 +831,9 @@ pub(super) async fn revalidate_mcp(
 ) -> Result<(), Response> {
     let mut tx = scope::begin(&state.db, principal.vault_id)
         .await
-        .map_err(|_| bearer_error(state, StatusCode::UNAUTHORIZED, "invalid_token"))?;
+        .map_err(|error| bearer_database_error(state, &error, "mcp_oauth_revalidate_begin"))?;
     let expected_resource = resource(state).map_err(|error| error.into_response())?;
-    let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mcp_oauth_tokens t JOIN mcp_grants g ON g.id=t.grant_id AND g.vault_id=t.vault_id AND g.device_id=t.device_id JOIN mcp_devices m ON m.vault_id=t.vault_id AND m.device_id=t.device_id JOIN devices d ON d.vault_id=t.vault_id AND d.device_id=t.device_id WHERE t.digest=$1 AND t.family_id=$2 AND t.token_kind='access' AND t.expires_at>now() AND t.revoked_at IS NULL AND t.resource=$3 AND g.id=$4 AND g.vault_id=$5 AND g.device_id=$6 AND g.revoked_at IS NULL AND d.revoked_at IS NULL)").bind(&principal.token_digest).bind(principal.family_id).bind(expected_resource).bind(principal.grant_id).bind(principal.vault_id).bind(principal.device_id).fetch_one(&mut *tx).await.map_err(|_| bearer_error(state, StatusCode::UNAUTHORIZED, "invalid_token"))?;
+    let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mcp_oauth_tokens t JOIN mcp_grants g ON g.id=t.grant_id AND g.vault_id=t.vault_id AND g.device_id=t.device_id JOIN mcp_devices m ON m.vault_id=t.vault_id AND m.device_id=t.device_id JOIN devices d ON d.vault_id=t.vault_id AND d.device_id=t.device_id WHERE t.digest=$1 AND t.family_id=$2 AND t.token_kind='access' AND t.expires_at>clock_timestamp() AND t.revoked_at IS NULL AND t.resource=$3 AND g.id=$4 AND g.vault_id=$5 AND g.device_id=$6 AND g.revoked_at IS NULL AND d.revoked_at IS NULL)").bind(&principal.token_digest).bind(principal.family_id).bind(expected_resource).bind(principal.grant_id).bind(principal.vault_id).bind(principal.device_id).fetch_one(&mut *tx).await.map_err(|error| bearer_database_error(state, &error, "mcp_oauth_revalidate"))?;
     if !live {
         return Err(bearer_error(
             state,
@@ -764,7 +843,7 @@ pub(super) async fn revalidate_mcp(
     }
     tx.commit()
         .await
-        .map_err(|_| bearer_error(state, StatusCode::UNAUTHORIZED, "invalid_token"))?;
+        .map_err(|error| bearer_database_error(state, &error, "mcp_oauth_revalidate_commit"))?;
     Ok(())
 }
 
@@ -816,10 +895,7 @@ fn parse_scopes(value: &str) -> ApiResult<Vec<McpScope>> {
             _ => Err(ApiError(StatusCode::BAD_REQUEST, "invalid_scope")),
         })
         .collect::<ApiResult<Vec<_>>>()?;
-    if scopes.is_empty()
-        || scopes.len() > 3
-        || scopes.windows(2).any(|window| window[0] == window[1])
-    {
+    if !McpScope::is_valid_set(&scopes) {
         Err(ApiError(StatusCode::BAD_REQUEST, "invalid_scope"))
     } else {
         Ok(scopes)
@@ -881,4 +957,13 @@ fn bearer_error(state: &ApiState, status: StatusCode, error: &str) -> Response {
             .insert(header::WWW_AUTHENTICATE, challenge);
     }
     no_store(response)
+}
+
+fn bearer_database_error(
+    state: &ApiState,
+    error: &sqlx::Error,
+    operation: &'static str,
+) -> Response {
+    let unavailable = database_unavailable(error, operation);
+    bearer_error(state, unavailable.0, "temporarily_unavailable")
 }

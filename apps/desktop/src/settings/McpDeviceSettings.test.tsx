@@ -18,14 +18,14 @@ const device = (state: McpDeviceState, cleanupPending = false): McpDeviceStatus 
   ...ready,
   device: { deviceId: "mcp-device", name: "Peppy MCP", state, lastSyncedAt: "now", cleanupPending },
 });
-const pendingStatus = device("pending");
+const cleanupStatus = device("revoked", true);
 const onlineStatus = device("online");
 const GRANT: McpGrantView = { id: "0f1e2d3c-4b5a-4968-8777-665544332211", clientName: "Claude", scopes: ["conversations:read", "messages:send"], createdAt: "2026-01-02", lastUsedAt: null };
-const PENDING_HINT = "Peppy MCP is starting. Status updates automatically.";
+const OFFLINE_HINT = "Peppy MCP is offline. Checking for it to connect.";
 const MAX_POLLS = 24;
-const ROW_STILL_WAITING = "Still waiting. Open Details to check again.";
+const ROW_STILL_WAITING = "Still offline. Open Details to check again.";
 const CLEANUP_HINT = "Cleanup is running. Status updates automatically.";
-const STILL_WAITING = "Still waiting. Select Refresh status to check again.";
+const STILL_WAITING = "Still offline. Select Refresh status to check again.";
 const STALE_STATUS = "Couldn't refresh status. Showing the last known status.";
 const COPY_FAILED = "Couldn't copy. Select the endpoint below.";
 const fresh = (template: McpDeviceStatus) => () => Promise.resolve({ ...template, device: template.device ? { ...template.device } : null });
@@ -114,6 +114,42 @@ describe("McpDeviceSettings", () => {
       await waitFor(() => expect(screen.getByRole("dialog")).toHaveTextContent("Unlock this vault to approve MCP."));
     });
 
+    it("clears an enable error after cancel and does not show it on reopen", async () => {
+      vi.mocked(bridge.mcp_enable).mockRejectedValueOnce({ code: "unknown", message: "Enable failed" });
+      renderSettings();
+      fireEvent.click(await screen.findByRole("button", { name: /review custody consent/i }));
+      fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt this vault/i }));
+      fireEvent.click(screen.getByRole("button", { name: /enable Peppy MCP/i }));
+      expect(await within(screen.getByRole("dialog")).findByRole("alert")).toHaveTextContent("Enable failed");
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(screen.queryByText("Enable failed")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /review custody consent/i }));
+      expect(screen.queryByText("Enable failed")).not.toBeInTheDocument();
+    });
+
+    it("disables Enable after a conflict refresh shows the existing device", async () => {
+      vi.mocked(bridge.mcp_status).mockResolvedValueOnce(ready).mockResolvedValueOnce(onlineStatus);
+      vi.mocked(bridge.mcp_enable).mockRejectedValueOnce({ code: "mcp_device_conflict", message: "already configured" });
+      renderSettings();
+      fireEvent.click(await screen.findByRole("button", { name: /review custody consent/i }));
+      fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt this vault/i }));
+      fireEvent.click(screen.getByRole("button", { name: /enable Peppy MCP/i }));
+      const dialog = screen.getByRole("dialog");
+      expect(await within(dialog).findByRole("alert")).toHaveTextContent("Peppy MCP is already set up. Close this to see its current status.");
+      expect(within(dialog).getByRole("button", { name: /enable Peppy MCP/i })).toBeDisabled();
+    });
+
+    it("keeps custody consent open for a native setup-in-progress error and silently refreshes status", async () => {
+      vi.mocked(bridge.mcp_enable).mockRejectedValue({ code: "server-rejected", message: "The server rejected the request (HTTP 409, mcp_enable_in_progress)." });
+      renderSettings();
+      fireEvent.click(await screen.findByRole("button", { name: /review custody consent/i }));
+      fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt this vault/i }));
+      fireEvent.click(screen.getByRole("button", { name: /enable Peppy MCP/i }));
+      expect(await within(screen.getByRole("dialog")).findByRole("alert")).toHaveTextContent("Peppy MCP setup is already running. Wait a few minutes, then try again.");
+      expect(screen.getByRole("button", { name: /enable Peppy MCP/i })).toBeEnabled();
+      expect(bridge.mcp_status).toHaveBeenCalledTimes(2);
+    });
+
     it("ignores an enable completion after the vault context changes", async () => {
       const enable = deferred<McpDeviceStatus>();
       vi.mocked(bridge.mcp_enable).mockReturnValue(enable.promise);
@@ -133,6 +169,18 @@ describe("McpDeviceSettings", () => {
       const { container } = renderSettings();
       expect(await screen.findByText("Offline")).toBeInTheDocument();
       expect(container.querySelector('[data-device-id="mcp-device"]')).toBeInTheDocument();
+    });
+
+    it("renders stable MCP settings hooks from durable device and grant identifiers", async () => {
+      vi.mocked(bridge.mcp_status).mockResolvedValue(onlineStatus);
+      vi.mocked(bridge.mcp_grants).mockResolvedValue([GRANT]);
+      renderSettings();
+      expect(await screen.findByRole("button", { name: /Peppy MCP details/i })).toHaveAttribute("id", "mcp-details-open");
+      expect(document.getElementById("mcp-device-mcp-device")).toBeInTheDocument();
+      const dialog = await openDetailsDialog();
+      expect(dialog.querySelector("#mcp-details-summary")).toBeInTheDocument();
+      expect(await within(dialog).findByRole("button", { name: "Revoke Claude (0f1e2d3c)" })).toHaveAttribute("id", `mcp-grant-revoke-${GRANT.id}`);
+      expect(document.getElementById(`mcp-grant-${GRANT.id}`)).toBeInTheDocument();
     });
 
     it("shows an initial status failure in the row and retries it", async () => {
@@ -207,6 +255,21 @@ describe("McpDeviceSettings", () => {
       await waitFor(() => expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument());
     });
 
+    it("restores Refresh status focus after the request settles", async () => {
+      const refresh = deferred<McpDeviceStatus>();
+      vi.mocked(bridge.mcp_status).mockResolvedValueOnce(onlineStatus).mockResolvedValueOnce(onlineStatus).mockReturnValueOnce(refresh.promise);
+      renderSettings();
+      const dialog = await openDetailsDialog();
+      await settle();
+      const button = within(dialog).getByRole("button", { name: "Refresh status" });
+      button.focus();
+      fireEvent.click(button);
+      await act(async () => {});
+      button.blur();
+      await act(async () => refresh.resolve(onlineStatus));
+      expect(button).toHaveFocus();
+    });
+
     it("shows the cleanup hint while cleanup is pending", async () => {
       vi.mocked(bridge.mcp_status).mockResolvedValue(device("revoked", true));
       renderSettings();
@@ -224,14 +287,14 @@ describe("McpDeviceSettings", () => {
       await act(async () => { vi.advanceTimersByTime(milliseconds); });
     }
 
-    it("polls a pending status every 5 seconds, exactly 24 times, then reports that it is still waiting", async () => {
-      vi.mocked(bridge.mcp_status).mockImplementation(fresh(pendingStatus));
+    it("polls cleanup status every 5 seconds, exactly 24 times, then reports that it is still waiting", async () => {
+      vi.mocked(bridge.mcp_status).mockImplementation(fresh(cleanupStatus));
       renderSettings();
       await settle();
       fireEvent.click(screen.getByRole("button", { name: /Peppy MCP details/i }));
       await settle();
       const opened = vi.mocked(bridge.mcp_status).mock.calls.length;
-      expect(screen.getByText(PENDING_HINT)).toBeInTheDocument();
+      expect(screen.getByText(CLEANUP_HINT)).toBeInTheDocument();
       for (let tick = 1; tick <= 24; tick += 1) {
         await advance(5_000);
         expect(vi.mocked(bridge.mcp_status).mock.calls.length).toBe(opened + tick);
@@ -239,12 +302,12 @@ describe("McpDeviceSettings", () => {
       await advance(120_000);
       expect(vi.mocked(bridge.mcp_status).mock.calls.length).toBe(opened + 24);
       await settle();
-      expect(screen.getByText(STILL_WAITING)).toBeInTheDocument();
-      expect(screen.queryByText(PENDING_HINT)).not.toBeInTheDocument();
+      expect(screen.getByText("Cleanup is still running. Select Refresh status to check again.")).toBeInTheDocument();
+      expect(screen.queryByText(CLEANUP_HINT)).not.toBeInTheDocument();
     });
 
     it("keeps a 5 second cadence when status responses land between ticks", async () => {
-      vi.mocked(bridge.mcp_status).mockImplementation(fresh(pendingStatus));
+      vi.mocked(bridge.mcp_status).mockImplementation(fresh(cleanupStatus));
       renderSettings();
       await settle();
       fireEvent.click(screen.getByRole("button", { name: /Peppy MCP details/i }));
@@ -258,8 +321,8 @@ describe("McpDeviceSettings", () => {
       expect(vi.mocked(bridge.mcp_status).mock.calls.length).toBe(opened + 2);
     });
 
-    it("stops polling once the status is no longer pending and announces the change", async () => {
-      vi.mocked(bridge.mcp_status).mockImplementationOnce(fresh(pendingStatus)).mockImplementationOnce(fresh(pendingStatus)).mockImplementation(fresh(onlineStatus));
+    it("stops polling once cleanup finishes and announces the change", async () => {
+      vi.mocked(bridge.mcp_status).mockImplementationOnce(fresh(cleanupStatus)).mockImplementationOnce(fresh(cleanupStatus)).mockImplementation(fresh(onlineStatus));
       renderSettings();
       await settle();
       fireEvent.click(screen.getByRole("button", { name: /Peppy MCP details/i }));
@@ -273,7 +336,7 @@ describe("McpDeviceSettings", () => {
     });
 
     it("stops polling when the details close", async () => {
-      vi.mocked(bridge.mcp_status).mockImplementation(fresh(pendingStatus));
+      vi.mocked(bridge.mcp_status).mockImplementation(fresh(cleanupStatus));
       renderSettings();
       await settle();
       fireEvent.click(screen.getByRole("button", { name: /Peppy MCP details/i }));
@@ -285,14 +348,14 @@ describe("McpDeviceSettings", () => {
     });
 
     it("restarts a fresh 24-poll budget when details are reopened", async () => {
-      vi.mocked(bridge.mcp_status).mockImplementation(fresh(pendingStatus));
+      vi.mocked(bridge.mcp_status).mockImplementation(fresh(cleanupStatus));
       renderSettings();
       await settle();
       fireEvent.click(screen.getByRole("button", { name: /Peppy MCP details/i }));
       await settle();
       await advance(120_000);
       await settle();
-      expect(screen.getByText(STILL_WAITING)).toBeInTheDocument();
+      expect(screen.getByText("Cleanup is still running. Select Refresh status to check again.")).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "Close" }));
       fireEvent.click(screen.getByRole("button", { name: /Peppy MCP details/i }));
       await settle();
@@ -302,11 +365,34 @@ describe("McpDeviceSettings", () => {
       expect(vi.mocked(bridge.mcp_status).mock.calls.length).toBe(calls + 1);
     });
 
+    it("reactivates cleanup polling with a fresh budget after a spent run settles", async () => {
+      let next = cleanupStatus;
+      vi.mocked(bridge.mcp_status).mockImplementation(() => Promise.resolve(next));
+      const { rerender } = renderSettings();
+      await settle();
+      fireEvent.click(screen.getByRole("button", { name: /Peppy MCP details/i }));
+      await settle();
+      for (let tick = 0; tick < MAX_POLLS; tick += 1) {
+        await advance(5_000);
+        await settle();
+      }
+      next = onlineStatus;
+      fireEvent.click(screen.getByRole("button", { name: "Refresh status" }));
+      await settle();
+      next = cleanupStatus;
+      rerender(<McpDeviceSettings roster={owner} serverOffline={false} accountReadOnly={false} sessionKey="vault-a" unlocked refreshToken={1} />);
+      await settle();
+      expect(screen.queryByText("Cleanup is still running. Select Refresh status to check again.")).not.toBeInTheDocument();
+      const calls = vi.mocked(bridge.mcp_status).mock.calls.length;
+      await advance(5_000);
+      expect(vi.mocked(bridge.mcp_status).mock.calls.length).toBe(calls + 1);
+    });
+
     it("drops a late poll result that finishes after a newer manual refresh", async () => {
       const late = deferred<McpDeviceStatus>();
       vi.mocked(bridge.mcp_status)
-        .mockImplementationOnce(fresh(pendingStatus))
-        .mockImplementationOnce(fresh(pendingStatus))
+         .mockImplementationOnce(fresh(cleanupStatus))
+         .mockImplementationOnce(fresh(cleanupStatus))
         .mockReturnValueOnce(late.promise)
         .mockImplementation(fresh(onlineStatus));
       renderSettings();
@@ -317,10 +403,61 @@ describe("McpDeviceSettings", () => {
       fireEvent.click(screen.getByRole("button", { name: "Refresh status" }));
       await settle();
       expect(screen.getByText("Status is now Online.")).toBeInTheDocument();
-      await act(async () => late.resolve(pendingStatus));
+      await act(async () => late.resolve(cleanupStatus));
       await settle();
-      expect(screen.queryByText(PENDING_HINT)).not.toBeInTheDocument();
+      expect(screen.queryByText(CLEANUP_HINT)).not.toBeInTheDocument();
       expect(screen.getByText("Status is now Online.")).toBeInTheDocument();
+    });
+
+    it("does not invalidate an active poll when later ticks are skipped", async () => {
+      const poll = deferred<McpDeviceStatus>();
+      vi.mocked(bridge.mcp_status).mockResolvedValueOnce(cleanupStatus).mockResolvedValueOnce(cleanupStatus).mockReturnValueOnce(poll.promise);
+      renderSettings();
+      await settle();
+      fireEvent.click(screen.getByRole("button", { name: /Peppy MCP details/i }));
+      await settle();
+      await advance(5_000);
+      await advance(10_000);
+      await act(async () => poll.resolve(onlineStatus));
+      expect(screen.getByText("Status is now Online.")).toBeInTheDocument();
+    });
+
+    it("does not invalidate an active manual refresh when polling ticks are skipped", async () => {
+      const manual = deferred<McpDeviceStatus>();
+      vi.mocked(bridge.mcp_status).mockResolvedValueOnce(cleanupStatus).mockResolvedValueOnce(cleanupStatus).mockReturnValueOnce(manual.promise);
+      renderSettings();
+      await settle();
+      fireEvent.click(screen.getByRole("button", { name: /Peppy MCP details/i }));
+      await settle();
+      const dialog = screen.getByRole("dialog", { name: "Peppy MCP" });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Refresh status" }));
+      await advance(10_000);
+      await act(async () => manual.resolve(onlineStatus));
+      expect(screen.getByText("Status is now Online.")).toBeInTheDocument();
+    });
+
+    it("declares final poll exhaustion after a superseding manual refresh settles", async () => {
+      const finalPoll = deferred<McpDeviceStatus>();
+      let statusCalls = 0;
+      vi.mocked(bridge.mcp_status).mockImplementation(() => {
+        statusCalls += 1;
+        return statusCalls === MAX_POLLS + 2 ? finalPoll.promise : Promise.resolve(cleanupStatus);
+      });
+      renderSettings();
+      await settle();
+      fireEvent.click(screen.getByRole("button", { name: /Peppy MCP details/i }));
+      await settle();
+      const dialog = screen.getByRole("dialog", { name: "Peppy MCP" });
+      for (let tick = 0; tick < MAX_POLLS - 1; tick += 1) {
+        await advance(5_000);
+        await settle();
+      }
+      await advance(5_000);
+      expect(screen.queryByText("Cleanup is still running. Select Refresh status to check again.")).not.toBeInTheDocument();
+      fireEvent.click(within(dialog).getByRole("button", { name: "Refresh status" }));
+      await settle();
+      expect(screen.getByText("Cleanup is still running. Select Refresh status to check again.")).toBeInTheDocument();
+      await act(async () => finalPoll.resolve(onlineStatus));
     });
 
     it("announces a finished cleanup of a removed device through the removed notice only", async () => {
@@ -426,6 +563,16 @@ describe("McpDeviceSettings", () => {
       expect(bridge.mcp_revoke_grant).not.toHaveBeenCalled();
     });
 
+    it("keeps an open revoke confirmation while a background grant refresh runs", async () => {
+      vi.mocked(bridge.mcp_grants).mockResolvedValue([GRANT]);
+      renderSettings();
+      const dialog = await openDetailsDialog();
+      fireEvent.click(await within(dialog).findByRole("button", { name: "Revoke Claude (0f1e2d3c)" }));
+      fireEvent.click(within(dialog).getByRole("button", { name: "Refresh status" }));
+      expect(within(dialog).getByRole("button", { name: "Confirm revoke Claude (0f1e2d3c)" })).toBeInTheDocument();
+      expect(document.getElementById("mcp-grants")).toHaveAttribute("aria-busy", "true");
+    });
+
     it("returns focus to that row's Revoke button when Cancel is chosen", async () => {
       vi.mocked(bridge.mcp_grants).mockResolvedValue([GRANT]);
       renderSettings();
@@ -499,6 +646,100 @@ describe("McpDeviceSettings", () => {
       expect(screen.queryByText(/Revoked Claude/)).not.toBeInTheDocument();
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
+
+    it("clears a delayed revoke after Details closes and reopens successfully", async () => {
+      const revoke = deferred<void>();
+      vi.mocked(bridge.mcp_grants).mockResolvedValue([GRANT]);
+      vi.mocked(bridge.mcp_revoke_grant).mockReturnValue(revoke.promise);
+      renderSettings();
+      let dialog = await openDetailsDialog();
+      fireEvent.click(await within(dialog).findByRole("button", { name: "Revoke Claude (0f1e2d3c)" }));
+      fireEvent.click(within(dialog).getByRole("button", { name: "Confirm revoke Claude (0f1e2d3c)" }));
+      fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+      dialog = await openDetailsDialog();
+      expect(within(dialog).getByRole("button", { name: "Revoke Claude (0f1e2d3c)" })).toBeDisabled();
+      await act(async () => revoke.resolve());
+      await settle();
+      expect(within(dialog).queryByText("Claude")).not.toBeInTheDocument();
+      expect(document.getElementById("mcp-grant-status")).toHaveTextContent("");
+    });
+
+    it("clears a delayed revoke after Details closes and reopens on failure", async () => {
+      const revoke = deferred<void>();
+      vi.mocked(bridge.mcp_grants).mockResolvedValue([GRANT]);
+      vi.mocked(bridge.mcp_revoke_grant).mockReturnValue(revoke.promise);
+      renderSettings();
+      let dialog = await openDetailsDialog();
+      fireEvent.click(await within(dialog).findByRole("button", { name: "Revoke Claude (0f1e2d3c)" }));
+      fireEvent.click(within(dialog).getByRole("button", { name: "Confirm revoke Claude (0f1e2d3c)" }));
+      fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+      dialog = await openDetailsDialog();
+      await act(async () => revoke.reject({ code: "network", message: "native revoke failed" }));
+      await settle();
+      expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+      expect(within(dialog).getByRole("button", { name: "Revoke Claude (0f1e2d3c)" })).toBeEnabled();
+    });
+
+    it.each([
+      ["browser", { code: "mcp_grant_not_found", message: "The MCP server could not complete the request." }],
+      ["native", { code: "server-rejected", message: "The server rejected the request (HTTP 404, mcp_grant_not_found)." }],
+    ])("treats a direct %s grant-not-found response as an already revoked success", async (_host, reason) => {
+      vi.mocked(bridge.mcp_grants).mockResolvedValue([GRANT]);
+      vi.mocked(bridge.mcp_revoke_grant).mockRejectedValue(reason);
+      renderSettings();
+      const dialog = await openDetailsDialog();
+      fireEvent.click(await within(dialog).findByRole("button", { name: "Revoke Claude (0f1e2d3c)" }));
+      fireEvent.click(within(dialog).getByRole("button", { name: "Confirm revoke Claude (0f1e2d3c)" }));
+      expect(await within(dialog).findByText("Claude (0f1e2d3c) was already revoked.")).toBeInTheDocument();
+      expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("drops a stale delayed grant result after revoke succeeds", async () => {
+      const staleGrants = deferred<McpGrantView[]>();
+      const revoke = deferred<void>();
+      vi.mocked(bridge.mcp_grants).mockResolvedValue([GRANT]);
+      vi.mocked(bridge.mcp_revoke_grant).mockReturnValue(revoke.promise);
+      renderSettings();
+      const dialog = await openDetailsDialog();
+      await within(dialog).findByRole("button", { name: "Revoke Claude (0f1e2d3c)" });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Revoke Claude (0f1e2d3c)" }));
+      fireEvent.click(within(dialog).getByRole("button", { name: "Confirm revoke Claude (0f1e2d3c)" }));
+      vi.mocked(bridge.mcp_grants).mockReturnValueOnce(staleGrants.promise);
+      fireEvent.click(within(dialog).getByRole("button", { name: "Refresh status" }));
+      await act(async () => revoke.resolve());
+      await act(async () => staleGrants.resolve([GRANT]));
+      await settle();
+      expect(within(dialog).queryByText("Claude")).not.toBeInTheDocument();
+      expect(document.getElementById("mcp-grant-status")).toHaveTextContent("Revoked Claude (0f1e2d3c).");
+    });
+
+    it("restores Confirm focus after a native-shaped revoke failure", async () => {
+      vi.mocked(bridge.mcp_grants).mockResolvedValue([GRANT]);
+      vi.mocked(bridge.mcp_revoke_grant).mockRejectedValue({ code: "server-rejected", message: "Could not reach the configured server." });
+      renderSettings();
+      const dialog = await openDetailsDialog();
+      fireEvent.click(await within(dialog).findByRole("button", { name: "Revoke Claude (0f1e2d3c)" }));
+      const confirm = within(dialog).getByRole("button", { name: "Confirm revoke Claude (0f1e2d3c)" });
+      fireEvent.click(confirm);
+      expect(await within(dialog).findByRole("alert")).toHaveTextContent("Could not reach the configured server.");
+      expect(confirm).toHaveFocus();
+    });
+
+    it("announces a completed revoke, not progress, when a refresh removed the grant first", async () => {
+      const revoke = deferred<void>();
+      vi.mocked(bridge.mcp_grants).mockResolvedValue([GRANT]);
+      vi.mocked(bridge.mcp_revoke_grant).mockReturnValue(revoke.promise);
+      renderSettings();
+      const dialog = await openDetailsDialog();
+      fireEvent.click(await within(dialog).findByRole("button", { name: "Revoke Claude (0f1e2d3c)" }));
+      fireEvent.click(within(dialog).getByRole("button", { name: "Confirm revoke Claude (0f1e2d3c)" }));
+      vi.mocked(bridge.mcp_grants).mockResolvedValueOnce([]);
+      fireEvent.click(within(dialog).getByRole("button", { name: "Refresh status" }));
+      expect(await within(dialog).findByText(/No authorized clients yet/)).toBeInTheDocument();
+      await act(async () => revoke.resolve());
+      expect(document.getElementById("mcp-grant-status")).toHaveTextContent("Revoked Claude (0f1e2d3c).");
+      expect(document.getElementById("mcp-grant-status")).not.toHaveTextContent("Revoking");
+    });
   });
 
   describe("settling after enablement", () => {
@@ -528,7 +769,7 @@ describe("McpDeviceSettings", () => {
       await settle();
       await enableFromRow();
       expect(screen.getByText("Offline")).toBeInTheDocument();
-      expect(rowNotice()).toHaveTextContent(PENDING_HINT);
+      expect(rowNotice()).toHaveTextContent(OFFLINE_HINT);
 
       await advance(5_000);
       await settle();
@@ -555,7 +796,7 @@ describe("McpDeviceSettings", () => {
       await advance(120_000);
       await settle();
       expect(vi.mocked(bridge.mcp_status).mock.calls.length).toBe(afterEnable + MAX_POLLS);
-      expect(rowNotice()).toHaveTextContent("Still waiting. Open Details to check again.");
+      expect(rowNotice()).toHaveTextContent("Still offline. Open Details to check again.");
     });
 
     it("stops settling polls when the session changes mid-poll and drops the notice", async () => {
@@ -597,7 +838,7 @@ describe("McpDeviceSettings", () => {
       fireEvent.click(screen.getByRole("button", { name: /Peppy MCP details/i }));
       await settle();
       const dialog = screen.getByRole("dialog", { name: "Peppy MCP" });
-      expect(dialog.querySelector("#mcp-status-notice")).toHaveTextContent(PENDING_HINT);
+      expect(dialog.querySelector("#mcp-status-notice")).toHaveTextContent(OFFLINE_HINT);
       const reopened = vi.mocked(bridge.mcp_status).mock.calls.length;
       for (let tick = 1; tick <= MAX_POLLS; tick += 1) {
         await advance(5_000);

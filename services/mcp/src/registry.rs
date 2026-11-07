@@ -4,21 +4,26 @@ use std::{
     io,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
 use peppy_domain::{DeviceId, VaultId};
+use peppy_hosted_api::mcp::McpWorkerCompleteRequest;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{Mutex, watch},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
 };
 use uuid::Uuid;
 
 use crate::{
     config::WorkerConfig,
     custody::Custody,
+    enrollment::{EnrollmentError, EnrollmentManager},
     runtime::{Runtime, RuntimeError},
 };
 
@@ -56,12 +61,35 @@ impl StateLock {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct RuntimeIdentity {
     vault_id: Uuid,
     device_id: Uuid,
     #[serde(default)]
     cleanup_pending: bool,
+    #[serde(default)]
+    revoked: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct RevokedFence {
+    vault_id: Uuid,
+    device_id: Uuid,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RegistryRecord {
+    #[serde(default)]
+    identities: Vec<RuntimeIdentity>,
+    #[serde(default)]
+    revoked_fences: Vec<RevokedFence>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredRegistryRecord {
+    Current(RegistryRecord),
+    Legacy(Vec<RuntimeIdentity>),
 }
 
 /// The durable set of approved vault bindings. It owns independent runtime
@@ -76,29 +104,59 @@ struct RegistryContext {
     state_dir: PathBuf,
     custody: Arc<Custody>,
     identities: Arc<Mutex<HashMap<Uuid, RuntimeIdentity>>>,
+    revoked_fences: Arc<Mutex<Vec<RevokedFence>>>,
     runtimes: Arc<Mutex<HashMap<Uuid, Arc<Runtime>>>>,
-    tasks: Arc<Mutex<HashMap<Uuid, JoinHandle<()>>>>,
+    tasks: Arc<Mutex<HashMap<Uuid, SyncTask>>>,
+    cleanup_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     mutation: Arc<Mutex<()>>,
+    next_task_generation: Arc<AtomicU64>,
+}
+
+struct SyncTask {
+    generation: u64,
+    device_id: Uuid,
+    stop: watch::Sender<bool>,
+    handle: JoinHandle<()>,
 }
 
 impl RuntimeRegistry {
     pub fn open(config: WorkerConfig) -> Result<Self, RuntimeError> {
-        if !config.key_file.exists()
-            && has_durable_state(&config.state_dir).map_err(|_| RuntimeError::NeedsApproval)?
-        {
-            return Err(RuntimeError::NeedsApproval);
-        }
-        let custody = Custody::open(config.state_dir.join("registry-custody"), &config.key_file)?;
-        let identities = custody
+        crate::runtime::sweep_owned_scratch(&config.state_dir)
+            .map_err(|_| RuntimeError::NeedsApproval)?;
+        let custody_root = config.state_dir.join("registry-custody");
+        let custody = match fs::symlink_metadata(&config.key_file) {
+            Ok(_) => Custody::open_existing(custody_root, &config.key_file)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if has_durable_state(&config.state_dir).map_err(|_| RuntimeError::NeedsApproval)? {
+                    return Err(RuntimeError::NeedsApproval);
+                }
+                Custody::bootstrap(custody_root, &config.key_file)?
+            }
+            Err(error) => return Err(crate::custody::CustodyError::Io(error).into()),
+        };
+        let record = custody
             .load(REGISTRY_RECORD, REGISTRY_AAD)?
-            .map(|record| serde_json::from_slice::<Vec<RuntimeIdentity>>(&record))
+            .map(|record| serde_json::from_slice::<StoredRegistryRecord>(&record))
             .transpose()
             .map_err(|_| RuntimeError::NeedsApproval)?
-            .unwrap_or_default();
+            .map(|record| match record {
+                StoredRegistryRecord::Current(record) => record,
+                StoredRegistryRecord::Legacy(identities) => RegistryRecord {
+                    identities,
+                    revoked_fences: Vec::new(),
+                },
+            })
+            .unwrap_or(RegistryRecord {
+                identities: Vec::new(),
+                revoked_fences: Vec::new(),
+            });
         let mut runtimes = HashMap::new();
         let mut identity_map = HashMap::new();
-        for identity in identities {
+        for identity in record.identities {
             identity_map.insert(identity.vault_id, identity);
+            if identity.revoked {
+                continue;
+            }
             let vault_id = VaultId(identity.vault_id);
             let device_id = DeviceId(identity.device_id);
             let state_dir = vault_state_dir(&config.state_dir, identity.vault_id);
@@ -121,15 +179,34 @@ impl RuntimeRegistry {
                 state_dir: config.state_dir,
                 custody: Arc::new(custody),
                 identities: Arc::new(Mutex::new(identity_map)),
+                revoked_fences: Arc::new(Mutex::new(record.revoked_fences)),
                 runtimes: Arc::new(Mutex::new(runtimes)),
                 tasks: Arc::new(Mutex::new(HashMap::new())),
+                cleanup_task: Arc::new(Mutex::new(None)),
                 mutation: Arc::new(Mutex::new(())),
+                next_task_generation: Arc::new(AtomicU64::new(0)),
             },
             shutdown,
         })
     }
 
     pub async fn start_sync(&self) {
+        self.retry_pending_cleanup().await;
+        self.spawn_cleanup_retry().await;
+        let runtimes = self
+            .context
+            .runtimes
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for runtime in runtimes {
+            self.spawn_sync(runtime).await;
+        }
+    }
+
+    async fn retry_pending_cleanup(&self) {
         let pending = self
             .context
             .identities
@@ -144,17 +221,25 @@ impl RuntimeRegistry {
                 log_failure("cleanup", identity.vault_id, &error);
             }
         }
-        let runtimes = self
-            .context
-            .runtimes
-            .lock()
-            .await
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        for runtime in runtimes {
-            self.spawn_sync(runtime).await;
+    }
+
+    async fn spawn_cleanup_retry(&self) {
+        let mut task = self.context.cleanup_task.lock().await;
+        if task.is_some() || *self.shutdown.borrow() {
+            return;
         }
+        let context = self.context.clone();
+        let mut shutdown = self.shutdown.subscribe();
+        *task = Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(cleanup_retry_interval());
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = shutdown.changed() => return,
+                    _ = interval.tick() => retry_pending_cleanup(&context).await,
+                }
+            }
+        }));
     }
 
     pub async fn get(&self, vault_id: Uuid) -> Option<Arc<Runtime>> {
@@ -163,10 +248,15 @@ impl RuntimeRegistry {
 
     pub async fn insert(&self, runtime: Runtime) -> Result<(), RuntimeError> {
         let _mutation = self.context.mutation.lock().await;
+        self.insert_locked(runtime).await
+    }
+
+    async fn insert_locked(&self, runtime: Runtime) -> Result<(), RuntimeError> {
         let identity = RuntimeIdentity {
             vault_id: runtime.vault_id().0,
             device_id: runtime.device_id().0,
             cleanup_pending: false,
+            revoked: false,
         };
         if let Some(existing) = self
             .context
@@ -176,7 +266,11 @@ impl RuntimeRegistry {
             .get(&identity.vault_id)
             .copied()
         {
-            if existing.device_id != identity.device_id || existing.cleanup_pending {
+            if existing.cleanup_pending
+                || (!existing.revoked && existing.device_id != identity.device_id)
+                || (existing.device_id == identity.device_id
+                    && (existing.cleanup_pending || existing.revoked))
+            {
                 return Err(RuntimeError::IdentityMismatch);
             }
             if self
@@ -193,7 +287,11 @@ impl RuntimeRegistry {
         let mut identities = self.context.identities.lock().await;
         let mut next = identities.clone();
         next.insert(identity.vault_id, identity);
-        persist_identities(&self.context.custody, &next)?;
+        persist_identities(
+            &self.context.custody,
+            &next,
+            &self.context.revoked_fences.lock().await,
+        )?;
         *identities = next;
         drop(identities);
         self.context
@@ -202,6 +300,43 @@ impl RuntimeRegistry {
             .await
             .insert(identity.vault_id, runtime.clone());
         self.spawn_sync(runtime).await;
+        Ok(())
+    }
+
+    /// Serializes the synchronous on-disk installation through durable registry
+    /// publication with revoke. A matching revoked fence is checked before any
+    /// enrollment persistence can recreate local state.
+    pub async fn complete(
+        &self,
+        enrollments: &mut EnrollmentManager,
+        request: McpWorkerCompleteRequest,
+    ) -> Result<(), EnrollmentError> {
+        let _mutation = self.context.mutation.lock().await;
+        let device_id = request.admission.device_id;
+        if self
+            .context
+            .revoked_fences
+            .lock()
+            .await
+            .iter()
+            .any(|fence| fence.vault_id == request.vault_id && fence.device_id == device_id)
+        {
+            return Err(EnrollmentError::Invalid);
+        }
+        if let Some(identity) = self
+            .context
+            .identities
+            .lock()
+            .await
+            .get(&request.vault_id)
+            .copied()
+            && identity.device_id != device_id
+            && (!identity.revoked || identity.cleanup_pending)
+        {
+            return Err(EnrollmentError::Invalid);
+        }
+        let runtime = enrollments.complete(request)?;
+        self.insert_locked(runtime).await?;
         Ok(())
     }
 
@@ -215,7 +350,19 @@ impl RuntimeRegistry {
         // `send_replace` stores the flag even with no live receiver; `send`
         // would drop it, so a later `spawn_sync` could start a live loop.
         self.shutdown.send_replace(true);
-        for (_, task) in self.context.tasks.lock().await.drain() {
+        let tasks = self
+            .context
+            .tasks
+            .lock()
+            .await
+            .drain()
+            .map(|(_, task)| task)
+            .collect::<Vec<_>>();
+        for task in tasks {
+            task.stop.send_replace(true);
+            let _ = task.handle.await;
+        }
+        if let Some(task) = self.context.cleanup_task.lock().await.take() {
             task.abort();
             let _ = task.await;
         }
@@ -229,59 +376,154 @@ impl RuntimeRegistry {
         let mut tasks_guard = self.context.tasks.lock().await;
         // A receiver subscribed after `send(true)` never observes `changed()`,
         // so a post-shutdown spawn must be refused here rather than rely on it.
-        if tasks_guard.contains_key(&vault_id) || *shutdown.borrow() {
+        if *shutdown.borrow() {
             return;
+        }
+        if let Some(existing) = tasks_guard.get(&vault_id)
+            && existing.device_id == device_id
+        {
+            return;
+        }
+        if let Some(existing) = tasks_guard.remove(&vault_id) {
+            existing.stop.send_replace(true);
+            // A retiring loop can only remove its own generation, so it cannot
+            // erase this replacement after its self-cleanup epilogue.
+            tokio::spawn(async move {
+                let _ = existing.handle.await;
+            });
         }
         // `interval.tick()` below consumes the interval's immediate tick, so the
         // first pass comes from this coalesced wake instead of waiting 30 s.
         runtime.request_sync();
+        let generation = self
+            .context
+            .next_task_generation
+            .fetch_add(1, Ordering::Relaxed);
+        let (stop, mut stop_requested) = watch::channel(false);
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             interval.tick().await;
             loop {
-                let stopping = *shutdown.borrow();
+                let stopping = *shutdown.borrow() || *stop_requested.borrow();
                 if stopping {
-                    return;
+                    break;
                 }
                 tokio::select! {
                     biased;
-                    _ = shutdown.changed() => return,
+                    _ = shutdown.changed() => break,
+                    _ = stop_requested.changed() => break,
                     _ = runtime.sync_requested() => {
-                        if !run_sync(&runtime, &context, vault_id, device_id).await {
-                            return;
+                        if !supervise_sync(runtime.clone(), vault_id, &mut shutdown, &mut stop_requested).await {
+                            if let Err(error) = revoke_registered_without_stopping(&context, vault_id, device_id).await {
+                                log_failure("cleanup", vault_id, &error);
+                            }
+                            break;
                         }
                     }
                     _ = interval.tick() => {
-                        if !run_sync(&runtime, &context, vault_id, device_id).await {
-                            return;
+                        if !supervise_sync(runtime.clone(), vault_id, &mut shutdown, &mut stop_requested).await {
+                            if let Err(error) = revoke_registered_without_stopping(&context, vault_id, device_id).await {
+                                log_failure("cleanup", vault_id, &error);
+                            }
+                            break;
                         }
                     }
                 }
             }
+            let mut tasks = context.tasks.lock().await;
+            if tasks
+                .get(&vault_id)
+                .is_some_and(|task| task.generation == generation)
+            {
+                tasks.remove(&vault_id);
+            }
         });
-        tasks_guard.insert(vault_id, task);
+        tasks_guard.insert(
+            vault_id,
+            SyncTask {
+                generation,
+                device_id,
+                stop,
+                handle: task,
+            },
+        );
     }
 }
 
-async fn run_sync(
-    runtime: &Runtime,
-    context: &RegistryContext,
-    vault_id: Uuid,
-    device_id: Uuid,
-) -> bool {
-    if let Err(error) = runtime.sync_once().await {
-        log_failure(outcome_category(&error), vault_id, &error);
-        if matches!(error, RuntimeError::NotLive) {
-            let context = context.clone();
-            tokio::spawn(async move {
-                if let Err(error) = revoke_registered(&context, vault_id, device_id).await {
-                    log_failure("cleanup", vault_id, &error);
-                }
-            });
-            return false;
+async fn run_sync(runtime: &Runtime, vault_id: Uuid) -> bool {
+    match runtime.sync_once_report().await {
+        Ok(report) => {
+            if report.replay_backlog {
+                runtime.request_sync();
+            }
+        }
+        Err(error) => {
+            log_failure(outcome_category(&error), vault_id, &error);
+            if matches!(error, RuntimeError::NotLive) {
+                return false;
+            }
         }
     }
     true
+}
+
+async fn supervise_sync(
+    runtime: Arc<Runtime>,
+    vault_id: Uuid,
+    shutdown: &mut watch::Receiver<bool>,
+    stop_requested: &mut watch::Receiver<bool>,
+) -> bool {
+    let pass_runtime = runtime.clone();
+    let mut passes = JoinSet::new();
+    passes.spawn(async move { run_sync(&pass_runtime, vault_id).await });
+    let joined = tokio::select! {
+        result = passes.join_next() => result,
+        _ = shutdown.changed() => {
+            passes.shutdown().await;
+            return true;
+        }
+        _ = stop_requested.changed() => {
+            passes.shutdown().await;
+            return true;
+        }
+    };
+    match joined {
+        Some(Ok(keep_running)) => keep_running,
+        Some(Err(error)) => {
+            runtime.mark_offline().await;
+            tracing::warn!(category = "sync", vault = %short_vault_id(vault_id), panic = error.is_panic(), "mcp runtime sync task failed");
+            true
+        }
+        None => true,
+    }
+}
+
+async fn retry_pending_cleanup(context: &RegistryContext) {
+    let pending = context
+        .identities
+        .lock()
+        .await
+        .values()
+        .filter(|identity| identity.cleanup_pending)
+        .copied()
+        .collect::<Vec<_>>();
+    for identity in pending {
+        if let Err(error) = revoke_registered(context, identity.vault_id, identity.device_id).await
+        {
+            log_failure("cleanup", identity.vault_id, &error);
+        }
+    }
+}
+
+fn cleanup_retry_interval() -> Duration {
+    #[cfg(test)]
+    {
+        Duration::from_millis(10)
+    }
+    #[cfg(not(test))]
+    {
+        Duration::from_secs(30)
+    }
 }
 
 /// Logs a background outcome by category only: no tokens, keys, bodies, or
@@ -313,46 +555,104 @@ async fn revoke_registered(
     vault_id: Uuid,
     device_id: Uuid,
 ) -> Result<(), RuntimeError> {
+    // Only stop the exact binding that is being revoked. A delayed revoke for
+    // an older device must never interrupt its replacement.
+    if context
+        .identities
+        .lock()
+        .await
+        .get(&vault_id)
+        .is_some_and(|identity| identity.device_id == device_id)
+    {
+        stop_task(&context.tasks, vault_id, device_id).await;
+    }
+    revoke_registered_inner(context, vault_id, device_id).await
+}
+
+async fn revoke_registered_without_stopping(
+    context: &RegistryContext,
+    vault_id: Uuid,
+    device_id: Uuid,
+) -> Result<(), RuntimeError> {
+    revoke_registered_inner(context, vault_id, device_id).await
+}
+
+async fn revoke_registered_inner(
+    context: &RegistryContext,
+    vault_id: Uuid,
+    device_id: Uuid,
+) -> Result<(), RuntimeError> {
     let _mutation = context.mutation.lock().await;
     let identity = context.identities.lock().await.get(&vault_id).copied();
-    let Some(identity) = identity else {
-        return Runtime::cleanup_state_dir(&vault_state_dir(&context.state_dir, vault_id));
+    let mut fences = context.revoked_fences.lock().await;
+    let fence = RevokedFence {
+        vault_id,
+        device_id,
     };
-    if identity.device_id != device_id {
-        return Err(RuntimeError::IdentityMismatch);
+    if !fences.contains(&fence) {
+        fences.push(fence);
     }
-    let mut tombstone = identity;
+    if identity.is_some_and(|identity| identity.device_id != device_id) {
+        // This is a stale revoke for a replaced binding. Its exact denial is
+        // durable, but the current device exclusively owns the vault state.
+        let identities = context.identities.lock().await.clone();
+        persist_identities(&context.custody, &identities, &fences)?;
+        return Ok(());
+    }
+    let mut tombstone = identity.unwrap_or(RuntimeIdentity {
+        vault_id,
+        device_id,
+        cleanup_pending: false,
+        revoked: false,
+    });
     tombstone.cleanup_pending = true;
+    tombstone.revoked = true;
     let mut next = context.identities.lock().await.clone();
     next.insert(vault_id, tombstone);
-    persist_identities(&context.custody, &next)?;
+    persist_identities(&context.custody, &next, &fences)?;
     *context.identities.lock().await = next;
-    stop_task(&context.tasks, vault_id).await;
     let runtime = context.runtimes.lock().await.remove(&vault_id);
     match runtime {
         Some(runtime) => runtime.revoke().await,
         None => Runtime::cleanup_state_dir(&vault_state_dir(&context.state_dir, vault_id)),
     }?;
     let mut next = context.identities.lock().await.clone();
-    next.remove(&vault_id);
-    persist_identities(&context.custody, &next)?;
+    let mut revoked = tombstone;
+    revoked.cleanup_pending = false;
+    next.insert(vault_id, revoked);
+    persist_identities(&context.custody, &next, &fences)?;
     *context.identities.lock().await = next;
     Ok(())
 }
 
-async fn stop_task(tasks: &Arc<Mutex<HashMap<Uuid, JoinHandle<()>>>>, vault_id: Uuid) {
-    if let Some(task) = tasks.lock().await.remove(&vault_id) {
-        task.abort();
-        let _ = task.await;
+async fn stop_task(tasks: &Arc<Mutex<HashMap<Uuid, SyncTask>>>, vault_id: Uuid, device_id: Uuid) {
+    let task = {
+        let mut tasks = tasks.lock().await;
+        if tasks
+            .get(&vault_id)
+            .is_some_and(|task| task.device_id == device_id)
+        {
+            tasks.remove(&vault_id)
+        } else {
+            None
+        }
+    };
+    if let Some(task) = task {
+        task.stop.send_replace(true);
+        let _ = task.handle.await;
     }
 }
 
 fn persist_identities(
     custody: &Custody,
     identities: &HashMap<Uuid, RuntimeIdentity>,
+    revoked_fences: &[RevokedFence],
 ) -> Result<(), RuntimeError> {
-    let identities = identities.values().copied().collect::<Vec<_>>();
-    let bytes = serde_json::to_vec(&identities).map_err(|_| RuntimeError::Core)?;
+    let record = RegistryRecord {
+        identities: identities.values().copied().collect(),
+        revoked_fences: revoked_fences.to_vec(),
+    };
+    let bytes = serde_json::to_vec(&record).map_err(|_| RuntimeError::Core)?;
     custody.store(REGISTRY_RECORD, REGISTRY_AAD, &bytes)?;
     Ok(())
 }
@@ -383,8 +683,8 @@ mod tests {
     };
 
     use super::{
-        RuntimeIdentity, RuntimeRegistry, StateLock, outcome_category, persist_identities,
-        short_vault_id, vault_state_dir,
+        RevokedFence, RuntimeIdentity, RuntimeRegistry, StateLock, outcome_category,
+        persist_identities, short_vault_id, vault_state_dir,
     };
     use crate::{
         config::WorkerConfig,
@@ -428,6 +728,23 @@ mod tests {
         assert!(StateLock::acquire(directory.path()).is_err());
     }
 
+    #[test]
+    fn opening_registry_sweeps_only_crash_left_vault_scratch() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = config(&directory);
+        drop(RuntimeRegistry::open(config.clone()).unwrap());
+        let vault = vault_state_dir(&config.state_dir, Uuid::new_v4());
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(vault.join("mcp-image-crash-left"), b"plaintext").unwrap();
+        fs::write(vault.join("preserve"), b"state").unwrap();
+
+        let registry = RuntimeRegistry::open(config).unwrap();
+
+        assert!(!vault.join("mcp-image-crash-left").exists());
+        assert!(vault.join("preserve").exists());
+        drop(registry);
+    }
+
     async fn counting_server() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
         async fn devices(State(count): State<Arc<AtomicUsize>>) -> StatusCode {
             count.fetch_add(1, Ordering::SeqCst);
@@ -449,6 +766,31 @@ mod tests {
             .unwrap();
         });
         (origin, count, server)
+    }
+
+    #[tokio::test]
+    async fn panicked_sync_pass_marks_offline_and_the_loop_recovers() {
+        let directory = tempfile::tempdir().unwrap();
+        let (origin, count, server) = counting_server().await;
+        let registry = RuntimeRegistry::open(config(&directory)).unwrap();
+        let runtime = Runtime::test_runtime_for_registry(directory.path().join("runtime"), origin);
+        let vault_id = runtime.vault_id().0;
+        runtime.panic_next_sync();
+        registry.insert(runtime).await.unwrap();
+        let runtime = registry.get(vault_id).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while runtime.sync_panic_pending() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("panic was not supervised");
+        runtime.request_sync();
+        wait_for_count(&count, 1).await;
+        assert!(registry.context.tasks.lock().await.contains_key(&vault_id));
+        registry.shutdown().await;
+        server.abort();
     }
 
     async fn wait_for_count(count: &AtomicUsize, expected: usize) {
@@ -688,8 +1030,10 @@ mod tests {
 
         wait_entered(&gate).await;
         runtime.request_sync();
-        registry.revoke(vault_id, device_id).await.unwrap();
+        // The pass holds synchronous core work, so cooperative revocation must
+        // join it rather than returning while that work is still live.
         gate.release.notify_one();
+        registry.revoke(vault_id, device_id).await.unwrap();
 
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert_eq!(gate.hits.load(Ordering::SeqCst), 1, "successor pass ran");
@@ -734,9 +1078,10 @@ mod tests {
             vault_id,
             device_id,
             cleanup_pending: false,
+            revoked: false,
         };
         let identities = HashMap::from([(vault_id, identity)]);
-        persist_identities(&registry.context.custody, &identities).unwrap();
+        persist_identities(&registry.context.custody, &identities, &[]).unwrap();
         *registry.context.identities.lock().await = identities;
         fs::create_dir_all(
             vault_state_dir(&registry.context.state_dir, vault_id).join("vault.sqlite"),
@@ -759,14 +1104,75 @@ mod tests {
             vault_state_dir(&registry.context.state_dir, vault_id).join("vault.sqlite"),
         )
         .unwrap();
-        registry.revoke(vault_id, device_id).await.unwrap();
-        assert!(
-            !registry
+        registry.start_sync().await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while registry
                 .context
                 .identities
                 .lock()
                 .await
-                .contains_key(&vault_id)
+                .get(&vault_id)
+                .is_none_or(|identity| identity.cleanup_pending)
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("cleanup retry did not clear the durable tombstone");
+        assert!(
+            registry
+                .context
+                .identities
+                .lock()
+                .await
+                .get(&vault_id)
+                .is_some_and(|identity| identity.revoked && !identity.cleanup_pending)
         );
+    }
+
+    #[tokio::test]
+    async fn revoked_device_fences_survive_replacement_and_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = config(&directory);
+        let registry = RuntimeRegistry::open(config.clone()).unwrap();
+        let vault_id = Uuid::new_v4();
+        let device_a = Uuid::new_v4();
+        let device_b = Uuid::new_v4();
+
+        registry.revoke(vault_id, device_a).await.unwrap();
+        let binding_b = RuntimeIdentity {
+            vault_id,
+            device_id: device_b,
+            cleanup_pending: false,
+            revoked: false,
+        };
+        let identities = HashMap::from([(vault_id, binding_b)]);
+        persist_identities(
+            &registry.context.custody,
+            &identities,
+            &registry.context.revoked_fences.lock().await,
+        )
+        .unwrap();
+        *registry.context.identities.lock().await = identities;
+
+        // A delayed A revoke records its own fence but does not replace B.
+        registry.revoke(vault_id, device_a).await.unwrap();
+        assert_eq!(
+            registry.context.identities.lock().await.get(&vault_id),
+            Some(&binding_b)
+        );
+        registry.revoke(vault_id, device_b).await.unwrap();
+        drop(registry);
+
+        let reopened = RuntimeRegistry::open(config).unwrap();
+        let fences = reopened.context.revoked_fences.lock().await;
+        assert!(fences.contains(&RevokedFence {
+            vault_id,
+            device_id: device_a
+        }));
+        assert!(fences.contains(&RevokedFence {
+            vault_id,
+            device_id: device_b
+        }));
     }
 }

@@ -161,6 +161,14 @@ describe("McpAuthorizationConsent", () => {
     expect(screen.queryByRole("button", { name: "Deny access" })).not.toBeInTheDocument();
   });
 
+  it("shows Close only for a native-shaped expired authorization load", async () => {
+    vi.mocked(bridge.mcp_authorization).mockRejectedValueOnce({ code: "server-rejected", message: "The server rejected the request (HTTP 404, mcp_authorization_not_found)." });
+    render(<McpAuthorizationConsent authorizationId="request-1" browserHost={false} sessionKey="vault-a" focusFallback={{ current: null }} onClose={() => undefined} />);
+    expect(await screen.findByText("This authorization request expired or was already used.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
   it("shows Close and Retry for an ordinary load error, and Retry loads the request", async () => {
     vi.mocked(bridge.mcp_authorization).mockRejectedValueOnce(new Error("Gateway unavailable")).mockResolvedValueOnce(authorization);
     render(<McpAuthorizationConsent authorizationId="request-1" browserHost={false} sessionKey="vault-a" focusFallback={{ current: null }} onClose={() => undefined} />);
@@ -186,6 +194,21 @@ describe("McpAuthorizationConsent", () => {
     expect(bridge.open_external_url).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["Approve access", "mcp_approve_authorization"],
+    ["Deny access", "mcp_deny_authorization"],
+  ])("shows Close only when native %s reports an expired authorization", async (action, method) => {
+    const nativeExpired = { code: "server-rejected", message: "The server rejected the request (HTTP 404, mcp_authorization_not_found)." };
+    if (method === "mcp_approve_authorization") vi.mocked(bridge.mcp_approve_authorization).mockRejectedValueOnce(nativeExpired);
+    else vi.mocked(bridge.mcp_deny_authorization).mockRejectedValueOnce(nativeExpired);
+    render(<McpAuthorizationConsent authorizationId="request-1" browserHost={false} sessionKey="vault-a" focusFallback={{ current: null }} onClose={() => undefined} />);
+    fireEvent.click(await screen.findByRole("button", { name: action }));
+    expect(await screen.findByText("This authorization request expired or was already used.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve access" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Deny access" })).not.toBeInTheDocument();
+  });
+
   it("keeps Approve enabled after an ordinary decision error", async () => {
     vi.mocked(bridge.mcp_approve_authorization).mockRejectedValueOnce(new Error("Try again later"));
     render(<McpAuthorizationConsent authorizationId="request-1" browserHost={false} sessionKey="vault-a" focusFallback={{ current: null }} onClose={() => undefined} />);
@@ -194,6 +217,17 @@ describe("McpAuthorizationConsent", () => {
     expect(screen.getByText("requests access to vault", { exact: false })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Approve access" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Deny access" })).toBeEnabled();
+  });
+
+  it.each([
+    ["approve", "Couldn't approve this request. Try again."],
+    ["deny", "Couldn't deny this request. Try again."],
+  ])("shows native plain-object %s failures with the matching fallback", async (action, fallback) => {
+    if (action === "approve") vi.mocked(bridge.mcp_approve_authorization).mockRejectedValueOnce({ code: "unknown", message: "" });
+    else vi.mocked(bridge.mcp_deny_authorization).mockRejectedValueOnce({ code: "unknown", message: "" });
+    render(<McpAuthorizationConsent authorizationId="request-1" browserHost={false} sessionKey="vault-a" focusFallback={{ current: null }} onClose={() => undefined} />);
+    fireEvent.click(await screen.findByRole("button", { name: action === "approve" ? "Approve access" : "Deny access" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(fallback);
   });
 
   it("does not navigate for a stale decision completion after the authorization request changes", async () => {

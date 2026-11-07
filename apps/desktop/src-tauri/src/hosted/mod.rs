@@ -53,6 +53,7 @@ pub struct HostedState {
     session: Mutex<Option<HostedSessionRecord>>,
     provisioning: Mutex<()>,
     sign_in_generation: AtomicU64,
+    account_session_revision: AtomicU64,
     renewal: Mutex<()>,
     last_renewal_failure_at: Mutex<Option<u64>>,
     /// Tests send requests to a local fake server while keeping an HTTPS credential origin.
@@ -131,6 +132,34 @@ pub(crate) async fn provision_enrollment(
 }
 
 impl HostedState {
+    pub(crate) fn begin_sign_in_attempt(&self) -> u64 {
+        self.sign_in_generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub(crate) async fn capture_mcp_account_session(&self, bearer: &str) -> BridgeResult<u64> {
+        let session = self.session.lock().await;
+        if session
+            .as_ref()
+            .is_none_or(|current| current.bearer.as_str() != bearer)
+        {
+            return Err(BridgeError::new(
+                "hosted-account-changed",
+                "The Peppy Hosted account changed during MCP enablement.",
+            ));
+        }
+        Ok(self.account_session_revision.load(Ordering::SeqCst))
+    }
+
+    pub(crate) fn ensure_mcp_account_session_current(&self, revision: u64) -> BridgeResult<()> {
+        if self.account_session_revision.load(Ordering::SeqCst) != revision {
+            return Err(BridgeError::new(
+                "hosted-account-changed",
+                "The Peppy Hosted account changed during MCP enablement.",
+            ));
+        }
+        Ok(())
+    }
+
     fn api_base(&self, origin: &str) -> String {
         #[cfg(test)]
         if let Some(base) = self.base_override.lock().unwrap().clone() {
@@ -181,10 +210,10 @@ impl HostedAccountView {
 }
 
 /// Deliberately no `Debug`: bearer tokens must never reach diagnostics.
-struct HostedSessionRecord {
-    account_id: String,
-    bearer: Zeroizing<String>,
-    expires_at_unix: u64,
+pub(crate) struct HostedSessionRecord {
+    pub(crate) account_id: String,
+    pub(crate) bearer: Zeroizing<String>,
+    pub(crate) expires_at_unix: u64,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -419,7 +448,7 @@ async fn sign_in_providers(hosted: &HostedState, origin: &str) -> BridgeResult<V
 }
 
 async fn begin_sign_in(hosted: &HostedState, origin: &str, provider: &str) -> BridgeResult<u64> {
-    let generation = hosted.sign_in_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let generation = hosted.begin_sign_in_attempt();
     if !sign_in_providers(hosted, origin)
         .await?
         .iter()
@@ -1255,7 +1284,7 @@ async fn load_session_from_store(
     Ok(Some(record))
 }
 
-async fn tombstone_session(
+pub(crate) async fn tombstone_session(
     store: &dyn SecretStore,
     hosted: &HostedState,
     origin: &str,
@@ -1263,6 +1292,9 @@ async fn tombstone_session(
     let mut cached = hosted.session.lock().await;
     tombstone(store, &session_key(origin))?;
     hosted.sign_in_generation.fetch_add(1, Ordering::SeqCst);
+    hosted
+        .account_session_revision
+        .fetch_add(1, Ordering::SeqCst);
     *cached = None;
     Ok(())
 }
@@ -1275,7 +1307,7 @@ fn copy_session(record: &HostedSessionRecord) -> HostedSessionRecord {
     }
 }
 
-async fn commit_sign_in_session(
+pub(crate) async fn commit_sign_in_session(
     store: &dyn SecretStore,
     hosted: &HostedState,
     origin: &str,
@@ -1299,6 +1331,9 @@ async fn commit_sign_in_session(
     );
     store.set(&session_key(origin), &encoded)?;
     *cached = Some(record);
+    hosted
+        .account_session_revision
+        .fetch_add(1, Ordering::SeqCst);
     Ok(())
 }
 
@@ -1326,6 +1361,9 @@ async fn tombstone_observed_session(
     }
     tombstone(store, &session_key(origin))?;
     *cached = None;
+    hosted
+        .account_session_revision
+        .fetch_add(1, Ordering::SeqCst);
     Ok(true)
 }
 

@@ -13,15 +13,13 @@ use peppy_hosted_client::{
     HostedClientError,
     newenrollment::{ClientKind, EnrollmentClient, NativeEnrollmentIdentity},
 };
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
 use crate::{
     WorkerConfig,
-    custody::Custody,
     registry::vault_state_dir,
-    runtime::{Runtime, RuntimeError},
+    runtime::{ApprovedBinding, CompletionBinding, Runtime, RuntimeError},
 };
 
 #[derive(Debug, Error)]
@@ -36,6 +34,11 @@ pub enum EnrollmentError {
 
 /// Lifetime of an unactivated claimant; matches computer enrollment expiry.
 const CLAIM_TTL: Duration = Duration::from_secs(300);
+
+#[cfg(test)]
+thread_local! {
+    static INSTALL_FAULT_AFTER_RUNTIME_RECORD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// Ephemeral claimant state. It intentionally cannot survive process restart:
 /// computer transfer private keys are non-exportable and restarting requires a
@@ -66,11 +69,15 @@ impl PendingClaim {
 
 impl PendingEnrollment {
     fn is_claim_for(&self, vault_id: uuid::Uuid, owner_device_id: uuid::Uuid) -> bool {
-        matches!(
-            self,
-            PendingEnrollment::Claimant(claim)
-                if claim.vault_id == vault_id && claim.owner_device_id == owner_device_id
-        )
+        match self {
+            PendingEnrollment::Claimant(claim) => {
+                claim.vault_id == vault_id && claim.owner_device_id == owner_device_id
+            }
+            PendingEnrollment::Installing(installing) => {
+                installing.vault_id == vault_id && installing.owner_device_id == owner_device_id
+            }
+            PendingEnrollment::Completed(_) => false,
+        }
     }
 }
 
@@ -79,6 +86,15 @@ struct InstallingEnrollment {
     database_key: Zeroizing<[u8; 32]>,
     operation_id: uuid::Uuid,
     admission: [u8; 32],
+    vault_id: uuid::Uuid,
+    owner_device_id: uuid::Uuid,
+    created_at: Instant,
+}
+
+impl InstallingEnrollment {
+    fn expired_at(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.created_at) > CLAIM_TTL
+    }
 }
 
 struct CompletedEnrollment {
@@ -86,17 +102,6 @@ struct CompletedEnrollment {
     device_id: DeviceId,
     admission: [u8; 32],
 }
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CompletionReceipt {
-    operation_id: uuid::Uuid,
-    admission: [u8; 32],
-    vault_id: uuid::Uuid,
-    device_id: uuid::Uuid,
-}
-
-const COMPLETION_RECEIPT: &str = "completion";
 
 impl EnrollmentManager {
     pub fn new(config: WorkerConfig) -> Self {
@@ -160,12 +165,13 @@ impl EnrollmentManager {
         }
     }
 
-    /// Drops claimants older than `CLAIM_TTL`; afterwards they are unknown.
-    /// Installing and completed enrollments are never swept.
+    /// Drops incomplete enrollment state older than `CLAIM_TTL`; completed
+    /// enrollments remain available for replay.
     pub fn sweep_expired(&mut self, now: Instant) {
         self.pending.retain(|_, pending| match pending {
             PendingEnrollment::Claimant(claim) => !claim.expired_at(now),
-            PendingEnrollment::Installing(_) | PendingEnrollment::Completed(_) => true,
+            PendingEnrollment::Installing(installing) => !installing.expired_at(now),
+            PendingEnrollment::Completed(_) => true,
         });
     }
 
@@ -183,6 +189,17 @@ impl EnrollmentManager {
         let PendingEnrollment::Claimant(claim) = pending else {
             return Err(EnrollmentError::Invalid);
         };
+        let transcript = request
+            .status
+            .transcript
+            .as_ref()
+            .ok_or(EnrollmentError::Invalid)?;
+        if claim.vault_id != request.vault_id
+            || transcript.vault_id != claim.vault_id
+            || transcript.owner_device_id != claim.owner_device_id
+        {
+            return Err(EnrollmentError::Invalid);
+        }
         let status =
             serde_json::to_string(&request.status).map_err(|_| EnrollmentError::Invalid)?;
         let confirm = claim.client.confirm_computer_enrollment(status)?;
@@ -204,30 +221,40 @@ impl EnrollmentManager {
         };
         let (result, pending) = match pending {
             PendingEnrollment::Claimant(mut claim) => {
-                let identity = claim.client.finish_computer_admission(
-                    serde_json::to_string(&request.admission)
-                        .map_err(|_| EnrollmentError::Invalid)?,
-                );
-                match identity {
-                    Ok(identity) => {
-                        let mut database_key = [0_u8; 32];
-                        libsodium_rs::random::fill_bytes(&mut database_key);
-                        let installing = InstallingEnrollment {
-                            identity,
-                            database_key: Zeroizing::new(database_key),
-                            operation_id: request.operation_id,
-                            admission,
-                        };
-                        if installing.identity.metadata().vault_id == request.vault_id {
-                            self.install(installing)
-                        } else {
-                            (
-                                Err(EnrollmentError::Invalid),
-                                PendingEnrollment::Installing(Box::new(installing)),
-                            )
+                if claim.vault_id != request.vault_id {
+                    (
+                        Err(EnrollmentError::Invalid),
+                        PendingEnrollment::Claimant(claim),
+                    )
+                } else {
+                    let identity = claim.client.finish_computer_admission(
+                        serde_json::to_string(&request.admission)
+                            .map_err(|_| EnrollmentError::Invalid)?,
+                    );
+                    match identity {
+                        Ok(identity) => {
+                            let mut database_key = [0_u8; 32];
+                            libsodium_rs::random::fill_bytes(&mut database_key);
+                            let installing = InstallingEnrollment {
+                                identity,
+                                database_key: Zeroizing::new(database_key),
+                                operation_id: request.operation_id,
+                                admission,
+                                vault_id: claim.vault_id,
+                                owner_device_id: claim.owner_device_id,
+                                created_at: claim.created_at,
+                            };
+                            if installing.identity.metadata().vault_id == request.vault_id {
+                                self.install(installing)
+                            } else {
+                                (
+                                    Err(EnrollmentError::Invalid),
+                                    PendingEnrollment::Installing(Box::new(installing)),
+                                )
+                            }
                         }
+                        Err(error) => (Err(error.into()), PendingEnrollment::Claimant(claim)),
                     }
-                    Err(error) => (Err(error.into()), PendingEnrollment::Claimant(claim)),
                 }
             }
             PendingEnrollment::Installing(installing) if installing.admission == admission => {
@@ -294,21 +321,24 @@ impl EnrollmentManager {
             Runtime::persist_approved(
                 state_dir.clone(),
                 self.config.key_file.clone(),
-                vault_id,
-                device_id,
-                *installing.database_key,
-                installing
-                    .identity
-                    .device_credential_for_native_secure_store(),
-                cache,
+                ApprovedBinding {
+                    vault_id,
+                    device_id,
+                    database_key: *installing.database_key,
+                    device_credential: installing
+                        .identity
+                        .device_credential_for_native_secure_store(),
+                    key_cache: cache,
+                    completion: CompletionBinding {
+                        operation_id: installing.operation_id,
+                        admission: installing.admission,
+                    },
+                },
             )?;
-            self.persist_completion_receipt(
-                &state_dir,
-                vault_id,
-                device_id,
-                installing.operation_id,
-                installing.admission,
-            )?;
+            #[cfg(test)]
+            if INSTALL_FAULT_AFTER_RUNTIME_RECORD.with(|fault| fault.replace(false)) {
+                return Err(EnrollmentError::Invalid);
+            }
             installing.identity.commit_verified_handoff_activation();
             Runtime::open_existing(
                 state_dir,
@@ -335,33 +365,6 @@ impl EnrollmentManager {
         }
     }
 
-    fn persist_completion_receipt(
-        &self,
-        state_dir: &std::path::Path,
-        vault_id: VaultId,
-        device_id: DeviceId,
-        operation_id: uuid::Uuid,
-        admission: [u8; 32],
-    ) -> Result<(), EnrollmentError> {
-        let receipt = CompletionReceipt {
-            operation_id,
-            admission,
-            vault_id: vault_id.0,
-            device_id: device_id.0,
-        };
-        let custody = Custody::open(state_dir.join("custody"), &self.config.key_file)
-            .map_err(RuntimeError::from)?;
-        let bytes = serde_json::to_vec(&receipt).map_err(|_| EnrollmentError::Invalid)?;
-        custody
-            .store(
-                COMPLETION_RECEIPT,
-                &completion_receipt_aad(vault_id, device_id, operation_id),
-                &bytes,
-            )
-            .map_err(RuntimeError::from)?;
-        Ok(())
-    }
-
     fn restore_completed(
         &self,
         request: &McpWorkerCompleteRequest,
@@ -372,32 +375,16 @@ impl EnrollmentManager {
             return Err(EnrollmentError::Invalid);
         }
         let device_id = DeviceId(request.admission.device_id);
-        let custody = Custody::open(state_dir.join("custody"), &self.config.key_file)
-            .map_err(RuntimeError::from)?;
-        let Some(bytes) = custody
-            .load(
-                COMPLETION_RECEIPT,
-                &completion_receipt_aad(VaultId(request.vault_id), device_id, request.operation_id),
-            )
-            .map_err(RuntimeError::from)?
-        else {
-            return Err(EnrollmentError::Invalid);
-        };
-        let receipt: CompletionReceipt =
-            serde_json::from_slice(&bytes).map_err(|_| EnrollmentError::Invalid)?;
-        if receipt.operation_id != request.operation_id
-            || receipt.admission != admission
-            || receipt.vault_id != request.vault_id
-            || receipt.device_id != request.admission.device_id
-        {
-            return Err(EnrollmentError::Invalid);
-        }
-        Runtime::open_existing(
+        Runtime::open_completed_existing(
             state_dir,
             self.config.key_file.clone(),
             self.config.api_url.clone(),
-            VaultId(receipt.vault_id),
-            DeviceId(receipt.device_id),
+            VaultId(request.vault_id),
+            device_id,
+            CompletionBinding {
+                operation_id: request.operation_id,
+                admission,
+            },
         )
         .map_err(Into::into)
     }
@@ -411,18 +398,6 @@ fn admission_fingerprint(
     Ok(Sha256::digest(serde_json::to_vec(admission).map_err(|_| EnrollmentError::Invalid)?).into())
 }
 
-fn completion_receipt_aad(
-    vault_id: VaultId,
-    device_id: DeviceId,
-    operation_id: uuid::Uuid,
-) -> Vec<u8> {
-    format!(
-        "peppy-mcp-completion-v1:{}:{}:{operation_id}",
-        vault_id.0, device_id.0
-    )
-    .into_bytes()
-}
-
 #[cfg(test)]
 mod tests {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -430,23 +405,28 @@ mod tests {
     use peppy_hosted_api::{
         computer_enrollment::{
             ApproveComputerEnrollmentRequest, ComputerEnrollmentCreated, ComputerEnrollmentStatus,
+            ComputerPairingQr,
         },
         enrollment::{AdmissionComplete, EnrollmentRole, EnrollmentState, VaultMaterial},
         mcp::{McpWorkerActivateRequest, McpWorkerCompleteRequest, McpWorkerPrepareRequest},
     };
     use peppy_hosted_client::newenrollment::{ClientKind, EnrollmentClient};
 
+    use crate::registry::RuntimeRegistry;
+
     use super::*;
 
     fn config(root: &tempfile::TempDir) -> WorkerConfig {
-        WorkerConfig {
+        let config = WorkerConfig {
             api_url: "https://api.example".into(),
             public_api_url: "https://enroll.example".into(),
             state_dir: root.path().join("state"),
             key_file: root.path().join("storage-key"),
             worker_token_file: root.path().join("worker-token"),
             bind_addr: "127.0.0.1:8091".parse().unwrap(),
-        }
+        };
+        RuntimeRegistry::open(config.clone()).unwrap();
+        config
     }
 
     fn state_bytes(path: &std::path::Path) -> Vec<u8> {
@@ -473,6 +453,50 @@ mod tests {
                 owner_device_id,
             })
             .unwrap();
+        let (status, material) = approved_status(&prepared.pairing, vault_id, owner_device_id);
+        let device_id = status
+            .transcript
+            .as_ref()
+            .unwrap()
+            .recipient
+            .device
+            .device_id;
+        let replay_status = serde_json::to_value(&status).unwrap();
+        let confirmation = manager
+            .activate(McpWorkerActivateRequest {
+                vault_id,
+                operation_id: prepared.operation_id,
+                status,
+            })
+            .unwrap();
+        let replay = manager
+            .activate(McpWorkerActivateRequest {
+                vault_id,
+                operation_id: prepared.operation_id,
+                status: serde_json::from_value(replay_status).unwrap(),
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(confirmation).unwrap(),
+            serde_json::to_value(replay).unwrap()
+        );
+        McpWorkerCompleteRequest {
+            vault_id,
+            operation_id: prepared.operation_id,
+            admission: AdmissionComplete {
+                vault_id,
+                device_id,
+                role: EnrollmentRole::Device,
+                material,
+            },
+        }
+    }
+
+    fn approved_status(
+        pairing: &ComputerPairingQr,
+        vault_id: uuid::Uuid,
+        owner_device_id: uuid::Uuid,
+    ) -> (ComputerEnrollmentStatus, VaultMaterial) {
         let profile = KeyProfile::new(vault_id, 3).unwrap();
         let root = derive_root_key("correct horse battery staple", &profile).unwrap();
         let header = create_vault_check_header(&root, profile.clone()).unwrap();
@@ -488,7 +512,7 @@ mod tests {
             .configure_computer_owner_device(owner_device_id)
             .unwrap();
         owner
-            .scan_computer_qr(serde_json::to_string(&prepared.pairing).unwrap())
+            .scan_computer_qr(serde_json::to_string(pairing).unwrap())
             .unwrap();
         owner
             .accept_computer_created(
@@ -518,7 +542,6 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let device_id = approval.transcript.recipient.device.device_id;
         let status = ComputerEnrollmentStatus {
             state: EnrollmentState::Approved,
             expires_in_seconds: 60,
@@ -527,41 +550,14 @@ mod tests {
             transfer_nonce: Some(approval.transfer_nonce),
             owner_proof: Some(approval.owner_proof),
         };
-        let replay_status = serde_json::to_value(&status).unwrap();
-        let confirmation = manager
-            .activate(McpWorkerActivateRequest {
-                vault_id,
-                operation_id: prepared.operation_id,
-                status,
-            })
-            .unwrap();
-        let replay = manager
-            .activate(McpWorkerActivateRequest {
-                vault_id,
-                operation_id: prepared.operation_id,
-                status: serde_json::from_value(replay_status).unwrap(),
-            })
-            .unwrap();
-        assert_eq!(
-            serde_json::to_value(confirmation).unwrap(),
-            serde_json::to_value(replay).unwrap()
-        );
-        McpWorkerCompleteRequest {
-            vault_id,
-            operation_id: prepared.operation_id,
-            admission: AdmissionComplete {
-                vault_id,
-                device_id,
-                role: EnrollmentRole::Device,
-                material: VaultMaterial {
-                    profile: serde_json::to_value(&profile).unwrap(),
-                    check_header: URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap()),
-                    fingerprint: profile.fingerprint().unwrap(),
-                    key_epoch: profile.key_epoch,
-                    admission_public_key: URL_SAFE_NO_PAD.encode([0; 32]),
-                },
-            },
-        }
+        let material = VaultMaterial {
+            profile: serde_json::to_value(&profile).unwrap(),
+            check_header: URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap()),
+            fingerprint: profile.fingerprint().unwrap(),
+            key_epoch: profile.key_epoch,
+            admission_public_key: URL_SAFE_NO_PAD.encode([0; 32]),
+        };
+        (status, material)
     }
 
     #[test]
@@ -574,6 +570,48 @@ mod tests {
 
         assert!(manager.complete(invalid).is_err());
         assert!(manager.complete(request).unwrap().state_dir().exists());
+    }
+
+    #[test]
+    fn activation_rejects_a_valid_approval_for_the_wrong_vault_or_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let mut manager = EnrollmentManager::new(config(&root));
+        let vault_id = uuid::Uuid::new_v4();
+        let owner_device_id = uuid::Uuid::new_v4();
+        let prepared = prepare_for(&mut manager, vault_id, owner_device_id);
+
+        let wrong_vault =
+            approved_status(&prepared.pairing, uuid::Uuid::new_v4(), owner_device_id).0;
+        assert!(
+            manager
+                .activate(McpWorkerActivateRequest {
+                    vault_id,
+                    operation_id: prepared.operation_id,
+                    status: wrong_vault,
+                })
+                .is_err()
+        );
+
+        let wrong_owner = approved_status(&prepared.pairing, vault_id, uuid::Uuid::new_v4()).0;
+        assert!(
+            manager
+                .activate(McpWorkerActivateRequest {
+                    vault_id,
+                    operation_id: prepared.operation_id,
+                    status: wrong_owner,
+                })
+                .is_err()
+        );
+
+        assert!(
+            manager
+                .activate(McpWorkerActivateRequest {
+                    vault_id,
+                    operation_id: prepared.operation_id,
+                    status: approved_status(&prepared.pairing, vault_id, owner_device_id).0,
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -616,14 +654,26 @@ mod tests {
     }
 
     #[test]
-    fn sealed_completion_receipt_restores_only_the_matching_durable_binding() {
+    fn runtime_record_recovers_the_exact_request_after_a_post_record_crash() {
         let root = tempfile::tempdir().unwrap();
         let config = config(&root);
         let mut manager = EnrollmentManager::new(config.clone());
         let request = approved_admission(&mut manager);
         let expected_device_id = request.admission.device_id;
 
-        manager.complete(request.clone()).unwrap();
+        INSTALL_FAULT_AFTER_RUNTIME_RECORD.set(true);
+        assert!(manager.complete(request.clone()).is_err());
+        assert!(
+            !INSTALL_FAULT_AFTER_RUNTIME_RECORD.get(),
+            "the injected post-record fault was not reached"
+        );
+        let record = vault_state_dir(&config.state_dir, request.vault_id)
+            .join("custody")
+            .join("runtime.sealed");
+        assert!(
+            record.is_file(),
+            "runtime record was not sealed before the fault"
+        );
         drop(manager);
 
         let mut restored = EnrollmentManager::new(config.clone());
@@ -637,7 +687,13 @@ mod tests {
         assert!(restored.complete(altered).is_err());
 
         drop(restored);
-        std::fs::remove_dir_all(vault_state_dir(&config.state_dir, request.vault_id)).unwrap();
+        std::fs::write(&record, b"corrupt").unwrap();
+        assert!(
+            EnrollmentManager::new(config.clone())
+                .complete(request.clone())
+                .is_err()
+        );
+        std::fs::remove_file(&record).unwrap();
         assert!(EnrollmentManager::new(config).complete(request).is_err());
     }
 
@@ -660,6 +716,17 @@ mod tests {
             panic!("expected a pending claimant");
         };
         claim.created_at = Instant::now()
+            .checked_sub(CLAIM_TTL + Duration::from_secs(1))
+            .unwrap();
+    }
+
+    fn expire_installing(manager: &mut EnrollmentManager, operation_id: uuid::Uuid) {
+        let Some(PendingEnrollment::Installing(installing)) =
+            manager.pending.get_mut(&operation_id)
+        else {
+            panic!("expected an installing enrollment");
+        };
+        installing.created_at = Instant::now()
             .checked_sub(CLAIM_TTL + Duration::from_secs(1))
             .unwrap();
     }
@@ -740,6 +807,44 @@ mod tests {
             manager.complete(request).unwrap().device_id().0,
             expected_device_id
         );
+    }
+
+    #[test]
+    fn cancel_and_expiry_drop_only_the_matching_installing_enrollment() {
+        let root = tempfile::tempdir().unwrap();
+        let mut manager = EnrollmentManager::new(config(&root));
+        let request = approved_admission(&mut manager);
+        let owner_device_id = manager
+            .pending
+            .get(&request.operation_id)
+            .and_then(|pending| match pending {
+                PendingEnrollment::Claimant(claim) => Some(claim.owner_device_id),
+                _ => None,
+            })
+            .unwrap();
+        let unusable_key_file = root.path().join("not-a-key-file");
+        std::fs::create_dir(&unusable_key_file).unwrap();
+        manager.config.key_file = unusable_key_file;
+        assert!(manager.complete(request.clone()).is_err());
+
+        manager.cancel(McpWorkerCancelRequest {
+            vault_id: request.vault_id,
+            owner_device_id: uuid::Uuid::new_v4(),
+            invitation_id: request.operation_id,
+        });
+        assert!(manager.pending.contains_key(&request.operation_id));
+        manager.cancel(McpWorkerCancelRequest {
+            vault_id: request.vault_id,
+            owner_device_id,
+            invitation_id: request.operation_id,
+        });
+        assert!(!manager.pending.contains_key(&request.operation_id));
+
+        let retry = approved_admission(&mut manager);
+        assert!(manager.complete(retry.clone()).is_err());
+        expire_installing(&mut manager, retry.operation_id);
+        manager.sweep_expired(Instant::now());
+        assert!(!manager.pending.contains_key(&retry.operation_id));
     }
 
     #[test]

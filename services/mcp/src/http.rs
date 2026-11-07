@@ -15,17 +15,21 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use peppy_hosted_api::mcp::{
-    McpWorkerActivateRequest, McpWorkerCallRequest, McpWorkerCancelRequest,
+    McpDeviceState, McpWorkerActivateRequest, McpWorkerCallRequest, McpWorkerCancelRequest,
     McpWorkerCompleteRequest, McpWorkerPrepareRequest, McpWorkerRevokeRequest,
-    McpWorkerStatusRequest,
+    McpWorkerStatusRequest, McpWorkerStatusResponse,
 };
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::{config::WorkerConfig, enrollment::EnrollmentManager, registry::RuntimeRegistry};
+use crate::{
+    config::WorkerConfig, custody::read_private, enrollment::EnrollmentManager,
+    registry::RuntimeRegistry,
+};
 
 /// How often abandoned claimants are swept even without enrollment traffic.
 const CLAIM_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+const CALL_WORK_LOCK_TIMEOUT: Duration = Duration::from_secs(4);
 
 #[derive(Clone)]
 pub struct WorkerHttp {
@@ -86,7 +90,8 @@ fn load_or_create_control_token(path: &Path) -> io::Result<String> {
 }
 
 fn read_control_token(path: &Path) -> io::Result<String> {
-    let token = fs::read_to_string(path)?;
+    let token = String::from_utf8(read_private(path)?)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid worker token"))?;
     if token.trim().len() < 32 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -121,7 +126,7 @@ fn create_control_token(path: &Path) -> io::Result<String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     let mut file = match options.open(path) {
         Ok(file) => file,
@@ -132,6 +137,8 @@ fn create_control_token(path: &Path) -> io::Result<String> {
     };
     file.write_all(token.as_bytes())?;
     file.sync_all()?;
+    #[cfg(unix)]
+    crate::custody::validate_private_file(&file)?;
     fs::File::open(parent)?.sync_all()?;
     Ok(token)
 }
@@ -201,17 +208,11 @@ async fn complete(
 ) -> Result<Json<Value>, StatusCode> {
     authorize(&headers, &state)?;
     let vault_id = request.vault_id;
-    let runtime = state
-        .enrollments
-        .lock()
-        .await
-        .complete(request)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
     state
         .runtimes
-        .insert(runtime)
+        .complete(&mut *state.enrollments.lock().await, request)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok(Json(json!({"vault_id": vault_id, "state":"offline"})))
 }
 
@@ -229,34 +230,60 @@ async fn status(
     State(state): State<WorkerHttp>,
     headers: HeaderMap,
     Json(request): Json<McpWorkerStatusRequest>,
-) -> Result<Json<Value>, StatusCode> {
+) -> Result<Json<McpWorkerStatusResponse>, StatusCode> {
     authorize(&headers, &state)?;
     let runtime = state.runtimes.get(request.vault_id).await;
     Ok(Json(
-        status_response(request.vault_id, runtime.as_deref()).await,
+        worker_status_response(&request, runtime.as_deref()).await,
     ))
 }
 
+async fn worker_status_response(
+    request: &McpWorkerStatusRequest,
+    runtime: Option<&crate::runtime::Runtime>,
+) -> McpWorkerStatusResponse {
+    let device_id = runtime
+        .map(|runtime| runtime.device_id().0)
+        .unwrap_or(request.device_id);
+    let (state, last_synced_at) = match runtime {
+        Some(runtime) => (
+            match runtime.state().await {
+                crate::runtime::RuntimeState::Offline => McpDeviceState::Offline,
+                crate::runtime::RuntimeState::Online => McpDeviceState::Online,
+                crate::runtime::RuntimeState::NeedsApproval => McpDeviceState::NeedsApproval,
+                crate::runtime::RuntimeState::Revoked => McpDeviceState::Revoked,
+            },
+            runtime.last_synced_at().await.and_then(sync_timestamp),
+        ),
+        None => (McpDeviceState::NeedsApproval, None),
+    };
+    McpWorkerStatusResponse {
+        vault_id: request.vault_id,
+        device_id,
+        state,
+        last_synced_at,
+    }
+}
+
+#[cfg(test)]
 pub(crate) async fn status_response(
     vault_id: uuid::Uuid,
     runtime: Option<&crate::runtime::Runtime>,
 ) -> Value {
-    let (state_name, last_synced_at) = match runtime {
-        Some(runtime) => {
-            let state_name = match runtime.state().await {
-                crate::runtime::RuntimeState::Offline => "offline",
-                crate::runtime::RuntimeState::Online => "online",
-                crate::runtime::RuntimeState::NeedsApproval => "needs_approval",
-                crate::runtime::RuntimeState::Revoked => "revoked",
-            };
-            (
-                state_name,
-                runtime.last_synced_at().await.and_then(sync_timestamp),
-            )
-        }
-        None => ("needs_approval", None),
-    };
-    json!({"vault_id": vault_id, "state": state_name, "last_synced_at": last_synced_at})
+    let device_id = runtime
+        .map(|runtime| runtime.device_id().0)
+        .unwrap_or(uuid::Uuid::nil());
+    serde_json::to_value(
+        worker_status_response(
+            &McpWorkerStatusRequest {
+                vault_id,
+                device_id,
+            },
+            runtime,
+        )
+        .await,
+    )
+    .expect("worker status DTO serializes")
 }
 
 fn sync_timestamp(time: std::time::SystemTime) -> Option<String> {
@@ -318,7 +345,13 @@ async fn call(
     let result = match request.request.get("method").and_then(Value::as_str) {
         Some("tools/list") => crate::tools::list_tools(&request.scopes),
         Some("tools/call") => {
-            let _work = runtime.work_guard().await;
+            let _work = tokio::time::timeout(CALL_WORK_LOCK_TIMEOUT, runtime.work_guard())
+                .await
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            runtime
+                .ensure_live()
+                .await
+                .map_err(|_| StatusCode::FORBIDDEN)?;
             crate::tools::call_tool(&runtime, &request)
                 .await
                 .map_err(|_| StatusCode::BAD_REQUEST)?
@@ -363,6 +396,11 @@ mod tests {
         let path = root.path().join("token");
         let original = format!("  {}\n", "existing-control-token".repeat(3));
         fs::write(&path, &original).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
         assert!(load_or_create_control_token(&path).unwrap() == original);
         assert!(create_control_token(&path).unwrap() == original);
         assert!(fs::read(&path).unwrap() == original.as_bytes());
@@ -379,6 +417,11 @@ mod tests {
             b"\xff\xfe",
         ] {
             fs::write(&path, original).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
             assert_eq!(
                 load_or_create_control_token(&path).unwrap_err().kind(),
                 io::ErrorKind::InvalidData
@@ -389,6 +432,25 @@ mod tests {
             );
             assert!(fs::read(&path).unwrap() == original);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_token_must_be_a_private_regular_file_without_symlinks() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("token");
+        fs::write(&path, "existing-control-token-value-that-is-long-enough").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(load_or_create_control_token(&path).is_err());
+
+        let target = root.path().join("target");
+        fs::write(&target, "existing-control-token-value-that-is-long-enough").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = root.path().join("link");
+        symlink(&target, &link).unwrap();
+        assert!(load_or_create_control_token(&link).is_err());
     }
 
     #[test]
@@ -487,6 +549,85 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(accepted.status(), reqwest::StatusCode::NO_CONTENT);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn status_response_reports_actual_runtime_identity_and_honest_missing_binding() {
+        let root = tempfile::tempdir().unwrap();
+        let config = WorkerConfig {
+            api_url: "http://127.0.0.1:1".into(),
+            public_api_url: "http://127.0.0.1:1".into(),
+            state_dir: root.path().join("state"),
+            key_file: root.path().join("storage-key"),
+            worker_token_file: root.path().join("control-token"),
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        };
+        let worker = WorkerHttp::new(config.clone()).unwrap();
+        let runtime_state_dir = root.path().join("runtime");
+        fs::create_dir(&runtime_state_dir).unwrap();
+        let runtime = crate::runtime::Runtime::test_runtime_for_registry(
+            runtime_state_dir,
+            "http://127.0.0.1:1".into(),
+        );
+        let runtime_vault_id = runtime.vault_id().0;
+        let runtime_device_id = runtime.device_id().0;
+        worker.runtimes.insert(runtime).await.unwrap();
+        let token = fs::read_to_string(&config.worker_token_file).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/internal/mcp/status",
+            listener.local_addr().unwrap()
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, worker.router()).await.unwrap();
+        });
+        let requested_foreign_device_id = uuid::Uuid::new_v4();
+
+        let response = reqwest::Client::new()
+            .post(&url)
+            .bearer_auth(token.trim())
+            .json(&serde_json::json!({
+                "vault_id": runtime_vault_id,
+                "device_id": requested_foreign_device_id,
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap(),
+            serde_json::json!({
+                "vault_id": runtime_vault_id,
+                "device_id": runtime_device_id,
+                "state": "offline",
+                "last_synced_at": null,
+            })
+        );
+        let missing_vault_id = uuid::Uuid::new_v4();
+        let missing_device_id = uuid::Uuid::new_v4();
+        let missing = reqwest::Client::new()
+            .post(url)
+            .bearer_auth(token.trim())
+            .json(&serde_json::json!({
+                "vault_id": missing_vault_id,
+                "device_id": missing_device_id,
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(missing.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            missing.json::<serde_json::Value>().await.unwrap(),
+            serde_json::json!({
+                "vault_id": missing_vault_id,
+                "device_id": missing_device_id,
+                "state": "needs_approval",
+                "last_synced_at": null,
+            })
+        );
         server.abort();
     }
 }

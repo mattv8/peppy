@@ -99,13 +99,6 @@ impl Fixture {
         }
         sqlx::query("INSERT INTO vault_owners(vault_id,username,password_hash,is_admin,operation_id,request_digest) VALUES($1,'owner','hash',TRUE,$2,$3)").bind(vault).bind(Uuid::new_v4()).bind(vec![1u8; 32]).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO instance_sessions(token_digest,vault_id,expires_at) VALUES($1,$2,now()+interval '1 hour')").bind(Sha256::digest(session_token.as_bytes()).as_slice()).bind(vault).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO mcp_devices(vault_id,device_id) VALUES($1,$2)")
-            .bind(vault)
-            .bind(device)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO mcp_grants(id,vault_id,device_id,client_name,scopes) VALUES($1,$2,$3,'test',ARRAY['conversations:read'])").bind(grant).bind(vault).bind(device).execute(&pool).await.unwrap();
         Self {
             admin,
             pool,
@@ -160,6 +153,7 @@ struct Gate {
 #[derive(Clone)]
 struct WorkerState {
     requests: WorkerRequests,
+    request_received: Arc<Notify>,
     gate: Option<Gate>,
     revoke_status: Arc<Mutex<StatusCode>>,
 }
@@ -185,6 +179,20 @@ impl FakeWorker {
             .map(|(_, body)| body.clone())
             .collect()
     }
+
+    async fn wait_for_bodies(&self, path: &str, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let request_received = self.state.request_received.notified();
+                if self.bodies(path).await.len() >= expected {
+                    return;
+                }
+                request_received.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {expected} requests to {path}"));
+    }
 }
 
 async fn fake_worker() -> FakeWorker {
@@ -203,6 +211,7 @@ async fn gated_fake_worker(path: &'static str) -> FakeWorker {
 async fn spawn_fake_worker(gate: Option<Gate>) -> FakeWorker {
     let state = WorkerState {
         requests: Arc::new(Mutex::new(Vec::new())),
+        request_received: Arc::new(Notify::new()),
         gate,
         revoke_status: Arc::new(Mutex::new(StatusCode::NO_CONTENT)),
     };
@@ -232,6 +241,7 @@ async fn handle_worker_request(State(state): State<WorkerState>, request: AxumRe
         serde_json::from_slice(&bytes).unwrap()
     };
     state.requests.lock().await.push((path.clone(), body));
+    state.request_received.notify_waiters();
     if let Some(gate) = state
         .gate
         .as_ref()
@@ -415,6 +425,33 @@ async fn wait_for_count(
     .unwrap_or_else(|_| panic!("timed out waiting for {description}"));
 }
 
+async fn wait_for_cleanup_attempts(pool: &PgPool, vault: Uuid, expected: i64) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let device_attempts: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(sum(cleanup_attempts), 0) FROM mcp_devices WHERE vault_id=$1",
+            )
+            .bind(vault)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            let job_attempts: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(sum(attempts), 0) FROM mcp_cleanup_jobs WHERE vault_id=$1",
+            )
+            .bind(vault)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if device_attempts >= expected && job_attempts >= expected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cleanup maintenance must attempt the expected batch");
+}
+
 /// Inserts an activated operation that expires two seconds from now, with the worker device
 /// enrolled, so that `complete` reaches the worker call and only the expiry can reject it.
 async fn insert_activated_operation(fixture: &Fixture) -> (Uuid, Uuid) {
@@ -454,6 +491,19 @@ fn completion_request(operation: Uuid, vault: Uuid, device: Uuid) -> serde_json:
 #[tokio::test]
 async fn grants_are_owner_only_and_device_revoke_fences_them_with_cleanup() {
     let fixture = Fixture::new().await;
+    sqlx::query("INSERT INTO mcp_devices(vault_id,device_id) VALUES($1,$2)")
+        .bind(fixture.vault)
+        .bind(fixture.device)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO mcp_grants(id,vault_id,device_id,client_name,scopes) VALUES($1,$2,$3,'test',ARRAY['conversations:read'])")
+        .bind(fixture.grant)
+        .bind(fixture.vault)
+        .bind(fixture.device)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
     let (status, body) = request(
         fixture.pool.clone(),
         &fixture.owner_token,
@@ -623,6 +673,186 @@ async fn concurrent_prepares_leave_one_live_operation() {
     .await
     .unwrap();
     assert_eq!(live_operations, 1);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn prepare_rejects_a_second_live_mcp_device_before_worker_installation() {
+    let fixture = Fixture::new().await;
+    sqlx::query("INSERT INTO mcp_devices(vault_id,device_id) VALUES($1,$2)")
+        .bind(fixture.vault)
+        .bind(fixture.device)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let worker = fake_worker().await;
+    let worker_config_lock = worker_config_lock().lock().await;
+    let router = router_for_worker(fixture.pool.clone(), &worker, &worker_config_lock);
+
+    let (status, body) = spawn_owner_post(router, &fixture, "/v1/mcp/device/prepare", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.contains("mcp_device_conflict"), "{body}");
+    assert!(worker.bodies("/internal/mcp/prepare").await.is_empty());
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn already_prepared_losing_completion_conflicts_before_worker_installation() {
+    let fixture = Fixture::new().await;
+    let worker = fake_worker().await;
+    let worker_config_lock = worker_config_lock().lock().await;
+    let router = router_for_worker(fixture.pool.clone(), &worker, &worker_config_lock);
+    let (operation, worker_device) = insert_activated_operation(&fixture).await;
+    sqlx::query("INSERT INTO mcp_devices(vault_id,device_id) VALUES($1,$2)")
+        .bind(fixture.vault)
+        .bind(fixture.device)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+
+    let (status, body) = spawn_owner_post(
+        router,
+        &fixture,
+        "/v1/mcp/device/complete",
+        completion_request(operation, fixture.vault, worker_device),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.contains("mcp_device_conflict"), "{body}");
+    assert!(worker.bodies("/internal/mcp/complete").await.is_empty());
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn mcp_device_delete_enqueues_a_durable_cleanup_job() {
+    let fixture = Fixture::new().await;
+    sqlx::query("INSERT INTO mcp_devices(vault_id,device_id) VALUES($1,$2)")
+        .bind(fixture.vault)
+        .bind(fixture.device)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM mcp_devices WHERE vault_id=$1 AND device_id=$2")
+        .bind(fixture.vault)
+        .bind(fixture.device)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let jobs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mcp_cleanup_jobs WHERE vault_id=$1 AND worker_device_id=$2",
+    )
+    .bind(fixture.vault)
+    .bind(fixture.device)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(jobs, 1);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn cleanup_retries_rotate_past_more_than_one_batch_of_failed_devices_and_jobs() {
+    let fixture = Fixture::new().await;
+    let worker = fake_worker().await;
+    *worker.state.revoke_status.lock().await = StatusCode::SERVICE_UNAVAILABLE;
+    let worker_config_lock = worker_config_lock().lock().await;
+    let mut later_device = Uuid::nil();
+    let mut later_job = Uuid::nil();
+
+    for index in 0..33 {
+        let device_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch,name,kind) VALUES($1,$2,'device','{}',$3,1,'cleanup','desktop')")
+            .bind(fixture.vault)
+            .bind(device_id)
+            .bind("11".repeat(32))
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO mcp_devices(vault_id,device_id,cleanup_pending) VALUES($1,$2,TRUE)",
+        )
+        .bind(fixture.vault)
+        .bind(device_id)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        if index == 32 {
+            later_device = device_id;
+        }
+
+        let job_device_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO mcp_cleanup_jobs(vault_id,worker_device_id) VALUES($1,$2)")
+            .bind(fixture.vault)
+            .bind(job_device_id)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        if index == 32 {
+            later_job = job_device_id;
+        }
+    }
+
+    let _first_cycle = router_for_worker(fixture.pool.clone(), &worker, &worker_config_lock);
+    wait_for_cleanup_attempts(&fixture.pool, fixture.vault, 32).await;
+    let _second_cycle = router_for_worker(fixture.pool.clone(), &worker, &worker_config_lock);
+    wait_for_cleanup_attempts(&fixture.pool, fixture.vault, 33).await;
+
+    let (device_attempts, device_pending): (i32, bool) = sqlx::query_as(
+        "SELECT cleanup_attempts,cleanup_pending FROM mcp_devices WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(fixture.vault)
+    .bind(later_device)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!((device_attempts, device_pending), (1, true));
+    let job_attempts: i32 = sqlx::query_scalar(
+        "SELECT attempts FROM mcp_cleanup_jobs WHERE vault_id=$1 AND worker_device_id=$2",
+    )
+    .bind(fixture.vault)
+    .bind(later_job)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(job_attempts, 1);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn missing_origin_with_a_worker_reports_mcp_unavailable() {
+    let fixture = Fixture::new().await;
+    let worker = fake_worker().await;
+    let worker_config_lock = worker_config_lock().lock().await;
+    let public_api_url = std::env::var_os("PUBLIC_API_URL");
+    unsafe {
+        std::env::remove_var("PUBLIC_API_URL");
+    }
+    let router = router_for_worker(fixture.pool.clone(), &worker, &worker_config_lock);
+    if let Some(public_api_url) = public_api_url {
+        unsafe {
+            std::env::set_var("PUBLIC_API_URL", public_api_url);
+        }
+    }
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/mcp/device")
+                .header("authorization", format!("Bearer {}", fixture.owner_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["available"], false);
+    assert_eq!(body["serverOrigin"], "");
     fixture.cleanup().await;
 }
 
@@ -1240,6 +1470,7 @@ async fn delete_vault_while_gated(router: Router, fixture: &Fixture) {
 async fn complete_gated_on_worker_returns_not_found_after_vault_deletion_and_revokes_runtime() {
     let fixture = Fixture::new().await;
     let worker = gated_fake_worker("/internal/mcp/complete").await;
+    *worker.state.revoke_status.lock().await = StatusCode::SERVICE_UNAVAILABLE;
     let worker_config_lock = worker_config_lock().lock().await;
     let router = router_for_worker(fixture.pool.clone(), &worker, &worker_config_lock);
     let (operation, worker_device) = insert_activated_operation(&fixture).await;
@@ -1252,16 +1483,66 @@ async fn complete_gated_on_worker_returns_not_found_after_vault_deletion_and_rev
     );
     worker.gate().arrived.notified().await;
     delete_vault_while_gated(router, &fixture).await;
+    let _sweeping_router = router_for_worker(fixture.pool.clone(), &worker, &worker_config_lock);
+    wait_for_count(
+        &fixture.pool,
+        SQL_ADVISORY_WAITERS,
+        fixture.vault,
+        "deletion maintenance to queue behind the in-flight completion",
+        |waiters| waiters > 0,
+    )
+    .await;
     worker.gate().release.notify_one();
 
     let (status, body) = complete.await.unwrap();
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("mcp_operation_not_found"), "{body}");
     assert!(!body.contains("deadlock"), "{body}");
+    worker.wait_for_bodies("/internal/mcp/revoke", 2).await;
     assert_eq!(
         worker.bodies("/internal/mcp/revoke").await,
-        vec![json!({"vault_id":fixture.vault.to_string(),"device_id":worker_device.to_string()})],
-        "the installed runtime must be revoked best-effort"
+        vec![
+            json!({"vault_id":fixture.vault.to_string(),"device_id":worker_device.to_string()}),
+            json!({"vault_id":fixture.vault.to_string(),"device_id":worker_device.to_string()}),
+        ],
+        "completion rejection and durable maintenance must both attempt the failed revoke"
+    );
+    let jobs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mcp_cleanup_jobs WHERE vault_id=$1 AND worker_device_id=$2",
+    )
+    .bind(fixture.vault)
+    .bind(worker_device)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(jobs, 1, "a failed revoke after cascade must remain durable");
+
+    *worker.state.revoke_status.lock().await = StatusCode::NO_CONTENT;
+    let _retrying_router = router_for_worker(fixture.pool.clone(), &worker, &worker_config_lock);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM mcp_cleanup_jobs WHERE vault_id=$1 AND worker_device_id=$2",
+        )
+        .bind(fixture.vault)
+        .bind(worker_device)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap()
+            != 0
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("maintenance must retry the durable deletion cleanup");
+    assert_eq!(
+        worker.bodies("/internal/mcp/revoke").await,
+        vec![
+            json!({"vault_id":fixture.vault.to_string(),"device_id":worker_device.to_string()}),
+            json!({"vault_id":fixture.vault.to_string(),"device_id":worker_device.to_string()}),
+            json!({"vault_id":fixture.vault.to_string(),"device_id":worker_device.to_string()}),
+        ],
+        "the retry must acknowledge and remove the durable cleanup job"
     );
     fixture.cleanup().await;
 }

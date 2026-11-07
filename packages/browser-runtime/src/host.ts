@@ -255,7 +255,12 @@ function mcpErrorFor(error: unknown): RpcError {
   const httpError = mcpHttpError(error);
   if (httpError) return httpError;
   if (error instanceof TypeError) return { code: "network", message: "Peppy could not connect to the MCP server. Try again." };
+  if (error instanceof Error && isMcpLocalCode(error.message)) return { code: error.message, message: "The MCP operation could not be completed. Try again." };
   return errorFor(error);
+}
+
+function isMcpLocalCode(value: string): value is "owner_required" | "mcp-response" | "enrollment-state" {
+  return value === "owner_required" || value === "mcp-response" || value === "enrollment-state";
 }
 
 function isMcpCancellation(error: unknown): boolean {

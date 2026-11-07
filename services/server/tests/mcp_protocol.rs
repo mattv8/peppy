@@ -58,7 +58,8 @@ async fn worker_call(
     {
         Some("tools/list") => Json(serde_json::json!({"tools":[
             {"name":"list_conversations","description":"read","inputSchema":{"type":"object"}},
-            {"name":"send_message","description":"write","inputSchema":{"type":"object"}}
+            {"name":"send_message","description":"write","inputSchema":{"type":"object"}},
+            {"name":"send_image","description":"media","inputSchema":{"type":"object"}}
         ]})),
         Some("tools/call") => Json(
             serde_json::json!({"content":[{"type":"text","text":request.vault_id.to_string()}],"isError":false}),
@@ -80,6 +81,22 @@ impl AccessPolicy for DenyingPolicy {
     ) -> PolicyFuture<'_, bool> {
         let allowed = !self.denied.contains(&operation);
         Box::pin(async move { allowed })
+    }
+}
+
+#[derive(Default)]
+struct RecordingPolicy {
+    operations: Arc<Mutex<Vec<Operation>>>,
+}
+
+impl AccessPolicy for RecordingPolicy {
+    fn authorize(
+        &self,
+        _principal: AccessPrincipal,
+        operation: Operation,
+    ) -> PolicyFuture<'_, bool> {
+        self.operations.lock().unwrap().push(operation);
+        Box::pin(async { true })
     }
 }
 
@@ -548,8 +565,8 @@ async fn protected_result_is_fenced_when_credential_changes_midflight() {
             async move { request_router(router, &token, call("list_conversations")).await },
         );
     fixture.worker.entered.notified().await;
-    sqlx::query("UPDATE mcp_oauth_tokens SET revoked_at=now() WHERE digest=$1")
-        .bind(Sha256::digest(fixture.token.as_bytes()).as_slice())
+    sqlx::query("UPDATE mcp_grants SET revoked_at=now() WHERE id=$1")
+        .bind(fixture.grant)
         .execute(&fixture.pool)
         .await
         .unwrap();
@@ -559,7 +576,7 @@ async fn protected_result_is_fenced_when_credential_changes_midflight() {
     let result = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
     assert!(
         result.get("error").is_some(),
-        "revoked token must not release tool output"
+        "revoked grant must not release tool output"
     );
     assert!(
         !String::from_utf8(body)
@@ -673,10 +690,8 @@ async fn read_denied_policy_fails_tools_list_as_invalid_request() {
 
 #[tokio::test]
 async fn scope_is_checked_before_policy_for_calls() {
-    let fixture = Fixture::with_policy(Arc::new(DenyingPolicy {
-        denied: vec![Operation::Send, Operation::Upload],
-    }))
-    .await;
+    let policy = Arc::new(RecordingPolicy::default());
+    let fixture = Fixture::with_policy(policy.clone()).await;
 
     // `fixture.token` carries only `conversations:read`, so the send is outside its grant.
     let (status, body, _) = fixture
@@ -702,6 +717,42 @@ async fn scope_is_checked_before_policy_for_calls() {
     assert!(
         fixture.worker.calls.lock().unwrap().is_empty(),
         "out-of-scope calls never reach the worker"
+    );
+    assert!(
+        policy
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|operation| *operation == Operation::Read),
+        "scope denials never invoke the denied tool's policy operation"
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn tool_catalogue_caches_each_policy_operation_for_one_request() {
+    let policy = Arc::new(RecordingPolicy::default());
+    let fixture = Fixture::with_policy(policy.clone()).await;
+    let (_, _, _, token) = seed(
+        &fixture.pool,
+        "catalogue",
+        &["conversations:read", "messages:send", "media:send"],
+    )
+    .await;
+
+    let (status, _, _) = fixture.request(Some(&token), list()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        *policy.operations.lock().unwrap(),
+        vec![
+            Operation::Read,
+            Operation::Read,
+            Operation::Send,
+            Operation::Upload,
+        ],
+        "after request authentication, the catalogue checks each policy operation once"
     );
 
     fixture.cleanup().await;
@@ -755,6 +806,44 @@ async fn upload_only_denial_blocks_send_image_but_not_send_message() {
         "tools/call",
         "the worker received the tool call"
     );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn media_and_text_scopes_advertise_and_execute_only_their_matching_tools() {
+    let fixture = Fixture::new().await;
+    let (_, _, _, text_token) = seed(&fixture.pool, "text", &["messages:send"]).await;
+    let (_, _, _, media_token) = seed(&fixture.pool, "media", &["media:send"]).await;
+
+    for (token, permitted, denied) in [
+        (&text_token, "send_message", "send_image"),
+        (&media_token, "send_image", "send_message"),
+    ] {
+        let (status, body, _) = fixture.request(Some(token), list()).await;
+        assert_eq!(status, StatusCode::OK);
+        let response = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+        let tools = response["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(tools, vec![permitted]);
+
+        let (status, body, _) = fixture.request(Some(token), call(permitted)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["result"]["isError"],
+            false
+        );
+
+        let (status, body, _) = fixture.request(Some(token), call(denied)).await;
+        assert_eq!(status, StatusCode::OK);
+        let response = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+        assert_eq!(response["error"]["code"], -32602);
+        assert_eq!(response["error"]["message"], "tool is not available");
+    }
 
     fixture.cleanup().await;
 }

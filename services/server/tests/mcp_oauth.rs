@@ -178,7 +178,7 @@ async fn register(app: Router) -> String {
         &[("content-type", "application/json")],
     )
     .await;
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::CREATED);
     json(response).await["client_id"]
         .as_str()
         .unwrap()
@@ -243,7 +243,7 @@ async fn register_with_redirect(app: Router, redirect_uri: &str) -> String {
         &[("content-type", "application/json")],
     )
     .await;
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::CREATED);
     json(response).await["client_id"]
         .as_str()
         .unwrap()
@@ -251,11 +251,26 @@ async fn register_with_redirect(app: Router, redirect_uri: &str) -> String {
 }
 
 async fn approve(app: Router, authorization_id: &str, owner_token: &str) -> String {
+    approve_with_scopes(
+        app,
+        authorization_id,
+        owner_token,
+        json!(["conversations:read"]),
+    )
+    .await
+}
+
+async fn approve_with_scopes(
+    app: Router,
+    authorization_id: &str,
+    owner_token: &str,
+    scopes: Value,
+) -> String {
     let response = request(
         app,
         Method::POST,
         &format!("/v1/mcp/authorizations/{authorization_id}/approve"),
-        Body::from(json!({"scopes":["conversations:read"]}).to_string()),
+        Body::from(json!({"scopes":scopes}).to_string()),
         &[
             ("content-type", "application/json"),
             ("authorization", &format!("Bearer {owner_token}")),
@@ -288,6 +303,35 @@ async fn exchange(app: Router, client_id: &str, code: &str, verifier: &str) -> V
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["cache-control"], "no-store");
     json(response).await
+}
+
+async fn refresh_request(app: Router, client_id: &str, refresh: &str) -> Response<Body> {
+    request(
+        app,
+        Method::POST,
+        "/oauth/token",
+        Body::from(format!(
+            "grant_type=refresh_token&client_id={client_id}&refresh_token={refresh}&resource=http%3A%2F%2Flocalhost%3A3000%2Fmcp"
+        )),
+        &[("content-type", "application/x-www-form-urlencoded")],
+    )
+    .await
+}
+
+async fn wait_for_database_lock(pool: &PgPool) {
+    for _ in 0..100 {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='transactionid' AND NOT granted)",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiting {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("request did not wait for the row lock");
 }
 
 #[tokio::test]
@@ -979,7 +1023,7 @@ async fn concurrent_registrations_do_not_exceed_the_durable_capacity() {
     assert_eq!(
         responses
             .iter()
-            .filter(|response| response.status() == StatusCode::OK)
+            .filter(|response| response.status() == StatusCode::CREATED)
             .count(),
         1
     );
@@ -1044,7 +1088,7 @@ async fn oauth_registration_admission_limits_sources_and_global_anonymous_traffi
             )
             .await
             .status(),
-            StatusCode::OK
+            StatusCode::CREATED
         );
     }
     assert_eq!(
@@ -1073,7 +1117,7 @@ async fn oauth_registration_admission_limits_sources_and_global_anonymous_traffi
             )
             .await
             .status(),
-            StatusCode::OK
+            StatusCode::CREATED
         );
     }
     assert_eq!(
@@ -1106,7 +1150,898 @@ async fn sweeping_unused_registrations_restores_registration_capacity() {
             .fetch_one(&fixture.pool)
             .await
             .unwrap(),
+        513
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn discovery_and_registration_advertise_accepted_oauth_metadata() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app().await;
+    let metadata = request(
+        app.clone(),
+        Method::GET,
+        "/.well-known/oauth-authorization-server",
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(metadata.status(), StatusCode::OK);
+    assert_eq!(
+        json(metadata).await["grant_types_supported"],
+        json!(["authorization_code", "refresh_token"])
+    );
+    let metadata = request(
+        app.clone(),
+        Method::GET,
+        "/.well-known/oauth-authorization-server",
+        Body::empty(),
+        &[],
+    )
+    .await;
+    let metadata = json(metadata).await;
+    assert_eq!(metadata["response_types_supported"], json!(["code"]));
+    assert_eq!(
+        metadata["token_endpoint_auth_methods_supported"],
+        json!(["none"])
+    );
+    let registration = request(
+        app,
+        Method::POST,
+        "/oauth/register",
+        Body::from(json!({"client_name":"metadata client","redirect_uris":["https://client.example/callback"]}).to_string()),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(registration.status(), StatusCode::CREATED);
+    let registration = json(registration).await;
+    assert_eq!(registration["scope"], "conversations:read");
+    assert_eq!(
+        registration["grant_types"],
+        json!(["authorization_code", "refresh_token"])
+    );
+    assert_eq!(registration["response_types"], json!(["code"]));
+    assert_eq!(registration["token_endpoint_auth_method"], "none");
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn refresh_revoke_revokes_the_entire_token_family() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app().await;
+    let verifier = "a-valid-pkce-verifier-that-is-long-enough-to-satisfy-rfc7636";
+    let client_id = register(app.clone()).await;
+    let code = approve(
+        app.clone(),
+        &authorize(app.clone(), &client_id, verifier).await,
+        &fixture.owner_token,
+    )
+    .await;
+    let tokens = exchange(app.clone(), &client_id, &code, verifier).await;
+    let refresh = tokens["refresh_token"].as_str().unwrap();
+    let revoke = request(
+        app,
+        Method::POST,
+        "/oauth/revoke",
+        Body::from(format!("token={refresh}&client_id={client_id}")),
+        &[("content-type", "application/x-www-form-urlencoded")],
+    )
+    .await;
+    assert_eq!(revoke.status(), StatusCode::OK);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM mcp_oauth_tokens WHERE family_id=(SELECT family_id FROM mcp_oauth_tokens WHERE digest=$1) AND revoked_at IS NULL")
+            .bind(Sha256::digest(refresh.as_bytes()).as_slice())
+            .fetch_one(&fixture.pool).await.unwrap(),
+        0
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn oauth_token_admission_preserves_unspent_refresh_tokens() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app().await;
+    let verifier = "a-valid-pkce-verifier-that-is-long-enough-to-satisfy-rfc7636";
+    let client_id = register(app.clone()).await;
+    let code = approve(
+        app.clone(),
+        &authorize(app.clone(), &client_id, verifier).await,
+        &fixture.owner_token,
+    )
+    .await;
+    let refresh = exchange(app.clone(), &client_id, &code, verifier).await["refresh_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let peer = "192.0.2.55:1234".parse().unwrap();
+    for _ in 0..10 {
+        assert_eq!(request_from(app.clone(), Method::POST, "/oauth/token", Body::from("grant_type=refresh_token&client_id=unknown&refresh_token=unknown&resource=http%3A%2F%2Flocalhost%3A3000%2Fmcp"), &[("content-type", "application/x-www-form-urlencoded")], peer).await.status(), StatusCode::BAD_REQUEST);
+    }
+    let throttled = request_from(app, Method::POST, "/oauth/token", Body::from(format!("grant_type=refresh_token&client_id={client_id}&refresh_token={refresh}&resource=http%3A%2F%2Flocalhost%3A3000%2Fmcp")), &[("content-type", "application/x-www-form-urlencoded")], peer).await;
+    assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+    let used: bool =
+        sqlx::query_scalar("SELECT used_at IS NOT NULL FROM mcp_oauth_tokens WHERE digest=$1")
+            .bind(Sha256::digest(refresh.as_bytes()).as_slice())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert!(!used);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn oauth_sweep_retains_recent_replay_evidence_and_prunes_expired_history_in_batches() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app().await;
+    let verifier = "a-valid-pkce-verifier-that-is-long-enough-to-satisfy-rfc7636";
+    let client_id = register(app.clone()).await;
+    let code = approve(
+        app.clone(),
+        &authorize(app.clone(), &client_id, verifier).await,
+        &fixture.owner_token,
+    )
+    .await;
+    let refresh = exchange(app.clone(), &client_id, &code, verifier).await["refresh_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let family: Uuid = sqlx::query_scalar("SELECT family_id FROM mcp_oauth_tokens WHERE digest=$1")
+        .bind(Sha256::digest(refresh.as_bytes()).as_slice())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    let (grant_id, device_id): (Uuid, Uuid) =
+        sqlx::query_as("SELECT grant_id,device_id FROM mcp_oauth_tokens WHERE digest=$1")
+            .bind(Sha256::digest(refresh.as_bytes()).as_slice())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE mcp_oauth_clients SET created_at=clock_timestamp()-interval '25 hours' WHERE client_id=$1")
+        .bind(&client_id).execute(&fixture.pool).await.unwrap();
+    sqlx::query("UPDATE mcp_oauth_tokens SET expires_at=clock_timestamp()-interval '6 days' WHERE family_id=$1")
+        .bind(family).execute(&fixture.pool).await.unwrap();
+    sqlx::query("UPDATE mcp_oauth_tokens SET revoked_at=clock_timestamp() WHERE digest=$1")
+        .bind(Sha256::digest(refresh.as_bytes()).as_slice())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO mcp_oauth_codes(digest,vault_id,device_id,grant_id,client_id,redirect_uri,code_challenge,resource,expires_at) SELECT decode(lpad(to_hex(value),64,'0'),'hex'),$1,$2,$3,$4,'https://client.example/callback',repeat('a',43),'http://localhost:3000/mcp',clock_timestamp()-interval '2 days' FROM generate_series(1,513) value")
+        .bind(fixture.vault).bind(device_id).bind(grant_id).bind(&client_id).execute(&fixture.pool).await.unwrap();
+    sqlx::query("INSERT INTO mcp_oauth_tokens(digest,token_kind,family_id,vault_id,device_id,grant_id,client_id,resource,expires_at) SELECT decode(lpad(to_hex(value + 1024),64,'0'),'hex'),'access',$1,$2,$3,$4,$5,'http://localhost:3000/mcp',clock_timestamp()-interval '8 days' FROM generate_series(1,513) value")
+        .bind(family).bind(fixture.vault).bind(device_id).bind(grant_id).bind(&client_id).execute(&fixture.pool).await.unwrap();
+    sqlx::query("SELECT mcp_sweep_oauth()")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM mcp_oauth_codes WHERE client_id=$1 AND expires_at < clock_timestamp()-interval '1 day'").bind(&client_id).fetch_one(&fixture.pool).await.unwrap(), 1);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM mcp_oauth_tokens WHERE client_id=$1 AND expires_at < clock_timestamp()-interval '7 days'").bind(&client_id).fetch_one(&fixture.pool).await.unwrap(), 1);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM mcp_oauth_tokens WHERE family_id=$1 AND expires_at > clock_timestamp()-interval '7 days'").bind(family).fetch_one(&fixture.pool).await.unwrap(), 2);
+    sqlx::query("SELECT mcp_sweep_oauth()")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM mcp_oauth_codes WHERE client_id=$1 AND expires_at < clock_timestamp()-interval '1 day'").bind(&client_id).fetch_one(&fixture.pool).await.unwrap(), 0);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM mcp_oauth_tokens WHERE client_id=$1 AND expires_at < clock_timestamp()-interval '7 days'").bind(&client_id).fetch_one(&fixture.pool).await.unwrap(), 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM mcp_oauth_clients WHERE client_id=$1")
+            .bind(&client_id)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap(),
         1
     );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn oauth_rejects_non_adjacent_duplicate_scopes_at_every_public_boundary() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app().await;
+    let verifier = "a-valid-pkce-verifier-that-is-long-enough-to-satisfy-rfc7636";
+    let registration = request(
+        app.clone(),
+        Method::POST,
+        "/oauth/register",
+        Body::from(json!({"client_name":"duplicates","redirect_uris":["https://client.example/callback"],"scope":"conversations:read messages:send conversations:read"}).to_string()),
+        &[("content-type", "application/json")],
+    ).await;
+    assert_eq!(registration.status(), StatusCode::BAD_REQUEST);
+    let client_id = register(app.clone()).await;
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("response_type", "code");
+    query.append_pair("client_id", &client_id);
+    query.append_pair("redirect_uri", "https://client.example/callback");
+    query.append_pair("state", "opaque-state");
+    query.append_pair(
+        "scope",
+        "conversations:read messages:send conversations:read",
+    );
+    query.append_pair("resource", "http://localhost:3000/mcp");
+    query.append_pair("code_challenge", &challenge(verifier));
+    query.append_pair("code_challenge_method", "S256");
+    let authorization = request(
+        app.clone(),
+        Method::GET,
+        &format!("/oauth/authorize?{}", query.finish()),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(authorization.status(), StatusCode::BAD_REQUEST);
+    let authorization_id = authorize(app.clone(), &client_id, verifier).await;
+    let approval = request(
+        app.clone(),
+        Method::POST,
+        &format!("/v1/mcp/authorizations/{authorization_id}/approve"),
+        Body::from(
+            json!({"scopes":["conversations:read","messages:send","conversations:read"]})
+                .to_string(),
+        ),
+        &[
+            ("content-type", "application/json"),
+            ("authorization", &format!("Bearer {}", fixture.owner_token)),
+        ],
+    )
+    .await;
+    assert_eq!(approval.status(), StatusCode::BAD_REQUEST);
+    let grants: i64 = sqlx::query_scalar("SELECT count(*) FROM mcp_grants")
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(grants, 0);
+    let pending: bool =
+        sqlx::query_scalar("SELECT decided_at IS NULL FROM mcp_oauth_authorizations WHERE id=$1")
+            .bind(authorization_id)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert!(pending);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn sweep_keeps_an_old_clients_live_code_after_its_authorization_expires() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app().await;
+    let verifier = "a-valid-pkce-verifier-that-is-long-enough-to-satisfy-rfc7636";
+    let client_id = register(app.clone()).await;
+    let authorization_id = authorize(app.clone(), &client_id, verifier).await;
+    let code = approve(app.clone(), &authorization_id, &fixture.owner_token).await;
+    sqlx::query("UPDATE mcp_oauth_clients SET created_at=clock_timestamp()-interval '25 hours' WHERE client_id=$1")
+        .bind(&client_id).execute(&fixture.pool).await.unwrap();
+    sqlx::query("UPDATE mcp_oauth_authorizations SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1")
+        .bind(&authorization_id).execute(&fixture.pool).await.unwrap();
+    sqlx::query("SELECT mcp_sweep_oauth()")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM mcp_oauth_clients WHERE client_id=$1)"
+        )
+        .bind(&client_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap()
+    );
+    let tokens = exchange(app, &client_id, &code, verifier).await;
+    assert!(tokens["access_token"].is_string());
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn sweep_skips_an_old_client_with_a_concurrently_inserted_authorization() {
+    let fixture = Fixture::new().await;
+    let client_id = register(fixture.app().await).await;
+    sqlx::query("UPDATE mcp_oauth_clients SET created_at=clock_timestamp()-interval '25 hours' WHERE client_id=$1")
+        .bind(&client_id).execute(&fixture.pool).await.unwrap();
+    let authorization_id = format!("concurrent-{client_id}");
+    let mut child_transaction = fixture.pool.begin().await.unwrap();
+    sqlx::query("INSERT INTO mcp_oauth_authorizations(id,client_id,redirect_uri,state,code_challenge,requested_scopes,resource,expires_at) VALUES($1,$2,'https://client.example/callback','state',repeat('a',43),ARRAY['conversations:read'],'http://localhost:3000/mcp',clock_timestamp()+interval '10 minutes')")
+        .bind(&authorization_id).bind(&client_id).execute(&mut *child_transaction).await.unwrap();
+    let sweep_pool = fixture.pool.clone();
+    let sweep = tokio::spawn(async move {
+        sqlx::query("SELECT mcp_sweep_oauth()")
+            .execute(&sweep_pool)
+            .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), sweep)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_ok()
+    );
+    child_transaction.commit().await.unwrap();
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM mcp_oauth_clients WHERE client_id=$1)"
+        )
+        .bind(&client_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap()
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM mcp_oauth_authorizations WHERE id=$1)"
+        )
+        .bind(&authorization_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap()
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn code_exchange_rechecks_expiry_after_a_lock_only_wait() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app().await;
+    let verifier = "a-valid-pkce-verifier-that-is-long-enough-to-satisfy-rfc7636";
+    let client_id = register(app.clone()).await;
+    let code = approve(
+        app.clone(),
+        &authorize(app.clone(), &client_id, verifier).await,
+        &fixture.owner_token,
+    )
+    .await;
+    let digest = Sha256::digest(code.as_bytes());
+    sqlx::query("UPDATE mcp_oauth_codes SET expires_at=clock_timestamp()+interval '500 milliseconds' WHERE digest=$1")
+        .bind(digest.as_slice())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let token_count: i64 = sqlx::query_scalar("SELECT count(*) FROM mcp_oauth_tokens")
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    let mut blocker = fixture.pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM mcp_oauth_codes WHERE digest=$1 FOR UPDATE")
+        .bind(digest.as_slice())
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let request_code = code.clone();
+    let request_client = client_id.clone();
+    let exchange_request = tokio::spawn(request(
+        app,
+        Method::POST,
+        "/oauth/token",
+        Body::from(format!(
+            "grant_type=authorization_code&client_id={request_client}&code={request_code}&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&resource=http%3A%2F%2Flocalhost%3A3000%2Fmcp&code_verifier={verifier}"
+        )),
+        &[("content-type", "application/x-www-form-urlencoded")],
+    ));
+    wait_for_database_lock(&fixture.pool).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    blocker.commit().await.unwrap();
+    let response = exchange_request.await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json(response).await, json!({"error":"invalid_grant"}));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM mcp_oauth_tokens")
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap(),
+        token_count
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT used_at IS NULL FROM mcp_oauth_codes WHERE digest=$1"
+        )
+        .bind(digest.as_slice())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap()
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn refresh_rechecks_expiry_after_a_grant_lock_only_wait() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app().await;
+    let verifier = "a-valid-pkce-verifier-that-is-long-enough-to-satisfy-rfc7636";
+    let client_id = register(app.clone()).await;
+    let code = approve(
+        app.clone(),
+        &authorize(app.clone(), &client_id, verifier).await,
+        &fixture.owner_token,
+    )
+    .await;
+    let refresh = exchange(app.clone(), &client_id, &code, verifier).await["refresh_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let digest = Sha256::digest(refresh.as_bytes());
+    let grant_id: Uuid =
+        sqlx::query_scalar("SELECT grant_id FROM mcp_oauth_tokens WHERE digest=$1")
+            .bind(digest.as_slice())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE mcp_oauth_tokens SET expires_at=clock_timestamp()+interval '500 milliseconds' WHERE digest=$1")
+        .bind(digest.as_slice())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let token_count: i64 = sqlx::query_scalar("SELECT count(*) FROM mcp_oauth_tokens")
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    let mut blocker = fixture.pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM mcp_grants WHERE id=$1 FOR UPDATE")
+        .bind(grant_id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let request_client = client_id.clone();
+    let request_refresh = refresh.clone();
+    let refresh_request =
+        tokio::spawn(async move { refresh_request(app, &request_client, &request_refresh).await });
+    wait_for_database_lock(&fixture.pool).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    blocker.commit().await.unwrap();
+    let response = refresh_request.await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json(response).await, json!({"error":"invalid_grant"}));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM mcp_oauth_tokens")
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap(),
+        token_count
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT used_at IS NULL FROM mcp_oauth_tokens WHERE digest=$1"
+        )
+        .bind(digest.as_slice())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap()
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn refresh_rotation_then_oauth_revoke_serializes_without_live_descendants() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app().await;
+    let verifier = "a-valid-pkce-verifier-that-is-long-enough-to-satisfy-rfc7636";
+    let client_id = register(app.clone()).await;
+    let code = approve(
+        app.clone(),
+        &authorize(app.clone(), &client_id, verifier).await,
+        &fixture.owner_token,
+    )
+    .await;
+    let refresh = exchange(app.clone(), &client_id, &code, verifier).await["refresh_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let family: Uuid = sqlx::query_scalar("SELECT family_id FROM mcp_oauth_tokens WHERE digest=$1")
+        .bind(Sha256::digest(refresh.as_bytes()).as_slice())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query(&format!(
+        "CREATE FUNCTION mcp_block_refresh_rotation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.family_id = '{family}'::uuid THEN PERFORM pg_advisory_xact_lock(42720, 1); END IF; RETURN NEW; END $$"
+    ))
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    sqlx::query("CREATE TRIGGER mcp_block_refresh_rotation BEFORE INSERT ON mcp_oauth_tokens FOR EACH ROW EXECUTE FUNCTION mcp_block_refresh_rotation()")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let mut blocker = fixture.pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(42720, 1)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let rotation_client = client_id.clone();
+    let rotation_refresh = refresh.clone();
+    let rotation = tokio::spawn(async move {
+        refresh_request(app.clone(), &rotation_client, &rotation_refresh).await
+    });
+    for _ in 0..100 {
+        let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=42720 AND objid=1 AND NOT granted)")
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+        if waiting {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let revoke_app = fixture.app().await;
+    let revoke_client = client_id.clone();
+    let revoke_refresh = refresh.clone();
+    let revoke = tokio::spawn(async move {
+        request(
+            revoke_app,
+            Method::POST,
+            "/oauth/revoke",
+            Body::from(format!("token={revoke_refresh}&client_id={revoke_client}")),
+            &[("content-type", "application/x-www-form-urlencoded")],
+        )
+        .await
+    });
+    let family_lock: i64 = sqlx::query_scalar("SELECT hashtextextended($1, 0)")
+        .bind(family.to_string())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=(($1::bigint >> 32) & 4294967295)::oid AND objid=($1::bigint & 4294967295)::oid AND objsubid=1 AND NOT granted)")
+            .bind(family_lock)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+        if waiting {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    sqlx::query("SELECT pg_advisory_unlock(42720, 1)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    drop(blocker);
+    assert_eq!(rotation.await.unwrap().status(), StatusCode::OK);
+    assert_eq!(revoke.await.unwrap().status(), StatusCode::OK);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM mcp_oauth_tokens WHERE family_id=$1 AND revoked_at IS NULL",
+        )
+        .bind(family)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap(),
+        0
+    );
+    sqlx::query("DROP TRIGGER mcp_block_refresh_rotation ON mcp_oauth_tokens")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION mcp_block_refresh_rotation()")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn oauth_revoke_then_refresh_rotation_serializes_without_live_descendants() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app().await;
+    let verifier = "a-valid-pkce-verifier-that-is-long-enough-to-satisfy-rfc7636";
+    let client_id = register(app.clone()).await;
+    let code = approve(
+        app.clone(),
+        &authorize(app.clone(), &client_id, verifier).await,
+        &fixture.owner_token,
+    )
+    .await;
+    let refresh = exchange(app.clone(), &client_id, &code, verifier).await["refresh_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let family: Uuid = sqlx::query_scalar("SELECT family_id FROM mcp_oauth_tokens WHERE digest=$1")
+        .bind(Sha256::digest(refresh.as_bytes()).as_slice())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query(&format!(
+        "CREATE FUNCTION mcp_block_family_revoke() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.family_id = '{family}'::uuid THEN PERFORM pg_advisory_xact_lock(42721, 1); END IF; RETURN NEW; END $$"
+    ))
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    sqlx::query("CREATE TRIGGER mcp_block_family_revoke BEFORE UPDATE ON mcp_oauth_tokens FOR EACH ROW EXECUTE FUNCTION mcp_block_family_revoke()")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let mut blocker = fixture.pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(42721, 1)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let revoke_client = client_id.clone();
+    let revoke_refresh = refresh.clone();
+    let revoke = tokio::spawn(async move {
+        request(
+            app,
+            Method::POST,
+            "/oauth/revoke",
+            Body::from(format!("token={revoke_refresh}&client_id={revoke_client}")),
+            &[("content-type", "application/x-www-form-urlencoded")],
+        )
+        .await
+    });
+    for _ in 0..100 {
+        let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=42721 AND objid=1 AND NOT granted)")
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+        if waiting {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let refresh_client = client_id.clone();
+    let refresh_token = refresh.clone();
+    let refresh_app = fixture.app().await;
+    let rotation =
+        tokio::spawn(
+            async move { refresh_request(refresh_app, &refresh_client, &refresh_token).await },
+        );
+    let family_lock: i64 = sqlx::query_scalar("SELECT hashtextextended($1, 0)")
+        .bind(family.to_string())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=(($1::bigint >> 32) & 4294967295)::oid AND objid=($1::bigint & 4294967295)::oid AND objsubid=1 AND NOT granted)")
+            .bind(family_lock)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+        if waiting {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    sqlx::query("SELECT pg_advisory_unlock(42721, 1)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    drop(blocker);
+    assert_eq!(revoke.await.unwrap().status(), StatusCode::OK);
+    assert_eq!(rotation.await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM mcp_oauth_tokens WHERE family_id=$1 AND revoked_at IS NULL",
+        )
+        .bind(family)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap(),
+        0
+    );
+    sqlx::query("DROP TRIGGER mcp_block_family_revoke ON mcp_oauth_tokens")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION mcp_block_family_revoke()")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn sweep_retains_future_revoked_refreshes_and_used_ancestors_detect_reuse() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app().await;
+    let verifier = "a-valid-pkce-verifier-that-is-long-enough-to-satisfy-rfc7636";
+    let client_id = register(app.clone()).await;
+    let code = approve(
+        app.clone(),
+        &authorize(app.clone(), &client_id, verifier).await,
+        &fixture.owner_token,
+    )
+    .await;
+    let refresh0 = exchange(app.clone(), &client_id, &code, verifier).await["refresh_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let refresh1 =
+        json(refresh_request(app.clone(), &client_id, &refresh0).await).await["refresh_token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+    let (family, grant_id, device_id): (Uuid, Uuid, Uuid) =
+        sqlx::query_as("SELECT family_id,grant_id,device_id FROM mcp_oauth_tokens WHERE digest=$1")
+            .bind(Sha256::digest(refresh0.as_bytes()).as_slice())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE mcp_oauth_tokens SET expires_at=clock_timestamp()-interval '6 days' WHERE digest=$1")
+        .bind(Sha256::digest(refresh0.as_bytes()).as_slice())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let retained_digest = Sha256::digest(b"future-expiry-revoked-refresh");
+    sqlx::query("INSERT INTO mcp_oauth_tokens(digest,token_kind,family_id,vault_id,device_id,grant_id,client_id,resource,expires_at,revoked_at) VALUES($1,'refresh',$2,$3,$4,$5,$6,'http://localhost:3000/mcp',clock_timestamp()+interval '1 day',clock_timestamp())")
+        .bind(retained_digest.as_slice())
+        .bind(family)
+        .bind(fixture.vault)
+        .bind(device_id)
+        .bind(grant_id)
+        .bind(&client_id)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query("SELECT mcp_sweep_oauth()")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM mcp_oauth_tokens WHERE digest=$1)"
+        )
+        .bind(retained_digest.as_slice())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap()
+    );
+    let replay = refresh_request(app, &client_id, &refresh0).await;
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json(replay).await, json!({"error":"invalid_grant"}));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM mcp_oauth_tokens WHERE family_id=$1 AND revoked_at IS NULL",
+        )
+        .bind(family)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT token_kind FROM mcp_oauth_tokens WHERE digest=$1")
+            .bind(Sha256::digest(refresh1.as_bytes()).as_slice())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap(),
+        "refresh"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn management_grant_and_device_revocations_prevent_code_and_refresh_issuance() {
+    for revoke_device in [false, true] {
+        let fixture = Fixture::new().await;
+        let app = fixture.app().await;
+        let verifier = "a-valid-pkce-verifier-that-is-long-enough-to-satisfy-rfc7636";
+        let client_id = register(app.clone()).await;
+        let code_for_exchange = approve(
+            app.clone(),
+            &authorize(app.clone(), &client_id, verifier).await,
+            &fixture.owner_token,
+        )
+        .await;
+        let refresh =
+            exchange(app.clone(), &client_id, &code_for_exchange, verifier).await["refresh_token"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        let code = approve(
+            app.clone(),
+            &authorize(app.clone(), &client_id, verifier).await,
+            &fixture.owner_token,
+        )
+        .await;
+        let grant_id: Uuid =
+            sqlx::query_scalar("SELECT grant_id FROM mcp_oauth_codes WHERE digest=$1")
+                .bind(Sha256::digest(code.as_bytes()).as_slice())
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        let refresh_grant_id: Uuid =
+            sqlx::query_scalar("SELECT grant_id FROM mcp_oauth_tokens WHERE digest=$1")
+                .bind(Sha256::digest(refresh.as_bytes()).as_slice())
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        let revoke_paths = if revoke_device {
+            vec![format!("/v1/devices/{}/revoke", fixture.mcp_device)]
+        } else {
+            vec![
+                format!("/v1/mcp/grants/{grant_id}/revoke"),
+                format!("/v1/mcp/grants/{refresh_grant_id}/revoke"),
+            ]
+        };
+        for revoke_path in revoke_paths {
+            let revoke = request(
+                app.clone(),
+                Method::POST,
+                &revoke_path,
+                Body::empty(),
+                &[("authorization", &format!("Bearer {}", fixture.owner_token))],
+            )
+            .await;
+            assert_eq!(revoke.status(), StatusCode::NO_CONTENT);
+        }
+        let token_count: i64 = sqlx::query_scalar("SELECT count(*) FROM mcp_oauth_tokens")
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+        let code_response = request(
+            app.clone(),
+            Method::POST,
+            "/oauth/token",
+            Body::from(format!(
+                "grant_type=authorization_code&client_id={client_id}&code={code}&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&resource=http%3A%2F%2Flocalhost%3A3000%2Fmcp&code_verifier={verifier}"
+            )),
+            &[("content-type", "application/x-www-form-urlencoded")],
+        )
+        .await;
+        assert_eq!(code_response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json(code_response).await, json!({"error":"invalid_grant"}));
+        let refresh_response = refresh_request(app, &client_id, &refresh).await;
+        assert_eq!(refresh_response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json(refresh_response).await,
+            json!({"error":"invalid_grant"})
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM mcp_oauth_tokens")
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap(),
+            token_count
+        );
+        fixture.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn sweep_reclaims_clients_behind_more_than_one_batch_of_protected_history() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app().await;
+    let verifier = "a-valid-pkce-verifier-that-is-long-enough-to-satisfy-rfc7636";
+    let client_id = register(app.clone()).await;
+    let code = approve(
+        app.clone(),
+        &authorize(app.clone(), &client_id, verifier).await,
+        &fixture.owner_token,
+    )
+    .await;
+    let refresh = exchange(app.clone(), &client_id, &code, verifier).await["refresh_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (grant_id, device_id): (Uuid, Uuid) =
+        sqlx::query_as("SELECT grant_id,device_id FROM mcp_oauth_tokens WHERE digest=$1")
+            .bind(Sha256::digest(refresh.as_bytes()).as_slice())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    sqlx::query("INSERT INTO mcp_oauth_clients(client_id,client_name,redirect_uris,allowed_scopes,created_at) SELECT 'protected-client-' || value,'protected',ARRAY['https://client.example/callback'],ARRAY['conversations:read'],clock_timestamp()-interval '26 hours' FROM generate_series(1,512) value")
+        .execute(&fixture.pool).await.unwrap();
+    sqlx::query("INSERT INTO mcp_oauth_tokens(digest,token_kind,family_id,vault_id,device_id,grant_id,client_id,resource,expires_at) SELECT decode(lpad(to_hex(value + 4096),64,'0'),'hex'),'refresh',$1,$2,$3,$4,'protected-client-' || value,'http://localhost:3000/mcp',clock_timestamp()+interval '1 day' FROM generate_series(1,512) value")
+        .bind(Uuid::new_v4()).bind(fixture.vault).bind(device_id).bind(grant_id).execute(&fixture.pool).await.unwrap();
+    sqlx::query("INSERT INTO mcp_oauth_clients(client_id,client_name,redirect_uris,allowed_scopes,created_at) SELECT 'reclaimable-client-' || value,'reclaimable',ARRAY['https://client.example/callback'],ARRAY['conversations:read'],clock_timestamp()-interval '25 hours' FROM generate_series(1,512) value")
+        .execute(&fixture.pool).await.unwrap();
+    sqlx::query("SELECT mcp_sweep_oauth()")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM mcp_oauth_clients WHERE client_id LIKE 'protected-client-%'"
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap(),
+        512
+    );
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM mcp_oauth_tokens WHERE client_id LIKE 'protected-client-%' AND expires_at > clock_timestamp()").fetch_one(&fixture.pool).await.unwrap(), 512);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM mcp_oauth_clients WHERE client_id LIKE 'reclaimable-client-%'"
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert!(!register(app).await.is_empty());
     fixture.cleanup().await;
 }
