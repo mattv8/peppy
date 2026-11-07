@@ -24,6 +24,8 @@ import type {
   AppFilter,
   NotificationPreferences,
   NotificationCheck,
+  NotificationPersistence,
+  NotificationPersistenceSettings,
   NotificationPermissionStatus,
   ContactBookState,
   BookCapabilities,
@@ -98,6 +100,8 @@ export {
   type AppFilter,
   type NotificationPreferences,
   type NotificationCheck,
+  type NotificationPersistence,
+  type NotificationPersistenceSettings,
   type NotificationPermissionStatus,
   type ContactBookState,
   type BookCapabilities,
@@ -311,6 +315,7 @@ const fixtureSave = (input: DraftInput): Draft => {
   return saved;
 };
 let fixtureNotificationSound = false;
+let fixtureNotificationPersistence: NotificationPersistence = { seconds: 5 };
 export const fixtureBridge: DesktopBridge = {
   load_state: async (conversationId, historyFromMessageId, options) => {
     const active = conversationId && fixtureConversationIds().includes(conversationId) ? conversationId : fixtureSnapshot.activeConversationId!;
@@ -427,6 +432,8 @@ export const fixtureBridge: DesktopBridge = {
   open_login_items: async () => undefined,
   get_notification_sound: async () => fixtureNotificationSound,
   set_notification_sound: async enabled => { fixtureNotificationSound = enabled; },
+  get_notification_persistence: async () => ({ ...fixtureNotificationPersistence, supported: true }),
+  set_notification_persistence: async value => { fixtureNotificationPersistence = value; },
   popout_conversation: async conversationId => {
     if (!fixtureConversationIds().includes(conversationId)) throw fixtureError("not-found", "The requested conversation was not found.");
     fixtureSnapshot.head = { ...fixtureSnapshot.head, enabled: true, capability: "unconfirmed", pinnedConversationIds: [...new Set([...(fixtureSnapshot.head.pinnedConversationIds ?? []), conversationId])] };
@@ -583,6 +590,7 @@ export const renewHostedSession = () => "__TAURI_INTERNALS__" in window
   : Promise.resolve();
 export const tauriBridge: DesktopBridge = {
   get_notification_sound: () => invoke("get_notification_sound"),
+  get_notification_persistence: () => invoke("get_notification_persistence"),
   startup_status: () => invoke("startup_status"),
   set_open_in_background: enabled => invoke("set_open_in_background", { enabled }),
   open_login_items: () => invoke("open_login_items"),
@@ -593,6 +601,7 @@ export const tauriBridge: DesktopBridge = {
   store_restore: () => invoke("store_restore"),
   open_store_subscriptions: () => invoke("open_store_subscriptions"),
   set_notification_sound: enabled => invoke("set_notification_sound", { enabled }),
+  set_notification_persistence: value => invoke("set_notification_persistence", { value }),
   media_sync_request: attachmentIds => invoke("media_sync_request", { attachmentIds }),
   open_media_viewer: (conversationId, attachmentId, messageId) => invoke("open_media_viewer", { conversationId, attachmentId, messageId }),
   media_page_around: (conversationId, attachmentId, messageId, limit) => invoke("media_page_around", { conversationId, attachmentId, messageId, limit }),

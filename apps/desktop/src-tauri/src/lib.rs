@@ -51,7 +51,9 @@ mod material_state;
 mod media;
 mod net;
 mod notification_activation;
+mod notification_icon;
 mod notification_permission;
+mod notification_persistence;
 mod notifications;
 mod origin;
 mod purchases;
@@ -4917,6 +4919,38 @@ fn get_notification_sound(
     Ok(state.notifications.sound_enabled())
 }
 
+#[derive(serde::Serialize)]
+struct NotificationPersistenceSettings {
+    seconds: Option<u16>,
+    supported: bool,
+}
+
+#[tauri::command]
+fn get_notification_persistence(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> BridgeResult<NotificationPersistenceSettings> {
+    let _operation = admit_update_operation(&state)?;
+    require_main(window.label())?;
+    let persistence = state.notifications.persistence();
+    Ok(NotificationPersistenceSettings {
+        seconds: persistence.seconds,
+        supported: notification_persistence::supported(),
+    })
+}
+
+#[tauri::command]
+async fn set_notification_persistence(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    value: notification_persistence::NotificationPersistence,
+) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
+    require_main(window.label())?;
+    let settings = state.notifications.clone();
+    blocking(move || settings.set_persistence(value)).await
+}
+
 #[tauri::command]
 async fn set_notification_sound(
     window: tauri::WebviewWindow,
@@ -5530,6 +5564,7 @@ pub fn run() {
                 std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
                     .map_err(|_| "could not protect native app data")?;
             }
+            notification_icon::recover_at_startup(app.handle());
             let handle = app.handle().clone();
             // State hints only; no payload, no focus or window changes.
             let notifier: Notifier = Arc::new(move || {
@@ -5967,6 +6002,8 @@ pub fn run() {
         set_notification_context,
         request_notification_permission,
         open_notification_settings,
+        get_notification_persistence,
+        set_notification_persistence,
         list_devices,
         revoke_device,
         list_contact_books,

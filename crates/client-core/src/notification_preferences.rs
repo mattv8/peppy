@@ -26,6 +26,13 @@ pub(super) fn preview_from_code(code: &str) -> Result<NotificationPreview, Error
     }
 }
 
+fn normalize(mut preferences: NotificationPreferences) -> NotificationPreferences {
+    if preferences.preview == NotificationPreview::Full {
+        preferences.show_source = false;
+    }
+    preferences
+}
+
 pub(super) fn apply(
     conn: &Connection,
     preferences: &NotificationPreferences,
@@ -42,20 +49,25 @@ pub(super) fn apply(
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(0);
     set_meta(conn, CLOCK, &clock.max(revision).to_string())?;
-    conn.execute("INSERT INTO notification_preferences(id,message_banners,mirrored_banners,preview,mute_with_heads,logical_revision,writer_device_id,producer_device_id,source_sequence) VALUES(1,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET message_banners=excluded.message_banners,mirrored_banners=excluded.mirrored_banners,preview=excluded.preview,mute_with_heads=excluded.mute_with_heads,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,producer_device_id=excluded.producer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>notification_preferences.logical_revision OR (excluded.logical_revision=notification_preferences.logical_revision AND excluded.writer_device_id>notification_preferences.writer_device_id)", params![preferences.message_banners, preferences.mirrored_banners, preview_code(preferences.preview), preferences.mute_with_heads, revision, writer, producer, sequence])?;
+    conn.execute("INSERT INTO notification_preferences(id,message_banners,mirrored_banners,preview,mute_with_heads,show_source,logical_revision,writer_device_id,producer_device_id,source_sequence) VALUES(1,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET message_banners=excluded.message_banners,mirrored_banners=excluded.mirrored_banners,preview=excluded.preview,mute_with_heads=excluded.mute_with_heads,show_source=excluded.show_source,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,producer_device_id=excluded.producer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>notification_preferences.logical_revision OR (excluded.logical_revision=notification_preferences.logical_revision AND excluded.writer_device_id>notification_preferences.writer_device_id)", params![preferences.message_banners, preferences.mirrored_banners, preview_code(preferences.preview), preferences.mute_with_heads, preferences.show_source, revision, writer, producer, sequence])?;
     Ok(())
 }
 
 fn read(conn: &Connection) -> Result<Option<(NotificationPreferences, u64)>, Error> {
-    let row: Option<(bool, bool, String, bool, i64)> = conn.query_row("SELECT message_banners,mirrored_banners,preview,mute_with_heads,logical_revision FROM notification_preferences WHERE id=1", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).optional()?;
+    let row: Option<(bool, bool, String, bool, bool, i64)> = conn.query_row("SELECT message_banners,mirrored_banners,preview,mute_with_heads,show_source,logical_revision FROM notification_preferences WHERE id=1", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))).optional()?;
     row.map(
-        |(message_banners, mirrored_banners, preview, mute_with_heads, revision)| {
+        |(message_banners, mirrored_banners, preview, mute_with_heads, show_source, revision)| {
             Ok((
                 NotificationPreferences {
                     message_banners,
                     mirrored_banners,
                     preview: preview_from_code(&preview)?,
                     mute_with_heads,
+                    show_source: if preview == "full" {
+                        false
+                    } else {
+                        show_source
+                    },
                 },
                 revision.max(0) as u64,
             ))
@@ -102,6 +114,7 @@ impl Client {
         &self,
         preferences: NotificationPreferences,
     ) -> Result<(), Error> {
+        let preferences = normalize(preferences);
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
         if ctx
@@ -135,6 +148,7 @@ impl Client {
         &self,
         preferences: NotificationPreferences,
     ) -> Result<bool, Error> {
+        let preferences = normalize(preferences);
         if preferences == NotificationPreferences::default() {
             return Ok(false);
         }
@@ -248,6 +262,7 @@ mod tests {
         }
         let preferences = NotificationPreferences {
             preview: NotificationPreview::Hidden,
+            show_source: true,
             ..Default::default()
         };
         source
@@ -394,6 +409,7 @@ mod tests {
         }
         let preferences = NotificationPreferences {
             preview: NotificationPreview::Hidden,
+            show_source: true,
             ..Default::default()
         };
         source
@@ -419,6 +435,19 @@ mod tests {
         recovered
             .unlock(&profile, &header, "correct horse battery staple")
             .unwrap();
+        assert_eq!(
+            recovered.notification_preferences().unwrap(),
+            Some(preferences.clone()),
+            "decoder recovery restores source-only before interrupted projection promotion",
+        );
+        assert_eq!(
+            recovered
+                .snapshot_projection_status()
+                .unwrap()
+                .unwrap()
+                .state,
+            SnapshotProjectionState::Staging,
+        );
         recovered.apply_pending(10).unwrap();
         assert_eq!(
             recovered.notification_preferences().unwrap(),

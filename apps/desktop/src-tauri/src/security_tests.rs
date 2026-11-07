@@ -535,6 +535,8 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "open_login_items",
         "get_notification_sound",
         "set_notification_sound",
+        "get_notification_persistence",
+        "set_notification_persistence",
         "popout_conversation",
         "hide_head",
         "mark_all_read",
@@ -616,6 +618,25 @@ fn runtime_window_checks_back_the_acl() {
         crate::require_main("composer-any").unwrap_err().code,
         "window-context"
     );
+}
+
+#[test]
+fn notification_persistence_commands_require_the_main_window_at_runtime() {
+    let registered = include_str!("lib.rs");
+    for command in [
+        "get_notification_persistence",
+        "set_notification_persistence",
+    ] {
+        let definition = registered
+            .split(&format!("fn {command}("))
+            .nth(1)
+            .unwrap()
+            .split("\n}")
+            .next()
+            .unwrap();
+        assert!(definition.contains("window: tauri::WebviewWindow"));
+        assert!(definition.contains("require_main(window.label())?;"));
+    }
 }
 
 #[test]
