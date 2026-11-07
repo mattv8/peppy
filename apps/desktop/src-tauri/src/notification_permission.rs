@@ -46,8 +46,8 @@ pub enum WinSetting {
 const MAC_SETTINGS: &str = "x-apple.systempreferences:com.apple.Notifications-Settings.extension";
 #[cfg(windows)]
 const WINDOWS_SETTINGS: &str = "ms-settings:notifications";
-const TEST_TITLE: &str = "Peppy";
-const TEST_BODY: &str = "Test notification: desktop banners are working.";
+const TEST_TITLE: &str = "New notification";
+const TEST_BODY: &str = "";
 
 #[cfg(any(target_os = "macos", test))]
 pub fn map_macos(auth: MacAuth, alerts_off: bool) -> PermissionStatus {
@@ -294,6 +294,12 @@ mod tests {
             assert!(send_test(status, || Ok(())));
             assert!(!send_test(status, || Err(())));
         }
+    }
+
+    #[test]
+    fn notification_permission_test_banner_is_generic_and_content_free() {
+        assert_eq!(TEST_TITLE, "New notification");
+        assert!(TEST_BODY.is_empty());
     }
 
     #[test]

@@ -83,6 +83,8 @@
     "allow-open-login-items",
     "allow-get-notification-sound",
     "allow-set-notification-sound",
+    "allow-get-notification-persistence",
+    "allow-set-notification-persistence",
     "allow-hide-head",
     "allow-set-maximize-button-region",
     "allow-popout-conversation",

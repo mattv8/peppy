@@ -50,6 +50,7 @@ pub struct NotificationSettings {
     drain_lock: Mutex<()>,
     banner_drain: Mutex<BannerDrainState>,
     sound: Mutex<bool>,
+    persistence: Mutex<crate::notification_persistence::NotificationPersistence>,
 }
 
 #[derive(Default)]
@@ -91,6 +92,31 @@ impl NotificationSettings {
         Ok(())
     }
 
+    pub fn persistence(&self) -> crate::notification_persistence::NotificationPersistence {
+        *self
+            .persistence
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    pub fn set_persistence(
+        &self,
+        value: crate::notification_persistence::NotificationPersistence,
+    ) -> BridgeResult<()> {
+        let mut persistence = self
+            .persistence
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        crate::notification_persistence::save(&self.root, value).map_err(|_| {
+            BridgeError::new(
+                "notification-persistence",
+                "Could not save notification persistence settings.",
+            )
+        })?;
+        *persistence = value;
+        Ok(())
+    }
+
     pub fn load(root: &Path) -> Self {
         let path = root.join(PREFERENCES_FILE);
         Self {
@@ -106,6 +132,7 @@ impl NotificationSettings {
                     .and_then(|bytes| serde_json::from_slice::<bool>(&bytes).ok())
                     .unwrap_or(false),
             ),
+            persistence: Mutex::new(crate::notification_persistence::load(root)),
         }
     }
 
@@ -379,11 +406,44 @@ fn banner_text(
 ) -> (String, String) {
     match preferences.preview {
         Preview::Full => (candidate.title.clone(), candidate.body.clone()),
-        Preview::Hidden => match candidate.kind.as_str() {
-            "message" => ("New message".into(), "Open Peppy to view it.".into()),
-            _ => ("New notification".into(), "Open Peppy to view it.".into()),
-        },
+        Preview::Hidden if preferences.show_source => (
+            source_or_generic_title(&candidate.kind, candidate.source_name.as_deref()),
+            String::new(),
+        ),
+        Preview::Hidden => (
+            source_or_generic_title(&candidate.kind, None),
+            String::new(),
+        ),
     }
+}
+
+fn source_or_generic_title(kind: &str, source_name: Option<&str>) -> String {
+    if let Some(source_name) = source_name.filter(|name| !name.trim().is_empty()) {
+        return source_name.to_owned();
+    }
+    if kind == "message" {
+        "New message".into()
+    } else {
+        "New notification".into()
+    }
+}
+
+fn summary_text() -> (String, String) {
+    ("New activity".into(), String::new())
+}
+
+fn effective_delivery_policy(
+    session: &Session,
+    settings: &NotificationSettings,
+    app_locked: &impl Fn() -> bool,
+) -> BridgeResult<(NotificationPreferences, bool)> {
+    let mut preferences = session.delivery_notification_preferences(settings)?;
+    let locked = app_locked();
+    if locked {
+        preferences.preview = Preview::Hidden;
+        preferences.show_source = false;
+    }
+    Ok((preferences, locked))
 }
 
 /// Drains only durable live candidates produced by core. A candidate is acknowledged after an OS
@@ -408,8 +468,8 @@ pub fn drain_banner_candidates(
                     crate::heads_runtime::has_head(app, id)
                 })
         },
-        |destination, title, body| {
-            crate::notification_activation::post(app, session, destination, title, body)
+        |destination, title, body, icon| {
+            crate::notification_activation::post(app, session, destination, title, body, icon)
         },
     )
 }
@@ -423,16 +483,13 @@ pub(crate) fn drain_with_delivery(
         peppy_desktop_api::NotificationActivationDestination,
         String,
         String,
+        Option<crate::notification_icon::Icon>,
     ) -> Result<(), crate::notification_activation::PostError>,
 ) -> BridgeResult<bool> {
     let _drain = settings
         .drain_lock
         .lock()
         .unwrap_or_else(|p| p.into_inner());
-    let mut preferences = session.delivery_notification_preferences(settings)?;
-    if app_locked() {
-        preferences.preview = Preview::Hidden;
-    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
@@ -447,24 +504,58 @@ pub(crate) fn drain_with_delivery(
             break;
         }
         let mut acknowledge = Vec::with_capacity(candidates.len());
-        let mut summary_count = 0usize;
-        let mut summary_ids = Vec::new();
+        let mut summary = Vec::new();
         let mut recent = Vec::new();
         for candidate in candidates {
-            if !allowed(&preferences, &candidate) || suppress(&candidate, &preferences) {
-                acknowledge.push(candidate.id);
-            } else if now.saturating_sub(candidate.created_at) > STALE_CANDIDATE_MS {
-                summary_count += 1;
-                summary_ids.push(candidate.id);
+            if now.saturating_sub(candidate.created_at) > STALE_CANDIDATE_MS {
+                summary.push(candidate);
             } else {
                 recent.push(candidate);
             }
         }
-        if recent.len() > BANNER_BURST_SUMMARY_THRESHOLD {
-            summary_count += recent.len();
-            summary_ids.extend(recent.into_iter().map(|candidate| candidate.id));
-        } else {
+        let mut eligible_recent = Vec::with_capacity(recent.len());
+        if !recent.is_empty() {
+            let (preferences, _) = match effective_delivery_policy(session, settings, &app_locked) {
+                Ok(policy) => policy,
+                Err(error) => {
+                    if !acknowledge.is_empty() {
+                        session
+                            .client
+                            .ack_banner_candidates(acknowledge)
+                            .map_err(crate::error::core_error)?;
+                    }
+                    return Err(error);
+                }
+            };
             for candidate in recent {
+                if allowed(&preferences, &candidate) && !suppress(&candidate, &preferences) {
+                    eligible_recent.push(candidate);
+                } else {
+                    acknowledge.push(candidate.id);
+                }
+            }
+        }
+        if eligible_recent.len() > BANNER_BURST_SUMMARY_THRESHOLD {
+            summary.extend(eligible_recent);
+        } else {
+            for candidate in eligible_recent {
+                let (preferences, locked) =
+                    match effective_delivery_policy(session, settings, &app_locked) {
+                        Ok(policy) => policy,
+                        Err(error) => {
+                            if !acknowledge.is_empty() {
+                                session
+                                    .client
+                                    .ack_banner_candidates(acknowledge)
+                                    .map_err(crate::error::core_error)?;
+                            }
+                            return Err(error);
+                        }
+                    };
+                if !allowed(&preferences, &candidate) || suppress(&candidate, &preferences) {
+                    acknowledge.push(candidate.id);
+                    continue;
+                }
                 let (mut title, body) = banner_text(&preferences, &candidate);
                 // Full previews only: a phone-number title may show the contact's name. Hidden
                 // previews stay generic and never resolve names.
@@ -479,6 +570,7 @@ pub(crate) fn drain_with_delivery(
                     crate::notification_activation::destination(&candidate),
                     title,
                     body,
+                    crate::notification_icon::for_candidate(&preferences, &candidate, locked),
                 ) {
                     Ok(()) | Err(crate::notification_activation::PostError::NotAllowed) => {
                         acknowledge.push(candidate.id);
@@ -515,43 +607,67 @@ pub(crate) fn drain_with_delivery(
                 }
             }
         }
-        if summary_count > 0 && (preferences.message_banners || preferences.mirrored_banners) {
-            match post(
-                peppy_desktop_api::NotificationActivationDestination::Main,
-                "Peppy".into(),
-                format!("{summary_count} new items arrived while Peppy was away."),
-            ) {
-                Ok(()) | Err(crate::notification_activation::PostError::NotAllowed) => {}
-                Err(crate::notification_activation::PostError::AwaitingAuthorization) => {
+        if !summary.is_empty() {
+            let (preferences, _) = match effective_delivery_policy(session, settings, &app_locked) {
+                Ok(policy) => policy,
+                Err(error) => {
                     if !acknowledge.is_empty() {
                         session
                             .client
                             .ack_banner_candidates(acknowledge)
                             .map_err(crate::error::core_error)?;
                     }
-                    session.set_status(|status| {
-                        if status.work_error == Some("notification-post") {
-                            status.work_error = None;
-                        }
-                    });
-                    return Ok(false);
+                    return Err(error);
                 }
-                Err(crate::notification_activation::PostError::Failed) => {
-                    if !acknowledge.is_empty() {
-                        session
-                            .client
-                            .ack_banner_candidates(acknowledge)
-                            .map_err(crate::error::core_error)?;
-                    }
-                    session.set_status(|status| status.work_error = Some("notification-post"));
-                    return Err(BridgeError::new(
-                        "notification-post",
-                        "Could not post a native notification.",
-                    ));
+            };
+            let mut summary_ids = Vec::new();
+            for candidate in summary {
+                if allowed(&preferences, &candidate) && !suppress(&candidate, &preferences) {
+                    summary_ids.push(candidate.id);
+                } else {
+                    acknowledge.push(candidate.id);
                 }
             }
+            if !summary_ids.is_empty() {
+                let (title, body) = summary_text();
+                match post(
+                    peppy_desktop_api::NotificationActivationDestination::Main,
+                    title,
+                    body,
+                    None,
+                ) {
+                    Ok(()) | Err(crate::notification_activation::PostError::NotAllowed) => {}
+                    Err(crate::notification_activation::PostError::AwaitingAuthorization) => {
+                        if !acknowledge.is_empty() {
+                            session
+                                .client
+                                .ack_banner_candidates(acknowledge)
+                                .map_err(crate::error::core_error)?;
+                        }
+                        session.set_status(|status| {
+                            if status.work_error == Some("notification-post") {
+                                status.work_error = None;
+                            }
+                        });
+                        return Ok(false);
+                    }
+                    Err(crate::notification_activation::PostError::Failed) => {
+                        if !acknowledge.is_empty() {
+                            session
+                                .client
+                                .ack_banner_candidates(acknowledge)
+                                .map_err(crate::error::core_error)?;
+                        }
+                        session.set_status(|status| status.work_error = Some("notification-post"));
+                        return Err(BridgeError::new(
+                            "notification-post",
+                            "Could not post a native notification.",
+                        ));
+                    }
+                }
+                acknowledge.extend(summary_ids);
+            }
         }
-        acknowledge.extend(summary_ids);
         session
             .client
             .ack_banner_candidates(acknowledge)
@@ -579,6 +695,263 @@ pub(crate) fn drain_with_delivery(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    fn app_icon() -> String {
+        use image::{DynamicImage, ImageFormat, RgbaImage};
+        use std::io::Cursor;
+
+        let mut bytes = Vec::new();
+        DynamicImage::ImageRgba8(RgbaImage::new(32, 32))
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+            .unwrap();
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+    }
+
+    fn recent_mirrored_candidates(
+        count: usize,
+    ) -> (crate::tests::Fixture, Session, NotificationSettings) {
+        use peppy_client_core::{
+            Client, ClientConfig, Cursor, DatabaseKey, DeviceId, NotificationCapture,
+        };
+
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = crate::tests::open(&fixture, &fixture.binding, &[]);
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, crate::tests::PHRASE)
+            .unwrap();
+        session
+            .client
+            .set_server_compaction_state(true, true)
+            .unwrap();
+        let phone = Client::open(
+            ClientConfig {
+                database_path: fixture.dir.path().join("phone.db"),
+                vault_id: fixture.binding.vault_id.parse().unwrap(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[7; 32]).unwrap(),
+        )
+        .unwrap();
+        phone
+            .unlock(&fixture.profile, &fixture.header, crate::tests::PHRASE)
+            .unwrap();
+        phone.set_server_compaction_state(true, true).unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        for id in 0..count {
+            phone
+                .capture_notification(NotificationCapture {
+                    notification_key: format!("notification-{id}"),
+                    instance: format!("instance-{id}"),
+                    package_name: "com.example.calendar".into(),
+                    app_name: "Calendar".into(),
+                    app_icon_png_base64: Some(app_icon()),
+                    title: "private title".into(),
+                    text: "private body".into(),
+                    category: None,
+                    posted_at: now + id as i64,
+                    dismissible: true,
+                })
+                .unwrap();
+        }
+        for (index, envelope) in phone.pending_outbox().unwrap().iter().enumerate() {
+            session
+                .client
+                .ingest(envelope, Cursor(index as u64 + 1))
+                .unwrap();
+        }
+        session.client.apply_pending(100).unwrap();
+        assert_eq!(
+            session.client.pending_banner_candidates(100).unwrap().len(),
+            count
+        );
+        let settings = NotificationSettings::load(fixture.dir.path());
+        (fixture, session, settings)
+    }
+
+    #[test]
+    fn drain_rechecks_hidden_preview_after_an_accepted_first_post() {
+        let (_fixture, session, settings) = recent_mirrored_candidates(2);
+        let posts = RefCell::new(Vec::new());
+
+        assert!(!drain_with_delivery(
+            &session,
+            &settings,
+            || false,
+            |_, _| false,
+            |_, title, body, icon| {
+                let mut posts = posts.borrow_mut();
+                posts.push((
+                    title,
+                    body,
+                    match icon {
+                        Some(crate::notification_icon::Icon::App(_)) => "app",
+                        None => "none",
+                        Some(crate::notification_icon::Icon::Message) => "message",
+                    },
+                ));
+                if posts.len() == 1 {
+                    session
+                        .client
+                        .set_notification_preferences(NotificationPreferences {
+                            preview: Preview::Hidden,
+                            ..NotificationPreferences::default()
+                        })
+                        .unwrap();
+                }
+                Ok(())
+            },
+        )
+        .unwrap());
+
+        assert_eq!(
+            posts.into_inner(),
+            vec![
+                ("private title".into(), "private body".into(), "app"),
+                ("New notification".into(), String::new(), "none"),
+            ]
+        );
+    }
+
+    #[test]
+    fn drain_rechecks_source_only_preview_after_an_accepted_first_post() {
+        let (_fixture, session, settings) = recent_mirrored_candidates(2);
+        let posts = RefCell::new(Vec::new());
+
+        drain_with_delivery(
+            &session,
+            &settings,
+            || false,
+            |_, _| false,
+            |_, title, body, icon| {
+                let mut posts = posts.borrow_mut();
+                posts.push((
+                    title,
+                    body,
+                    matches!(icon, Some(crate::notification_icon::Icon::App(_))),
+                ));
+                if posts.len() == 1 {
+                    session
+                        .client
+                        .set_notification_preferences(NotificationPreferences {
+                            preview: Preview::Hidden,
+                            show_source: true,
+                            ..NotificationPreferences::default()
+                        })
+                        .unwrap();
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            posts.into_inner(),
+            vec![
+                ("private title".into(), "private body".into(), true),
+                ("Calendar".into(), String::new(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn drain_rechecks_app_lock_after_an_accepted_first_post() {
+        let (_fixture, session, settings) = recent_mirrored_candidates(2);
+        let locked = std::cell::Cell::new(false);
+        let posts = RefCell::new(Vec::new());
+
+        drain_with_delivery(
+            &session,
+            &settings,
+            || locked.get(),
+            |_, _| false,
+            |_, title, body, icon| {
+                let mut posts = posts.borrow_mut();
+                posts.push((
+                    title,
+                    body,
+                    matches!(icon, Some(crate::notification_icon::Icon::App(_))),
+                ));
+                if posts.len() == 1 {
+                    locked.set(true);
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            posts.into_inner(),
+            vec![
+                ("private title".into(), "private body".into(), true),
+                ("New notification".into(), String::new(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn drain_rechecks_suppression_after_an_accepted_first_post() {
+        let (_fixture, session, settings) = recent_mirrored_candidates(2);
+        let suppress_remaining = std::cell::Cell::new(false);
+        let posts = std::cell::Cell::new(0);
+
+        drain_with_delivery(
+            &session,
+            &settings,
+            || false,
+            |_, _| suppress_remaining.get(),
+            |_, _, _, _| {
+                posts.set(posts.get() + 1);
+                suppress_remaining.set(true);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(posts.get(), 1);
+        assert!(session
+            .client
+            .pending_banner_candidates(100)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn mixed_eligibility_burst_posts_the_remaining_candidate_without_a_summary() {
+        let (_fixture, session, settings) = recent_mirrored_candidates(4);
+        let posts = RefCell::new(Vec::new());
+
+        drain_with_delivery(
+            &session,
+            &settings,
+            || false,
+            |candidate, _| {
+                candidate
+                    .notification_target
+                    .as_ref()
+                    .is_none_or(|target| target.notification_key != "notification-3")
+            },
+            |destination, title, body, _| {
+                posts.borrow_mut().push((destination, title, body));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let posts = posts.into_inner();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].1, "private title");
+        assert_eq!(posts[0].2, "private body");
+        assert!(matches!(
+            &posts[0].0,
+            peppy_desktop_api::NotificationActivationDestination::Mirrored { target }
+                if target.notification_key == "notification-3"
+        ));
+    }
 
     #[test]
     fn notification_sound_is_opt_in_and_survives_reopening() {
@@ -601,6 +974,30 @@ mod tests {
         fs::create_dir(dir.path().join("notification-sound.json")).unwrap();
         assert!(settings.set_sound_enabled(false).is_err());
         assert!(settings.sound_enabled());
+    }
+
+    #[test]
+    fn notification_persistence_defaults_round_trips_and_failed_save_keeps_last_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = NotificationSettings::load(dir.path());
+        assert_eq!(
+            settings.persistence(),
+            crate::notification_persistence::NotificationPersistence::default_value()
+        );
+        let indefinite = crate::notification_persistence::NotificationPersistence { seconds: None };
+        settings.set_persistence(indefinite).unwrap();
+        assert_eq!(
+            NotificationSettings::load(dir.path()).persistence(),
+            indefinite
+        );
+        fs::remove_file(dir.path().join(crate::notification_persistence::FILE)).unwrap();
+        fs::create_dir(dir.path().join(crate::notification_persistence::FILE)).unwrap();
+        assert!(settings
+            .set_persistence(crate::notification_persistence::NotificationPersistence {
+                seconds: Some(30)
+            })
+            .is_err());
+        assert_eq!(settings.persistence(), indefinite);
     }
 
     fn binding(vault_id: &str) -> Binding {
@@ -725,6 +1122,8 @@ mod tests {
             title: "private title".into(),
             body: "private body".into(),
             created_at: 0,
+            source_name: Some("private source".into()),
+            app_icon_png_base64: None,
         };
         let rendered = banner_text(
             &NotificationPreferences {
@@ -733,9 +1132,52 @@ mod tests {
             },
             &candidate,
         );
+        assert_eq!(rendered.0, "New notification");
+        assert!(rendered.1.is_empty());
         assert!(!rendered.0.contains("private"));
         assert!(!rendered.1.contains("private"));
         assert!(allowed(&NotificationPreferences::default(), &candidate));
+    }
+
+    #[test]
+    fn source_only_preview_uses_structured_source_or_a_kind_specific_generic_title() {
+        assert_eq!(source_or_generic_title("message", Some("Ava")), "Ava");
+        assert_eq!(source_or_generic_title("message", Some("")), "New message");
+        assert_eq!(
+            source_or_generic_title("notification", None),
+            "New notification"
+        );
+    }
+
+    #[test]
+    fn source_only_preview_never_uses_candidate_title_or_body() {
+        let candidate = BannerCandidate {
+            id: "candidate".into(),
+            kind: "notification".into(),
+            conversation_id: None,
+            notification_target: None,
+            title: "private title".into(),
+            body: "private body".into(),
+            created_at: 0,
+            source_name: Some("Calendar".into()),
+            app_icon_png_base64: None,
+        };
+        assert_eq!(
+            banner_text(
+                &NotificationPreferences {
+                    preview: Preview::Hidden,
+                    show_source: true,
+                    ..NotificationPreferences::default()
+                },
+                &candidate,
+            ),
+            ("Calendar".into(), String::new())
+        );
+    }
+
+    #[test]
+    fn summary_banner_is_generic_and_content_free() {
+        assert_eq!(summary_text(), ("New activity".into(), String::new()));
     }
 
     #[test]
@@ -748,6 +1190,8 @@ mod tests {
             title: String::new(),
             body: String::new(),
             created_at: 0,
+            source_name: None,
+            app_icon_png_base64: None,
         };
         let mirrored = BannerCandidate {
             id: "mirror".into(),
@@ -757,6 +1201,8 @@ mod tests {
             title: String::new(),
             body: String::new(),
             created_at: 0,
+            source_name: None,
+            app_icon_png_base64: None,
         };
         let notifications = NotificationContext {
             view: Some(NotificationView::Notifications),
@@ -782,6 +1228,8 @@ mod tests {
             title: String::new(),
             body: String::new(),
             created_at: 0,
+            source_name: None,
+            app_icon_png_base64: None,
         };
         let headed = |id: &str| id == "conversation-a";
         let enabled = NotificationPreferences::default();

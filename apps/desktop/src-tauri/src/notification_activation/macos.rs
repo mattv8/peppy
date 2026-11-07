@@ -1,9 +1,10 @@
 use super::{owner::Signal, PostError};
+use crate::notification_icon::{self, Icon, Lease};
 use block2::{DynBlock, RcBlock};
 use objc2::{
     define_class, msg_send, rc::Retained, runtime::ProtocolObject, AnyThread, DefinedClass,
 };
-use objc2_foundation::{NSArray, NSBundle, NSError, NSObject, NSObjectProtocol, NSString};
+use objc2_foundation::{NSArray, NSBundle, NSError, NSObject, NSObjectProtocol, NSString, NSURL};
 use objc2_user_notifications::*;
 use std::{
     cell::RefCell,
@@ -22,12 +23,27 @@ fn notification_content(
     title: &str,
     body: &str,
     sound: bool,
+    icon: Option<&Lease>,
 ) -> Retained<UNMutableNotificationContent> {
     let content = UNMutableNotificationContent::new();
     content.setTitle(&NSString::from_str(title));
     content.setBody(&NSString::from_str(body));
     if sound {
         content.setSound(Some(&UNNotificationSound::defaultSound()));
+    }
+    if let Some(icon) = icon {
+        let path = NSString::from_str(&icon.path().to_string_lossy());
+        let url = NSURL::fileURLWithPath(&path);
+        if let Ok(attachment) = unsafe {
+            UNNotificationAttachment::attachmentWithIdentifier_URL_options_error(
+                &NSString::from_str("content-icon"),
+                &url,
+                None,
+            )
+        } {
+            let attachments = NSArray::from_retained_slice(&[attachment]);
+            content.setAttachments(&attachments);
+        }
     }
     content
 }
@@ -122,6 +138,7 @@ pub struct Backend {
 pub struct Item {
     id: String,
     retiring: Arc<AtomicBool>,
+    _icon: Option<Lease>,
 }
 
 impl Item {
@@ -159,13 +176,16 @@ impl Backend {
         title: &str,
         body: &str,
         sound: bool,
+        icon: Option<&Icon>,
         signal: Signal,
     ) -> Result<Item, PostError> {
         // UN owns completion blocks until posting finishes. Removing a request
         // does not guarantee its completion has run, so bound this lifetime too.
         reserve_completion(&self.in_flight).map_err(|_| PostError::Failed)?;
         objc2::rc::autoreleasepool(|_| {
-            let content = notification_content(title, body, sound);
+            let icon =
+                content_icon(icon).and_then(|icon| notification_icon::materialize(&self.app, icon));
+            let content = notification_content(title, body, sound, icon.as_ref());
             let identifier = NSString::from_str(id);
             let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
                 &identifier,
@@ -179,6 +199,7 @@ impl Backend {
             let item = Item {
                 id: id.to_owned(),
                 retiring: Arc::new(AtomicBool::new(false)),
+                _icon: icon,
             };
             let completing = item.clone();
             let in_flight = self.in_flight.clone();
@@ -286,6 +307,13 @@ fn reserve_completion(in_flight: &AtomicUsize) -> Result<(), ()> {
         .map_err(|_| ())
 }
 
+fn content_icon(icon: Option<&Icon>) -> Option<&Icon> {
+    match icon {
+        Some(Icon::App(_)) => icon,
+        Some(Icon::Message) | None => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,7 +321,7 @@ mod tests {
     #[test]
     fn notification_sound_macos_content_and_foreground_policy_match() {
         for enabled in [false, true] {
-            let content = notification_content("title", "body", enabled);
+            let content = notification_content("title", "body", enabled, None);
             assert_eq!(content.sound().is_some(), enabled);
             assert_eq!(
                 presentation_options(enabled).contains(UNNotificationPresentationOptions::Sound),
@@ -304,6 +332,46 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn notification_macos_content_attaches_only_app_icons() {
+        let directory = tempfile::tempdir().unwrap();
+        let app_icon = Icon::App(include_bytes!("../../icons/notification-message.png").to_vec());
+        let lease = crate::notification_icon::materialize_for_test(
+            directory.path(),
+            content_icon(Some(&app_icon)).unwrap(),
+        )
+        .unwrap();
+        let content = notification_content("title", "body", false, Some(&lease));
+        assert_eq!(content.attachments().count(), 1);
+        assert!(content_icon(None).is_none());
+        assert!(content_icon(Some(&Icon::Message)).is_none());
+        assert_eq!(
+            notification_content("title", "body", false, None)
+                .attachments()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn notification_macos_item_clone_retains_the_real_lease_through_late_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let app_icon = Icon::App(include_bytes!("../../icons/notification-message.png").to_vec());
+        let lease =
+            crate::notification_icon::materialize_for_test(directory.path(), &app_icon).unwrap();
+        let path = lease.path().to_path_buf();
+        let item = Item {
+            id: "request".into(),
+            retiring: Arc::new(AtomicBool::new(false)),
+            _icon: Some(lease),
+        };
+        let late_completion = item.clone();
+        drop(item);
+        assert!(path.exists());
+        drop(late_completion);
+        assert!(!path.exists());
+    }
     use std::cell::Cell;
 
     #[test]
@@ -311,6 +379,7 @@ mod tests {
         let item = Item {
             id: "request".into(),
             retiring: Arc::new(AtomicBool::new(false)),
+            _icon: None,
         };
         let os_item = Cell::new(true);
         let callback_owned = Cell::new(true);
@@ -344,6 +413,7 @@ mod tests {
         let item = Item {
             id: "request".into(),
             retiring: Arc::new(AtomicBool::new(false)),
+            _icon: None,
         };
         let callback_owned = Cell::new(true);
         assert!(!item.retire(|_| false, |_| callback_owned.set(false)));

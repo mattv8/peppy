@@ -535,6 +535,8 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "open_login_items",
         "get_notification_sound",
         "set_notification_sound",
+        "get_notification_persistence",
+        "set_notification_persistence",
         "popout_conversation",
         "hide_head",
         "mark_all_read",
