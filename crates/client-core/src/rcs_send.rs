@@ -38,9 +38,10 @@ pub struct CarrierOnlyProof {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct IntentionalUnlinkContext {
-    link_generation: u64,
-    session_generation: u64,
-    context_revision: u64,
+    link_generation: Option<u64>,
+    session_generation: Option<u64>,
+    context_revision: Option<u64>,
+    lifecycle_generation: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -132,11 +133,13 @@ pub(crate) fn carrier_admission(
         return Ok(CarrierAdmission::Permitted);
     };
     if !linked {
-        return Ok(if recorded_link_state_is_unlinked(conn)? {
-            CarrierAdmission::Permitted
-        } else {
-            CarrierAdmission::Blocked
-        });
+        return Ok(
+            if !rcs_mapping::has_prior_link(conn)? || intentional_unlink_is_current(conn)? {
+                CarrierAdmission::Permitted
+            } else {
+                CarrierAdmission::Blocked
+            },
+        );
     }
     let region = crate::rcs_target::resolved_region(conn).map_err(|_| Error::Database)?;
     let current_route = rcs_mapping::carrier_route_is_current(conn, subscription_id, now_ms)?;
@@ -266,14 +269,17 @@ pub(crate) fn invalidate_carrier_only_proof(
 
 pub(crate) fn record_intentional_unlink(
     conn: &Connection,
-    link_generation: u64,
-    session_generation: u64,
-    context_revision: u64,
+    context: Option<(u64, u64, u64)>,
+    lifecycle_generation: u64,
 ) -> Result<(), Error> {
+    let (link_generation, session_generation, context_revision) = context
+        .map(|(link, session, revision)| (Some(link), Some(session), Some(revision)))
+        .unwrap_or((None, None, None));
     let context = IntentionalUnlinkContext {
         link_generation,
         session_generation,
         context_revision,
+        lifecycle_generation: Some(lifecycle_generation),
     };
     conn.execute(
         "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
@@ -285,13 +291,7 @@ pub(crate) fn record_intentional_unlink(
     Ok(())
 }
 
-fn recorded_link_state_is_unlinked(conn: &Connection) -> Result<bool, Error> {
-    if matches!(
-        rcs_mapping::recorded_link_lifecycle(conn)?,
-        Some(crate::RcsCapabilityState::Unlinked)
-    ) {
-        return Ok(true);
-    }
+fn intentional_unlink_is_current(conn: &Connection) -> Result<bool, Error> {
     let value = conn
         .query_row(
             "SELECT v FROM metadata WHERE k=?",
@@ -304,13 +304,34 @@ fn recorded_link_state_is_unlinked(conn: &Connection) -> Result<bool, Error> {
     };
     let context: IntentionalUnlinkContext =
         serde_json::from_str(&value).map_err(|_| Error::Database)?;
-    rcs_mapping::context_is_current(
-        conn,
+    let Some(lifecycle) = rcs_mapping::recorded_link_lifecycle_metadata(conn)? else {
+        return Ok(false);
+    };
+    let Some(lifecycle_generation) = context.lifecycle_generation else {
+        return Ok(false);
+    };
+    if lifecycle.state != crate::RcsCapabilityState::Unlinked
+        || lifecycle.generation != lifecycle_generation
+    {
+        return Ok(false);
+    }
+    match (
         context.link_generation,
         context.session_generation,
         context.context_revision,
-        false,
-    )
+    ) {
+        (Some(link_generation), Some(session_generation), Some(context_revision)) => {
+            rcs_mapping::context_is_current(
+                conn,
+                link_generation,
+                session_generation,
+                context_revision,
+                false,
+            )
+        }
+        (None, None, None) => Ok(true),
+        _ => Ok(false),
+    }
 }
 
 fn proof_key(conversation_id: ConversationId) -> String {
@@ -556,4 +577,30 @@ fn local_target_snapshot(
 
 fn target_identity_key(command_id: CommandId) -> String {
     format!("{RCS_TARGET_IDENTITY_PREFIX}{command_id}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{INTENTIONAL_UNLINK_KEY, IntentionalUnlinkContext, intentional_unlink_is_current};
+    use rusqlite::Connection;
+
+    #[test]
+    fn legacy_intentional_unlink_context_is_unfenced() {
+        let legacy = r#"{"link_generation":1,"session_generation":2,"context_revision":3}"#;
+        let context: IntentionalUnlinkContext = serde_json::from_str(legacy).unwrap();
+        assert_eq!(context.lifecycle_generation, None);
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE metadata(k TEXT PRIMARY KEY, v TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO metadata(k,v) VALUES(?,?)",
+            [INTENTIONAL_UNLINK_KEY, legacy],
+        )
+        .unwrap();
+        assert!(!intentional_unlink_is_current(&conn).unwrap());
+    }
 }

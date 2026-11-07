@@ -170,6 +170,9 @@ pub(crate) fn verify_and_store(
         ContextUpdate::Changed => invalidate_all_mappings(conn, "context_changed")?,
         ContextUpdate::Unchanged | ContextUpdate::Advanced => {}
     }
+    if observation.link_state == RcsLinkState::Linked {
+        record_prior_link(conn)?;
+    }
     record_accepted_carrier_route(conn, observation, now_ms)?;
     let outcome = verify(conn, observation, now_ms)?;
     let RcsMappingOutcome::Mapped(mapping) = &outcome else {
@@ -644,6 +647,18 @@ pub(crate) enum ContextUpdate {
 const RCS_CONTEXT_KEY: &str = "rcs_mapping_context_v1";
 const RCS_ACCEPTED_CARRIER_ROUTE_KEY: &str = "rcs_accepted_carrier_route_v1";
 const RCS_LINK_LIFECYCLE_KEY: &str = "rcs_link_lifecycle_v1";
+const RCS_LINK_LIFECYCLE_OBSERVED_AT_KEY: &str = "rcs_link_lifecycle_observed_at_ms_v1";
+const RCS_LINK_LIFECYCLE_GENERATION_KEY: &str = "rcs_link_lifecycle_generation_v1";
+const RCS_PRIOR_LINK_KEY: &str = "rcs_prior_link_v1";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RecordedLinkLifecycle {
+    pub state: RcsCapabilityState,
+    pub observed_at_ms: Option<i64>,
+    pub generation: u64,
+}
+
+pub(crate) type OptionalRcsContextTuple = Option<(u64, u64, u64)>;
 
 pub(crate) fn next_rcs_context_tuple(
     conn: &Connection,
@@ -742,8 +757,24 @@ fn ensure_sqlite_context_tuple(tuple: RcsContextTuple) -> Result<(), Error> {
 pub(crate) fn record_link_lifecycle(
     conn: &Connection,
     state: RcsCapabilityState,
+    observed_at_ms: i64,
 ) -> Result<bool, Error> {
-    let changed = recorded_link_lifecycle(conn)?.is_none_or(|previous| previous != state);
+    let previous = recorded_link_lifecycle_metadata(conn)?;
+    if previous.is_some_and(|previous| previous.state == RcsCapabilityState::Linked)
+        || state == RcsCapabilityState::Linked
+    {
+        record_prior_link(conn)?;
+    }
+    let changed = previous.is_none_or(|previous| previous.state != state);
+    let generation = if changed {
+        previous
+            .map(|previous| previous.generation)
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(Error::InvalidRequest("RCS lifecycle generation exhausted"))?
+    } else {
+        previous.map(|previous| previous.generation).unwrap_or(0)
+    };
     conn.execute(
         "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
         params![
@@ -751,7 +782,65 @@ pub(crate) fn record_link_lifecycle(
             serde_json::to_string(&state).map_err(|_| Error::Database)?
         ],
     )?;
+    conn.execute(
+        "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        params![
+            RCS_LINK_LIFECYCLE_OBSERVED_AT_KEY,
+            observed_at_ms.to_string()
+        ],
+    )?;
+    conn.execute(
+        "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        params![RCS_LINK_LIFECYCLE_GENERATION_KEY, generation.to_string()],
+    )?;
     Ok(changed)
+}
+
+pub(crate) fn record_prior_link(conn: &Connection) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO NOTHING",
+        [RCS_PRIOR_LINK_KEY, "1"],
+    )?;
+    Ok(())
+}
+
+/// Returns whether this database has ever had local linked authority.
+/// Legacy databases without the marker derive and persist it from retained mapping history.
+pub(crate) fn has_prior_link(conn: &Connection) -> Result<bool, Error> {
+    let marked: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM metadata WHERE k=?)",
+        [RCS_PRIOR_LINK_KEY],
+        |row| row.get(0),
+    )?;
+    if marked {
+        return Ok(true);
+    }
+    let mapped: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rcs_conversation_mappings)",
+        [],
+        |row| row.get(0),
+    )?;
+    let linked_context = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [RCS_CONTEXT_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|value| serde_json::from_str::<RcsContext>(&value).map_err(|_| Error::Database))
+        .transpose()?
+        .is_some_and(|context| {
+            context.link_state == RcsLinkState::Linked as u8 && context.has_authentic_go_binding()
+        });
+    let linked_route = accepted_carrier_route(conn)?.is_some_and(|route| {
+        route.context.link_state == RcsLinkState::Linked as u8
+            && route.context.has_authentic_go_binding()
+    });
+    let has_prior_link = mapped || linked_context || linked_route;
+    if has_prior_link {
+        record_prior_link(conn)?;
+    }
+    Ok(has_prior_link)
 }
 
 pub(crate) fn recorded_link_lifecycle(
@@ -765,6 +854,38 @@ pub(crate) fn recorded_link_lifecycle(
     .optional()?
     .map(|value| serde_json::from_str(&value).map_err(|_| Error::Database))
     .transpose()
+}
+
+pub(crate) fn recorded_link_lifecycle_metadata(
+    conn: &Connection,
+) -> Result<Option<RecordedLinkLifecycle>, Error> {
+    let Some(state) = recorded_link_lifecycle(conn)? else {
+        return Ok(None);
+    };
+    let observed_at_ms = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [RCS_LINK_LIFECYCLE_OBSERVED_AT_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|value| value.parse().map_err(|_| Error::Database))
+        .transpose()?;
+    let generation = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [RCS_LINK_LIFECYCLE_GENERATION_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|value| value.parse().map_err(|_| Error::Database))
+        .transpose()?
+        .unwrap_or(0);
+    Ok(Some(RecordedLinkLifecycle {
+        state,
+        observed_at_ms,
+        generation,
+    }))
 }
 
 pub(crate) fn update_context(
@@ -973,6 +1094,49 @@ pub(crate) fn context_is_current(
         context.context_revision,
     ) == (link_generation, session_generation, context_revision)
         && (!require_linked || context.link_state == RcsLinkState::Linked as u8))
+}
+
+pub(crate) fn explicit_unlink_context(
+    conn: &Connection,
+    observed_at_ms: i64,
+    now_ms: i64,
+) -> Result<(OptionalRcsContextTuple, u64), Error> {
+    now_ms
+        .checked_sub(observed_at_ms)
+        .filter(|age| (0..=RCS_MAPPING_FRESHNESS_MS).contains(age))
+        .ok_or(Error::InvalidRequest("unlink context is not current"))?;
+    let Some(lifecycle) = recorded_link_lifecycle_metadata(conn)? else {
+        return Err(Error::InvalidRequest("explicit unlink context required"));
+    };
+    if lifecycle.state != RcsCapabilityState::Unlinked
+        || lifecycle
+            .observed_at_ms
+            .is_none_or(|stored| observed_at_ms < stored || !is_fresh(now_ms, stored))
+    {
+        return Err(Error::InvalidRequest("explicit unlink context required"));
+    }
+    let Some(value) = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [RCS_CONTEXT_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok((None, lifecycle.generation));
+    };
+    let context: RcsContext = serde_json::from_str(&value).map_err(|_| Error::Database)?;
+    if !context.has_authentic_go_binding() {
+        return Err(Error::InvalidRequest("unlink context is not current"));
+    }
+    Ok((
+        Some((
+            context.link_generation,
+            context.session_generation,
+            context.context_revision,
+        )),
+        lifecycle.generation,
+    ))
 }
 
 pub(crate) fn context_matches_carrier_proof(
@@ -1300,10 +1464,18 @@ pub(crate) fn invalidate_mapping(
     Ok(())
 }
 
-fn invalidate_all_mappings(conn: &Connection, code: &str) -> Result<(), Error> {
+pub(crate) fn invalidate_all_mappings(conn: &Connection, code: &str) -> Result<(), Error> {
     conn.execute(
         "UPDATE rcs_conversation_mappings SET invalidated_at_ms=verified_at_ms, invalidation_code=? WHERE invalidated_at_ms IS NULL",
         [code],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn clear_accepted_carrier_route(conn: &Connection) -> Result<(), Error> {
+    conn.execute(
+        "DELETE FROM metadata WHERE k=?",
+        [RCS_ACCEPTED_CARRIER_ROUTE_KEY],
     )?;
     Ok(())
 }
@@ -1335,6 +1507,67 @@ mod tests {
     use crate::{
         DeviceId, Direction, MessageId, MessagePayload, MessageRecord, SourceSequence, Transport,
     };
+
+    fn metadata_connection() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE metadata(k TEXT PRIMARY KEY, v TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE rcs_conversation_mappings(id INTEGER PRIMARY KEY)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn legacy_previous_linked_lifecycle_marks_prior_link_before_unlinked_overwrite() {
+        let conn = metadata_connection();
+        conn.execute(
+            "INSERT INTO metadata(k,v) VALUES(?,?)",
+            params![
+                RCS_LINK_LIFECYCLE_KEY,
+                serde_json::to_string(&RcsCapabilityState::Linked).unwrap()
+            ],
+        )
+        .unwrap();
+        record_link_lifecycle(&conn, RcsCapabilityState::Unlinked, 1_001).unwrap();
+        assert!(has_prior_link(&conn).unwrap());
+    }
+
+    #[test]
+    fn marker_absent_authentic_linked_context_derives_prior_link() {
+        let conn = metadata_connection();
+        let context = RcsContext {
+            link_generation: 1,
+            session_generation: 1,
+            context_revision: 1,
+            identity_region: "US".into(),
+            own_identity: "+12025550100".into(),
+            sim_id: "sim".into(),
+            outgoing_id: "outgoing".into(),
+            sim_participant_id: "participant".into(),
+            own_number: "+12025550100".into(),
+            sim_payload_two: 2,
+            sim_payload_sim_number: 1,
+            canonicalizer_revision: RCS_CANONICALIZER_REVISION,
+            link_state: RcsLinkState::Linked as u8,
+            go_runtime_id: "runtime".into(),
+            go_run_generation: 1,
+            go_stream_epoch: 1,
+            go_pairing_evidence_id: "pairing".into(),
+        };
+        conn.execute(
+            "INSERT INTO metadata(k,v) VALUES(?,?)",
+            params![RCS_CONTEXT_KEY, serde_json::to_string(&context).unwrap()],
+        )
+        .unwrap();
+        record_link_lifecycle(&conn, RcsCapabilityState::Unlinked, 1_001).unwrap();
+        assert!(has_prior_link(&conn).unwrap());
+    }
 
     fn observation() -> RcsMappingObservation {
         RcsMappingObservation {

@@ -328,6 +328,7 @@ impl Client {
             google_message_id,
             google_conversation_id,
             None,
+            false,
         )?;
         match outcome {
             RcsIdentityOutcome::Recorded => {}
@@ -410,6 +411,7 @@ impl Client {
                     &record.google_message_id,
                     &record.google_conversation_id,
                     Some(message_id),
+                    true,
                 )? {
                     RcsIdentityOutcome::Recorded => {
                         apply_reported_facts(
@@ -452,6 +454,7 @@ impl Client {
             &record.google_message_id,
             &record.google_conversation_id,
             Some(message_id),
+            false,
         )?;
         let outcome = match identity {
             RcsIdentityOutcome::Recorded => {
@@ -556,36 +559,37 @@ impl Client {
                 RcsReceiveCode::GatewayUnavailable,
             ));
         }
-        let mut identity_recorded = false;
         let mut message_id: Option<String> = tx.query_row(
             "SELECT message_id FROM rcs_message_identities WHERE google_message_id=? AND google_conversation_id=? AND conversation_id=?",
             params![application.google_message_id, application.google_conversation_id, conversation_id.to_string()],
             |row| row.get(0),
         ).optional()?.flatten();
-        if message_id.is_none()
-            && let Some(tmp_id) = application.tmp_id.as_deref()
-        {
-            message_id = tx
+        if let Some(tmp_id) = application.tmp_id.as_deref() {
+            let tmp_message_id: Option<String> = tx
                 .query_row(
                     "SELECT c.message_id FROM rcs_send_ledger l JOIN commands c ON c.command_id=l.command_id WHERE l.tmp_id=? AND l.google_conversation_id=?",
                     params![tmp_id, application.google_conversation_id],
                     |row| row.get(0),
             )
             .optional()?;
-            if let Some(message_id) = message_id.as_deref() {
+            if let Some(tmp_message_id) = tmp_message_id.as_deref() {
                 match record_identity(
                     &tx,
                     conversation_id,
                     ownership_generation,
                     &application.google_message_id,
                     &application.google_conversation_id,
-                    Some(message_id.parse().map_err(|_| Error::Database)?),
+                    Some(tmp_message_id.parse().map_err(|_| Error::Database)?),
+                    true,
                 )? {
-                    RcsIdentityOutcome::Recorded => identity_recorded = true,
+                    RcsIdentityOutcome::Recorded => {}
                     RcsIdentityOutcome::Duplicate => {}
                     RcsIdentityOutcome::Rejected(code) => {
                         return Ok(RcsReceiveOutcome::Rejected(code));
                     }
+                }
+                if message_id.is_none() {
+                    message_id = Some(tmp_message_id.to_owned());
                 }
             }
         }
@@ -602,10 +606,27 @@ impl Client {
             RcsProjectedStatus::Delivered => RcsMessageStatus::Delivered,
             RcsProjectedStatus::Read => RcsMessageStatus::Read,
         };
-        if !apply_status(&tx, message_id, status, true)? {
-            if identity_recorded {
-                tx.commit()?;
+        if let Some(tmp_id) = application.tmp_id.as_deref() {
+            let evidence = match application.status {
+                RcsProjectedStatus::Sending => None,
+                RcsProjectedStatus::Sent => Some(crate::SendResult::Sent),
+                RcsProjectedStatus::Failed => Some(crate::SendResult::FailedConfirmed),
+                RcsProjectedStatus::Delivered | RcsProjectedStatus::Read => {
+                    Some(crate::SendResult::Delivered)
+                }
+            };
+            if let Some(evidence) = evidence {
+                crate::reconcile_rcs_tmp_id_in_transaction(
+                    &tx,
+                    &ctx,
+                    tmp_id,
+                    &application.google_conversation_id,
+                    evidence,
+                )?;
             }
+        }
+        if !apply_status(&tx, message_id, status, true)? {
+            tx.commit()?;
             return Ok(RcsReceiveOutcome::StatusUnchanged);
         }
         enqueue(
@@ -692,7 +713,7 @@ impl Client {
         {
             return Ok(RcsIdentityOutcome::Rejected(RcsReceiveCode::OwnershipStale));
         }
-        if !unique_current_gateway(&tx, ctx.device_id)? {
+        if !local_gateway(&tx, ctx.device_id)? {
             return Ok(RcsIdentityOutcome::Rejected(
                 RcsReceiveCode::GatewayUnavailable,
             ));
@@ -822,6 +843,15 @@ fn unique_current_gateway(conn: &Connection, device_id: DeviceId) -> Result<bool
     Ok(count == 1 && crate::rcs_capability::current_gateway(conn, device_id, now_ms)?)
 }
 
+fn local_gateway(conn: &Connection, device_id: DeviceId) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rcs_link_status_projection WHERE gateway_device_id=?)",
+        [device_id.to_string()],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
 fn checkpoint_record(
     conn: &Connection,
     conversation_id: ConversationId,
@@ -844,6 +874,7 @@ fn record_identity(
     google_message_id: &str,
     google_conversation_id: &str,
     message_id: Option<MessageId>,
+    require_matching_message: bool,
 ) -> Result<RcsIdentityOutcome, Error> {
     let existing: Option<(String, Option<String>)> = conn
         .query_row(
@@ -864,6 +895,17 @@ fn record_identity(
                 params![ownership_generation, message_id.map(|id| id.to_string()), google_message_id, google_conversation_id],
             )?;
             return Ok(RcsIdentityOutcome::Recorded);
+        }
+        if require_matching_message
+            && let (Some(existing_message), Some(message_id)) = (
+                existing_message.as_deref(),
+                message_id.map(|id| id.to_string()),
+            )
+            && existing_message != message_id
+        {
+            return Ok(RcsIdentityOutcome::Rejected(
+                RcsReceiveCode::IdentityConflict,
+            ));
         }
         return Ok(RcsIdentityOutcome::Duplicate);
     }

@@ -54,6 +54,8 @@ mod message_history_requests;
 mod message_origin;
 mod notification_preferences;
 mod sender_blocklist;
+#[cfg(feature = "test-support")]
+mod test_support;
 pub use deferred_media::{DeferredMediaRequestReport, DeferredMediaStatus, DeferredOriginal};
 pub use ephemeral::{
     MAX_TYPING_ROSTER, TYPING_START_INTERVAL_MS, TYPING_STARTS_PER_MINUTE, TypingOrigin,
@@ -1274,12 +1276,27 @@ impl Client {
         )? {
             return Err(Error::InvalidRequest("unlink context is not current"));
         }
-        rcs_send::record_intentional_unlink(
-            &transaction,
-            observation.link_generation,
-            observation.session_generation,
-            observation.context_revision,
-        )?;
+        let (context, lifecycle_generation) =
+            rcs_mapping::explicit_unlink_context(&transaction, observation.observed_at_ms, now_ms)?;
+        rcs_send::record_intentional_unlink(&transaction, context, lifecycle_generation)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Records that the owner durably completed an explicit unlink or reset.
+    /// Incidental observed lifecycle changes cannot invoke this trusted path.
+    pub fn record_rcs_explicit_unlink_completed(
+        &self,
+        observed_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let transaction = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (context, lifecycle_generation) =
+            rcs_mapping::explicit_unlink_context(&transaction, observed_at_ms, now_ms)?;
+        rcs_send::record_intentional_unlink(&transaction, context, lifecycle_generation)?;
         transaction.commit()?;
         Ok(())
     }
@@ -1376,8 +1393,17 @@ impl Client {
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let previous_state = rcs_mapping::recorded_link_lifecycle(&tx)?;
-        let state_changed = rcs_mapping::record_link_lifecycle(&tx, state)?;
+        let state_changed = rcs_mapping::record_link_lifecycle(&tx, state, observed_at_ms)?;
         if state_changed {
+            if matches!(
+                state,
+                RcsCapabilityState::SignedOut
+                    | RcsCapabilityState::NeedsRelink
+                    | RcsCapabilityState::Unlinked
+            ) {
+                rcs_mapping::invalidate_all_mappings(&tx, "link_lifecycle_terminal")?;
+                rcs_mapping::clear_accepted_carrier_route(&tx)?;
+            }
             tx.execute(
                 "DELETE FROM metadata WHERE k LIKE 'rcs_carrier_only_proof_v1/%'",
                 [],
@@ -1480,7 +1506,6 @@ impl Client {
 
     pub fn carrier_route_context(
         &self,
-        _conversation_id: ConversationId,
         subscription_id: &str,
     ) -> Result<Option<ValidatedCarrierRouteContext>, Error> {
         rcs_mapping::carrier_route_context(&self.lock()?.conn, Some(subscription_id))
@@ -4215,6 +4240,42 @@ impl Client {
         Ok(SendState::FailedBeforeSubmission)
     }
 
+    /// Records uncertainty for one exact native RCS attempt without authorizing a retry.
+    pub fn record_native_rcs_outcome_unknown(
+        &self,
+        command_id: CommandId,
+        tmp_id: &str,
+        google_conversation_id: &str,
+    ) -> Result<SendState, Error> {
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let matched: Option<()> = tx
+            .query_row(
+                "SELECT 1 FROM attempts a JOIN rcs_send_ledger r ON r.command_id=a.command_id WHERE a.command_id=? AND a.finalized_transport='rcs' AND r.tmp_id=? AND r.google_conversation_id=?",
+                params![command_id.to_string(), tmp_id, google_conversation_id],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if matched.is_none() {
+            return Err(Error::NoAttempt);
+        }
+        let current = attempt_state(&tx, command_id)?.ok_or(Error::NoAttempt)?;
+        if current != SendState::AttemptRecorded {
+            return Ok(current);
+        }
+        tx.execute(
+            "UPDATE attempts SET state=? WHERE command_id=?",
+            params![
+                state_code(SendState::OutcomeUnknown),
+                command_id.to_string()
+            ],
+        )?;
+        emit_status(&tx, &ctx, command_id, SendState::OutcomeUnknown)?;
+        tx.commit()?;
+        Ok(SendState::OutcomeUnknown)
+    }
+
     /// Creates a new local RCS command after the original attempt is explicitly known unknown.
     /// The new command has no permit until it is received through the normal command ledger.
     pub fn resend_rcs_outcome_unknown(&self, command_id: CommandId) -> Result<QueuedSend, Error> {
@@ -4352,8 +4413,18 @@ impl Client {
             let command_id = parse(&command_id)?;
             return attempt_state(&self.lock()?.conn, command_id);
         };
-        self.record_send_result(parse(&command_id)?, evidence)
-            .map(Some)
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let state = reconcile_rcs_tmp_id_in_transaction(
+            &tx,
+            &ctx,
+            tmp_id,
+            google_conversation_id,
+            evidence,
+        )?;
+        tx.commit()?;
+        Ok(state)
     }
 
     fn require_rcs_attempt(&self, command_id: CommandId) -> Result<(), Error> {
@@ -8023,9 +8094,7 @@ fn apply_record(
                 rcs_reported,
             },
         ) => {
-            if !rcs_receive::apply_replicated_status(conn, message_id, status, rcs_reported)? {
-                return Ok(None);
-            }
+            rcs_receive::apply_replicated_status(conn, message_id, status, rcs_reported)?;
         }
         (EnvelopePurpose::Event, PrivatePayload::RcsLinkStatus(status)) => {
             if !rcs_capability::apply_status(
@@ -10220,6 +10289,37 @@ pub(crate) fn outbox_priority(purpose: EnvelopePurpose, payload: &PrivatePayload
     }
 }
 
+pub(crate) fn reconcile_rcs_tmp_id_in_transaction(
+    conn: &Connection,
+    ctx: &Ctx,
+    tmp_id: &str,
+    google_conversation_id: &str,
+    evidence: SendResult,
+) -> Result<Option<SendState>, Error> {
+    let command_id: Option<String> = conn
+        .query_row(
+            "SELECT command_id FROM rcs_send_ledger WHERE tmp_id=? AND google_conversation_id=?",
+            params![tmp_id, google_conversation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(command_id) = command_id else {
+        return Ok(None);
+    };
+    let command_id = parse(&command_id)?;
+    let current = attempt_state(conn, command_id)?.ok_or(Error::NoAttempt)?;
+    let next = SendState::from(evidence);
+    if current == next || !legal_transition(current, next) {
+        return Ok(Some(current));
+    }
+    conn.execute(
+        "UPDATE attempts SET state=? WHERE command_id=?",
+        params![state_code(next), command_id.to_string()],
+    )?;
+    emit_status(conn, ctx, command_id, next)?;
+    Ok(Some(next))
+}
+
 fn attempt_state(conn: &Connection, command_id: CommandId) -> Result<Option<SendState>, Error> {
     conn.query_row(
         "SELECT state FROM attempts WHERE command_id=?",
@@ -10339,6 +10439,11 @@ fn exact_rcs_mapping(
     observation: &RcsMappingObservation,
     now_ms: i64,
 ) -> Result<Option<RcsMapping>, Error> {
+    if rcs_mapping::recorded_link_lifecycle(conn)?
+        .is_some_and(|state| state != RcsCapabilityState::Linked)
+    {
+        return Ok(None);
+    }
     let Some(mapping) = rcs_mapping::get(conn, conversation_id)? else {
         return Ok(None);
     };

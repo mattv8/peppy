@@ -306,6 +306,7 @@ fn authenticated_two_client_typing_reaches_a_tagged_gateway_intent() {
             .is_some()
     );
 
+    receiver.set_typing_sharing(false).unwrap();
     let typing = seal(
         &sender,
         conversation,
@@ -322,6 +323,7 @@ fn authenticated_two_client_typing_reaches_a_tagged_gateway_intent() {
             .action,
         Some(LiveAction::GatewayTypingIntent { conversation_id, state: TypingStateV2::Started, .. }) if conversation_id == conversation
     ));
+    receiver.set_typing_sharing(true).unwrap();
     let renewal = seal(
         &sender,
         conversation,
@@ -348,7 +350,7 @@ fn authenticated_two_client_typing_reaches_a_tagged_gateway_intent() {
 }
 
 #[test]
-fn disabled_sharing_preserves_outbound_clock_and_sequence_state() {
+fn disabled_sharing_validates_and_commits_the_outbound_clock_without_sealing() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
     let config = config(&directory, "v2-sharing", &vault);
@@ -371,10 +373,23 @@ fn disabled_sharing_preserves_outbound_clock_and_sequence_state() {
             conversation,
             config.device_id,
             TypingStateV2::Started,
-            -1,
-            999,
+            1_001,
+            1_001,
         ),
         None
+    );
+    assert_eq!(
+        client.seal_typing_signal_v2(
+            conversation,
+            config.device_id,
+            TypingOriginV2::VaultDevice,
+            TypingStateV2::Stopped,
+            LiveClock {
+                wall_ms: 1_002,
+                mono_ms: 1_000,
+            },
+        ),
+        Err(LiveError::Clock)
     );
     client.set_typing_sharing(true).unwrap();
     assert_eq!(
@@ -383,8 +398,8 @@ fn disabled_sharing_preserves_outbound_clock_and_sequence_state() {
             conversation,
             config.device_id,
             TypingStateV2::Started,
-            1_001,
-            1_001,
+            1_002,
+            1_002,
         )
         .unwrap()
         .signal
@@ -394,13 +409,15 @@ fn disabled_sharing_preserves_outbound_clock_and_sequence_state() {
 }
 
 #[test]
-fn disabled_sharing_seals_only_the_stop_for_an_admitted_start() {
+fn disabled_sharing_suppresses_both_states_without_consuming_sequence_or_budget() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
     let config = config(&directory, "v2-sharing-stop", &vault);
     let client = unlocked(&config, &vault);
     let conversation = ConversationId::new();
+    let google_conversation = ConversationId::new();
     publish_eligible(&client, config.device_id, conversation);
+    publish_eligible(&client, config.device_id, google_conversation);
     enable(
         &client,
         config.device_id,
@@ -433,16 +450,64 @@ fn disabled_sharing_seals_only_the_stop_for_an_admitted_start() {
         ),
         None
     );
+    assert_eq!(
+        seal(
+            &client,
+            conversation,
+            config.device_id,
+            TypingStateV2::Stopped,
+            1_003,
+            1_003,
+        ),
+        None
+    );
+    assert_eq!(
+        client
+            .seal_typing_signal_v2(
+                google_conversation,
+                config.device_id,
+                TypingOriginV2::GoogleContact,
+                TypingStateV2::Started,
+                LiveClock {
+                    wall_ms: 1_004,
+                    mono_ms: 1_004,
+                },
+            )
+            .unwrap()
+            .unwrap()
+            .signal
+            .sequence,
+        "2"
+    );
+    assert_eq!(
+        client
+            .seal_typing_signal_v2(
+                google_conversation,
+                config.device_id,
+                TypingOriginV2::GoogleContact,
+                TypingStateV2::Stopped,
+                LiveClock {
+                    wall_ms: 1_005,
+                    mono_ms: 1_005,
+                },
+            )
+            .unwrap()
+            .unwrap()
+            .signal
+            .sequence,
+        "3"
+    );
+    client.set_typing_sharing(true).unwrap();
     let stopped = seal(
         &client,
         conversation,
         config.device_id,
         TypingStateV2::Stopped,
-        1_003,
-        1_003,
+        1_006,
+        1_006,
     )
     .unwrap();
-    assert_eq!(stopped.signal.sequence, "2");
+    assert_eq!(stopped.signal.sequence, "4");
 }
 
 #[test]
@@ -997,6 +1062,19 @@ fn eligibility_changes_refuse_without_consuming_the_next_sequence() {
         ),
         None
     );
+    assert_eq!(
+        client.seal_typing_signal_v2(
+            conversation,
+            config.device_id,
+            TypingOriginV2::VaultDevice,
+            TypingStateV2::Stopped,
+            LiveClock {
+                wall_ms: 1_003,
+                mono_ms: 1_001,
+            },
+        ),
+        Err(LiveError::Clock)
+    );
     publish_eligible_at(&client, config.device_id, conversation, 3, 1_003);
     assert_eq!(
         seal(
@@ -1006,6 +1084,76 @@ fn eligibility_changes_refuse_without_consuming_the_next_sequence() {
             TypingStateV2::Stopped,
             1_003,
             1_003
+        )
+        .unwrap()
+        .signal
+        .sequence,
+        "2"
+    );
+}
+
+#[test]
+fn rate_limited_start_advances_the_clock_without_consuming_sequence() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "v2-rate-limited-clock", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    publish_eligible(&client, config.device_id, conversation);
+    enable(
+        &client,
+        config.device_id,
+        LiveClock {
+            wall_ms: 1_000,
+            mono_ms: 1_000,
+        },
+    );
+    assert_eq!(
+        seal(
+            &client,
+            conversation,
+            config.device_id,
+            TypingStateV2::Started,
+            1_001,
+            1_001,
+        )
+        .unwrap()
+        .signal
+        .sequence,
+        "1"
+    );
+    assert_eq!(
+        seal(
+            &client,
+            conversation,
+            config.device_id,
+            TypingStateV2::Started,
+            1_002,
+            1_002,
+        ),
+        None
+    );
+    assert_eq!(
+        client.seal_typing_signal_v2(
+            conversation,
+            config.device_id,
+            TypingOriginV2::VaultDevice,
+            TypingStateV2::Started,
+            LiveClock {
+                wall_ms: 1_003,
+                mono_ms: 1_001,
+            },
+        ),
+        Err(LiveError::Clock)
+    );
+    assert_eq!(
+        seal(
+            &client,
+            conversation,
+            config.device_id,
+            TypingStateV2::Started,
+            4_002,
+            4_002,
         )
         .unwrap()
         .signal
@@ -1224,7 +1372,7 @@ fn global_reservations_keep_stops_available_without_consuming_suppressed_sequenc
 }
 
 #[test]
-fn no_frame_admission_leaves_the_clock_and_sequence_candidate_uncommitted() {
+fn suppressed_redundant_stop_advances_the_clock_without_consuming_sequence() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
     let config = config(&directory, "v2-no-frame-candidate", &vault);
@@ -1281,13 +1429,26 @@ fn no_frame_admission_leaves_the_clock_and_sequence_candidate_uncommitted() {
         None
     );
     assert_eq!(
+        client.seal_typing_signal_v2(
+            second,
+            config.device_id,
+            TypingOriginV2::VaultDevice,
+            TypingStateV2::Started,
+            LiveClock {
+                wall_ms: 1_004,
+                mono_ms: 1_002,
+            },
+        ),
+        Err(LiveError::Clock)
+    );
+    assert_eq!(
         seal(
             &client,
             second,
             config.device_id,
             TypingStateV2::Started,
-            1_002,
-            1_002
+            1_004,
+            1_004
         )
         .unwrap()
         .signal

@@ -5,6 +5,9 @@ edition = "2024"
 publish = false
 autotests = false
 
+[features]
+test-support = []
+
 [[test]]
 name = "integration"
 path = "tests/integration.rs"

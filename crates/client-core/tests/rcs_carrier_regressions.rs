@@ -615,12 +615,7 @@ fn unsupported_canonicalizer_revisions_establish_no_route_or_classifier_authorit
             lab.gateway.verify_rcs_mapping(&invalid, 1_000).unwrap(),
             RcsMappingOutcome::Refused(RcsMappingRefusal::IneligibleConversation)
         );
-        assert!(
-            lab.gateway
-                .carrier_route_context(lab.conversation, SIM)
-                .unwrap()
-                .is_none()
-        );
+        assert!(lab.gateway.carrier_route_context(SIM).unwrap().is_none());
         assert_eq!(
             lab.classify(PEER, &snapshot(Vec::new(), 1), 1_000).unwrap(),
             RcsTargetDecision::Unknown {
@@ -792,12 +787,7 @@ fn refused_native_route_evidence_mints_no_carrier_route_context() {
         lab.gateway.verify_rcs_mapping(&invalid, 1_000).unwrap(),
         RcsMappingOutcome::Refused(RcsMappingRefusal::IneligibleConversation)
     );
-    assert!(
-        lab.gateway
-            .carrier_route_context(lab.conversation, SIM)
-            .unwrap()
-            .is_none()
-    );
+    assert!(lab.gateway.carrier_route_context(SIM).unwrap().is_none());
     lab.book("home", "US");
     assert_eq!(
         lab.classify(PEER, &snapshot(Vec::new(), 1), 1_000).unwrap(),
@@ -812,12 +802,7 @@ fn refused_native_route_evidence_mints_no_carrier_route_context() {
 
     // Positive control: the same route, once accepted, yields the capability.
     lab.link();
-    assert!(
-        lab.gateway
-            .carrier_route_context(lab.conversation, SIM)
-            .unwrap()
-            .is_some()
-    );
+    assert!(lab.gateway.carrier_route_context(SIM).unwrap().is_some());
 }
 
 // Guards: 103622b3 (finding 2). A later rejected observation changes the context; older accepted
@@ -826,36 +811,21 @@ fn refused_native_route_evidence_mints_no_carrier_route_context() {
 fn later_rejected_observation_withdraws_older_route_authority() {
     let lab = Lab::new(PEER);
     lab.link();
-    assert!(
-        lab.gateway
-            .carrier_route_context(lab.conversation, SIM)
-            .unwrap()
-            .is_some()
-    );
+    assert!(lab.gateway.carrier_route_context(SIM).unwrap().is_some());
     let mut invalid = observation(PEER, 1, 2, 1_001);
     invalid.carrier_binding.is_current_default_sms = false;
     assert_eq!(
         lab.gateway.verify_rcs_mapping(&invalid, 1_001).unwrap(),
         RcsMappingOutcome::Refused(RcsMappingRefusal::IneligibleConversation)
     );
-    assert!(
-        lab.gateway
-            .carrier_route_context(lab.conversation, SIM)
-            .unwrap()
-            .is_none()
-    );
+    assert!(lab.gateway.carrier_route_context(SIM).unwrap().is_none());
     assert_eq!(
         lab.gateway
             .verify_rcs_mapping(&observation(PEER, 0, 1, 1_002), 1_002)
             .unwrap(),
         RcsMappingOutcome::Refused(RcsMappingRefusal::RetiredContext)
     );
-    assert!(
-        lab.gateway
-            .carrier_route_context(lab.conversation, SIM)
-            .unwrap()
-            .is_none()
-    );
+    assert!(lab.gateway.carrier_route_context(SIM).unwrap().is_none());
 }
 
 // Guards: 103622b3 (finding 2). Explicit unlink validation is transactional: a failed validation
@@ -872,12 +842,7 @@ fn failed_explicit_unlink_validation_writes_no_context() {
             .update_rcs_context(&retired_unlink, 1_000)
             .is_err()
     );
-    assert!(
-        lab.gateway
-            .carrier_route_context(lab.conversation, SIM)
-            .unwrap()
-            .is_some()
-    );
+    assert!(lab.gateway.carrier_route_context(SIM).unwrap().is_some());
     assert_eq!(lab.permit(command, 1_000), blocked());
     assert_eq!(lab.attempts(command), 0);
 }
@@ -1207,10 +1172,7 @@ fn accepted_route_evidence_must_be_current_when_classifying() {
     );
     assert!(!lab.proof_stored());
     assert!(
-        lab.gateway
-            .carrier_route_context(lab.conversation, SIM)
-            .unwrap()
-            .is_some(),
+        lab.gateway.carrier_route_context(SIM).unwrap().is_some(),
         "the accessor reports presence; classification enforces freshness"
     );
     assert!(matches!(
@@ -1442,12 +1404,7 @@ fn refused_native_settings_cannot_mint_carrier_context() {
             lab.gateway.verify_rcs_mapping(&invalid, 1_000).unwrap(),
             RcsMappingOutcome::Refused(RcsMappingRefusal::IneligibleConversation)
         );
-        assert!(
-            lab.gateway
-                .carrier_route_context(lab.conversation, SIM)
-                .unwrap()
-                .is_none()
-        );
+        assert!(lab.gateway.carrier_route_context(SIM).unwrap().is_none());
         assert_eq!(
             lab.classify(PEER, &snapshot(Vec::new(), 1), 1_000).unwrap(),
             RcsTargetDecision::Unknown {

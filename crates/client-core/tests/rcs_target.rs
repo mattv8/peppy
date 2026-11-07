@@ -12,10 +12,5 @@ fn public_target_classification_requires_current_core_route_context() {
         .classify_and_commit_rcs_target(ConversationId::new(), "+12025550123", "{}", 1_000)
         .unwrap();
     assert!(matches!(decision, RcsTargetDecision::Unknown { .. }));
-    assert!(
-        client
-            .carrier_route_context(ConversationId::new(), "sim-test")
-            .unwrap()
-            .is_none()
-    );
+    assert!(client.carrier_route_context("sim-test").unwrap().is_none());
 }

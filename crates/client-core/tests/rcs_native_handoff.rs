@@ -26,7 +26,7 @@ fn actual_go_observations_verify_classify_and_begin() {
     let conversation_id = command_conversation(&gateway);
     assert!(
         gateway
-            .carrier_route_context(conversation_id, &route.selected_sim_id)
+            .carrier_route_context(&route.selected_sim_id)
             .unwrap()
             .is_some()
     );
@@ -1206,6 +1206,55 @@ fn native_pre_effect_refusal_requires_the_exact_unacknowledged_rcs_attempt() {
         gateway
             .record_native_rcs_pre_effect_refusal(command_id, "tmp", "google")
             .is_err()
+    );
+}
+
+#[test]
+fn native_outcome_unknown_requires_the_exact_attempt_and_is_idempotent() {
+    let (_directory, _vault, _config, gateway, command_id, observation) = rcs_command("peer-local");
+    let permit = gateway
+        .begin_rcs_send_attempt(command_id, &observation, 1_000)
+        .unwrap();
+    let tmp_id = permit.tmp_id().to_owned();
+    let google_conversation_id = permit.google_conversation_id().to_owned();
+    let outbox_before = gateway.pending_outbox().unwrap().len();
+
+    assert!(
+        gateway
+            .record_native_rcs_outcome_unknown(command_id, "wrong-tmp", &google_conversation_id)
+            .is_err()
+    );
+    assert_eq!(
+        gateway
+            .record_native_rcs_outcome_unknown(command_id, &tmp_id, &google_conversation_id)
+            .unwrap(),
+        SendState::OutcomeUnknown
+    );
+    let outbox_after_unknown = gateway.pending_outbox().unwrap().len();
+    assert_eq!(outbox_after_unknown, outbox_before + 1);
+    assert_eq!(
+        gateway
+            .record_native_rcs_outcome_unknown(command_id, &tmp_id, &google_conversation_id)
+            .unwrap(),
+        SendState::OutcomeUnknown
+    );
+    assert_eq!(
+        gateway.pending_outbox().unwrap().len(),
+        outbox_after_unknown
+    );
+
+    let (_directory, _vault, _config, gateway, command_id, observation) = rcs_command("peer-local");
+    let permit = gateway
+        .begin_rcs_send_attempt(command_id, &observation, 1_000)
+        .unwrap();
+    let tmp_id = permit.tmp_id().to_owned();
+    let google_conversation_id = permit.google_conversation_id().to_owned();
+    gateway.record_rcs_submitted(command_id).unwrap();
+    assert_eq!(
+        gateway
+            .record_native_rcs_outcome_unknown(command_id, &tmp_id, &google_conversation_id)
+            .unwrap(),
+        SendState::SubmittedToOs
     );
 }
 

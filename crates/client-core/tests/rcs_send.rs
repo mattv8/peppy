@@ -165,6 +165,28 @@ fn unlinked_carrier_remains_allowed() {
 }
 
 #[test]
+fn first_use_unlinked_lifecycle_keeps_carrier_permitted_after_reopen() {
+    let (_directory, vault, config, gateway, command_id) = carrier_command();
+    gateway
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            1_000,
+            1_000,
+        )
+        .unwrap();
+    drop(gateway);
+
+    let reopened = unlocked(&config, &vault);
+    assert!(matches!(
+        reopened.begin_send_attempt_at(command_id, 1_000).unwrap(),
+        PermitDecision::Permit(_)
+    ));
+}
+
+#[test]
 fn linked_unknown_carrier_is_blocked_without_an_attempt() {
     let (_directory, _vault, _config, gateway, command_id) = carrier_command();
     let mut unknown = observation("peer-local", 1);
@@ -703,6 +725,61 @@ fn rcs_command_for_peer_with_body(
 
 #[path = "rcs_native_handoff.rs"]
 mod native_handoff;
+
+#[test]
+fn terminal_lifecycle_states_refuse_every_rcs_permit_entry_point() {
+    for state in [
+        RcsCapabilityState::Unlinked,
+        RcsCapabilityState::SignedOut,
+        RcsCapabilityState::NeedsRelink,
+    ] {
+        let (_directory, _vault, _config, gateway, command_id, observation) =
+            rcs_command("peer-local");
+        let preparation = gateway.prepare_native_rcs_send(command_id, 1_000).unwrap();
+        gateway
+            .record_rcs_link_lifecycle(state, false, false, false, 1_001, 1_001)
+            .unwrap();
+
+        assert!(
+            gateway
+                .begin_rcs_send_attempt(command_id, &observation, 1_001)
+                .is_err()
+        );
+        assert!(gateway.prepare_native_rcs_send(command_id, 1_001).is_err());
+        assert!(
+            gateway
+                .begin_native_rcs_send(preparation, &observation, 1_001)
+                .is_err()
+        );
+        assert_eq!(
+            gateway
+                .begin_automatic_send_attempt(command_id, Some(&observation), 1_001)
+                .unwrap(),
+            AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
+        );
+
+        let (_directory, _vault, _config, gateway, command_id, observation) =
+            rcs_command("peer-local");
+        let permit = gateway
+            .begin_rcs_send_attempt(command_id, &observation, 1_000)
+            .unwrap();
+        gateway
+            .record_native_rcs_pre_effect_refusal(
+                command_id,
+                permit.tmp_id(),
+                permit.google_conversation_id(),
+            )
+            .unwrap();
+        gateway
+            .record_rcs_link_lifecycle(state, false, false, false, 1_001, 1_001)
+            .unwrap();
+        assert!(
+            gateway
+                .retry_rcs_failed_before_submission(command_id, &observation, 1_001)
+                .is_err()
+        );
+    }
+}
 
 #[test]
 fn current_lookup_withdrawal_revokes_strict_authority_across_reopen() {
@@ -1316,8 +1393,8 @@ fn clock_rollback_invalidates_carrier_proof_until_a_new_lookup_is_recorded() {
 }
 
 #[test]
-fn explicit_unlink_restores_regular_carrier_but_never_a_historically_proven_rcs_chat() {
-    let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+fn explicit_unlink_restores_carrier_even_after_invalidating_a_historical_rcs_mapping() {
+    let (_directory, vault, config, gateway, command_id) = carrier_command();
     let mut linked = observation("peer-local", 1);
     linked.google_candidate_count = 0;
     gateway.verify_rcs_mapping(&linked, 1_000).unwrap();
@@ -1330,25 +1407,385 @@ fn explicit_unlink_restores_regular_carrier_but_never_a_historically_proven_rcs_
     unlinked.mapping_revision = 2;
     unlinked.observed_at_ms = 1_001;
     unlinked.link_state = RcsLinkState::Unlinked;
+    gateway
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            1_001,
+            1_001,
+        )
+        .unwrap();
     gateway.update_rcs_context(&unlinked, 1_001).unwrap();
+    drop(gateway);
+    let gateway = unlocked(&config, &vault);
     assert!(matches!(
         gateway.begin_send_attempt_at(command_id, 1_001).unwrap(),
         PermitDecision::Permit(_)
     ));
 
-    let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+    let (_directory, vault, config, gateway, command_id) = carrier_command();
+    let conversation_id = gateway
+        .pending_commands()
+        .unwrap()
+        .pop()
+        .unwrap()
+        .message
+        .record
+        .conversation_id;
+    gateway
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+        .unwrap();
     let mapped = observation("peer-local", 1);
     gateway.verify_rcs_mapping(&mapped, 1_000).unwrap();
+    gateway
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            1_001,
+            1_001,
+        )
+        .unwrap();
+    assert!(gateway.rcs_mapping(conversation_id).unwrap().is_none());
     let mut unlinked = mapped;
     unlinked.context_revision = 2;
     unlinked.mapping_revision = 2;
     unlinked.observed_at_ms = 1_001;
     unlinked.link_state = RcsLinkState::Unlinked;
     gateway.update_rcs_context(&unlinked, 1_001).unwrap();
+    drop(gateway);
+    let gateway = unlocked(&config, &vault);
     assert!(matches!(
         gateway.begin_send_attempt_at(command_id, 1_001).unwrap(),
         PermitDecision::Permit(_)
     ));
+}
+
+#[test]
+fn durable_explicit_unlink_completion_restores_carrier_idempotently_without_rcs_authority() {
+    let (_directory, vault, config, gateway, command_id) = carrier_command();
+    let conversation_id = gateway
+        .pending_commands()
+        .unwrap()
+        .pop()
+        .unwrap()
+        .message
+        .record
+        .conversation_id;
+    gateway
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+        .unwrap();
+    let mapped = observation("peer-local", 1);
+    gateway.verify_rcs_mapping(&mapped, 1_000).unwrap();
+    gateway
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            1_001,
+            1_001,
+        )
+        .unwrap();
+    gateway
+        .record_rcs_explicit_unlink_completed(1_001, 1_001)
+        .unwrap();
+    gateway
+        .record_rcs_explicit_unlink_completed(1_001, 1_001)
+        .unwrap();
+    assert!(gateway.rcs_mapping(conversation_id).unwrap().is_none());
+    drop(gateway);
+    let reopened = unlocked(&config, &vault);
+    assert!(matches!(
+        reopened.begin_send_attempt_at(command_id, 1_001).unwrap(),
+        PermitDecision::Permit(_)
+    ));
+}
+
+#[test]
+fn lifecycle_only_explicit_unlink_completion_restores_both_carrier_entry_points_after_reopen() {
+    for automatic in [false, true] {
+        let (_directory, vault, config, gateway, command_id) = carrier_command();
+        gateway
+            .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+            .unwrap();
+        gateway
+            .record_rcs_link_lifecycle(
+                RcsCapabilityState::Unlinked,
+                false,
+                false,
+                false,
+                1_001,
+                1_001,
+            )
+            .unwrap();
+        gateway
+            .record_rcs_explicit_unlink_completed(1_001, 1_001)
+            .unwrap();
+        drop(gateway);
+
+        let reopened = unlocked(&config, &vault);
+        if automatic {
+            assert!(matches!(
+                reopened
+                    .begin_automatic_send_attempt(command_id, None, 1_001)
+                    .unwrap(),
+                AutomaticPermitDecision::Carrier(_)
+            ));
+        } else {
+            assert!(matches!(
+                reopened.begin_send_attempt_at(command_id, 1_001).unwrap(),
+                PermitDecision::Permit(_)
+            ));
+        }
+    }
+}
+
+#[test]
+fn lifecycle_only_unlink_without_completion_stays_blocked_after_reopen() {
+    let (_directory, vault, config, gateway, command_id) = carrier_command();
+    gateway
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+        .unwrap();
+    gateway
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            1_001,
+            1_001,
+        )
+        .unwrap();
+    drop(gateway);
+
+    let reopened = unlocked(&config, &vault);
+    assert_eq!(
+        reopened.begin_send_attempt_at(command_id, 1_001).unwrap(),
+        PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
+}
+
+#[test]
+fn lifecycle_only_completion_is_revoked_by_successor_lifecycles() {
+    for successor in [RcsCapabilityState::SignedOut, RcsCapabilityState::Unlinked] {
+        let (_directory, vault, config, gateway, command_id) = carrier_command();
+        gateway
+            .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+            .unwrap();
+        gateway
+            .record_rcs_link_lifecycle(
+                RcsCapabilityState::Unlinked,
+                false,
+                false,
+                false,
+                1_001,
+                1_001,
+            )
+            .unwrap();
+        gateway
+            .record_rcs_explicit_unlink_completed(1_001, 1_001)
+            .unwrap();
+        gateway
+            .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_002, 1_002)
+            .unwrap();
+        gateway
+            .record_rcs_link_lifecycle(successor, false, false, false, 1_003, 1_003)
+            .unwrap();
+        drop(gateway);
+
+        let reopened = unlocked(&config, &vault);
+        assert_eq!(
+            reopened.begin_send_attempt_at(command_id, 1_003).unwrap(),
+            PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+        );
+    }
+}
+
+#[test]
+fn first_use_lifecycle_only_completion_is_a_permitted_no_context_noop() {
+    let (_directory, vault, config, gateway, command_id) = carrier_command();
+    gateway
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            1_000,
+            1_000,
+        )
+        .unwrap();
+    gateway
+        .record_rcs_explicit_unlink_completed(1_000, 1_000)
+        .unwrap();
+    drop(gateway);
+
+    let reopened = unlocked(&config, &vault);
+    assert!(matches!(
+        reopened.begin_send_attempt_at(command_id, 1_000).unwrap(),
+        PermitDecision::Permit(_)
+    ));
+}
+
+#[test]
+fn explicit_unlink_completion_rejects_missing_terminal_and_stale_lifecycles() {
+    let (_directory, _vault, _config, gateway, _command_id) = carrier_command();
+    assert!(
+        gateway
+            .record_rcs_explicit_unlink_completed(1_000, 1_000)
+            .is_err()
+    );
+
+    for state in [
+        RcsCapabilityState::Linked,
+        RcsCapabilityState::SignedOut,
+        RcsCapabilityState::NeedsRelink,
+    ] {
+        gateway
+            .record_rcs_link_lifecycle(state, false, false, false, 1_000, 1_000)
+            .unwrap();
+        assert!(
+            gateway
+                .record_rcs_explicit_unlink_completed(1_000, 1_000)
+                .is_err()
+        );
+    }
+
+    gateway
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            1_001,
+            1_001,
+        )
+        .unwrap();
+    assert!(
+        gateway
+            .record_rcs_explicit_unlink_completed(1_002, 1_001)
+            .is_err()
+    );
+    assert!(
+        gateway
+            .record_rcs_explicit_unlink_completed(0, 1_001)
+            .is_err()
+    );
+    let (_directory, _vault, _config, fresh_gateway, _command_id) = carrier_command();
+    fresh_gateway
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+        .unwrap();
+    fresh_gateway
+        .verify_rcs_mapping(&observation("peer-local", 1), 1_000)
+        .unwrap();
+    fresh_gateway
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            1_001,
+            1_001,
+        )
+        .unwrap();
+    fresh_gateway
+        .record_rcs_explicit_unlink_completed(1_001, 1_001)
+        .unwrap();
+
+    let (_directory, _vault, _config, stale_gateway, stale_command_id) = carrier_command();
+    stale_gateway
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+        .unwrap();
+    stale_gateway
+        .verify_rcs_mapping(&observation("peer-local", 1), 1_000)
+        .unwrap();
+    stale_gateway
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            1_001,
+            1_001,
+        )
+        .unwrap();
+    assert!(
+        stale_gateway
+            .record_rcs_explicit_unlink_completed(31_002, 31_002)
+            .is_err()
+    );
+    assert_eq!(
+        stale_gateway
+            .begin_send_attempt_at(stale_command_id, 31_002)
+            .unwrap(),
+        PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
+}
+
+#[test]
+fn explicit_unlink_authority_expires_on_every_successor_lifecycle_generation() {
+    for successor in [
+        RcsCapabilityState::Linked,
+        RcsCapabilityState::SignedOut,
+        RcsCapabilityState::NeedsRelink,
+        RcsCapabilityState::Unlinked,
+    ] {
+        let (_directory, vault, config, gateway, command_id) = carrier_command();
+        gateway
+            .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+            .unwrap();
+        gateway
+            .verify_rcs_mapping(&observation("peer-local", 1), 1_000)
+            .unwrap();
+        gateway
+            .record_rcs_link_lifecycle(
+                RcsCapabilityState::Unlinked,
+                false,
+                false,
+                false,
+                1_001,
+                1_001,
+            )
+            .unwrap();
+        gateway
+            .record_rcs_explicit_unlink_completed(1_001, 1_001)
+            .unwrap();
+        if successor == RcsCapabilityState::Unlinked {
+            gateway
+                .record_rcs_link_lifecycle(
+                    RcsCapabilityState::Linked,
+                    true,
+                    true,
+                    true,
+                    1_002,
+                    1_002,
+                )
+                .unwrap();
+            gateway
+                .record_rcs_link_lifecycle(successor, false, false, false, 1_003, 1_003)
+                .unwrap();
+        } else {
+            gateway
+                .record_rcs_link_lifecycle(successor, false, false, false, 1_002, 1_002)
+                .unwrap();
+        }
+        drop(gateway);
+
+        let reopened = unlocked(&config, &vault);
+        assert_eq!(
+            reopened
+                .begin_automatic_send_attempt(command_id, None, 1_003)
+                .unwrap(),
+            AutomaticPermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+        );
+        assert_eq!(
+            reopened.begin_send_attempt_at(command_id, 1_003).unwrap(),
+            PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+        );
+    }
 }
 
 #[test]
@@ -1373,9 +1810,72 @@ fn an_unlinked_observation_without_explicit_owner_action_does_not_enable_carrier
 }
 
 #[test]
+fn observed_unlink_after_a_link_blocks_carrier_after_reopen() {
+    let (_directory, vault, config, gateway, command_id) = carrier_command();
+    let conversation_id = gateway
+        .pending_commands()
+        .unwrap()
+        .pop()
+        .unwrap()
+        .message
+        .record
+        .conversation_id;
+    gateway
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+        .unwrap();
+    gateway
+        .verify_rcs_mapping(&observation("peer-local", 1), 1_000)
+        .unwrap();
+    gateway
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            1_001,
+            1_001,
+        )
+        .unwrap();
+    assert!(gateway.rcs_mapping(conversation_id).unwrap().is_none());
+    drop(gateway);
+
+    let reopened = unlocked(&config, &vault);
+    assert_eq!(
+        reopened.begin_send_attempt_at(command_id, 1_001).unwrap(),
+        PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    );
+}
+
+#[test]
+fn previously_linked_terminal_lifecycle_states_block_carrier_after_reopen() {
+    for state in [
+        RcsCapabilityState::SignedOut,
+        RcsCapabilityState::NeedsRelink,
+    ] {
+        let (_directory, vault, config, gateway, command_id) = carrier_command();
+        gateway
+            .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+            .unwrap();
+        gateway
+            .record_rcs_link_lifecycle(state, false, false, false, 1_001, 1_001)
+            .unwrap();
+        drop(gateway);
+
+        let reopened = unlocked(&config, &vault);
+        assert_eq!(
+            reopened.begin_send_attempt_at(command_id, 1_001).unwrap(),
+            PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+        );
+    }
+}
+
+#[test]
 fn terminal_link_states_do_not_fall_back_to_carrier() {
     for link_state in [RcsLinkState::NeedsRelink, RcsLinkState::SignedOut] {
         let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+        gateway
+            .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 999, 999)
+            .unwrap();
         let mut unavailable = observation("peer-local", 1);
         unavailable.google_candidate_count = 0;
         unavailable.link_state = link_state;
@@ -1391,6 +1891,9 @@ fn terminal_link_states_do_not_fall_back_to_carrier() {
 fn terminal_context_cannot_be_relabelled_as_an_explicit_unlink() {
     for link_state in [RcsLinkState::NeedsRelink, RcsLinkState::SignedOut] {
         let (_directory, _vault, _config, gateway, command_id) = carrier_command();
+        gateway
+            .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 999, 999)
+            .unwrap();
         let mut terminal = observation("peer-local", 1);
         terminal.google_candidate_count = 0;
         terminal.link_state = link_state;

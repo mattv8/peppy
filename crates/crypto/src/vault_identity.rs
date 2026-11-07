@@ -441,6 +441,7 @@ mod tests {
 
     const VAULT: &str = "00112233-4455-6677-8899-aabbccddeeff";
     const ANCHOR: &str = "70657070792d7661756c742d6964656e746974792d616e63686f722d7631000001000100112233445566778899aabbccddeeff102132435465768798a9bacbdcedfe0fffeeddccbbaa99887766554433221100000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f918a360d58325ba711dc0f6f14c31c939ba441c0dfd05a33a8e44cbd7fe7a490";
+    const RECOVERY_RECORD: &str = "70657070792d7661756c742d6964656e746974792d7265636f766572792d763100000100010001101112131415161718191a1b1c1d1e1f00112233445566778899aabbccddeeff01020304202122232425262728292a2b2c2d2e2f3031323334353637000000a3404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2";
 
     fn hex(value: &str) -> Vec<u8> {
         (0..value.len())
@@ -483,6 +484,27 @@ mod tests {
             identity.uuid(),
             Uuid::parse_str("f19ab0ba-7d10-8fea-a890-deef44d160fc").unwrap()
         );
+    }
+
+    #[test]
+    fn independent_recovery_record_codec_vector_round_trips_exactly() {
+        let bytes = hex(RECOVERY_RECORD);
+        let record = VaultIdentityRecoveryRecord::decode(&bytes).unwrap();
+
+        assert_eq!(bytes.len(), RECOVERY_BYTES);
+        assert_eq!(
+            record.profile(),
+            &KeyProfile {
+                crypto_suite: 1,
+                salt: [
+                    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+                    0x1d, 0x1e, 0x1f,
+                ],
+                vault_id: Uuid::parse_str(VAULT).unwrap(),
+                key_epoch: 0x0102_0304,
+            }
+        );
+        assert_eq!(record.encode(), bytes);
     }
 
     fn profile(epoch: u32) -> KeyProfile {

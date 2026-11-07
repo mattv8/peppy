@@ -22,6 +22,12 @@ fn sql(config: &ClientConfig) -> Connection {
     connection
 }
 
+fn outbox_count(config: &ClientConfig) -> i64 {
+    sql(config)
+        .query_row("SELECT COUNT(*) FROM outbox", [], |row| row.get(0))
+        .unwrap()
+}
+
 fn publish_gateway(client: &Client, config: &ClientConfig) {
     let observed_at_ms = now();
     client
@@ -462,6 +468,146 @@ fn tmp_status_conflict_is_atomic_and_unchanged_status_keeps_new_association() {
 }
 
 #[test]
+fn tmp_status_rejects_an_immutable_identity_for_a_different_local_message() {
+    let (_dir, _vault, config, client, conversation, owner) = fixture();
+    client
+        .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("first"))
+        .unwrap();
+    let first = only_message(&client, conversation)
+        .payload
+        .record
+        .message_id;
+    let mut second = record("second");
+    second.google_message_id = "second-message".into();
+    client
+        .ingest_rcs_projected_record(conversation, owner.ownership_generation, second)
+        .unwrap();
+    let second = client.messages(conversation).unwrap()[1]
+        .payload
+        .record
+        .message_id;
+    let connection = sql(&config);
+    install_echo_ledger(&connection, second);
+    let first = first.to_string();
+    connection
+        .execute(
+            "INSERT INTO rcs_message_identities(google_message_id,google_conversation_id,conversation_id,ownership_generation,message_id) VALUES(?,?,?,?,?)",
+            params!["immutable", "google-conversation", conversation.to_string(), owner.ownership_generation, first],
+        )
+        .unwrap();
+    let before = fenced_snapshot(&client, &connection, conversation);
+    assert_eq!(
+        client
+            .apply_rcs_projected_status(
+                conversation,
+                owner.ownership_generation,
+                status("immutable", Some("tmp"), RcsProjectedStatus::Delivered),
+            )
+            .unwrap(),
+        RcsReceiveOutcome::Rejected(RcsReceiveCode::IdentityConflict)
+    );
+    assert_eq!(fenced_snapshot(&client, &connection, conversation), before);
+    drop(client);
+    let reopened = open(&config);
+    assert_eq!(
+        fenced_snapshot(&reopened, &connection, conversation),
+        before
+    );
+}
+
+#[test]
+fn projected_delivery_reconciles_an_unknown_attempt_once_without_resend() {
+    let (_dir, vault, config, client, conversation, owner) = fixture();
+    client
+        .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("sent"))
+        .unwrap();
+    let message_id = only_message(&client, conversation)
+        .payload
+        .record
+        .message_id;
+    let connection = sql(&config);
+    install_echo_ledger(&connection, message_id);
+    let command_id: CommandId = connection
+        .query_row(
+            "SELECT command_id FROM rcs_send_ledger WHERE tmp_id='tmp'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap()
+        .parse()
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload) VALUES(?,1,'','{}')",
+            [command_id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO attempts(command_id,state,attempted_at_ms,finalized_transport) VALUES(?,'outcome_unknown',1,'rcs')",
+            [command_id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO rcs_message_identities(google_message_id,google_conversation_id,conversation_id,ownership_generation,message_id) VALUES(?,?,?,?,?)",
+            params!["delivery", "google-conversation", conversation.to_string(), owner.ownership_generation, message_id.to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        client
+            .apply_rcs_projected_status(
+                conversation,
+                owner.ownership_generation,
+                status("delivery", None, RcsProjectedStatus::Delivered),
+            )
+            .unwrap(),
+        RcsReceiveOutcome::StatusApplied
+    );
+    let before = outbox_count(&config);
+    drop(client);
+    let reopened = unlocked(&config, &vault);
+    let delivered = status("delivery", Some("tmp"), RcsProjectedStatus::Delivered);
+    assert_eq!(
+        reopened
+            .apply_rcs_projected_status(conversation, owner.ownership_generation, delivered.clone())
+            .unwrap(),
+        RcsReceiveOutcome::StatusUnchanged
+    );
+    assert_eq!(
+        reopened
+            .apply_rcs_projected_status(conversation, owner.ownership_generation, delivered)
+            .unwrap(),
+        RcsReceiveOutcome::StatusUnchanged
+    );
+    assert_eq!(
+        reopened
+            .apply_rcs_projected_status(
+                conversation,
+                owner.ownership_generation,
+                status("delivery", Some("tmp"), RcsProjectedStatus::Sent),
+            )
+            .unwrap(),
+        RcsReceiveOutcome::StatusUnchanged
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT state FROM attempts WHERE command_id=?",
+                [command_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "delivered"
+    );
+    assert_eq!(outbox_count(&config), before + 1);
+    assert_eq!(
+        reopened.resend_rcs_outcome_unknown(command_id),
+        Err(Error::AlreadyAttempted(SendState::Delivered))
+    );
+}
+
+#[test]
 fn reported_facts_converge_for_outgoing_match_and_immutable_duplicate() {
     for first_reported in [false, true] {
         let (directory, vault, client_config, client, conversation, owner) = fixture();
@@ -690,7 +836,7 @@ fn overflow_publication_failure_rolls_back_alert_detector_and_outbox() {
 }
 
 #[test]
-fn opened_fact_only_payload_contains_no_provider_identity() {
+fn serialized_fact_only_payload_contains_no_provider_identity() {
     let message_id = MessageId::new();
     let opened = PrivatePayload::RcsMessageReported {
         message_id,
@@ -743,19 +889,13 @@ fn known_rcs_payload_variants_apply_and_malformed_variants_do_not_deserialize() 
 
 #[derive(Clone, Copy, Debug)]
 enum Denial {
-    Absent,
-    Stale,
-    Multiple,
     CurrentOther,
     StaleGeneration,
     ProviderOwned,
     Unproven,
 }
 
-const DENIALS: [Denial; 7] = [
-    Denial::Absent,
-    Denial::Stale,
-    Denial::Multiple,
+const DENIALS: [Denial; 4] = [
     Denial::CurrentOther,
     Denial::StaleGeneration,
     Denial::ProviderOwned,
@@ -765,9 +905,7 @@ const DENIALS: [Denial; 7] = [
 impl Denial {
     fn expected(self) -> RcsReceiveCode {
         match self {
-            Self::Absent | Self::Stale | Self::Multiple | Self::CurrentOther => {
-                RcsReceiveCode::GatewayUnavailable
-            }
+            Self::CurrentOther => RcsReceiveCode::GatewayUnavailable,
             Self::StaleGeneration | Self::ProviderOwned => RcsReceiveCode::OwnershipStale,
             Self::Unproven => RcsReceiveCode::ConversationUnproven,
         }
@@ -790,34 +928,6 @@ fn denied_scene(denial: Denial) -> Scene {
         .unwrap();
     let connection = sql(&config);
     match denial {
-        Denial::Absent => {
-            connection
-                .execute("DELETE FROM rcs_link_status_projection", [])
-                .unwrap();
-        }
-        Denial::Stale => {
-            connection
-                .execute("UPDATE rcs_link_status_projection SET observed_at_ms=0", [])
-                .unwrap();
-        }
-        Denial::Multiple => {
-            connection
-                .execute(
-                    "INSERT INTO rcs_link_status_projection VALUES(?,?,?,?,?,?,?,?,?)",
-                    params![
-                        DeviceId::new().to_string(),
-                        "linked",
-                        true,
-                        true,
-                        true,
-                        now(),
-                        1,
-                        1,
-                        1
-                    ],
-                )
-                .unwrap();
-        }
         Denial::CurrentOther => {
             connection
                 .execute(
@@ -993,7 +1103,7 @@ fn fenced_detector_rejects_gateway_and_ownership_denials_without_writes() {
             "{denial:?}"
         );
     }
-    // Positive control: the unique current gateway admits the detector (guard: unique_current_gateway in record_rcs_provider_detector, 94109b0f).
+    // Positive control: the local gateway admits the detector.
     let (_directory, _vault, config, client, conversation, owner) = fixture();
     let connection = sql(&config);
     let before = fenced_snapshot(&client, &connection, conversation);
@@ -1009,7 +1119,62 @@ fn fenced_detector_rejects_gateway_and_ownership_denials_without_writes() {
     );
     let after = fenced_snapshot(&client, &connection, conversation);
     assert_eq!(after.detectors, before.detectors + 1);
-    // Reverting the ownership-generation or unique_current_gateway checks in record_rcs_provider_detector fails the loop above.
+    // Reverting the ownership-generation or local-gateway checks fails the loop above.
+}
+
+#[test]
+fn outage_detectors_extend_the_cutover_floor_and_raise_the_ambiguous_window_alert() {
+    let (_directory, vault, config, client, conversation, owner) = fixture();
+    let states = [
+        (RcsCapabilityState::SignedOut, true, true),
+        (RcsCapabilityState::NeedsRelink, true, true),
+        (RcsCapabilityState::Unlinked, true, true),
+        (RcsCapabilityState::Unavailable, false, false),
+        (RcsCapabilityState::Linked, false, true),
+    ];
+    for (index, (state, availability, health)) in states.into_iter().enumerate() {
+        let observed_at_ms = now();
+        client
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id: config.device_id,
+                    state,
+                    availability,
+                    health,
+                    phone_responsive: health,
+                    observed_at_ms,
+                    capability_revision: u64::try_from(index + 2).unwrap(),
+                    feature_bits: 0,
+                    linked_since_ms: None,
+                },
+                &[],
+                observed_at_ms,
+            )
+            .unwrap();
+        assert_eq!(
+            client
+                .record_rcs_provider_detector(
+                    conversation,
+                    owner.ownership_generation,
+                    detector(
+                        i64::try_from(index + 1).unwrap(),
+                        owner.ownership_generation
+                    ),
+                )
+                .unwrap(),
+            RcsIdentityOutcome::Recorded
+        );
+    }
+    let cutover = client.begin_rcs_unlink_cutover(conversation).unwrap();
+    assert_eq!(cutover.freeze_detector_floor, 5);
+    assert!(cutover.ambiguous_detector_alert);
+    drop(client);
+    let reopened = open(&config);
+    let state = reopened.rcs_receive_state(conversation).unwrap().unwrap();
+    assert_eq!(state.detector_floor, 5);
+    assert_eq!(state.alert, RcsReceiveAlert::AmbiguousProviderWindow);
+    drop(reopened);
+    drop(vault);
 }
 
 #[test]

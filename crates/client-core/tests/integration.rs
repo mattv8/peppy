@@ -51,6 +51,7 @@ mod phone_read_ingest;
 mod provider_archive;
 mod rcs_capability;
 mod rcs_mapping;
+mod rcs_restore;
 mod rcs_send;
 mod recipient_identity;
 mod repair_dedup;

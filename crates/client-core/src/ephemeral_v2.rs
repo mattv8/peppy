@@ -203,9 +203,6 @@ pub(crate) fn seal(
     if !store.ephemeral_v2.enabled {
         return Err(LiveError::Disabled);
     }
-    if !store.ephemeral_v2.sharing_enabled && state == TypingStateV2::Started {
-        return Ok(None);
-    }
     let mut clock_candidate = store
         .ephemeral_v2
         .clock
@@ -217,6 +214,10 @@ pub(crate) fn seal(
             mono_ms: clock.mono_ms,
         })
         .map_err(policy_error)?;
+    store.ephemeral_v2.clock = Some(clock_candidate);
+    if !store.ephemeral_v2.sharing_enabled && origin == TypingOriginV2::VaultDevice {
+        return Ok(None);
+    }
     let context = store
         .ephemeral_v2
         .context
@@ -290,7 +291,6 @@ pub(crate) fn seal(
     frame.extend_from_slice(&encrypted.ciphertext);
     signal.ciphertext_b64 = STANDARD.encode(frame);
     signal.validate().map_err(|_| LiveError::Crypto)?;
-    store.ephemeral_v2.clock = Some(clock_candidate);
     store.ephemeral_v2.budget = budget_candidate;
     store.ephemeral_v2.last_sequence = sequence;
     Ok(Some(LiveOutbound {
