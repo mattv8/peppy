@@ -1,0 +1,490 @@
+/* Webhook settings inside the Advanced card. Uses --peppy-* tokens only so light, dark and forced-colors themes all apply. */
+
+#settings-advanced {
+  container: webhooks / inline-size;
+}
+
+.webhooks-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.webhooks-heading {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+#webhooks-settings h3 {
+  margin: 0;
+  color: var(--peppy-text-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+#webhooks-settings h3:focus-visible {
+  outline: 2px solid var(--peppy-focus);
+  outline-offset: 2px;
+}
+
+.webhooks-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+}
+
+.webhook-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--peppy-text-muted);
+}
+
+.webhook-dot[data-tone="success"],
+.webhook-last[data-tone="success"] .webhook-dot,
+.webhook-test-result[data-tone="success"] .webhook-dot {
+  background: var(--peppy-success);
+}
+
+.webhook-dot[data-tone="warning"],
+.webhook-last[data-tone="warning"] .webhook-dot {
+  background: var(--peppy-warning-text);
+}
+
+.webhook-dot[data-tone="error"],
+.webhook-last[data-tone="error"] .webhook-dot,
+.webhook-test-result[data-tone="error"] .webhook-dot {
+  background: var(--peppy-error);
+}
+
+.webhook-compact-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 22px;
+  white-space: nowrap;
+}
+
+.webhooks-callout {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--peppy-border-strong);
+  border-radius: var(--peppy-radius-md);
+  background: var(--peppy-surface-widget);
+}
+
+.webhooks-callout p {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+}
+
+.webhooks-callout b {
+  color: var(--peppy-text-strong);
+  font-weight: 600;
+}
+
+.webhooks-error {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.webhooks-error .settings-error {
+  margin: 0;
+}
+
+/* List: 40px rows, mockup column grid. */
+
+.webhook-list {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  list-style: none;
+  border: 1px solid var(--peppy-border);
+  border-radius: var(--peppy-radius-md);
+}
+
+.webhook-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1.3fr) minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 6px 0 10px;
+  border-top: 1px solid var(--peppy-border);
+  background: var(--peppy-surface-widget);
+}
+
+.webhook-list > li:first-child {
+  border-top: 0;
+}
+
+.webhook-row[data-paused="true"] .webhook-main,
+.webhook-row[data-paused="true"] .webhook-filter {
+  opacity: 0.65;
+}
+
+/* Status dot on the name line: shown only when the last-delivery column is hidden. */
+.webhook-name-status {
+  display: none;
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--peppy-text-muted);
+}
+
+.webhook-name-status[data-tone="success"] {
+  background: var(--peppy-success);
+}
+
+.webhook-name-status[data-tone="warning"] {
+  background: var(--peppy-warning-text);
+}
+
+.webhook-name-status[data-tone="error"] {
+  background: var(--peppy-error);
+}
+
+.webhook-main {
+  min-width: 0;
+}
+
+.webhook-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--peppy-text-strong);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.webhook-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.webhook-badge {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--peppy-border-strong);
+  border-radius: var(--peppy-radius-pill);
+  color: var(--peppy-text-secondary);
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.webhook-url {
+  display: block;
+  overflow: hidden;
+  color: var(--peppy-text-muted);
+  font-family: var(--peppy-font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.webhook-filter {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.webhook-filter b {
+  color: var(--peppy-text-primary);
+  font-weight: 400;
+}
+
+.webhook-last {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 180px;
+  min-width: 0;
+  color: var(--peppy-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.webhook-last-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.webhook-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.webhook-icon-button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--peppy-radius-sm);
+  background: transparent;
+  color: var(--peppy-text-secondary);
+}
+
+.webhook-icon-button:hover:not(:disabled) {
+  background: var(--peppy-surface-hover);
+  color: var(--peppy-text-primary);
+}
+
+.webhook-icon-button:focus-visible,
+.webhook-compact-button:focus-visible {
+  outline: 2px solid var(--peppy-focus);
+  outline-offset: 2px;
+}
+
+.webhook-icon-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.webhook-row-confirm {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  background: var(--peppy-error-surface);
+}
+
+.webhook-confirm-text {
+  min-width: 0;
+  margin: 0;
+  color: var(--peppy-text-primary);
+  font-size: 12px;
+}
+
+.webhook-row-error {
+  grid-column: 1 / -1;
+  margin: 0 0 4px;
+  font-size: 12px;
+}
+
+/* Editor modal. */
+
+#webhook-editor .peppy-modal-panel {
+  width: min(520px, calc(100vw - 32px));
+}
+
+#webhook-editor [data-modal-actions] {
+  justify-content: stretch;
+}
+
+.webhook-editor-body,
+.webhook-field {
+  display: grid;
+  gap: 4px;
+}
+
+.webhook-editor-body {
+  gap: 12px;
+}
+
+.webhook-field-label {
+  color: var(--peppy-text-primary);
+  font-size: 12px;
+}
+
+.webhook-input {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--peppy-border-strong);
+  border-radius: var(--peppy-radius-sm);
+  background: var(--peppy-surface-input);
+  color: var(--peppy-text-primary);
+  font-size: 12.5px;
+}
+
+.webhook-input-mono {
+  font-family: var(--peppy-font-mono);
+  font-size: 12px;
+}
+
+.webhook-input[aria-invalid="true"] {
+  border-color: var(--peppy-error);
+}
+
+.webhook-input:focus-visible {
+  outline: 2px solid var(--peppy-focus);
+  outline-offset: 1px;
+}
+
+.webhook-input:read-only {
+  color: var(--peppy-text-secondary);
+}
+
+.webhook-field-note,
+.webhook-field-hint {
+  margin: 0;
+  color: var(--peppy-text-muted);
+  font-size: 11px;
+}
+
+.webhook-field-status {
+  margin: 0;
+  color: var(--peppy-text-secondary);
+  font-size: 11px;
+}
+
+.webhook-segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  width: max-content;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--peppy-border-strong);
+  border-radius: var(--peppy-radius-sm);
+}
+
+.webhook-segment {
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-left: 1px solid var(--peppy-border-strong);
+  background: transparent;
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+}
+
+.webhook-segment:first-child {
+  border-left: 0;
+}
+
+.webhook-segment:hover:not([aria-checked="true"]) {
+  background: var(--peppy-surface-hover);
+}
+
+.webhook-segment[aria-checked="true"] {
+  background: color-mix(in srgb, var(--peppy-accent) 16%, transparent);
+  color: var(--peppy-text-strong);
+}
+
+.webhook-segment:focus-visible {
+  outline: 2px solid var(--peppy-focus);
+  outline-offset: -2px;
+}
+
+.webhook-secret-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.webhook-secret-row .webhook-input {
+  flex: 1;
+}
+
+.webhook-rotate-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--peppy-radius-sm);
+  background: var(--peppy-error-surface);
+}
+
+.webhook-rotate-confirm p {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+}
+
+.webhook-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+}
+
+.webhook-footer-spacer {
+  flex: 1;
+}
+
+.webhook-test-result {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--peppy-text-secondary);
+  font-size: 11px;
+}
+
+.webhook-test-result[data-tone="error"] {
+  color: var(--peppy-error);
+}
+
+.webhook-test-note {
+  min-width: 0;
+  color: var(--peppy-text-muted);
+  font-size: 11px;
+}
+
+/* Narrow Advanced card: keep the switch, name, and actions; filter and last delivery move out of the way. */
+@container webhooks (max-width: 560px) {
+  .webhook-row {
+    grid-template-columns: 32px minmax(0, 1fr) auto;
+  }
+
+  .webhook-filter,
+  .webhook-last {
+    display: none;
+  }
+
+  .webhook-name-status {
+    display: inline-block;
+  }
+}
+
+@media (forced-colors: active) {
+  .webhook-list,
+  .webhook-row,
+  .webhook-input,
+  .webhook-segmented {
+    border-color: CanvasText;
+  }
+
+  .webhook-row-confirm {
+    background: Canvas;
+  }
+
+  .webhook-segment[aria-checked="true"] {
+    background: Highlight;
+    color: HighlightText;
+  }
+
+  .webhook-dot {
+    forced-color-adjust: none;
+    background: CanvasText;
+  }
+}

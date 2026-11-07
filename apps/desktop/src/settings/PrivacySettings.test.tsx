@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PRIVACY_POLICY_URL, PrivacySettings } from "./PrivacySettings";
+import { peppyCopy } from "../generated/peppyCopy";
 
 const openUrl = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl }));
@@ -20,6 +21,15 @@ describe("PrivacySettings", () => {
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
     expect(openUrl).not.toHaveBeenCalled();
+  });
+
+  it("keeps the scope note as the link's accessible description and marks the footer section", () => {
+    const { container } = render(<PrivacySettings browserHost={false} />);
+
+    const button = screen.getByRole("button", { name: "Privacy Policy" });
+    expect(button).toHaveAccessibleDescription(peppyCopy.privacy_policy_scope);
+    expect(container.querySelector("footer#settings-privacy")).toHaveAttribute("data-settings-section", "privacy-links");
+    expect(screen.queryByText(peppyCopy.privacy_policy_scope, { selector: ":not(.visually-hidden)" })).not.toBeInTheDocument();
   });
 
   it("opens only the canonical policy URL from the native host", async () => {

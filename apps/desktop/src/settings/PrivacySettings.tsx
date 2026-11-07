@@ -10,28 +10,36 @@ export async function openPrivacyPolicy(): Promise<void> {
 
 export function PrivacySettings({ browserHost }: { browserHost: boolean }) {
   const [openError, setOpenError] = useState(false);
-
   const openPolicy = async () => {
     setOpenError(false);
-    try {
-      await openPrivacyPolicy();
-    } catch {
-      setOpenError(true);
-    }
+    try { await openPrivacyPolicy(); } catch { setOpenError(true); }
   };
-
-  return <section id="settings-privacy" className="settings-card" data-settings-section="privacy" aria-labelledby="settings-privacy-title">
-    <h2 id="settings-privacy-title">Privacy</h2>
-    <p className="settings-note">{peppyCopy.privacy_policy_scope}</p>
-    {browserHost ? (
-      <a id="settings-privacy-policy-link" href={PRIVACY_POLICY_URL} target="_blank" rel="noopener noreferrer" className="secondary-button">
-        {peppyCopy.privacy_policy}<span className="visually-hidden"> (opens in a new tab)</span>
-      </a>
-    ) : (
-      <button id="settings-privacy-policy-button" className="secondary-button" type="button" onClick={() => void openPolicy()}>
-        {peppyCopy.privacy_policy}
-      </button>
-    )}
-    {openError && <p id="settings-privacy-policy-error" className="settings-error" role="alert">Privacy Policy could not be opened.</p>}
-  </section>;
+  const scopeId = "settings-privacy-policy-scope";
+  return (
+    <footer id="settings-privacy" data-settings-section="privacy-links">
+      {browserHost ? (
+        <a
+          id="settings-privacy-policy-link"
+          href={PRIVACY_POLICY_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-describedby={scopeId}
+        >
+          {peppyCopy.privacy_policy}
+          <span className="visually-hidden"> (opens in a new tab)</span>
+        </a>
+      ) : (
+        <button
+          id="settings-privacy-policy-button"
+          type="button"
+          aria-describedby={scopeId}
+          onClick={() => void openPolicy()}
+        >
+          {peppyCopy.privacy_policy}
+        </button>
+      )}
+      <span id={scopeId} className="visually-hidden">{peppyCopy.privacy_policy_scope}</span>
+      {openError && <p id="settings-privacy-policy-error" className="settings-error" role="alert">Privacy Policy could not be opened.</p>}
+    </footer>
+  );
 }

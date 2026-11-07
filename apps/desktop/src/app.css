@@ -3,6 +3,7 @@
 * {
   box-sizing: border-box;
 }
+
 html,
 body,
 #root {
@@ -1065,16 +1066,16 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   align-items: end;
   gap: 8px;
 }
-:is(#notification-settings, #settings-messages) .settings-control-row:has(.settings-switch) {
+:is(#notification-settings, #settings-messages, #settings-advanced) .settings-control-row:has(.settings-switch) {
   align-items: center;
 }
-:is(#notification-settings, #settings-messages) .settings-switch {
+:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch {
   position: relative;
   width: 32px;
   height: 18px;
   flex: 0 0 32px;
 }
-:is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"] {
+:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch > input[role="switch"] {
   position: absolute;
   z-index: 1;
   inset: 0;
@@ -1084,7 +1085,7 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   cursor: pointer;
   opacity: 0;
 }
-:is(#notification-settings, #settings-messages) .settings-switch > span {
+:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch > span {
   position: absolute;
   inset: 0;
   border: 1px solid var(--peppy-border-strong);
@@ -1092,7 +1093,7 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   background: var(--peppy-surface-active);
   transition: background-color var(--peppy-duration-fast) var(--peppy-ease-out), border-color var(--peppy-duration-fast) var(--peppy-ease-out);
 }
-:is(#notification-settings, #settings-messages) .settings-switch > span::before {
+:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch > span::before {
   display: block;
   width: 12px;
   height: 12px;
@@ -1102,22 +1103,22 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   content: "";
   transition: transform var(--peppy-duration-fast) var(--peppy-ease-out), background-color var(--peppy-duration-fast) var(--peppy-ease-out);
 }
-:is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"]:checked + span {
+:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch > input[role="switch"]:checked + span {
   border-color: var(--peppy-accent);
   background: var(--peppy-accent);
 }
-:is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"]:checked + span::before {
+:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch > input[role="switch"]:checked + span::before {
   background: var(--peppy-accent-text);
   transform: translateX(14px);
 }
-:is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"]:focus-visible + span {
+:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch > input[role="switch"]:focus-visible + span {
   outline: 2px solid var(--peppy-focus);
   outline-offset: 2px;
 }
-:is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"]:disabled {
+:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch > input[role="switch"]:disabled {
   cursor: not-allowed;
 }
-:is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"]:disabled + span {
+:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch > input[role="switch"]:disabled + span {
   opacity: .55;
 }
 @media (forced-colors: active) {
