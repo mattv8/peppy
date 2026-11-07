@@ -1,7 +1,54 @@
 //! SQLCipher-backed notification lifecycle regression coverage.
 use crate::common::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde_json::{Value, json};
 use tempfile::TempDir;
+
+fn capture_contact_book(
+    client: &Client,
+    owner: &ClientConfig,
+    book_id: &str,
+    generation: &str,
+    contacts: Value,
+) {
+    client
+        .capture_contact_book(
+            &json!({
+                "schema_version": 1,
+                "book": {
+                    "id": book_id,
+                    "owner_device_id": owner.device_id.to_string(),
+                    "generation": generation,
+                    "state": "active",
+                    "region": "US",
+                },
+                "contacts": contacts,
+            })
+            .to_string(),
+        )
+        .unwrap();
+}
+
+fn contact(book_id: &str, id: &str, name: &str, phone: &str) -> Value {
+    json!({
+        "id": id,
+        "book_id": book_id,
+        "display_name": name,
+        "name": {},
+        "phones": [{"id": "p1", "value": phone}],
+        "emails": [],
+        "addresses": [],
+    })
+}
+
+fn incoming_from(address: &str, body: &str, provider_id: &str) -> IncomingSms {
+    IncomingSms {
+        sender_address: address.into(),
+        body: body.into(),
+        provider_message_id: Some(provider_id.into()),
+        ..incoming(body, provider_id)
+    }
+}
 
 fn capture(key: &str, instance: &str, text: &str) -> NotificationCapture {
     NotificationCapture {
@@ -33,6 +80,33 @@ fn legacy_notification_capture_without_icon_deserializes() {
             .unwrap()
             .app_icon_png_base64,
         None
+    );
+}
+
+#[test]
+fn mirrored_banner_source_metadata_uses_structured_app_fields_only() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone = unlocked(&config(&dir, "source-phone", &vault), &vault);
+    let desktop = unlocked(&config(&dir, "source-desktop", &vault), &vault);
+    let mut server = Server::default();
+    let mut notification = capture("source", "one", "malicious title text");
+    notification.title = "malicious title text".into();
+    notification.app_name = "Mail".into();
+    notification.app_icon_png_base64 = Some("iVBORw0KGgoAAAANSUhEUgAAACAAAAAg".into());
+    phone.capture_notification(notification).unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+
+    let candidate = desktop.pending_banner_candidates(1).unwrap().remove(0);
+    assert_eq!(candidate.source_name.as_deref(), Some("Mail"));
+    assert_eq!(
+        candidate.app_icon_png_base64.as_deref(),
+        Some("iVBORw0KGgoAAAANSUhEUgAAACAAAAAg")
+    );
+    assert_ne!(
+        candidate.source_name.as_deref(),
+        Some("malicious title text")
     );
 }
 
@@ -973,5 +1047,228 @@ fn remove_then_immediate_repost_does_not_rebind_old_pending_dismissal() {
             .pending_notification_dismissals(10)
             .unwrap()
             .is_empty()
+    );
+}
+
+#[test]
+fn message_banner_resolves_a_freshly_synced_contact_without_a_prior_address_lookup() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone_config = config(&dir, "fresh-contact-phone", &vault);
+    let phone = unlocked(&phone_config, &vault);
+    let desktop = unlocked(&config(&dir, "fresh-contact-desktop", &vault), &vault);
+    let mut server = Server::default();
+    let sender = "+12025550101";
+
+    capture_contact_book(
+        &phone,
+        &phone_config,
+        "fresh-book",
+        "1",
+        json!([contact("fresh-book", "fresh", "Fresh Contact", sender)]),
+    );
+    phone
+        .capture_incoming(incoming_from(
+            sender,
+            "Malicious body identity",
+            "fresh-message",
+        ))
+        .unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+
+    let candidate = desktop.pending_banner_candidates(1).unwrap().remove(0);
+    assert_eq!(candidate.source_name.as_deref(), Some("Fresh Contact"));
+    assert_ne!(
+        candidate.source_name.as_deref(),
+        Some("Malicious body identity")
+    );
+}
+
+#[test]
+fn message_banner_discards_a_changed_contact_number_before_resolving_the_new_one() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone_config = config(&dir, "changed-contact-phone", &vault);
+    let phone = unlocked(&phone_config, &vault);
+    let desktop = unlocked(&config(&dir, "changed-contact-desktop", &vault), &vault);
+    let mut server = Server::default();
+    let old_number = "+12025550102";
+    let new_number = "+12025550103";
+
+    capture_contact_book(
+        &phone,
+        &phone_config,
+        "changed-book",
+        "1",
+        json!([contact(
+            "changed-book",
+            "changed",
+            "Changed Contact",
+            old_number
+        )]),
+    );
+    phone
+        .capture_incoming(incoming_from(old_number, "first", "changed-first"))
+        .unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+    let initial = desktop.pending_banner_candidates(1).unwrap().remove(0);
+    assert_eq!(initial.source_name.as_deref(), Some("Changed Contact"));
+    desktop.ack_banner_candidates(vec![initial.id]).unwrap();
+
+    capture_contact_book(
+        &phone,
+        &phone_config,
+        "changed-book",
+        "2",
+        json!([contact(
+            "changed-book",
+            "changed",
+            "Changed Contact",
+            new_number
+        )]),
+    );
+    phone
+        .capture_incoming(incoming_from(old_number, "stale-name", "changed-old"))
+        .unwrap();
+    phone
+        .capture_incoming(incoming_from(new_number, "new-name", "changed-new"))
+        .unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+
+    let candidates = desktop.pending_banner_candidates(2).unwrap();
+    let old = candidates
+        .iter()
+        .find(|candidate| candidate.body == "stale-name")
+        .unwrap();
+    let new = candidates
+        .iter()
+        .find(|candidate| candidate.body == "new-name")
+        .unwrap();
+    assert_eq!(old.source_name.as_deref(), Some(old_number));
+    assert_eq!(new.source_name.as_deref(), Some("Changed Contact"));
+}
+
+#[test]
+fn message_banner_falls_back_to_the_number_when_a_new_duplicate_makes_a_prior_match_ambiguous() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone_config = config(&dir, "duplicate-contact-phone", &vault);
+    let phone = unlocked(&phone_config, &vault);
+    let desktop = unlocked(&config(&dir, "duplicate-contact-desktop", &vault), &vault);
+    let mut server = Server::default();
+    let sender = "+12025550104";
+
+    capture_contact_book(
+        &phone,
+        &phone_config,
+        "duplicate-book",
+        "1",
+        json!([contact("duplicate-book", "first", "First Match", sender)]),
+    );
+    phone
+        .capture_incoming(incoming_from(sender, "unique", "duplicate-first"))
+        .unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+    let unique = desktop.pending_banner_candidates(1).unwrap().remove(0);
+    assert_eq!(unique.source_name.as_deref(), Some("First Match"));
+    desktop.ack_banner_candidates(vec![unique.id]).unwrap();
+
+    capture_contact_book(
+        &phone,
+        &phone_config,
+        "duplicate-book",
+        "2",
+        json!([
+            contact("duplicate-book", "first", "First Match", sender),
+            contact("duplicate-book", "second", "Second Match", sender),
+        ]),
+    );
+    phone
+        .capture_incoming(incoming_from(sender, "ambiguous", "duplicate-second"))
+        .unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+
+    let ambiguous = desktop.pending_banner_candidates(1).unwrap().remove(0);
+    assert_eq!(ambiguous.source_name.as_deref(), Some(sender));
+}
+
+#[test]
+fn message_banner_uses_the_message_source_phone_to_disambiguate_matching_contact_books() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let first_config = config(&dir, "first-source-phone", &vault);
+    let second_config = config(&dir, "second-source-phone", &vault);
+    let first = unlocked(&first_config, &vault);
+    let second = unlocked(&second_config, &vault);
+    let desktop = unlocked(&config(&dir, "source-scoped-desktop", &vault), &vault);
+    let mut server = Server::default();
+    let sender = "+12025550105";
+
+    capture_contact_book(
+        &first,
+        &first_config,
+        "first-book",
+        "1",
+        json!([contact(
+            "first-book",
+            "first",
+            "First Phone Contact",
+            sender
+        )]),
+    );
+    capture_contact_book(
+        &second,
+        &second_config,
+        "second-book",
+        "1",
+        json!([contact(
+            "second-book",
+            "second",
+            "Second Phone Contact",
+            sender
+        )]),
+    );
+    first
+        .capture_incoming(incoming_from(sender, "from-first", "source-first"))
+        .unwrap();
+    second
+        .capture_incoming(incoming_from(sender, "from-second", "source-second"))
+        .unwrap();
+    first
+        .capture_incoming(incoming_from("+12025550106", "unknown", "source-unknown"))
+        .unwrap();
+    server.upload(&first);
+    server.upload(&second);
+    server.sync(&desktop);
+
+    let candidates = desktop.pending_banner_candidates(3).unwrap();
+    let first_candidate = candidates
+        .iter()
+        .find(|candidate| candidate.body == "from-first")
+        .unwrap();
+    let second_candidate = candidates
+        .iter()
+        .find(|candidate| candidate.body == "from-second")
+        .unwrap();
+    let unknown_candidate = candidates
+        .iter()
+        .find(|candidate| candidate.body == "unknown")
+        .unwrap();
+    assert_eq!(
+        first_candidate.source_name.as_deref(),
+        Some("First Phone Contact")
+    );
+    assert_eq!(
+        second_candidate.source_name.as_deref(),
+        Some("Second Phone Contact")
+    );
+    assert_eq!(
+        unknown_candidate.source_name.as_deref(),
+        Some("+12025550106")
     );
 }

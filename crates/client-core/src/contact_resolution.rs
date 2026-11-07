@@ -137,15 +137,17 @@ fn refresh(conn: &mut Connection) -> Result<bool, Error> {
         )?;
     }
 
-    let rows: Vec<(String, String, i64, String, Option<i64>)> = {
-        let mut statement = conn.prepare(
+    let rows: Vec<(String, String, i64, String, Option<i64>)> = if visible_ids.is_empty() {
+        Vec::new()
+    } else {
+        let mut statement = conn.prepare(&format!(
             "SELECT c.book_id,c.id,c.revision,c.body,c.deleted_at FROM contacts c \
-               JOIN contact_books b ON b.id=c.book_id AND b.forgotten=0 \
-             LEFT JOIN contact_resolution_projection p ON p.book_id=c.book_id AND p.contact_id=c.id \
-             WHERE p.revision IS NULL OR p.revision!=c.revision ORDER BY c.book_id,c.id LIMIT ?"
-        )?;
+               LEFT JOIN contact_resolution_projection p ON p.book_id=c.book_id AND p.contact_id=c.id \
+             WHERE c.book_id IN ({placeholders}) AND (p.revision IS NULL OR p.revision!=c.revision) \
+             ORDER BY c.book_id,c.id LIMIT {BATCH}"
+        ))?;
         statement
-            .query_map([BATCH], |row| {
+            .query_map(rusqlite::params_from_iter(&visible_ids), |row| {
                 Ok((
                     row.get(0)?,
                     row.get(1)?,
@@ -410,6 +412,19 @@ pub(crate) fn display_resolver(conn: &Connection) -> Result<DisplayResolver<'_>,
         books: books(conn, &visible_book_ids)?,
         visible_book_ids,
     })
+}
+
+/// Returns a resolver only after the visible contact index is current. If the bounded refresh
+/// cannot finish, callers must fall back to structured identity rather than expose a stale name.
+pub(crate) fn current_display_resolver(
+    conn: &mut Connection,
+) -> Result<Option<DisplayResolver<'_>>, Error> {
+    for _ in 0..64 {
+        if !refresh(conn)? {
+            return display_resolver(conn).map(Some);
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn resolve(conn: &mut Connection, input: &str) -> Result<String, Error> {
