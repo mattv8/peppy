@@ -188,3 +188,55 @@ describe("restored browser MCP lifecycle", () => {
     expectSanitizedError(await responseFor(attached, 2), expectedCode);
   });
 });
+
+describe("webhook RPC input validation", () => {
+  const validInput = {
+    name: "Inbox",
+    url: "https://hooks.example.test/peppy",
+    events: ["message.received"],
+    filterMode: "only",
+    filter: [{ address: "alice@example.test", label: "Alice", contactId: null, bookId: "book-1" }],
+    paused: false,
+  };
+
+  async function createWebhook(input: unknown): Promise<{ response: unknown; webhookCreate: ReturnType<typeof vi.fn> }> {
+    const session = new RestoredSession();
+    const webhookCreate = vi.fn(async () => ({ webhook: {}, secret: "s" }));
+    const network = { start: async () => true, stop: async () => undefined, webhookCreate } as unknown as BrowserNetwork;
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "unlock", args: { passphrase: "vault phrase" } });
+    expect(await responseFor(attached, 1)).toMatchObject({ ok: true });
+    attached.emit({ id: 2, command: "webhook_create", args: { input } });
+    return { response: await responseFor(attached, 2), webhookCreate };
+  }
+
+  it("passes a well-formed webhook input through as a typed value", async () => {
+    const { response, webhookCreate } = await createWebhook(validInput);
+    expect(response).toMatchObject({ ok: true });
+    expect(webhookCreate).toHaveBeenCalledWith(validInput);
+  });
+
+  it("accepts a null name and an empty filter", async () => {
+    const { response, webhookCreate } = await createWebhook({ ...validInput, name: null, filterMode: "all", filter: [] });
+    expect(response).toMatchObject({ ok: true });
+    expect(webhookCreate).toHaveBeenCalledWith({ ...validInput, name: null, filterMode: "all", filter: [] });
+  });
+
+  it.each([
+    ["unknown top-level key", { ...validInput, extra: true }],
+    ["unknown filter entry key", { ...validInput, filter: [{ ...validInput.filter[0], extra: "x" }] }],
+    ["wrong filterMode", { ...validInput, filterMode: "some" }],
+    ["missing paused", (({ paused: _paused, ...rest }) => rest)(validInput)],
+    ["oversize filter", { ...validInput, filter: Array.from({ length: 51 }, (_, index) => ({ address: `a${index}@example.test`, label: null, contactId: null, bookId: null })) }],
+    ["bad event", { ...validInput, events: ["message.sent"] }],
+    ["empty events", { ...validInput, events: [] }],
+    ["url over byte bound", { ...validInput, url: `https://example.test/${"a".repeat(2048)}` }],
+    ["non-string label", { ...validInput, filter: [{ ...validInput.filter[0], label: 7 }] }],
+  ])("rejects %s before reaching the network", async (_name, input) => {
+    const { response, webhookCreate } = await createWebhook(input);
+    expect(rpcError(response)).toMatchObject({ code: "invalid-request" });
+    expect(webhookCreate).not.toHaveBeenCalled();
+  });
+});

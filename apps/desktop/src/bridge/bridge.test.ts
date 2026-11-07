@@ -284,6 +284,13 @@ describe("bridge subscriptions", () => {
     await tauriBridge.store_restore();
     await tauriBridge.open_store_subscriptions();
     await tauriBridge.billing_summary();
+    await tauriBridge.webhooks_list();
+    await tauriBridge.webhook_create({ name: null, url: "https://hooks.example.test", events: ["message.received"], filterMode: "all", filter: [], paused: false });
+    await tauriBridge.webhook_update("00000000-0000-4000-8000-000000000001", { name: "Updated", url: "https://hooks.example.test", events: ["message.received"], filterMode: "all", filter: [], paused: false });
+    await tauriBridge.webhook_delete("00000000-0000-4000-8000-000000000001");
+    await tauriBridge.webhook_reveal_secret("00000000-0000-4000-8000-000000000001");
+    await tauriBridge.webhook_rotate_secret("00000000-0000-4000-8000-000000000001");
+    await tauriBridge.webhook_test("00000000-0000-4000-8000-000000000001");
 
     expect(invokeMock).toHaveBeenNthCalledWith(1, "list_devices", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(2, "revoke_device", { deviceId: "device-id" });
@@ -314,6 +321,13 @@ describe("bridge subscriptions", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(27, "store_restore", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(28, "open_store_subscriptions", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(29, "billing_summary", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(30, "webhooks_list", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(31, "webhook_create", { input: { name: null, url: "https://hooks.example.test", events: ["message.received"], filterMode: "all", filter: [], paused: false } });
+    expect(invokeMock).toHaveBeenNthCalledWith(32, "webhook_update", { id: "00000000-0000-4000-8000-000000000001", input: { name: "Updated", url: "https://hooks.example.test", events: ["message.received"], filterMode: "all", filter: [], paused: false } });
+    expect(invokeMock).toHaveBeenNthCalledWith(33, "webhook_delete", { id: "00000000-0000-4000-8000-000000000001" });
+    expect(invokeMock).toHaveBeenNthCalledWith(34, "webhook_reveal_secret", { id: "00000000-0000-4000-8000-000000000001" });
+    expect(invokeMock).toHaveBeenNthCalledWith(35, "webhook_rotate_secret", { id: "00000000-0000-4000-8000-000000000001" });
+    expect(invokeMock).toHaveBeenNthCalledWith(36, "webhook_test", { id: "00000000-0000-4000-8000-000000000001" });
   });
 
   it("opens a media viewer with its conversation, attachment, and message", async () => {

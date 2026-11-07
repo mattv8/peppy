@@ -1,7 +1,7 @@
 import { ATTACHMENT_RETENTION_PROTOCOL_HEADER_NAME, ATTACHMENT_RETENTION_PROTOCOL_HEADER_VALUE } from "@peppy/generated/attachment-retention";
 import { CheckpointError, RuntimeCoreError } from "./checkpoint.js";
 import { BrowserCoreError, CoreRejectedError } from "./core.js";
-import type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceState, McpDeviceStatus, McpGrantView, McpScope } from "@peppy/generated/mcp";
+import type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceState, McpDeviceStatus, McpGrantView, McpScope, WebhookCreated, WebhookInput, WebhookList, WebhookSecret, WebhookTestResult, WebhookView } from "@peppy/generated/mcp";
 
 const MAX_JSON_BYTES = 64 * 1024;
 // Must exceed the server's 15 s long-poll (?wait=15) plus margin for the bounded body read.
@@ -169,6 +169,34 @@ export class BrowserEnrollment {
 
   public async mcpRevokeGrant(id: string): Promise<void> {
     await this.request(`/v1/mcp/grants/${encodeURIComponent(mcpId(id))}/revoke`, "POST", undefined, true);
+  }
+
+  public async webhooksList(): Promise<WebhookList> {
+    return webhookList(await this.request("/v1/mcp/webhooks", "GET", undefined, true));
+  }
+
+  public async webhookCreate(input: WebhookInput): Promise<WebhookCreated> {
+    return webhookCreated(await this.request("/v1/mcp/webhooks", "POST", input, true));
+  }
+
+  public async webhookUpdate(id: string, input: WebhookInput): Promise<WebhookView> {
+    return webhookView(await this.request(`/v1/mcp/webhooks/${encodeURIComponent(mcpId(id))}`, "PUT", input, true));
+  }
+
+  public async webhookDelete(id: string): Promise<void> {
+    await this.request(`/v1/mcp/webhooks/${encodeURIComponent(mcpId(id))}`, "DELETE", undefined, true);
+  }
+
+  public async webhookRevealSecret(id: string): Promise<WebhookSecret> {
+    return webhookSecret(await this.request(`/v1/mcp/webhooks/${encodeURIComponent(mcpId(id))}/secret`, "POST", undefined, true));
+  }
+
+  public async webhookRotateSecret(id: string): Promise<WebhookSecret> {
+    return webhookSecret(await this.request(`/v1/mcp/webhooks/${encodeURIComponent(mcpId(id))}/rotate-secret`, "POST", undefined, true));
+  }
+
+  public async webhookTest(id: string): Promise<WebhookTestResult> {
+    return webhookTestResult(await this.request(`/v1/mcp/webhooks/${encodeURIComponent(mcpId(id))}/test`, "POST", undefined, true));
   }
 
   public async mcpAuthorization(id: string): Promise<McpAuthorizationView> {
@@ -850,7 +878,7 @@ export class BrowserEnrollment {
     }
   }
 
-  private async request<T = Record<string, unknown>>(path: string, method: "GET" | "POST" | "DELETE", body?: unknown, authenticated = false, extraHeaders: Record<string, string> = {}): Promise<T> {
+  private async request<T = Record<string, unknown>>(path: string, method: "GET" | "POST" | "PUT" | "DELETE", body?: unknown, authenticated = false, extraHeaders: Record<string, string> = {}): Promise<T> {
     if (this.signal?.aborted) throw new Error("enrollment-cancelled");
     const token = authenticated ? this.session.tokenForTransport() : undefined;
     const csrfHeader = this.viewValue.mode === "hosted" ? "X-Peppy-CSRF" : "X-Peppy-CSRF-Token";
@@ -942,6 +970,46 @@ function mcpGrant(value: unknown): McpGrantView {
   };
 }
 
+function webhookList(value: unknown): WebhookList {
+  const list = record(value);
+  if (!Array.isArray(list.webhooks)) throw new Error("mcp-response");
+  return { available: requiredBoolean(list, "available"), webhooks: list.webhooks.map(webhookView) };
+}
+
+function webhookCreated(value: unknown): WebhookCreated {
+  const created = record(value);
+  return { webhook: webhookView(created.webhook), secret: required(created, "secret") };
+}
+
+function webhookSecret(value: unknown): WebhookSecret {
+  const secret = record(value);
+  return { id: mcpId(required(secret, "id")), secret: required(secret, "secret") };
+}
+
+function webhookTestResult(value: unknown): WebhookTestResult {
+  const result = record(value);
+  const statusCode = optionalNumber(result, "statusCode");
+  const durationMs = requiredNumber(result, "durationMs");
+  if (statusCode !== null && (!Number.isInteger(statusCode) || statusCode < 100 || statusCode > 599) || !Number.isSafeInteger(durationMs) || durationMs < 0) throw new Error("mcp-response");
+  return { ok: requiredBoolean(result, "ok"), statusCode, durationMs, error: optionalString(result, "error") };
+}
+
+function webhookView(value: unknown): WebhookView {
+  const webhook = record(value);
+  const events = webhook.events;
+  const filter = webhook.filter;
+  if (!Array.isArray(events) || !Array.isArray(filter)) throw new Error("mcp-response");
+  const lastStatusCode = optionalNumber(webhook, "lastStatusCode");
+  const pendingDeliveries = requiredNumber(webhook, "pendingDeliveries");
+  if (lastStatusCode !== null && (!Number.isInteger(lastStatusCode) || lastStatusCode < 100 || lastStatusCode > 599) || !Number.isSafeInteger(pendingDeliveries) || pendingDeliveries < 0) throw new Error("mcp-response");
+  return { id: mcpId(required(webhook, "id")), name: required(webhook, "name"), nameIsDerived: requiredBoolean(webhook, "nameIsDerived"), url: required(webhook, "url"), events: events.map(webhookEvent), filterMode: webhookFilterMode(required(webhook, "filterMode")), filter: filter.map(webhookFilterEntry), paused: requiredBoolean(webhook, "paused"), createdAt: required(webhook, "createdAt"), lastDeliveryState: webhookDeliveryState(required(webhook, "lastDeliveryState")), lastDeliveryAt: optionalString(webhook, "lastDeliveryAt"), lastStatusCode, lastError: optionalString(webhook, "lastError"), pendingDeliveries };
+}
+
+function webhookEvent(value: unknown): "message.received" { if (value !== "message.received") throw new Error("mcp-response"); return value; }
+function webhookFilterMode(value: unknown): "all" | "only" | "except" { if (value !== "all" && value !== "only" && value !== "except") throw new Error("mcp-response"); return value; }
+function webhookDeliveryState(value: unknown): "never" | "delivered" | "retrying" | "failed" { if (value !== "never" && value !== "delivered" && value !== "retrying" && value !== "failed") throw new Error("mcp-response"); return value; }
+function webhookFilterEntry(value: unknown): WebhookView["filter"][number] { const entry = record(value); return { address: required(entry, "address"), label: optionalString(entry, "label"), contactId: optionalString(entry, "contactId"), bookId: optionalString(entry, "bookId") }; }
+
 function mcpAuthorization(value: unknown): McpAuthorizationView {
   const authorization = record(value);
   const scopes = authorization.requestedScopes;
@@ -1012,6 +1080,18 @@ function optionalString(value: Record<string, unknown>, field: string): string |
   const candidate = value[field];
   if (candidate === null) return null;
   if (typeof candidate !== "string") throw new Error("mcp-response");
+  return candidate;
+}
+
+function requiredNumber(value: Record<string, unknown>, field: string): number {
+  if (typeof value[field] !== "number") throw new Error("mcp-response");
+  return value[field];
+}
+
+function optionalNumber(value: Record<string, unknown>, field: string): number | null {
+  const candidate = value[field];
+  if (candidate === null) return null;
+  if (typeof candidate !== "number") throw new Error("mcp-response");
   return candidate;
 }
 

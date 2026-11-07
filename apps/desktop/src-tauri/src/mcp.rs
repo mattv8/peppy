@@ -7,7 +7,8 @@ use crate::{
 use peppy_hosted_api::mcp::{
     McpAuthorizationDecision, McpAuthorizationView, McpDeviceStatus, McpEnrollmentPreparation,
     McpGrantView, McpHostActivationRequest, McpHostCompletionRequest, McpScope,
-    McpWorkerActivateResponse,
+    McpWorkerActivateResponse, WebhookCreated, WebhookInput, WebhookList, WebhookSecret,
+    WebhookTestResult, WebhookView,
 };
 use peppy_hosted_api::{
     computer_enrollment::{ComputerEnrollmentCreated, ComputerEnrollmentStatus},
@@ -279,6 +280,132 @@ pub async fn mcp_revoke_grant(
 }
 
 #[tauri::command]
+pub async fn webhooks_list(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> BridgeResult<WebhookList> {
+    crate::require_main(window.label())?;
+    let command = McpCommand::admit(&state)?;
+    command
+        .session()
+        .await?
+        .api
+        .get_json("/v1/mcp/webhooks", MAX_JSON_BYTES)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn webhook_create(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    input: WebhookInput,
+) -> BridgeResult<WebhookCreated> {
+    crate::require_main(window.label())?;
+    validate_webhook_input(&input)?;
+    let command = McpCommand::admit(&state)?;
+    command
+        .session()
+        .await?
+        .api
+        .post_json("/v1/mcp/webhooks", &input)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn webhook_update(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+    input: WebhookInput,
+) -> BridgeResult<WebhookView> {
+    crate::require_main(window.label())?;
+    let id = webhook_id(&id)?;
+    validate_webhook_input(&input)?;
+    let command = McpCommand::admit(&state)?;
+    command
+        .session()
+        .await?
+        .api
+        .put_json(&format!("/v1/mcp/webhooks/{id}"), &input)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn webhook_delete(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> BridgeResult<()> {
+    crate::require_main(window.label())?;
+    let id = webhook_id(&id)?;
+    let command = McpCommand::admit(&state)?;
+    command
+        .session()
+        .await?
+        .api
+        .delete_discard(&format!("/v1/mcp/webhooks/{id}"))
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn webhook_reveal_secret(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> BridgeResult<WebhookSecret> {
+    crate::require_main(window.label())?;
+    let id = webhook_id(&id)?;
+    let command = McpCommand::admit(&state)?;
+    command
+        .session()
+        .await?
+        .api
+        .post_empty(&format!("/v1/mcp/webhooks/{id}/secret"))
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn webhook_rotate_secret(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> BridgeResult<WebhookSecret> {
+    crate::require_main(window.label())?;
+    let id = webhook_id(&id)?;
+    let command = McpCommand::admit(&state)?;
+    command
+        .session()
+        .await?
+        .api
+        .post_empty(&format!("/v1/mcp/webhooks/{id}/rotate-secret"))
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn webhook_test(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> BridgeResult<WebhookTestResult> {
+    crate::require_main(window.label())?;
+    let id = webhook_id(&id)?;
+    let command = McpCommand::admit(&state)?;
+    command
+        .session()
+        .await?
+        .api
+        .post_empty(&format!("/v1/mcp/webhooks/{id}/test"))
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn mcp_authorization(
     window: WebviewWindow,
     state: State<'_, AppState>,
@@ -348,6 +475,21 @@ fn grant_id(value: &str) -> BridgeResult<Uuid> {
         .ok()
         .filter(|id| id.to_string() == value)
         .ok_or_else(|| BridgeError::new("invalid-request", "The MCP identifier is invalid."))
+}
+
+fn webhook_id(value: &str) -> BridgeResult<Uuid> {
+    grant_id(value)
+}
+
+fn validate_webhook_input(input: &WebhookInput) -> BridgeResult<()> {
+    if serde_json::to_vec(input)
+        .map_err(|_| BridgeError::new("invalid-request", "The webhook input is invalid."))?
+        .len()
+        > 64 * 1024
+    {
+        return Err(BridgeError::new("invalid-request", "The webhook input is too large."));
+    }
+    Ok(())
 }
 
 fn authorization_id(value: &str) -> BridgeResult<&str> {

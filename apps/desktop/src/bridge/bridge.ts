@@ -76,6 +76,12 @@ import type {
   PurchaseOptions,
   StartupStatus,
   StoreProduct,
+  WebhookCreated,
+  WebhookInput,
+  WebhookList,
+  WebhookSecret,
+  WebhookTestResult,
+  WebhookView,
   DesktopBridge as SharedDesktopBridge,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { normalizePhoneNumber } from "@peppy/desktop-ui";
@@ -198,6 +204,13 @@ let fixturePhoneApproved = false;
 let fixtureMcpEnabled = false;
 let fixtureMcpGeneration = 0;
 const fixtureMcpGrants = [{ id: "11111111-1111-4111-8111-111111111111", clientName: "Fixture assistant", scopes: ["conversations:read" as const], createdAt: "Fixture", lastUsedAt: null }];
+const fixtureWebhooks: WebhookView[] = [
+  { id: "22222222-2222-4222-8222-222222222222", name: "Home Assistant", nameIsDerived: false, url: "https://home.example.com/peppy", events: ["message.received"], filterMode: "all", filter: [], paused: false, createdAt: "2026-11-01T12:00:00Z", lastDeliveryState: "delivered", lastDeliveryAt: "2026-11-07T12:00:00Z", lastStatusCode: 200, lastError: null, pendingDeliveries: 0 },
+  { id: "33333333-3333-4333-8333-333333333333", name: "Zapier: Alice & Bob", nameIsDerived: false, url: "https://hooks.zapier.com/example", events: ["message.received"], filterMode: "only", filter: [{ address: "+12025550123", label: "Alice", contactId: null, bookId: null }, { address: "+12025550124", label: "Bob", contactId: null, bookId: null }], paused: false, createdAt: "2026-11-02T12:00:00Z", lastDeliveryState: "failed", lastDeliveryAt: "2026-11-07T12:00:00Z", lastStatusCode: 503, lastError: "http_503", pendingDeliveries: 1 },
+  { id: "44444444-4444-4444-8444-444444444444", name: "n8n triage", nameIsDerived: false, url: "https://n8n.example.com/webhook/triage", events: ["message.received"], filterMode: "except", filter: [{ address: "+12025550125", label: "Mina", contactId: null, bookId: null }], paused: true, createdAt: "2026-11-03T12:00:00Z", lastDeliveryState: "never", lastDeliveryAt: null, lastStatusCode: null, lastError: null, pendingDeliveries: 0 },
+];
+let fixtureWebhookSequence = 4;
+const fixtureWebhook = (input: WebhookInput, id: string): WebhookView => ({ id, name: input.name?.trim() || new URL(input.url).hostname.replace(/^www\./, ""), nameIsDerived: !input.name?.trim(), url: input.url, events: [...input.events], filterMode: input.filterMode, filter: input.filter.map(entry => ({ ...entry })), paused: input.paused, createdAt: "2026-11-07T12:00:00Z", lastDeliveryState: "never", lastDeliveryAt: null, lastStatusCode: null, lastError: null, pendingDeliveries: 0 });
 const fixtureError = (code: string, message: string): BridgeError => ({ code, message });
 const fixtureSearchContacts = [
   { id: "contact-aurora", bookId: "book-pixel8", title: "Aurora Chen", subtitle: "+12025550123" },
@@ -467,6 +480,13 @@ export const fixtureBridge: DesktopBridge = {
   mcp_enable: async () => { fixtureMcpEnabled = true; fixtureMcpGeneration += 1; fixtureDevices.push({ id: `fixture-mcp-device-${fixtureMcpGeneration}`, name: "Peppy MCP", kind: "desktop", role: "device", revoked: false }); return fixtureBridge.mcp_status(); },
   mcp_grants: async () => fixtureMcpGrants.map(grant => ({ ...grant })),
   mcp_revoke_grant: async id => { const index = fixtureMcpGrants.findIndex(grant => grant.id === id); if (index >= 0) fixtureMcpGrants.splice(index, 1); },
+  webhooks_list: async (): Promise<WebhookList> => ({ available: true, webhooks: fixtureWebhooks.map(webhook => ({ ...webhook, filter: webhook.filter.map(entry => ({ ...entry })) })) }),
+  webhook_create: async (input): Promise<WebhookCreated> => { const id = `00000000-0000-4000-8000-${String(++fixtureWebhookSequence).padStart(12, "0")}`; const webhook = fixtureWebhook(input, id); fixtureWebhooks.push(webhook); return { webhook: { ...webhook }, secret: `whsec_fixture_${id.replaceAll("-", "")}` }; },
+  webhook_update: async (id, input) => { const index = fixtureWebhooks.findIndex(webhook => webhook.id === id); if (index < 0) throw fixtureError("webhook_not_found", "Webhook not found."); const current = fixtureWebhooks[index]; const webhook = { ...fixtureWebhook(input, id), createdAt: current.createdAt, lastDeliveryState: current.lastDeliveryState, lastDeliveryAt: current.lastDeliveryAt, lastStatusCode: current.lastStatusCode, lastError: current.lastError, pendingDeliveries: current.pendingDeliveries }; fixtureWebhooks[index] = webhook; return { ...webhook }; },
+  webhook_delete: async id => { const index = fixtureWebhooks.findIndex(webhook => webhook.id === id); if (index < 0) throw fixtureError("webhook_not_found", "Webhook not found."); fixtureWebhooks.splice(index, 1); },
+  webhook_reveal_secret: async id => ({ id, secret: `whsec_fixture_${id.replaceAll("-", "")}` }),
+  webhook_rotate_secret: async id => ({ id, secret: `whsec_rotated_${id.replaceAll("-", "")}` }),
+  webhook_test: async (): Promise<WebhookTestResult> => ({ ok: true, statusCode: 200, durationMs: 142, error: null }),
   mcp_authorization: async () => { throw fixtureError("unsupported", "MCP authorization is unavailable."); },
   mcp_approve_authorization: async () => { throw fixtureError("unsupported", "MCP authorization is unavailable."); },
   mcp_deny_authorization: async () => { throw fixtureError("unsupported", "MCP authorization is unavailable."); },
@@ -653,6 +673,13 @@ export const tauriBridge: DesktopBridge = {
   mcp_enable: () => invoke("mcp_enable"),
   mcp_grants: () => invoke("mcp_grants"),
   mcp_revoke_grant: id => invoke("mcp_revoke_grant", { id }),
+  webhooks_list: () => invoke("webhooks_list"),
+  webhook_create: input => invoke("webhook_create", { input }),
+  webhook_update: (id, input) => invoke("webhook_update", { id, input }),
+  webhook_delete: id => invoke("webhook_delete", { id }),
+  webhook_reveal_secret: id => invoke("webhook_reveal_secret", { id }),
+  webhook_rotate_secret: id => invoke("webhook_rotate_secret", { id }),
+  webhook_test: id => invoke("webhook_test", { id }),
   mcp_authorization: id => invoke("mcp_authorization", { id }),
   mcp_approve_authorization: (id, scopes) => invoke("mcp_approve_authorization", { id, scopes }),
   mcp_deny_authorization: id => invoke("mcp_deny_authorization", { id }),
