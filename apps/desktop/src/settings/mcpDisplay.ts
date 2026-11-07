@@ -12,6 +12,12 @@ const VAULT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 
 export const mcpStateLabel = (state: McpDeviceState) => stateLabels[state];
 
+/** A removed device finished cleanup and has no endpoint to connect to; Re-enable sets it up again. */
+export const isRemovedDevice = (device: McpDeviceStatus["device"] | undefined) => device?.state === "revoked" && !device.cleanupPending;
+
+/** Cleanup in progress and removed devices both leave the endpoint unusable. */
+export const hasUsableEndpoint = (device: NonNullable<McpDeviceStatus["device"]>) => !device.cleanupPending && !isRemovedDevice(device);
+
 /** Offline and pending are transitional right after enablement, while the worker first syncs. */
 export const isStartingState = (state: McpDeviceState | undefined) => state === "offline" || state === "pending";
 

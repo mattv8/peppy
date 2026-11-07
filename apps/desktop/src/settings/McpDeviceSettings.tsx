@@ -4,7 +4,7 @@ import { Modal } from "@peppy/desktop-ui";
 import type { McpDeviceStatus, McpGrantView } from "@peppy/desktop-ui/bridge-contracts";
 import { bridge, type DeviceRosterView } from "../bridge/bridge";
 import { McpDetailsModal } from "./McpDetailsModal";
-import { errorMessage, grantShortId, isStartingState, mcpStateLabel, mcpVaultId } from "./mcpDisplay";
+import { errorMessage, grantShortId, isRemovedDevice, isStartingState, mcpStateLabel, mcpVaultId } from "./mcpDisplay";
 
 type McpDeviceSettingsProps = {
   roster: DeviceRosterView;
@@ -31,6 +31,15 @@ const PENDING_HINT = "Peppy MCP is starting. Status updates automatically.";
 const staleStatusMessage = (reason: unknown) => {
   const detail = errorMessage(reason, "");
   return detail ? `${STALE_STATUS_MESSAGE} ${detail}` : STALE_STATUS_MESSAGE;
+};
+
+/** The removed notice owns the announcement, so a removed device shows no separate status text. */
+const statusHintFor = ({ removed, exhausted, cleanupPending, starting, statusNotice }: { removed: boolean; exhausted: boolean; cleanupPending: boolean; starting: boolean; statusNotice: string }) => {
+  if (removed) return "";
+  if (exhausted) return STILL_WAITING_MESSAGE;
+  if (cleanupPending) return CLEANUP_HINT;
+  if (starting) return PENDING_HINT;
+  return statusNotice;
 };
 
 export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sessionKey, unlocked = false, refreshToken = 0, onDeviceId, onRemove, onMutation }: McpDeviceSettingsProps) {
@@ -140,7 +149,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
 
   const refreshDetails = useCallback((generation: number) => {
     void refreshStatus(() => isCurrentDetails(generation), true);
-    void loadGrants(generation);
+    if (!isRemovedDevice(statusRef.current?.device)) void loadGrants(generation);
   }, [isCurrentDetails, loadGrants, refreshStatus]);
 
   useEffect(() => {
@@ -331,13 +340,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
                 ? "Approval is needed. Remove and re-enable Peppy MCP to create a new enrolled client."
                 : "";
   const exhausted = pollingExhausted && pollActive;
-  const statusHint = exhausted
-    ? STILL_WAITING_MESSAGE
-    : device?.cleanupPending
-      ? CLEANUP_HINT
-      : device?.state === "pending" || settling
-        ? PENDING_HINT
-        : statusNotice;
+  const statusHint = statusHintFor({ removed: isRemovedDevice(device), exhausted, cleanupPending: device?.cleanupPending === true, starting: device?.state === "pending" || settling, statusNotice });
 
   return (
     <>
@@ -396,6 +399,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
             focusFallback={rowRef}
             status={status}
             device={device}
+            canReenable={canEnable}
             refreshing={refreshingStatus}
             copyStatus={copyStatus}
             statusNotice={statusHint}

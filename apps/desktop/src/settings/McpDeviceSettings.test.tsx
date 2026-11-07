@@ -323,7 +323,7 @@ describe("McpDeviceSettings", () => {
       expect(screen.getByText("Status is now Online.")).toBeInTheDocument();
     });
 
-    it("announces cleanup completion once cleanup finishes", async () => {
+    it("announces a finished cleanup of a removed device through the removed notice only", async () => {
       vi.mocked(bridge.mcp_status).mockResolvedValueOnce(device("revoked", true)).mockResolvedValueOnce(device("revoked", true)).mockResolvedValue(device("revoked", false));
       renderSettings();
       await settle();
@@ -331,7 +331,9 @@ describe("McpDeviceSettings", () => {
       await settle();
       await advance(5_000);
       await settle();
-      expect(screen.getByText("Cleanup finished.")).toBeInTheDocument();
+      const dialog = screen.getByRole("dialog", { name: "Peppy MCP" });
+      expect(dialog.querySelector("#mcp-removed-notice")).toHaveTextContent("Peppy MCP was removed.");
+      expect(dialog.querySelector("#mcp-status-notice")).not.toHaveTextContent("Cleanup finished.");
     });
   });
 
@@ -621,6 +623,86 @@ describe("McpDeviceSettings", () => {
         await advance(5_000);
         expect(vi.mocked(bridge.mcp_status).mock.calls.length).toBe(opened + tick);
       }
+    });
+  });
+
+  describe("removed and cleanup presentation", () => {
+    const removedNotice = "Peppy MCP was removed. Close this and select Re-enable to set it up again.";
+
+    it("tells the owner a removed device must be re-enabled, without endpoint actions, steps, or grants", async () => {
+      vi.mocked(bridge.mcp_status).mockResolvedValue(device("revoked"));
+      renderSettings();
+      const dialog = await openDetailsDialog();
+      const notice = dialog.querySelector("#mcp-removed-notice");
+      expect(notice).toHaveAttribute("role", "status");
+      expect(notice).toHaveTextContent(removedNotice);
+      expect(within(dialog).queryByRole("button", { name: "Copy endpoint" })).toBeNull();
+      expect(within(dialog).queryByRole("button", { name: "Refresh status" })).toBeNull();
+      expect(within(dialog).queryByRole("heading", { name: "Connect an AI client" })).toBeNull();
+      expect(within(dialog).queryByRole("heading", { name: "Authorized clients" })).toBeNull();
+      expect(within(dialog).queryByText("https://vault.example/mcp")).toBeNull();
+      expect(bridge.mcp_grants).not.toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: "Review custody consent for Peppy MCP" })).toHaveTextContent("Re-enable");
+    });
+
+    it("drops the re-enable instruction when re-enable is unavailable", async () => {
+      vi.mocked(bridge.mcp_status).mockResolvedValue(device("revoked"));
+      renderSettings({ unlocked: false });
+      const dialog = await openDetailsDialog();
+      expect(dialog.querySelector("#mcp-removed-notice")).toHaveTextContent(/^Peppy MCP was removed\.$/);
+      expect(within(dialog).queryByText(/select Re-enable/)).toBeNull();
+    });
+
+    it("keeps Refresh and the cleanup hint, and hides endpoint actions and steps, while cleanup runs", async () => {
+      vi.mocked(bridge.mcp_status).mockResolvedValue(device("revoked", true));
+      renderSettings();
+      const dialog = await openDetailsDialog();
+      expect(dialog.querySelector("#mcp-status-notice")).toHaveTextContent(CLEANUP_HINT);
+      expect(within(dialog).getByRole("button", { name: "Refresh status" })).toBeInTheDocument();
+      expect(within(dialog).queryByRole("button", { name: "Copy endpoint" })).toBeNull();
+      expect(within(dialog).queryByRole("heading", { name: "Connect an AI client" })).toBeNull();
+      expect(dialog.querySelector("#mcp-removed-notice")).toBeNull();
+      expect(within(dialog).getByRole("heading", { name: "Authorized clients" })).toBeInTheDocument();
+      await waitFor(() => expect(bridge.mcp_grants).toHaveBeenCalled());
+    });
+
+    it("moves a live cleanup-to-removed transition to the notice, stops polling and grant requests, and keeps focus", async () => {
+      vi.useFakeTimers();
+      vi.mocked(bridge.mcp_status).mockResolvedValueOnce(device("revoked", true)).mockResolvedValueOnce(device("revoked", true)).mockImplementation(fresh(device("revoked")));
+      renderSettings();
+      await settle();
+      fireEvent.click(screen.getByRole("button", { name: /Peppy MCP details/i }));
+      await settle();
+      const dialog = screen.getByRole("dialog", { name: "Peppy MCP" });
+      within(dialog).getByRole("button", { name: "Refresh status" }).focus();
+      expect(dialog.querySelector("#mcp-status-notice")).toHaveTextContent(CLEANUP_HINT);
+      const grantCalls = vi.mocked(bridge.mcp_grants).mock.calls.length;
+
+      await act(async () => { vi.advanceTimersByTime(5_000); });
+      await settle();
+      expect(dialog.querySelector("#mcp-removed-notice")).toHaveTextContent("Peppy MCP was removed.");
+      expect(within(dialog).queryByRole("button", { name: "Refresh status" })).toBeNull();
+      expect(within(dialog).queryByRole("button", { name: "Copy endpoint" })).toBeNull();
+      expect(within(dialog).getByRole("button", { name: "Close" })).toHaveFocus();
+      expect(dialog.querySelector("#mcp-status-notice")).not.toHaveTextContent("Cleanup finished.");
+      expect(bridge.mcp_grants).toHaveBeenCalledTimes(grantCalls);
+
+      const statusCalls = vi.mocked(bridge.mcp_status).mock.calls.length;
+      await act(async () => { vi.advanceTimersByTime(60_000); });
+      expect(vi.mocked(bridge.mcp_status).mock.calls.length).toBe(statusCalls);
+      expect(bridge.mcp_grants).toHaveBeenCalledTimes(grantCalls);
+    });
+
+    it("keeps the endpoint actions, steps, and grants for an online device", async () => {
+      vi.mocked(bridge.mcp_status).mockResolvedValue(onlineStatus);
+      renderSettings();
+      const dialog = await openDetailsDialog();
+      expect(within(dialog).getByRole("button", { name: "Copy endpoint" })).toBeInTheDocument();
+      expect(within(dialog).getByRole("button", { name: "Refresh status" })).toBeInTheDocument();
+      expect(within(dialog).getByRole("heading", { name: "Connect an AI client" })).toBeInTheDocument();
+      expect(within(dialog).getByRole("heading", { name: "Authorized clients" })).toBeInTheDocument();
+      expect(dialog.querySelector("#mcp-removed-notice")).toBeNull();
+      await waitFor(() => expect(bridge.mcp_grants).toHaveBeenCalled());
     });
   });
 });
