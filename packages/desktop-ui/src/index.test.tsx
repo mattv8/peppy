@@ -12,6 +12,7 @@ import {
   NavButtons,
   Panel,
   RecipientPanel,
+  RecipientChipInput,
   RecipientPicker,
   ResizeHandle,
   StatusPopover,
@@ -628,6 +629,85 @@ describe("ConversationList interactions", () => {
 });
 
 describe("desktop UI controls", () => {
+  it("renders standalone recipient chips and commits typed phone numbers", () => {
+    const committed = vi.fn();
+    render(<RecipientChipInput recipients={[{ id: "aurora", label: "Aurora" }]} onCommit={committed} />);
+
+    expect(screen.getByText("Aurora")).toBeInTheDocument();
+    const input = screen.getByLabelText("Recipients");
+    fireEvent.change(input, { target: { value: "2025550100" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(committed).toHaveBeenCalledWith(["aurora", "+12025550100"]);
+    expect(screen.queryByText("Group · MMS")).not.toBeInTheDocument();
+  });
+
+  it("removes standalone recipient chips by Backspace and remove button", () => {
+    const committed = vi.fn();
+    render(<RecipientChipInput recipients={[{ id: "aurora", label: "Aurora" }, { id: "sol", label: "Sol" }]} onCommit={committed} />);
+
+    fireEvent.keyDown(screen.getByLabelText("Recipients"), { key: "Backspace" });
+    expect(committed).toHaveBeenLastCalledWith(["aurora"]);
+    fireEvent.click(screen.getByRole("button", { name: "Remove Aurora" }));
+    expect(committed).toHaveBeenLastCalledWith(["sol"]);
+  });
+
+  it("chooses standalone contact suggestions and generates distinct ids", async () => {
+    const committed = vi.fn();
+    const chosen = vi.fn();
+    render(<>
+      <RecipientChipInput recipients={[]} onCommit={committed} onSuggestionChosen={chosen} searchContacts={async () => [{ id: "+12025550100", label: "Aurora" }]} />
+      <RecipientChipInput recipients={[]} onCommit={() => {}} />
+    </>);
+
+    const inputs = screen.getAllByLabelText("Recipients");
+    expect(inputs[0].getAttribute("aria-describedby")).not.toBe(inputs[1].getAttribute("aria-describedby"));
+    fireEvent.change(inputs[0], { target: { value: "Aur" } });
+    const option = await screen.findByRole("option", { name: "Aurora" });
+    fireEvent.mouseDown(option);
+
+    expect(chosen).toHaveBeenCalledWith({ id: "+12025550100", label: "Aurora" });
+    expect(committed).toHaveBeenCalledWith(["+12025550100"]);
+  });
+
+  it("marks a standalone chip input invalid and appends its external description", () => {
+    render(<>
+      <p id="field-error">Add at least one contact.</p>
+      <RecipientChipInput recipients={[]} onCommit={() => {}} hint="Pick contacts." inputLabel="Contacts" invalid describedBy="field-error" />
+    </>);
+
+    const input = screen.getByLabelText("Contacts");
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(input.getAttribute("aria-describedby")).toMatch(/ field-error$/);
+  });
+
+  it("keeps the input valid when no error is present", () => {
+    render(<RecipientChipInput recipients={[]} onCommit={() => {}} inputLabel="Contacts" />);
+
+    expect(screen.getByLabelText("Contacts")).not.toHaveAttribute("aria-invalid");
+  });
+
+  it("shows the hint as visible text only when asked", () => {
+    const { unmount } = render(<RecipientChipInput recipients={[]} onCommit={() => {}} hint="Visible hint" hintVisible inputLabel="Contacts" />);
+    expect(screen.getByText("Visible hint")).not.toHaveClass("sr-only");
+    expect(screen.getByLabelText("Contacts")).toHaveAccessibleDescription("Visible hint");
+    unmount();
+
+    render(<RecipientChipInput recipients={[]} onCommit={() => {}} hint="Hidden hint" inputLabel="Contacts" />);
+    expect(screen.getByText("Hidden hint")).toHaveClass("sr-only");
+  });
+
+  it("applies the standalone variant class only when requested", () => {
+    const { container, unmount } = render(<RecipientChipInput recipients={[]} onCommit={() => {}} variant="standalone" />);
+    expect(container.querySelector("[data-recipient-chip-input]")).toHaveClass("recipient-chip-input", "recipient-chip-input--standalone");
+    unmount();
+
+    const inline = render(<RecipientChipInput recipients={[]} onCommit={() => {}} className="composer-part" />);
+    const root = inline.container.querySelector("[data-recipient-chip-input]");
+    expect(root).toHaveClass("recipient-chip-input", "composer-part");
+    expect(root).not.toHaveClass("recipient-chip-input--standalone");
+  });
+
   it("uses a deterministic fallback avatar for conversations without an identity", () => {
     render(<ConversationList conversations={people} selectedId="conv-a" onSelect={() => {}} />);
     const avatar = screen.getByRole("button", { name: /Aurora/ }).querySelector(".contact-avatar");
