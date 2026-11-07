@@ -50,10 +50,20 @@ The restore verifies the manifest and checksums, verifies image/layout compatibi
 
 Before you reopen access or carrier processing:
 
+- Do not restore the server database while live-typing tickets could still be
+  unexpired. Restoring an older point can revive consumed tickets and reuse
+  incarnation or connection authority; after a restore, restart every server
+  replica before reopening access. See
+  [`raw_live_ticket_table_restore_revives_a_consumed_ticket_and_reuses_authority`](../../services/server/src/api/live_socket_tests/backup_restore_tests.rs).
 - Reapply device and public-link revocations that occurred after the backup, or replace affected device credentials. An old dump can make a revoked token or public image link valid again.
 - Reconcile post-backup key-profile activations from trusted recovery material and establish a trusted owner credential.
 - Resynchronize every existing client or enroll it with a fresh device identity. Peppy has no restore-generation marker, so a reused cursor range can make an old client miss records without an automatic resync signal.
 - Keep old client stores while you reconcile drafts, unuploaded records, encrypted attachments, and carrier attempts. A gateway restored from a client backup needs the restore guard and a fresh enrollment before carrier execution. Do not clear an uncertain attempt to resume sending.
+- Never restore an older client database over a live device. Core cannot detect
+  a database rollback: a copy taken before an RCS send attempt can admit a new
+  send permit for the same command. A copy taken while an attempt is in flight
+  reopens as `OutcomeUnknown` and is never resent. See
+  [`rcs_restore` tests](../../crates/client-core/tests/rcs_restore.rs).
 
 Snapshot history does not execute carrier work. The automated encrypted recovery drill proves a fresh-namespace restore, client decryption, and historical-command blocking. It does not prove continuous existing-client operation or automatic recovery of post-backup revocations. Carrier outcomes remain uncertain until an operator reconciles them.
 

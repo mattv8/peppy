@@ -380,6 +380,15 @@ This reference records non-obvious Peppy domain constraints.
   SELinux denies `hard_link` for app data on current Android, so the link
   path is a fallback, not the primary. See
   [crypto filesystem](../crates/crypto/src/filesystem.rs).
+- After a prior link, only the durable explicit owner-unlink completion
+  (`gateway_record_rcs_explicit_unlink_completed`) restores carrier authority.
+  Observed `Unlinked`, `SignedOut`, and `NeedsRelink` invalidate send mappings
+  and grant no carrier fallback. See [native RCS binding](../crates/mobile-bindings/src/rcs_native.rs).
+- Typing sharing gates only the user's vault-device-origin frames; it does not
+  gate Google-contact display frames. After the off transition commits, it seals
+  no typing frame. See [typing admission](../crates/client-core/src/ephemeral_v2.rs).
+- Google conversation scans report incomplete when records lack IDs or contain
+  conflicting duplicates. See [conversation scans](../apps/android/googlemessages/gmlink/conversations.go).
 
 ## iOS limits
 

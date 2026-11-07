@@ -62,13 +62,13 @@ Evidence boundary: a Pixel 7 on Android 17 with Google Messages 20261020 showed 
 
 ## Google Messages link (sideload)
 
-The Google Messages link runs libgm in the native Android host on the gateway phone. M1 covers sign-in, emoji pairing, local link status, re-link, unlink, and connection hosting only; it does not establish RCS sending, receiving, media, groups, or the complete RCS runtime. Tests, Go checks, and packaged artifacts are separate evidence from owner-approved real-account linking and message delivery. Do not claim general RCS support from the M1 link.
+The Google Messages link runs libgm in the native Android host on the gateway phone. Send and receive code paths exist in the core and host, but production activation (the native send executor and receive sink) remains disabled pending owner approval. Tests, Go checks, and packaged artifacts are separate evidence from owner-approved real-account linking and message delivery. The in-app link copy describes what the link may do once activated; it is not evidence that sending or receiving works. Do not claim RCS send, receive, media, or group support from the link until that activation is approved and verified.
 
-During development, `peppyGoogleMessagesLink` defaults to `false`. A local sideload build opts in with `-PpeppyGoogleMessagesLink=true` after building the AAR. Debug and Play builds exclude libgm, `libgojni.so`, and link notices. Release workflows do not opt in during M1. The full program continues through M9: the launch sideload build will ship with the feature on, not behind a default-off flag, only after AGPL-3.0 notices, corresponding-source information, and explicit owner licensing sign-off. Do not enable releases containing libgm before that gate.
+`peppyGoogleMessagesLink` defaults to `false` for every distribution. A local sideload build can opt in with `-PpeppyGoogleMessagesLink=true` after building the AAR. Debug and Play builds exclude libgm, `libgojni.so`, and link notices. Trusted release builds create the AAR and pass that flag only when the protected `PEPPY_GOOGLE_MESSAGES_LICENSE_SIGNOFF` variable is nonempty; otherwise their direct APK excludes libgm. The distribution verifier receives an explicit libgm-present or libgm-absent expectation. Play/AAB builds never include libgm.
 
 ### Build and check commands
 
-Use Go `1.27.3` (the module declares `go 1.26.0` and `toolchain go1.27.3`), JDK 17, Android SDK API 36/build-tools 35.0.0, and NDK `27.2.12479018`. Pins are libgm `v0.2610.1-0.20261103213626-d9140a5e807e` and gomobile/gobind `v0.0.0-20261011034528-197770444867`. The private safety patch SHA-256 is `04bae7b44c7e970a5e2b8f2056d70bd7e67c00ae2e1712aef22702a19a7250e7`; `prepare-libgm.sh` checks it, copies the pinned upstream into ignored `build/third_party`, applies it, and verifies the resulting tree. From the repository root:
+Use Go `1.27.3` (the module declares `go 1.26.0` and `toolchain go1.27.3`), JDK 17, Android SDK API 36/build-tools 35.0.0, and NDK `27.2.12479018`. Pins are libgm `v0.2610.1-0.20261103213626-d9140a5e807e` and gomobile/gobind `v0.0.0-20261011034528-197770444867`. The private safety patch SHA-256 is `c8090ce0e6da503ed1af75f22e5343de3f439430dce437787e81311859ca8aa3`; `prepare-libgm.sh` checks it, copies the pinned upstream into ignored `build/third_party`, applies it, and verifies the resulting tree. From the repository root:
 
 ```sh
 cd apps/android/googlemessages
@@ -78,7 +78,7 @@ go vet ./...
 test -z "$(gofmt -l .)"
 ```
 
-CI runs those commands without producing an AAR. For a local sideload artifact, set `JAVA_HOME` to JDK 17 and `ANDROID_HOME` to the SDK, then run from the repository root:
+CI builds the AAR, runs `check-licenses.sh` and `check-licenses-test.sh`, and packages a flag-on sideload artifact. For a local sideload artifact, set `JAVA_HOME` to JDK 17 and `ANDROID_HOME` to the SDK, then run from the repository root:
 
 ```sh
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
