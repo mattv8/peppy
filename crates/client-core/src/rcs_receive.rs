@@ -1203,7 +1203,10 @@ mod tests {
         assert_eq!(table, "rcs_lane_ownership");
         store
             .conn
-            .execute("UPDATE schema_meta SET version=?", [crate::SCHEMA_VERSION + 1])
+            .execute(
+                "UPDATE schema_meta SET version=?",
+                [crate::SCHEMA_VERSION + 1],
+            )
             .unwrap();
         drop(store);
         drop(upgraded);
