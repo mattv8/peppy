@@ -69,24 +69,27 @@ type fixtureKnobs struct {
 	gateSend       bool
 	gateAction     gmproto.ActionType
 	gateList       bool
+	getOverride    *gmproto.Conversation
+	getOverrideSet bool
 }
 
 // phoneFixture stands in for Google's servers on localhost. It answers config,
 // sign-in, sends and the long poll, and records every request the link makes.
 type phoneFixture struct {
-	server      *httptest.Server
-	auth        *libgm.AuthData
-	rotations   atomic.Int32
-	current     chan []byte
-	pending     [][]byte
-	stop        chan struct{}
-	gate        chan struct{}
-	gateOnce    sync.Once
-	listOnce    sync.Once
-	streamOnce  sync.Once
-	listReached chan struct{}
-	listRelease chan struct{}
-	streamReady chan struct{}
+	server        *httptest.Server
+	auth          *libgm.AuthData
+	rotations     atomic.Int32
+	current       chan []byte
+	pending       [][]byte
+	stop          chan struct{}
+	gate          chan struct{}
+	gateOnce      sync.Once
+	listOnce      sync.Once
+	streamOnce    sync.Once
+	listReached   chan struct{}
+	listRelease   chan struct{}
+	streamReady   chan struct{}
+	actionReached chan gmproto.ActionType
 
 	mu            sync.Mutex
 	knobs         fixtureKnobs
@@ -105,7 +108,7 @@ type phoneFixture struct {
 // auth is the link's auth: the fixture decrypts its requests and encrypts replies.
 func newPhoneFixture(t *testing.T, auth *libgm.AuthData) *phoneFixture {
 	t.Helper()
-	fixture := &phoneFixture{auth: auth, stop: make(chan struct{}), gate: make(chan struct{}), listReached: make(chan struct{}), listRelease: make(chan struct{}), streamReady: make(chan struct{})}
+	fixture := &phoneFixture{auth: auth, stop: make(chan struct{}), gate: make(chan struct{}), listReached: make(chan struct{}), listRelease: make(chan struct{}), streamReady: make(chan struct{}), actionReached: make(chan gmproto.ActionType, 64)}
 	fixture.server = httptest.NewTLSServer(http.HandlerFunc(fixture.serve))
 	installSafetyDialer(t, fixture.server)
 	t.Cleanup(fixture.server.Close)
@@ -305,6 +308,10 @@ func (fixture *phoneFixture) handleSend(writer http.ResponseWriter, request *htt
 	fixture.mu.Lock()
 	fixture.actions = append(fixture.actions, action.String())
 	fixture.mu.Unlock()
+	select {
+	case fixture.actionReached <- action:
+	default:
+	}
 	if knobs.failStatus != 0 && action == knobs.failAction {
 		writer.WriteHeader(knobs.failStatus)
 		return
@@ -375,6 +382,7 @@ func (fixture *phoneFixture) answerListConversations(data *gmproto.OutgoingRPCDa
 }
 
 func (fixture *phoneFixture) answerGetConversation(data *gmproto.OutgoingRPCData) {
+	knobs := fixture.snapshot()
 	plain, err := fixture.auth.RequestCrypto.Decrypt(data.GetEncryptedProtoData())
 	if err != nil {
 		panic(err)
@@ -390,6 +398,9 @@ func (fixture *phoneFixture) answerGetConversation(data *gmproto.OutgoingRPCData
 			conversation = candidate
 			break
 		}
+	}
+	if knobs.getOverrideSet {
+		conversation = knobs.getOverride
 	}
 	fixture.mu.Unlock()
 	encrypted, err := fixture.auth.RequestCrypto.Encrypt(mustMarshal(&gmproto.GetConversationResponse{Conversation: conversation}))

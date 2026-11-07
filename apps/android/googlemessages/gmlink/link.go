@@ -45,6 +45,8 @@ type Link struct {
 	state               string
 	pairingFrom         string
 	stopCode            string
+	pairingEvidenceID   string
+	runIncarnationID    string
 	auth                *libgm.AuthData
 	seq                 uint64
 	client              *libgm.Client
@@ -96,6 +98,10 @@ type Link struct {
 	pendingConversationEvents    uint64
 	settings                     *gmproto.Settings
 	settingsAt                   time.Time
+	settingsStreamEpoch          uint64
+	conversationObservedAt       map[string]time.Time
+	nativeTicket                 *nativeRcsTicket
+	nativeInFlight               *nativeRcsInFlight
 	settingsVersion              uint64
 	streamEpoch                  uint64
 	streamSource                 libgm.StreamSource
@@ -172,7 +178,7 @@ func Open(state []byte, host Host) (*Link, error) {
 		return nil, err
 	}
 	zerolog.SetGlobalLevel(zerolog.Disabled)
-	link := &Link{host: host, state: decoded.State, stopCode: decoded.StopCode, seq: decoded.Seq, changes: make(chan any, 64), conversationCandidates: make(map[string][]conversationSummary), conversationTargets: make(map[string][]string), conversationRecords: make(map[string]*gmproto.Conversation)}
+	link := &Link{host: host, state: decoded.State, stopCode: decoded.StopCode, pairingEvidenceID: decoded.PairingEvidenceID, runIncarnationID: uuid.NewString(), seq: decoded.Seq, changes: make(chan any, 64), conversationCandidates: make(map[string][]conversationSummary), conversationTargets: make(map[string][]string), conversationRecords: make(map[string]*gmproto.Conversation), conversationObservedAt: make(map[string]time.Time)}
 	if len(decoded.Auth) > 0 && string(decoded.Auth) != "null" {
 		link.auth = libgm.NewAuthData()
 		if err := json.Unmarshal(decoded.Auth, link.auth); err != nil {
@@ -288,6 +294,7 @@ func (link *Link) pair(auth *libgm.AuthData, relink bool, storedSource string) (
 		<-pending.done
 	}
 	previous := link.state
+	previousEvidence := link.pairingEvidenceID
 	if link.closed {
 		link.mu.Unlock()
 		link.outputMu.Unlock()
@@ -317,7 +324,7 @@ func (link *Link) pair(auth *libgm.AuthData, relink bool, storedSource string) (
 		cancel()
 		if !completed {
 			code := pairCode(err)
-			if link.restorePairFor(owner, previous, code) {
+			if link.restorePairFor(owner, previous, previousEvidence, code) {
 				link.emitFor(owner, "link", code, 0)
 			}
 		}
@@ -388,6 +395,9 @@ func (link *Link) pair(auth *libgm.AuthData, relink bool, storedSource string) (
 		link.mu.Unlock()
 		return errPersistFailed
 	}
+	if !relink {
+		link.pairingEvidenceID = uuid.NewString()
+	}
 	link.auth, link.state, link.pairingFrom, link.stopCode = published, stateLinked, "", ""
 	link.mu.Unlock()
 	if err = link.persistIfGeneration(owner); err != nil {
@@ -403,11 +413,11 @@ func (link *Link) pair(auth *libgm.AuthData, relink bool, storedSource string) (
 	return nil
 }
 
-func (link *Link) restorePairFor(owner uint64, previous, code string) bool {
+func (link *Link) restorePairFor(owner uint64, previous, previousEvidence, code string) bool {
 	link.mu.Lock()
 	restored := false
 	if link.state == statePairing && link.generation == owner && link.pairOwner == owner {
-		link.state, link.pairingFrom, link.stopCode = previous, "", code
+		link.state, link.pairingFrom, link.pairingEvidenceID, link.stopCode = previous, "", previousEvidence, code
 		restored = true
 	}
 	link.mu.Unlock()
@@ -788,7 +798,7 @@ func (link *Link) Unlink() error {
 		link.mu.Unlock()
 		return errors.New("unlink_cancelled")
 	}
-	link.state, link.pairingFrom, link.auth = stateUnlinked, "", libgm.NewAuthData()
+	link.state, link.pairingFrom, link.pairingEvidenceID, link.auth = stateUnlinked, "", "", libgm.NewAuthData()
 	link.healthy, link.responding, link.lastOKMS = false, false, 0
 	if err != nil {
 		link.stopCode = "unlink_remote_failed"
@@ -961,7 +971,7 @@ func (link *Link) persistRuntimeAuthSnapshot(generation, revision uint64, snapsh
 	link.authPersistRevision = revision
 	link.seq++
 	auth, authErr := json.Marshal(link.auth)
-	state := persistedState{Version: stateVersion, Seq: link.seq, State: link.state, PairingFrom: link.pairingFrom, StopCode: link.stopCode, Auth: auth}
+	state := persistedState{Version: stateVersion, Seq: link.seq, State: link.state, PairingFrom: link.pairingFrom, StopCode: link.stopCode, PairingEvidenceID: link.pairingEvidenceID, Auth: auth}
 	encoded, stateErr := json.Marshal(state)
 	link.mu.Unlock()
 	if authErr != nil || stateErr != nil {
@@ -1246,11 +1256,12 @@ func (link *Link) commitTerminalLocked(owner uint64, event any) *terminalComplet
 		runGeneration: runGeneration,
 		revision:      link.stateRevision,
 		state: persistedState{
-			Version:     stateVersion,
-			State:       state,
-			PairingFrom: "",
-			StopCode:    code,
-			Auth:        auth,
+			Version:           stateVersion,
+			State:             state,
+			PairingFrom:       "",
+			StopCode:          code,
+			PairingEvidenceID: link.pairingEvidenceID,
+			Auth:              auth,
 		},
 		kind:      "link",
 		code:      code,
@@ -1645,7 +1656,7 @@ func (link *Link) persistIfGeneration(generation uint64) error {
 	}
 	link.seq++
 	auth, err := json.Marshal(link.auth)
-	state := persistedState{Version: stateVersion, Seq: link.seq, State: link.state, PairingFrom: link.pairingFrom, StopCode: link.stopCode, Auth: auth}
+	state := persistedState{Version: stateVersion, Seq: link.seq, State: link.state, PairingFrom: link.pairingFrom, StopCode: link.stopCode, PairingEvidenceID: link.pairingEvidenceID, Auth: auth}
 	encoded, marshalErr := json.Marshal(state)
 	link.mu.Unlock()
 	if err != nil || marshalErr != nil {
@@ -1667,7 +1678,7 @@ func (link *Link) persistForGeneration(generation uint64) error {
 	}
 	link.seq++
 	auth, err := json.Marshal(link.auth)
-	state := persistedState{Version: stateVersion, Seq: link.seq, State: link.state, PairingFrom: link.pairingFrom, StopCode: link.stopCode, Auth: auth}
+	state := persistedState{Version: stateVersion, Seq: link.seq, State: link.state, PairingFrom: link.pairingFrom, StopCode: link.stopCode, PairingEvidenceID: link.pairingEvidenceID, Auth: auth}
 	encoded, marshalErr := json.Marshal(state)
 	link.mu.Unlock()
 	if err != nil || marshalErr != nil {
@@ -1689,7 +1700,7 @@ func (link *Link) persist() error {
 	}
 	link.seq++
 	auth, err := json.Marshal(link.auth)
-	state := persistedState{Version: stateVersion, Seq: link.seq, State: link.state, PairingFrom: link.pairingFrom, StopCode: link.stopCode, Auth: auth}
+	state := persistedState{Version: stateVersion, Seq: link.seq, State: link.state, PairingFrom: link.pairingFrom, StopCode: link.stopCode, PairingEvidenceID: link.pairingEvidenceID, Auth: auth}
 	encoded, marshalErr := json.Marshal(state)
 	link.mu.Unlock()
 	if err != nil || marshalErr != nil {

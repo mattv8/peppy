@@ -65,13 +65,14 @@ type conversationCandidateRecord struct {
 }
 
 type conversationCandidateSnapshot struct {
-	Code          string                        `json:"code"`
-	SnapshotToken string                        `json:"snapshot_token"`
-	Generation    uint64                        `json:"generation"`
-	StreamEpoch   uint64                        `json:"stream_epoch"`
-	Revision      uint64                        `json:"revision"`
-	Complete      bool                          `json:"complete"`
-	Conversations []conversationCandidateRecord `json:"conversations"`
+	Code           string                        `json:"code"`
+	SnapshotToken  string                        `json:"snapshot_token"`
+	Generation     uint64                        `json:"generation"`
+	StreamEpoch    uint64                        `json:"stream_epoch"`
+	Revision       uint64                        `json:"revision"`
+	RunIncarnation string                        `json:"run_incarnation,omitempty"`
+	Complete       bool                          `json:"complete"`
+	Conversations  []conversationCandidateRecord `json:"conversations"`
 }
 
 type conversationPageLoader func(context.Context, *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error)
@@ -102,6 +103,10 @@ func (link *Link) ConversationCandidateSnapshot() string {
 	if !link.hasOwnerVerificationLocked() || !link.conversationIndexComplete || link.conversationIndexGeneration != link.generation || link.conversationIndexStreamEpoch != link.streamEpoch || link.runGeneration != link.generation || link.pendingConversationEvents != 0 {
 		return unavailableConversationCandidateSnapshotJSON()
 	}
+	return link.conversationCandidateSnapshotLocked()
+}
+
+func (link *Link) conversationCandidateSnapshotLocked() string {
 	ids := make([]string, 0, len(link.conversationRecords))
 	for id := range link.conversationRecords {
 		ids = append(ids, id)
@@ -138,13 +143,14 @@ func (link *Link) ConversationCandidateSnapshot() string {
 		})
 	}
 	snapshot := conversationCandidateSnapshot{
-		Code:          "conversation_candidate_snapshot",
-		SnapshotToken: fmt.Sprintf("%d:%d:%d", link.generation, link.streamEpoch, link.indexRevision),
-		Generation:    link.generation,
-		StreamEpoch:   link.streamEpoch,
-		Revision:      link.indexRevision,
-		Complete:      true,
-		Conversations: records,
+		Code:           "conversation_candidate_snapshot",
+		SnapshotToken:  fmt.Sprintf("%d:%d:%d", link.generation, link.streamEpoch, link.indexRevision),
+		Generation:     link.generation,
+		StreamEpoch:    link.streamEpoch,
+		Revision:       link.indexRevision,
+		RunIncarnation: link.runIncarnationID,
+		Complete:       true,
+		Conversations:  records,
 	}
 	encoded, _ := json.Marshal(snapshot)
 	return string(encoded)
@@ -267,6 +273,9 @@ func (link *Link) applyConversationsLocked(conversations []*gmproto.Conversation
 }
 
 func (link *Link) indexConversationsLocked(conversations []*gmproto.Conversation) {
+	if link.conversationObservedAt == nil {
+		link.conversationObservedAt = make(map[string]time.Time)
+	}
 	for _, source := range conversations {
 		conversation := cloneConversation(source)
 		if conversation == nil || conversation.GetConversationID() == "" {
@@ -274,6 +283,7 @@ func (link *Link) indexConversationsLocked(conversations []*gmproto.Conversation
 		}
 		link.removeConversationLocked(conversation.GetConversationID())
 		link.conversationRecords[conversation.GetConversationID()] = conversation
+		link.conversationObservedAt[conversation.GetConversationID()] = time.Now()
 		others := visibleOtherParticipants(conversation)
 		for _, participant := range conversation.GetParticipants() {
 			if !participant.GetIsVisible() {
@@ -297,6 +307,7 @@ func (link *Link) indexConversationsLocked(conversations []*gmproto.Conversation
 }
 
 func (link *Link) removeConversationLocked(id string) {
+	delete(link.conversationObservedAt, id)
 	for _, target := range link.conversationTargets[id] {
 		summaries := link.conversationCandidates[target]
 		for index := len(summaries) - 1; index >= 0; index-- {
@@ -327,6 +338,7 @@ func (link *Link) replaceConversationIndexForContext(ctx context.Context, genera
 	link.conversationCandidates = make(map[string][]conversationSummary)
 	link.conversationTargets = make(map[string][]string)
 	link.conversationRecords = make(map[string]*gmproto.Conversation)
+	link.conversationObservedAt = make(map[string]time.Time)
 	link.indexConversationsLocked(conversations)
 	link.indexRevision++
 	link.conversationIndexComplete = true
@@ -464,6 +476,7 @@ func (link *Link) invalidateConversationIndexLocked() {
 	link.conversationCandidates = make(map[string][]conversationSummary)
 	link.conversationTargets = make(map[string][]string)
 	link.conversationRecords = make(map[string]*gmproto.Conversation)
+	link.conversationObservedAt = make(map[string]time.Time)
 	link.conversationEvents = []conversationEvent{{Code: "conversation_resync"}}
 	link.pendingConversationEvents = 0
 	link.indexRevision++
@@ -489,7 +502,7 @@ func (link *Link) recordSettingsFor(generation uint64, source libgm.StreamSource
 		link.invalidateSettingsLocked()
 		return
 	}
-	link.settings, link.settingsAt = event.Settings, receivedAt
+	link.settings, link.settingsAt, link.settingsStreamEpoch = event.Settings, receivedAt, streamEpoch
 	link.settingsVersion++
 }
 
@@ -501,5 +514,5 @@ func (link *Link) recordSettings(event *libgm.WrappedSettings) {
 }
 
 func (link *Link) invalidateSettingsLocked() {
-	link.settings, link.settingsAt = nil, time.Time{}
+	link.settings, link.settingsAt, link.settingsStreamEpoch = nil, time.Time{}, 0
 }

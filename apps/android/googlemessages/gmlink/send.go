@@ -104,7 +104,8 @@ func (link *Link) PrepareRcs(requestJSON string) string {
 	if link.preparedTicket != nil && !now.Before(link.preparedTicket.expiresAt) {
 		link.clearPreparedTicketLocked()
 	}
-	if link.preparedTicket != nil || link.sendAdmissionInFlight {
+	link.expireNativeTicketLocked(now)
+	if link.preparedTicket != nil || link.nativeTicket != nil || link.nativeInFlight != nil || link.sendAdmissionInFlight {
 		return sendJSON(rcsSendResult{Code: "busy"})
 	}
 	if link.closed || !link.hasOwnerVerificationLocked() || link.runGeneration != link.generation {

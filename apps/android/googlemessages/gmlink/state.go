@@ -3,6 +3,8 @@ package gmlink
 import (
 	"encoding/json"
 	"errors"
+
+	"github.com/google/uuid"
 )
 
 const stateVersion = 1
@@ -16,12 +18,13 @@ const (
 )
 
 type persistedState struct {
-	Version     int             `json:"version"`
-	Seq         uint64          `json:"seq"`
-	State       string          `json:"state"`
-	PairingFrom string          `json:"pairing_from,omitempty"`
-	StopCode    string          `json:"stop_code"`
-	Auth        json.RawMessage `json:"auth,omitempty"`
+	Version           int             `json:"version"`
+	Seq               uint64          `json:"seq"`
+	State             string          `json:"state"`
+	PairingFrom       string          `json:"pairing_from,omitempty"`
+	StopCode          string          `json:"stop_code"`
+	PairingEvidenceID string          `json:"pairing_evidence_id,omitempty"`
+	Auth              json.RawMessage `json:"auth,omitempty"`
 }
 
 func decodeState(data []byte) (persistedState, error) {
@@ -42,6 +45,11 @@ func decodeState(data []byte) (persistedState, error) {
 			return persistedState{}, errors.New("invalid_state")
 		}
 		state.State, state.PairingFrom = state.PairingFrom, ""
+	}
+	if state.State == stateLinked {
+		if _, err := uuid.Parse(state.PairingEvidenceID); err != nil {
+			return persistedState{}, errors.New("missing_pairing_evidence")
+		}
 	}
 	return state, nil
 }
