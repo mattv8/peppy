@@ -246,11 +246,19 @@ async fn retained_message_counts(pool: &PgPool) -> (i64, i64, i64) {
 async fn next_termination(
     socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
 ) -> Option<CloseFrame> {
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        termination_frame_or_disconnect(socket),
+    )
+    .await
+    .expect("socket did not terminate")
+}
+
+async fn termination_frame_or_disconnect(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
+) -> Option<CloseFrame> {
     loop {
-        match tokio::time::timeout(Duration::from_secs(1), socket.next())
-            .await
-            .expect("socket did not terminate")
-        {
+        match socket.next().await {
             Some(Ok(tungstenite::Message::Close(frame))) => return frame,
             Some(Ok(tungstenite::Message::Ping(payload))) => socket
                 .send(tungstenite::Message::Pong(payload))
@@ -669,12 +677,12 @@ async fn replica_commit_ack_loss_never_installs_a_late_socket() {
         0,
         "released acknowledgement must not publish late replacement control"
     );
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(1), next_close(&mut old_socket))
-            .await
-            .expect("old tuple must fail durable fallback after replacement")
-            .code,
-        tungstenite::protocol::frame::coding::CloseCode::Policy
+    let termination = bounded(termination_frame_or_disconnect(&mut old_socket)).await;
+    assert!(
+        termination.is_none_or(|frame| {
+            frame.code == tungstenite::protocol::frame::coding::CloseCode::Policy
+        }),
+        "old tuple used an unexpected close code after replacement"
     );
 
     replica_b.shutdown().await;

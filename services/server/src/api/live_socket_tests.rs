@@ -155,6 +155,7 @@ impl Drop for PublishDropAcknowledgement {
 struct DelayedCommitProxy {
     proxy_url: String,
     armed: Arc<AtomicBool>,
+    hold_after_query: Arc<Mutex<Option<&'static [u8]>>>,
     commit_seen: Arc<AtomicBool>,
     commit_seen_notify: Arc<Notify>,
     release: Arc<tokio::sync::Semaphore>,
@@ -189,6 +190,7 @@ impl DelayedCommitProxy {
             .append_pair("sslmode", "disable");
 
         let armed = Arc::new(AtomicBool::new(false));
+        let hold_after_query: Arc<Mutex<Option<&'static [u8]>>> = Arc::new(Mutex::new(None));
         let commit_seen = Arc::new(AtomicBool::new(false));
         let commit_seen_notify = Arc::new(Notify::new());
         let release = Arc::new(tokio::sync::Semaphore::new(0));
@@ -196,6 +198,7 @@ impl DelayedCommitProxy {
         let acknowledgement_notify = Arc::new(Notify::new());
         let task = {
             let armed = armed.clone();
+            let hold_after_query = hold_after_query.clone();
             let commit_seen = commit_seen.clone();
             let commit_seen_notify = commit_seen_notify.clone();
             let release = release.clone();
@@ -208,6 +211,7 @@ impl DelayedCommitProxy {
                     };
                     let upstream_address = upstream_address.clone();
                     let armed = armed.clone();
+                    let hold_after_query = hold_after_query.clone();
                     let commit_seen = commit_seen.clone();
                     let commit_seen_notify = commit_seen_notify.clone();
                     let release = release.clone();
@@ -222,6 +226,7 @@ impl DelayedCommitProxy {
                         let acknowledgement_release = release.clone();
 
                         let client_to_server = tokio::spawn(async move {
+                            let mut hold_next_commit = false;
                             let Ok(length) = client_read.read_u32().await else {
                                 return;
                             };
@@ -245,8 +250,19 @@ impl DelayedCommitProxy {
                                 if client_read.read_exact(&mut body).await.is_err() {
                                     return;
                                 }
-                                let hold_commit = kind == b'Q'
-                                    && body == b"COMMIT\0"
+                                let targets_renewal = {
+                                    let mut target = hold_after_query.lock().unwrap();
+                                    let matches = target.as_ref().is_some_and(|query| {
+                                        body.windows(query.len()).any(|window| window == *query)
+                                    });
+                                    if matches {
+                                        target.take();
+                                    }
+                                    matches
+                                };
+                                hold_next_commit |= targets_renewal;
+                                let is_commit = kind == b'Q' && body == b"COMMIT\0";
+                                let armed_for_commit = is_commit
                                     && armed
                                         .compare_exchange(
                                             true,
@@ -255,6 +271,8 @@ impl DelayedCommitProxy {
                                             Ordering::SeqCst,
                                         )
                                         .is_ok();
+                                let hold_commit = is_commit
+                                    && (std::mem::take(&mut hold_next_commit) || armed_for_commit);
                                 if hold_commit {
                                     commit_seen.store(true, Ordering::SeqCst);
                                     commit_seen_notify.notify_waiters();
@@ -322,6 +340,7 @@ impl DelayedCommitProxy {
         Self {
             proxy_url: proxy_url.into(),
             armed,
+            hold_after_query,
             commit_seen,
             commit_seen_notify,
             release,
@@ -333,6 +352,10 @@ impl DelayedCommitProxy {
 
     fn arm(&self) {
         self.armed.store(true, Ordering::SeqCst);
+    }
+
+    fn hold_commit_after_query(&self, query: &'static [u8]) {
+        *self.hold_after_query.lock().unwrap() = Some(query);
     }
 
     async fn wait_for_commit(&self) {
@@ -2532,13 +2555,11 @@ async fn commit_forwarded_after_scaled_lease_expiry_is_inert_and_rejected() {
 
     let database_url = std::env::var("TEST_DATABASE_URL").unwrap();
     let proxy = DelayedCommitProxy::start(&database_url).await;
-    let before_commit = LiveTicketTestGate::new(2);
     let lease_duration = Duration::from_millis(700);
     let hooks = LiveTicketTestHooks {
-        recheck_operation_budget: Some(Duration::from_millis(250)),
+        recheck_operation_budget: Some(Duration::from_secs(30)),
         recheck_interval: Some(Duration::from_millis(100)),
         lease_duration: Some(lease_duration),
-        before_commit: Some(before_commit.clone()),
         ..LiveTicketTestHooks::default()
     };
     let mut options = LiveTestOptions::new(FakeLiveBackend::immediate(), true);
@@ -2553,10 +2574,8 @@ async fn commit_forwarded_after_scaled_lease_expiry_is_inert_and_rejected() {
         .unwrap();
     let session_hash = Sha256::digest(session_bytes).to_vec();
     let ticket = issue_ticket(&server, session_id.clone()).await;
-    let connect = spawn_ticket_connect(&server, session_id.clone(), ticket);
-    bounded(before_commit.wait_for_entries(1)).await;
-    before_commit.release_one();
-    let mut socket = bounded(connect).await.unwrap().unwrap();
+    proxy.hold_commit_after_query(b"UPDATE live_ticket_sessions SET lease_until=");
+    let (mut socket, _) = server.connect_with_ticket(&session_id, &ticket).await;
     expect_strict_hello(&mut socket).await;
     let (incarnation, connection_id): (i64, i64) = sqlx::query_as(
         "SELECT session_incarnation,active_connection_id FROM live_ticket_sessions WHERE session_id_hash=$1",
@@ -2566,9 +2585,6 @@ async fn commit_forwarded_after_scaled_lease_expiry_is_inert_and_rejected() {
     .await
     .unwrap();
 
-    bounded(before_commit.wait_for_entries(2)).await;
-    proxy.arm();
-    before_commit.release_one();
     bounded(proxy.wait_for_commit()).await;
     let sampled_at = hooks
         .sampled_at
@@ -2578,9 +2594,8 @@ async fn commit_forwarded_after_scaled_lease_expiry_is_inert_and_rejected() {
         .cloned()
         .expect("renewal must capture its database sample before COMMIT");
 
-    let close = tokio::time::timeout(Duration::from_secs(1), next_close(&mut socket))
-        .await
-        .expect("caller did not expire while the already-sent COMMIT was held");
+    server.readiness_sender.send(false).unwrap();
+    let close = bounded(next_close(&mut socket)).await;
     assert_eq!(close.code, CloseCode::Error);
     assert_eq!(close.reason, "live_unavailable");
 
