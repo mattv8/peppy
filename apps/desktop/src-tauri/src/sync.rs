@@ -257,27 +257,16 @@ pub(crate) fn apply_gateway_refresh(
         .filter(|device| device.revoked)
         .map(|device| device.device_id.clone())
         .collect();
-    let changed = {
-        let mut status = session.status.lock().unwrap_or_else(|p| p.into_inner());
-        let changed = !status.gateways_known
-            || status.gateways != views
-            || status.device_role != device_role
-            || status.rcs_roster_validated != rcs_roster_validated
-            || status.rcs_live_roster != rcs_live_roster
-            || status.revoked_device_ids != revoked_device_ids;
-        status.gateways = views.clone();
-        status.gateways_known = true;
-        status.rcs_roster_validated = rcs_roster_validated;
-        status.rcs_live_roster = rcs_live_roster;
-        status.device_role = device_role;
-        status.revoked_device_ids = revoked_device_ids;
-        changed
-    };
-    session.live_typing.refresh_gateways();
-    if changed {
-        session.persist_gateways(&views);
-        session.notify();
-    }
+    session.live_typing.submit_gateway_refresh(
+        session,
+        crate::live_typing::GatewayRefresh {
+            gateways: views,
+            device_role,
+            rcs_roster_validated,
+            rcs_live_roster,
+            revoked_device_ids,
+        },
+    );
 }
 
 /// Drains published snapshot records and applies journaled records in bounded steps, yielding

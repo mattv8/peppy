@@ -3,14 +3,20 @@ use peppy_client_core::{
     Client, ConversationId, DeviceId, LiveAction, LiveClock, LiveEnableContext,
     LiveEnableGeneration, LiveError, LiveExecutor, LiveOutcome, PeerSessionUpdate,
 };
-use peppy_desktop_api::rcs_status::{
-    snapshot_at, RcsEligibilityState, RcsGatewayState, RcsStatusSnapshot, SnapshotAccess,
+use peppy_desktop_api::{
+    rcs_status::{
+        snapshot_at, RcsEligibilityState, RcsGatewayState, RcsStatusSnapshot, SnapshotAccess,
+    },
+    GatewayView,
 };
 use peppy_protocol::{LiveHelloV2, TypingOriginV2, TypingStateV2};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     pin::Pin,
-    sync::{atomic::Ordering, Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -38,10 +44,37 @@ pub(crate) fn install_events(app: &tauri::AppHandle) {
 }
 
 pub(crate) struct LiveTypingHost {
-    sender: Mutex<Option<mpsc::Sender<Cmd>>>,
+    sender: Mutex<Option<mpsc::UnboundedSender<Cmd>>>,
+    /// User-request budget. Supervisor control asks never draw from it.
+    in_flight: AtomicUsize,
+    refresh_inbox: Mutex<RefreshInbox>,
+    expire_queued: AtomicBool,
+    reevaluate_queued: AtomicBool,
+    socket: Mutex<SocketLifecycle>,
     started: Instant,
     #[cfg(test)]
+    refresh_wakes: AtomicUsize,
+    #[cfg(test)]
+    expire_requests: AtomicUsize,
+    #[cfg(test)]
+    reevaluate_sends: AtomicUsize,
+    #[cfg(test)]
+    socket_wakes: AtomicUsize,
+    #[cfg(test)]
     suspend_clock: Mutex<Option<Arc<TestSuspendClock>>>,
+    #[cfg(test)]
+    mono_override: Mutex<Option<u64>>,
+    #[cfg(test)]
+    status_probe: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+}
+
+/// One reply-bearing command in flight. Dropping it releases the request budget.
+struct RequestSlot<'a>(&'a AtomicUsize);
+
+impl Drop for RequestSlot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 #[cfg(test)]
@@ -88,41 +121,224 @@ impl Default for LiveTypingHost {
     fn default() -> Self {
         Self {
             sender: Mutex::new(None),
+            in_flight: AtomicUsize::new(0),
+            refresh_inbox: Mutex::new(RefreshInbox::default()),
+            expire_queued: AtomicBool::new(false),
+            reevaluate_queued: AtomicBool::new(false),
+            socket: Mutex::new(SocketLifecycle::default()),
             started: Instant::now(),
             #[cfg(test)]
+            refresh_wakes: AtomicUsize::new(0),
+            #[cfg(test)]
+            expire_requests: AtomicUsize::new(0),
+            #[cfg(test)]
+            reevaluate_sends: AtomicUsize::new(0),
+            #[cfg(test)]
+            socket_wakes: AtomicUsize::new(0),
+            #[cfg(test)]
             suspend_clock: Mutex::new(None),
+            #[cfg(test)]
+            mono_override: Mutex::new(None),
+            #[cfg(test)]
+            status_probe: Mutex::new(None),
         }
     }
 }
 
 impl LiveTypingHost {
-    fn install(&self, sender: mpsc::Sender<Cmd>) {
+    fn install(&self, sender: mpsc::UnboundedSender<Cmd>) {
         *self
             .sender
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = Some(sender);
     }
 
-    fn commands(&self) -> Option<mpsc::Sender<Cmd>> {
+    fn sender(&self) -> Option<mpsc::UnboundedSender<Cmd>> {
         self.sender
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .clone()
     }
 
-    /// Gateway status changed; the actor re-derives its context. A full queue is harmless because
-    /// every authority boundary re-derives the context before it admits or publishes anything.
-    pub(crate) fn refresh_gateways(&self) {
-        if let Some(sender) = self.commands() {
-            let _ = sender.try_send(Cmd::GatewayRefresh);
+    fn reserve_request(&self) -> Option<RequestSlot<'_>> {
+        if self.in_flight.fetch_add(1, Ordering::AcqRel) >= REQUEST_LIMIT {
+            self.in_flight.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(RequestSlot(&self.in_flight))
+    }
+
+    /// The refresh inbox holds at most one unprocessed refresh and queues at most one wake. A refresh
+    /// that replaces an unprocessed one marks it superseded, so the actor treats the burst as a
+    /// revocation-capable change and starts a fresh incarnation. Without a running actor the update
+    /// applies inline.
+    pub(crate) fn submit_gateway_refresh(&self, session: &Session, refresh: GatewayRefresh) {
+        let Some(sender) = self.sender() else {
+            apply_gateway_refresh_now(session, &refresh);
+            return;
+        };
+        let mut inbox = self
+            .refresh_inbox
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        inbox.pending = Some(match inbox.pending.take() {
+            Some(_) => PendingRefresh {
+                refresh,
+                superseded: true,
+            },
+            None => PendingRefresh {
+                refresh,
+                superseded: false,
+            },
+        });
+        if inbox.wake_queued {
+            return;
+        }
+        if sender.send(Cmd::RefreshWake).is_ok() {
+            inbox.wake_queued = true;
+            #[cfg(test)]
+            self.refresh_wakes.fetch_add(1, Ordering::AcqRel);
+            return;
+        }
+        let pending = inbox.pending.take();
+        drop(inbox);
+        if let Some(pending) = pending {
+            apply_gateway_refresh_now(session, &pending.refresh);
         }
     }
 
+    fn take_refresh(&self) -> Option<PendingRefresh> {
+        let mut inbox = self
+            .refresh_inbox
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        inbox.wake_queued = false;
+        inbox.pending.take()
+    }
+
+    /// At most one `Expire` is outstanding; the actor clears the flag when it handles it.
+    fn mark_expire_queued(&self) {
+        #[cfg(test)]
+        self.expire_requests.fetch_add(1, Ordering::AcqRel);
+        self.expire_queued.store(true, Ordering::Release);
+    }
+
+    fn clear_expire_queued(&self) {
+        self.expire_queued.store(false, Ordering::Release);
+    }
+
+    /// At most one `Reevaluate` is queued. A wake that arrives while one is pending is absorbed: the
+    /// pending command re-derives from the current status when the actor runs it.
+    pub(crate) fn request_reevaluate(&self) {
+        if self.reevaluate_queued.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let sent = self
+            .sender()
+            .is_some_and(|sender| sender.send(Cmd::Reevaluate).is_ok());
+        if sent {
+            #[cfg(test)]
+            self.reevaluate_sends.fetch_add(1, Ordering::AcqRel);
+        } else {
+            self.reevaluate_queued.store(false, Ordering::Release);
+        }
+    }
+
+    fn clear_reevaluate_queued(&self) {
+        self.reevaluate_queued.store(false, Ordering::Release);
+    }
+
+    /// Records the latest socket lifecycle. Each opening of a socket bumps the epoch, so the actor can
+    /// tell Up→Down→Up from a single Up even when the transitions coalesce. At most one wake is queued.
+    pub(crate) fn set_socket(&self, up: bool) {
+        if !self.set_socket_state(up) {
+            return;
+        }
+        let sent = self
+            .sender()
+            .is_some_and(|sender| sender.send(Cmd::SocketWake).is_ok());
+        if sent {
+            #[cfg(test)]
+            self.socket_wakes.fetch_add(1, Ordering::AcqRel);
+        } else {
+            self.socket
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .wake_queued = false;
+        }
+    }
+
+    /// Returns true when a wake must be sent.
+    fn set_socket_state(&self, up: bool) -> bool {
+        let mut socket = self
+            .socket
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if up && !socket.up {
+            socket.epoch += 1;
+        }
+        socket.up = up;
+        if socket.wake_queued {
+            return false;
+        }
+        socket.wake_queued = true;
+        true
+    }
+
+    /// The actor takes the latest lifecycle and clears the wake, so a later change queues a new one.
+    fn take_socket(&self) -> (bool, u64) {
+        let mut socket = self
+            .socket
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        socket.wake_queued = false;
+        (socket.up, socket.epoch)
+    }
+
+    fn expire_pending(&self) -> bool {
+        self.expire_queued.load(Ordering::Acquire)
+    }
+
     fn clock(&self) -> LiveClock {
+        #[cfg(test)]
+        if let Some(mono_ms) = *self
+            .mono_override
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+        {
+            return LiveClock {
+                wall_ms: wall_ms(),
+                mono_ms,
+            };
+        }
         clock(self.started)
     }
 
+    #[cfg(test)]
+    fn override_mono(&self, mono_ms: Option<u64>) {
+        *self
+            .mono_override
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = mono_ms;
+    }
+
+    #[cfg(test)]
+    fn install_status_probe(&self, probe: std::sync::mpsc::Sender<()>) {
+        *self
+            .status_probe
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(probe);
+    }
+
     fn mono_ms(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(mono_ms) = *self
+            .mono_override
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+        {
+            return mono_ms;
+        }
         self.started
             .elapsed()
             .as_millis()
@@ -304,7 +520,8 @@ const LIVE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LIVE_HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const LIVE_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const LIVE_MAX_FRAME: usize = 64 * 1024;
-const COMMAND_QUEUE_LIMIT: usize = 32;
+/// Reply-bearing requests allowed in flight. Authoritative gateway refreshes are not budgeted.
+const REQUEST_LIMIT: usize = 32;
 const SEALED_QUEUE_LIMIT: usize = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -551,8 +768,39 @@ fn emit_events(
     }
 }
 
-/// Commands are the only way into typing state. Every reply is awaited under cancellation, and the
-/// actor never awaits anything the supervisor or Tauri command holds.
+/// Gateway state computed by `sync::apply_gateway_refresh`. The actor applies it to `session.status`
+/// in the same handler that re-derives the typing context.
+pub(crate) struct GatewayRefresh {
+    pub gateways: Vec<GatewayView>,
+    pub device_role: Option<String>,
+    pub rcs_roster_validated: bool,
+    pub rcs_live_roster: Vec<String>,
+    pub revoked_device_ids: HashSet<String>,
+}
+
+/// Latest socket lifecycle as the supervisor last reported it.
+#[derive(Default)]
+struct SocketLifecycle {
+    up: bool,
+    epoch: u64,
+    wake_queued: bool,
+}
+
+/// The newest unprocessed refresh. `superseded` records that another refresh replaced an earlier one
+/// before the actor ran, so the burst may hide a revocation and must start a fresh incarnation.
+struct PendingRefresh {
+    refresh: GatewayRefresh,
+    superseded: bool,
+}
+
+#[derive(Default)]
+struct RefreshInbox {
+    pending: Option<PendingRefresh>,
+    wake_queued: bool,
+}
+
+/// Commands are the only way into typing state. Reply-bearing commands are awaited under
+/// cancellation; the actor never awaits anything the supervisor or Tauri command holds.
 enum Cmd {
     SendTyping {
         conversation_id: ConversationId,
@@ -563,10 +811,23 @@ enum Cmd {
         enabled: bool,
         reply: oneshot::Sender<Result<(), ()>>,
     },
-    GatewayRefresh,
-    Reevaluate,
+    /// Wakes the actor to take the refresh inbox. Authoritative payloads never travel as commands.
+    RefreshWake,
+    /// Wakes the actor to apply the latest socket lifecycle.
+    SocketWake,
+    /// Test seams: apply one socket transition directly, as the supervisor would have reported it.
+    #[cfg(test)]
     SocketUp,
+    #[cfg(test)]
     SocketDown,
+    /// Direct payload delivery for harness tests; production always goes through the inbox.
+    #[cfg(test)]
+    GatewayRefresh(GatewayRefresh),
+    #[cfg(test)]
+    DisplayCount {
+        reply: oneshot::Sender<usize>,
+    },
+    Reevaluate,
     Retire,
     InboundFrame {
         json: String,
@@ -614,7 +875,14 @@ struct InboundOutcome {
     suspended: bool,
 }
 
-type Published = (u64, Option<u64>);
+/// What the supervisor observes: the incarnation, the next display deadline, and a counter that moves
+/// only on internal retirement (not on ordinary roster or context changes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Published {
+    enabled_seq: u64,
+    next_deadline: Option<u64>,
+    retirements: u64,
+}
 
 struct TypingActor {
     session: Arc<Session>,
@@ -623,8 +891,10 @@ struct TypingActor {
     sharing: bool,
     sharing_epoch: u64,
     enabled_seq: u64,
+    retirements: u64,
     retired: bool,
     socket_up: bool,
+    socket_epoch: u64,
     anchor: (Instant, SystemTime),
     sealed: mpsc::Sender<SealedFrame>,
     published: watch::Sender<Published>,
@@ -644,15 +914,17 @@ impl TypingActor {
             sharing: true,
             sharing_epoch: 0,
             enabled_seq: 0,
+            retirements: 0,
             retired: false,
             socket_up: false,
+            socket_epoch: 0,
             anchor,
             sealed,
             published,
         }
     }
 
-    fn run(mut self, mut commands: mpsc::Receiver<Cmd>) {
+    fn run(mut self, mut commands: mpsc::UnboundedReceiver<Cmd>) {
         while let Some(cmd) = commands.blocking_recv() {
             if matches!(cmd, Cmd::Shutdown) {
                 break;
@@ -674,18 +946,34 @@ impl TypingActor {
             Cmd::SetSharing { enabled, reply } => {
                 let _ = reply.send(self.set_sharing(enabled));
             }
-            Cmd::GatewayRefresh | Cmd::Reevaluate => self.reevaluate(),
-            Cmd::SocketUp => {
-                // A new connection starts a new suspend window; backoff time between sockets is
-                // not observed by the periodic tick and must not read as a suspend gap.
-                self.anchor = self.session.live_typing.suspend_now();
-                self.socket_up = true;
-                self.retired = false;
+            Cmd::RefreshWake => {
+                if let Some(pending) = self.session.live_typing.take_refresh() {
+                    self.apply_refresh(pending);
+                }
+            }
+            #[cfg(test)]
+            Cmd::GatewayRefresh(refresh) => self.apply_refresh(PendingRefresh {
+                refresh,
+                superseded: false,
+            }),
+            #[cfg(test)]
+            Cmd::DisplayCount { reply } => {
+                let _ = reply.send(self.inbound.displays.len());
+            }
+            Cmd::Reevaluate => {
+                self.session.live_typing.clear_reevaluate_queued();
                 self.reevaluate();
             }
+            Cmd::SocketWake => self.apply_socket_wake(),
+            #[cfg(test)]
+            Cmd::SocketUp => {
+                let _ = self.session.live_typing.set_socket_state(true);
+                self.apply_socket_wake();
+            }
+            #[cfg(test)]
             Cmd::SocketDown => {
-                self.socket_up = false;
-                self.retire();
+                let _ = self.session.live_typing.set_socket_state(false);
+                self.apply_socket_wake();
             }
             Cmd::Retire => self.retire(),
             Cmd::InboundFrame { json, reply } => {
@@ -697,7 +985,10 @@ impl TypingActor {
             Cmd::SuspendTick { reply } => {
                 let _ = reply.send(self.observe_suspend());
             }
-            Cmd::Expire => self.expire(),
+            Cmd::Expire => {
+                self.session.live_typing.clear_expire_queued();
+                self.expire();
+            }
             #[cfg(test)]
             Cmd::QueueSealedForTest { json, reply } => {
                 let mark = SealMark {
@@ -710,6 +1001,21 @@ impl TypingActor {
             Cmd::Shutdown => {}
         }
         self.publish();
+    }
+
+    /// A superseded refresh disables the current incarnation before re-deriving it, so any message
+    /// queued under the old incarnation is rejected even when the latest payload matches it.
+    fn apply_refresh(&mut self, pending: PendingRefresh) {
+        if apply_gateway_status(&self.session, &pending.refresh) {
+            self.session.persist_gateways(&pending.refresh.gateways);
+            self.session.notify();
+        }
+        if pending.superseded {
+            self.disable_core();
+            self.incarnation_changed();
+            self.emit();
+        }
+        self.reevaluate();
     }
 
     fn send_typing(&mut self, conversation_id: ConversationId, state: TypingStateV2) -> bool {
@@ -762,11 +1068,7 @@ impl TypingActor {
     }
 
     fn resolve_target(&self, conversation_id: ConversationId) -> Option<DeviceId> {
-        let status = self
-            .session
-            .status
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let status = typing_status(&self.session);
         resolve_typing_target(
             &status,
             snapshot_inputs(&self.session, &status, wall_ms()),
@@ -790,7 +1092,7 @@ impl TypingActor {
     fn reevaluate(&mut self) {
         if self.retired || !self.socket_up || self.session.cancel.is_cancelled() {
             if self.state.generation().is_some() {
-                self.retire();
+                self.teardown();
             }
             return;
         }
@@ -830,11 +1132,44 @@ impl TypingActor {
         self.inbound.clear();
     }
 
+    /// Internal retirement also publishes a retirement so the supervisor closes the socket and
+    /// reconnects for a fresh incarnation. Ordinary context changes do not reach this path.
     fn retire(&mut self) {
+        self.retirements += 1;
+        self.teardown();
+    }
+
+    /// Ends the current incarnation without publishing a retirement: lifecycle changes are reported
+    /// by the socket state, not by the supervisor's retirement check.
+    fn teardown(&mut self) {
         self.retired = true;
         self.disable_core();
         self.incarnation_changed();
         self.emit();
+    }
+
+    /// Applies the latest socket lifecycle. A new epoch means a new socket was opened since the actor
+    /// last looked, so the old incarnation ends even when the socket is now down or up again.
+    fn apply_socket_wake(&mut self) {
+        let (up, epoch) = self.session.live_typing.take_socket();
+        if epoch != self.socket_epoch {
+            self.socket_epoch = epoch;
+            if self.socket_up {
+                self.socket_up = false;
+                self.teardown();
+            }
+        }
+        if up && !self.socket_up {
+            self.socket_up = true;
+            // A new connection starts a new suspend window; backoff time between sockets is not
+            // observed by the periodic tick and must not read as a suspend gap.
+            self.anchor = self.session.live_typing.suspend_now();
+            self.retired = false;
+            self.reevaluate();
+        } else if !up && self.socket_up {
+            self.socket_up = false;
+            self.teardown();
+        }
     }
 
     fn observe_suspend(&mut self) -> bool {
@@ -881,7 +1216,7 @@ impl TypingActor {
     /// are the final boundary for this frame.
     fn publish_inbound(&mut self, mut outcome: LiveOutcome, clock: LiveClock) -> InboundOutcome {
         let suspended = self.observe_suspend();
-        if suspended || self.retired || self.session.cancel.is_cancelled() {
+        if suspended || self.session.cancel.is_cancelled() {
             withhold_started(&mut outcome);
         }
         let wire = self
@@ -903,9 +1238,73 @@ impl TypingActor {
     }
 
     fn publish(&self) {
-        self.published
-            .send_replace((self.enabled_seq, self.inbound.next_deadline()));
+        self.published.send_replace(Published {
+            enabled_seq: self.enabled_seq,
+            next_deadline: self.inbound.next_deadline(),
+            retirements: self.retirements,
+        });
     }
+}
+
+/// Applies a gateway refresh to `session.status` and reports whether anything changed. Only the
+/// status lock is taken; no Store call happens under it.
+fn apply_gateway_status(session: &Session, refresh: &GatewayRefresh) -> bool {
+    let mut status = session
+        .status
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let changed = !status.gateways_known
+        || status.gateways != refresh.gateways
+        || status.device_role != refresh.device_role
+        || status.rcs_roster_validated != refresh.rcs_roster_validated
+        || status.rcs_live_roster != refresh.rcs_live_roster
+        || status.revoked_device_ids != refresh.revoked_device_ids;
+    status.gateways = refresh.gateways.clone();
+    status.gateways_known = true;
+    status.rcs_roster_validated = refresh.rcs_roster_validated;
+    status.rcs_live_roster = refresh.rcs_live_roster.clone();
+    status.device_role = refresh.device_role.clone();
+    status.revoked_device_ids = refresh.revoked_device_ids.clone();
+    changed
+}
+
+/// Inline path used when no actor is running: the same status mutation, persistence, and
+/// notification as the actor handler.
+fn apply_gateway_refresh_now(session: &Session, refresh: &GatewayRefresh) {
+    if apply_gateway_status(session, refresh) {
+        session.persist_gateways(&refresh.gateways);
+        session.notify();
+    }
+}
+
+/// Copies the status fields typing derivation reads, then releases the status lock. Callers must
+/// never hold `session.status` across a Client/Store call (DA-01).
+fn typing_status(session: &Session) -> NetStatus {
+    let copy = {
+        let status = session
+            .status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        NetStatus {
+            gateways: status.gateways.clone(),
+            rcs_roster_validated: status.rcs_roster_validated,
+            rcs_live_roster: status.rcs_live_roster.clone(),
+            revoked_device_ids: status.revoked_device_ids.clone(),
+            vault: status.vault.clone(),
+            ..NetStatus::default()
+        }
+    };
+    #[cfg(test)]
+    if let Some(probe) = session
+        .live_typing
+        .status_probe
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .as_ref()
+    {
+        let _ = probe.send(());
+    }
+    copy
 }
 
 fn withhold_started(outcome: &mut LiveOutcome) {
@@ -921,10 +1320,7 @@ fn withhold_started(outcome: &mut LiveOutcome) {
 }
 
 fn live_enable_context(session: &Session) -> Option<LiveEnableContext> {
-    let status = session
-        .status
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+    let status = typing_status(session);
     enable_context(&status, snapshot_inputs(session, &status, wall_ms()))
 }
 
@@ -982,29 +1378,23 @@ async fn request_send_typing(
     conversation_id: ConversationId,
     state: TypingStateV2,
 ) -> bool {
-    let Some(commands) = session.live_typing.commands() else {
-        return false;
-    };
-    ask(session, &commands, |reply| Cmd::SendTyping {
+    // Typing is lossy under overload: the frame is not sent and the caller learns it with `false`.
+    match ask_user(session, |reply| Cmd::SendTyping {
         conversation_id,
         state,
         reply,
     })
     .await
-    .unwrap_or(false)
+    {
+        UserReply::Done(sent) => sent,
+        UserReply::Overloaded | UserReply::Cancelled => false,
+    }
 }
 
 async fn request_sharing(session: &Session, enabled: bool) -> bool {
-    let Some(commands) = session.live_typing.commands() else {
-        return false;
-    };
     matches!(
-        ask(session, &commands, |reply| Cmd::SetSharing {
-            enabled,
-            reply
-        })
-        .await,
-        Some(Ok(()))
+        ask_user(session, |reply| Cmd::SetSharing { enabled, reply }).await,
+        UserReply::Done(Ok(()))
     )
 }
 
@@ -1032,34 +1422,56 @@ fn sharing_failed() -> crate::error::BridgeError {
 
 type LiveSocket = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// Sends one command and returns its reply. `None` means the session was cancelled or the actor is
-/// gone; callers treat it as a cancelled operation.
-async fn ask<T>(
-    session: &Session,
-    commands: &mpsc::Sender<Cmd>,
-    build: impl FnOnce(oneshot::Sender<T>) -> Cmd,
-) -> Option<T> {
-    let (reply, received) = oneshot::channel();
-    if !send_cmd(session, commands, build(reply)).await {
+/// Outcome of a user request. Overload and cancellation are different: an overloaded request is
+/// refused immediately, while a cancelled one ends with the session.
+enum UserReply<T> {
+    Done(T),
+    Overloaded,
+    Cancelled,
+}
+
+/// Supervisor control asks (ticks, inbound frames, confirmations, expiry). They are never refused for
+/// overload: the supervisor issues them one at a time and awaits each reply, so their count is
+/// bounded by construction. `None` means cancelled or the actor is gone.
+async fn ask<T>(session: &Session, build: impl FnOnce(oneshot::Sender<T>) -> Cmd) -> Option<T> {
+    if session.cancel.is_cancelled() {
         return None;
     }
+    let sender = session.live_typing.sender()?;
+    let (reply, received) = oneshot::channel();
+    sender.send(build(reply)).ok()?;
     tokio::select! {
         _ = session.cancel.cancelled() => None,
         value = received => value.ok(),
     }
 }
 
-async fn send_cmd(session: &Session, commands: &mpsc::Sender<Cmd>, cmd: Cmd) -> bool {
-    tokio::select! {
-        _ = session.cancel.cancelled() => false,
-        sent = commands.send(cmd) => sent.is_ok(),
+/// User requests (typing, sharing) are budgeted. Over budget they are refused with `Overloaded`,
+/// which never ends the supervisor.
+async fn ask_user<T>(
+    session: &Session,
+    build: impl FnOnce(oneshot::Sender<T>) -> Cmd,
+) -> UserReply<T> {
+    let Some(_slot) = session.live_typing.reserve_request() else {
+        return UserReply::Overloaded;
+    };
+    match ask(session, build).await {
+        Some(value) => UserReply::Done(value),
+        None => UserReply::Cancelled,
     }
 }
 
+fn send_cmd(session: &Session, cmd: Cmd) -> bool {
+    session
+        .live_typing
+        .sender()
+        .is_some_and(|sender| sender.send(cmd).is_ok())
+}
+
 pub(crate) fn start(session: Arc<Session>) {
-    let (commands, command_rx) = mpsc::channel(COMMAND_QUEUE_LIMIT);
+    let (commands, command_rx) = mpsc::unbounded_channel();
     let (sealed_tx, sealed_rx) = mpsc::channel(SEALED_QUEUE_LIMIT);
-    let (published_tx, published_rx) = watch::channel((0, None));
+    let (published_tx, published_rx) = watch::channel(Published::default());
     let actor = TypingActor::new(session.clone(), sealed_tx, published_tx);
     let Ok(thread) = thread::Builder::new()
         .name("live-typing-actor".into())
@@ -1070,37 +1482,42 @@ pub(crate) fn start(session: Arc<Session>) {
     session.live_typing.install(commands.clone());
     session.track_worker(tokio::spawn(shutdown_actor(
         session.clone(),
-        commands.clone(),
+        commands,
         thread,
     )));
     session.track_worker(tokio::spawn(supervise(
         session.clone(),
-        commands,
         sealed_rx,
         published_rx,
     )));
 }
 
-/// Joins the actor thread once the session is cancelled. The join runs as a tracked worker, so
-/// session drain and its deadline cover the actor exactly as they cover the other workers.
+/// Shutdown is a non-lossy send. The join runs as a tracked worker, so session drain and its
+/// deadline cover the actor exactly as they cover the other workers.
 async fn shutdown_actor(
     session: Arc<Session>,
-    commands: mpsc::Sender<Cmd>,
+    commands: mpsc::UnboundedSender<Cmd>,
     thread: thread::JoinHandle<()>,
 ) {
     session.cancel.cancelled().await;
-    let _ = tokio::task::spawn_blocking(move || {
-        let _ = commands.blocking_send(Cmd::Shutdown);
-        let _ = thread.join();
-    })
-    .await;
+    let _ = commands.send(Cmd::Shutdown);
+    let _ = tokio::task::spawn_blocking(move || thread.join()).await;
+}
+
+async fn socket_down_and_back_off(
+    session: &Session,
+    retry: &mut LiveRetry,
+    connected_for: Duration,
+) -> bool {
+    session.live_typing.set_socket(false);
+    let retry_delay = retry.after_connection(connected_for);
+    wait_or_cancel(session, live_backoff_delay(retry_delay)).await
 }
 
 async fn supervise(
     session: Arc<Session>,
-    commands: mpsc::Sender<Cmd>,
     mut sealed: mpsc::Receiver<SealedFrame>,
-    published: watch::Receiver<Published>,
+    mut published: watch::Receiver<Published>,
 ) {
     let mut retry = LiveRetry::default();
     let mut probed = false;
@@ -1116,38 +1533,27 @@ async fn supervise(
                         _ = probe => {}
                     }
                 }
-                if !send_cmd(&session, &commands, Cmd::SocketDown).await {
-                    return;
-                }
-                let retry_delay = retry.after_failure();
-                if !wait_or_cancel(&session, live_backoff_delay(retry_delay)).await {
+                if !socket_down_and_back_off(&session, &mut retry, Duration::ZERO).await {
                     return;
                 }
                 continue;
             }
         };
         if !server_hello(&mut socket, &session).await {
-            if !send_cmd(&session, &commands, Cmd::SocketDown).await {
-                return;
-            }
-            let retry_delay = retry.after_failure();
-            if !wait_or_cancel(&session, live_backoff_delay(retry_delay)).await {
+            if !socket_down_and_back_off(&session, &mut retry, Duration::ZERO).await {
                 return;
             }
             continue;
         }
         probed = false;
         let connected_at = Instant::now();
-        if !send_cmd(&session, &commands, Cmd::SocketUp).await {
-            return;
-        }
-        let end = run_socket(&session, &commands, &mut sealed, &published, &mut socket).await;
+        let baseline = published.borrow().retirements;
+        session.live_typing.set_socket(true);
+        let end = run_socket(&session, &mut sealed, &mut published, baseline, &mut socket).await;
         drop(socket);
-        if end == SocketEnd::Cancelled || !send_cmd(&session, &commands, Cmd::SocketDown).await {
-            return;
-        }
-        let retry_delay = retry.after_connection(connected_at.elapsed());
-        if !wait_or_cancel(&session, live_backoff_delay(retry_delay)).await {
+        if end == SocketEnd::Cancelled
+            || !socket_down_and_back_off(&session, &mut retry, connected_at.elapsed()).await
+        {
             return;
         }
     }
@@ -1156,14 +1562,16 @@ async fn supervise(
 #[derive(Debug, PartialEq, Eq)]
 enum SocketEnd {
     Cancelled,
+    /// The socket must be closed and reconnected: transport loss, a suspend gap, or any internal
+    /// retirement (Clock) that the actor published. A fresh incarnation needs a fresh handshake.
     Lost,
 }
 
 async fn run_socket(
     session: &Session,
-    commands: &mpsc::Sender<Cmd>,
     sealed: &mut mpsc::Receiver<SealedFrame>,
-    published: &watch::Receiver<Published>,
+    published: &mut watch::Receiver<Published>,
+    baseline: u64,
     socket: &mut LiveSocket,
 ) -> SocketEnd {
     // The periodic deadline is retained across socket traffic so a busy connection cannot defer
@@ -1171,19 +1579,30 @@ async fn run_socket(
     let mut suspend_tick = tokio::time::interval(LIVE_SUSPEND_TICK);
     suspend_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        let deadline = published.borrow().1;
+        // A pending Expire already covers the published deadline; wait for the actor to publish.
+        let deadline = if session.live_typing.expire_pending() {
+            None
+        } else {
+            published.borrow().next_deadline
+        };
         let expiry_delay = deadline.map(|deadline| {
             Duration::from_millis(deadline.saturating_sub(session.live_typing.mono_ms()))
         });
         tokio::select! {
             _ = session.cancel.cancelled() => return SocketEnd::Cancelled,
-            _ = session.live_context_wake.notified() => {
-                if !send_cmd(session, commands, Cmd::Reevaluate).await {
+            changed = published.changed() => {
+                if changed.is_err() {
                     return SocketEnd::Cancelled;
                 }
+                if published.borrow().retirements != baseline {
+                    return SocketEnd::Lost;
+                }
+            }
+            _ = session.live_context_wake.notified() => {
+                session.live_typing.request_reevaluate();
             }
             _ = suspend_tick.tick() => {
-                match ask(session, commands, |reply| Cmd::SuspendTick { reply }).await {
+                match ask(session, |reply| Cmd::SuspendTick { reply }).await {
                     Some(false) => {}
                     Some(true) => return SocketEnd::Lost,
                     None => return SocketEnd::Cancelled,
@@ -1195,7 +1614,8 @@ async fn run_socket(
                     None => std::future::pending().await,
                 }
             } => {
-                if !send_cmd(session, commands, Cmd::Expire).await {
+                session.live_typing.mark_expire_queued();
+                if !send_cmd(session, Cmd::Expire) {
                     return SocketEnd::Cancelled;
                 }
             }
@@ -1203,7 +1623,7 @@ async fn run_socket(
                 let Some(frame) = frame else {
                     return SocketEnd::Cancelled;
                 };
-                match transmit(session, commands, socket, frame).await {
+                match transmit(session, socket, frame).await {
                     Transmit::Sent | Transmit::Dropped => {}
                     Transmit::Lost => return SocketEnd::Lost,
                     Transmit::Cancelled => return SocketEnd::Cancelled,
@@ -1211,7 +1631,7 @@ async fn run_socket(
             }
             frame = socket.next() => match frame {
                 Some(Ok(Message::Text(frame))) => {
-                    let Some(outcome) = ask(session, commands, |reply| Cmd::InboundFrame {
+                    let Some(outcome) = ask(session, |reply| Cmd::InboundFrame {
                         json: frame.to_string(),
                         reply,
                     })
@@ -1245,12 +1665,7 @@ enum Transmit {
 
 /// The final boundary: readiness is awaited first, then the actor confirms the frame's authority
 /// (and the suspend clock) before the frame is handed to the socket.
-async fn transmit<S>(
-    session: &Session,
-    commands: &mpsc::Sender<Cmd>,
-    socket: &mut S,
-    frame: SealedFrame,
-) -> Transmit
+async fn transmit<S>(session: &Session, socket: &mut S, frame: SealedFrame) -> Transmit
 where
     S: Sink<Message> + Unpin,
 {
@@ -1261,12 +1676,8 @@ where
     if !matches!(ready, Ok(Ok(()))) {
         return Transmit::Lost;
     }
-    match ask(session, commands, |reply| Cmd::ConfirmTransmit {
-        mark: frame.mark,
-        reply,
-    })
-    .await
-    {
+    let mark = frame.mark;
+    match ask(session, |reply| Cmd::ConfirmTransmit { mark, reply }).await {
         Some(Admission::Transmit) => {}
         Some(Admission::Rejected) => return Transmit::Dropped,
         Some(Admission::Suspended) => return Transmit::Lost,
@@ -1572,9 +1983,21 @@ mod tests {
         sealed: mpsc::Receiver<SealedFrame>,
     }
 
+    /// A gateway refresh payload built from the current status, with the roster under test.
+    fn status_refresh(session: &Session, roster: &[&str], validated: bool) -> GatewayRefresh {
+        let status = session.status.lock().unwrap();
+        GatewayRefresh {
+            gateways: status.gateways.clone(),
+            device_role: validated.then(|| "gateway".to_owned()),
+            rcs_roster_validated: validated,
+            rcs_live_roster: roster.iter().map(|id| (*id).to_owned()).collect(),
+            revoked_device_ids: status.revoked_device_ids.clone(),
+        }
+    }
+
     fn harness(session: &Arc<Session>) -> Harness {
         let (sealed_tx, sealed) = mpsc::channel(SEALED_QUEUE_LIMIT);
-        let (published_tx, _published) = watch::channel((0, None));
+        let (published_tx, _published) = watch::channel(Published::default());
         Harness {
             actor: TypingActor::new(session.clone(), sealed_tx, published_tx),
             sealed,
@@ -2441,42 +2864,19 @@ mod tests {
 
     #[test]
     fn sealed_start_is_rejected_after_gateway_revocation() {
-        let (fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
         let mut h = harness(&session);
         h.send(Cmd::SocketUp);
         assert!(h.send_typing(conversation, TypingStateV2::Started));
         let mark = h.next_mark();
 
-        roster_refresh(&session, &fixture.binding.device_id, true);
-        h.send(Cmd::GatewayRefresh);
+        h.send(Cmd::GatewayRefresh(status_refresh(&session, &[], false)));
 
         assert_eq!(h.confirm(mark), Admission::Rejected);
         assert_eq!(
             session.client.set_typing_sharing(true),
             Err(LiveError::Disabled)
         );
-    }
-
-    #[test]
-    fn gateway_refresh_replaces_the_incarnation_and_bumps_the_sequence() {
-        let (_fixture, session, _) = real_supervisor_session("http://127.0.0.1:9");
-        let mut h = harness(&session);
-        h.send(Cmd::SocketUp);
-        let first = h.actor.state.generation();
-        let first_seq = h.actor.enabled_seq;
-
-        session.set_status(|status| status.rcs_live_roster.push(DeviceId::new().to_string()));
-        h.send(Cmd::GatewayRefresh);
-
-        assert!(h.actor.state.generation().is_some());
-        assert_ne!(first, h.actor.state.generation());
-        assert!(h.actor.enabled_seq > first_seq);
-        let outcome = h.call(|reply| Cmd::InboundFrame {
-            json: "{}".into(),
-            reply,
-        });
-        assert!(outcome.wire.is_none());
-        assert!(!outcome.suspended);
     }
 
     #[test]
@@ -2487,18 +2887,23 @@ mod tests {
         h.send(Cmd::SocketUp);
         let first = h.actor.state.generation();
 
-        session.set_status(|status| {
-            status.rcs_live_roster = vec![DeviceId::new().to_string()];
-        });
-        h.send(Cmd::GatewayRefresh);
+        let other = DeviceId::new().to_string();
+        h.send(Cmd::GatewayRefresh(status_refresh(
+            &session,
+            &[other.as_str()],
+            true,
+        )));
         assert_eq!(h.actor.state.generation(), None);
         assert_eq!(
             session.client.set_typing_sharing(true),
             Err(LiveError::Disabled)
         );
 
-        session.set_status(|status| status.rcs_live_roster = vec![gateway_id]);
-        h.send(Cmd::GatewayRefresh);
+        h.send(Cmd::GatewayRefresh(status_refresh(
+            &session,
+            &[gateway_id.as_str()],
+            true,
+        )));
         assert!(h.actor.state.generation().is_some());
         assert_ne!(first, h.actor.state.generation());
 
@@ -2708,6 +3113,25 @@ mod tests {
         h.send(Cmd::SocketUp);
         assert!(h.send_typing(conversation, TypingStateV2::Started));
         assert!(h.sealed.try_recv().is_ok());
+    }
+
+    /// Gateway refreshes are applied by the actor, so tests wait for the applied status instead of
+    /// reading it right after `roster_refresh`.
+    async fn wait_for_status(session: &Session, ready: impl Fn(&NetStatus) -> bool) {
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let done = {
+                    let status = session.status.lock().unwrap();
+                    ready(&status)
+                };
+                if done {
+                    return;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("gateway refresh was not applied")
     }
 
     async fn wait_for_live_enabled(session: &Session, expected: bool) {
@@ -2996,15 +3420,9 @@ mod tests {
     }
 
     async fn queue_sealed_for_test(session: &Session, json: String) -> bool {
-        let Some(commands) = session.live_typing.commands() else {
-            return false;
-        };
-        ask(session, &commands, |reply| Cmd::QueueSealedForTest {
-            json,
-            reply,
-        })
-        .await
-        .unwrap_or(false)
+        ask(session, |reply| Cmd::QueueSealedForTest { json, reply })
+            .await
+            .unwrap_or(false)
     }
 
     #[tokio::test]
@@ -3114,8 +3532,10 @@ mod tests {
 
         wait_for_live_enabled(&session, true).await;
         roster_refresh(&session, &fixture.binding.device_id, true);
+        wait_for_status(&session, |status| !status.rcs_roster_validated).await;
         wait_for_live_enabled(&session, false).await;
         roster_refresh(&session, &fixture.binding.device_id, false);
+        wait_for_status(&session, |status| status.rcs_roster_validated).await;
         install_gateway(&session, &fixture.binding.device_id);
         session.notify();
         wait_for_live_enabled(&session, true).await;
@@ -3133,6 +3553,946 @@ mod tests {
             session.client.set_typing_sharing(true),
             Err(LiveError::Disabled)
         );
+    }
+
+    impl Harness {
+        fn inbound(&mut self, json: &str) -> InboundOutcome {
+            self.call(|reply| Cmd::InboundFrame {
+                json: json.to_owned(),
+                reply,
+            })
+        }
+    }
+
+    /// A second device on the same vault that drives valid challenge, ack, and typing traffic.
+    /// Its clock stays on the receiver's timeline: the wall is the latest challenge the peer saw and
+    /// the monotonic reading is constant, so the core never advances the peer's wall past the
+    /// receiver's clock (a millisecond of monotonic rounding otherwise makes frames look future).
+    struct PeerSender {
+        client: Client,
+        device: DeviceId,
+        generation: LiveEnableGeneration,
+        wall: std::cell::Cell<i64>,
+        _directory: tempfile::TempDir,
+    }
+
+    fn peer_clock(peer: &PeerSender) -> LiveClock {
+        LiveClock {
+            wall_ms: peer.wall.get(),
+            mono_ms: 0,
+        }
+    }
+
+    fn peer_sender(
+        fixture: &crate::tests::Fixture,
+        gateway: DeviceId,
+        conversations: &[ConversationId],
+    ) -> PeerSender {
+        use peppy_client_core::{ClientConfig, DatabaseKey, VaultId};
+        let directory = tempfile::tempdir().unwrap();
+        let device = DeviceId::new();
+        let vault: uuid::Uuid = fixture.binding.vault_id.parse().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("peer.db"),
+                vault_id: VaultId(vault),
+                device_id: device,
+            },
+            DatabaseKey::new(&[9; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(&fixture.profile, &fixture.header, PHRASE)
+            .unwrap();
+        let now = wall_ms();
+        let projections: Vec<_> = conversations
+            .iter()
+            .map(|conversation_id| RcsEligibilityProjection {
+                conversation_id: *conversation_id,
+                eligibility: RcsEligibility::Eligible,
+                feature_bits: 1,
+                mapping_revision: 1,
+                observed_at_ms: now,
+                gateway_device_id: device,
+            })
+            .collect();
+        client
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id: device,
+                    state: RcsCapabilityState::Linked,
+                    availability: true,
+                    health: true,
+                    phone_responsive: true,
+                    observed_at_ms: now,
+                    capability_revision: 1,
+                    feature_bits: 1,
+                    linked_since_ms: Some(now),
+                },
+                &projections,
+                now,
+            )
+            .unwrap();
+        let peer = PeerSender {
+            generation: LiveEnableGeneration(0),
+            wall: std::cell::Cell::new(now),
+            client,
+            device,
+            _directory: directory,
+        };
+        let generation = peer
+            .client
+            .enable_live_typing(
+                LiveEnableContext {
+                    trusted_roster: vec![device, gateway],
+                    local_gateway_device_id: device,
+                    local_executor: LiveExecutor::CurrentGateway,
+                },
+                peer_clock(&peer),
+            )
+            .unwrap();
+        PeerSender { generation, ..peer }
+    }
+
+    /// Ingests the peer's capability journal into the receiver so it can judge the peer's typing.
+    fn share_capabilities(peer: &PeerSender, receiver: &Client) {
+        let pending = peer.client.pending_outbox().unwrap();
+        for envelope in &pending {
+            peer.client.ack_outbox(envelope.envelope_id).unwrap();
+        }
+        for (index, envelope) in pending.iter().enumerate() {
+            let cursor = peppy_client_core::Cursor(index as u64 + 1);
+            let result = receiver.ingest(envelope, cursor).unwrap();
+            assert!(matches!(
+                result,
+                peppy_client_core::IngestResult::Journaled
+                    | peppy_client_core::IngestResult::Duplicate
+            ));
+        }
+        receiver.apply_pending(100).unwrap();
+    }
+
+    fn seal_started(peer: &PeerSender, conversation: ConversationId) -> String {
+        let outbound = peer
+            .client
+            .seal_typing_signal_v2(
+                conversation,
+                peer.device,
+                TypingOriginV2::GoogleContact,
+                TypingStateV2::Started,
+                peer_clock(peer),
+            )
+            .unwrap()
+            .unwrap();
+        serde_json::to_string(&outbound.signal).unwrap()
+    }
+
+    fn peer_answer(peer: &PeerSender, challenge: &str) -> String {
+        // The receiver's effective wall clock can run ahead of real time by a millisecond. The peer
+        // must not judge the challenge to be from the future, so its clock is at least the challenge's.
+        let header: serde_json::Value = serde_json::from_str(challenge).unwrap();
+        let challenge_sent: i64 = header["sent_at_ms"].as_str().unwrap().parse().unwrap();
+        peer.wall.set(peer.wall.get().max(challenge_sent));
+        process_inbound_frame(
+            &peer.client,
+            &mut InboundTyping::default(),
+            challenge,
+            Some(peer.generation),
+            peer_clock(peer),
+        )
+        .unwrap()
+        .expect("peer answers the challenge")
+    }
+
+    /// Drives challenge then ack through the actor, leaving the peer validated on the receiver.
+    fn complete_handshake(h: &mut Harness, peer: &PeerSender, conversation: ConversationId) {
+        let challenge = h
+            .inbound(&seal_started(peer, conversation))
+            .wire
+            .expect("challenge for an unknown session");
+        let ack = peer_answer(peer, &challenge);
+        assert!(h.inbound(&ack).wire.is_none());
+    }
+
+    fn session_id_of(frame: &str) -> String {
+        let value: serde_json::Value = serde_json::from_str(frame).unwrap();
+        value["session_id"].as_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn inbound_publication_follows_the_incarnation_that_admitted_it() {
+        let (fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        // Frozen suspend clock: the harness must not depend on real elapsed time under test load.
+        session
+            .live_typing
+            .install_suspend_clock(Arc::new(TestSuspendClock::new()));
+        let gateway = fixture.binding.device_id.parse().unwrap();
+        let (conv_a, conv_b, conv_c) = (
+            ConversationId::new(),
+            ConversationId::new(),
+            ConversationId::new(),
+        );
+        let peer = peer_sender(&fixture, gateway, &[conv_a, conv_b, conv_c]);
+        share_capabilities(&peer, &session.client);
+        let peer_id = peer.device.to_string();
+        let mut h = harness(&session);
+        h.send(Cmd::GatewayRefresh(status_refresh(
+            &session,
+            &[&fixture.binding.device_id, &peer_id],
+            true,
+        )));
+        h.send(Cmd::SocketUp);
+        let first = h.actor.state.generation().unwrap();
+        complete_handshake(&mut h, &peer, conv_a);
+
+        let frame_b = seal_started(&peer, conv_b);
+        assert!(h.inbound(&frame_b).wire.is_none());
+        assert_eq!(h.actor.inbound.displays[&conv_b].generation, first);
+        assert!(!h.actor.inbound.displays.contains_key(&conversation));
+
+        let extra = DeviceId::new().to_string();
+        h.send(Cmd::GatewayRefresh(status_refresh(
+            &session,
+            &[&fixture.binding.device_id, &peer_id, &extra],
+            true,
+        )));
+        let second = h.actor.state.generation().unwrap();
+        assert_ne!(first, second);
+        assert!(h.actor.inbound.displays.is_empty());
+
+        let challenge = h
+            .inbound(&frame_b)
+            .wire
+            .expect("the replayed frame is a new demand under the new incarnation");
+        assert!(h.actor.inbound.displays.is_empty());
+        let ack = peer_answer(&peer, &challenge);
+        assert!(h.inbound(&ack).wire.is_none());
+        assert!(h.inbound(&seal_started(&peer, conv_c)).wire.is_none());
+        assert_eq!(h.actor.inbound.displays[&conv_c].generation, second);
+    }
+
+    #[test]
+    fn revoke_then_restore_refreshes_pending_together_are_applied_in_order() {
+        let (fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        session
+            .live_typing
+            .install_suspend_clock(Arc::new(TestSuspendClock::new()));
+        let gateway = fixture.binding.device_id.clone();
+        let (conv_a, conv_b) = (ConversationId::new(), ConversationId::new());
+        let peer = peer_sender(&fixture, gateway.parse().unwrap(), &[conv_a, conv_b]);
+        share_capabilities(&peer, &session.client);
+        let peer_id = peer.device.to_string();
+        let mut h = harness(&session);
+        h.send(Cmd::GatewayRefresh(status_refresh(
+            &session,
+            &[&gateway, &peer_id],
+            true,
+        )));
+        h.send(Cmd::SocketUp);
+        let first = h.actor.state.generation().unwrap();
+        complete_handshake(&mut h, &peer, conv_a);
+        assert!(h.inbound(&seal_started(&peer, conv_b)).wire.is_none());
+        assert!(h.actor.inbound.displays.contains_key(&conv_b));
+        assert!(!h.actor.inbound.peers.is_empty());
+
+        assert!(h.send_typing(conversation, TypingStateV2::Started));
+        let mark = h.next_mark();
+
+        // The harness applies each message in arrival order, so this checks the payload ordering only.
+        // Coalescing of two refreshes queued while the actor is busy is covered by
+        // `coalesced_refreshes_revoke_then_restore_retire_the_pending_incarnation`.
+        h.send(Cmd::GatewayRefresh(status_refresh(&session, &[], false)));
+        h.send(Cmd::GatewayRefresh(status_refresh(
+            &session,
+            &[&gateway, &peer_id],
+            true,
+        )));
+
+        assert_eq!(h.confirm(mark), Admission::Rejected);
+        assert!(h.actor.inbound.displays.is_empty());
+        assert!(h.actor.inbound.peers.is_empty());
+        assert_ne!(Some(first), h.actor.state.generation());
+        assert!(h.actor.state.generation().is_some());
+    }
+
+    /// Status copies happen under a brief lock. A Store-waiting actor must leave the status path and
+    /// Tokio cancellation live; the Store is released by an independent OS thread with a bound.
+    #[tokio::test(flavor = "current_thread")]
+    async fn actor_waiting_on_store_holds_no_status_lock_for_refresh_or_cancellation() {
+        let (fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        session.live_typing.install_status_probe(probe_tx);
+        start(session.clone());
+        let store_client = session.client.clone();
+        let (held, reached) = std::sync::mpsc::channel();
+        let (release, unblock) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let store_lock = store_client.hold_store_lock_for_test().unwrap();
+            held.send(()).unwrap();
+            let _ = unblock.recv_timeout(Duration::from_secs(5));
+            drop(store_lock);
+        });
+        reached.recv().unwrap();
+
+        let sending_session = session.clone();
+        let sending = tokio::spawn(async move {
+            request_send_typing(&sending_session, conversation, TypingStateV2::Started).await
+        });
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if probe_rx.try_recv().is_ok() {
+                    return;
+                }
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the actor never reached the Store after reading status");
+
+        let started = Instant::now();
+        roster_refresh(&session, &fixture.binding.device_id, false);
+        session.set_status(|status| status.rcs_live_roster.clear());
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "status path blocked behind a Store-waiting actor"
+        );
+        session.cancel.cancel();
+        let sent = timeout(Duration::from_secs(2), sending)
+            .await
+            .expect("cancellation was blocked behind the Store")
+            .unwrap();
+        assert!(!sent);
+        let _ = release.send(());
+        holder.join().unwrap();
+        assert!(crate::sync::drain(&session, Duration::from_secs(5)).await);
+    }
+
+    #[tokio::test]
+    async fn internal_clock_retirement_reconnects_for_a_fresh_incarnation() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (fixture, session, first_conversation) = real_supervisor_session(&origin);
+        let second_conversation = ConversationId::new();
+        let gateway: DeviceId = fixture.binding.device_id.parse().unwrap();
+        let now = wall_ms();
+        // A capability publish replaces the gateway's eligibility set, so both conversations go in one.
+        session
+            .client
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id: gateway,
+                    state: RcsCapabilityState::Linked,
+                    availability: true,
+                    health: true,
+                    phone_responsive: true,
+                    observed_at_ms: now,
+                    capability_revision: 3,
+                    feature_bits: 1,
+                    linked_since_ms: Some(now),
+                },
+                &[first_conversation, second_conversation].map(|conversation_id| {
+                    RcsEligibilityProjection {
+                        conversation_id,
+                        eligibility: RcsEligibility::Eligible,
+                        feature_bits: 1,
+                        mapping_revision: 3,
+                        observed_at_ms: now,
+                        gateway_device_id: gateway,
+                    }
+                }),
+                now,
+            )
+            .unwrap();
+        start(session.clone());
+
+        let mut first_peer = accept_live_peer(&listener).await;
+        send_server_hello(&mut first_peer).await;
+        wait_for_live_enabled(&session, true).await;
+        assert!(request_send_typing(&session, first_conversation, TypingStateV2::Started).await);
+        let Ok(Some(Ok(Message::Text(frame)))) =
+            timeout(Duration::from_secs(5), first_peer.next()).await
+        else {
+            panic!("the first incarnation did not transmit");
+        };
+        let first_session = session_id_of(&frame);
+
+        // Force the supported core Clock outcome: a monotonic reading behind the core's last one.
+        session.live_typing.override_mono(Some(0));
+        assert!(!request_send_typing(&session, second_conversation, TypingStateV2::Started).await);
+        session.live_typing.override_mono(None);
+
+        let mut second_peer = timeout(Duration::from_secs(5), accept_live_peer(&listener))
+            .await
+            .expect("the supervisor did not reconnect after an internal retirement");
+        send_server_hello(&mut second_peer).await;
+        wait_for_live_enabled(&session, true).await;
+        assert!(request_send_typing(&session, second_conversation, TypingStateV2::Started).await);
+        let Ok(Some(Ok(Message::Text(frame)))) =
+            timeout(Duration::from_secs(5), second_peer.next()).await
+        else {
+            panic!("the fresh incarnation did not transmit");
+        };
+        assert_ne!(first_session, session_id_of(&frame));
+        assert!(crate::sync::drain(&session, Duration::from_secs(5)).await);
+    }
+
+    /// Publishes eligibility for every given conversation at once; a publish replaces the set.
+    fn publish_gateway_conversations(
+        fixture: &crate::tests::Fixture,
+        session: &Session,
+        conversations: &[ConversationId],
+    ) {
+        let gateway: DeviceId = fixture.binding.device_id.parse().unwrap();
+        let now = wall_ms();
+        let projections: Vec<_> = conversations
+            .iter()
+            .map(|conversation_id| RcsEligibilityProjection {
+                conversation_id: *conversation_id,
+                eligibility: RcsEligibility::Eligible,
+                feature_bits: 1,
+                mapping_revision: 100,
+                observed_at_ms: now,
+                gateway_device_id: gateway,
+            })
+            .collect();
+        session
+            .client
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id: gateway,
+                    state: RcsCapabilityState::Linked,
+                    availability: true,
+                    health: true,
+                    phone_responsive: true,
+                    observed_at_ms: now,
+                    capability_revision: 100,
+                    feature_bits: 1,
+                    linked_since_ms: Some(now),
+                },
+                &projections,
+                now,
+            )
+            .unwrap();
+    }
+
+    async fn wait_until(what: &str, ready: impl Fn() -> bool) {
+        timeout(Duration::from_secs(5), async {
+            while !ready() {
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    }
+
+    async fn display_count(session: &Session) -> usize {
+        ask(session, |reply| Cmd::DisplayCount { reply })
+            .await
+            .unwrap_or(0)
+    }
+
+    fn hold_store(session: &Session) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+        let store_client = session.client.clone();
+        let (held, reached) = std::sync::mpsc::channel();
+        let (release, unblock) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let store_lock = store_client.hold_store_lock_for_test().unwrap();
+            held.send(()).unwrap();
+            let _ = unblock.recv_timeout(Duration::from_secs(10));
+            drop(store_lock);
+        });
+        reached.recv().unwrap();
+        (release, holder)
+    }
+
+    /// DAR2-01: all user slots occupied while the Store is held. Control asks keep the supervisor
+    /// alive; after release the same session transmits, and cancellation was live throughout.
+    #[tokio::test(flavor = "current_thread")]
+    async fn user_request_saturation_does_not_stop_the_supervisor() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (fixture, session, conversation) = real_supervisor_session(&origin);
+        let second = ConversationId::new();
+        publish_gateway_conversations(&fixture, &session, &[conversation, second]);
+        start(session.clone());
+        let mut peer = accept_live_peer(&listener).await;
+        send_server_hello(&mut peer).await;
+        wait_for_live_enabled(&session, true).await;
+
+        let (release, holder) = hold_store(&session);
+        let mut senders = Vec::new();
+        for _ in 0..REQUEST_LIMIT {
+            let sending = session.clone();
+            senders.push(tokio::spawn(async move {
+                request_send_typing(&sending, conversation, TypingStateV2::Started).await
+            }));
+        }
+        wait_until("the user budget to saturate", || {
+            session.live_typing.in_flight.load(Ordering::Acquire) == REQUEST_LIMIT
+        })
+        .await;
+        // Overload is a refusal, not a cancellation: the call returns at once with `false`.
+        assert!(!request_send_typing(&session, second, TypingStateV2::Started).await);
+        assert!(!session.cancel.is_cancelled());
+
+        // Inbound traffic and supervisor ticks arrive while saturated.
+        peer.send(Message::Text("{}".into())).await.unwrap();
+        sleep(Duration::from_millis(60)).await;
+
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        for sending in senders {
+            timeout(Duration::from_secs(5), sending)
+                .await
+                .expect("a saturated request never completed")
+                .unwrap();
+        }
+        assert!(request_send_typing(&session, second, TypingStateV2::Started).await);
+        let transmitted = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(Ok(Message::Text(_))) = peer.next().await {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(
+            transmitted.is_ok(),
+            "the supervisor stopped transmitting after saturation"
+        );
+        assert!(crate::sync::drain(&session, Duration::from_secs(5)).await);
+    }
+
+    /// Cancellation stays live while every user slot is occupied and the Store is held.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellation_completes_saturated_requests_while_the_store_is_held() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (_fixture, session, conversation) = real_supervisor_session(&origin);
+        start(session.clone());
+        let mut peer = accept_live_peer(&listener).await;
+        send_server_hello(&mut peer).await;
+        wait_for_live_enabled(&session, true).await;
+
+        let (release, holder) = hold_store(&session);
+        let mut senders = Vec::new();
+        for _ in 0..REQUEST_LIMIT {
+            let sending = session.clone();
+            senders.push(tokio::spawn(async move {
+                request_send_typing(&sending, conversation, TypingStateV2::Started).await
+            }));
+        }
+        wait_until("the user budget to saturate", || {
+            session.live_typing.in_flight.load(Ordering::Acquire) == REQUEST_LIMIT
+        })
+        .await;
+
+        session.cancel.cancel();
+        for sending in senders {
+            timeout(Duration::from_secs(2), sending)
+                .await
+                .expect("cancellation was blocked behind the saturated Store")
+                .unwrap();
+        }
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(crate::sync::drain(&session, Duration::from_secs(5)).await);
+    }
+
+    /// DAR2-02: the actor is blocked on the Store with an expired display deadline. Many supervisor
+    /// turns queue exactly one Expire; after release the flag clears and cancellation still drains.
+    #[tokio::test(flavor = "current_thread")]
+    async fn expiry_requests_coalesce_while_the_actor_is_blocked() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (fixture, session, conversation) = real_supervisor_session(&origin);
+        let (conv_a, conv_b) = (ConversationId::new(), ConversationId::new());
+        let gateway: DeviceId = fixture.binding.device_id.parse().unwrap();
+        let peer = peer_sender(&fixture, gateway, &[conv_a, conv_b]);
+        share_capabilities(&peer, &session.client);
+        session.set_status(|status| status.rcs_live_roster.push(peer.device.to_string()));
+        start(session.clone());
+        let mut server = accept_live_peer(&listener).await;
+        send_server_hello(&mut server).await;
+        wait_for_live_enabled(&session, true).await;
+
+        // Challenge, ack, and a display, all over the real socket.
+        server
+            .send(Message::Text(seal_started(&peer, conv_a).into()))
+            .await
+            .unwrap();
+        let Ok(Some(Ok(Message::Text(challenge)))) =
+            timeout(Duration::from_secs(5), server.next()).await
+        else {
+            panic!("the receiver did not challenge the peer");
+        };
+        server
+            .send(Message::Text(peer_answer(&peer, &challenge).into()))
+            .await
+            .unwrap();
+        server
+            .send(Message::Text(seal_started(&peer, conv_b).into()))
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), async {
+            while display_count(&session).await == 0 {
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the display was not published");
+
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        session.live_typing.install_status_probe(probe_tx);
+        let (release, holder) = hold_store(&session);
+        // Enqueue the blocking request and make the deadline due without yielding, so the supervisor
+        // cannot park on a tick between the two: the expiry is due while the actor is busy.
+        let (reply, blocked) = oneshot::channel();
+        session
+            .live_typing
+            .sender()
+            .unwrap()
+            .send(Cmd::SendTyping {
+                conversation_id: conversation,
+                state: TypingStateV2::Started,
+                reply,
+            })
+            .unwrap();
+        session.live_typing.override_mono(Some(60_000));
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if probe_rx.try_recv().is_ok() {
+                    return;
+                }
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the actor never reached the Store");
+
+        // Several supervisor turns pass while the actor stays blocked.
+        sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            session.live_typing.expire_requests.load(Ordering::Acquire),
+            1,
+            "supervisor turns queued more than one Expire"
+        );
+
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        timeout(Duration::from_secs(5), blocked)
+            .await
+            .expect("the blocked request never completed")
+            .unwrap();
+        wait_until("the queued expiry to be handled", || {
+            !session.live_typing.expire_pending()
+        })
+        .await;
+        session.live_typing.override_mono(None);
+        assert!(crate::sync::drain(&session, Duration::from_secs(5)).await);
+    }
+
+    /// Two refreshes arrive while the actor is still inside a Store-blocked typing request, so both
+    /// are pending when the actor next runs: one wake is queued and the second refresh coalesces into
+    /// the first. The superseded refresh must start a fresh incarnation, so a frame sealed before the
+    /// revocation is rejected at the final boundary and never reaches the socket.
+    #[tokio::test(flavor = "current_thread")]
+    async fn coalesced_refreshes_revoke_then_restore_retire_the_pending_incarnation() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (fixture, session, conversation) = real_supervisor_session(&origin);
+        let second = ConversationId::new();
+        publish_gateway_conversations(&fixture, &session, &[conversation, second]);
+        start(session.clone());
+        let mut peer = accept_live_peer(&listener).await;
+        send_server_hello(&mut peer).await;
+        wait_for_live_enabled(&session, true).await;
+        let gateway = fixture.binding.device_id.clone();
+
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        session.live_typing.install_status_probe(probe_tx);
+        let (release, holder) = hold_store(&session);
+        let pre_revocation = tokio::spawn({
+            let sending = session.clone();
+            async move { request_send_typing(&sending, conversation, TypingStateV2::Started).await }
+        });
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if probe_rx.try_recv().is_ok() {
+                    return;
+                }
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the actor never reached the Store");
+
+        // Revoke, then restore the same roster; both arrive before the actor handles either.
+        session
+            .live_typing
+            .submit_gateway_refresh(&session, status_refresh(&session, &[], false));
+        session.live_typing.submit_gateway_refresh(
+            &session,
+            status_refresh(&session, &[gateway.as_str()], true),
+        );
+        assert_eq!(
+            session.live_typing.refresh_wakes.load(Ordering::Acquire),
+            1,
+            "the refresh inbox queued more than one wake"
+        );
+
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        timeout(Duration::from_secs(5), pre_revocation)
+            .await
+            .expect("the blocked request never completed")
+            .unwrap();
+
+        match timeout(Duration::from_millis(500), peer.next()).await {
+            Err(_) => {}
+            Ok(Some(Ok(Message::Text(_)))) => {
+                panic!("a frame sealed before the coalesced revocation reached the socket")
+            }
+            Ok(_) => {}
+        }
+        assert!(request_send_typing(&session, second, TypingStateV2::Started).await);
+        let transmitted = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(Ok(Message::Text(_))) = peer.next().await {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(
+            transmitted.is_ok(),
+            "the fresh incarnation did not transmit"
+        );
+        assert!(crate::sync::drain(&session, Duration::from_secs(5)).await);
+    }
+
+    /// The actor on its own thread with no supervisor, so each test controls every wake.
+    struct BareActor {
+        commands: mpsc::UnboundedSender<Cmd>,
+        thread: Option<thread::JoinHandle<()>>,
+        sealed: mpsc::Receiver<SealedFrame>,
+    }
+
+    fn spawn_bare_actor(session: &Arc<Session>) -> BareActor {
+        let (commands, command_rx) = mpsc::unbounded_channel();
+        let (sealed_tx, sealed) = mpsc::channel(SEALED_QUEUE_LIMIT);
+        let (published_tx, _published) = watch::channel(Published::default());
+        let actor = TypingActor::new(session.clone(), sealed_tx, published_tx);
+        session.live_typing.install(commands.clone());
+        let thread = thread::spawn(move || actor.run(command_rx));
+        BareActor {
+            commands,
+            thread: Some(thread),
+            sealed,
+        }
+    }
+
+    impl BareActor {
+        /// Round-trips a query behind everything already queued, so earlier wakes have run.
+        fn sync(&self) -> usize {
+            let (reply, received) = oneshot::channel();
+            self.commands
+                .send(Cmd::DisplayCount { reply })
+                .expect("the actor is running");
+            received.blocking_recv().expect("the actor replied")
+        }
+    }
+
+    impl Drop for BareActor {
+        fn drop(&mut self) {
+            let _ = self.commands.send(Cmd::Shutdown);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    fn wait_sync(what: &str, ready: impl Fn() -> bool) {
+        let started = std::time::Instant::now();
+        while !ready() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "timed out waiting for {what}"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Enabled-incarnation probe that does not consume a start: a seal for a conversation nothing else
+    /// has started returns the outbound generation.
+    fn incarnation_of(
+        session: &Session,
+        conversation: ConversationId,
+        device: DeviceId,
+    ) -> LiveEnableGeneration {
+        session
+            .client
+            .seal_typing_signal_v2(
+                conversation,
+                device,
+                TypingOriginV2::VaultDevice,
+                TypingStateV2::Started,
+                session.live_typing.clock(),
+            )
+            .unwrap()
+            .expect("an enabled incarnation seals")
+            .generation
+    }
+
+    /// DAR3-01: a blocked actor and many wakes leave exactly one Reevaluate queued; the flag clears
+    /// when the actor handles it.
+    #[test]
+    fn reevaluate_wakes_coalesce_while_the_actor_is_blocked() {
+        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let bare = spawn_bare_actor(&session);
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        session.live_typing.install_status_probe(probe_tx);
+        let (release, holder) = hold_store(&session);
+        let (reply, blocked) = oneshot::channel();
+        bare.commands
+            .send(Cmd::SendTyping {
+                conversation_id: conversation,
+                state: TypingStateV2::Started,
+                reply,
+            })
+            .unwrap();
+        probe_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the actor never reached the Store");
+
+        for _ in 0..100 {
+            session.live_typing.request_reevaluate();
+        }
+        assert_eq!(
+            session.live_typing.reevaluate_sends.load(Ordering::Acquire),
+            1,
+            "blocked wakes queued more than one Reevaluate"
+        );
+
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        blocked.blocking_recv().unwrap();
+        wait_sync("the queued Reevaluate to be handled", || {
+            !session
+                .live_typing
+                .reevaluate_queued
+                .load(Ordering::Acquire)
+        });
+        session.live_typing.request_reevaluate();
+        assert_eq!(
+            session.live_typing.reevaluate_sends.load(Ordering::Acquire),
+            2,
+            "a wake after handling was absorbed"
+        );
+        drop(bare);
+    }
+
+    /// DAR3-01: socket flaps while the actor is blocked produce one queued wake, and the final Up
+    /// starts a fresh incarnation (Up→Down→Up is not a single Up).
+    #[test]
+    fn socket_flaps_while_the_actor_is_blocked_coalesce_and_restart_the_incarnation() {
+        let (fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let (first_conversation, second_conversation, third_conversation) =
+            (conversation, ConversationId::new(), ConversationId::new());
+        publish_gateway_conversations(
+            &fixture,
+            &session,
+            &[first_conversation, second_conversation, third_conversation],
+        );
+        let device: DeviceId = fixture.binding.device_id.parse().unwrap();
+        let bare = spawn_bare_actor(&session);
+        session.live_typing.set_socket(true);
+        wait_sync("the first socket to enable", || {
+            session.client.set_typing_sharing(true).is_ok()
+        });
+        assert_eq!(bare.sync(), 0);
+        let first = incarnation_of(&session, first_conversation, device);
+        let wakes_before = session.live_typing.socket_wakes.load(Ordering::Acquire);
+
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        session.live_typing.install_status_probe(probe_tx);
+        let (release, holder) = hold_store(&session);
+        let (reply, blocked) = oneshot::channel();
+        bare.commands
+            .send(Cmd::SendTyping {
+                conversation_id: second_conversation,
+                state: TypingStateV2::Started,
+                reply,
+            })
+            .unwrap();
+        probe_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the actor never reached the Store");
+
+        for _ in 0..200 {
+            session.live_typing.set_socket(false);
+            session.live_typing.set_socket(true);
+        }
+        assert_eq!(
+            session.live_typing.socket_wakes.load(Ordering::Acquire) - wakes_before,
+            1,
+            "socket flaps queued more than one wake"
+        );
+
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        blocked.blocking_recv().unwrap();
+        assert_eq!(bare.sync(), 0);
+        let second = incarnation_of(&session, third_conversation, device);
+        assert_ne!(first, second, "Up→Down→Up kept the old incarnation");
+        assert!(session.client.set_typing_sharing(true).is_ok());
+        drop(bare);
+    }
+
+    /// DAR3-01: flaps that end Down leave the core disabled and still queue one wake.
+    #[test]
+    fn socket_flaps_ending_down_disable_the_core() {
+        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let bare = spawn_bare_actor(&session);
+        session.live_typing.set_socket(true);
+        wait_sync("the socket to enable", || {
+            session.client.set_typing_sharing(true).is_ok()
+        });
+        assert_eq!(bare.sync(), 0);
+        let wakes_before = session.live_typing.socket_wakes.load(Ordering::Acquire);
+
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        session.live_typing.install_status_probe(probe_tx);
+        let (release, holder) = hold_store(&session);
+        let (reply, blocked) = oneshot::channel();
+        bare.commands
+            .send(Cmd::SendTyping {
+                conversation_id: conversation,
+                state: TypingStateV2::Started,
+                reply,
+            })
+            .unwrap();
+        probe_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the actor never reached the Store");
+        for _ in 0..200 {
+            session.live_typing.set_socket(true);
+            session.live_typing.set_socket(false);
+        }
+        assert_eq!(
+            session.live_typing.socket_wakes.load(Ordering::Acquire) - wakes_before,
+            1,
+            "socket flaps queued more than one wake"
+        );
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        blocked.blocking_recv().unwrap();
+        assert_eq!(bare.sync(), 0);
+        assert_eq!(
+            session.client.set_typing_sharing(true),
+            Err(LiveError::Disabled)
+        );
+        drop(bare);
     }
 
     fn gateway_status(gateway_id: DeviceId) -> RcsGatewayStatus {
