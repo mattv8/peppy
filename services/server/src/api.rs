@@ -2695,6 +2695,51 @@ fn heartbeat_action(has_outstanding_challenge: bool) -> HeartbeatAction {
     }
 }
 
+const DRAFT_HINT_COOLDOWN: Duration = Duration::from_millis(500);
+
+#[derive(Default)]
+struct DraftHintCoalescer {
+    cooldown_until: Option<tokio::time::Instant>,
+    pending: bool,
+}
+
+impl DraftHintCoalescer {
+    fn notice(&mut self, now: tokio::time::Instant) -> bool {
+        if self
+            .cooldown_until
+            .is_none_or(|cooldown_until| now >= cooldown_until)
+        {
+            self.cooldown_until = None;
+            self.pending = false;
+            true
+        } else {
+            self.pending = true;
+            false
+        }
+    }
+
+    fn sent(&mut self, completed_at: tokio::time::Instant) -> tokio::time::Instant {
+        let cooldown_until = completed_at + DRAFT_HINT_COOLDOWN;
+        self.cooldown_until = Some(cooldown_until);
+        cooldown_until
+    }
+
+    fn timeout_expired(&mut self, now: tokio::time::Instant) -> bool {
+        let Some(cooldown_until) = self.cooldown_until else {
+            return false;
+        };
+        if now < cooldown_until {
+            return false;
+        }
+        self.cooldown_until = None;
+        std::mem::take(&mut self.pending)
+    }
+
+    fn cooling_down(&self) -> bool {
+        self.cooldown_until.is_some()
+    }
+}
+
 async fn websocket(
     State(s): State<ApiState>,
     headers: HeaderMap,
@@ -2902,8 +2947,7 @@ async fn ws_session_inner(
     // Broadcast is only a latency hint; committed rows are the durable source.
     let mut durable_replay = tokio::time::interval(options.durable_replay_interval);
     durable_replay.tick().await;
-    let mut draft_hint_ready = true;
-    let mut draft_hint_pending = false;
+    let mut draft_hint_coalescer = DraftHintCoalescer::default();
     let mut draft_hint_cooldown = Box::pin(tokio::time::sleep(Duration::from_secs(3_600)));
     loop {
         let stop = tokio::select! {
@@ -3014,31 +3058,28 @@ async fn ws_session_inner(
                         return
                     }
                 }
-                if !draft_hint_ready {
-                    draft_hint_pending = true;
+                if !draft_hint_coalescer.notice(tokio::time::Instant::now()) {
                     continue;
                 }
-                draft_hint_ready = false;
-                draft_hint_cooldown
-                    .as_mut()
-                    .reset(tokio::time::Instant::now() + Duration::from_millis(500));
                 if send_frame(&mut socket, json!({"type":"drafts_changed"}).to_string(), options.send_timeout).await.is_err() {
                     WsStop::Disconnected
-                } else { continue }
+                } else {
+                    let cooldown_until = draft_hint_coalescer.sent(tokio::time::Instant::now());
+                    draft_hint_cooldown.as_mut().reset(cooldown_until);
+                    continue
+                }
             },
-            _ = &mut draft_hint_cooldown, if !draft_hint_ready => {
-                draft_hint_ready = true;
-                if !draft_hint_pending {
+            _ = &mut draft_hint_cooldown, if draft_hint_coalescer.cooling_down() => {
+                if !draft_hint_coalescer.timeout_expired(tokio::time::Instant::now()) {
                     continue;
                 }
-                draft_hint_pending = false;
-                draft_hint_ready = false;
-                draft_hint_cooldown
-                    .as_mut()
-                    .reset(tokio::time::Instant::now() + Duration::from_millis(500));
                 if send_frame(&mut socket, json!({"type":"drafts_changed"}).to_string(), options.send_timeout).await.is_err() {
                     WsStop::Disconnected
-                } else { continue }
+                } else {
+                    let cooldown_until = draft_hint_coalescer.sent(tokio::time::Instant::now());
+                    draft_hint_cooldown.as_mut().reset(cooldown_until);
+                    continue
+                }
             },
         };
         if presence_active {
@@ -3139,6 +3180,51 @@ mod tests {
     fn heartbeat_disconnects_before_replacing_an_unanswered_challenge() {
         assert_eq!(heartbeat_action(false), HeartbeatAction::SendChallenge);
         assert_eq!(heartbeat_action(true), HeartbeatAction::Disconnect);
+    }
+
+    #[test]
+    fn draft_hint_coalescer_enforces_leading_and_trailing_windows() {
+        let start = tokio::time::Instant::now();
+        let mut coalescer = DraftHintCoalescer::default();
+
+        assert!(coalescer.notice(start));
+        coalescer.sent(start);
+        for _ in 0..100 {
+            assert!(!coalescer.notice(start + Duration::from_millis(100)));
+        }
+        assert!(!coalescer.notice(start + Duration::from_millis(499)));
+        assert!(!coalescer.timeout_expired(start + Duration::from_millis(499)));
+        assert!(coalescer.timeout_expired(start + Duration::from_millis(500)));
+
+        coalescer.sent(start + Duration::from_millis(500));
+        assert!(!coalescer.notice(start + Duration::from_millis(500)));
+        assert!(!coalescer.timeout_expired(start + Duration::from_millis(999)));
+        assert!(coalescer.timeout_expired(start + Duration::from_millis(1_000)));
+    }
+
+    #[test]
+    fn draft_hint_coalescer_has_no_trailing_send_without_a_pending_notice() {
+        let start = tokio::time::Instant::now();
+        let mut coalescer = DraftHintCoalescer::default();
+
+        assert!(coalescer.notice(start));
+        coalescer.sent(start);
+        assert!(!coalescer.timeout_expired(start + Duration::from_millis(500)));
+        assert!(coalescer.notice(start + Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn draft_hint_cooldown_starts_after_send_completion() {
+        let notice_at = tokio::time::Instant::now();
+        let send_completed_at = notice_at + Duration::from_millis(100);
+        let mut coalescer = DraftHintCoalescer::default();
+
+        assert!(coalescer.notice(notice_at));
+        coalescer.sent(send_completed_at);
+        assert!(!coalescer.notice(send_completed_at));
+        assert!(!coalescer.timeout_expired(notice_at + Duration::from_millis(500)));
+        assert!(!coalescer.timeout_expired(notice_at + Duration::from_millis(599)));
+        assert!(coalescer.timeout_expired(notice_at + Duration::from_millis(600)));
     }
 
     #[test]

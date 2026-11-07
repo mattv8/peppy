@@ -125,6 +125,7 @@ mod tests {
         kind: String,
         caption: Option<bool>,
         groups: Option<Vec<usize>>,
+        parts: Option<usize>,
     }
 
     #[test]
@@ -157,6 +158,12 @@ mod tests {
                         assert_eq!(
                             image_groups.iter().map(Vec::len).collect::<Vec<_>>(),
                             vector.expect.groups.unwrap(),
+                            "{}",
+                            vector.name
+                        );
+                        assert_eq!(
+                            Some(image_groups.len() + usize::from(caption)),
+                            vector.expect.parts,
                             "{}",
                             vector.name
                         );

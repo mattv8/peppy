@@ -66,6 +66,87 @@ class MmsImageFitterTest {
     }
 
     @Test
+    fun generatesOnlyTheFirstLadderCandidateThatFits() {
+        val root = kotlin.io.path.createTempDirectory("mms-fit").toFile()
+        val source = File(root, "source.jpg").apply { writeBytes(ByteArray(100_000)) }
+        var encodes = 0
+        val fitter = MmsImageFitter(root) { _, _, _, destination ->
+            encodes++
+            destination.apply { writeBytes(ByteArray(100)) }
+        }
+
+        val result = fitter.fit("lazy", "fingerprint", 300, listOf(MmsFitPart(source, "image/jpeg", "photo.jpg"))) {
+            it.sumOf { part -> part.file.length() }
+        }
+
+        assertTrue(result is MmsFitResult.Fitted)
+        assertEquals("a fitting first candidate must not prepare the remaining ladder", 1, encodes)
+    }
+
+    @Test
+    fun usesABoundedJpegFallbackNameForNamelessAndLongUtf8Sources() {
+        val root = kotlin.io.path.createTempDirectory("mms-fit").toFile()
+        val source = File(root, "source.jpg").apply { writeBytes(ByteArray(100_000)) }
+        val fitter = MmsImageFitter(root) { _, _, _, destination -> destination.apply { writeBytes(ByteArray(100)) } }
+        val names = listOf<String?>(null, "é".repeat(200) + ".png")
+
+        names.forEachIndexed { index, name ->
+            val result = fitter.fit("name-$index", "fingerprint-$index", 300, listOf(MmsFitPart(source, "image/jpeg", name))) {
+                it.sumOf { part -> part.file.length() }
+            } as MmsFitResult.Fitted
+            assertEquals(".jpg", result.parts.single().name?.takeLast(4))
+            assertTrue(result.parts.single().name!!.toByteArray(Charsets.UTF_8).size <= 255)
+            assertTrue(result.parts.single().name != "null.jpg")
+        }
+    }
+
+    @Test
+    fun treatsDeterministicDecodeFailureAsPermanent() {
+        val root = kotlin.io.path.createTempDirectory("mms-fit").toFile()
+        val source = File(root, "source.jpg").apply { writeBytes(ByteArray(100_000)) }
+        val fitter = MmsImageFitter(root) { _, _, _, _ -> throw IllegalArgumentException("malformed image") }
+
+        assertTrue(fitter.fit("invalid", "fingerprint", 300, listOf(MmsFitPart(source, "image/jpeg", "photo.jpg"))) { 400L } is MmsFitResult.Impossible)
+    }
+
+    @Test
+    fun defersBeforePreparationWhenTheDispatcherBudgetIsExhausted() {
+        val root = kotlin.io.path.createTempDirectory("mms-fit").toFile()
+        val source = File(root, "source.jpg").apply { writeBytes(ByteArray(100_000)) }
+        var encodes = 0
+        val fitter = MmsImageFitter(root, beforePreparation = { false }) { _, _, _, destination ->
+            encodes++
+            destination.apply { writeBytes(ByteArray(400)) }
+        }
+
+        val result = fitter.fit("budget", "fingerprint", 300, listOf(MmsFitPart(source, "image/jpeg", "photo.jpg"))) { 400L }
+
+        assertTrue(result is MmsFitResult.Transient)
+        assertEquals(0, encodes)
+    }
+
+    @Test
+    fun fitsTwoImagesThatEachNeedTheirFourthLadderCandidate() {
+        val root = kotlin.io.path.createTempDirectory("mms-fit").toFile()
+        val sources = (0..1).map { index ->
+            File(root, "$index.jpg").apply { writeBytes(ByteArray(100_000)) }
+        }
+        var encodes = 0
+        val fitter = MmsImageFitter(root) { _, edge, _, destination ->
+            encodes++
+            destination.apply { writeBytes(ByteArray(if (edge <= 800) 100 else 200)) }
+        }
+
+        val result = fitter.fit(
+            "two-images", "fingerprint", 200,
+            sources.mapIndexed { index, source -> MmsFitPart(source, "image/jpeg", "$index.jpg") },
+        ) { parts -> parts.sumOf { it.file.length() } }
+
+        assertTrue(result is MmsFitResult.Fitted)
+        assertEquals("each image needs four ladder candidates", 8, encodes)
+    }
+
+    @Test
     fun cacheUsesDurableAttachmentIdentityAndReconstructsUnchangedCurrentParts() {
         val root = kotlin.io.path.createTempDirectory("mms-fit").toFile()
         var encodes = 0
@@ -85,7 +166,7 @@ class MmsImageFitterTest {
         assertEquals(firstFingerprint, secondFingerprint)
         val result = fitter.fit("command", secondFingerprint, 300, second) { it.sumOf { part -> part.file.length() } }
 
-        assertEquals(6, encodes)
+        assertEquals(1, encodes)
         val fitted = result as MmsFitResult.Fitted
         assertTrue(fitted.parts[0].file.parentFile?.name == "command")
         assertEquals(second[1].file, fitted.parts[1].file)

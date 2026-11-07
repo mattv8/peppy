@@ -50,7 +50,7 @@ export class DraftTransport {
 
   public async probeAuthenticatedRoute(signal: AbortSignal): Promise<boolean> {
     try {
-      object(await this.transport.json("/v1/gateways", { method: "GET", signal }));
+      object(await this.transport.json("/v1/vault", { method: "GET", signal }));
       return true;
     } catch {
       return false;

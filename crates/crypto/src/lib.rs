@@ -272,7 +272,9 @@ pub fn derive_draft_purpose_key(
         Hkdf::<Sha256>::new(Some(b"peppy.draft.v1"), key).expand(b"peppy.draft.v1", &mut bytes)
     });
     result.map_err(|_| CryptoError::OperationFailed)?;
-    PurposeKey::import_native_cache(bytes, profile, KeyPurpose::Draft)
+    let key = PurposeKey::import_native_cache(bytes, profile, KeyPurpose::Draft);
+    bytes.zeroize();
+    key
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

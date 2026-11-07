@@ -173,6 +173,42 @@ fn accepted_command_id_belongs_to_the_first_split_part() {
 }
 
 #[test]
+fn persisted_send_intent_reports_split_part_count_after_queueing() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&dir, "client", &vault);
+    let client = unlocked(&config, &vault);
+    let (draft, ids) = saved_split_draft(&client, &config, &dir, "caption", 2);
+    accept_draft_push(&client, &draft);
+    let command_id = client
+        .begin_draft_send(
+            draft.draft_id,
+            draft.revision,
+            Some(split_parts(&ids, true)),
+        )
+        .unwrap()
+        .remote
+        .unwrap()
+        .command_id;
+    client
+        .send_compose_draft_accepted(draft.draft_id, draft.revision, command_id)
+        .unwrap();
+
+    assert_eq!(
+        client
+            .draft_send_intent_parts_count(draft.draft_id, command_id)
+            .unwrap(),
+        Some(3)
+    );
+    assert_eq!(
+        client
+            .draft_send_intent_parts_count(draft.draft_id, CommandId::new())
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
 fn sent_terminal_recovers_the_persisted_split_plan_once() {
     let dir = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();

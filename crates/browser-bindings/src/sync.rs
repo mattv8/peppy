@@ -275,6 +275,16 @@ impl BrowserCore {
                     json!({"draftId": push.draft_id.to_string(), "revisionId": push.revision_id.to_string(), "request": request})
                 }).collect::<Vec<_>>() }))
             }
+            "_worker_draft_mark_push_attempt" => {
+                let revision_id = required_string(&args, "revisionId")?
+                    .parse()
+                    .map_err(|_| invalid())?;
+                let attempted = self
+                    .client()?
+                    .mark_draft_push_attempt(draft_id(&args)?, revision_id)
+                    .map_err(core)?;
+                Ok(json!({"attempted": attempted}))
+            }
             "_worker_draft_record_push" => {
                 let revision_id = required_string(&args, "revisionId")?
                     .parse()

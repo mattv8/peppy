@@ -394,9 +394,8 @@ export class DraftStore {
     if (!slot || isDirty(slot) || slot.held || !this.shouldAdopt(slot, draft)) return;
     const incomingContent = contentOf(draft);
     const changed = !sameDraftContent(slot.content, incomingContent);
-    const textOnlyChange = changed && slot.id === draft.id && sameStructure(slot.content, incomingContent);
-    if (textOnlyChange) this.preserveUndo(slot, slot.content, draft);
-    else if (changed || slot.id !== draft.id) {
+    const structuralReplacement = slot.id !== draft.id || !sameStructure(slot.content, incomingContent);
+    if (changed && structuralReplacement) {
       this.retainCopy(slot.key, slot.content);
       this.undoVersions.delete(slot.key);
     }
@@ -408,7 +407,7 @@ export class DraftStore {
       error: undefined,
       acknowledgedContent: incomingContent,
     });
-    if (changed) this.events.notice?.(slot.key, "remote-update");
+    if (changed && structuralReplacement) this.events.notice?.(slot.key, "remote-update");
     this.events.changed();
   }
 

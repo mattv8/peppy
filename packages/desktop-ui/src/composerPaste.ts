@@ -9,8 +9,11 @@ export type ComposerPaste = {
   rejected: ComposerPasteRejection[];
 };
 
+export const MAX_COMPOSER_ATTACHMENTS = 10;
+export const MAX_COMPOSER_ATTACHMENT_BYTES = 32 * 1024 * 1024;
+export const MAX_COMPOSER_ATTACHMENT_SIZE_LABEL = "32 MiB";
+
 const ACCEPTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-const MAX_IMAGE_BYTES = 33_554_432;
 
 function isSingleUrl(value: string): boolean {
   const trimmed = value.trim();
@@ -32,7 +35,7 @@ export function extractComposerPaste(data: DataTransfer, remainingSlots: number)
     if (!file.type.startsWith("image/")) continue;
     if (!ACCEPTED_IMAGE_TYPES.has(file.type)) {
       rejected.push({ name: file.name, reason: "type" });
-    } else if (file.size > MAX_IMAGE_BYTES) {
+    } else if (file.size > MAX_COMPOSER_ATTACHMENT_BYTES) {
       rejected.push({ name: file.name, reason: "size" });
     } else if (images.length >= Math.max(0, remainingSlots)) {
       rejected.push({ name: file.name, reason: "limit" });

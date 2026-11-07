@@ -1,3 +1,17 @@
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM draft_incarnations)
+     OR EXISTS (SELECT 1 FROM draft_branches)
+     OR EXISTS (SELECT 1 FROM draft_revisions)
+     OR EXISTS (SELECT 1 FROM draft_terminals)
+     OR EXISTS (SELECT 1 FROM draft_attachment_holds)
+     OR EXISTS (SELECT 1 FROM attachments WHERE draft_id IS NOT NULL)
+     OR EXISTS (SELECT 1 FROM upload_reservations WHERE draft_id IS NOT NULL)
+     OR EXISTS (SELECT 1 FROM storage_deletions WHERE reason = 'draft_expired') THEN
+    RAISE EXCEPTION 'cannot downgrade 0026_draft_retention: draft data is present'
+      USING HINT = 'Draft terminal metadata is retained indefinitely; discarding or expiring drafts is not sufficient. Keep a compatible server version, or prepare an explicitly reviewed data-preserving recovery migration.';
+  END IF;
+END $$;
 DROP TABLE draft_attachment_holds;
 DROP TABLE draft_terminals;
 DROP TABLE draft_revisions;

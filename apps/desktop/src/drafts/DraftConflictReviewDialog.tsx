@@ -74,15 +74,21 @@ export function DraftConflictReviewDialog({
     setBusy(true);
     setError(undefined);
     setChanged(false);
-    const result = await onResolve(selection === LOCAL_VERSION ? null : selection);
-    resolving.current = false;
-    setBusy(false);
-    if (result.ok) {
-      onClose();
-      return;
+    try {
+      const result = await onResolve(selection === LOCAL_VERSION ? null : selection);
+      if (result.ok) {
+        onClose();
+        return;
+      }
+      setSelection(undefined);
+      setError(result.message);
+    } catch (error) {
+      setSelection(undefined);
+      setError(error instanceof Error && error.message ? error.message : "Could not apply the selected version.");
+    } finally {
+      resolving.current = false;
+      setBusy(false);
     }
-    setSelection(undefined);
-    setError(result.message);
   };
 
   const dismiss = () => {
@@ -97,7 +103,7 @@ export function DraftConflictReviewDialog({
     </>;
   };
 
-  return <div className="draft-review-dialog" onKeyDownCapture={(event) => {
+  return <div className="draft-review-dialog" data-draft-review-dialog onKeyDownCapture={(event) => {
     if (event.key !== "Escape") return;
     event.preventDefault();
     event.stopPropagation();
@@ -125,9 +131,9 @@ export function DraftConflictReviewDialog({
       </div>}
     >
       <div data-draft-review-body className="draft-review-body">
-        {noConflicts ? <p>These versions no longer need review.</p> : <fieldset className="draft-review-choices" disabled={busy}>
+        {noConflicts ? <p>These versions no longer need review.</p> : <fieldset className="draft-review-choices" data-draft-review-radio-group disabled={busy}>
           <legend className="draft-review-instruction">Choose the version to keep in this draft.</legend>
-          <div className="draft-review-versions">
+          <div className="draft-review-versions" data-draft-review-version-list>
             <DraftVersionSummary id="draft-review-version-local" heading={choice(LOCAL_VERSION, "draft-review-version-local", "This device")} {...local} attachments={attachments} />
             {conflicts.map((conflict, index) => {
               const hookId = `draft-review-version-${conflict.branchId}`;

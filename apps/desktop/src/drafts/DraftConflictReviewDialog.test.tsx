@@ -85,6 +85,16 @@ describe("DraftConflictReviewDialog", () => {
     expect(screen.getByRole("button", { name: "Use selected version" })).toBeDisabled();
   });
 
+  it("recovers from a rejected resolution promise", async () => {
+    renderDialog({ onResolve: vi.fn().mockRejectedValue(new Error("Native resolver failed")) });
+
+    fireEvent.click(screen.getByRole("radio", { name: /Other version/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Use selected version" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Native resolver failed");
+    expect(screen.getByRole("button", { name: "Use selected version" })).toBeDisabled();
+  });
+
   it("clears selection when reviewed content becomes stale", () => {
     const { rerender } = renderDialog();
 

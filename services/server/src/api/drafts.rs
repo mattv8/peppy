@@ -57,13 +57,7 @@ pub(super) async fn list(
 ) -> ApiResult<Json<DraftChangesResponse>> {
     let principal = auth_with_mode(&s, &headers).await?;
     authorize(&s, &principal, Operation::Sync).await?;
-    let after = query
-        .after
-        .as_deref()
-        .unwrap_or("0")
-        .parse::<i64>()
-        .ok()
-        .filter(|value| *value >= 0)
+    let after = parse_change_cursor(query.after.as_deref())
         .ok_or(ApiError(StatusCode::BAD_REQUEST, "invalid_cursor"))?;
     let limit = i64::from(
         query
@@ -133,6 +127,19 @@ pub(super) async fn list(
     }))
 }
 
+/// Canonical change cursor: `0`, or a nonzero unpadded decimal within `i64`.
+fn parse_change_cursor(value: Option<&str>) -> Option<i64> {
+    let raw = value.unwrap_or("0");
+    let canonical = raw == "0"
+        || (raw.starts_with(|c: char| matches!(c, '1'..='9'))
+            && raw.bytes().all(|byte| byte.is_ascii_digit()));
+    if canonical {
+        raw.parse::<i64>().ok()
+    } else {
+        None
+    }
+}
+
 fn timestamp(row: &sqlx::postgres::PgRow, column: &str) -> String {
     row.try_get(column).unwrap_or_default()
 }
@@ -179,12 +186,6 @@ pub(super) async fn put(
             },
         )
     })?;
-    if request.resolves_branch_ids.contains(&revision_id) {
-        return Err(ApiError(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "draft_invalid_request",
-        ));
-    }
     let sealed = URL_SAFE_NO_PAD
         .decode(&request.sealed_record)
         .map_err(|_| ApiError(StatusCode::UNPROCESSABLE_ENTITY, "draft_invalid_request"))?;
@@ -232,7 +233,7 @@ pub(super) async fn put(
     }
     let base = request.base_revision_id;
     let target = sqlx::query("SELECT branch_id,to_char(expires_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') expires_at FROM draft_branches WHERE vault_id=$1 AND draft_id=$2 AND head_revision_id=$3 AND state='live' AND expires_at>now() FOR UPDATE").bind(principal.vault).bind(draft_id).bind(base).fetch_optional(&mut *tx).await.map_err(|error| database_unavailable(&error, "draft_put_head"))?;
-    let (branch_id, conflict, expires_at) = if let Some(row) = target {
+    let (branch_id, conflict, expires_at, prior_head) = if let Some(row) = target {
         (
             row.get("branch_id"),
             false,
@@ -244,6 +245,7 @@ pub(super) async fn put(
             } else {
                 row.get("expires_at")
             },
+            base,
         )
     } else {
         let live: i64 = sqlx::query_scalar("SELECT count(*) FROM draft_branches WHERE vault_id=$1 AND draft_id=$2 AND state='live' AND expires_at>now()").bind(principal.vault).bind(draft_id).fetch_one(&mut *tx).await.map_err(|error| database_unavailable(&error, "draft_put_count"))?;
@@ -258,11 +260,14 @@ pub(super) async fn put(
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(|error| database_unavailable(&error, "draft_put_new_expiry"))?,
+            None,
         )
     };
     let seq = next_seq(&mut tx, principal.vault).await?;
     sqlx::query("INSERT INTO draft_branches(vault_id,draft_id,branch_id,head_revision_id,state,expires_at,change_seq) VALUES($1,$2,$3,$4,'live',$5::timestamptz,$6) ON CONFLICT(vault_id,branch_id) DO UPDATE SET head_revision_id=EXCLUDED.head_revision_id,expires_at=EXCLUDED.expires_at,change_seq=EXCLUDED.change_seq").bind(principal.vault).bind(draft_id).bind(branch_id).bind(revision_id).bind(&expires_at).bind(seq).execute(&mut *tx).await.map_err(|error| database_unavailable(&error, "draft_put_branch"))?;
-    sqlx::query("UPDATE draft_revisions SET sealed_record=NULL WHERE vault_id=$1 AND draft_id=$2 AND branch_id=$3 AND sealed_record IS NOT NULL").bind(principal.vault).bind(draft_id).bind(branch_id).execute(&mut *tx).await.map_err(|error| database_unavailable(&error, "draft_put_clear_head"))?;
+    if let Some(prior) = prior_head {
+        sqlx::query("UPDATE draft_revisions SET sealed_record=NULL WHERE vault_id=$1 AND draft_id=$2 AND revision_id=$3 AND sealed_record IS NOT NULL").bind(principal.vault).bind(draft_id).bind(prior).execute(&mut *tx).await.map_err(|error| database_unavailable(&error, "draft_put_clear_head"))?;
+    }
     sqlx::query("INSERT INTO draft_revisions(vault_id,draft_id,revision_id,branch_id,parent_revision_id,producer_device_id,sealed_record,attachment_ids,authored,conflict,expires_at_at_accept) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::timestamptz)").bind(principal.vault).bind(draft_id).bind(revision_id).bind(branch_id).bind(base).bind(principal.device).bind(sealed).bind(&request.attachment_ids).bind(request.authored).bind(conflict).bind(&expires_at).execute(&mut *tx).await.map_err(|error| database_unavailable(&error, "draft_put_revision"))?;
     if !request.resolves_branch_ids.is_empty() {
         if request.resolves_branch_ids.contains(&branch_id) {

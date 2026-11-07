@@ -130,7 +130,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 47;
+const SCHEMA_VERSION: i64 = 48;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -2645,16 +2645,34 @@ impl Client {
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let Some(current) = load_compose_draft(&tx, "draft_id", &draft_id.to_string())? else {
-            return Err(unavailable_draft_error(&tx, draft_id)?);
-        };
-        if stored_snapshot.is_none() && current.revision != expected_revision {
+        let current = load_compose_draft(&tx, "draft_id", &draft_id.to_string())?;
+        if stored_snapshot.is_none()
+            && current
+                .as_ref()
+                .is_none_or(|current| current.revision != expected_revision)
+        {
+            let Some(current) = current else {
+                return Err(unavailable_draft_error(&tx, draft_id)?);
+            };
             return Err(Error::StaleDraft {
                 current_revision: current.revision,
             });
         }
-        let draft = stored_snapshot.unwrap_or_else(|| current.clone());
-        let clear_current = current.revision == expected_revision && current == draft;
+        let is_local_queue = stored_snapshot.is_none();
+        let draft = stored_snapshot.or(current.clone()).ok_or(Error::NotFound)?;
+        if is_local_queue {
+            let remote_or_attempted: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM draft_sync d WHERE d.draft_id=? AND (d.accepted_revision_id IS NOT NULL OR EXISTS(SELECT 1 FROM draft_push_attempts a WHERE a.draft_id=d.draft_id)))",
+                [draft_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if remote_or_attempted {
+                return Err(Error::DraftNotSynced);
+            }
+        }
+        let clear_current = current
+            .as_ref()
+            .is_some_and(|current| current.revision == expected_revision && *current == draft);
         let route = draft.route.as_ref().ok_or(Error::InvalidRequest("route"))?;
         // For one-to-one text replies, the latest record defines the current thread transport;
         // an old legacy picture MMS must not permanently convert a later SMS thread to MMS.
@@ -5806,6 +5824,27 @@ CREATE TABLE IF NOT EXISTS draft_sync_merge_fallbacks(
   draft_id TEXT PRIMARY KEY, branch_id TEXT NOT NULL, record BLOB NOT NULL
 );
 ";
+/// Version 47 -> 48: durable evidence that a draft revision PUT may have reached the server.
+const MIGRATION_48: &str = "
+CREATE TABLE IF NOT EXISTS draft_push_attempts(
+  draft_id TEXT NOT NULL, revision_id TEXT NOT NULL,
+  PRIMARY KEY(draft_id, revision_id)
+);
+CREATE TABLE IF NOT EXISTS draft_sync_quarantines(
+  draft_id TEXT NOT NULL, revision_id TEXT NOT NULL, reason TEXT NOT NULL,
+  PRIMARY KEY(draft_id, revision_id)
+);
+";
+fn apply_migration_48(conn: &Connection, legacy_pending_is_ambiguous: bool) -> Result<(), Error> {
+    conn.execute_batch(MIGRATION_48)?;
+    if legacy_pending_is_ambiguous {
+        conn.execute(
+            "INSERT OR IGNORE INTO draft_push_attempts(draft_id,revision_id) SELECT draft_id,pending_revision_id FROM draft_sync WHERE pending_revision_id IS NOT NULL AND pending_sealed_record IS NOT NULL",
+            [],
+        )?;
+    }
+    Ok(())
+}
 fn apply_migration_47(conn: &Connection) -> Result<(), Error> {
     conn.execute_batch(MIGRATION_47)?;
     add_column_if_missing(
@@ -5995,6 +6034,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             apply_migration_45(&tx)?;
             tx.execute_batch(MIGRATION_46)?;
             apply_migration_47(&tx)?;
+            apply_migration_48(&tx, false)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -6003,7 +6043,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=46)) => {
+        Some(version @ (4..=47)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -6129,6 +6169,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 46 {
                 apply_migration_47(&tx)?;
+            }
+            if version <= 47 {
+                apply_migration_48(&tx, true)?;
             }
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;

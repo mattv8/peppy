@@ -283,6 +283,17 @@ Update participating clients before you enable Android notification mirroring. O
 
 The desktop shows a notification feed, app mutes, and dismissals. Phone dismissals sync through the vault. Desktop dismissal requests wait for the phone's next sync and Android background scheduling can delay them by 15 minutes or more; this is not an immediate remote-control channel. Group summaries can remain on the phone after their children are dismissed. The feed keeps up to 1,000 active notifications; bulk dismissal handles up to 100 at a time. Native banner behavior depends on OS permissions and settings.
 
+### Drafts and attachment limits
+
+- A draft expires 30 days after the server accepts an authored edit. Expiry closes the draft, clears the sealed bytes of its revisions, and deletes only private draft attachments that no message record, sent-message history, hold, or public copy still uses. Sent MMS media stays protected.
+- A draft whose upload was never attempted stays editable and sendable offline. If an upload was attempted and the server's acceptance is unknown, Peppy blocks local sending of that draft until the client reconnects and reconciles with the server.
+- Each draft allows up to three live branches. The vault attachment quota is set by `VAULT_ATTACHMENT_QUOTA_BYTES`; Compose defaults it to `536870912` bytes. Finalized attachments, unexpired upload reservations, and unpurged removals or public copies count against it.
+- On Android, MMS content version 4 can resize images and split a large message into groups. Split parts are sent in planned order on a best-effort basis, and carriers can deliver them out of order. Content version 3 and older get no split plan; an oversize message is refused.
+- Android keeps fitted MMS images as plaintext in app-private storage that Android does not back up, and removes them when the command settles or the fit fails.
+- Downgrading across migration 0026 is refused while draft data remains. Older client binaries refuse a database with a newer local schema; the current checkout uses schema 48.
+
+Carrier delivery order, production role permissions, and hosted deployment state are not established by this repository's tests.
+
 ### Compaction and recovery
 
 Compaction can run only after every non-revoked device supports generation-fenced snapshots. Upgrade clients together: an older device blocks compaction, and downgrading a device that declared support can leave it unable to restore a compacted snapshot. Keep historical key material needed to read retained history.

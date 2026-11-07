@@ -318,6 +318,62 @@ fn host() -> BridgeError {
 
 const CORE_MEDIA_DIRECTORY: &str = "client.sqlcipher.media";
 
+fn pasted_attachment_save_error() -> BridgeError {
+    BridgeError::new("attachment-local", "The pasted image could not be saved.")
+}
+
+/// Owns the plaintext temporary file from the moment it is created until it is removed.
+struct PastedAttachmentTemporary {
+    /// Closed by `Drop` before removal, because Windows cannot delete a file that is still open.
+    file: Option<fs::File>,
+    path: PathBuf,
+}
+
+impl PastedAttachmentTemporary {
+    fn create(path: &Path, bytes: &[u8]) -> BridgeResult<Self> {
+        Self::create_with(path, bytes, |file, bytes| {
+            std::io::Write::write_all(file, bytes)?;
+            file.sync_all()
+        })
+    }
+
+    /// `durable_write` is the only step tests replace, to inject write and sync failures.
+    fn create_with(
+        path: &Path,
+        bytes: &[u8],
+        durable_write: impl FnOnce(&mut fs::File, &[u8]) -> std::io::Result<()>,
+    ) -> BridgeResult<Self> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(path)
+            .map_err(|_| pasted_attachment_save_error())?;
+        // The guard exists before any byte is written, so a failed write or sync still cleans up.
+        let mut temporary = Self {
+            file: Some(file),
+            path: path.to_path_buf(),
+        };
+        let file = temporary
+            .file
+            .as_mut()
+            .ok_or_else(pasted_attachment_save_error)?;
+        durable_write(file, bytes).map_err(|_| pasted_attachment_save_error())?;
+        Ok(temporary)
+    }
+}
+
+impl Drop for PastedAttachmentTemporary {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 fn pasted_extension(media_type: &str) -> &'static str {
     match media_type {
         "image/png" => "png",
@@ -339,6 +395,42 @@ fn pasted_attachment_display_name(name: &str, media_type: &str) -> String {
         name.into()
     } else {
         format!("{name}.{}", pasted_extension(media_type))
+    }
+}
+
+fn draft_attachment_state_label(state: peppy_client_core::DraftAttachmentState) -> &'static str {
+    match state {
+        peppy_client_core::DraftAttachmentState::Saving => "saving",
+        peppy_client_core::DraftAttachmentState::Local => "local",
+        peppy_client_core::DraftAttachmentState::Waiting => "waiting",
+        peppy_client_core::DraftAttachmentState::Uploading => "uploading",
+        peppy_client_core::DraftAttachmentState::Uploaded => "uploaded",
+        peppy_client_core::DraftAttachmentState::UploadFailed => "upload-failed",
+        peppy_client_core::DraftAttachmentState::Downloading => "downloading",
+        peppy_client_core::DraftAttachmentState::DownloadFailed => "download-failed",
+        peppy_client_core::DraftAttachmentState::Unavailable => "unavailable",
+    }
+}
+
+pub(crate) fn missing_draft_attachment_view(
+    id: AttachmentId,
+    state: Option<peppy_client_core::DraftAttachmentState>,
+) -> AttachmentView {
+    AttachmentView {
+        id: id.to_string(),
+        name: "Attachment".into(),
+        media_type: "application/octet-stream".into(),
+        byte_size: 0,
+        state: "pending",
+        error: None,
+        preview_url: None,
+        transfer: None,
+        retryable: None,
+        media_hold: None,
+        media_meta: None,
+        remote_state: None,
+        local_available: None,
+        draft_state: state.map(draft_attachment_state_label),
     }
 }
 
@@ -788,22 +880,7 @@ impl Session {
             .iter()
             .map(|id| {
                 let Ok(info) = self.client.attachment_info(*id) else {
-                    return AttachmentView {
-                        id: id.to_string(),
-                        name: "Attachment unavailable".into(),
-                        media_type: "application/octet-stream".into(),
-                        byte_size: 0,
-                        state: "failed",
-                        error: None,
-                        preview_url: None,
-                        transfer: None,
-                        retryable: Some(false),
-                        media_hold: None,
-                        media_meta: None,
-                        remote_state: None,
-                        local_available: Some(false),
-                        draft_state: Some("unavailable"),
-                    };
+                    return missing_draft_attachment_view(*id, states.get(id).copied());
                 };
                 let preview = self
                     .previews
@@ -1012,27 +1089,8 @@ impl Session {
                 uuid::Uuid::new_v4(),
                 pasted_extension(media_type)
             ));
-        let result = (|| {
-            let mut options = fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temporary).map_err(|_| {
-                BridgeError::new("attachment-local", "The pasted image could not be saved.")
-            })?;
-            std::io::Write::write_all(&mut file, bytes).map_err(|_| {
-                BridgeError::new("attachment-local", "The pasted image could not be saved.")
-            })?;
-            file.sync_all().map_err(|_| {
-                BridgeError::new("attachment-local", "The pasted image could not be saved.")
-            })?;
-            self.prepare_attachment_with_media_type(&temporary, media_type, &name)
-        })();
-        let _ = fs::remove_file(&temporary);
-        result
+        let temporary = PastedAttachmentTemporary::create(&temporary, bytes)?;
+        self.prepare_attachment_with_media_type(&temporary.path, media_type, &name)
     }
 
     /// Retries only a locally recorded transfer failure. It never changes message state or queues
@@ -1041,6 +1099,9 @@ impl Session {
         let id = AttachmentId::from_str(id)
             .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
         self.client.attachment_info(id).map_err(core_error)?;
+        self.client
+            .clear_draft_attachment_transfer_failure(id)
+            .map_err(core_error)?;
         crate::sync::clear_download_retry(self, &id);
         let removed = self
             .transfer_errors
@@ -2012,6 +2073,115 @@ mod tests {
             .unwrap()
             .next()
             .is_none());
+    }
+
+    #[test]
+    fn pasted_attachment_temporary_file_is_removed_when_preparation_panics() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pasted-image.png");
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _temporary = PastedAttachmentTemporary::create(&path, b"plaintext").unwrap();
+            panic!("preparation panicked");
+        }));
+
+        assert!(panic.is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn pasted_attachment_temporary_file_is_removed_when_write_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pasted-image.png");
+
+        let result = PastedAttachmentTemporary::create_with(&path, b"plaintext", |file, bytes| {
+            std::io::Write::write_all(file, &bytes[..4])?;
+            Err(std::io::Error::other("injected write failure"))
+        });
+
+        assert!(result.is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn pasted_attachment_temporary_file_is_removed_when_sync_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pasted-image.png");
+
+        let result = PastedAttachmentTemporary::create_with(&path, b"plaintext", |file, bytes| {
+            std::io::Write::write_all(file, bytes)?;
+            Err(std::io::Error::other("injected sync failure"))
+        });
+
+        assert!(result.is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn missing_draft_attachment_row_preserves_the_core_saving_state() {
+        let view = missing_draft_attachment_view(
+            AttachmentId::new(),
+            Some(peppy_client_core::DraftAttachmentState::Saving),
+        );
+
+        assert_eq!(view.state, "pending");
+        assert_eq!(view.draft_state, Some("saving"));
+        assert_ne!(view.draft_state, Some("unavailable"));
+    }
+
+    #[test]
+    fn retry_attachment_clears_the_core_draft_failure() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, PHRASE)
+            .unwrap();
+        let source = fixture.dir.path().join("draft-image.png");
+        std::fs::write(&source, sample_png(2, 2)).unwrap();
+        let attachment = session.prepare_attachment(&source).unwrap();
+        let draft = session.client.recipientless_compose_draft().unwrap();
+        let mut draft_input = input(
+            &draft.draft_id.to_string(),
+            &draft.conversation_id.to_string(),
+            "image",
+            &[],
+            &draft.revision.to_string(),
+        );
+        draft_input.attachment_ids = vec![attachment.id.clone()];
+        let saved = session.save_draft(&draft_input).unwrap();
+        let id = attachment.id.parse().unwrap();
+        session
+            .client
+            .record_draft_attachment_transfer_failure(
+                id,
+                peppy_client_core::DraftTransferDirection::Upload,
+            )
+            .unwrap();
+        session
+            .transfer_errors
+            .lock()
+            .unwrap()
+            .insert(id, "upload failed".into());
+
+        session.retry_attachment(&attachment.id).unwrap();
+
+        assert!(session.transfer_errors.lock().unwrap().get(&id).is_none());
+        assert_ne!(
+            session
+                .client
+                .draft_attachment_states(saved.id.parse().unwrap())
+                .unwrap()[0]
+                .1,
+            peppy_client_core::DraftAttachmentState::UploadFailed
+        );
     }
 
     #[test]

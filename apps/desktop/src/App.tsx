@@ -183,6 +183,25 @@ type PinFocusRestoreIntent = {
 };
 
 const MMS_WARNING_THRESHOLD = 0.8;
+const DEFAULT_MMS_LIMIT_BYTES = 300 * 1024;
+
+const isOlderDraftView = (current: Draft | undefined, incoming: Draft) => {
+  if (!current || current.id !== incoming.id) return false;
+  try {
+    return BigInt(incoming.revision) < BigInt(current.revision);
+  } catch {
+    return false;
+  }
+};
+
+export const nextComposerDraftIdentity = (
+  previousSlotKey: string,
+  previousIdentity: string,
+  slotKey: string,
+  resolve: (key: string) => string,
+) => previousSlotKey && resolve(previousSlotKey) === slotKey
+  ? previousIdentity
+  : slotKey;
 
 function mmsHeaderSize(estimatedBytes: number, limitBytes: number): { text: string; tone: "default" | "warning" | "error" } {
   if (estimatedBytes > limitBytes) return { text: `${fileSize(estimatedBytes)} of ${fileSize(limitBytes)}`, tone: "error" };
@@ -519,7 +538,7 @@ function routeProblem(
   if (requiresMms && mmsPlan.kind === "error")
     return mmsPlan.imageId && oversizedImageName
       ? `${oversizedImageName} cannot be resized to fit the MMS limit`
-      : `the MMS estimate exceeds the ${fileSize(route.gateway.mmsMaxBytes ?? 300 * 1024)} limit`;
+      : `the MMS estimate exceeds the ${fileSize(route.gateway.mmsMaxBytes ?? DEFAULT_MMS_LIMIT_BYTES)} limit`;
   return undefined;
 }
 
@@ -534,7 +553,7 @@ const draftEstimateBytes = (content: DraftContent, attachments: Record<string, A
   new TextEncoder().encode(content.text).length + content.attachmentIds.reduce((total, id) => total + (attachments[id]?.byteSize ?? 0), 0);
 const planDraftMms = (content: DraftContent, route: RouteChoice, attachments: Record<string, AttachmentView>) =>
   planMms({
-    limitBytes: route.kind === "route" ? route.gateway.mmsMaxBytes ?? 300 * 1024 : 300 * 1024,
+    limitBytes: route.kind === "route" ? route.gateway.mmsMaxBytes ?? DEFAULT_MMS_LIMIT_BYTES : DEFAULT_MMS_LIMIT_BYTES,
     gatewayVersion: route.kind === "route" ? route.gateway.mmsContentVersion : undefined,
     text: content.text,
     images: content.attachmentIds.map((id) => ({
@@ -1709,7 +1728,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }));
   };
   const rememberHostDraft = (draft: Draft) => {
-    setDraftViews((current) => ({ ...current, [draft.id]: draft }));
+    setDraftViews((current) => isOlderDraftView(current[draft.id], draft)
+      ? current
+      : { ...current, [draft.id]: draft });
     mergeDraftAttachmentViews(draft);
   };
   const resetDraftAttachmentCache = (sessionScopeId?: string) => {
@@ -3076,6 +3097,18 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
 
   /* Only rows that are actually visible while the window is focused are marked seen. */
   const slotKey = store.resolve(selected);
+  const previousSlotKeyRef = useRef(slotKey);
+  const composerDraftKeyRef = useRef(slotKey);
+  if (slotKey !== previousSlotKeyRef.current) {
+    composerDraftKeyRef.current = nextComposerDraftIdentity(
+      previousSlotKeyRef.current,
+      composerDraftKeyRef.current,
+      slotKey,
+      key => store.resolve(key),
+    );
+    previousSlotKeyRef.current = slotKey;
+  }
+  const composerDraftKey = composerDraftKeyRef.current;
   useEffect(() => {
     setPendingRecipient(false);
     setComposerFeedback(current => current?.key === slotKey ? current : undefined);
@@ -3466,6 +3499,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const commitRecipients = (recipientIds: string[]) => {
     if (!slotKey || resolvingDraftConflict) return;
+    autoAcknowledgeDraftSyncNotice();
     const previous = content.recipientIds;
     void store.edit(slotKey, { recipientIds }).then(outcome => {
       const current = store.get(slotKey);
@@ -3717,6 +3751,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const addAttachment = async () => {
     if (!slotKey || resolvingDraftConflict) return;
+    autoAcknowledgeDraftSyncNotice();
     const draftKey = slotKey;
     const session = currentSearchSessionKey();
     const generation = draftStoreGeneration.current;
@@ -3727,7 +3762,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       if (generation !== draftStoreGeneration.current || session !== currentSearchSessionKey()) return;
       const selectedFiles = picked.slice(0, remainingAttachmentSlots(draftKey));
       if (selectedFiles.length < picked.length)
-        setComposerNotice(draftKey, "You can attach up to 10 images.", "warning", "attachment-feedback");
+        setComposerNotice(draftKey, `You can attach up to ${MAX_DRAFT_ATTACHMENTS} images.`, "warning", "attachment-feedback");
       if (!selectedFiles.length) return;
       setAttachmentViews((current) => ({
         ...current,
@@ -3747,16 +3782,17 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const addPastedAttachments = async (files: File[]) => {
     if (!slotKey || !files.length || resolvingDraftConflict) return;
+    autoAcknowledgeDraftSyncNotice();
     const draftKey = slotKey;
     const inFlight = pastedAttachmentInFlight.current.get(draftKey) ?? 0;
     const remaining = remainingAttachmentSlots(draftKey);
     const selectedFiles = files.slice(0, remaining);
     if (!selectedFiles.length) {
-      setComposerNotice(draftKey, "You can attach up to 10 images.", "warning", "attachment-feedback");
+      setComposerNotice(draftKey, `You can attach up to ${MAX_DRAFT_ATTACHMENTS} images.`, "warning", "attachment-feedback");
       return;
     }
     if (selectedFiles.length < files.length)
-      setComposerNotice(draftKey, "You can attach up to 10 images.", "warning", "attachment-feedback");
+      setComposerNotice(draftKey, `You can attach up to ${MAX_DRAFT_ATTACHMENTS} images.`, "warning", "attachment-feedback");
     const session = currentSearchSessionKey();
     const generation = draftStoreGeneration.current;
     const operation = beginAttachmentPreparation(draftKey);
@@ -3775,7 +3811,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       const available = Math.max(0, MAX_DRAFT_ATTACHMENTS - current.length);
       const outcome = await store.edit(resolvedKey, { attachmentIds: [...current, ...views.slice(0, available).map((file) => file.id)] });
       if (!outcome.ok) setComposerNotice(store.resolve(draftKey), `Couldn't add pasted image: ${outcome.error}`, "error", "attachment-feedback");
-      else if (failures.length || views.length > available) setComposerNotice(resolvedKey, [...failures, ...(views.length > available ? ["You can attach up to 10 images."] : [])].join(" "), "warning", "attachment-feedback");
+      else if (failures.length || views.length > available) setComposerNotice(resolvedKey, [...failures, ...(views.length > available ? [`You can attach up to ${MAX_DRAFT_ATTACHMENTS} images.`] : [])].join(" "), "warning", "attachment-feedback");
     } catch (error) {
       setComposerNotice(store.resolve(draftKey), `Couldn't add pasted image: ${errorText(error)}`, "error", "attachment-feedback");
     } finally {
@@ -3816,8 +3852,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       const current = store.get(resolvedKey);
       if (!current?.id)
         return setComposerNotice(resolvedKey, "Not sent: the draft has not been stored yet.");
-      if (draftSendBlock)
-        return setComposerNotice(resolvedKey, `Not sent: ${draftSendBlock}`);
       const latestSnapshot = snapshotRef.current;
       const latestConversation = latestSnapshot?.conversations.find(
         (conversation) => conversation.id === current.conversationId,
@@ -4426,11 +4460,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   );
   const draftConflict = Boolean(activeDraftView?.sync?.conflicts.length);
   const syncedOffline = Boolean(serverOffline && activeDraftView?.sync?.sendRequiresConnection);
-  const draftSavePending = slotKey ? store.saveState(slotKey) === "saving" || store.saveState(slotKey) === "failed" : false;
   const draftSendBlock = draftConflict ? "resolve the draft conflict before sending"
     : failedDraftAttachment ? `image unavailable: ${failedDraftAttachment.name}`
-    : syncedOffline ? "Reconnect to send this synced draft."
-    : draftSavePending ? "the draft must be saved before sending"
+    : syncedOffline ? "Reconnect to check this draft before sending."
     : undefined;
   const activeDisplay = active
     ? displayConversation(active.name, active.participants, resolution, active.id, active.recipientlessDraft)
@@ -4571,11 +4603,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     : undefined;
   const mmsLimitShown =
     mmsRequired && route.kind === "route" && estimateBytes > 0;
-  const mmsLimitBytes = route.kind === "route" ? route.gateway.mmsMaxBytes ?? 300 * 1024 : 0;
+  const mmsLimitBytes = route.kind === "route" ? route.gateway.mmsMaxBytes ?? DEFAULT_MMS_LIMIT_BYTES : 0;
   const mmsHeader = mmsLimitShown
     ? mmsPlan.kind === "split"
       ? { text: `Sends as ${mmsPlan.parts} messages`, tone: "default" as const }
-      : route.kind === "route" && (route.gateway.mmsContentVersion ?? 0) >= 4 && estimateBytes > mmsLimitBytes
+      : route.kind === "route" && mmsPlan.kind !== "error" && (route.gateway.mmsContentVersion ?? 0) >= 4 && estimateBytes > mmsLimitBytes
         ? { text: fileSize(estimateBytes), tone: "default" as const }
         : mmsHeaderSize(estimateBytes, mmsLimitBytes)
     : undefined;
@@ -4702,7 +4734,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         if (restoreFocus) document.getElementById("composer-textarea")?.focus();
       })
       .catch((error) => {
-        acknowledgedDraftNoticeRef.current = undefined;
         if (mountedRef.current && generation === draftSessionGenerationRef.current && session === currentSearchSessionKey() && selectedRef.current === key)
           setComposerNotice(key, `Couldn't dismiss draft notice: ${errorText(error)}`);
       });
@@ -4802,6 +4833,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         }}
         attachmentLayout={attachmentLayout}
         draftKey={slotKey}
+        draftIdentity={composerDraftKey}
         attachmentHeaderDetail={mmsHeader && route.kind === "route" ? <span className="mms-size-header-detail" data-mms-size-tone={mmsHeader.tone}>
           <span>{mmsHeader.text}</span>
           <MmsSizeHelp
@@ -4810,7 +4842,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             limitSize={fileSize(mmsLimitBytes)}
             limitKilobytes={Math.round(mmsLimitBytes / 1024)}
             recipientLimit={Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)}
-            resizingImages={(route.gateway.mmsContentVersion ?? 0) >= 4 && estimateBytes > mmsLimitBytes}
+            resizingImages={mmsPlan.kind !== "error" && (route.gateway.mmsContentVersion ?? 0) >= 4 && estimateBytes > mmsLimitBytes}
           />
         </span> : undefined}
         maxAttachments={MAX_DRAFT_ATTACHMENTS}
@@ -4818,7 +4850,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         statusSlot={
           <>
             <span id="unavailable-hint" className={unavailableReason === draftSendBlock && failedDraftAttachment ? "sr-only" : undefined} hidden={!unavailableReason || hasDraftConflicts}>
-              Sending unavailable: {composerUnavailableReason}
+              {unavailableReason && <>Sending unavailable: {composerUnavailableReason}</>}
             </span>
             <DraftNotice notice={visibleDraftNotice} noticeKey={slotKey} onAction={onDraftNoticeAction} busy={sending || noticeActionBusy} />
             <DraftSyncStatus

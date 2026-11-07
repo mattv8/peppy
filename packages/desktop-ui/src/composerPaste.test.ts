@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractComposerPaste } from "./composerPaste";
+import { MAX_COMPOSER_ATTACHMENT_BYTES, extractComposerPaste } from "./composerPaste";
 
 function pasteData(files: File[], text = ""): DataTransfer {
   return { files, getData: (type: string) => type === "text/plain" ? text : "" } as unknown as DataTransfer;
@@ -17,8 +17,14 @@ describe("extractComposerPaste", () => {
   });
 
   it("rejects unsupported types and images over 32 MiB", () => {
-    const result = extractComposerPaste(pasteData([image("one.bmp", "image/bmp"), image("two.png", "image/png", 33_554_433)]), 2);
+    const result = extractComposerPaste(pasteData([image("one.bmp", "image/bmp"), image("two.png", "image/png", MAX_COMPOSER_ATTACHMENT_BYTES + 1)]), 2);
     expect(result.rejected).toEqual([{ name: "one.bmp", reason: "type" }, { name: "two.png", reason: "size" }]);
+  });
+
+  it("accepts an image at the inclusive 32 MiB cap", () => {
+    const result = extractComposerPaste(pasteData([image("at-limit.png", "image/png", MAX_COMPOSER_ATTACHMENT_BYTES)]), 1);
+
+    expect(result.images.map((file) => file.name)).toEqual(["at-limit.png"]);
   });
 
   it("keeps caption text once unless it duplicates an image filename or is a URL", () => {

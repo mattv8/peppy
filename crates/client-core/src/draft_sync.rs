@@ -12,9 +12,11 @@ use crate::{
 use peppy_crypto::{FileKey, decrypt, encrypt};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 #[cfg(debug_assertions)]
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 #[cfg(debug_assertions)]
 #[doc(hidden)]
@@ -33,7 +35,7 @@ struct SendIntentSnapshot {
     parts: Option<DraftSendParts>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftRecordAttachmentV1 {
     pub attachment_id: AttachmentId,
     pub media_type: String,
@@ -45,7 +47,20 @@ pub struct DraftRecordAttachmentV1 {
     pub file_key: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+impl fmt::Debug for DraftRecordAttachmentV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DraftRecordAttachmentV1")
+            .field("attachment_id", &self.attachment_id)
+            .field("media_type", &self.media_type)
+            .field("plaintext_bytes", &self.plaintext_bytes)
+            .field("ciphertext_bytes", &self.ciphertext_bytes)
+            .field("stream_version", &self.stream_version)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftRecordV1 {
     pub version: u8,
     pub draft_id: DraftId,
@@ -55,6 +70,18 @@ pub struct DraftRecordV1 {
     pub route: Option<GatewayRoute>,
     pub attachments: Vec<DraftRecordAttachmentV1>,
     pub authored_at_ms: i64,
+}
+
+impl fmt::Debug for DraftRecordV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DraftRecordV1")
+            .field("version", &self.version)
+            .field("draft_id", &self.draft_id)
+            .field("revision_id", &self.revision_id)
+            .field("attachment_count", &self.attachments.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -203,7 +230,7 @@ impl Client {
             )?;
         } else {
             store.conn.execute(
-                "UPDATE draft_sync SET state='paused' WHERE state NOT IN ('local_only','paused')",
+                "UPDATE draft_sync SET state='paused' WHERE state IN ('saved_local','syncing','synced','failed')",
                 [],
             )?;
         }
@@ -287,6 +314,32 @@ impl Client {
             .collect()
     }
 
+    /// Records a PUT attempt before transport. An ACK can be lost after the server accepts it,
+    /// so this evidence must outlive the pending snapshot and support negotiation.
+    pub fn mark_draft_push_attempt(
+        &self,
+        draft_id: DraftId,
+        revision_id: Uuid,
+    ) -> Result<bool, Error> {
+        let mut store = self.lock()?;
+        let tx = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let eligible: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM draft_sync WHERE draft_id=? AND pending_revision_id=? AND pending_sealed_record IS NOT NULL AND state NOT IN ('retired', 'local_only') AND discard_pending=0)",
+            params![draft_id.to_string(), revision_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if eligible {
+            tx.execute(
+                "INSERT OR IGNORE INTO draft_push_attempts(draft_id,revision_id) VALUES(?,?)",
+                params![draft_id.to_string(), revision_id.to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(eligible)
+    }
+
     pub fn record_draft_push(
         &self,
         draft_id: DraftId,
@@ -318,6 +371,8 @@ impl Client {
                 if let Some(sealed) = pending {
                     let record = open_record(&store, draft_id, revision_id, &sealed)?;
                     store_merge_base(&store.conn, &record)?;
+                } else {
+                    clear_merge_state(&store.conn, draft_id)?;
                 }
                 let local_revision: i64 = store.conn.query_row(
                     "SELECT local_revision FROM draft_sync_revisions WHERE draft_id=? AND revision_id=?",
@@ -389,7 +444,14 @@ impl Client {
                         revision_id,
                         sealed_record,
                         ..
-                    } => open_record(&store, *draft_id, *revision_id, sealed_record).map(Some),
+                    } => match open_record(&store, *draft_id, *revision_id, sealed_record) {
+                        Ok(record) => Ok(Some(record)),
+                        // A malformed or unauthentic record can never become valid on retry.
+                        // Preserve only opaque identities and let unrelated records progress.
+                        Err(Error::Crypto) => Ok(None),
+                        // Historical keys may arrive after this page; do not advance the cursor.
+                        Err(error) => Err(error),
+                    },
                     _ => Ok(None),
                 })
                 .collect::<Result<Vec<Option<DraftRecordV1>>, Error>>()?
@@ -419,16 +481,20 @@ impl Client {
         for (change, record) in changes.into_iter().zip(records) {
             match change {
                 RemoteDraftChange::Head {
-                    draft_id: _,
+                    draft_id,
                     branch_id,
-                    revision_id: _,
+                    revision_id,
                     sealed_record: _,
                     attachment_ids,
                     expires_at_ms,
                     ..
                 } => {
-                    let record = record.ok_or(Error::Database)?;
-                    apply_head(
+                    let Some(record) = record else {
+                        quarantine_draft_head(&tx, draft_id, revision_id)?;
+                        continue;
+                    };
+                    tx.execute_batch("SAVEPOINT draft_head")?;
+                    if let Err(error) = apply_head(
                         &tx,
                         branch_id,
                         expires_at_ms,
@@ -436,7 +502,15 @@ impl Client {
                         record,
                         vault_id,
                         merge_key.as_ref(),
-                    )?;
+                    ) {
+                        if error == Error::Crypto {
+                            tx.execute_batch("ROLLBACK TO draft_head; RELEASE draft_head")?;
+                            quarantine_draft_head(&tx, draft_id, revision_id)?;
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                    tx.execute_batch("RELEASE draft_head")?;
                 }
                 RemoteDraftChange::BranchClosed {
                     draft_id,
@@ -459,7 +533,7 @@ impl Client {
                     command_id,
                 } => {
                     tx.execute(
-                        "INSERT INTO draft_sync_terminals(draft_id,reason,command_id) VALUES(?,?,?) ON CONFLICT(draft_id) DO UPDATE SET reason=excluded.reason,command_id=excluded.command_id",
+                        "INSERT INTO draft_sync_terminals(draft_id,reason,command_id) VALUES(?,?,?) ON CONFLICT(draft_id) DO UPDATE SET reason=excluded.reason,command_id=COALESCE(excluded.command_id,draft_sync_terminals.command_id)",
                         params![draft_id.to_string(), terminal_code(reason), command_id.map(|id| id.to_string())],
                     )?;
                     match reason {
@@ -470,12 +544,16 @@ impl Client {
                                 [draft_id.to_string()],
                                 |row| Ok((row.get(0)?, row.get(1)?)),
                             ).optional()?;
-                            if let (Some((intent_id, _)), Some(command_id)) = (intent, command_id) {
-                                if intent_id != command_id.to_string() {
+                            match (intent.as_ref(), command_id) {
+                                (Some((intent_id, _)), Some(command_id))
+                                    if *intent_id != command_id.to_string() =>
+                                {
                                     keep_local_after_terminal(&tx, draft_id, "kept-after-sent")?;
                                 }
-                            } else {
-                                keep_local_after_terminal(&tx, draft_id, "kept-after-sent")?;
+                                (None, _) => {
+                                    keep_local_after_terminal(&tx, draft_id, "kept-after-sent")?;
+                                }
+                                _ => {}
                             }
                         }
                         DraftTerminalReasonCore::Expired => {
@@ -521,15 +599,15 @@ impl Client {
             "UPDATE draft_sync SET state='synced' WHERE branch_id IS NOT NULL AND state='paused' AND pending_revision_id IS NULL AND pending_sealed_record IS NULL AND authored_dirty=0",
             [],
         )?;
-        tx.execute(
-            "UPDATE draft_sync_meta SET bootstrap_complete=1 WHERE id=1",
-            [],
-        )?;
         tx.commit()?;
         drop(store);
         for draft_id in dirty_absent {
             self.resurrect_expired_draft(draft_id)?;
         }
+        self.lock()?.conn.execute(
+            "UPDATE draft_sync_meta SET bootstrap_complete=1 WHERE id=1",
+            [],
+        )?;
         Ok(())
     }
 
@@ -569,6 +647,17 @@ impl Client {
             return Ok(DraftSendGate { remote: None });
         };
         if accepted.is_none() {
+            let attempted = match pending.as_deref() {
+                Some(_) => store.conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM draft_push_attempts WHERE draft_id=?)",
+                    [draft_id.to_string()],
+                    |row| row.get(0),
+                )?,
+                None => false,
+            };
+            if attempted {
+                return Err(Error::DraftNotSynced);
+            }
             return Ok(DraftSendGate { remote: None });
         }
         if dirty != 0 || pending.is_some() {
@@ -663,6 +752,36 @@ impl Client {
         command_id: CommandId,
     ) -> Result<(), Error> {
         self.send_compose_draft_accepted_with_parts(draft_id, expected_revision, command_id, None)
+    }
+
+    /// Returns the durable number of messages for this exact send intent.
+    pub fn draft_send_intent_parts_count(
+        &self,
+        draft_id: DraftId,
+        command_id: CommandId,
+    ) -> Result<Option<u32>, Error> {
+        let snapshot: Option<Vec<u8>> = self
+            .lock()?
+            .conn
+            .query_row(
+                "SELECT sealed_snapshot FROM draft_send_intents WHERE draft_id=? AND command_id=?",
+                params![draft_id.to_string(), command_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        snapshot
+            .map(|snapshot| {
+                let snapshot: SendIntentSnapshot =
+                    serde_json::from_slice(&snapshot).map_err(|_| Error::Database)?;
+                match snapshot.parts {
+                    None => Ok(1),
+                    Some(parts) => u32::try_from(parts.image_groups.len())
+                        .map_err(|_| Error::Database)?
+                        .checked_add(u32::from(parts.caption))
+                        .ok_or(Error::Database),
+                }
+            })
+            .transpose()
     }
 
     pub fn send_compose_draft_accepted_with_parts(
@@ -858,15 +977,16 @@ impl Client {
 
     pub fn draft_sync_status(&self, draft_id: DraftId) -> Result<DraftSyncStatus, Error> {
         let store = self.lock()?;
-        let row: Option<(String, Option<i64>, Option<String>)> = store
+        let row: Option<DraftSyncStatusRow> = store
             .conn
             .query_row(
-                "SELECT state,expires_at_ms,notice FROM draft_sync WHERE draft_id=?",
+                "SELECT state,expires_at_ms,notice,accepted_revision_id,EXISTS(SELECT 1 FROM draft_push_attempts a WHERE a.draft_id=draft_sync.draft_id) FROM draft_sync WHERE draft_id=?",
                 [draft_id.to_string()],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
-        let (state, expires_at_ms, notice) = row.unwrap_or(("local_only".into(), None, None));
+        let (state, expires_at_ms, notice, accepted_revision_id, pending_attempted) =
+            row.unwrap_or(("local_only".into(), None, None, None, false));
         let conflicts = conflicts(&store.conn, draft_id)?
             .iter()
             .map(|(branch_id, record)| conflict_version(*branch_id, record))
@@ -876,7 +996,7 @@ impl Client {
             expires_at_ms,
             conflicts,
             notice: notice.as_deref().and_then(notice_from_code),
-            send_requires_connection: state != "local_only",
+            send_requires_connection: accepted_revision_id.is_some() || pending_attempted,
         })
     }
 
@@ -1262,6 +1382,8 @@ struct SyncRow {
 
 type SyncRowColumns = (Option<String>, i64, Option<String>, i64, String);
 
+type DraftSyncStatusRow = (String, Option<i64>, Option<String>, Option<String>, bool);
+
 fn sync_row(conn: &Connection, draft_id: DraftId) -> Result<Option<SyncRow>, Error> {
     let row: Option<SyncRowColumns> = conn
         .query_row(
@@ -1407,6 +1529,12 @@ fn try_merge_head(
     let Some(base) = merge_base(conn, draft_id)? else {
         return Ok(false);
     };
+    if conflicts(conn, draft_id)?
+        .iter()
+        .any(|(branch_id, record)| record.draft_id == draft_id && *branch_id != remote_branch_id)
+    {
+        return Ok(false);
+    }
     let local = crate::load_compose_draft(conn, "draft_id", &draft_id.to_string())?
         .ok_or(Error::NotFound)?;
     let remote_attachment_ids = record_attachment_ids(remote);
@@ -1429,14 +1557,6 @@ fn try_merge_head(
     };
     let effective_target = Some(remote_branch_id);
     let mut resolves = pending_resolves(conn, draft_id)?;
-    resolves.extend(
-        conflicts(conn, draft_id)?
-            .into_iter()
-            .filter(|(branch_id, record)| {
-                record.draft_id == draft_id && effective_target != Some(*branch_id)
-            })
-            .map(|(branch_id, _)| branch_id),
-    );
     if let Some(branch_id) = sync_row(conn, draft_id)?
         .and_then(|sync| (!sync.branch_closed).then_some(sync.branch_id).flatten())
         && effective_target != Some(branch_id)
@@ -1591,6 +1711,18 @@ fn canonical_cursor(value: &str) -> bool {
         && value.parse::<u64>().is_ok()
 }
 
+fn quarantine_draft_head(
+    conn: &Connection,
+    draft_id: DraftId,
+    revision_id: Uuid,
+) -> Result<(), Error> {
+    conn.execute(
+        "INSERT OR IGNORE INTO draft_sync_quarantines(draft_id,revision_id,reason) VALUES(?,?,'invalid_record')",
+        params![draft_id.to_string(), revision_id.to_string()],
+    )?;
+    Ok(())
+}
+
 fn remove_terminal_draft(conn: &Connection, draft_id: DraftId) -> Result<(), Error> {
     clear_merge_state(conn, draft_id)?;
     let branches: Vec<String> = conn
@@ -1626,6 +1758,16 @@ fn remove_terminal_draft(conn: &Connection, draft_id: DraftId) -> Result<(), Err
     conn.execute(
         "DELETE FROM draft_sync WHERE draft_id=? AND state!='retired'",
         [draft_id.to_string()],
+    )?;
+    // A retained sync row may still need a late acceptance's local-revision mapping. Once a
+    // terminal fully removes that row, no acknowledgement can safely target this draft again.
+    conn.execute(
+        "DELETE FROM draft_sync_revisions WHERE draft_id=? AND NOT EXISTS(SELECT 1 FROM draft_sync WHERE draft_id=?)",
+        params![draft_id.to_string(), draft_id.to_string()],
+    )?;
+    conn.execute(
+        "DELETE FROM draft_push_attempts WHERE draft_id=? AND NOT EXISTS(SELECT 1 FROM draft_sync WHERE draft_id=?)",
+        params![draft_id.to_string(), draft_id.to_string()],
     )?;
     Ok(())
 }
@@ -1937,15 +2079,6 @@ pub(crate) fn record_local_save(
     epoch: u32,
     key: &PurposeKey,
 ) -> Result<ComposeDraft, Error> {
-    // Compose validation deliberately permits a host to save before media preparation finishes;
-    // leave such a draft local rather than changing the legacy save contract.
-    if next
-        .attachment_ids
-        .iter()
-        .any(|id| attachment_row(conn, *id).ok().flatten().is_none())
-    {
-        return Ok(next);
-    }
     let authored = previous.text != next.text
         || previous.recipients != next.recipients
         || previous.attachment_ids != next.attachment_ids;
@@ -1963,6 +2096,23 @@ pub(crate) fn record_local_save(
             "UPDATE compose_draft_redirects SET target_draft_id=? WHERE target_draft_id=?",
             params![next.draft_id.to_string(), retired_id.to_string()],
         )?;
+    }
+    // Compose validation deliberately permits a host to save before media preparation finishes.
+    // A changed draft must still invalidate an older pending snapshot, even though it cannot yet
+    // be sealed for upload without every descriptor.
+    if next
+        .attachment_ids
+        .iter()
+        .map(|id| attachment_row(conn, *id))
+        .collect::<Result<Vec<_>, Error>>()?
+        .iter()
+        .any(Option::is_none)
+    {
+        conn.execute(
+            "INSERT INTO draft_sync(draft_id,authored_dirty,state) VALUES(?,?,?) ON CONFLICT(draft_id) DO UPDATE SET pending_revision_id=NULL,pending_sealed_record=NULL,pending_local_revision=NULL,resolves_json=NULL,authored_dirty=CASE WHEN excluded.authored_dirty=1 THEN 1 ELSE draft_sync.authored_dirty END,state=CASE WHEN excluded.authored_dirty=1 THEN 'saved_local' ELSE draft_sync.state END",
+            params![next.draft_id.to_string(), i64::from(authored), "saved_local"],
+        )?;
+        return Ok(next);
     }
     seal_pending(conn, &next, authored, vault_id, epoch, key)?;
     Ok(next)
@@ -2014,7 +2164,7 @@ fn seal_pending(
         attachments,
         authored_at_ms: now_ms(),
     };
-    let plaintext = serde_json::to_vec(&record).map_err(|_| Error::Database)?;
+    let plaintext = Zeroizing::new(serde_json::to_vec(&record).map_err(|_| Error::Database)?);
     let sealed = encrypt(
         key,
         &draft_aad(vault_id, draft.draft_id, revision_id),
@@ -2073,12 +2223,14 @@ fn open_record(
         .and_then(|keys| keys.draft.as_ref())
         .ok_or(Error::KeysUnavailable)?;
     let envelope = crate::open_frame(frame).ok_or(Error::Crypto)?;
-    let plaintext = decrypt(
-        key,
-        &draft_aad(store.config.vault_id, draft_id, revision_id),
-        &envelope,
-    )
-    .map_err(|_| Error::Crypto)?;
+    let plaintext = Zeroizing::new(
+        decrypt(
+            key,
+            &draft_aad(store.config.vault_id, draft_id, revision_id),
+            &envelope,
+        )
+        .map_err(|_| Error::Crypto)?,
+    );
     let record: DraftRecordV1 = serde_json::from_slice(&plaintext).map_err(|_| Error::Crypto)?;
     if record.version != 1 || record.draft_id != draft_id || record.revision_id != revision_id {
         return Err(Error::Crypto);
@@ -2105,9 +2257,9 @@ fn install_remote_attachments(conn: &Connection, record: &DraftRecordV1) -> Resu
             )
             .optional()?;
         let plaintext_bytes =
-            i64::try_from(attachment.plaintext_bytes).map_err(|_| Error::Database)?;
+            i64::try_from(attachment.plaintext_bytes).map_err(|_| Error::Crypto)?;
         let ciphertext_bytes =
-            i64::try_from(attachment.ciphertext_bytes).map_err(|_| Error::Database)?;
+            i64::try_from(attachment.ciphertext_bytes).map_err(|_| Error::Crypto)?;
         let stream_version = i64::from(attachment.stream_version);
         if let Some(existing) = existing {
             if existing

@@ -81,6 +81,14 @@ describe("pasted attachment bridge", () => {
       headers: { "peppy-attachment-name": "pasted-image", "peppy-attachment-type": "image/png" },
     });
   });
+
+  it("reports a native plain-object rejection reason", async () => {
+    invokeMock.mockRejectedValueOnce({ message: "Image is too large" });
+
+    await expect(tauriBridge.prepare_pasted_attachments([
+      { bytes: new Uint8Array([1]).buffer, name: "large.png", mediaType: "image/png" },
+    ])).resolves.toEqual({ views: [], failures: ["large.png: Image is too large"] });
+  });
 });
 
 describe("bridge subscriptions", () => {

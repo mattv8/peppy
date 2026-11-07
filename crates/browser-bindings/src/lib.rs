@@ -678,46 +678,93 @@ impl BrowserCore {
         draft: &peppy_client_core::ComposeDraft,
     ) -> Result<dto::DraftView, CoreError> {
         let mut view = dto::draft_view_with_sync(client, draft)?;
-        let states = client.draft_attachment_states(draft.draft_id)?;
-        view.attachments = Some(
-            states
-                .into_iter()
-                .map(|(id, draft_state)| match client.attachment_info(id) {
-                    Ok(info) => {
-                        let mut attachment = dto::attachment_view(&info, None, None);
-                        attachment.draft_state = Some(match draft_state {
-                            peppy_client_core::DraftAttachmentState::Saving => "saving",
-                            peppy_client_core::DraftAttachmentState::Local => "local",
-                            peppy_client_core::DraftAttachmentState::Waiting => "waiting",
-                            peppy_client_core::DraftAttachmentState::Uploading => "uploading",
-                            peppy_client_core::DraftAttachmentState::Uploaded => "uploaded",
-                            peppy_client_core::DraftAttachmentState::UploadFailed => {
-                                "upload-failed"
-                            }
-                            peppy_client_core::DraftAttachmentState::Downloading => "downloading",
-                            peppy_client_core::DraftAttachmentState::DownloadFailed => {
-                                "download-failed"
-                            }
-                            peppy_client_core::DraftAttachmentState::Unavailable => "unavailable",
-                        });
-                        attachment
+        let states: HashMap<_, _> = client
+            .draft_attachment_states(draft.draft_id)?
+            .into_iter()
+            .collect();
+        let mut attachment_ids = draft.attachment_ids.clone();
+        if let Some(sync) = &view.sync {
+            for conflict in &sync.conflicts {
+                for id in &conflict.attachment_ids {
+                    let id = id.parse().map_err(|_| CoreError::Database)?;
+                    if !attachment_ids.contains(&id) {
+                        attachment_ids.push(id);
                     }
-                    Err(_) => dto::AttachmentView {
-                        id: id.to_string(),
-                        name: "Image unavailable".into(),
-                        media_type: "application/octet-stream".into(),
-                        byte_size: 0,
-                        state: "failed",
-                        error: None,
-                        preview_url: None,
-                        transfer: None,
-                        retryable: Some(false),
-                        media_hold: None,
-                        media_meta: None,
-                        remote_state: None,
-                        local_available: Some(false),
-                        draft_state: Some("unavailable"),
-                    },
+                }
+            }
+        }
+        view.attachments = Some(
+            attachment_ids
+                .into_iter()
+                .map(|id| {
+                    let draft_state = states.get(&id).copied();
+                    match client.attachment_info(id) {
+                        Ok(info) => {
+                            let mut attachment = dto::attachment_view(&info, None, None);
+                            attachment.draft_state =
+                                draft_state.map(|draft_state| match draft_state {
+                                    peppy_client_core::DraftAttachmentState::Saving => "saving",
+                                    peppy_client_core::DraftAttachmentState::Local => "local",
+                                    peppy_client_core::DraftAttachmentState::Waiting => "waiting",
+                                    peppy_client_core::DraftAttachmentState::Uploading => {
+                                        "uploading"
+                                    }
+                                    peppy_client_core::DraftAttachmentState::Uploaded => "uploaded",
+                                    peppy_client_core::DraftAttachmentState::UploadFailed => {
+                                        "upload-failed"
+                                    }
+                                    peppy_client_core::DraftAttachmentState::Downloading => {
+                                        "downloading"
+                                    }
+                                    peppy_client_core::DraftAttachmentState::DownloadFailed => {
+                                        "download-failed"
+                                    }
+                                    peppy_client_core::DraftAttachmentState::Unavailable => {
+                                        "unavailable"
+                                    }
+                                });
+                            attachment
+                        }
+                        Err(_)
+                            if matches!(
+                                draft_state,
+                                Some(peppy_client_core::DraftAttachmentState::Saving)
+                            ) =>
+                        {
+                            dto::AttachmentView {
+                                id: id.to_string(),
+                                name: "Saving image".into(),
+                                media_type: "application/octet-stream".into(),
+                                byte_size: 0,
+                                state: "uploading",
+                                error: None,
+                                preview_url: None,
+                                transfer: None,
+                                retryable: None,
+                                media_hold: None,
+                                media_meta: None,
+                                remote_state: None,
+                                local_available: Some(false),
+                                draft_state: Some("saving"),
+                            }
+                        }
+                        Err(_) => dto::AttachmentView {
+                            id: id.to_string(),
+                            name: "Image unavailable".into(),
+                            media_type: "application/octet-stream".into(),
+                            byte_size: 0,
+                            state: "failed",
+                            error: None,
+                            preview_url: None,
+                            transfer: None,
+                            retryable: Some(false),
+                            media_hold: None,
+                            media_meta: None,
+                            remote_state: None,
+                            local_available: Some(false),
+                            draft_state: Some("unavailable"),
+                        },
+                    }
                 })
                 .collect(),
         );

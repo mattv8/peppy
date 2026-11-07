@@ -52,6 +52,11 @@ function attachmentStatus(attachment: Attachment): AttachmentStatus {
   }
 }
 
+function hasFailedAttachmentState(attachment: Attachment): boolean {
+  const state = attachment.draftState ?? attachment.state;
+  return state === "failed" || state === "upload-failed" || state === "download-failed";
+}
+
 function AttachmentPreview({ attachment }: { attachment: Attachment }) {
   const [previewFailed, setPreviewFailed] = useState(false);
   useEffect(() => setPreviewFailed(false), [attachment.previewUrl]);
@@ -104,6 +109,7 @@ export function ComposerAttachmentTray({
     const changed = attachments.flatMap((attachment) => {
       const previousAttachment = previous.get(attachment.id);
       const currentAttachment = currentStates.get(attachment.id)!;
+      if (!previousAttachment && hasFailedAttachmentState(attachment)) return [`${attachment.name}: ${currentAttachment.status}`];
       return previousAttachment && previousAttachment.status !== currentAttachment.status
         ? [`${attachment.name}: ${currentAttachment.status}`]
         : [];
@@ -122,11 +128,11 @@ export function ComposerAttachmentTray({
     });
   };
   if (!attachments.length) {
-    return <section id="attachment-tray-region" data-attachment-layout={layout} data-empty aria-label="Attached images"><p className="sr-only" aria-live="polite">{announcement}</p></section>;
+    return <section id="attachment-tray-region" data-composer-attachment-tray data-attachment-layout={layout} data-empty aria-label="Attached images"><p className="sr-only" data-attachment-announcement aria-live="polite">{announcement}</p></section>;
   }
   return (
-    <section id="attachment-tray-region" data-attachment-layout={layout} aria-label="Attached images">
-      <header className="attachment-tray-header">
+    <section id="attachment-tray-region" data-composer-attachment-tray data-attachment-layout={layout} aria-label="Attached images">
+      <header className="attachment-tray-header" data-attachment-tray-header>
         <span>{attachments.length} {attachments.length === 1 ? "image" : "images"}</span>
         {attachmentHeaderDetail ?? (totalSize !== null && <span>{formatBytes(totalSize)}</span>)}
       </header>
@@ -149,7 +155,7 @@ export function ComposerAttachmentTray({
           );
         })}
       </ul>
-      <p className="sr-only" aria-live="polite">{announcement}</p>
+      <p className="sr-only" data-attachment-announcement aria-live="polite">{announcement}</p>
     </section>
   );
 }

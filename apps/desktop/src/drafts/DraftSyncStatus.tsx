@@ -62,7 +62,7 @@ function primaryMessage(props: Pick<DraftSyncStatusProps, "offline" | "localSave
   if (props.localSaveState === "failed") return "Draft not saved on this device. Keep this window open.";
   if (sync.conflicts.length > 0) return "Draft versions need review";
   if (sync.state === "failed") return "Draft sync failed.";
-  if (sync.sendRequiresConnection && props.offline) return "Reconnect to send this synced draft.";
+  if (sync.sendRequiresConnection && props.offline) return "Reconnect to check this draft before sending.";
   return undefined;
 }
 

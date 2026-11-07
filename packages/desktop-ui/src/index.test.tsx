@@ -94,6 +94,54 @@ describe("Composer external draft updates", () => {
 
     expect(textarea).toHaveValue("hello!");
   });
+
+  it("keeps a local IME edit when a first-save alias rekeys the draft", () => {
+    function ControlledComposer() {
+      const [draft, setDraft] = useState("hello");
+      const [draftKey, setDraftKey] = useState("new:1");
+      return <>
+        <button type="button" onClick={() => setDraftKey("conversation-1")}>Save draft</button>
+        <Composer attachments={[]} draft={draft} draftIdentity="new-draft" draftKey={draftKey} sendSupported onDraftChange={setDraft} onSend={() => {}} />
+      </>;
+    }
+
+    render(<ControlledComposer />);
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.compositionStart(textarea);
+    fireEvent.change(textarea, { target: { value: "hello!" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+    fireEvent.compositionEnd(textarea);
+
+    expect(textarea).toHaveValue("hello!");
+  });
+
+  it("clears transient composer state when navigation follows a new draft", () => {
+    function ControlledComposer() {
+      const [draft, setDraft] = useState("hello");
+      const [draftKey, setDraftKey] = useState("new:1");
+      const [draftIdentity, setDraftIdentity] = useState("new:1");
+      return <>
+        <button type="button" onClick={() => {
+          setDraft("remote");
+          setDraftKey("conversation-2");
+          setDraftIdentity("conversation-2");
+        }}>Open conversation</button>
+        <Composer attachments={[]} draft={draft} draftIdentity={draftIdentity} draftKey={draftKey} sendSupported onDraftChange={setDraft} onPasteImages={() => {}} onSend={() => {}} />
+      </>;
+    }
+
+    render(<ControlledComposer />);
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.paste(textarea, { clipboardData: { files: [new File(["x"], "invalid.bmp", { type: "image/bmp" })], getData: () => "" } });
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    fireEvent.compositionStart(textarea);
+    fireEvent.change(textarea, { target: { value: "hello!" } });
+    fireEvent.click(screen.getByRole("button", { name: "Open conversation" }));
+    fireEvent.compositionEnd(textarea);
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(textarea).toHaveValue("remote");
+  });
 });
 
 describe("isPopoutMode", () => {

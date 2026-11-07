@@ -30,7 +30,7 @@ export function MmsSizeHelp({ estimatedSize, limitLabel, limitSize, limitKilobyt
     >
       <Info size={16} aria-hidden="true" />
     </button>
-    {helpOpen && <div onKeyDownCapture={(event) => {
+    {helpOpen && <div data-mms-size-help onKeyDownCapture={(event) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopPropagation();

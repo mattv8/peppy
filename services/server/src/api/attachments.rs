@@ -44,7 +44,8 @@ use super::sync::parse_cursor;
 use super::{
     AccessPrincipal, ApiError, ApiResult, ApiState, DeviceAttachmentRetentionError, Operation,
     Principal, attachment_quota, auth_with_mode, authorize, authorize_resolved,
-    database_unavailable, insert_error, revalidate_principal, withdraw_legacy_retention_mutation,
+    database_error_kind, database_unavailable, insert_error, revalidate_principal,
+    withdraw_legacy_retention_mutation,
 };
 use crate::attachment_retention::retention_storage_status_on_connection;
 use crate::scope;
@@ -1717,7 +1718,6 @@ pub(super) async fn process_storage_deletions(
     store: &Storage,
     limit: i64,
 ) -> Result<DeletionStats, sqlx::Error> {
-    crate::draft_retention::expire_due(db, limit).await?;
     let deadline = Instant::now() + PURGE_TIMEOUT;
     let mut stats = DeletionStats::default();
     let mut tx = db.begin().await?;
@@ -1788,7 +1788,7 @@ pub(super) async fn process_storage_deletions(
 /// copies, then process due deletions.
 pub(super) async fn storage_maintenance(
     db: &PgPool,
-    store: &Storage,
+    store: Option<&Storage>,
     limit: i64,
 ) -> Result<DeletionStats, sqlx::Error> {
     retire_expired_reservations(db, None, limit).await?;
@@ -1797,7 +1797,16 @@ pub(super) async fn storage_maintenance(
     // so a crash before the SQL commit safely retries; purged_at is recorded only
     // after a full purge.
     crate::attachment_retention::repair_retention_cleanup_queue(db, limit).await?;
-    process_storage_deletions(db, store, limit).await
+    if let Err(error) = crate::draft_retention::expire_due(db, limit).await {
+        tracing::warn!(
+            error_kind = database_error_kind(&error),
+            "draft retention expiry failed; continuing storage cleanup"
+        );
+    }
+    match store {
+        Some(store) => process_storage_deletions(db, store, limit).await,
+        None => Ok(DeletionStats::default()),
+    }
 }
 
 #[cfg(test)]

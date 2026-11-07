@@ -9,6 +9,7 @@ CREATE INDEX draft_branches_change_seq ON draft_branches(vault_id,change_seq);
 CREATE INDEX draft_branches_live_expiry ON draft_branches(expires_at) WHERE state='live';
 CREATE TABLE draft_revisions (vault_id UUID NOT NULL REFERENCES vaults(vault_id) ON DELETE CASCADE, draft_id UUID NOT NULL, revision_id UUID NOT NULL, branch_id UUID NOT NULL, parent_revision_id UUID, producer_device_id UUID NOT NULL, sealed_record BYTEA, attachment_ids UUID[] NOT NULL, authored BOOLEAN NOT NULL, conflict BOOLEAN NOT NULL, accepted_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at_at_accept TIMESTAMPTZ NOT NULL, PRIMARY KEY(vault_id,draft_id,revision_id));
 CREATE TABLE draft_terminals (vault_id UUID NOT NULL REFERENCES vaults(vault_id) ON DELETE CASCADE, draft_id UUID NOT NULL, reason TEXT NOT NULL CHECK(reason IN ('sent','discarded','expired')), command_id UUID, terminated_at TIMESTAMPTZ NOT NULL DEFAULT now(), change_seq BIGINT NOT NULL, PRIMARY KEY(vault_id,draft_id));
+CREATE INDEX draft_terminals_change_seq ON draft_terminals(vault_id,change_seq);
 CREATE TABLE draft_attachment_holds (vault_id UUID NOT NULL REFERENCES vaults(vault_id) ON DELETE CASCADE, draft_id UUID NOT NULL, attachment_id UUID NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('staging','draft','send')), expires_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(vault_id,draft_id,attachment_id,kind));
 CREATE INDEX draft_attachment_holds_expiry ON draft_attachment_holds(expires_at);
 CREATE INDEX draft_attachment_holds_attachment ON draft_attachment_holds(vault_id,attachment_id);

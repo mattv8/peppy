@@ -11,8 +11,8 @@ use crate::{
 };
 use futures_util::{SinkExt, StreamExt};
 use peppy_client_core::{
-    Client, Cursor, DraftPushOutcome, DraftTerminalReasonCore, EnvelopePurpose,
-    HistorySearchReplayProof, HistorySearchSyncFacts, KeyProfile, RawReplayRecord,
+    Client, Cursor, DraftPushOutcome, DraftTerminalReasonCore, DraftTransferDirection,
+    EnvelopePurpose, HistorySearchReplayProof, HistorySearchSyncFacts, KeyProfile, RawReplayRecord,
     RawSnapshotRecord, SnapshotPurpose, VaultCheckHeader, MAX_APPLY_BATCH, MAX_SEAL_BATCH,
     MAX_SNAPSHOT_PAGE,
 };
@@ -207,10 +207,8 @@ pub(crate) fn schedule_draft_push(session: Arc<Session>, delay: Duration) {
                         false
                     }
                 };
-                if current {
-                    if !session.cancel.is_cancelled() {
-                        session.request_work();
-                    }
+                if current && !session.cancel.is_cancelled() {
+                    session.request_work();
                 }
                 return;
             }
@@ -886,6 +884,14 @@ pub(crate) fn classify(failure: &Failure) -> MediaOutcome {
     }
 }
 
+fn draft_transfer_failure_direction(
+    is_draft_attachment: bool,
+    direction: DraftTransferDirection,
+    failure: &Failure,
+) -> Option<DraftTransferDirection> {
+    (is_draft_attachment && classify(failure) == MediaOutcome::Permanent).then_some(direction)
+}
+
 /// Applies the media failure policy; returns `Err` only for a round-ending transport failure.
 fn handle_media_failure(
     session: &Arc<Session>,
@@ -902,18 +908,39 @@ fn handle_media_failure(
             Ok(())
         }
         MediaOutcome::Permanent => {
-            let message = match failure {
-                Failure::Net(error) => BridgeError::from(error).message,
-                Failure::Permanent(error) => error.message,
-            };
             session
                 .transfer_errors
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .insert(id, message);
+                .insert(id, "media-transfer-failed".into());
             Ok(())
         }
     }
+}
+
+async fn record_draft_transfer_failure(
+    session: &Arc<Session>,
+    id: peppy_client_core::AttachmentId,
+    direction: DraftTransferDirection,
+) -> BridgeResult<()> {
+    let c = client(session);
+    blocking(move || {
+        c.record_draft_attachment_transfer_failure(id, direction)
+            .map_err(core_error)
+    })
+    .await
+}
+
+async fn clear_draft_transfer_failure(
+    session: &Arc<Session>,
+    id: peppy_client_core::AttachmentId,
+) -> BridgeResult<()> {
+    let c = client(session);
+    blocking(move || {
+        c.clear_draft_attachment_transfer_failure(id)
+            .map_err(core_error)
+    })
+    .await
 }
 
 fn handle_download_failure(
@@ -1189,7 +1216,11 @@ fn remote_draft_change(
 
 /// Synchronizes encrypted draft metadata and draft-only attachment objects. Draft contents are
 /// deliberately never logged; malformed server records fail the round without advancing the cursor.
-async fn sync_drafts(session: &Arc<Session>) -> BridgeResult<bool> {
+async fn sync_drafts(
+    session: &Arc<Session>,
+    retention_maintenance_ready: bool,
+    failed: &[peppy_client_core::AttachmentId],
+) -> BridgeResult<bool> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use peppy_hosted_api::drafts::{
         DraftChangesResponse, PutDraftRevisionRequest, PutDraftRevisionResponse,
@@ -1225,22 +1256,26 @@ async fn sync_drafts(session: &Arc<Session>) -> BridgeResult<bool> {
         Err(NetError::Status {
             status: 404,
             code: None,
-        }) if session
+        }) => match session
             .api
-            .get_json_200::<serde_json::Value>("/v1/gateways", MAX_JSON_BYTES)
+            .get_json_200::<serde_json::Value>("/v1/vault", MAX_JSON_BYTES)
             .await
-            .is_ok() =>
         {
-            let c = client(session);
-            blocking(move || c.set_draft_sync_supported(false).map_err(core_error)).await?;
-            return Ok(false);
-        }
+            Ok(_) => {
+                let c = client(session);
+                blocking(move || c.set_draft_sync_supported(false).map_err(core_error)).await?;
+                return Ok(false);
+            }
+            Err(error) if transport_fatal(&error) => return Err(error.into()),
+            Err(_) => return Ok(false),
+        },
         Err(error) if transport_fatal(&error) => return Err(error.into()),
         Err(_) => return Ok(false),
     };
     let c = client(session);
     blocking(move || c.set_draft_sync_supported(true).map_err(core_error)).await?;
     let mut seen_draft_ids = Vec::new();
+    let mut fully_applied = true;
     let mut page = first;
     loop {
         if bootstrap {
@@ -1261,11 +1296,23 @@ async fn sync_drafts(session: &Arc<Session>) -> BridgeResult<bool> {
         let next_after = page.next_after.clone();
         let c = client(session);
         let applied_cursor = next_after.clone();
-        blocking(move || {
-            c.apply_draft_changes(changes, &applied_cursor)
-                .map_err(core_error)
-        })
-        .await?;
+        let applied =
+            tokio::task::spawn_blocking(move || c.apply_draft_changes(changes, &applied_cursor))
+                .await
+                .map_err(|_| BridgeError::host_state())?;
+        if let Err(error) = applied {
+            match error {
+                peppy_client_core::Error::KeysUnavailable
+                | peppy_client_core::Error::Crypto
+                | peppy_client_core::Error::InvalidMedia
+                | peppy_client_core::Error::InvalidRequest(_) => {
+                    record_work_error(session, "draft-apply-deferred");
+                    fully_applied = false;
+                    break;
+                }
+                error => return Err(core_error(error)),
+            }
+        }
         if session.cancel.is_cancelled() {
             return Ok(false);
         }
@@ -1281,7 +1328,7 @@ async fn sync_drafts(session: &Arc<Session>) -> BridgeResult<bool> {
             .await
             .map_err(BridgeError::from)?;
     }
-    if bootstrap {
+    if bootstrap && fully_applied {
         let c = client(session);
         blocking(move || {
             c.finish_draft_bootstrap(&seen_draft_ids)
@@ -1289,21 +1336,45 @@ async fn sync_drafts(session: &Arc<Session>) -> BridgeResult<bool> {
         })
         .await?;
     }
-    let c = client(session);
-    let uploads = blocking(move || c.pending_draft_uploads().map_err(core_error)).await?;
-    for upload in uploads.into_iter().take(MEDIA_PER_ROUND) {
-        if session.cancel.is_cancelled() {
-            return Ok(true);
-        }
-        let id = upload.object.attachment_id;
-        if let Err(failure) =
-            upload_object_for_draft(session, upload.object, Some(upload.draft_id)).await
+    if retention_maintenance_ready {
+        let c = client(session);
+        let uploads = blocking(move || c.pending_draft_uploads().map_err(core_error)).await?;
+        for upload in uploads
+            .into_iter()
+            .filter(|upload| !failed.contains(&upload.object.attachment_id))
+            .take(MEDIA_PER_ROUND)
         {
-            handle_media_failure(session, id, failure)?;
+            if session.cancel.is_cancelled() {
+                return Ok(true);
+            }
+            let id = upload.object.attachment_id;
+            match upload_object_for_draft(session, upload.object, Some(upload.draft_id)).await {
+                Ok(()) => clear_draft_transfer_failure(session, id).await?,
+                Err(failure) => {
+                    let direction = draft_transfer_failure_direction(
+                        true,
+                        DraftTransferDirection::Upload,
+                        &failure,
+                    );
+                    handle_media_failure(session, id, failure)?;
+                    if let Some(direction) = direction {
+                        record_draft_transfer_failure(session, id, direction).await?;
+                    }
+                }
+            }
         }
     }
     let c = client(session);
     for push in blocking(move || c.pending_draft_pushes().map_err(core_error)).await? {
+        let c = client(session);
+        let attempted = blocking(move || {
+            c.mark_draft_push_attempt(push.draft_id, push.revision_id)
+                .map_err(core_error)
+        })
+        .await?;
+        if !attempted {
+            continue;
+        }
         let request = PutDraftRevisionRequest {
             base_revision_id: push.base_revision_id,
             sealed_record: URL_SAFE_NO_PAD.encode(push.sealed_record),
@@ -1389,6 +1460,10 @@ async fn sync_drafts(session: &Arc<Session>) -> BridgeResult<bool> {
 #[cfg(test)]
 mod draft_push_outcome_tests {
     use super::*;
+    use crate::{
+        contacts::tests::mock_server,
+        tests::{fixture_at, open},
+    };
 
     #[test]
     fn only_documented_client_rejections_are_permanent() {
@@ -1408,6 +1483,114 @@ mod draft_push_outcome_tests {
             };
             assert_eq!(outcome.is_some(), rejected);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_draft_route_uses_the_authenticated_vault_probe() {
+        let (origin, seen) = mock_server(|method, path, _| match (method, path) {
+            // A router 404 is JSON but has no API error code. A plaintext 404 is classified as
+            // a proxy/non-API response and must not disable draft sync.
+            ("GET", "/v1/drafts?after=0&limit=2") => (404, "{}".into()),
+            ("GET", "/v1/vault") => (200, "{}".into()),
+            _ => (404, "{}".into()),
+        })
+        .await;
+        let fixture = fixture_at(&origin);
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+
+        assert!(!sync_drafts(&session, false, &[]).await.unwrap());
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().any(|request| request.path == "/v1/vault"));
+        assert!(seen.iter().all(|request| request.path != "/v1/gateways"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_draft_route_probe_propagates_revocation() {
+        let (origin, _) = mock_server(|method, path, _| match (method, path) {
+            ("GET", "/v1/drafts?after=0&limit=2") => (404, "{}".into()),
+            ("GET", "/v1/vault") => (401, "{}".into()),
+            _ => (404, "{}".into()),
+        })
+        .await;
+        let fixture = fixture_at(&origin);
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+
+        assert_eq!(
+            sync_drafts(&session, false, &[]).await.unwrap_err().code,
+            "revoked"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deferred_bootstrap_page_does_not_complete_absence_reconciliation() {
+        let response = serde_json::json!({
+            "changes": [{
+                "kind": "head",
+                "seq": "1",
+                "draft_id": "00000000-0000-0000-0000-000000000001",
+                "branch_id": "00000000-0000-0000-0000-000000000002",
+                "revision_id": "00000000-0000-0000-0000-000000000003",
+                "parent_revision_id": null,
+                "sealed_record": "AA",
+                "attachment_ids": [],
+                "expires_at": "2026-12-01T00:00:00Z"
+            }],
+            "next_after": "1",
+            "more": true
+        })
+        .to_string();
+        let (origin, _) = mock_server(move |method, path, _| match (method, path) {
+            ("GET", "/v1/drafts?after=0&limit=2") => (200, response.clone()),
+            _ => (404, "{}".into()),
+        })
+        .await;
+        let fixture = fixture_at(&origin);
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+
+        sync_drafts(&session, false, &[]).await.unwrap();
+        assert!(session.client.draft_bootstrap_required().unwrap());
+    }
+
+    #[test]
+    fn production_classifier_retries_transient_server_failures() {
+        assert_eq!(
+            classify(&Failure::Net(NetError::Status {
+                status: 503,
+                code: None,
+            })),
+            MediaOutcome::Retry
+        );
+    }
+
+    #[test]
+    fn production_draft_failure_policy_records_permanent_downloads_only_for_drafts() {
+        assert_eq!(
+            draft_transfer_failure_direction(
+                true,
+                DraftTransferDirection::Download,
+                &Failure::Net(NetError::Invalid),
+            ),
+            Some(DraftTransferDirection::Download)
+        );
+        assert_eq!(
+            draft_transfer_failure_direction(
+                false,
+                DraftTransferDirection::Download,
+                &Failure::Net(NetError::Invalid),
+            ),
+            None
+        );
+        assert_eq!(
+            draft_transfer_failure_direction(
+                true,
+                DraftTransferDirection::Download,
+                &Failure::Net(NetError::Status {
+                    status: 503,
+                    code: None,
+                }),
+            ),
+            None
+        );
     }
 }
 
@@ -1440,7 +1623,6 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
         }
     };
     let mut changed = false;
-    changed |= sync_drafts(session).await?;
     let failed: Vec<_> = session
         .transfer_errors
         .lock()
@@ -1448,6 +1630,7 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
         .keys()
         .copied()
         .collect();
+    changed |= sync_drafts(session, retention_maintenance_ready, &failed).await?;
     let tracked = contact_photo_transfers(session).await?;
     if !tracked.unavailable.is_empty() {
         record_work_error(session, "contact-photo-unavailable");
@@ -1541,19 +1724,41 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
             .map(|candidate| (candidate.object, candidate.demanded))
             .collect(),
     );
+    let c = client(session);
+    let draft_attachment_ids = blocking(move || {
+        c.compose_drafts().map_err(core_error).map(|drafts| {
+            drafts
+                .into_iter()
+                .flat_map(|draft| draft.attachment_ids)
+                .collect::<Vec<_>>()
+        })
+    })
+    .await?;
     for object in downloads {
         if session.cancel.is_cancelled() {
             return Ok(());
         }
         let id = object.attachment_id;
+        let is_draft_attachment = draft_attachment_ids.contains(&id);
         match download_one(session, object).await {
             Ok(()) => {
                 clear_download_retry(session, &id);
+                if is_draft_attachment {
+                    clear_draft_transfer_failure(session, id).await?;
+                }
                 session.invalidate_cached_attachment(&id);
                 changed = true;
             }
             Err(failure) => {
+                let direction = draft_transfer_failure_direction(
+                    is_draft_attachment,
+                    DraftTransferDirection::Download,
+                    &failure,
+                );
                 handle_download_failure(session, id, failure)?;
+                if let Some(direction) = direction {
+                    record_draft_transfer_failure(session, id, direction).await?;
+                }
                 changed = true;
             }
         }

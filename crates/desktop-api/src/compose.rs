@@ -317,11 +317,29 @@ pub fn send_draft(
 pub fn send_draft_accepted(
     client: &Client,
     input: &DraftInput,
-    gateways: Option<&[GatewayView]>,
+    _gateways: Option<&[GatewayView]>,
     command_id: CommandId,
 ) -> Result<SendResultView, ComposeError> {
-    let prepared = immutable_prepared_draft_send(client, input, gateways)?;
-    queue_prepared_draft_send(client, &prepared, gateways, Some(command_id))
+    let draft_id = DraftId::from_str(&input.id)
+        .map_err(|_| ui("invalid-draft", "Save the draft before sending it."))?;
+    let revision = revision(&input.expected_revision)?;
+    let parts = client
+        .draft_send_intent_parts_count(draft_id, command_id)
+        .map_err(ComposeError::Core)?
+        .filter(|count| *count > 1);
+    client
+        .send_compose_draft_accepted_with_parts(draft_id, revision, command_id, None)
+        .map_err(|source| ComposeError::AfterRoute {
+            source,
+            current_revision: revision,
+        })?;
+    Ok(SendResultView {
+        accepted: true,
+        status: "queued-local",
+        reason: None,
+        revision: Some((revision + 1).to_string()),
+        parts,
+    })
 }
 
 /// Validates a stored draft and persists canonical route/recipient fields before a host creates
@@ -511,48 +529,6 @@ pub fn prepare_draft_send(
     })
 }
 
-fn immutable_prepared_draft_send(
-    client: &Client,
-    input: &DraftInput,
-    gateways: Option<&[GatewayView]>,
-) -> Result<DraftInput, ComposeError> {
-    let draft_id = DraftId::from_str(&input.id)
-        .map_err(|_| ui("invalid-draft", "Save the draft before sending it."))?;
-    let expected = revision(&input.expected_revision)?;
-    let route = match (input.gateway_id.as_deref(), input.sim_id.as_deref()) {
-        (Some(gateway), Some(sim)) if !gateway.is_empty() && !sim.is_empty() => {
-            parse_route(gateway, sim)?
-        }
-        _ => {
-            return Err(ui(
-                "invalid-route",
-                "Select a phone and SIM before sending.",
-            ));
-        }
-    };
-    let stored = client
-        .resolve_compose_draft_for_send(draft_id, expected)
-        .map_err(ComposeError::Core)?;
-    let attachment_ids: Vec<String> = stored
-        .attachment_ids
-        .iter()
-        .map(ToString::to_string)
-        .collect();
-    if input.conversation_id != stored.conversation_id.to_string()
-        || input.text != stored.text
-        || input.recipient_ids != stored.recipients
-        || input.attachment_ids != attachment_ids
-        || stored.route.as_ref() != Some(&route)
-    {
-        return Err(ui(
-            "draft-intent-changed",
-            "The draft changed after send approval; refresh it before sending.",
-        ));
-    }
-    // The exact match above makes the shared preflight validation read-only here.
-    prepare_draft_send(client, input, gateways)
-}
-
 fn queue_prepared_draft_send(
     client: &Client,
     input: &DraftInput,
@@ -623,6 +599,9 @@ pub fn prepared_draft_send_parts(
     input: &DraftInput,
     gateways: Option<&[GatewayView]>,
 ) -> Result<Option<DraftSendParts>, ComposeError> {
+    if input.attachment_ids.is_empty() {
+        return Ok(None);
+    }
     let (Some(gateway_id), Some(sim_id), Some(gateways)) = (
         input.gateway_id.as_deref(),
         input.sim_id.as_deref(),
@@ -712,7 +691,10 @@ fn validate_draft_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use peppy_client_core::{ClientConfig, DatabaseKey, DraftPushOutcome, IncomingSms, VaultId};
+    use peppy_client_core::{
+        ClientConfig, DatabaseKey, DraftPushOutcome, DraftTerminalReasonCore, IncomingSms,
+        RemoteDraftChange, VaultId,
+    };
     use peppy_crypto::{KeyProfile, create_vault_check_header, derive_root_key};
 
     const PASSPHRASE: &str = "compose test passphrase";
@@ -946,7 +928,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_send_refuses_changed_content_and_preserves_the_exact_command() {
+    fn accepted_send_uses_the_durable_intent_instead_of_mutable_draft_input() {
         let fixture = fixture();
         let draft = saved_draft(&fixture.client, vec!["+14155552671"]);
         let prepared = prepared(prepare_draft_send(
@@ -955,6 +937,7 @@ mod tests {
             Some(&[gateway(GatewayAvailability::Connected)]),
         ));
         let prepared_id = DraftId::from_str(&prepared.id).unwrap();
+        let prepared_revision = prepared.expected_revision.parse().unwrap();
         mark_synced(&fixture.client, prepared_id);
         let command = fixture
             .client
@@ -977,22 +960,9 @@ mod tests {
 
         let mut changed = prepared;
         changed.text = "changed after approval".into();
-        assert!(
-            send_draft_accepted(
-                &fixture.client,
-                &changed,
-                Some(&[gateway(GatewayAvailability::Connected)]),
-                command
-            )
-            .is_err()
-        );
-        let unchanged = fixture.client.compose_draft(prepared_id).unwrap().unwrap();
-        assert_eq!(unchanged.text, "ready");
-        assert_eq!(unchanged.route.as_ref().unwrap().subscription_id, "sim");
-
         let accepted = match send_draft_accepted(
             &fixture.client,
-            &input(&unchanged),
+            &changed,
             Some(&[gateway(GatewayAvailability::Connected)]),
             command,
         ) {
@@ -1003,12 +973,169 @@ mod tests {
         assert_eq!(
             fixture
                 .client
-                .begin_draft_send(prepared_id, unchanged.revision, None)
+                .begin_draft_send(prepared_id, prepared_revision, None)
                 .unwrap()
                 .remote
                 .unwrap()
                 .command_id,
             command
+        );
+    }
+
+    #[test]
+    fn accepted_send_is_idempotent_after_the_command_is_already_queued() {
+        let fixture = fixture();
+        let draft = saved_draft(&fixture.client, vec!["+14155552671"]);
+        let prepared = prepared(prepare_draft_send(
+            &fixture.client,
+            &input(&draft),
+            Some(&[gateway(GatewayAvailability::Connected)]),
+        ));
+        let draft_id = DraftId::from_str(&prepared.id).unwrap();
+        mark_synced(&fixture.client, draft_id);
+        let command = fixture
+            .client
+            .begin_draft_send(draft_id, prepared.expected_revision.parse().unwrap(), None)
+            .unwrap()
+            .remote
+            .unwrap()
+            .command_id;
+
+        assert!(
+            send_draft_accepted(
+                &fixture.client,
+                &prepared,
+                Some(&[gateway(GatewayAvailability::Connected)]),
+                command,
+            )
+            .is_ok()
+        );
+
+        assert!(
+            send_draft_accepted(
+                &fixture.client,
+                &prepared,
+                Some(&[gateway(GatewayAvailability::Connected)]),
+                command,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn accepted_split_send_reports_persisted_parts_after_terminal_recovery() {
+        let fixture = fixture();
+        let attachment_ids: Vec<AttachmentId> = (0..6)
+            .map(|index| {
+                let source = fixture._directory.path().join(format!("image-{index}.jpg"));
+                std::fs::write(&source, vec![0; 100_000]).unwrap();
+                fixture
+                    .client
+                    .prepare_attachment(&source, "image/jpeg", "image.jpg")
+                    .unwrap()
+                    .attachment_id
+            })
+            .collect();
+        let draft = saved_draft(&fixture.client, vec!["+14155552671"]);
+        let draft = fixture
+            .client
+            .save_compose_draft(
+                draft.draft_id,
+                draft.revision,
+                ComposeDraftUpdate {
+                    text: "caption".into(),
+                    recipients: draft.recipients,
+                    attachment_ids: attachment_ids.clone(),
+                    route: None,
+                },
+            )
+            .unwrap();
+        for attachment_id in attachment_ids {
+            fixture
+                .client
+                .mark_attachment_uploaded(attachment_id, &uuid::Uuid::new_v4().to_string())
+                .unwrap();
+        }
+        let mut planned_gateway = gateway(GatewayAvailability::Connected);
+        planned_gateway.mms_content_version = Some(4);
+        let prepared = prepared(prepare_draft_send(
+            &fixture.client,
+            &input(&draft),
+            Some(&[planned_gateway.clone()]),
+        ));
+        let draft_id = DraftId::from_str(&prepared.id).unwrap();
+        mark_synced(&fixture.client, draft_id);
+        let command = fixture
+            .client
+            .begin_draft_send(
+                draft_id,
+                prepared.expected_revision.parse().unwrap(),
+                match prepared_draft_send_parts(
+                    &fixture.client,
+                    &prepared,
+                    Some(&[planned_gateway]),
+                ) {
+                    Ok(parts) => parts,
+                    Err(_) => panic!("prepared split send should have a valid plan"),
+                },
+            )
+            .unwrap()
+            .remote
+            .unwrap()
+            .command_id;
+
+        fixture
+            .client
+            .apply_draft_changes(
+                vec![RemoteDraftChange::Terminal {
+                    draft_id,
+                    reason: DraftTerminalReasonCore::Sent,
+                    command_id: Some(command),
+                }],
+                "1",
+            )
+            .unwrap();
+
+        let first = match send_draft_accepted(&fixture.client, &prepared, None, command) {
+            Ok(result) => result,
+            Err(_) => panic!("terminal-first accepted send should report its durable part count"),
+        };
+        let repeated = match send_draft_accepted(&fixture.client, &prepared, None, command) {
+            Ok(result) => result,
+            Err(_) => panic!("repeated accepted send should report its durable part count"),
+        };
+        assert_eq!(first.parts, Some(3));
+        assert_eq!(repeated.parts, Some(3));
+    }
+
+    #[test]
+    fn sms_send_does_not_run_the_mms_split_planner() {
+        let fixture = fixture();
+        let mut draft = saved_draft(&fixture.client, vec!["+14155552671"]);
+        draft = fixture
+            .client
+            .save_compose_draft(
+                draft.draft_id,
+                draft.revision,
+                ComposeDraftUpdate {
+                    text: "body".into(),
+                    recipients: draft.recipients.clone(),
+                    attachment_ids: vec![],
+                    route: draft.route.clone(),
+                },
+            )
+            .unwrap();
+        let mut constrained_gateway = gateway(GatewayAvailability::Connected);
+        constrained_gateway.mms_content_version = Some(3);
+        constrained_gateway.mms_max_bytes = Some(2);
+
+        assert!(
+            send_draft(
+                &fixture.client,
+                &input(&draft),
+                Some(&[constrained_gateway])
+            )
+            .is_ok()
         );
     }
 }

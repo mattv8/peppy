@@ -260,6 +260,23 @@ fn update_activity_reporting_is_allowed_from_main_and_composer_windows() {
     );
 }
 
+#[test]
+fn raw_pasted_attachment_invoke_is_allowed_only_from_main_and_composer_windows() {
+    let command = "prepare_pasted_attachment";
+    let permission = allow(command);
+    let main = permissions(include_str!("../capabilities/default.json"));
+    let composer = permissions(include_str!("../capabilities/composer.json"));
+    let media = permissions(include_str!("../capabilities/media.json"));
+
+    assert_eq!(
+        command_window_risk(command),
+        CommandWindowRisk::MainAndComposer
+    );
+    assert!(main.contains(&permission));
+    assert!(composer.contains(&permission));
+    assert!(!media.contains(&permission));
+}
+
 /// Explicit window-risk registry. New commands default to main-only, the least-privileged window.
 fn command_window_risk(command: &str) -> CommandWindowRisk {
     if [

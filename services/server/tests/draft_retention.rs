@@ -258,6 +258,65 @@ async fn live_hold_does_not_starve_later_draft_cleanup_at_quota() {
     admin.close().await;
 }
 
+#[tokio::test]
+async fn expiry_bounds_branch_attachment_and_lapsed_hold_work_per_vault() {
+    let (admin, pool, schema) = pool().await;
+    let (vault, device, _) = seed(&pool).await;
+    for draft in [Uuid::new_v4(), Uuid::new_v4()] {
+        sqlx::query("INSERT INTO draft_incarnations(vault_id,draft_id) VALUES($1,$2)")
+            .bind(vault)
+            .bind(draft)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            sqlx::query("INSERT INTO draft_branches(vault_id,draft_id,branch_id,head_revision_id,state,expires_at,change_seq) VALUES($1,$2,$3,$4,'live',now()-interval '1 second',1)")
+                .bind(vault)
+                .bind(draft)
+                .bind(Uuid::new_v4())
+                .bind(Uuid::new_v4())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
+    for index in 0..3 {
+        sqlx::query("INSERT INTO attachments(vault_id,attachment_id,object_key,ciphertext_bytes,ciphertext_sha256,created_by_device_id,draft_id) VALUES($1,$2,$3,1,$4,$5,$6)")
+            .bind(vault)
+            .bind(Uuid::new_v4())
+            .bind(format!("draft/bounded-{index}"))
+            .bind(vec![0_u8; 32])
+            .bind(device)
+            .bind(Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO draft_attachment_holds(vault_id,draft_id,attachment_id,kind,expires_at) VALUES($1,$2,$3,'draft',now()-interval '1 second')")
+            .bind(vault)
+            .bind(Uuid::new_v4())
+            .bind(Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    expire_due(&pool, 2).await.unwrap();
+
+    let work: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM draft_branches WHERE vault_id=$1 AND state='closed'), (SELECT count(*) FROM attachments WHERE vault_id=$1), (SELECT count(*) FROM draft_attachment_holds WHERE vault_id=$1)")
+        .bind(vault)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(work, (2, 1, 1));
+
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+}
+
 // ---------------------------------------------------------------------------
 // HTTP harness
 // ---------------------------------------------------------------------------
@@ -276,14 +335,18 @@ struct Harness {
 
 impl Harness {
     async fn start() -> Self {
-        Self::start_inner(false).await
+        Self::start_inner(false, true).await
     }
 
     async fn start_with_maintenance() -> Self {
-        Self::start_inner(true).await
+        Self::start_inner(true, true).await
     }
 
-    async fn start_inner(start_maintenance: bool) -> Self {
+    async fn start_without_storage_maintenance() -> Self {
+        Self::start_inner(true, false).await
+    }
+
+    async fn start_inner(start_maintenance: bool, include_storage: bool) -> Self {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL is required; integration tests never silently skip");
         let mut config = Config::from_env().expect("complete S3 test configuration is required");
@@ -291,6 +354,9 @@ impl Harness {
             Storage::initialize(config.s3.as_ref().expect("S3 is required for draft tests"))
                 .await
                 .unwrap();
+        if !include_storage {
+            config.s3 = None;
+        }
         let admin = PgPoolOptions::new()
             .max_connections(2)
             .connect(&database_url)
@@ -1167,6 +1233,26 @@ async fn worker_keeps_draft_attachments_that_are_referenced_published_or_held_el
     )
     .await;
 
+    let message_history = s.draft_attachment(draft, b"message history").await;
+    sqlx::query("INSERT INTO attachment_retention_uses(vault_id,use_id,attachment_id,device_id,kind,released_at) VALUES($1,$2,$3,$4,'message_history',now())")
+        .bind(s.vault)
+        .bind(Uuid::new_v4())
+        .bind(message_history)
+        .bind(s.owner_device)
+        .execute(&s.pool)
+        .await
+        .unwrap();
+
+    let pending_send = s.draft_attachment(draft, b"pending send").await;
+    sqlx::query("INSERT INTO attachment_retention_uses(vault_id,use_id,attachment_id,device_id,kind) VALUES($1,$2,$3,$4,'pending_send')")
+        .bind(s.vault)
+        .bind(Uuid::new_v4())
+        .bind(pending_send)
+        .bind(s.owner_device)
+        .execute(&s.pool)
+        .await
+        .unwrap();
+
     let control = s.draft_attachment(draft, b"control").await;
 
     // Expire every hold owned by the first draft; the other draft's hold stays live.
@@ -1179,7 +1265,13 @@ async fn worker_keeps_draft_attachments_that_are_referenced_published_or_held_el
     let control_key = s.object_key(control).await;
     expire_due(&s.pool, 10).await.unwrap();
 
-    for kept in [referenced, published, held_elsewhere] {
+    for kept in [
+        referenced,
+        published,
+        held_elsewhere,
+        message_history,
+        pending_send,
+    ] {
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM attachments WHERE vault_id=$1 AND attachment_id=$2)",
         )
@@ -1207,6 +1299,73 @@ async fn worker_keeps_draft_attachments_that_are_referenced_published_or_held_el
     .await
     .unwrap();
     assert_eq!(queued, 1);
+    s.shutdown().await;
+}
+
+#[tokio::test]
+async fn maintenance_expires_caption_drafts_without_object_storage() {
+    let s = Harness::start_without_storage_maintenance().await;
+    let draft = Uuid::new_v4();
+    let revision_id = Uuid::new_v4();
+    s.put_ok(draft, revision_id, revision(None, "caption", &[], true))
+        .await;
+    sqlx::query("UPDATE draft_branches SET expires_at=now()-interval '1 second' WHERE vault_id=$1 AND draft_id=$2")
+        .bind(s.vault)
+        .bind(draft)
+        .execute(&s.pool)
+        .await
+        .unwrap();
+
+    for _ in 0..200 {
+        let expired: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM draft_terminals WHERE vault_id=$1 AND draft_id=$2 AND reason='expired')")
+            .bind(s.vault)
+            .bind(draft)
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        if expired {
+            s.shutdown().await;
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    s.shutdown().await;
+    panic!("maintenance did not expire caption draft without object storage");
+}
+
+#[tokio::test]
+async fn maintenance_continues_public_copy_cleanup_after_draft_expiry_error() {
+    let s = Harness::start_with_maintenance().await;
+    let attachment = s.draft_attachment(Uuid::new_v4(), b"public cleanup").await;
+    let copy = Client::new()
+        .post(s.url(&format!("/v1/attachments/{attachment}/public-copies")))
+        .bearer_auth(&s.owner_token)
+        .header("x-file-name", "photo.png")
+        .body(png(32))
+        .send()
+        .await
+        .unwrap();
+    read_ok(copy).await;
+    let key: String = sqlx::query_scalar(
+        "SELECT object_key FROM public_attachment_copies WHERE vault_id=$1 AND attachment_id=$2",
+    )
+    .bind(s.vault)
+    .bind(attachment)
+    .fetch_one(&s.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE public_attachment_copies SET expires_at=now()-interval '1 second' WHERE vault_id=$1 AND attachment_id=$2")
+        .bind(s.vault)
+        .bind(attachment)
+        .execute(&s.pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE draft_branches")
+        .execute(&s.pool)
+        .await
+        .unwrap();
+
+    s.wait_for_storage_cleanup(&key).await;
     s.shutdown().await;
 }
 
@@ -1271,16 +1430,45 @@ async fn expiry_revisits_a_draft_image_after_its_public_copy_stops_protecting_it
 }
 
 #[tokio::test]
-async fn release_is_refused_while_a_draft_hold_is_live() {
+async fn send_hold_survives_reference_registration_and_blocks_release_until_lapse() {
     let s = Harness::start().await;
     let draft = Uuid::new_v4();
     let attachment = s.draft_attachment(draft, b"held release").await;
-    // Establish an otherwise valid release proof, so only the live hold can
-    // explain the refusal (not an invalid generation or absent references).
+    let revision_id = Uuid::new_v4();
+    let command_id = Uuid::new_v4();
+    s.put_ok(
+        draft,
+        revision_id,
+        revision(None, "held", &[attachment], true),
+    )
+    .await;
+    read_ok(s.send(draft, revision_id, command_id).await).await;
+    assert_eq!(
+        Client::new()
+            .post(s.url(&format!("/v1/attachments/{attachment}/references")))
+            .bearer_auth(&s.owner_token)
+            .json(&json!({"references": [{"producer_device_id": s.owner_device, "producer_sequence": "7"}]}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    let send_hold: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM draft_attachment_holds WHERE vault_id=$1 AND attachment_id=$2 AND kind='send' AND expires_at>now())")
+        .bind(s.vault)
+        .bind(attachment)
+        .fetch_one(&s.pool)
+        .await
+        .unwrap();
+    assert!(
+        send_hold,
+        "reference registration must not clear the live send hold"
+    );
+
+    // Establish an otherwise valid release proof, so only the live send hold
+    // explains the refusal.
     sqlx::query("UPDATE vaults SET next_cursor=10,replay_floor_cursor=10,compaction_generation=1 WHERE vault_id=$1")
         .bind(s.vault).execute(&s.pool).await.unwrap();
-    sqlx::query("INSERT INTO attachment_record_references(vault_id,attachment_id,producer_device_id,producer_sequence,registered_by_device_id) VALUES($1,$2,$3,7,$3)")
-        .bind(s.vault).bind(attachment).bind(s.owner_device).execute(&s.pool).await.unwrap();
     sqlx::query("INSERT INTO compacted_records(vault_id,producer_device_id,producer_sequence,envelope_id,cipher_digest,original_cursor) VALUES($1,$2,7,$3,$4,5)")
         .bind(s.vault).bind(s.owner_device).bind(Uuid::new_v4()).bind(vec![0_u8;32]).execute(&s.pool).await.unwrap();
     let release = |generation: &str, cursor: &str| {
@@ -1290,19 +1478,6 @@ async fn release_is_refused_while_a_draft_hold_is_live() {
             .json(&json!({"compaction_generation": generation, "release_before_cursor": cursor}))
             .send()
     };
-    assert_error(
-        release("1", "10").await.unwrap(),
-        StatusCode::CONFLICT,
-        "attachment_release_not_proven",
-    )
-    .await;
-
-    s.put_ok(
-        draft,
-        Uuid::new_v4(),
-        revision(None, "held", &[attachment], true),
-    )
-    .await;
     assert_error(
         release("1", "10").await.unwrap(),
         StatusCode::CONFLICT,

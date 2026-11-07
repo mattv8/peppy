@@ -1796,21 +1796,52 @@ async fn websocket_draft_hints_are_ready_gated_vault_scoped_and_coalesced() {
     );
 
     let mut unready = server.connect_ws(&server.owner_token).await;
-    server.put_draft(Uuid::new_v4(), Uuid::new_v4()).await;
-    assert_eq!(
-        next_draft_hint(&mut observer, 3).await,
-        json!({"type":"drafts_changed"})
+    let (writes_complete, mut observe_complete) = tokio::sync::watch::channel(false);
+    let burst_started = tokio::time::Instant::now();
+    let send_burst = async {
+        for _ in 0..4 {
+            server.put_draft(Uuid::new_v4(), Uuid::new_v4()).await;
+        }
+        writes_complete.send_replace(true);
+    };
+    let observe_burst = async {
+        let mut hints = Vec::new();
+        let mut writes_done = false;
+        let mut settle = Box::pin(tokio::time::sleep(Duration::from_secs(3_600)));
+        loop {
+            tokio::select! {
+                frame = next_json_frame(&mut observer) => match frame["type"].as_str() {
+                    Some("drafts_changed") => {
+                        assert_eq!(frame, json!({"type":"drafts_changed"}));
+                        hints.push(tokio::time::Instant::now());
+                    }
+                    Some("presence_changed") => {}
+                    other => panic!("expected a draft hint or presence hint, got {other:?}: {frame}"),
+                },
+                changed = observe_complete.changed(), if !writes_done => {
+                    assert!(changed.is_ok(), "draft writes ended without completion");
+                    writes_done = true;
+                    settle
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + Duration::from_millis(600));
+                }
+                _ = &mut settle, if writes_done => break,
+            }
+        }
+        hints
+    };
+    let ((), hint_times) = tokio::join!(send_burst, observe_burst);
+    assert!(
+        hint_times.len() >= 2,
+        "a burst must produce leading and trailing hints"
     );
-
-    for _ in 0..3 {
-        server.put_draft(Uuid::new_v4(), Uuid::new_v4()).await;
+    for (index, received_at) in hint_times.into_iter().enumerate() {
+        let minimum_elapsed = Duration::from_millis(500 * index as u64);
+        assert!(
+            received_at.duration_since(burst_started) >= minimum_elapsed,
+            "draft hint {index} arrived before its 500 ms rate-limit window"
+        );
     }
-    assert_no_draft_hint(&mut observer, Duration::from_millis(300)).await;
-    assert_eq!(
-        next_draft_hint(&mut observer, 3).await,
-        json!({"type":"drafts_changed"})
-    );
-    assert_no_draft_hint(&mut observer, Duration::from_millis(600)).await;
     assert_no_text_frame(&mut foreign_observer, Duration::from_millis(600)).await;
     assert_no_text_frame(&mut unready, Duration::from_millis(600)).await;
     server.shutdown().await;
@@ -2070,37 +2101,6 @@ async fn next_durable_event(ws: &mut Ws, seconds: u64) -> Value {
     })
     .await
     .expect("timed out waiting for a durable websocket event")
-}
-
-async fn next_draft_hint(ws: &mut Ws, seconds: u64) -> Value {
-    tokio::time::timeout(Duration::from_secs(seconds), async {
-        loop {
-            let frame = next_json_frame(ws).await;
-            match frame["type"].as_str() {
-                Some("drafts_changed") => return frame,
-                Some("presence_changed") => {}
-                other => panic!("expected a draft hint or presence hint, got {other:?}: {frame}"),
-            }
-        }
-    })
-    .await
-    .expect("timed out waiting for a draft websocket hint")
-}
-
-async fn assert_no_draft_hint(ws: &mut Ws, duration: Duration) {
-    let received = tokio::time::timeout(duration, async {
-        loop {
-            let frame = next_json_frame(ws).await;
-            if frame["type"] == "drafts_changed" {
-                return frame;
-            }
-        }
-    })
-    .await;
-    assert!(
-        received.is_err(),
-        "unexpected draft websocket hint: {received:?}"
-    );
 }
 
 async fn assert_no_text_frame(ws: &mut Ws, duration: Duration) {

@@ -38,10 +38,21 @@ import {
 import { conversationAvatar, seedKey, type AvatarIdentity } from "./avatar";
 import { ContactAvatar } from "./ContactAvatar";
 import { ComposerAttachmentTray, type Attachment, type AttachmentLayout } from "./ComposerAttachmentTray";
-import { extractComposerPaste } from "./composerPaste";
+import {
+  MAX_COMPOSER_ATTACHMENTS,
+  MAX_COMPOSER_ATTACHMENT_SIZE_LABEL,
+  extractComposerPaste,
+} from "./composerPaste";
 import type { DraftAttachmentState } from "./bridge-contracts";
 export { ComposerAttachmentTray, type Attachment, type AttachmentLayout } from "./ComposerAttachmentTray";
-export { extractComposerPaste, type ComposerPaste, type ComposerPasteRejection } from "./composerPaste";
+export {
+  MAX_COMPOSER_ATTACHMENTS,
+  MAX_COMPOSER_ATTACHMENT_BYTES,
+  MAX_COMPOSER_ATTACHMENT_SIZE_LABEL,
+  extractComposerPaste,
+  type ComposerPaste,
+  type ComposerPasteRejection,
+} from "./composerPaste";
 export type { DraftAttachmentState };
 export { BusyIndicator } from "./BusyIndicator";
 import type { ConversationFolder } from "./bridge-contracts";
@@ -726,12 +737,12 @@ function smsCounter(text: string): string | null {
   return `${segments} SMS · ${remaining} left`;
 }
 
-function formatPasteRejections(rejections: { name: string; reason: "type" | "size" | "limit" }[]): string | null {
+function formatPasteRejections(rejections: { name: string; reason: "type" | "size" | "limit" }[], maxAttachments: number): string | null {
   if (!rejections.length) return null;
   const copy = {
     type: "Use PNG, JPEG, GIF or WebP.",
-    size: "Images must be under 32 MB.",
-    limit: "Up to 10 images per message.",
+    size: `Images can be up to ${MAX_COMPOSER_ATTACHMENT_SIZE_LABEL}.`,
+    limit: `Up to ${maxAttachments} images per message.`,
   } as const;
   return rejections.map((rejection) => `Couldn't add ${rejection.name}. ${copy[rejection.reason]}`).join(" ");
 }
@@ -1358,9 +1369,10 @@ export function Composer({
   attachmentLayout = "tiles",
   attachmentHeaderDetail,
   draftKey,
+  draftIdentity,
   onPasteImages,
   onRetryAttachment,
-  maxAttachments = 10,
+  maxAttachments = MAX_COMPOSER_ATTACHMENTS,
 }: {
   draft: string;
   attachments: Attachment[];
@@ -1385,8 +1397,10 @@ export function Composer({
   platform?: "macos" | "windows" | "linux";
   attachmentLayout?: AttachmentLayout;
   attachmentHeaderDetail?: ReactNode;
-  /** Resets textarea state when rendering a different draft with the same text. */
+  /** Raw draft key used by callers that do not provide a stable logical identity. */
   draftKey?: string;
+  /** Stable logical draft identity; remains unchanged when a first save rekeys `draftKey`. */
+  draftIdentity?: string;
   onPasteImages?(files: File[]): void;
   onRetryAttachment?(id: string): void;
   maxAttachments?: number;
@@ -1394,7 +1408,8 @@ export function Composer({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pastedCaretRef = useRef<{ draft: string; position: number } | null>(null);
   const previousDraftRef = useRef(draft);
-  const previousDraftKeyRef = useRef(draftKey);
+  const logicalDraftIdentity = draftIdentity ?? draftKey;
+  const previousDraftIdentityRef = useRef(logicalDraftIdentity);
   const localDraftRef = useRef<string | null>(null);
   const compositionValueRef = useRef<string | null>(null);
   const compositionHasLocalEditRef = useRef(false);
@@ -1405,14 +1420,15 @@ export function Composer({
   const canSend = sendSupported && !readOnly && hasContent;
   const counter = !attachments.length ? smsCounter(draft) : null;
   const fallbackShown = !sendSupported && !gatewaySlot && !statusSlot;
-  if (draftKey !== previousDraftKeyRef.current) {
-    previousDraftKeyRef.current = draftKey;
+  if (logicalDraftIdentity !== previousDraftIdentityRef.current) {
+    previousDraftIdentityRef.current = logicalDraftIdentity;
     previousDraftRef.current = draft;
     localDraftRef.current = null;
     compositionValueRef.current = null;
     compositionHasLocalEditRef.current = false;
     pendingSelectionRef.current = null;
     pastedCaretRef.current = null;
+    setPasteRejection(null);
   }
   if (
     draft !== previousDraftRef.current &&
@@ -1482,7 +1498,7 @@ export function Composer({
       onDraftChange(nextDraft);
     }
     if (pasted.images.length) onPasteImages(pasted.images);
-    setPasteRejection(formatPasteRejections(pasted.rejected));
+    setPasteRejection(formatPasteRejections(pasted.rejected, maxAttachments));
   };
   return (
     <section
@@ -1494,7 +1510,7 @@ export function Composer({
         <div id="composer-banner-row" hidden={!bannerSlot}>
           {bannerSlot}
         </div>
-        <ComposerAttachmentTray attachments={attachments} layout={attachmentLayout} attachmentHeaderDetail={attachmentHeaderDetail} onRemoveAttachment={onRemoveAttachment} onRetryAttachment={onRetryAttachment} onPaste={pasteImages} onFocusTextarea={() => textareaRef.current?.focus()} />
+        <ComposerAttachmentTray key={logicalDraftIdentity} attachments={attachments} layout={attachmentLayout} attachmentHeaderDetail={attachmentHeaderDetail} onRemoveAttachment={onRemoveAttachment} onRetryAttachment={onRetryAttachment} onPaste={pasteImages} onFocusTextarea={() => textareaRef.current?.focus()} />
         <div id="composer-input-row">
         <label htmlFor="composer-textarea" className="sr-only">
           Message
@@ -1557,7 +1573,7 @@ export function Composer({
               {status}
             </p>
           )}
-          {pasteRejection && <p className="composer-paste-rejection" role="alert">{pasteRejection}</p>}
+          {pasteRejection && <p data-composer-paste-rejection className="composer-paste-rejection" role="alert">{pasteRejection}</p>}
            {fallbackShown && <span id="unavailable-hint">Sending unavailable: {unavailableReason ?? "phone is offline"}</span>}
         </div>
         <div id="composer-toolbar">

@@ -1426,6 +1426,7 @@ function draftSyncFixture(overrides: {
         const changes = args as { more: boolean; next_after: string };
         return { more: changes.more, nextAfter: changes.next_after };
       }
+      if (command === "_worker_draft_mark_push_attempt") return { attempted: true };
       if (command === "ack_outbox") pendingOutbox = [];
       if (command === "apply_pending") return { applied: 0, quarantined: 0, drained: 0 };
       return {};
@@ -1454,6 +1455,61 @@ function draftSyncFixture(overrides: {
   };
   return { calls, draftLimits, mutations, session, transport, scheduler: new BrowserScheduler(session, transport, { media: overrides.media }) };
 }
+
+const pendingDraftPush = {
+  draftId: DRAFT_ID,
+  revisionId: REVISION_ID,
+  request: { base_revision_id: null, sealed_record: "record", attachment_ids: [], authored: true },
+};
+
+const acceptedDraftPush = async (_path: string, request: { method: string }) =>
+  request.method === "GET"
+    ? { changes: [], next_after: "0", more: false }
+    : { branch_id: DRAFT_ID, expires_at: "2026-12-01T00:00:00Z", conflict: false };
+
+it("checkpoints a draft push attempt before its PUT", async () => {
+  const fixture = draftSyncFixture({ draftJson: acceptedDraftPush, pendingPushes: [pendingDraftPush] });
+
+  await fixture.scheduler.poll();
+
+  const mark = fixture.calls.indexOf("mutate:_worker_draft_mark_push_attempt");
+  const put = fixture.calls.findIndex(call => call === `http:/v1/drafts/${DRAFT_ID}/revisions/${REVISION_ID}`);
+  expect(mark).toBeGreaterThan(-1);
+  expect(mark).toBeLessThan(put);
+});
+
+it("skips a stale draft push attempt without a PUT", async () => {
+  const fixture = draftSyncFixture({ draftJson: acceptedDraftPush, pendingPushes: [pendingDraftPush] });
+  const mutate = fixture.session.mutate;
+  fixture.session.mutate = async (command, args) => {
+    if (command === "_worker_draft_mark_push_attempt") {
+      fixture.mutations.push([command, args]);
+      return { attempted: false };
+    }
+    return mutate(command, args);
+  };
+
+  await fixture.scheduler.poll();
+
+  expect(fixture.mutations).toContainEqual(["_worker_draft_mark_push_attempt", { draftId: DRAFT_ID, revisionId: REVISION_ID }]);
+  expect(fixture.calls).not.toContain(`http:/v1/drafts/${DRAFT_ID}/revisions/${REVISION_ID}`);
+});
+
+it("fails closed when the draft push checkpoint cannot commit", async () => {
+  const fixture = draftSyncFixture({ draftJson: acceptedDraftPush, pendingPushes: [pendingDraftPush] });
+  const mutate = fixture.session.mutate;
+  fixture.session.mutate = async (command, args) => {
+    if (command === "_worker_draft_mark_push_attempt") {
+      fixture.mutations.push([command, args]);
+      throw new Error("checkpoint failed");
+    }
+    return mutate(command, args);
+  };
+
+  expect(await fixture.scheduler.poll()).toEqual({ connection: "error" });
+  expect(fixture.mutations).toContainEqual(["_worker_draft_mark_push_attempt", { draftId: DRAFT_ID, revisionId: REVISION_ID }]);
+  expect(fixture.calls).not.toContain(`http:/v1/drafts/${DRAFT_ID}/revisions/${REVISION_ID}`);
+});
 
 it("bootstraps every draft page before finishing and records a discard with its bound transport", async () => {
   const fixture = draftSyncFixture({
@@ -1487,7 +1543,7 @@ it("pages two large valid draft records through the bounded transport", async ()
 
   await expect(fixture.scheduler.poll()).resolves.toEqual({ connection: "connected" });
 
-  expect(fixture.mutations.filter(([command]) => command === "_worker_draft_apply_changes").map(([, args]) => args.next_after)).toEqual(["2", "2"]);
+  expect(fixture.mutations.filter(([command]) => command === "_worker_draft_apply_changes").map(([, args]) => args.next_after)).toEqual(["2"]);
   expect(fixture.calls.filter(call => call.startsWith("http:/v1/drafts?"))).toEqual([
     "http:/v1/drafts?after=0&limit=2",
     "http:/v1/drafts?after=2&limit=2",
@@ -1533,8 +1589,9 @@ it("recognizes only documented draft-route fallbacks after authenticated evidenc
     const fixture = draftSyncFixture({ draftJson: async () => { throw error; } });
     if (probeFails) {
       const json = fixture.transport.json;
+      let vaultRequests = 0;
       fixture.transport.json = async function (this: { request: string }, path, request) {
-        if (path === "/v1/gateways") throw new TransportError("offline");
+        if (path === "/v1/vault" && ++vaultRequests > 1) throw new TransportError("offline");
         return json.call(this, path, request);
       };
     }
@@ -1561,6 +1618,57 @@ it("recognizes only documented draft-route fallbacks after authenticated evidenc
     await expect(fixture.scheduler.poll()).resolves.toEqual({ connection: "connected" });
     expect(fixture.mutations).not.toContainEqual(["_worker_draft_sync_supported", { supported: false }]);
   }
+});
+
+it("skips unchanged empty draft pages after the initial support checkpoint", async () => {
+  const fixture = draftSyncFixture({
+    draftJson: async () => ({ changes: [], next_after: "0", more: false }),
+  });
+
+  await fixture.scheduler.poll();
+  fixture.mutations.length = 0;
+  fixture.calls.length = 0;
+  await fixture.scheduler.poll();
+
+  expect(fixture.mutations).not.toContainEqual(["_worker_draft_sync_supported", { supported: true }]);
+  expect(fixture.mutations.some(([command]) => command === "_worker_draft_apply_changes")).toBe(false);
+  expect(fixture.calls.some(call => call.startsWith("hydrate:"))).toBe(false);
+});
+
+it("reprobes drafts after an unsupported route instead of permanently latching local-only mode", async () => {
+  let calls = 0;
+  const fixture = draftSyncFixture({
+    draftJson: async () => {
+      calls += 1;
+      if (calls === 1) throw new TransportError("status", 404, "not_found", "json");
+      return { changes: [], next_after: "0", more: false };
+    },
+  });
+
+  await fixture.scheduler.poll();
+  await fixture.scheduler.poll();
+
+  expect(calls).toBe(2);
+  expect(fixture.scheduler.isDraftSyncEnabled).toBe(true);
+  expect(fixture.mutations).toContainEqual(["_worker_draft_sync_supported", { supported: true }]);
+});
+
+it("records draft download failures durably while leaving ordinary media retries unchanged", async () => {
+  const mutations: unknown[] = [];
+  const session = {
+    hydrate: async () => undefined,
+    query: async (command: string) => command === "pending_uploads" ? [] : command === "pending_downloads"
+      ? [{ id: "draft", draftId: DRAFT_ID, ciphertextBytes: 1, remoteObjectId: "remote" }, { id: "ordinary", ciphertextBytes: 1, remoteObjectId: "ordinary" }]
+      : [],
+    mutate: async (command: string, args: unknown) => { mutations.push([command, args]); return {}; },
+  };
+
+  await transferMedia(session, {
+    json: async () => ({}), upload: async () => undefined, download: async () => { throw new TransportError("status", 503); },
+  }, { readCiphertext: async () => new Uint8Array(), stageDownload: async () => "unused" }, new AbortController().signal);
+
+  expect(mutations).toContainEqual(["_worker_draft_attachment_transfer_failure", { attachmentId: "draft", direction: "download" }]);
+  expect(mutations).not.toContainEqual(["_worker_draft_attachment_transfer_failure", { attachmentId: "ordinary", direction: "download" }]);
 });
 
 it("does not finish a draft bootstrap when cancellation interrupts its next page", async () => {

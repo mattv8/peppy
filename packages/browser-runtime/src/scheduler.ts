@@ -67,7 +67,7 @@ export class BrowserScheduler {
   /** True when this round stopped outbox delivery on a coded server refusal; reset at each round start. */
   private outboxRejected = false;
   private retentionNegotiationResolved = false;
-  private draftSyncEnabled = true;
+  private draftSyncEnabled?: boolean;
 
   public constructor(
     private readonly session: SchedulerSession,
@@ -85,7 +85,7 @@ export class BrowserScheduler {
   }
 
   public get producersReady(): boolean { return this.retentionNegotiationResolved; }
-  public get isDraftSyncEnabled(): boolean { return this.draftSyncEnabled; }
+  public get isDraftSyncEnabled(): boolean { return this.draftSyncEnabled !== false; }
 
   public async unlockNewEpoch(passphrase: string): Promise<void> {
     if (!this.protocol || !this.options.rotateEpoch) throw new TransportError("invalid");
@@ -144,7 +144,7 @@ export class BrowserScheduler {
       }
       if (this.transport.discard) {
         try {
-          await this.syncDrafts(signal);
+          await this.syncDrafts(signal, negotiationResolved && uploadsAllowed);
         } catch (error) {
           throwIfFatalDraftError(error, signal);
         }
@@ -175,8 +175,8 @@ export class BrowserScheduler {
     return this.protocol;
   }
 
-  private async syncDrafts(signal: AbortSignal): Promise<void> {
-    if (!this.transport.discard || !this.draftSyncEnabled) return;
+  private async syncDrafts(signal: AbortSignal, allowDraftUploads: boolean): Promise<void> {
+    if (!this.transport.discard) return;
     const drafts = new DraftTransport({
       json: (path: string, request: { method: "GET" | "POST" | "PUT"; body?: unknown; signal?: AbortSignal; limit?: number }) => this.transport.json(path, request),
       discard: (path, request) => this.transport.discard!(path, request),
@@ -188,8 +188,12 @@ export class BrowserScheduler {
     try {
       for (;;) {
         const changes = await drafts.draftChanges(after, signal);
-        await this.session.mutate("_worker_draft_sync_supported", { supported: true });
+        await this.setDraftSyncSupport(true);
         collectDraftIds(changes, seenDraftIds);
+        if (changes.changes.length === 0 && changes.next_after === after) {
+          if (!changes.more) break;
+          throw new TransportError("invalid");
+        }
         const applied = object(await this.session.mutate("_worker_draft_apply_changes", changes));
         await this.session.hydrateDraftMedia?.();
         after = stringField(applied, "nextAfter");
@@ -197,24 +201,34 @@ export class BrowserScheduler {
       }
     } catch (error) {
       if (await isUnsupportedDraftRoute(error, drafts, signal)) {
-        await this.session.mutate("_worker_draft_sync_supported", { supported: false });
-        this.draftSyncEnabled = false;
+        await this.setDraftSyncSupport(false);
         return;
       }
       throw error;
     }
     if (bootstrap) {
-      await this.session.hydrateDraftMedia?.();
       await this.session.mutate("_worker_draft_finish_bootstrap", { draftIds: [...seenDraftIds] });
     }
-    const uploads = await transferDraftUploads(this.session, this.transport, this.options.media, signal);
-    this.recordMediaTransfer(uploads);
+    if (allowDraftUploads) {
+      const uploads = await transferDraftUploads(this.session, this.transport, this.options.media, signal, this.deferredMediaIds);
+      this.recordMediaTransfer(uploads);
+    }
     const pendingPushes = object(await this.session.query("_worker_draft_pending_pushes", {})).pushes;
     if (!Array.isArray(pendingPushes)) throw new TransportError("invalid");
     for (const push of pendingPushes) {
       const input = draftPush(push);
-      const outcome = await drafts.putDraft(input, signal);
-      await this.session.mutate("_worker_draft_record_push", { draftId: input.draftId, revisionId: input.revisionId, outcome });
+      const checkpoint = object(await this.session.mutate("_worker_draft_mark_push_attempt", {
+        draftId: input.draftId,
+        revisionId: input.revisionId,
+      }));
+      if (checkpoint.attempted === false) continue;
+      if (checkpoint.attempted !== true) throw new TransportError("invalid");
+      try {
+        const outcome = await drafts.putDraft(input, signal);
+        await this.session.mutate("_worker_draft_record_push", { draftId: input.draftId, revisionId: input.revisionId, outcome });
+      } catch (error) {
+        throwIfFatalDraftError(error, signal);
+      }
     }
     const pendingDiscards = object(await this.session.query("_worker_draft_pending_discards", {})).draftIds;
     if (!Array.isArray(pendingDiscards)) throw new TransportError("invalid");
@@ -223,6 +237,12 @@ export class BrowserScheduler {
       await drafts.discardDraft(draftId, signal);
       await this.session.mutate("_worker_draft_record_discard", { draftId });
     }
+  }
+
+  private async setDraftSyncSupport(supported: boolean): Promise<void> {
+    if (this.draftSyncEnabled === supported) return;
+    await this.session.mutate("_worker_draft_sync_supported", { supported });
+    this.draftSyncEnabled = supported;
   }
 
   private async hasPendingProjectionWork(): Promise<boolean> {
@@ -490,8 +510,8 @@ function isCancelled(error: unknown): boolean {
 }
 
 function throwIfFatalDraftError(error: unknown, signal: AbortSignal): void {
-  if (signal.aborted || isCancelled(error) || !(error instanceof TransportError)
-    || error.kind === "revoked" || (error.kind === "status" && error.status === 401)) throw error;
+  if (signal.aborted || isCancelled(error) || !(error instanceof CoreRejectedError) && !(error instanceof TransportError)
+    || error instanceof TransportError && (error.kind === "revoked" || (error.kind === "status" && error.status === 401))) throw error;
 }
 
 function isUnavailableStatus(status: number | undefined): boolean {

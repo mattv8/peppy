@@ -21,6 +21,9 @@ export type MmsPlan =
   | { kind: "split"; parts: number; caption: boolean; groups: string[][] }
   | { kind: "error"; parts: 0; imageId?: string };
 
+// Unicode White_Space, the set Rust str::trim strips. Unlike JS trim(), it keeps U+FEFF and includes U+0085.
+const NON_WHITE_SPACE = /[^\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/;
+
 function textBytes(text: string): number {
   return new TextEncoder().encode(text).length;
 }
@@ -54,6 +57,6 @@ export function planMms({ limitBytes, gatewayVersion, text, images }: MmsPlanInp
   if (images.length <= imagesPerMessage) return { kind: "single", parts: 1 };
 
   const groups = balancedGroups(images, Math.ceil(images.length / imagesPerMessage));
-  const caption = text.trim().length > 0;
+  const caption = NON_WHITE_SPACE.test(text);
   return { kind: "split", parts: groups.length + Number(caption), caption, groups };
 }

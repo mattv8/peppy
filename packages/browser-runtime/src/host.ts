@@ -276,13 +276,21 @@ function safeSnapshot(phase: BrowserSessionPhase): Record<string, unknown> {
 
 function errorFor(error: unknown): RpcError {
   if (typeof error === "object" && error !== null && (error as { code?: unknown }).code === "draft-reconnect") {
-    return { code: "unavailable", message: "Reconnect to send this synced draft." };
+    return { code: "unavailable", message: "Reconnect to check this draft before sending." };
   }
   if (typeof error === "object" && error !== null && (error as { code?: unknown }).code === "draft-not-synced") {
     return { code: "draft-not-synced", message: "This draft is still syncing. Wait for sync to finish, then send again.", ...errorDetails(error) };
   }
-  if (typeof error === "object" && error !== null && typeof (error as { code?: unknown }).code === "string" && ["draft_expired", "draft_already_sent", "draft_revision_not_head"].includes((error as { code: string }).code)) {
-    return { code: (error as { code: string }).code, message: "The synced draft changed on another device." };
+  if (typeof error === "object" && error !== null && typeof (error as { code?: unknown }).code === "string") {
+    const code = (error as { code: string }).code;
+    const terminalMessages: Record<string, string> = {
+      draft_already_sent: "This draft was already sent from another device.",
+      draft_discarded: "This draft was discarded on another device.",
+      draft_expired: "This draft expired on another device.",
+      draft_revision_not_head: "A newer draft version exists on another device.",
+      draft_sent: "This draft was already sent from another device.",
+    };
+    if (terminalMessages[code]) return { code, message: terminalMessages[code], ...errorDetails(error) };
   }
   if (error instanceof TransportError) {
     return { code: error.kind === "offline" ? "offline" : "unavailable", message: "Browser operation failed." };

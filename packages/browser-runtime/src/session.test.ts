@@ -699,6 +699,21 @@ describe("BrowserSession", () => {
     expect(commit).not.toHaveBeenCalled();
   });
 
+  it("hydrates each committed draft cipher only once per session generation", async () => {
+    const files = [
+      { path: "client.db", bytes: encoder.encode("encrypted database") },
+      { path: cipherPath, bytes: encoder.encode("cold cipher") },
+    ];
+    const { session, store } = await unlockedAttachmentSession("ready", files);
+    const readCipher = vi.spyOn(store, "readCipher");
+
+    await session.hydrateDraftMedia();
+    await session.hydrateDraftMedia();
+
+    expect(readCipher).toHaveBeenCalledTimes(1);
+    expect(readCipher).toHaveBeenCalledWith(cipherPath, session.generation);
+  });
+
   it("treats an evicted queued preview as transient pending without poisoning or caching it", async () => {
     const { core, session } = await unlockedAttachmentSession("ready", [
       { path: "client.db", bytes: encoder.encode("encrypted database") },

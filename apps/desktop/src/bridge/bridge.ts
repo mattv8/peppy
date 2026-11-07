@@ -77,6 +77,7 @@ import type {
   DesktopBridge as SharedDesktopBridge,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { normalizePhoneNumber } from "@peppy/desktop-ui";
+import { errorText } from "./bridgeErrors";
 
 export {
   type ConnectionState,
@@ -599,7 +600,7 @@ export const tauriBridge: DesktopBridge = {
           "peppy-attachment-type": file.mediaType,
         }));
       } catch (error) {
-        failures.push(`${file.name || "Pasted image"}: ${error instanceof Error ? error.message : "could not be added"}`);
+        failures.push(`${file.name || "Pasted image"}: ${errorText(error)}`);
       }
     }
     return { views, failures };

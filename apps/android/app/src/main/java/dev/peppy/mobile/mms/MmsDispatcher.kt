@@ -42,7 +42,7 @@ class MmsDispatcher(
     private val callbacks: MmsCallbackStore = MmsCallbackStore(context),
 ) {
     fun dispatch(limit: Int = SmsDispatcher.MAX_COMMANDS_PER_RUN): DispatchSummary = synchronized(DISPATCH_LOCK) {
-        var submitted = 0; var refused = 0; var waiting = 0; var permits = 0; var more = false
+        var submitted = 0; var refused = 0; var waiting = 0; var permits = 0; var fitPreparations = 0; var more = false
         val blockedThreads = mutableSetOf<String>()
         fun waitForEarlier(thread: String?) { waiting++; thread?.let(blockedThreads::add) }
         for (pending in client.pendingCommands()) {
@@ -63,7 +63,21 @@ class MmsDispatcher(
                 waitForEarlier(thread); continue
             }
             val output = File(directory, "${pending.commandId}.pdu")
-            val prepared = try { compose(pending.commandId, pending.message, cap, output) }
+            var fittingThisCommand = false
+            var fitPreparationBudgetExhausted = false
+            val prepared = try {
+                compose(pending.commandId, pending.message, cap, output) {
+                    if (fittingThisCommand) true
+                    else if (fitPreparations >= limit) {
+                        fitPreparationBudgetExhausted = true
+                        false
+                    } else {
+                        fittingThisCommand = true
+                        fitPreparations++
+                        true
+                    }
+                }
+            }
             catch (error: MmsPduValidationException) {
                 callbacks.deletePrepared(pending.commandId)
                 if (error.message == "output directory does not exist" || error.message == "part is not a regular file") {
@@ -73,7 +87,11 @@ class MmsDispatcher(
                 } else waitForEarlier(thread)
                 continue
             } catch (_: MmsPduException) { null } catch (_: MobileBindingsException) { null }
-            if (prepared == null) { waitForEarlier(thread); continue } // transient media/IO failure: no permit
+            if (prepared == null) {
+                more = more || fitPreparationBudgetExhausted
+                waitForEarlier(thread)
+                continue
+            } // transient media/IO failure: no permit
             val sent = try { MmsCallbackIntents.create(context, pending.commandId) } catch (_: RuntimeException) { callbacks.deletePrepared(pending.commandId); waitForEarlier(thread); continue }
             val uri = try { FileProvider.getUriForFile(context, "${context.packageName}.mms-files", output) }
             catch (_: IllegalArgumentException) { callbacks.deletePrepared(pending.commandId); waitForEarlier(thread); continue }
@@ -90,7 +108,7 @@ class MmsDispatcher(
         }
         return DispatchSummary(submitted, refused, waiting, more)
     }
-    private fun compose(commandId: String, message: uniffi.peppy_mobile_bindings.NativeMessage, cap: MmsLimits, output: File): File {
+    private fun compose(commandId: String, message: uniffi.peppy_mobile_bindings.NativeMessage, cap: MmsLimits, output: File, beforePreparation: () -> Boolean): File {
         val handles = mutableListOf<uniffi.peppy_mobile_bindings.NativePlaintextHandle>()
         try {
             message.attachmentIds.forEach { handles += client.openNativePlaintextFile(it) }
@@ -106,7 +124,7 @@ class MmsDispatcher(
                 write(parts, output)
             } catch (error: MmsPduValidationException) {
                 if (error.message != "encoded PDU exceeds maximum size") throw error
-                val fitter = MmsImageFitter(File(context.noBackupFilesDir, "mms-fit"))
+                val fitter = MmsImageFitter(File(context.noBackupFilesDir, "mms-fit"), beforePreparation = beforePreparation)
                 val fingerprint = MmsImageFitter.fingerprint(parts, cap, "${message.recipients}|${message.subject}|${message.body}")
                 when (val fitted = fitter.fit(commandId, fingerprint, cap.maximumPduBytes, parts) { candidate ->
                     val trial = File(output.parentFile, ".mms-fit-$commandId.pdu")

@@ -97,8 +97,8 @@ describe("DraftSyncStatus", () => {
     ["local save failure", draft({ state: "failed", conflicts: [conflict] }), true, "failed", "Draft not saved on this device. Keep this window open."],
     ["conflicts", draft({ state: "failed", conflicts: [conflict] }), true, "idle", "Draft versions need review"],
     ["sync failure", draft({ state: "failed", sendRequiresConnection: true }), true, "idle", "Draft sync failed."],
-    ["offline send", draft({ sendRequiresConnection: true }), true, "idle", "Reconnect to send this synced draft."],
-    ["paused sync that blocks an offline send", draft({ state: "paused", sendRequiresConnection: true }), true, "idle", "Reconnect to send this synced draft."],
+    ["offline send", draft({ sendRequiresConnection: true }), true, "idle", "Reconnect to check this draft before sending."],
+    ["paused sync that blocks an offline send", draft({ state: "paused", sendRequiresConnection: true }), true, "idle", "Reconnect to check this draft before sending."],
   ] as const)("shows %s as the primary reason", (_name, statusDraft, offline, localSaveState, message) => {
     renderStatus({ draft: statusDraft, offline, localSaveState });
 

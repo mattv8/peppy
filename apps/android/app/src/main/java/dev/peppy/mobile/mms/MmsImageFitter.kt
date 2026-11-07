@@ -3,6 +3,7 @@ package dev.peppy.mobile.mms
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
+import android.os.Build
 import androidx.exifinterface.media.ExifInterface
 import java.io.File
 import java.nio.file.Files
@@ -13,6 +14,7 @@ import java.security.MessageDigest
 /** Bounded, durable image fitting used only before a carrier send permit is acquired. */
 internal class MmsImageFitter(
     private val root: File,
+    private val beforePreparation: (() -> Boolean)? = null,
     private val encoder: ((File, Int, Int, File) -> File)? = null,
 ) {
     fun fit(
@@ -33,38 +35,53 @@ internal class MmsImageFitter(
             directory.deleteRecursively()
         }
         if (!directory.exists() && !directory.mkdirs()) return MmsFitResult.Transient
-        var encodingFailed = false
-        val candidates = parts.mapIndexed { index, part ->
-            val encoded = if (part.resizable) LADDER.mapNotNull { (edge, quality) ->
-                encode(part.file, edge, quality, File(directory, "$index-$edge-$quality.jpg"))
-                    ?.let { part.copy(file = it, mediaType = "image/jpeg", name = jpegName(part.name)) }
-                    ?: run { encodingFailed = true; null }
-            } else emptyList()
-            when {
-                !part.resizable -> listOf(part)
-                part.file.length() <= SMALL_IMAGE_BYTES -> listOf(part) + encoded
-                else -> encoded
+        val attempts = IntArray(parts.size)
+        var preparations = 0
+        val selected = parts.map { part ->
+            if (!part.resizable || part.file.length() <= SMALL_IMAGE_BYTES) part else null
+        }.toMutableList()
+        var nextPart = 0
+        while (true) {
+            val missing = selected.indexOfFirst { it == null }
+            if (missing >= 0) {
+                if (preparations >= MAX_PREPARATIONS_PER_COMMAND || beforePreparation?.invoke() == false) return transient(directory)
+                preparations++
+                when (val candidate = nextCandidate(parts[missing], missing, attempts, directory)) {
+                    is EncodeResult.Success -> selected[missing] = parts[missing].copy(file = candidate.file, mediaType = "image/jpeg", name = jpegName(parts[missing].name))
+                    EncodeResult.Invalid -> return impossible(directory)
+                    EncodeResult.Transient -> return transient(directory)
+                    EncodeResult.Retryable -> return transient(directory)
+                    EncodeResult.Exhausted -> return impossible(directory)
+                }
+                continue
             }
-        }
-        if (candidates.any { it.isEmpty() }) return MmsFitResult.Transient
-        var selected = candidates.map { it.first() }
-        when (fits(selected, maximumPduBytes, measure)) {
-            true -> return save(directory, fingerprint, selected)
-            null -> return MmsFitResult.Transient
-            false -> Unit
-        }
-        for (partIndex in selected.indices) {
-            for (candidate in candidates[partIndex].drop(1)) {
-                selected = selected.toMutableList().also { it[partIndex] = candidate }
-                when (fits(selected, maximumPduBytes, measure)) {
-                    true -> return save(directory, fingerprint, selected)
-                    null -> return MmsFitResult.Transient
-                    false -> Unit
+            when (fits(selected.filterNotNull(), maximumPduBytes, measure)) {
+                true -> return save(directory, fingerprint, selected.filterNotNull())
+                null -> return transient(directory)
+                false -> Unit
+            }
+            var advanced = false
+            for (offset in parts.indices) {
+                val index = (nextPart + offset) % parts.size
+                if (!parts[index].resizable) continue
+                if (attempts[index] >= LADDER.size) continue
+                if (preparations >= MAX_PREPARATIONS_PER_COMMAND || beforePreparation?.invoke() == false) return transient(directory)
+                preparations++
+                when (val candidate = nextCandidate(parts[index], index, attempts, directory)) {
+                    is EncodeResult.Success -> {
+                        selected[index] = parts[index].copy(file = candidate.file, mediaType = "image/jpeg", name = jpegName(parts[index].name))
+                        nextPart = index + 1
+                        advanced = true
+                        break
+                    }
+                    EncodeResult.Invalid -> return impossible(directory)
+                    EncodeResult.Transient -> return transient(directory)
+                    EncodeResult.Retryable -> return transient(directory)
+                    EncodeResult.Exhausted -> Unit
                 }
             }
+            if (!advanced) return impossible(directory)
         }
-        directory.deleteRecursively()
-        return if (encodingFailed) MmsFitResult.Transient else MmsFitResult.Impossible
     }
 
     /** null means the PDU could not be measured, so oversize is not proven. */
@@ -104,23 +121,52 @@ internal class MmsImageFitter(
         }
     }.getOrNull()
 
-    private fun encode(source: File, edge: Int, quality: Int, destination: File): File? {
-        encoder?.let { return runCatching { it(source, edge, quality, destination) }.getOrNull() }
+    private fun nextCandidate(part: MmsFitPart, index: Int, attempts: IntArray, directory: File): EncodeResult {
+        var retryableFailure = false
+        while (attempts[index] < LADDER.size) {
+            val (edge, quality) = LADDER[attempts[index]++]
+            when (val result = encode(part.file, edge, quality, File(directory, "$index-$edge-$quality.jpg"))) {
+                EncodeResult.Retryable -> retryableFailure = true
+                else -> return result
+            }
+        }
+        return if (retryableFailure) EncodeResult.Retryable else EncodeResult.Exhausted
+    }
+
+    private fun impossible(directory: File): MmsFitResult { directory.deleteRecursively(); return MmsFitResult.Impossible }
+    private fun transient(directory: File): MmsFitResult { directory.deleteRecursively(); return MmsFitResult.Transient }
+
+    private fun encode(source: File, edge: Int, quality: Int, destination: File): EncodeResult {
+        encoder?.let {
+            return try { EncodeResult.Success(it(source, edge, quality, destination)) }
+            catch (_: OutOfMemoryError) { EncodeResult.Transient }
+            catch (_: java.io.IOException) { EncodeResult.Transient }
+            catch (_: IllegalArgumentException) { EncodeResult.Invalid }
+            catch (_: RuntimeException) { EncodeResult.Retryable }
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P && source.extension.lowercase() in setOf("heic", "heif")) return EncodeResult.Invalid
         return try {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(source.path, bounds)
-            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return EncodeResult.Invalid
             val sample = sampleSize(bounds.outWidth, bounds.outHeight)
-            val bitmap = BitmapFactory.decodeFile(source.path, BitmapFactory.Options().apply { inSampleSize = sample }) ?: return null
-            val oriented = orient(bitmap, orientation(source))
-            val scale = minOf(1f, edge.toFloat() / maxOf(oriented.width, oriented.height))
-            val resized = if (scale < 1f) Bitmap.createScaledBitmap(oriented, (oriented.width * scale).toInt().coerceAtLeast(1), (oriented.height * scale).toInt().coerceAtLeast(1), true) else oriented
-            destination.outputStream().use { resized.compress(Bitmap.CompressFormat.JPEG, quality, it) }
-            if (resized !== oriented) resized.recycle()
-            if (oriented !== bitmap) oriented.recycle()
-            bitmap.recycle()
-            destination.takeIf { it.isFile && it.length() > 0 }
-        } catch (_: OutOfMemoryError) { null } catch (_: RuntimeException) { null } catch (_: java.io.IOException) { null }
+            val bitmap = BitmapFactory.decodeFile(source.path, BitmapFactory.Options().apply { inSampleSize = sample }) ?: return EncodeResult.Invalid
+            var oriented: Bitmap? = null
+            var resized: Bitmap? = null
+            try {
+                oriented = orient(bitmap, orientation(source))
+                val scale = minOf(1f, edge.toFloat() / maxOf(oriented.width, oriented.height))
+                resized = if (scale < 1f) Bitmap.createScaledBitmap(oriented, (oriented.width * scale).toInt().coerceAtLeast(1), (oriented.height * scale).toInt().coerceAtLeast(1), true) else oriented
+                destination.outputStream().use { resized.compress(Bitmap.CompressFormat.JPEG, quality, it) }
+                destination.takeIf { it.isFile && it.length() > 0 }?.let(EncodeResult::Success) ?: EncodeResult.Invalid
+            } finally {
+                if (resized != null && resized !== oriented) resized.recycle()
+                if (oriented != null && oriented !== bitmap) oriented.recycle()
+                bitmap.recycle()
+            }
+        } catch (_: OutOfMemoryError) { EncodeResult.Transient }
+        catch (_: java.io.IOException) { EncodeResult.Transient }
+        catch (_: RuntimeException) { EncodeResult.Invalid }
     }
 
     private fun orientation(file: File): Int = runCatching { ExifInterface(file.path).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL) }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
@@ -143,16 +189,40 @@ internal class MmsImageFitter(
         while ((width / sample).toLong() * (height / sample) > MAX_DECODE_PIXELS) sample *= 2
         return sample
     }
-    private fun jpegName(name: String?) = name?.substringBeforeLast('.', name) + ".jpg"
+    private fun jpegName(name: String?): String {
+        val base = name?.substringBeforeLast('.', name)?.ifEmpty { "image" } ?: "image"
+        val bounded = StringBuilder()
+        var offset = 0
+        while (offset < base.length) {
+            val codePoint = base.codePointAt(offset)
+            val character = String(Character.toChars(codePoint))
+            if (bounded.toString().toByteArray(Charsets.UTF_8).size + character.toByteArray(Charsets.UTF_8).size > MAX_JPEG_BASENAME_BYTES) break
+            bounded.append(character)
+            offset += Character.charCount(codePoint)
+        }
+        return "${bounded.ifEmpty { "image" }}.jpg"
+    }
 
     companion object {
         private const val SMALL_IMAGE_BYTES = 90L * 1024
         private const val MAX_DECODE_PIXELS = 4_000_000L
+        private const val MAX_JPEG_BASENAME_BYTES = 251
+        private const val MAX_MMS_ATTACHMENTS = 10
+        private const val MAX_LADDER_STEPS = 6
+        const val MAX_PREPARATIONS_PER_COMMAND = MAX_MMS_ATTACHMENTS * MAX_LADDER_STEPS
         private val LADDER = listOf(1600 to 82, 1280 to 75, 1024 to 68, 800 to 60, 640 to 50, 480 to 40)
         fun fingerprint(parts: List<MmsFitPart>, cap: MmsLimits, messageKey: String): String = MessageDigest.getInstance("SHA-256").digest(
             buildString { append(cap.maximumPduBytes).append('|').append(messageKey); parts.forEach { append('|').append(it.attachmentId).append(':').append(it.file.length()).append(':').append(it.mediaType) } }.toByteArray(),
         ).joinToString("") { "%02x".format(it) }
     }
+}
+
+private sealed interface EncodeResult {
+    data class Success(val file: File) : EncodeResult
+    data object Invalid : EncodeResult
+    data object Transient : EncodeResult
+    data object Retryable : EncodeResult
+    data object Exhausted : EncodeResult
 }
 
 internal data class MmsFitPart(val file: File, val mediaType: String, val name: String?, val attachmentId: String? = null) {

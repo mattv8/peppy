@@ -1,7 +1,7 @@
 //! Peppy desktop native host. The webview only receives sanitized view models (`dto`) and
 //! state-change hints; credentials, keys, passphrases, tokens and file paths stay in Rust.
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::PathBuf,
@@ -2358,19 +2358,66 @@ async fn resolve_draft_conflict(
     let draft_id = DraftId::from_str(&draft_id)
         .map_err(|_| BridgeError::new("invalid-draft", "The draft ID is invalid."))?;
     require_draft_notice_window_scope(&state, window.label(), &session, draft_id).await?;
-    blocking(move || {
-        let branch_id = keep_branch_id
-            .as_deref()
-            .map(uuid::Uuid::parse_str)
-            .transpose()
-            .map_err(|_| BridgeError::new("invalid-draft", "The conflict branch ID is invalid."))?;
-        let draft = session
-            .client
-            .resolve_draft_conflict(draft_id, branch_id)
-            .map_err(core_error)?;
-        peppy_desktop_api::draft_view_with_sync(&session.client, &draft).map_err(core_error)
+    let resolving_session = session.clone();
+    let draft = blocking(move || {
+        resolve_draft_conflict_view(&resolving_session, draft_id, keep_branch_id.as_deref())
     })
-    .await
+    .await?;
+    Ok(draft)
+}
+
+fn resolve_draft_conflict_view(
+    session: &Session,
+    draft_id: DraftId,
+    keep_branch_id: Option<&str>,
+) -> BridgeResult<DraftView> {
+    let branch_id = keep_branch_id
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|_| BridgeError::new("invalid-draft", "The conflict branch ID is invalid."))?;
+    let conflict_attachment_ids = session
+        .client
+        .draft_sync_status(draft_id)
+        .map_err(core_error)?
+        .conflicts
+        .into_iter()
+        .flat_map(|conflict| conflict.attachment_ids)
+        .collect();
+    let draft = session
+        .client
+        .resolve_draft_conflict(draft_id, branch_id)
+        .map_err(core_error)?;
+    session.notify();
+    draft_view_with_conflict_attachments(session, &draft, conflict_attachment_ids)
+}
+
+fn draft_view_with_conflict_attachments(
+    session: &Session,
+    draft: &peppy_client_core::ComposeDraft,
+    conflict_attachment_ids: Vec<AttachmentId>,
+) -> BridgeResult<DraftView> {
+    let mut view = session.draft_view(draft)?;
+    let attachments = view.attachments.get_or_insert_default();
+    let mut included: HashSet<_> = attachments
+        .iter()
+        .map(|attachment| attachment.id.clone())
+        .collect();
+    let errors = session
+        .transfer_errors
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    for id in conflict_attachment_ids {
+        if !included.insert(id.to_string()) {
+            continue;
+        }
+        let attachment = match session.client.attachment_info(id) {
+            Ok(info) => dto::attachment_view(&info, errors.get(&id).cloned(), None),
+            Err(_) => session::missing_draft_attachment_view(id, None),
+        };
+        attachments.push(attachment);
+    }
+    Ok(view)
 }
 
 #[tauri::command]
@@ -2547,7 +2594,7 @@ async fn send_draft_for_window(
             Err(crate::net::NetError::Offline) => Ok((
                 Err(BridgeError::new(
                     "draft-sync-offline",
-                    "Reconnect to send this synced draft.",
+                    "Reconnect to check this draft before sending.",
                 )),
                 None,
             )),
@@ -2603,29 +2650,38 @@ fn permanent_draft_send_rejection(error: &crate::net::NetError) -> Option<Bridge
         crate::net::NetError::Status {
             status: 409,
             code: Some(code),
-        } if matches!(
-            code.as_str(),
-            "draft_already_sent" | "draft_revision_not_head"
-        ) =>
-        {
-            Some(BridgeError::new(
-                "draft-already-sent",
-                "This synced draft was already sent.",
-            ))
-        }
+        } if code == "draft_already_sent" => Some(BridgeError::new(
+            "draft-already-sent",
+            "This synced draft was already sent.",
+        )),
+        crate::net::NetError::Status {
+            status: 409,
+            code: Some(code),
+        } if code == "draft_revision_not_head" => Some(BridgeError::new(
+            "draft-revision-not-head",
+            "This draft changed before it could be sent. Review the latest version.",
+        )),
         crate::net::NetError::Status {
             status: 410,
             code: Some(code),
-        } if matches!(
-            code.as_str(),
-            "draft_sent" | "draft_discarded" | "draft_expired"
-        ) =>
-        {
-            Some(BridgeError::new(
-                "draft-expired",
-                "This synced draft expired before it could be sent.",
-            ))
-        }
+        } if code == "draft_sent" => Some(BridgeError::new(
+            "draft-sent",
+            "This synced draft was already sent.",
+        )),
+        crate::net::NetError::Status {
+            status: 410,
+            code: Some(code),
+        } if code == "draft_discarded" => Some(BridgeError::new(
+            "draft-discarded",
+            "This synced draft was discarded.",
+        )),
+        crate::net::NetError::Status {
+            status: 410,
+            code: Some(code),
+        } if code == "draft_expired" => Some(BridgeError::new(
+            "draft-expired",
+            "This synced draft expired before it could be sent.",
+        )),
         _ => None,
     }
 }
@@ -2638,9 +2694,9 @@ mod draft_send_rejection_tests {
     fn only_documented_terminal_responses_abort_a_send_intent() {
         for (status, code, expected) in [
             (409, "draft_already_sent", "draft-already-sent"),
-            (409, "draft_revision_not_head", "draft-already-sent"),
-            (410, "draft_sent", "draft-expired"),
-            (410, "draft_discarded", "draft-expired"),
+            (409, "draft_revision_not_head", "draft-revision-not-head"),
+            (410, "draft_sent", "draft-sent"),
+            (410, "draft_discarded", "draft-discarded"),
             (410, "draft_expired", "draft-expired"),
         ] {
             assert_eq!(
@@ -3065,6 +3121,20 @@ mod pasted_attachment_tests {
             pasted_attachment_type(None).unwrap_err().code,
             "invalid-attachment"
         );
+    }
+
+    #[test]
+    fn pasted_attachment_raw_bytes_are_only_admitted_after_type_validation() {
+        let png = crate::media::tests::sample_png(1, 1);
+        let raw = tauri::ipc::InvokeBody::Raw(png.clone());
+        let media_type = tauri::http::HeaderValue::from_static("image/png");
+
+        let bytes = pasted_attachment_bytes(&raw).unwrap();
+        pasted_attachment_type(Some(&media_type)).unwrap();
+        validate_pasted_attachment_size(bytes.len()).unwrap();
+        validate_pasted_attachment_media_type(bytes, "image/png").unwrap();
+
+        assert_eq!(bytes, png);
     }
 
     #[test]

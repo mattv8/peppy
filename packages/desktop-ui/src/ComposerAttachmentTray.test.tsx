@@ -80,6 +80,16 @@ describe("ComposerAttachmentTray", () => {
     expect(liveRegion).toHaveTextContent("one.png: Uploaded, two.png removed");
   });
 
+  it("announces a newly failed attachment once", () => {
+    const { container, rerender } = render(<ComposerAttachmentTray attachments={[attachments[0]]} onFocusTextarea={() => {}} />);
+
+    rerender(<ComposerAttachmentTray attachments={[attachments[0], { id: "failed", name: "failed.png", state: "failed" }]} onFocusTextarea={() => {}} />);
+
+    expect(container.querySelectorAll("[aria-live=polite]")).toHaveLength(1);
+    expect(container.querySelector("[aria-live=polite]")).toHaveTextContent("failed.png: Upload failed");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("replaces failed previews with a placeholder icon", () => {
     render(<ComposerAttachmentTray attachments={[{ ...attachments[0], previewUrl: "broken-image" }]} onFocusTextarea={() => {}} />);
     fireEvent.error(document.querySelector(".attachment-preview img")!);
@@ -133,7 +143,18 @@ describe("Composer paste", () => {
     render(<Composer {...baseProps} attachments={attachments} maxAttachments={3} onPasteImages={onPasteImages} />);
     fireEvent.paste(screen.getByRole("list", { name: "Image list" }), { clipboardData: pasteData([new File(["x"], "image.png", { type: "image/png" }), new File(["x"], "second.png", { type: "image/png" })]) });
     expect(onPasteImages).toHaveBeenCalledWith([expect.any(File)]);
-    expect(screen.getByText("Couldn't add second.png. Up to 10 images per message.")).toHaveAttribute("role", "alert");
+    expect(screen.getByText("Couldn't add second.png. Up to 3 images per message.")).toHaveAttribute("role", "alert");
+  });
+
+  it("clears a paste rejection and tray history when changing drafts", () => {
+    const { rerender } = render(<Composer {...baseProps} draftKey="draft-one" attachments={[attachments[0]]} onPasteImages={() => {}} />);
+    fireEvent.paste(screen.getByRole("textbox"), { clipboardData: pasteData([new File(["x"], "image.bmp", { type: "image/bmp" })]) });
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+
+    rerender(<Composer {...baseProps} draftKey="draft-two" attachments={[attachments[1]]} onPasteImages={() => {}} />);
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(document.querySelector("[aria-live=polite]")).toHaveTextContent("");
   });
 
   it("does not send when Enter activates attachment controls", () => {

@@ -26,18 +26,18 @@ export function DraftVersionSummary({
 
   return <article id={id} className="draft-review-version" data-draft-review-version>
     <div className="draft-review-version-heading">{heading}</div>
-    <dl className="draft-review-summary">
+    <dl className="draft-review-summary" data-draft-review-summary>
       <div>
         <dt>Caption</dt>
         <dd className="draft-review-caption">{text || "No caption"}</dd>
       </div>
       <div>
         <dt>Images</dt>
-        <dd>{attachmentIds.length > 0 ? <ul>{attachmentIds.map((attachmentId) => <li key={attachmentId}>{attachments[attachmentId]?.name ?? "Image details loading"}</li>)}</ul> : "No images"}</dd>
+        <dd>{attachmentIds.length > 0 ? <ul data-draft-review-images>{attachmentIds.map((attachmentId) => <li key={attachmentId}>{attachments[attachmentId]?.name ?? "Image details loading"}</li>)}</ul> : "No images"}</dd>
       </div>
       <div>
         <dt>Recipients</dt>
-        <dd>{recipientIds.length > 0 ? <ul>{recipientIds.map((recipientId) => <li key={recipientId}>{formatPhoneNumber(recipientId)}</li>)}</ul> : "No recipients"}</dd>
+        <dd>{recipientIds.length > 0 ? <ul data-draft-review-recipients>{recipientIds.map((recipientId) => <li key={recipientId}>{formatPhoneNumber(recipientId)}</li>)}</ul> : "No recipients"}</dd>
       </div>
       <div>
         <dt>Sending phone and SIM</dt>

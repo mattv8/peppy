@@ -1,6 +1,6 @@
 import { type CheckpointInput, CheckpointError, IndexedDbCheckpointStore, SerializedRuntime } from "./checkpoint.js";
 import { BrowserCoreError, CoreRejectedError, type CoreResult } from "./core.js";
-import { captureFilesystemCheckpoint, hydrateCipher, restoreFilesystemCheckpoint, type EmscriptenFilesystem } from "./filesystem.js";
+import { captureFilesystemCheckpoint, hasHydratedCipher, hydrateCipher, restoreFilesystemCheckpoint, type EmscriptenFilesystem } from "./filesystem.js";
 
 const ROOT = "/peppy";
 const MAX_PLAINTEXT_MEDIA_BYTES = 32 * 1024 * 1024;
@@ -589,7 +589,7 @@ export class BrowserSession {
     const attachmentIds = draftAttachmentIds(result);
     const committed = new Set(this.files);
     for (const id of attachmentIds) {
-      if (committed.has(`client.db.media/cipher/${id}.ppss`)) {
+      if (committed.has(`client.db.media/cipher/${id}.ppss`) && !hasHydratedCipher(id, this.options.filesystem)) {
         await hydrateCipher(id, this.generationValue, this.options.checkpoint, this.options.filesystem);
       }
     }

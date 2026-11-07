@@ -11,7 +11,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { conversationAvatar, formatDateTime, isoDateTime, paletteIndex } from "@peppy/desktop-ui";
-import { App, DraftStore, searchRecipientSuggestions } from "./App";
+import { App, DraftStore, nextComposerDraftIdentity, searchRecipientSuggestions } from "./App";
 import {
   bridge,
   fixtureBridge,
@@ -41,6 +41,21 @@ const findEmptyConversationAction = () => waitFor(() => {
   const action = document.getElementById("new-conversation-cta");
   expect(action).toBeVisible();
   return action!;
+});
+
+describe("composer draft identity", () => {
+  it("preserves identity only for a confirmed DraftStore rekey", async () => {
+    const store = new DraftStore(
+      async ({ expectedRevision: _, ...input }) => ({ ...input, id: "draft-created", conversationId: "conversation-created", revision: "1" }),
+      { changed: () => {}, rekeyed: () => {} },
+    );
+    const { key, saved } = store.createNew("+15550001");
+    await saved;
+    const rekeyed = store.resolve(key);
+
+    expect(nextComposerDraftIdentity(key, key, rekeyed, candidate => store.resolve(candidate))).toBe(key);
+    expect(nextComposerDraftIdentity(rekeyed, key, "conversation-unrelated", candidate => store.resolve(candidate))).toBe("conversation-unrelated");
+  });
 });
 
 describe("group sender attribution", () => {
@@ -3673,7 +3688,7 @@ describe("draft durability", () => {
     await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("other window"));
   });
 
-  it("adopts a same-recipient remote text change with an Undo that restores the previous text", async () => {
+  it("silently adopts a clean same-recipient remote text mirror", async () => {
     vi.spyOn(document, "hasFocus").mockReturnValue(true);
     host.drafts.set("aurora", { id: "draft-aurora", conversationId: "aurora", text: "stored", recipientIds: [], attachmentIds: [], revision: "1" });
     render(<App />);
@@ -3683,14 +3698,11 @@ describe("draft durability", () => {
     await act(async () => hint?.());
 
     expect(message()).toHaveValue("from window two");
-    const updated = (await screen.findByText("Updated from another window.")).closest("[data-draft-notice]") as HTMLElement;
-    expect(updated).toHaveAttribute("data-draft-notice", "remote-update");
-    fireEvent.click(within(updated).getByRole("button", { name: "Undo" }));
-    await waitFor(() => expect(message()).toHaveValue("stored"));
-    await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("stored"));
+    expect(screen.queryByText("Updated from another window.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Undo|Copy/ })).not.toBeInTheDocument();
   });
 
-  it("silences only pure remote mirror updates while this window is unfocused", async () => {
+  it("silences pure remote mirror updates regardless of window focus", async () => {
     const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
     host.drafts.set("aurora", { id: "draft-aurora", conversationId: "aurora", text: "stored", recipientIds: [], attachmentIds: [], revision: "1" });
     render(<App />);
@@ -3703,15 +3715,14 @@ describe("draft durability", () => {
     await act(async () => hint?.());
 
     expect(message()).toHaveValue("from an unfocused mirror");
-    const retainedWhileUnfocused = await screen.findByRole("button", { name: /Undo|Copy/ });
-    expect(retainedWhileUnfocused).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Undo|Copy/ })).not.toBeInTheDocument();
 
     hasFocus.mockReturnValue(true);
     host.drafts.set("aurora", { ...host.drafts.get("aurora")!, text: "from a focused update", revision: "4" });
     await act(async () => hint?.());
 
-    const updated = (await screen.findByText("Updated from another window.")).closest("[data-draft-notice]") as HTMLElement;
-    expect(within(updated).getByRole("button", { name: "Undo" })).toBeInTheDocument();
+    expect(message()).toHaveValue("from a focused update");
+    expect(screen.queryByText("Updated from another window.")).not.toBeInTheDocument();
   });
 
   it("offers copy, not Undo, when a remote update changed the recipients of the local text", async () => {
@@ -4241,7 +4252,7 @@ describe("draft durability", () => {
     expect(message()).toHaveValue("aurora unsaved");
   });
 
-  it("P8 discards an expired Aurora notice so a later Aurora update exposes its Undo despite River activity", async () => {
+  it("keeps same-device mirror updates quiet despite background River activity", async () => {
     vi.spyOn(document, "hasFocus").mockReturnValue(true);
     render(<App />);
     await screen.findByText("Hello from Aurora");
@@ -4256,25 +4267,18 @@ describe("draft durability", () => {
     const aurora = host.drafts.get("aurora")!;
     const firstRemote = { ...aurora, text: "Aurora remote", revision: String(Number(aurora.revision) + 1) };
     host.drafts.set("aurora", firstRemote);
-    vi.useFakeTimers();
-    try {
-      await act(async () => draftHint?.(firstRemote));
-      expect(screen.getByRole("button", { name: "Undo" })).toBeInTheDocument();
-      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
-      expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+    await act(async () => draftHint?.(firstRemote));
+    expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
 
-      const river = host.drafts.get("river")!;
-      const riverRemote = { ...river, text: "River remote", revision: String(Number(river.revision) + 1) };
-      host.drafts.set("river", riverRemote);
-      await act(async () => draftHint?.(riverRemote));
-      const secondRemote = { ...firstRemote, text: "Aurora remote again", revision: String(Number(firstRemote.revision) + 1) };
-      host.drafts.set("aurora", secondRemote);
-      await act(async () => draftHint?.(secondRemote));
+    const river = host.drafts.get("river")!;
+    const riverRemote = { ...river, text: "River remote", revision: String(Number(river.revision) + 1) };
+    host.drafts.set("river", riverRemote);
+    await act(async () => draftHint?.(riverRemote));
+    const secondRemote = { ...firstRemote, text: "Aurora remote again", revision: String(Number(firstRemote.revision) + 1) };
+    host.drafts.set("aurora", secondRemote);
+    await act(async () => draftHint?.(secondRemote));
 
-      expect(screen.getByRole("button", { name: "Undo" })).toBeEnabled();
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
   }, 10_000);
 
   it("P12 restores composer focus after fallback retained-text copy", async () => {
@@ -4767,6 +4771,25 @@ describe("gateway routes", () => {
     ...overrides,
   });
 
+  it("queues Enter through an in-flight save without a save-blocker hint", async () => {
+    const saving = deferred<Draft>();
+    host.drafts.set("aurora", storedDraft({ text: "before save" }));
+    vi.mocked(bridge.save_draft).mockReturnValueOnce(saving.promise);
+    render(<App />);
+    await screen.findByDisplayValue("before save");
+
+    fireEvent.change(message(), { target: { value: "send after save" } });
+    await waitFor(() => expect(bridge.save_draft).toHaveBeenCalledOnce());
+
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    expect(document.getElementById("unavailable-hint")).toBeEmptyDOMElement();
+    fireEvent.keyDown(message(), { key: "Enter" });
+    expect(bridge.send_draft).not.toHaveBeenCalled();
+
+    saving.resolve(storedDraft({ text: "send after save", revision: "2" }));
+    await waitFor(() => expect(bridge.send_draft).toHaveBeenCalledOnce());
+  });
+
   it("requires a version-2-or-newer MMS route for text-only groups and keeps the draft", async () => {
     host.gateways = [{ ...MMS_SIM, mmsContentVersion: undefined }];
     host.drafts.set("aurora", storedDraft({ recipientIds: ["+15550001", "+15550002"] }));
@@ -4952,6 +4975,19 @@ describe("gateway routes", () => {
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeEnabled());
     expect(document.querySelector("[data-mms-size-tone]")).toHaveAttribute("data-mms-size-tone", "default");
+  });
+
+  it("keeps an oversized unresizable image as an error on a version-4 route", async () => {
+    const attachment = { id: "file-1", name: "animated.gif", mediaType: "image/gif", byteSize: 3_000_000, state: "ready" as const };
+    host.gateways = [{ ...MMS_SIM, mmsContentVersion: 4, mmsMaxBytes: 1 }];
+    host.drafts.set("aurora", storedDraft({ attachmentIds: [attachment.id], attachments: [attachment] }));
+    render(<App />);
+
+    await screen.findByText("animated.gif");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeDisabled());
+    expect(document.querySelector("[data-mms-size-tone]")).toHaveAttribute("data-mms-size-tone", "error");
+    fireEvent.click(screen.getByRole("button", { name: "About message size" }));
+    expect(screen.getByRole("dialog", { name: "Message size" })).not.toHaveTextContent("Images are resized to fit");
   });
 
   it("shows the number of split MMS messages in the attachment header", async () => {
