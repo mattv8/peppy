@@ -457,7 +457,7 @@ async function adoptLegacyPreferences(session: HostSession, legacy: LegacyNotifi
 
 function sameNotificationPreferences(left: NotificationPreferences, right: NotificationPreferences): boolean {
   return left.messageBanners === right.messageBanners && left.mirroredBanners === right.mirroredBanners
-    && left.preview === right.preview && left.muteWithHeads === right.muteWithHeads;
+    && left.preview === right.preview && left.showSource === right.showSource && left.muteWithHeads === right.muteWithHeads;
 }
 
 class MigratingCoreNotificationSettings implements NotificationSettings {
@@ -1369,7 +1369,7 @@ function notificationContext(args: Record<string, unknown>): BannerContext | und
   if (args.conversationId !== undefined && typeof args.conversationId !== "string") return undefined;
   if (args.notificationPermission !== undefined && args.notificationPermission !== "granted" && args.notificationPermission !== "denied" && args.notificationPermission !== "default" && args.notificationPermission !== "unsupported") return undefined;
   if (args.focused !== undefined && typeof args.focused !== "boolean") return undefined;
-  return { view: args.view, ...(typeof args.conversationId === "string" ? { conversationId: args.conversationId } : {}), ...(typeof args.notificationPermission === "string" ? { notificationPermission: args.notificationPermission } : {}), ...(typeof args.focused === "boolean" ? { focused: args.focused } : {}) };
+  return { view: args.view, ...(typeof args.conversationId === "string" ? { conversationId: args.conversationId } : {}), ...(typeof args.notificationPermission === "string" ? { notificationPermission: args.notificationPermission } : {}), ...(typeof args.focused === "boolean" ? { focused: args.focused } : {}), ...(typeof args.requireInteraction === "boolean" ? { requireInteraction: args.requireInteraction } : {}) };
 }
 
 

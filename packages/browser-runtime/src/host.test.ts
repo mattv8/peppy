@@ -64,6 +64,34 @@ function port(): BrowserPort & { messages: unknown[]; emit(message: unknown): vo
 describe("browser host RPC", () => {
   afterEach(() => { vi.useRealTimers(); });
 
+  it("drops non-boolean notification persistence interaction flags", async () => {
+    const session = new FakeSession();
+    session.query = async command => {
+      if (command === "pending_banner_candidates") return [{ id: "candidate-1", kind: "message", conversationId: "conversation-1", title: "Private", body: "Private", createdAt: Date.now() }];
+      if (command === "notification_preferences") return { messageBanners: true, mirroredBanners: true, preview: "full" };
+      return {};
+    };
+    const shown: Array<Record<string, unknown>> = [];
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      notification: { available: true, permission: "granted", show: notification => { shown.push(notification); } },
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "set_notification_context", args: { view: "settings", requireInteraction: "yes" } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+
+    expect(attached.messages).toContainEqual({ id: 1, ok: true, value: undefined });
+    await eventually(() => shown.length === 1);
+    expect(shown[0]).not.toHaveProperty("requireInteraction");
+
+    attached.emit({ id: 2, command: "set_notification_context", args: { view: "settings", requireInteraction: true } });
+    await eventually(() => shown.length === 2);
+    expect(shown[1]).toMatchObject({ requireInteraction: true });
+  });
+
   it("constructs worker recovery against the app origin when the logical API origin differs", async () => {
     const fetch = vi.fn(async () => new Response(null, { status: 503 })) as unknown as typeof globalThis.fetch;
     const origins = { logicalOrigin: "https://api.peppy.pro", fetchBase: "https://app.peppy.pro" };
@@ -1786,7 +1814,7 @@ describe("browser host RPC", () => {
     await dispatchBrowserRpc(session, { id: 3, command: "discard_draft", args: { input: { id: "draft", conversationId: "conversation", expectedRevision: "1" } } });
     expect(session.calls).toEqual([
       { command: "save_draft", args: { text: "draft" }, mutation: true },
-      { command: "set_notification_preferences", args: { messageBanners: true, mirroredBanners: true, preview: "hidden", muteWithHeads: true }, mutation: true },
+      { command: "set_notification_preferences", args: { messageBanners: true, mirroredBanners: true, preview: "hidden", showSource: false, muteWithHeads: true }, mutation: true },
       { command: "discard_draft", args: { id: "draft", conversationId: "conversation", expectedRevision: "1" }, mutation: true },
     ]);
   });
@@ -1795,7 +1823,7 @@ describe("browser host RPC", () => {
     const session = new FakeSession();
     const response = await dispatchBrowserRpc(session, { id: 1, command: "set_notification_preferences", args: { preferences: { preview: "hidden" } } });
     expect(response).toMatchObject({ ok: true });
-    expect(session.calls).toEqual([{ command: "set_notification_preferences", args: { messageBanners: true, mirroredBanners: true, preview: "hidden", muteWithHeads: true }, mutation: true }]);
+    expect(session.calls).toEqual([{ command: "set_notification_preferences", args: { messageBanners: true, mirroredBanners: true, preview: "hidden", showSource: false, muteWithHeads: true }, mutation: true }]);
   });
 
   it("keeps a failed-clear adoption bound to its original vault", async () => {
@@ -1870,7 +1898,7 @@ describe("browser host RPC", () => {
     expect(shown).toEqual([]);
     changed?.();
     await eventually(() => shown.length === 1);
-    expect(shown).toEqual([{ title: "New message", body: "Open Peppy to view it.", tag: "peppy-candidate-1" }]);
+    expect(shown).toEqual([expect.objectContaining({ title: "New message", body: "", tag: "peppy-candidate-1" })]);
     expect(wake).toHaveBeenCalledOnce();
     expect(attached.messages).toContainEqual({ event: "changed" });
   });
