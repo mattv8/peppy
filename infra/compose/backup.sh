@@ -20,12 +20,13 @@ python3 - "$config" > "$layout_file" <<'PY'
 import json, sys
 c = json.load(open(sys.argv[1]))
 want = {"postgres": {"/var/lib/postgresql"}, "seaweedfs": {"/data", "/root/.seaweedfs"}}
+rows = []
 for service, targets in want.items():
     mounts = {v.get("target"): v for v in c["services"][service].get("volumes", []) if v.get("type") == "volume"}
     if set(mounts) & targets != targets: raise SystemExit(f"missing expected named-volume mount for {service}")
     for target in sorted(targets):
         source = mounts[target]["source"]
-        print(f"{service}\t{target}\t{c['volumes'][source]['name']}")
+        rows.append((service, target, c["volumes"][source]["name"]))
 if "mcp" in c["services"]:
     mounts = {v.get("target"): v for v in c["services"]["mcp"].get("volumes", []) if v.get("type") == "volume"}
     targets = {"/var/lib/peppy-mcp", "/run/peppy-mcp"}
@@ -33,7 +34,11 @@ if "mcp" in c["services"]:
         raise SystemExit("missing expected named-volume mount for mcp")
     for target in sorted(targets):
         source = mounts[target]["source"]
-        print(f"mcp\t{target}\t{c['volumes'][source]['name']}")
+        rows.append(("mcp", target, c["volumes"][source]["name"]))
+physical_names = [name for _, _, name in rows]
+if len(set(physical_names)) != len(physical_names):
+    raise SystemExit("Compose storage mounts must resolve to distinct volume names")
+for row in rows: print("\t".join(row))
 PY
 layout=()
 while IFS= read -r entry; do layout[${#layout[@]}]="$entry"; done < "$layout_file"
@@ -70,10 +75,11 @@ grep -qx postgres <<< "$running" || { echo "source PostgreSQL must be running" >
 
 # Inspect all containers so clean stopped states are visible and unstable states fail closed.
 "${compose[@]}" ps --all --format json > "$state_file"
-python3 - "$state_file" <<'PYSTATE'
+python3 - "$state_file" "$mcp_enabled" <<'PYSTATE'
 import json, sys
 with open(sys.argv[1]) as source:
     text = source.read()
+mcp_enabled = sys.argv[2] == "1"
 try:
     parsed = json.loads(text)
     services = parsed if isinstance(parsed, list) else [parsed]
@@ -87,9 +93,8 @@ allowed = {
     "api": {"running", "created", "exited"},
     "seaweedfs": {"running", "created", "exited"},
 }
-if "mcp" in state_map:
+if mcp_enabled:
     allowed["mcp"] = {"running", "created", "exited"}
-if "mcp-state-init" in state_map:
     allowed["mcp-state-init"] = {"exited"}
 for service, valid_states in allowed.items():
     state = state_map.get(service, "")
@@ -132,6 +137,10 @@ PYIMG
 fi
 if test "$mcp_enabled" = 1; then
   verify_image mcp "$mcp_image" >/dev/null || exit 67
+  init_container=$("${compose[@]}" ps --all -q mcp-state-init)
+  test -n "$init_container" || { echo "MCP state initializer is missing" >&2; exit 67; }
+  init_exit=$(docker inspect --format '{{.State.ExitCode}}' "$init_container") || { echo "could not inspect MCP state initializer" >&2; exit 67; }
+  test "$init_exit" = 0 || { echo "MCP state initializer did not exit cleanly (exit code $init_exit)" >&2; exit 67; }
 fi
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -140,7 +149,7 @@ mkdir "$backup_dir"
 api_was_running=0; seaweed_was_running=0; mcp_was_running=0
 grep -qx api <<< "$running" && api_was_running=1
 grep -qx seaweedfs <<< "$running" && seaweed_was_running=1
-grep -qx mcp <<< "$running" && mcp_was_running=1
+if test "$mcp_enabled" = 1 && grep -qx mcp <<< "$running"; then mcp_was_running=1; fi
 cleanup() {
   status=$?
   rm -f "$config" "$layout_file" "$state_file"

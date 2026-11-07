@@ -201,7 +201,13 @@ Peppy MCP is an opt-in, always-on client that runs beside the API on the same se
 docker compose -f docker-compose.yml -f infra/compose/compose.community.yml -f infra/compose/compose.mcp.yml -f infra/compose/compose.community-mcp.yml up -d
 ```
 
-Set `PEPPY_SERVER_IMAGE` and `PEPPY_MCP_IMAGE` to matching approved release digests. Do not mix a pinned API image with an arbitrary checkout-built worker. Obtain the companion worker's immutable digest from the release image publication and verify its signature before enabling this overlay.
+Set `PEPPY_SERVER_IMAGE` and `PEPPY_MCP_IMAGE` to matching approved release digests. Do not mix a pinned API image with an arbitrary checkout-built worker. Obtain the companion worker's immutable digest from the release image publication and verify its signature before enabling this overlay. Use the operator-published Cosign public key, the same key the release publisher verifies with before promotion:
+
+```sh
+cosign verify --key <operator-published-cosign.pub> hub.docker.visnovsky.us/library/peppy-mcp@sha256:<digest>
+```
+
+Do not enable the overlay if verification fails or no digest-bound signature is found.
 
 For source development only, omit the two Community overlays:
 

@@ -84,14 +84,17 @@ PY
 python3 - "$config" > "$volumes_file" <<'PY'
 import json,sys
 c=json.load(open(sys.argv[1]))
+names=[]
 for service, target in (("postgres","/var/lib/postgresql"),("seaweedfs","/data"),("seaweedfs","/root/.seaweedfs")):
   m=next((v for v in c["services"][service]["volumes"] if v.get("target")==target and v.get("type")=="volume"),None)
   if not m: raise SystemExit("target storage layout mismatch")
-  print(c["volumes"][m["source"]]["name"])
+  names.append(c["volumes"][m["source"]]["name"])
 if "mcp" in c["services"]:
    mounts={v.get("target"): v for v in c["services"]["mcp"].get("volumes", []) if v.get("type")=="volume"}
    for target in ("/var/lib/peppy-mcp", "/run/peppy-mcp"):
-      print(c["volumes"][mounts[target]["source"]]["name"])
+      names.append(c["volumes"][mounts[target]["source"]]["name"])
+if len(set(names)) != len(names): raise SystemExit("target storage mounts must resolve to distinct volume names")
+for name in names: print(name)
 PY
 volumes=()
 while IFS= read -r volume; do volumes[${#volumes[@]}]="$volume"; done < "$volumes_file"

@@ -7,6 +7,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Callable
 from hashlib import sha256
 
 
@@ -19,6 +20,12 @@ SEAWEED_ID = "sha256:" + "b" * 64
 API_ID = "sha256:" + "c" * 64
 STALE_API_ID = "sha256:" + "d" * 64
 
+BASELINE_ARTIFACTS = ("postgres.dump", "seaweed-data.tar.gz", "seaweed-home.tar.gz")
+MCP_ARTIFACTS = (*BASELINE_ARTIFACTS, "mcp-state.tar.gz")
+MCP_CONFIGURED = {"postgres": "postgres:fixture", "seaweedfs": "seaweed:fixture", "mcp": "mcp:fixture"}
+MCP_RUNNING = {"postgres": POSTGRES_ID, "seaweedfs": SEAWEED_ID, "mcp": API_ID}
+MCP_RESTORE_EXISTING_VOLUME = 73
+
 
 FAKE_DOCKER = r'''#!/usr/bin/env python3
 import json, os, sys
@@ -30,30 +37,27 @@ if args[0] == "compose":
     if "config" in args:
         print(os.environ["COMPOSE_CONFIG"])
     elif "ps" in args and "--status" in args:
-        print("postgres" + ("\nmcp" if os.environ.get("MCP_OVERLAY") == "1" else ""))
+        print(os.environ["PS_RUNNING"])
     elif "ps" in args and "--format" in args:
-        services = [
-            {"Service": "postgres", "State": "running"},
-            {"Service": "api", "State": "exited"},
-            {"Service": "seaweedfs", "State": "exited"},
-        ]
-        if os.environ.get("MCP_OVERLAY") == "1":
-            services.extend([
-                {"Service": "mcp", "State": "running"},
-                {"Service": "mcp-state-init", "State": "exited"},
-            ])
-        print(json.dumps(services))
-    elif "ps" in args:
-        print("container-" + args[-1])
+        print(os.environ["PS_ALL"])
+    elif "ps" in args and "-q" in args:
+        listed = {s["Service"] for s in json.loads(os.environ["PS_ALL"])}
+        if args[-1] in listed:
+            print("container-" + args[-1])
     elif "exec" in args:
         sys.stdout.buffer.write(b"postgres dump")
     sys.exit(0)
 if args[:2] == ["volume", "inspect"]:
-    if os.environ.get("VOLUME_INSPECT_MODE") == "absent":
-        sys.exit(1)
-    sys.exit(0)
+    name = args[-1]
+    explicit = json.loads(os.environ.get("EXISTING_VOLUMES", "{}"))
+    if name in explicit:
+        sys.exit(0 if explicit[name] else 1)
+    sys.exit(1 if os.environ.get("VOLUME_INSPECT_MODE") == "absent" else 0)
 if args[0] == "inspect":
     service = args[-1].removeprefix("container-")
+    if "{{.State.ExitCode}}" in args:
+        print(json.loads(os.environ["EXIT_CODES"])[service])
+        sys.exit(0)
     print(json.loads(os.environ["RUNNING_IDS"])[service])
     sys.exit(0)
 if args[:2] == ["image", "inspect"]:
@@ -94,20 +98,80 @@ def compose_config(api_image: str | None, seaweed_image: str, mcp_overlay: bool 
     return json.dumps(config)
 
 
+def ps_state(mcp_states: dict[str, str]) -> tuple[str, str]:
+    services = [
+        {"Service": "postgres", "State": "running"},
+        {"Service": "api", "State": "exited"},
+        {"Service": "seaweedfs", "State": "exited"},
+        *({"Service": name, "State": state} for name, state in mcp_states.items()),
+    ]
+    running = "\n".join(service["Service"] for service in services if service["State"] == "running")
+    return running, json.dumps(services)
+
+
+def share_volume_name(key: str, name: str) -> Callable[[dict], None]:
+    def mutate(config: dict) -> None:
+        config["volumes"][key]["name"] = name
+    return mutate
+
+
+def map_state_to_control(config: dict) -> None:
+    config["services"]["mcp"]["volumes"][0]["source"] = "mcp-control"
+
+
+ALIAS_MUTATIONS = {
+    "control shares state physical name": share_volume_name("mcp-control", "peppy_mcp-state"),
+    "state shares postgres physical name": share_volume_name("mcp-state", "peppy_postgres"),
+    "control shares seaweed data physical name": share_volume_name("mcp-control", "peppy_seaweed-data"),
+    "state mount resolves to control volume": map_state_to_control,
+}
+
+
+def write_restore_archive(root: pathlib.Path, artifacts: tuple[str, ...], configured: dict, running: dict) -> pathlib.Path:
+    archive = root / "archive"
+    archive.mkdir()
+    manifest = {
+        "format_version": 2,
+        "source_project": "source",
+        "images": {"configured": configured, "running_ids": running},
+        "artifacts": list(artifacts),
+    }
+    (archive / "manifest.json").write_text(json.dumps(manifest))
+    for name in artifacts:
+        (archive / name).write_bytes(b"fixture")
+    entries = [f"{sha256((archive / name).read_bytes()).hexdigest()}  {name}" for name in ("manifest.json", *artifacts)]
+    (archive / "manifest.sha256").write_text("\n".join(entries) + "\n")
+    return archive
+
+
 class ComposeRecoveryScriptTests(unittest.TestCase):
-    def backup_fixture(self, api_image: str | None, seaweed_image: str, api_id: str = API_ID, mcp_overlay: bool = False):
+    def fake_docker_root(self) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = pathlib.Path(directory.name)
         (root / ".env").write_text("fixture=true\n")
-        destination = root / "backups"
-        destination.mkdir()
         tools = root / "tools"
         tools.mkdir()
         docker = tools / "docker"
         docker.write_text(FAKE_DOCKER)
         docker.chmod(0o755)
-        log = root / "docker.log"
+        return root, tools, root / "docker.log"
+
+    def backup_fixture(
+        self,
+        api_image: str | None,
+        seaweed_image: str,
+        api_id: str = API_ID,
+        mcp_overlay: bool = False,
+        mcp_states: dict[str, str] | None = None,
+        exit_codes: dict[str, int] | None = None,
+    ):
+        root, tools, log = self.fake_docker_root()
+        destination = root / "backups"
+        destination.mkdir()
+        if mcp_states is None:
+            mcp_states = {"mcp": "running", "mcp-state-init": "exited"} if mcp_overlay else {}
+        running, ps_all = ps_state(mcp_states)
         images = {"postgres:fixture": POSTGRES_ID, seaweed_image: SEAWEED_ID, api_image or "peppy-api": API_ID, "mcp:fixture": API_ID}
         environment = os.environ | {
             "PATH": f"{tools}:{os.environ['PATH']}",
@@ -115,12 +179,50 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
             "COMPOSE_CONFIG": compose_config(api_image, seaweed_image, mcp_overlay),
             "RUNNING_IDS": json.dumps({"postgres": POSTGRES_ID, "seaweedfs": SEAWEED_ID, "api": api_id, "mcp": API_ID}),
             "IMAGE_IDS": json.dumps(images),
-            "MCP_OVERLAY": "1" if mcp_overlay else "0",
+            "PS_RUNNING": running,
+            "PS_ALL": ps_all,
+            "EXIT_CODES": json.dumps(exit_codes or {"mcp-state-init": 0}),
         }
         return root, destination, log, environment
 
+    def restore_fixture(
+        self,
+        artifacts: tuple[str, ...],
+        configured: dict,
+        running: dict,
+        config_json: str,
+        image_ids: dict,
+        existing_volumes: dict[str, bool] | None = None,
+    ):
+        root, tools, log = self.fake_docker_root()
+        archive = write_restore_archive(root, artifacts, configured, running)
+        environment = os.environ | {
+            "PATH": f"{tools}:{os.environ['PATH']}",
+            "DOCKER_LOG": str(log),
+            "COMPOSE_CONFIG": config_json,
+            "RUNNING_IDS": "{}",
+            "IMAGE_IDS": json.dumps(image_ids),
+            "VOLUME_INSPECT_MODE": "absent",
+            "EXISTING_VOLUMES": json.dumps(existing_volumes or {}),
+            "PS_RUNNING": "",
+            "PS_ALL": "[]",
+            "EXIT_CODES": "{}",
+        }
+        return root, archive, log, environment
+
     def run_backup(self, root, destination, environment):
         return subprocess.run(["bash", str(BACKUP), str(destination)], cwd=root, env=environment, text=True, capture_output=True)
+
+    def run_restore(self, root, archive, environment, target="target"):
+        return subprocess.run(["bash", str(RESTORE), str(archive), target], cwd=root, env=environment, text=True, capture_output=True)
+
+    def assert_backup_refused_before_stop(self, result, log, destination, expected_code: int | None = None):
+        if expected_code is None:
+            self.assertNotEqual(result.returncode, 0, result.stderr)
+        else:
+            self.assertEqual(result.returncode, expected_code, result.stderr)
+        self.assertNotIn('"stop"', log.read_text())
+        self.assertEqual(list(destination.iterdir()), [])
 
     def test_root_build_only_shape_uses_compose_default_tag_and_private_host_artifacts(self):
         root, destination, log, environment = self.backup_fixture(None, "seaweed:root")
@@ -170,9 +272,64 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
 
         result = self.run_backup(root, destination, environment)
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn('"stop"', log.read_text())
-        self.assertEqual(list(destination.iterdir()), [])
+        self.assert_backup_refused_before_stop(result, log, destination)
+
+    def test_mcp_volume_aliases_fail_before_any_stop_or_archive(self):
+        for name, mutate in ALIAS_MUTATIONS.items():
+            with self.subTest(alias=name):
+                root, destination, log, environment = self.backup_fixture("server:community", "seaweed:community", mcp_overlay=True)
+                config = json.loads(environment["COMPOSE_CONFIG"])
+                mutate(config)
+                environment["COMPOSE_CONFIG"] = json.dumps(config)
+
+                result = self.run_backup(root, destination, environment)
+
+                self.assert_backup_refused_before_stop(result, log, destination)
+                self.assertNotIn('"run"', log.read_text())
+
+    def test_orphan_mcp_containers_without_overlay_keep_baseline_behavior(self):
+        root, destination, log, environment = self.backup_fixture(
+            "server:community",
+            "seaweed:community",
+            mcp_states={"mcp": "running", "mcp-state-init": "exited"},
+            exit_codes={"mcp-state-init": 1},
+        )
+
+        result = self.run_backup(root, destination, environment)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = log.read_text()
+        self.assertNotIn('"stop", "mcp"', calls)
+        self.assertNotIn('"start", "mcp"', calls)
+        self.assertNotIn("peppy_mcp-state", calls)
+        manifest = json.loads((next(destination.iterdir()) / "manifest.json").read_text())
+        self.assertEqual(tuple(manifest["artifacts"]), BASELINE_ARTIFACTS)
+        self.assertNotIn("mcp", manifest["images"]["configured"])
+        self.assertNotIn("mcp", manifest["images"]["running_ids"])
+
+    def test_mcp_initializer_must_exit_cleanly_before_any_stop(self):
+        for code in (0, 1, 137):
+            with self.subTest(exit_code=code):
+                root, destination, log, environment = self.backup_fixture(
+                    "server:community", "seaweed:community", mcp_overlay=True, exit_codes={"mcp-state-init": code}
+                )
+
+                result = self.run_backup(root, destination, environment)
+
+                if code == 0:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                else:
+                    self.assert_backup_refused_before_stop(result, log, destination, expected_code=67)
+                    self.assertIn("MCP state initializer", result.stderr)
+
+    def test_mcp_overlay_requires_initializer_container_before_any_stop(self):
+        root, destination, log, environment = self.backup_fixture(
+            "server:community", "seaweed:community", mcp_overlay=True, mcp_states={"mcp": "running"}
+        )
+
+        result = self.run_backup(root, destination, environment)
+
+        self.assert_backup_refused_before_stop(result, log, destination, expected_code=67)
 
     def test_stale_build_only_tag_fails_before_any_service_stop_or_backup_creation(self):
         root, destination, log, environment = self.backup_fixture(None, "seaweed:root", STALE_API_ID)
@@ -185,104 +342,99 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
         self.assertEqual(list(destination.iterdir()), [])
 
     def test_untrusted_manifest_image_never_reaches_docker_run(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            (root / ".env").write_text("fixture=true\n")
-            archive = root / "archive"
-            archive.mkdir()
-            manifest = {
-                "format_version": 2,
-                "source_project": "source",
-                "images": {"configured": {"postgres": "postgres:fixture", "seaweedfs": "seaweed:fixture"}, "running_ids": {"postgres": "attacker/image:tag", "seaweedfs": SEAWEED_ID}},
-                "artifacts": ["postgres.dump", "seaweed-data.tar.gz", "seaweed-home.tar.gz"],
-            }
-            (archive / "manifest.json").write_text(json.dumps(manifest))
-            for name in ("postgres.dump", "seaweed-data.tar.gz", "seaweed-home.tar.gz"):
-                (archive / name).write_bytes(b"fixture")
-            entries = []
-            for name in ("manifest.json", "postgres.dump", "seaweed-data.tar.gz", "seaweed-home.tar.gz"):
-                entries.append(f"{sha256((archive / name).read_bytes()).hexdigest()}  {name}")
-            (archive / "manifest.sha256").write_text("\n".join(entries) + "\n")
-            tools = root / "tools"
-            tools.mkdir()
-            docker = tools / "docker"
-            docker.write_text(FAKE_DOCKER)
-            docker.chmod(0o755)
-            log = root / "docker.log"
-            environment = os.environ | {"PATH": f"{tools}:{os.environ['PATH']}", "DOCKER_LOG": str(log), "COMPOSE_CONFIG": "{}", "RUNNING_IDS": "{}", "IMAGE_IDS": "{}"}
+        root, archive, log, environment = self.restore_fixture(
+            BASELINE_ARTIFACTS,
+            {"postgres": "postgres:fixture", "seaweedfs": "seaweed:fixture"},
+            {"postgres": "attacker/image:tag", "seaweedfs": SEAWEED_ID},
+            "{}",
+            {},
+        )
 
-            result = subprocess.run(["bash", str(RESTORE), str(archive), "target"], cwd=root, env=environment, text=True, capture_output=True)
+        result = self.run_restore(root, archive, environment, target="target")
 
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("pinned sha256", result.stderr)
-            self.assertFalse(log.exists())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("pinned sha256", result.stderr)
+        self.assertFalse(log.exists())
 
     def test_mcp_restore_requires_matching_overlay_before_volume_creation(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            (root / ".env").write_text("fixture=true\n")
-            archive = root / "archive"
-            archive.mkdir()
-            manifest = {
-                "format_version": 2,
-                "source_project": "source",
-                "images": {"configured": {"postgres": "postgres:fixture", "seaweedfs": "seaweed:fixture", "mcp": "mcp:fixture"}, "running_ids": {"postgres": POSTGRES_ID, "seaweedfs": SEAWEED_ID, "mcp": API_ID}},
-                "artifacts": ["postgres.dump", "seaweed-data.tar.gz", "seaweed-home.tar.gz", "mcp-state.tar.gz"],
-            }
-            (archive / "manifest.json").write_text(json.dumps(manifest))
-            for name in manifest["artifacts"]:
-                (archive / name).write_bytes(b"fixture")
-            entries = [f"{sha256((archive / name).read_bytes()).hexdigest()}  {name}" for name in ("manifest.json", *manifest["artifacts"])]
-            (archive / "manifest.sha256").write_text("\n".join(entries) + "\n")
-            tools = root / "tools"
-            tools.mkdir()
-            docker = tools / "docker"
-            docker.write_text(FAKE_DOCKER)
-            docker.chmod(0o755)
-            log = root / "docker.log"
-            environment = os.environ | {"PATH": f"{tools}:{os.environ['PATH']}", "DOCKER_LOG": str(log), "COMPOSE_CONFIG": compose_config("server:fixture", "seaweed:fixture"), "RUNNING_IDS": "{}", "IMAGE_IDS": json.dumps({POSTGRES_ID: POSTGRES_ID, "postgres:fixture": POSTGRES_ID})}
+        root, archive, log, environment = self.restore_fixture(
+            MCP_ARTIFACTS, MCP_CONFIGURED, MCP_RUNNING,
+            compose_config("server:fixture", "seaweed:fixture"),
+            {POSTGRES_ID: POSTGRES_ID, "postgres:fixture": POSTGRES_ID},
+        )
 
-            result = subprocess.run(["bash", str(RESTORE), str(archive), "target"], cwd=root, env=environment, text=True, capture_output=True)
+        result = self.run_restore(root, archive, environment)
 
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("MCP overlay", result.stderr)
-            self.assertNotIn('"create"', log.read_text())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("MCP overlay", result.stderr)
+        self.assertNotIn('"create"', log.read_text())
+
+    def test_mcp_overlay_requires_matching_artifact_before_volume_creation(self):
+        root, archive, log, environment = self.restore_fixture(
+            BASELINE_ARTIFACTS,
+            {"postgres": "postgres:fixture", "seaweedfs": "seaweed:fixture"},
+            {"postgres": POSTGRES_ID, "seaweedfs": SEAWEED_ID},
+            compose_config("server:fixture", "seaweed:fixture", True),
+            {POSTGRES_ID: POSTGRES_ID, "postgres:fixture": POSTGRES_ID},
+        )
+
+        result = self.run_restore(root, archive, environment)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("MCP overlay", result.stderr)
+        self.assertNotIn('"create"', log.read_text())
+
+    def test_mcp_restore_rejects_aliased_volumes_before_creation(self):
+        for name, mutate in ALIAS_MUTATIONS.items():
+            with self.subTest(alias=name):
+                config = json.loads(compose_config("server:fixture", "seaweed:fixture", True))
+                mutate(config)
+                root, archive, log, environment = self.restore_fixture(
+                    MCP_ARTIFACTS, MCP_CONFIGURED, MCP_RUNNING,
+                    json.dumps(config),
+                    {POSTGRES_ID: POSTGRES_ID, "postgres:fixture": POSTGRES_ID},
+                )
+
+                result = self.run_restore(root, archive, environment)
+
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                calls = log.read_text()
+                self.assertNotIn('"create"', calls)
+                self.assertNotIn('"run"', calls)
+
+    def test_mcp_restore_refuses_existing_mcp_volumes_before_creation(self):
+        for volume in ("peppy_mcp-state", "peppy_mcp-control"):
+            with self.subTest(volume=volume):
+                root, archive, log, environment = self.restore_fixture(
+                    MCP_ARTIFACTS, MCP_CONFIGURED, MCP_RUNNING,
+                    compose_config("server:fixture", "seaweed:fixture", True),
+                    {POSTGRES_ID: POSTGRES_ID, "postgres:fixture": POSTGRES_ID},
+                    existing_volumes={volume: True},
+                )
+
+                result = self.run_restore(root, archive, environment)
+
+                self.assertEqual(result.returncode, MCP_RESTORE_EXISTING_VOLUME, result.stderr)
+                self.assertIn(volume, result.stderr)
+                self.assertNotIn('"create"', log.read_text())
 
     def test_mcp_restore_extracts_state_without_starting_worker(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            (root / ".env").write_text("fixture=true\n")
-            archive = root / "archive"
-            archive.mkdir()
-            manifest = {
-                "format_version": 2,
-                "source_project": "source",
-                "images": {"configured": {"postgres": "postgres:fixture", "seaweedfs": "seaweed:fixture", "mcp": "mcp:fixture"}, "running_ids": {"postgres": POSTGRES_ID, "seaweedfs": SEAWEED_ID, "mcp": API_ID}},
-                "artifacts": ["postgres.dump", "seaweed-data.tar.gz", "seaweed-home.tar.gz", "mcp-state.tar.gz"],
-            }
-            (archive / "manifest.json").write_text(json.dumps(manifest))
-            for name in manifest["artifacts"]:
-                (archive / name).write_bytes(b"fixture")
-            entries = [f"{sha256((archive / name).read_bytes()).hexdigest()}  {name}" for name in ("manifest.json", *manifest["artifacts"])]
-            (archive / "manifest.sha256").write_text("\n".join(entries) + "\n")
-            tools = root / "tools"
-            tools.mkdir()
-            docker = tools / "docker"
-            docker.write_text(FAKE_DOCKER)
-            docker.chmod(0o755)
-            log = root / "docker.log"
-            environment = os.environ | {"PATH": f"{tools}:{os.environ['PATH']}", "DOCKER_LOG": str(log), "COMPOSE_CONFIG": compose_config("server:fixture", "seaweed:fixture", True), "RUNNING_IDS": "{}", "IMAGE_IDS": json.dumps({POSTGRES_ID: POSTGRES_ID, "postgres:fixture": POSTGRES_ID}), "VOLUME_INSPECT_MODE": "absent"}
+        root, archive, log, environment = self.restore_fixture(
+            MCP_ARTIFACTS, MCP_CONFIGURED, MCP_RUNNING,
+            compose_config("server:fixture", "seaweed:fixture", True),
+            {POSTGRES_ID: POSTGRES_ID, "postgres:fixture": POSTGRES_ID},
+        )
 
-            result = subprocess.run(["bash", str(RESTORE), str(archive), "target"], cwd=root, env=environment, text=True, capture_output=True)
+        result = self.run_restore(root, archive, environment)
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            calls = log.read_text()
-            self.assertIn('"create", "mcp-state-init"', calls)
-            self.assertNotIn('"volume", "create", "peppy_mcp-state"', calls)
-            self.assertIn("mcp-state.tar.gz", calls)
-            self.assertIn("chown 10001:10001", calls)
-            self.assertNotIn('"start", "mcp"', calls)
-            self.assertNotIn('"up", "--wait", "mcp"', calls)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = log.read_text()
+        self.assertIn('"create", "mcp-state-init"', calls)
+        self.assertNotIn('"volume", "create", "peppy_mcp-state"', calls)
+        self.assertIn("mcp-state.tar.gz", calls)
+        self.assertIn("chown 10001:10001", calls)
+        self.assertNotIn('"start", "mcp"', calls)
+        self.assertNotIn('"up", "--wait", "mcp"', calls)
 
 
 if __name__ == "__main__":
