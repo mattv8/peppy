@@ -3,8 +3,9 @@
 Agent reference for public Peppy build, release, and native-artifact constraints.
 Paths prefixed with `peppy-platform/` belong to a separate private repository
 that is not in this checkout. Its inventory, hosts, credentials, runbooks, and
-hosted deployment state are out of scope here; do not infer them from this
-checkout.
+deployment state are private; do not infer them from this checkout. Changes
+listed under [Platform companion pull requests](#platform-companion-pull-requests)
+still require a companion pull request there.
 
 ## Ownership and signing authority
 
@@ -21,6 +22,53 @@ checkout.
   or a locally edited sibling checkout is not enough. The private pipeline
   consumes the signed public relay at that pinned revision; it does not rebuild
   or re-sign the relay with the hosted key.
+
+## Platform companion pull requests
+
+`peppy-platform` builds `peppy-server`, `peppy-hosted-api`, and `peppy-crypto`
+as path dependencies, runs this repository's server migrations, and applies its
+own runtime and maintenance grants, validators, and test fixtures. Public CI
+never builds it. Public row-security tests use this repository's grant
+functions, not the platform's. A green public pull request is not evidence that
+hosted still builds or starts.
+
+- You must open a companion `peppy-platform` pull request when a public change
+  touches any of these:
+  - [`services/server/migrations/`](../services/server/migrations/): tables,
+    functions, triggers, or grants;
+  - [`services/server/src/rls.rs`](../services/server/src/rls.rs): table
+    lists, resolvers, or grant and validate functions;
+  - startup checks or row-security behavior in `ServerBuilder::build`
+    ([server assembly](../services/server/src/lib.rs));
+  - added, removed, or changed public items of `peppy_server`,
+    `peppy_hosted_api`, or `peppy_crypto`, including new
+    `peppy_server::config::Config` fields;
+  - `[patch.crates-io]` entries or vendored crates the server needs, because
+    this workspace's patches do not apply to the platform build;
+  - new or changed collected, stored, retained, or shared data that the hosted
+    privacy policy (`peppy-platform/web/privacy.html`) must describe.
+
+  Changes limited to tests, docs, or private items need no companion.
+- The companion pull request pins the public commit in
+  `peppy-platform/docker/source-pins.json`. It updates hosted grants,
+  validators, fixtures, and policy text, and must pass private CI on both
+  PostgreSQL versions, including
+  `docker/scripts/source_compatibility.py --require-session-renewal`.
+- Before you merge the public pull request, pin the companion to the pushed
+  public branch head and get private CI green; for local runs, check the
+  platform out so that `../peppy` points at this checkout (symlink it if the
+  directory name differs). Then merge the public pull request, let it publish,
+  repin the companion to the merged public commit, merge it, and follow
+  platform `build-publish` through rehearsal and deployment.
+- Without an explicit revision, platform `build-publish` resolves the newest
+  published public release, so an incompatible release breaks the next hosted
+  build until the repinned companion merges. Do not merge the public pull
+  request without a companion that passes private CI.
+- If you cannot reach the private repository, state that in the public pull
+  request and stop before merging. "Private" or "out of scope" never waives the
+  companion.
+- Reviewers of these changes record whether the companion exists, its private
+  CI result, and the public commit it pins.
 
 ## Public image lanes and release
 
@@ -112,7 +160,9 @@ checkout.
   Check the proxy's access log before changing the server.
 - Public core migrations live in [`services/server/migrations`](../services/server/migrations/).
   They are not evidence of a hosted migration history, upgrade path, or deployed
-  schema; hosted role, source-pin, and ordering details are private.
+  schema; hosted role, source-pin, and ordering details are private. A change
+  here still requires a
+  [platform companion pull request](#platform-companion-pull-requests).
 
 ## Native artifact traps
 
