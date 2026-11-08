@@ -2694,18 +2694,35 @@ async fn membership_exchange_uses_transaction_local_scope_with_runtime_role() {
         .await
         .unwrap();
     });
-    let mut request = format!("ws://{address}/v1/live")
-        .into_client_request()
-        .unwrap();
-    request.headers_mut().insert(
-        "authorization",
-        format!("Bearer {}", owner.device_token).parse().unwrap(),
-    );
-    request.headers_mut().insert(
-        "x-peppy-live-capabilities",
-        "membership-version-v1".parse().unwrap(),
-    );
-    let (mut socket, _) = connect_async(request).await.unwrap();
+    let connect = async {
+        loop {
+            let mut request = format!("ws://{address}/v1/live")
+                .into_client_request()
+                .unwrap();
+            request.headers_mut().insert(
+                "authorization",
+                format!("Bearer {}", owner.device_token).parse().unwrap(),
+            );
+            request.headers_mut().insert(
+                "x-peppy-live-capabilities",
+                "membership-version-v1".parse().unwrap(),
+            );
+            match connect_async(request).await {
+                Ok(connected) => break connected,
+                Err(tokio_tungstenite::tungstenite::Error::Http(response))
+                    if response.status() == StatusCode::SERVICE_UNAVAILABLE
+                        && response.body().as_deref()
+                            == Some(br#"{"code":"live_unavailable"}"#) =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("live websocket upgrade failed: {error:?}"),
+            }
+        }
+    };
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(5), connect)
+        .await
+        .expect("PostgreSQL live backend did not become ready");
     let hello: Value = serde_json::from_str(&text(&mut socket).await).unwrap();
     assert_eq!(hello["type"], "hello");
     let MembershipControlV1::Bootstrap(bootstrap) =
