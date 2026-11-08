@@ -159,6 +159,15 @@ impl Server {
         self.task.abort();
         let _ = self.task.await;
         self.pool.close().await;
+        // A closed client connection's backend can still be finishing a
+        // maintenance statement; wait for it so DROP SCHEMA cannot deadlock.
+        sqlx::query(
+            "SELECT pg_terminate_backend(pid, 10000) FROM pg_stat_activity WHERE application_name=$1",
+        )
+        .bind(&self.application_name)
+        .execute(&self.admin)
+        .await
+        .unwrap();
         sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
             .execute(&self.admin)
             .await
