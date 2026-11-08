@@ -20,6 +20,14 @@ internal fun interface OwnNumberSource {
     fun read(subscriptionId: Int): String?
 }
 
+internal enum class OwnNumberRawSource { SubscriptionManagerPhoneNumber, TelephonyLine1Number }
+
+internal data class OwnNumberRawObservation(val value: String, val source: OwnNumberRawSource)
+
+internal fun interface RawOwnNumberSource {
+    fun read(subscriptionId: Int): String?
+}
+
 /** Reads a carrier-provided line number and commits it only to the encrypted native store. */
 internal object OwnNumberDetector {
     private val PHONE_NUMBER = Regex("^\\+?\\d{7,15}$")
@@ -73,6 +81,48 @@ internal object OwnNumberDetector {
             OwnNumberDetection.Unavailable
         }
     }
+
+    internal fun observeRaw(
+        route: SimRoute,
+        apiLevel: Int,
+        access: () -> Boolean,
+        source: RawOwnNumberSource,
+        line1: (Int) -> String?,
+    ): OwnNumberRawObservation? = try {
+        if (!access()) return null
+        if (apiLevel >= Build.VERSION_CODES.TIRAMISU) {
+            source.read(route.subscriptionId)?.takeUnless(String::isBlank)?.let {
+                return OwnNumberRawObservation(it, OwnNumberRawSource.SubscriptionManagerPhoneNumber)
+            }
+        }
+        line1(route.subscriptionId)?.takeUnless(String::isBlank)?.let {
+            OwnNumberRawObservation(it, OwnNumberRawSource.TelephonyLine1Number)
+        }
+    } catch (_: SecurityException) {
+        null
+    } catch (_: IllegalStateException) {
+        null
+    } catch (_: UnsupportedOperationException) {
+        null
+    }
+
+    internal fun observeRaw(context: Context?, route: SimRoute): OwnNumberRawObservation? = observeRaw(
+        route = route,
+        apiLevel = Build.VERSION.SDK_INT,
+        access = { hasAccess(context) },
+        source = RawOwnNumberSource { subscriptionId ->
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || context == null ||
+                context.checkSelfPermission(Manifest.permission.READ_PHONE_NUMBERS) != PackageManager.PERMISSION_GRANTED
+            ) null
+            else context.getSystemService(SubscriptionManager::class.java)?.getPhoneNumber(subscriptionId)
+        },
+        line1 = { subscriptionId -> context?.let { line1Number(it, subscriptionId) } },
+    )
+
+    internal fun simCountryIso(context: Context?, subscriptionId: Int): String? = context
+        ?.getSystemService(TelephonyManager::class.java)
+        ?.createForSubscriptionId(subscriptionId)
+        ?.simCountryIso
 
     internal fun sync(
         route: SimRoute?,
@@ -137,8 +187,6 @@ internal object OwnNumberDetector {
             ?.line1Number
 
     private fun androidCountryIso(context: Context?): (Int) -> String? = { subscriptionId ->
-        context?.getSystemService(TelephonyManager::class.java)
-            ?.createForSubscriptionId(subscriptionId)
-            ?.simCountryIso
+        simCountryIso(context, subscriptionId)
     }
 }

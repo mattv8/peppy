@@ -106,6 +106,7 @@ impl Fixture {
                 mcp_worker_url: None,
                 mcp_worker_token_file: None,
                 web_client: None,
+                web_live_trusted_origin: None,
             },
             self.pool.clone(),
         )

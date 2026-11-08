@@ -1,5 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
-import { notificationPersistence, readAccountAccess, type AccountAccessResult } from "./bridge-contracts";
+import { notificationPersistence, readAccountAccess, type AccountAccessResult, type MessageStatus, type MessageView } from "./bridge-contracts";
+
+describe("message bridge contract for RCS", () => {
+  it("accepts the read status and rcs transport and keeps rcsReported optional", () => {
+    const status: MessageStatus = "read";
+    const transport: MessageView["transport"] = "rcs";
+    const message: MessageView = { id: "m", revision: "1", sender: "self", body: "", timestamp: "0", attachments: [], status, transport };
+    expect(message.status).toBe("read");
+    expect(message.transport).toBe("rcs");
+    expect(message.rcsReported).toBeUndefined();
+    expect(transport).toBe("rcs");
+  });
+});
 
 describe("account access bridge contract", () => {
   const notice: AccountAccessResult = {

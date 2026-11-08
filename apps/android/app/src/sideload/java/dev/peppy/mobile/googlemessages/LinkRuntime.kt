@@ -1,0 +1,406 @@
+package dev.peppy.mobile.googlemessages
+
+import android.content.Context
+import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
+import java.util.concurrent.Executor
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import uniffi.peppy_mobile_bindings.NativeTypingState
+
+internal data class LinkHandleLease(val handle: LinkHandle, val generation: Long)
+internal data class LinkObservation(val token: Long, val lease: LinkHandleLease)
+
+object LinkRuntime {
+    private val callbackExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val nativeOperationLock = Any()
+    private val changeCounter = MutableStateFlow(0L)
+    private var cachedHandle: LinkHandle? = null
+    private var closingHandle: LinkHandle? = null
+    private var receiveCoordinator: RcsReceiveCoordinator? = null
+    private var handleGeneration = 0L
+    private var pairingGeneration = 0L
+
+    val emoji = MutableStateFlow<String?>(null)
+    val changes: StateFlow<Long> = changeCounter
+    val pairingInProgress = AtomicBoolean(false)
+
+    fun handle(context: Context): LinkOpenResult {
+        while (true) {
+            if (!awaitNoClosingHandle()) return LinkOpenResult.Unavailable
+            LinkRuntimeTestHooks.afterClosingCheck?.invoke()
+            val opened = synchronized(nativeOperationLock) {
+                val closing = synchronized(this) {
+                    cachedHandle?.let { return LinkOpenResult.Open(it) }
+                    closingHandle != null
+                }
+                if (closing) null else {
+                    val engine = LinkRuntimeTestHooks.engine ?: LinkEngines.current
+                    if (!engine.available) LinkOpenResult.Unavailable else {
+                        val store = store(context)
+                        val state = try { store.read() } catch (error: Exception) {
+                            return@synchronized LinkOpenResult.Unreadable(filterReasonCode(error.message))
+                        }
+                        try {
+                            val coordinator = RcsReceiveCoordinator(context.applicationContext)
+                            val handle = engine.open(state, host(store, nextHandleGeneration(), coordinator))
+                            synchronized(this) {
+                                handleGeneration += 1
+                                cachedHandle = handle
+                                receiveCoordinator = coordinator
+                            }
+                            LinkOpenResult.Open(handle)
+                        } catch (error: Exception) {
+                            if (error.message == "link_unavailable") LinkOpenResult.Unavailable
+                            else LinkOpenResult.Unreadable(filterReasonCode(error.message))
+                        }
+                    }
+                }
+            }
+            if (opened != null) return opened
+        }
+    }
+
+    fun resetLocalState(context: Context) {
+        LinkCoreBridge.invalidateObservations()
+        GoogleMessagesLinkService.stopAndAwait(context)
+        if (!awaitNoClosingHandle()) return
+        synchronized(nativeOperationLock) {
+            val handle = synchronized(this) {
+                val current = cachedHandle
+                cachedHandle = null
+                receiveCoordinator = null
+                handleGeneration += 1
+                emoji.value = null
+                pairingInProgress.set(false)
+                pairingGeneration += 1
+                current
+            }
+            handle?.close()
+            store(context).wipe()
+            if (!LinkCoreBridge.recordExplicitUnlinkCompleted(context.applicationContext)) {
+                throw IllegalStateException("persist_failed")
+            }
+        }
+        recordEvent("link", "reset_local", 0)
+        signalChange()
+    }
+
+    fun recordPreStart(context: Context): Boolean =
+        LinkCoreBridge.recordPreStart(context.applicationContext)
+
+    internal fun recordPreStart(context: Context, attempt: Long): Boolean {
+        if (!ownsPairingAttempt(attempt)) return false
+        LinkRuntimeTestHooks.beforePreStartPublication?.invoke()
+        return LinkCoreBridge.recordPreStart(context.applicationContext, attempt) && ownsPairingAttempt(attempt)
+    }
+
+    fun recordUnlinked(context: Context): Boolean =
+        LinkCoreBridge.recordIfNeeded(context.applicationContext, LinkStatus(0, "unlinked", false, false, false, 0, ""))
+
+    internal fun reconcileEmptyState(context: Context, status: LinkStatus? = null): Boolean {
+        val state = runCatching { store(context.applicationContext).read() }.getOrNull() ?: return false
+        return state.isEmpty() && (status == null || status.state == "unlinked") && recordUnlinked(context)
+    }
+
+    internal fun handleLease(context: Context): LinkHandleLease? {
+        val opened = (handle(context) as? LinkOpenResult.Open)?.handle ?: return null
+        return synchronized(this) {
+            opened.takeIf { it === cachedHandle }?.let { LinkHandleLease(it, handleGeneration) }
+        }
+    }
+
+    internal fun capturePanelObservation(handle: LinkHandle): LinkObservation? {
+        val token = LinkCoreBridge.observationToken()
+        val lease = synchronized(this) {
+            handle.takeIf { it === cachedHandle }?.let { LinkHandleLease(it, handleGeneration) }
+        } ?: return null
+        return LinkObservation(token, lease)
+    }
+
+    internal fun recordPanelObservation(context: Context, observation: LinkObservation, status: LinkStatus): Boolean {
+        LinkRuntimeTestHooks.beforePanelObservationRecord?.invoke()
+        return LinkCoreBridge.recordObservation(
+            observation.token,
+            observation.lease,
+            context.applicationContext,
+            status,
+        )
+    }
+
+    /** Admits a pairing attempt to its exact current handle without allowing reset to substitute one. */
+    internal fun acquirePairingLease(context: Context, attempt: Long): LinkHandleLease? {
+        if (!awaitNoClosingHandle()) return null
+        return synchronized(nativeOperationLock) {
+            synchronized(this) {
+                if (!pairingInProgress.get() || pairingGeneration != attempt) return@synchronized null
+                cachedHandle?.let { return@synchronized LinkHandleLease(it, handleGeneration) }
+                val engine = LinkRuntimeTestHooks.engine ?: LinkEngines.current
+                if (!engine.available) return@synchronized null
+                val store = store(context)
+                val state = runCatching { store.read() }.getOrNull() ?: return@synchronized null
+                val coordinator = RcsReceiveCoordinator(context.applicationContext)
+                val handle = runCatching { engine.open(state, host(store, nextHandleGeneration(), coordinator)) }.getOrNull() ?: return@synchronized null
+                handleGeneration += 1
+                cachedHandle = handle
+                receiveCoordinator = coordinator
+                LinkHandleLease(handle, handleGeneration)
+            }
+        }
+    }
+
+    /** Forwards an already-admitted typing effect without adding another asynchronous queue. */
+    internal fun setTyping(context: Context, intent: LiveTypingEffectIntent): String {
+        val lease = handleLease(context) ?: return "typing_unavailable"
+        return setTyping(lease, intent)
+    }
+
+    internal fun setTyping(lease: LinkHandleLease, intent: LiveTypingEffectIntent): String = synchronized(nativeOperationLock) {
+        if (!ownsLease(lease)) return@synchronized "typing_stale"
+        if (!intent.isCurrent.isCurrent()) return@synchronized "typing_stale"
+        val ownerGeneration = lease.handle.ownerGeneration()
+        if (ownerGeneration <= 0) return@synchronized "typing_stale"
+        val request = typingRequest(intent, ownerGeneration) ?: return@synchronized "typing_expired"
+        try {
+            lease.handle.setTyping(request)
+        } catch (_: Throwable) {
+            "typing_failed"
+        }
+    }
+
+    internal fun resumeRcsReceive(lease: LinkHandleLease, cancelled: AtomicBoolean) {
+        val coordinator = synchronized(this) {
+            if (!ownsLease(lease)) return
+            receiveCoordinator
+        } ?: return
+        coordinator.resume(lease.handle, cancelled) { ownsLease(lease) }
+    }
+
+    /** Calls native work on the exact captured owner, never a handle opened after retirement. */
+    internal fun <T> withCapturedLinkOperation(lease: LinkHandleLease, operation: (LinkHandle) -> T): T? = synchronized(nativeOperationLock) {
+        if (!ownsLease(lease)) return@synchronized null
+        operation(lease.handle)
+    }
+
+    /** Detaches the captured handle only while [lease] owns it. Native close is always outside the runtime monitor. */
+    internal fun detachHandleForServiceStop(lease: LinkHandleLease): LinkHandle? = synchronized(this) {
+        if (lease.generation != handleGeneration || lease.handle !== cachedHandle) null else {
+            cachedHandle = null
+            receiveCoordinator = null
+            closingHandle = lease.handle
+            handleGeneration += 1
+            lease.handle
+        }
+    }
+
+    internal fun closeHandleForServiceStop(lease: LinkHandleLease) {
+        detachHandleForServiceStop(lease)?.let(::closeDetachedHandle)
+    }
+
+    internal fun closeDetachedHandle(handle: LinkHandle) = synchronized(nativeOperationLock) {
+        try {
+            handle.close()
+        } finally {
+            synchronized(this) {
+                if (closingHandle === handle) {
+                    closingHandle = null
+                    (this@LinkRuntime as java.lang.Object).notifyAll()
+                }
+            }
+        }
+    }
+
+    /** Claims one owner-requested Pair or Relink attempt, returning its opaque generation token. */
+    fun tryBeginPairing(): Long? = synchronized(this) {
+        if (!pairingInProgress.compareAndSet(false, true)) return@synchronized null
+        pairingGeneration += 1
+        emoji.value = null
+        signalChange()
+        pairingGeneration
+    }
+
+    /** Completes exactly the attempt that acquired [attempt]; stale finally blocks are inert. */
+    fun endPairing(attempt: Long): Boolean = synchronized(this) {
+        if (!pairingInProgress.get() || attempt != pairingGeneration) return false
+        pairingInProgress.set(false)
+        pairingGeneration += 1
+        emoji.value = null
+        signalChange()
+        true
+    }
+
+    /** Compatibility helper for callers that cannot yet retain an attempt token. */
+    internal fun endPairing(): Boolean = synchronized(this) {
+        if (!pairingInProgress.get()) return false
+        endPairing(pairingGeneration)
+    }
+
+    internal fun resetForTest() {
+        GoogleMessagesLinkService.stopActiveWorker()
+        if (!awaitNoClosingHandle()) return
+        LinkRuntimeTestHooks.beforePanelObservationRecord = null
+        LinkRuntimeTestHooks.beforePreStartPublication = null
+        synchronized(nativeOperationLock) {
+            val captured = synchronized(this) {
+                val current = cachedHandle
+                cachedHandle = null
+                receiveCoordinator = null
+                handleGeneration += 1
+                emoji.value = null
+                changeCounter.value = 0
+                pairingInProgress.set(false)
+                current
+            }
+            captured?.close()
+        }
+    }
+
+    private fun store(context: Context): LinkStateStorage =
+        LinkRuntimeTestHooks.storeFactory?.invoke(context.applicationContext)
+            ?: LinkStateStoreAdapter(LinkStateStore(context.applicationContext.noBackupFilesDir))
+
+    private fun host(store: LinkStateStorage, generation: Long, receiveCoordinator: RcsReceiveCoordinator) = object : LinkHost {
+        override fun persistState(state: ByteArray) = store.write(state)
+
+        override fun event(kind: String, code: String, value: Long) = eventOwned(kind, code, value, -1, -1)
+
+        override fun eventOwned(kind: String, code: String, value: Long, ownerGeneration: Long, ownerRevision: Long) {
+            val safeCode = filterReasonCode(code)
+            callbackExecutor().execute {
+                if (!acceptsCallback(generation, ownerGeneration, ownerRevision)) return@execute
+                recordEvent(kind, safeCode, value)
+                GoogleMessagesLinkService.onLinkEvent(kind, safeCode)
+                signalChange()
+            }
+        }
+
+        override fun rcsEvent(recordJson: String) = rcsEventOwned(recordJson, -1, -1, -1)
+
+        override fun rcsEventOwned(recordJson: String, ownerGeneration: Long, ownerRevision: Long, streamEpoch: Long) {
+            callbackExecutor().execute {
+                if (!acceptsStreamCallback(generation, ownerGeneration, ownerRevision, streamEpoch)) return@execute
+                (LinkRuntimeTestHooks.rcsReceiveSink ?: receiveCoordinator).receive(recordJson)
+            }
+        }
+
+        override fun typingEvent(recordJson: String) = typingEventOwned(recordJson, -1, -1, -1)
+
+        override fun typingEventOwned(recordJson: String, ownerGeneration: Long, ownerRevision: Long, streamEpoch: Long) {
+            callbackExecutor().execute {
+                if (!acceptsStreamCallback(generation, ownerGeneration, ownerRevision, streamEpoch)) return@execute
+                (LinkRuntimeTestHooks.typingReceiveSink ?: NoOpTypingReceiveSink).receive(recordJson)
+            }
+        }
+
+        override fun showEmoji(value: String) = showEmojiOwned(value, -1, -1)
+
+        override fun showEmojiOwned(value: String, ownerGeneration: Long, ownerRevision: Long) {
+            val callbackPairingGeneration = synchronized(this@LinkRuntime) { pairingGeneration }
+            callbackExecutor().execute {
+                if (!acceptsCallback(generation, ownerGeneration, ownerRevision)) return@execute
+                assignEmojiIfCurrent(generation, callbackPairingGeneration, value)
+            }
+        }
+    }
+
+    private fun recordEvent(kind: String, code: String, value: Long) {
+        LinkRuntimeEventSink.record(kind, code, value)
+    }
+
+
+    private fun signalChange() {
+        changeCounter.value += 1
+    }
+
+    private fun acceptsCallback(handle: Long, ownerGeneration: Long, ownerRevision: Long): Boolean = synchronized(this) {
+        if (handle != handleGeneration) return@synchronized false
+        val current = cachedHandle ?: return@synchronized false
+        ownerGeneration >= 0 && ownerRevision >= 0 && current.acceptsOutput(ownerGeneration, ownerRevision)
+    }
+
+    private fun acceptsStreamCallback(handle: Long, ownerGeneration: Long, ownerRevision: Long, streamEpoch: Long): Boolean = synchronized(this) {
+        if (handle != handleGeneration) return@synchronized false
+        val current = cachedHandle ?: return@synchronized false
+        ownerGeneration >= 0 && ownerRevision >= 0 && streamEpoch >= 0 &&
+            current.acceptsStreamOutput(ownerGeneration, ownerRevision, streamEpoch)
+    }
+
+    private fun assignEmojiIfCurrent(handle: Long, attempt: Long, value: String) = synchronized(this) {
+        if (handle != handleGeneration || cachedHandle == null) return@synchronized
+        if (!pairingInProgress.get() || attempt != pairingGeneration) return@synchronized
+        emoji.value = value
+        signalChange()
+    }
+
+    private fun callbackExecutor(): Executor = LinkRuntimeTestHooks.callbackExecutor ?: callbackExecutor
+
+    private fun ownsLease(lease: LinkHandleLease): Boolean = synchronized(this) {
+        lease.generation == handleGeneration && lease.handle === cachedHandle
+    }
+
+    internal fun ownsPairingAttempt(attempt: Long): Boolean = synchronized(this) {
+        pairingInProgress.get() && pairingGeneration == attempt
+    }
+
+    internal fun ownsObservationLease(lease: LinkHandleLease): Boolean = ownsLease(lease)
+
+    private fun nextHandleGeneration(): Long = synchronized(this) { handleGeneration + 1 }
+
+    private fun awaitNoClosingHandle(): Boolean = synchronized(this) {
+        try {
+            while (closingHandle != null) (this@LinkRuntime as java.lang.Object).wait()
+            true
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+    }
+}
+
+private fun typingRequest(intent: LiveTypingEffectIntent, linkGeneration: Long): LinkTypingRequest? {
+    if (intent.state != NativeTypingState.STARTED || linkGeneration < 1) return null
+    val now = intent.clock.nowMs()
+    if (intent.deadlineMono <= now) return null
+    val remainingValidityMs = minOf(intent.deadlineMono - now, MAX_TYPING_VALIDITY_MS)
+    return LinkTypingRequest(intent.conversationId, NativeTypingState.STARTED, remainingValidityMs, linkGeneration)
+}
+
+private const val MAX_TYPING_VALIDITY_MS = 5_000UL
+
+internal interface LinkStateStorage {
+    fun read(): ByteArray
+    fun write(state: ByteArray)
+    fun wipe()
+}
+
+private class LinkStateStoreAdapter(private val store: LinkStateStore) : LinkStateStorage {
+    override fun read(): ByteArray = store.read()
+    override fun write(state: ByteArray) = store.write(state)
+    override fun wipe() = store.wipe()
+}
+
+internal fun filterReasonCode(code: String?): String =
+    code?.takeIf { REASON_CODE.matches(it) } ?: "unknown"
+
+private val REASON_CODE = Regex("[a-z][a-z0-9_]{0,39}")
+
+internal object LinkRuntimeTestHooks {
+    @Volatile var engine: LinkEngine? = null
+    @Volatile var storeFactory: ((Context) -> LinkStateStorage)? = null
+    @Volatile var eventRecorder: ((String, String, Long) -> Unit)? = null
+    @Volatile var rcsReceiveSink: RcsReceiveSink? = null
+    @Volatile var typingReceiveSink: TypingReceiveSink? = null
+    @Volatile var callbackExecutor: Executor? = null
+    @Volatile var afterClosingCheck: (() -> Unit)? = null
+    @Volatile var beforePanelObservationRecord: (() -> Unit)? = null
+    @Volatile var beforePreStartPublication: (() -> Unit)? = null
+}
+
+internal object LinkRuntimeEventSink {
+    fun record(kind: String, code: String, value: Long) {
+        recordGoogleMessagesLinkEvent(kind, code, value)
+        LinkRuntimeTestHooks.eventRecorder?.invoke(kind, code, value)
+    }
+}

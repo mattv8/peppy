@@ -6,6 +6,7 @@ mod instance;
 mod key_profiles;
 mod mcp;
 mod sync;
+mod vault_identity;
 
 pub use sync::{DrainStats, TransportOptions, compact_records, drain_outbox, prune_replay_log};
 
@@ -233,6 +234,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use ipnet::IpNet;
+use peppy_domain::{DeviceId, VaultId};
 use peppy_hosted_api::{DeviceRosterDevice, DeviceRosterResponse};
 use peppy_hosted_api::{
     PushConfig, PushConfigAdvertisement,
@@ -242,11 +244,15 @@ use peppy_hosted_api::{
         InstanceSession, VaultMaterial,
     },
 };
-use peppy_protocol::{Envelope, EnvelopePurpose};
+use peppy_protocol::{
+    Envelope, EnvelopePurpose, LiveFrameV2, LiveHelloV2, MEMBERSHIP_PROTOCOL_VERSION,
+    MembershipBootstrapV1, MembershipControlV1, MembershipDeviceV1, MembershipRoleV1,
+    MembershipVersionV1,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{Executor, PgPool, Row};
 use std::{
     collections::HashMap,
     convert::Infallible,
@@ -256,13 +262,187 @@ use std::{
 };
 use uuid::Uuid;
 
-use crate::{config::Config, scope, storage::Storage};
+use crate::{
+    config::Config,
+    live_ticket_work::{
+        ExecutionScope, OperationDeadline, TenantDevice, TicketDbWorkError, TicketDbWorkRegistry,
+        TicketWorkflow,
+    },
+    scope,
+    storage::Storage,
+};
 
 const TOKEN_BYTES_HEX: usize = 96;
 /// Fixed dummy hash checked for unknown usernames so login spends comparable Argon2id
 /// time. Its parameters match the libsodium INTERACTIVE limits used for stored admin hashes.
 const DUMMY_ADMIN_PASSWORD_HASH: &str =
     "$argon2id$v=19$m=65536,t=2,p=1$c2FsdHNhbHRzYWx0cw$EwM3PQ8nhmqXBdGiYHhvPYGBuA1jw0dz45Etz12Z1TQ";
+
+#[cfg(test)]
+#[derive(Clone)]
+struct LiveTicketTestGate {
+    inner: Arc<LiveTicketTestGateInner>,
+}
+
+#[cfg(test)]
+struct LiveTicketTestGateInner {
+    block_calls: usize,
+    entered: std::sync::atomic::AtomicUsize,
+    entered_notify: tokio::sync::Notify,
+    releases: tokio::sync::Semaphore,
+}
+
+#[cfg(test)]
+impl LiveTicketTestGate {
+    fn new(block_calls: usize) -> Self {
+        Self {
+            inner: Arc::new(LiveTicketTestGateInner {
+                block_calls,
+                entered: std::sync::atomic::AtomicUsize::new(0),
+                entered_notify: tokio::sync::Notify::new(),
+                releases: tokio::sync::Semaphore::new(0),
+            }),
+        }
+    }
+
+    async fn enter(&self) {
+        self.enter_after(0).await;
+    }
+
+    async fn enter_after(&self, skip_calls: usize) {
+        let call = self
+            .inner
+            .entered
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        self.inner.entered_notify.notify_waiters();
+        if call > skip_calls && call <= skip_calls + self.inner.block_calls {
+            self.inner
+                .releases
+                .acquire()
+                .await
+                .expect("live ticket test gate remains open")
+                .forget();
+        }
+    }
+
+    async fn wait_for_entries(&self, expected: usize) {
+        loop {
+            let notified = self.inner.entered_notify.notified();
+            if self.inner.entered.load(std::sync::atomic::Ordering::SeqCst) >= expected {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn release_one(&self) {
+        self.inner.releases.add_permits(1);
+    }
+
+    fn entries(&self) -> usize {
+        self.inner.entered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct LiveTicketWorkProbe {
+    cancellation_receivers: std::sync::Mutex<Vec<tokio::sync::watch::Receiver<bool>>>,
+    receiver_recorded: tokio::sync::Notify,
+    workflows_disposed: std::sync::atomic::AtomicUsize,
+    workflow_disposed: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl LiveTicketWorkProbe {
+    fn record_receiver(&self, receiver: tokio::sync::watch::Receiver<bool>) {
+        self.cancellation_receivers
+            .lock()
+            .expect("work cancellation receiver lock poisoned")
+            .push(receiver);
+        self.receiver_recorded.notify_waiters();
+    }
+
+    async fn wait_for_receiver(&self, index: usize) -> tokio::sync::watch::Receiver<bool> {
+        loop {
+            let notified = self.receiver_recorded.notified();
+            if let Some(receiver) = self
+                .cancellation_receivers
+                .lock()
+                .expect("work cancellation receiver lock poisoned")
+                .get(index)
+                .cloned()
+            {
+                return receiver;
+            }
+            notified.await;
+        }
+    }
+
+    async fn wait_for_cancellation(&self, index: usize) {
+        let mut receiver = self.wait_for_receiver(index).await;
+        while !*receiver.borrow_and_update() {
+            receiver
+                .changed()
+                .await
+                .expect("work cancellation sender remains alive until cancellation");
+        }
+    }
+
+    fn record_disposal(&self) {
+        self.workflows_disposed
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.workflow_disposed.notify_waiters();
+    }
+
+    async fn wait_for_disposals(&self, expected: usize) {
+        loop {
+            let notified = self.workflow_disposed.notified();
+            if self
+                .workflows_disposed
+                .load(std::sync::atomic::Ordering::SeqCst)
+                >= expected
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[cfg(test)]
+struct LiveTicketWorkflowDropProbe(Arc<LiveTicketWorkProbe>);
+
+#[cfg(test)]
+impl Drop for LiveTicketWorkflowDropProbe {
+    fn drop(&mut self) {
+        self.0.record_disposal();
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct LiveTicketTestHooks {
+    operation_budget: Option<Duration>,
+    recheck_operation_budget: Option<Duration>,
+    http_operation_budget: Option<Duration>,
+    recheck_interval: Option<Duration>,
+    lease_duration: Option<Duration>,
+    clock_ms: Option<Arc<std::sync::atomic::AtomicU64>>,
+    after_device_claim: Option<LiveTicketTestGate>,
+    after_sample: Option<LiveTicketTestGate>,
+    before_commit: Option<LiveTicketTestGate>,
+    after_commit: Option<LiveTicketTestGate>,
+    after_validation: Option<LiveTicketTestGate>,
+    membership_after_version: Option<LiveTicketTestGate>,
+    sampled_at: Arc<std::sync::Mutex<Vec<String>>>,
+    credential_query_started: Arc<std::sync::atomic::AtomicUsize>,
+    session_query_started: Arc<std::sync::atomic::AtomicUsize>,
+    renewal_update_started: Arc<std::sync::atomic::AtomicUsize>,
+    commit_started: Arc<std::sync::atomic::AtomicUsize>,
+    work_probe: Arc<LiveTicketWorkProbe>,
+}
 
 #[derive(Clone)]
 pub(super) struct ApiState {
@@ -289,6 +469,20 @@ pub(super) struct ApiState {
     claim_policy: crate::instance::ClaimPolicy,
     setup_window_started: std::time::Instant,
     trusted_proxy_cidrs: Arc<Vec<IpNet>>,
+    live_trusted_origin: Option<url::Origin>,
+    live_hub: crate::live::LiveHub,
+    live_ticket_work: TicketDbWorkRegistry,
+    live_backend: Arc<crate::live_postgres::PgLiveBackend>,
+    #[cfg(test)]
+    live_backend_override: Option<Arc<dyn crate::live::LiveBackend>>,
+    #[cfg(test)]
+    live_publish_timeout: Duration,
+    #[cfg(test)]
+    live_ticket_test_hooks: LiveTicketTestHooks,
+    live_readiness: tokio::sync::watch::Receiver<bool>,
+    live_rate_limiter: Arc<std::sync::Mutex<crate::live::LiveRateLimiter>>,
+    live_upgrade_limiter: Arc<std::sync::Mutex<crate::live::LiveRateLimiter>>,
+    live_ticket_http_limiter: Arc<std::sync::Mutex<crate::live::LiveRateLimiter>>,
     pub(super) mcp_worker: Option<McpWorkerClient>,
     pub(super) enrollment_authorization: Arc<dyn EnrollmentAuthorization>,
     pub(super) mcp_consent_origin: Option<String>,
@@ -485,6 +679,24 @@ impl Maintenance {
 }
 
 fn spawn_instance_maintenance(db: PgPool) {
+    let live_ticket_db = db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Err(error) = crate::live_ticket_maintenance::reap_live_tickets(
+                &live_ticket_db,
+                crate::live_ticket_maintenance::LIVE_TICKET_REAP_BATCH,
+            )
+            .await
+            {
+                tracing::warn!(
+                    kind = database_error_kind(&error),
+                    "live ticket retention sweep failed"
+                );
+            }
+        }
+    });
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(3_600));
         loop {
@@ -530,6 +742,52 @@ pub(crate) fn build_router(
     push_advertisement: PushConfigAdvertisement,
     authorization: RouterAuthorization,
 ) -> Result<(Router, Maintenance), &'static str> {
+    build_router_with_live_backend(
+        db,
+        RouterBuildOptions {
+            config,
+            initialized_storage,
+            transport: options,
+            explicit_relay_url,
+            push_advertisement,
+        },
+        authorization,
+        #[cfg(test)]
+        None,
+    )
+}
+
+struct RouterBuildOptions {
+    config: Option<Config>,
+    initialized_storage: Option<Storage>,
+    transport: TransportOptions,
+    explicit_relay_url: Option<url::Url>,
+    push_advertisement: PushConfigAdvertisement,
+}
+
+#[cfg(test)]
+struct LiveBackendOverride {
+    backend: Arc<dyn crate::live::LiveBackend>,
+    readiness: tokio::sync::watch::Receiver<bool>,
+    publish_timeout: Duration,
+    hub_observer: Option<Arc<std::sync::Mutex<Option<crate::live::LiveHub>>>>,
+    state_observer: Option<Arc<std::sync::Mutex<Option<ApiState>>>>,
+    ticket_hooks: LiveTicketTestHooks,
+}
+
+fn build_router_with_live_backend(
+    db: PgPool,
+    build: RouterBuildOptions,
+    authorization: RouterAuthorization,
+    #[cfg(test)] live_override: Option<LiveBackendOverride>,
+) -> Result<(Router, Maintenance), &'static str> {
+    let RouterBuildOptions {
+        config,
+        initialized_storage,
+        transport: options,
+        explicit_relay_url,
+        push_advertisement,
+    } = build;
     let RouterAuthorization {
         policy,
         enrollment: enrollment_authorization,
@@ -555,6 +813,9 @@ pub(crate) fn build_router(
         .as_ref()
         .map(|config| config.trusted_proxy_cidrs.clone())
         .unwrap_or_default();
+    let live_trusted_origin = config
+        .as_ref()
+        .and_then(|config| config.web_live_trusted_origin.clone());
     let mcp_worker = config
         .as_ref()
         .and_then(|config| {
@@ -588,6 +849,42 @@ pub(crate) fn build_router(
     let push_config_response = push_advertisement
         .response()
         .expect("router requires a validated push configuration");
+    let live_hub = crate::live::LiveHub::new();
+    let live_backend = Arc::new(crate::live_postgres::PgLiveBackend::new(
+        db.clone(),
+        live_hub.clone(),
+    ));
+    let live_readiness = live_backend.subscribe_readiness();
+    #[cfg(test)]
+    let (
+        live_backend_override,
+        live_readiness,
+        live_publish_timeout,
+        live_ticket_test_hooks,
+        live_state_observer,
+    ) = match live_override {
+        Some(live_override) => {
+            if let Some(hub_observer) = live_override.hub_observer {
+                *hub_observer
+                    .lock()
+                    .expect("live hub observer lock poisoned") = Some(live_hub.clone());
+            }
+            (
+                Some(live_override.backend),
+                live_override.readiness,
+                live_override.publish_timeout,
+                live_override.ticket_hooks,
+                live_override.state_observer,
+            )
+        }
+        None => (
+            None,
+            live_readiness,
+            LIVE_PUBLISH_TIMEOUT,
+            LiveTicketTestHooks::default(),
+            None,
+        ),
+    };
     let router = Router::new()
         .route("/v1/vault", get(vault_header))
         .route("/v1/devices/{device_id}/revoke", post(revoke_device))
@@ -630,6 +927,10 @@ pub(crate) fn build_router(
         .route(
             "/v1/vault/key-profiles/{key_epoch}/activate",
             post(key_profiles::activate),
+        )
+        .route(
+            "/v1/vault/identity",
+            get(vault_identity::get).post(vault_identity::establish),
         )
         .route("/v1/vault", delete(delete_vault))
         .route("/v1/commands/{command_id}/receipts", post(receipt))
@@ -682,13 +983,18 @@ pub(crate) fn build_router(
             "/file/mms-usercontent/{token}/{safe_name}",
             get(attachments::download_public_copy),
         )
-        .route("/v1/ws", get(websocket));
+        .route("/v1/ws", get(websocket))
+        .route(
+            "/v1/live/tickets",
+            post(issue_live_ticket).delete(close_live_ticket_session),
+        )
+        .route("/v1/live", get(live_websocket));
     let router = if row_security {
         router
     } else {
         router.merge(instance::routes())
     };
-    let router = router.with_state(ApiState {
+    let state = ApiState {
         db: db.clone(),
         committed: committed.clone(),
         presence_changed,
@@ -716,10 +1022,35 @@ pub(crate) fn build_router(
         claim_policy,
         setup_window_started: std::time::Instant::now(),
         trusted_proxy_cidrs: Arc::new(trusted_proxy_cidrs.clone()),
+        live_trusted_origin,
+        live_hub,
+        live_ticket_work: TicketDbWorkRegistry::new(),
+        live_backend,
+        #[cfg(test)]
+        live_backend_override,
+        #[cfg(test)]
+        live_publish_timeout,
+        #[cfg(test)]
+        live_ticket_test_hooks,
+        live_readiness,
+        live_rate_limiter: Arc::new(std::sync::Mutex::new(
+            crate::live::LiveRateLimiter::default(),
+        )),
+        live_upgrade_limiter: Arc::new(std::sync::Mutex::new(
+            crate::live::LiveRateLimiter::with_limit(crate::live::LIVE_UPGRADE_RATE_LIMIT),
+        )),
+        live_ticket_http_limiter: Arc::new(std::sync::Mutex::new(
+            crate::live::LiveRateLimiter::with_limit(30),
+        )),
         mcp_worker: mcp_worker.clone(),
         enrollment_authorization: enrollment_authorization.clone(),
         mcp_consent_origin,
-    });
+    };
+    #[cfg(test)]
+    if let Some(observer) = live_state_observer {
+        *observer.lock().expect("live state observer lock poisoned") = Some(state.clone());
+    }
+    let router = router.with_state(state);
     let manual_state = invitation_origin
         .as_ref()
         .map(|origin| {
@@ -1676,12 +2007,25 @@ async fn authenticated(
     headers: &HeaderMap,
     operation: Operation,
 ) -> ApiResult<Principal> {
+    let principal = authenticated_without_presence(s, headers, operation).await?;
+    touch_authenticated_presence(s, &principal).await;
+    Ok(principal)
+}
+
+async fn authenticated_without_presence(
+    s: &ApiState,
+    headers: &HeaderMap,
+    operation: Operation,
+) -> ApiResult<Principal> {
     let principal = auth_with_mode(s, headers).await?;
     authorize(s, &principal, operation).await?;
+    Ok(principal)
+}
+
+async fn touch_authenticated_presence(s: &ApiState, principal: &Principal) {
     if reserve_presence_touch(&s.presence_touches, principal.vault, principal.device) {
         crate::presence::touch_best_effort(&s.db, principal.vault, principal.device).await;
     }
-    Ok(principal)
 }
 
 const PRESENCE_TOUCH_CACHE_LIMIT: usize = 1_024;
@@ -1763,7 +2107,7 @@ pub(super) async fn auth_with_mode(s: &ApiState, headers: &HeaderMap) -> ApiResu
 /// Re-check the exact bearer credential after serializing on the vault row.
 /// The initial HTTP authentication can otherwise become stale while waiting for
 /// a concurrent revocation/delete transaction to release that lock.
-async fn revalidate_principal(
+pub(super) async fn revalidate_principal(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     principal: &Principal,
 ) -> ApiResult<String> {
@@ -1776,7 +2120,7 @@ async fn revalidate_principal(
         .map_err(|error| database_unavailable(&error, "principal_revalidate"))?
         .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid_bearer"))
 }
-fn owner(p: &Principal) -> ApiResult<()> {
+pub(super) fn owner(p: &Principal) -> ApiResult<()> {
     if p.role == "owner" {
         Ok(())
     } else {
@@ -2495,7 +2839,13 @@ async fn ingest(
         }
     }
     if let Some(route) = &e.route {
-        let gateway:Option<i32>=sqlx::query_scalar("SELECT 1 FROM devices d WHERE d.vault_id=$1 AND d.device_id=$2 AND d.revoked_at IS NULL AND (d.role='gateway' OR (d.role='owner' AND EXISTS (SELECT 1 FROM device_capabilities c WHERE c.vault_id=d.vault_id AND c.device_id=d.device_id)))").bind(p.vault).bind(route.gateway_device_id.0).fetch_optional(&mut *tx).await.map_err(|error| database_unavailable(&error, "ingest_route_lookup"))?;
+        let gateway_device_id = match route {
+            peppy_protocol::GatewayRoute::Carrier {
+                gateway_device_id, ..
+            }
+            | peppy_protocol::GatewayRoute::RcsLink { gateway_device_id } => gateway_device_id.0,
+        };
+        let gateway:Option<i32>=sqlx::query_scalar("SELECT 1 FROM devices d WHERE d.vault_id=$1 AND d.device_id=$2 AND d.revoked_at IS NULL AND (d.role='gateway' OR (d.role='owner' AND EXISTS (SELECT 1 FROM device_capabilities c WHERE c.vault_id=d.vault_id AND c.device_id=d.device_id)))").bind(p.vault).bind(gateway_device_id).fetch_optional(&mut *tx).await.map_err(|error| database_unavailable(&error, "ingest_route_lookup"))?;
         if gateway.is_none() {
             return Err(ApiError(StatusCode::FORBIDDEN, "gateway_not_authorized"));
         }
@@ -2562,12 +2912,12 @@ async fn ingest(
         }
     }
     if let Some(id) = e.command_id {
-        let gateway = e
-            .route
-            .as_ref()
-            .expect("validated route")
-            .gateway_device_id
-            .0;
+        let gateway = match e.route.as_ref().expect("validated route") {
+            peppy_protocol::GatewayRoute::Carrier {
+                gateway_device_id, ..
+            }
+            | peppy_protocol::GatewayRoute::RcsLink { gateway_device_id } => gateway_device_id.0,
+        };
         sqlx::query("INSERT INTO commands(vault_id,producer_device_id,command_id,gateway_device_id,cipher_digest,cursor) VALUES($1,$2,$3,$4,$5,$6)").bind(p.vault).bind(p.device).bind(id.0).bind(gateway).bind(digest.as_slice()).bind(c).execute(&mut *tx).await.map_err(|error| insert_error(error, "ingest_command_insert"))?;
     }
     // A lightweight reference only; the envelope stays in the log/records.
@@ -2734,32 +3084,36 @@ async fn receipt(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// WebSocket close codes. Clients reconnect and resume on 4429, take a
-/// snapshot on 4409, stop on 4401, and upgrade on 4426.
-mod close {
-    pub const INVALID_HELLO: u16 = 4400;
-    pub const REVOKED: u16 = 4401;
-    pub const HELLO_TIMEOUT: u16 = 4408;
-    pub const RESYNC_REQUIRED: u16 = 4409;
-    pub const UNSUPPORTED_VERSION: u16 = 4426;
-    pub const BACKPRESSURE: u16 = 4429;
-    pub const SERVER_ERROR: u16 = 1011;
-}
-const WS_PROTOCOL_VERSION: u64 = 1;
-const WS_REPLAY_PAGE: i64 = 100;
+const LIVE_TICKET_SESSION_LIMIT: i64 = 6;
+const LIVE_TICKET_LIFETIME_REFUSED: &str = "live_ticket_lifetime_refused";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HeartbeatAction {
-    SendChallenge,
-    Disconnect,
+#[derive(Deserialize)]
+struct LiveTicketRequest {
+    session_id: String,
+    #[serde(default)]
+    lifetime_handle: LifetimeHandleInput,
 }
 
-fn heartbeat_action(has_outstanding_challenge: bool) -> HeartbeatAction {
-    if has_outstanding_challenge {
-        HeartbeatAction::Disconnect
-    } else {
-        HeartbeatAction::SendChallenge
+#[derive(Default)]
+enum LifetimeHandleInput {
+    #[default]
+    Missing,
+    Value(Value),
+}
+
+impl<'de> Deserialize<'de> for LifetimeHandleInput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Value::deserialize(deserializer).map(Self::Value)
     }
+}
+#[derive(Serialize)]
+struct LiveTicketResponse {
+    ticket: String,
+    expires_at_ms: i64,
+    lifetime_handle: String,
 }
 
 const DRAFT_HINT_COOLDOWN: Duration = Duration::from_millis(500);
@@ -2837,6 +3191,2178 @@ async fn websocket(
             )
         })
         .into_response())
+}
+
+fn lifetime_refused() -> ApiError {
+    ApiError(StatusCode::CONFLICT, LIVE_TICKET_LIFETIME_REFUSED)
+}
+
+fn live_ticket_lifetime_handle(value: &str) -> ApiResult<i64> {
+    let bytes: [u8; 8] = URL_SAFE_NO_PAD
+        .decode(value)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(lifetime_refused)?;
+    let incarnation = i64::from_be_bytes(bytes);
+    (incarnation > 0 && URL_SAFE_NO_PAD.encode(bytes) == value)
+        .then_some(incarnation)
+        .ok_or_else(lifetime_refused)
+}
+
+fn requested_lifetime_handle(input: &LifetimeHandleInput) -> ApiResult<Option<i64>> {
+    match input {
+        LifetimeHandleInput::Missing => Ok(None),
+        LifetimeHandleInput::Value(Value::String(value)) => {
+            live_ticket_lifetime_handle(value).map(Some)
+        }
+        LifetimeHandleInput::Value(_) => Err(lifetime_refused()),
+    }
+}
+
+fn required_lifetime_handle(input: &LifetimeHandleInput) -> ApiResult<i64> {
+    requested_lifetime_handle(input)?.ok_or_else(lifetime_refused)
+}
+
+fn encode_live_ticket_lifetime_handle(incarnation: i64) -> String {
+    URL_SAFE_NO_PAD.encode(incarnation.to_be_bytes())
+}
+
+fn live_ticket_session_hash(value: &str) -> ApiResult<Vec<u8>> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .ok()
+        .filter(|bytes| bytes.len() == 16)
+        .ok_or(ApiError(
+            StatusCode::BAD_REQUEST,
+            "live_ticket_session_invalid",
+        ))?;
+    (URL_SAFE_NO_PAD.encode(&bytes) == value)
+        .then(|| Sha256::digest(bytes).to_vec())
+        .ok_or(ApiError(
+            StatusCode::BAD_REQUEST,
+            "live_ticket_session_invalid",
+        ))
+}
+
+/// Resolves a ticket's tenant through the narrow SECURITY DEFINER function, then
+/// consumes it under that tenant's RLS scope. PostgreSQL supplies acceptance time
+/// after all row locks have been acquired.
+struct ConsumedLiveTicket {
+    principal: Principal,
+    session_id: [u8; 16],
+    session_incarnation: i64,
+    connection_id: i64,
+    replaced: Option<crate::live::LiveTicketIdentity>,
+}
+
+const LIVE_TICKET_HTTP_OPERATION_BUDGET: Duration = Duration::from_secs(60);
+
+fn ticket_http_deadline(state: &ApiState) -> OperationDeadline {
+    #[cfg(test)]
+    if let Some(budget) = state.live_ticket_test_hooks.http_operation_budget {
+        return OperationDeadline::after(budget);
+    }
+    #[cfg(not(test))]
+    let _ = state;
+    OperationDeadline::after(LIVE_TICKET_HTTP_OPERATION_BUDGET)
+}
+
+fn ticket_http_unavailable() -> ApiError {
+    ApiError(StatusCode::SERVICE_UNAVAILABLE, "live_unavailable")
+}
+
+fn ticket_work_unavailable(error: &TicketDbWorkError, operation: &'static str) -> ApiError {
+    let kind = match error {
+        TicketDbWorkError::Database(error) => database_error_kind(error),
+        TicketDbWorkError::Deadline => "deadline",
+        TicketDbWorkError::Cancelled => "cancelled",
+        TicketDbWorkError::Capacity => "capacity",
+        TicketDbWorkError::Unsettled => "unsettled",
+        TicketDbWorkError::ChildStopped => "child_stopped",
+        TicketDbWorkError::Panicked => "panicked",
+    };
+    tracing::warn!(operation, kind, "live ticket database work failed");
+    ticket_http_unavailable()
+}
+
+async fn await_ticket_http<T>(
+    deadline: OperationDeadline,
+    operation: impl std::future::Future<Output = ApiResult<T>>,
+) -> ApiResult<T> {
+    let remaining = deadline.remaining().ok_or_else(ticket_http_unavailable)?;
+    let result = tokio::time::timeout(remaining, operation)
+        .await
+        .map_err(|_| ticket_http_unavailable())?;
+    deadline.remaining().ok_or_else(ticket_http_unavailable)?;
+    result
+}
+
+async fn run_ticket_http_work<T: Send + 'static>(
+    registry: &TicketDbWorkRegistry,
+    pool: &PgPool,
+    deadline: OperationDeadline,
+    workflow: TicketWorkflow<ApiResult<T>>,
+) -> ApiResult<T> {
+    let (cancel, cancellation) = tokio::sync::watch::channel(false);
+    let mut guard = TicketWorkCancellationGuard(Some(cancel));
+    let work = registry
+        .spawn(pool.clone(), deadline, cancellation, workflow)
+        .map_err(|error| ticket_work_unavailable(&error, "live_ticket_http"))?;
+    let remaining = deadline.remaining().ok_or_else(ticket_http_unavailable)?;
+    let result = tokio::time::timeout(remaining, work.outcome())
+        .await
+        .map_err(|_| ticket_http_unavailable())?;
+    guard.disarm();
+    deadline.remaining().ok_or_else(ticket_http_unavailable)?;
+    result.map_err(|error| ticket_work_unavailable(&error, "live_ticket_http"))?
+}
+
+async fn refuse_ticket_http<T>(
+    scope: &mut ExecutionScope,
+    error: ApiError,
+) -> Result<ApiResult<T>, TicketDbWorkError> {
+    scope.stage().await?.execute("ROLLBACK").await?;
+    scope.settled();
+    Ok(Err(error))
+}
+
+async fn consume_live_ticket(
+    pool: &PgPool,
+    session_id: [u8; 16],
+    secret: [u8; 32],
+) -> ApiResult<ConsumedLiveTicket> {
+    consume_live_ticket_owned(
+        &TicketDbWorkRegistry::new(),
+        pool,
+        OperationDeadline::after(LIVE_TICKET_HTTP_OPERATION_BUDGET),
+        session_id,
+        secret,
+    )
+    .await
+}
+
+async fn consume_live_ticket_owned(
+    registry: &TicketDbWorkRegistry,
+    pool: &PgPool,
+    deadline: OperationDeadline,
+    session_id: [u8; 16],
+    secret: [u8; 32],
+) -> ApiResult<ConsumedLiveTicket> {
+    let digest = Sha256::digest(secret).to_vec();
+    let session_hash = Sha256::digest(session_id).to_vec();
+    let workflow: TicketWorkflow<ApiResult<ConsumedLiveTicket>> = Box::new(move |scope| {
+        Box::pin(async move {
+            let invalid = || ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid");
+            scope.stage().await?.execute("BEGIN").await?;
+            scope
+                .stage()
+                .await?
+                .execute("SET LOCAL lock_timeout='60s'")
+                .await?;
+            scope
+                .stage()
+                .await?
+                .execute("SET LOCAL statement_timeout='60s'")
+                .await?;
+            let vault: Option<Uuid> =
+                sqlx::query_scalar("SELECT vault_id FROM community_resolve_live_ticket_vault($1)")
+                    .bind(&digest)
+                    .fetch_optional(scope.stage().await?)
+                    .await?;
+            let Some(vault) = vault else {
+                return refuse_ticket_http(scope, invalid()).await;
+            };
+            sqlx::query("SELECT set_config('peppy.vault_id',$1,true)")
+                .bind(vault.to_string())
+                .execute(scope.stage().await?)
+                .await?;
+            let device: Option<Uuid> = sqlx::query_scalar(
+                "SELECT device_id FROM live_tickets WHERE ticket_digest=$1 AND vault_id=$2",
+            )
+            .bind(&digest)
+            .bind(vault)
+            .fetch_optional(scope.stage().await?)
+            .await?;
+            let Some(device) = device else {
+                return refuse_ticket_http(scope, invalid()).await;
+            };
+            // Reject immutable/committed invalidity before capacity can mask it. The
+            // locked checks below remain authoritative after the device permit is held.
+            let valid_before_capacity: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM devices d JOIN device_credentials c ON c.vault_id=d.vault_id AND c.device_id=d.device_id JOIN live_ticket_sessions s ON s.vault_id=d.vault_id AND s.device_id=d.device_id JOIN live_tickets t ON t.vault_id=s.vault_id AND t.device_id=s.device_id AND t.session_id_hash=s.session_id_hash AND t.session_incarnation=s.session_incarnation WHERE d.vault_id=$1 AND d.device_id=$2 AND d.revoked_at IS NULL AND c.revoked_at IS NULL AND s.session_id_hash=$3 AND s.state='open' AND s.lease_until>clock_timestamp() AND t.ticket_digest=$4 AND t.consumed_at IS NULL AND t.expires_at>clock_timestamp())")
+                .bind(vault).bind(device).bind(&session_hash).bind(&digest)
+                .fetch_one(scope.stage().await?).await?;
+            if !valid_before_capacity {
+                return refuse_ticket_http(scope, invalid()).await;
+            }
+            scope
+                .claim_device(TenantDevice {
+                    vault_id: vault,
+                    device_id: device,
+                })
+                .await?;
+            let principal = sqlx::query("SELECT d.role,c.token_digest FROM devices d JOIN device_credentials c ON c.vault_id=d.vault_id AND c.device_id=d.device_id WHERE d.vault_id=$1 AND d.device_id=$2 AND d.revoked_at IS NULL AND c.revoked_at IS NULL FOR UPDATE OF d")
+                .bind(vault).bind(device).fetch_optional(scope.stage().await?).await?;
+            let Some(principal) = principal else {
+                return refuse_ticket_http(scope, invalid()).await;
+            };
+            let session: Option<(String, i64, Option<i64>)> = sqlx::query_as("SELECT state,session_incarnation,active_connection_id FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 FOR UPDATE")
+                .bind(vault).bind(device).bind(&session_hash)
+                .fetch_optional(scope.stage().await?).await?;
+            let Some((state, session_incarnation, previous_connection)) = session else {
+                return refuse_ticket_http(scope, invalid()).await;
+            };
+            let ticket: Option<(i64, bool)> = sqlx::query_as("SELECT session_incarnation,consumed_at IS NULL FROM live_tickets WHERE ticket_digest=$1 AND vault_id=$2 AND device_id=$3 AND session_id_hash=$4 FOR UPDATE")
+                .bind(&digest).bind(vault).bind(device).bind(&session_hash)
+                .fetch_optional(scope.stage().await?).await?;
+            let Some((ticket_incarnation, unconsumed)) = ticket else {
+                return refuse_ticket_http(scope, invalid()).await;
+            };
+            let sample_started = std::time::Instant::now();
+            let accepted_at: String = sqlx::query_scalar("SELECT clock_timestamp()::text")
+                .fetch_one(scope.stage().await?)
+                .await?;
+            let sample_finished = std::time::Instant::now();
+            debug_assert!(sample_finished >= sample_started);
+            if state != "open" || ticket_incarnation != session_incarnation || !unconsumed {
+                return refuse_ticket_http(scope, invalid()).await;
+            }
+            let live_at_acceptance: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM live_ticket_sessions s JOIN live_tickets t ON t.vault_id=s.vault_id AND t.device_id=s.device_id AND t.session_id_hash=s.session_id_hash AND t.session_incarnation=s.session_incarnation WHERE s.vault_id=$1 AND s.device_id=$2 AND s.session_id_hash=$3 AND t.ticket_digest=$4 AND s.session_incarnation=$5 AND s.state='open' AND s.lease_until>$6::timestamptz AND t.consumed_at IS NULL AND t.expires_at>$6::timestamptz)")
+                .bind(vault).bind(device).bind(&session_hash).bind(&digest)
+                .bind(session_incarnation).bind(&accepted_at)
+                .fetch_one(scope.stage().await?).await?;
+            if !live_at_acceptance {
+                return refuse_ticket_http(scope, invalid()).await;
+            }
+            let connection_id = match crate::live_ticket_authority::allocate_connection_id(
+                scope.stage().await?,
+                vault,
+                device,
+            )
+            .await
+            {
+                Ok(connection_id) => connection_id,
+                Err(crate::live_ticket_authority::AllocationError::Exhausted) => {
+                    return refuse_ticket_http(scope, invalid()).await;
+                }
+                Err(crate::live_ticket_authority::AllocationError::Database(error)) => {
+                    return Err(error.into());
+                }
+            };
+            let consumed: Option<i32> = sqlx::query_scalar("UPDATE live_tickets SET consumed_at=$5::timestamptz WHERE ticket_digest=$1 AND vault_id=$2 AND device_id=$3 AND session_id_hash=$4 AND session_incarnation=$6 AND consumed_at IS NULL AND expires_at>$5::timestamptz RETURNING 1")
+                .bind(&digest).bind(vault).bind(device).bind(&session_hash)
+                .bind(&accepted_at).bind(session_incarnation)
+                .fetch_optional(scope.stage().await?).await?;
+            if consumed.is_none() {
+                return refuse_ticket_http(scope, invalid()).await;
+            }
+            let updated = sqlx::query("UPDATE live_ticket_sessions SET active_connection_id=$5,lease_until=$6::timestamptz+interval '90 seconds' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND session_incarnation=$4 AND state='open' AND lease_until>$6::timestamptz")
+                .bind(vault).bind(device).bind(&session_hash).bind(session_incarnation)
+                .bind(connection_id).bind(&accepted_at)
+                .execute(scope.stage().await?).await?;
+            if updated.rows_affected() != 1 {
+                return refuse_ticket_http(scope, invalid()).await;
+            }
+            scope.stage().await?.execute("COMMIT").await?;
+            scope.settled();
+            Ok(Ok(ConsumedLiveTicket {
+                principal: Principal {
+                    vault,
+                    device,
+                    role: principal.get("role"),
+                    token_digest: principal.get("token_digest"),
+                },
+                session_id,
+                session_incarnation,
+                connection_id,
+                replaced: previous_connection.map(|connection| {
+                    crate::live::LiveTicketIdentity::new(
+                        session_id,
+                        session_incarnation,
+                        connection,
+                    )
+                }),
+            }))
+        })
+    });
+    run_ticket_http_work(registry, pool, deadline, workflow).await
+}
+
+#[doc(hidden)]
+pub async fn __test_consume_live_ticket(
+    pool: &PgPool,
+    session_id: [u8; 16],
+    secret: [u8; 32],
+) -> Result<crate::ConsumedTicketIds, &'static str> {
+    let consumed = consume_live_ticket(pool, session_id, secret)
+        .await
+        .map_err(|_| "live_ticket_invalid")?;
+    Ok(crate::ConsumedTicketIds {
+        vault_id: consumed.principal.vault,
+        device_id: consumed.principal.device,
+        session_id,
+    })
+}
+
+async fn begin_ticket_http_device(
+    scope: &mut ExecutionScope,
+    p: &Principal,
+) -> Result<bool, TicketDbWorkError> {
+    scope
+        .claim_device(TenantDevice {
+            vault_id: p.vault,
+            device_id: p.device,
+        })
+        .await?;
+    scope.stage().await?.execute("BEGIN").await?;
+    sqlx::query("SELECT set_config('peppy.vault_id',$1,true)")
+        .bind(p.vault.to_string())
+        .execute(scope.stage().await?)
+        .await?;
+    scope
+        .stage()
+        .await?
+        .execute("SET LOCAL lock_timeout='60s'")
+        .await?;
+    scope
+        .stage()
+        .await?
+        .execute("SET LOCAL statement_timeout='60s'")
+        .await?;
+    let locked: Option<i32> =
+        sqlx::query_scalar("SELECT 1 FROM devices WHERE vault_id=$1 AND device_id=$2 FOR UPDATE")
+            .bind(p.vault)
+            .bind(p.device)
+            .fetch_optional(scope.stage().await?)
+            .await?;
+    if locked.is_none() {
+        return Ok(false);
+    }
+    let role: Option<String> = sqlx::query_scalar("SELECT d.role FROM device_credentials c JOIN devices d ON d.vault_id=c.vault_id AND d.device_id=c.device_id WHERE c.token_digest=$1 AND c.vault_id=$2 AND c.device_id=$3 AND c.revoked_at IS NULL AND d.revoked_at IS NULL")
+        .bind(&p.token_digest).bind(p.vault).bind(p.device)
+        .fetch_optional(scope.stage().await?).await?;
+    Ok(role.as_deref() == Some(p.role.as_str()))
+}
+
+async fn commit_ticket_http(scope: &mut ExecutionScope) -> Result<(), TicketDbWorkError> {
+    scope.stage().await?.execute("COMMIT").await?;
+    scope.settled();
+    Ok(())
+}
+
+async fn terminalize_ticket_http(
+    scope: &mut ExecutionScope,
+    p: &Principal,
+    session: &[u8],
+    incarnation: i64,
+    accepted_at: &str,
+    state: &str,
+) -> Result<(), TicketDbWorkError> {
+    sqlx::query("UPDATE live_ticket_sessions SET state=$6,closed_at=$5::timestamptz,lease_until=NULL WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND session_incarnation=$4 AND state='open'")
+        .bind(p.vault).bind(p.device).bind(session).bind(incarnation).bind(accepted_at).bind(state)
+        .execute(scope.stage().await?).await?;
+    sqlx::query("DELETE FROM live_tickets WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND session_incarnation=$4 AND consumed_at IS NULL")
+        .bind(p.vault).bind(p.device).bind(session).bind(incarnation)
+        .execute(scope.stage().await?).await?;
+    Ok(())
+}
+
+async fn issue_live_ticket(
+    State(state): State<ApiState>,
+    PeerAddress(peer): PeerAddress,
+    headers: HeaderMap,
+    Json(request): Json<LiveTicketRequest>,
+) -> ApiResult<(StatusCode, Json<LiveTicketResponse>)> {
+    let deadline = ticket_http_deadline(&state);
+    if state.live_trusted_origin.is_none() {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "live_ticket_unsupported",
+        ));
+    }
+    let ready = if cfg!(test) {
+        *state.live_readiness.borrow()
+    } else {
+        state.live_backend.is_ready()
+    };
+    if !ready {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "live_unavailable",
+        ));
+    }
+    let session = live_ticket_session_hash(&request.session_id)?;
+    let lifetime = requested_lifetime_handle(&request.lifetime_handle)?;
+    let p = await_ticket_http(
+        deadline,
+        authenticated_without_presence(&state, &headers, Operation::Sync),
+    )
+    .await?;
+    admit_ticket_http_attempt(&state, &p, peer)?;
+    libsodium_rs::ensure_init().map_err(|_| ticket_http_unavailable())?;
+    let mut ticket = [0_u8; 32];
+    libsodium_rs::random::fill_bytes(&mut ticket);
+    let principal = p.clone();
+    let workflow: TicketWorkflow<ApiResult<LiveTicketResponse>> = Box::new(move |scope| {
+        Box::pin(async move {
+            issue_ticket_http_owned(scope, &principal, &session, lifetime, ticket).await
+        })
+    });
+    let response =
+        run_ticket_http_work(&state.live_ticket_work, &state.db, deadline, workflow).await?;
+    await_ticket_http(deadline, async {
+        touch_authenticated_presence(&state, &p).await;
+        Ok(())
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+async fn issue_ticket_http_owned(
+    scope: &mut ExecutionScope,
+    p: &Principal,
+    session: &[u8],
+    lifetime: Option<i64>,
+    ticket: [u8; 32],
+) -> Result<ApiResult<LiveTicketResponse>, TicketDbWorkError> {
+    if !begin_ticket_http_device(scope, p).await? {
+        return refuse_ticket_http(scope, ApiError(StatusCode::UNAUTHORIZED, "invalid_bearer"))
+            .await;
+    }
+    let current: Option<(String, i64)> = sqlx::query_as("SELECT state,session_incarnation FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 FOR UPDATE")
+        .bind(p.vault).bind(p.device).bind(session).fetch_optional(scope.stage().await?).await?;
+    let existing = match (lifetime, current) {
+        (Some(handle), Some((state, incarnation))) if state == "open" && handle == incarnation => {
+            Some(incarnation)
+        }
+        (None, None) => None,
+        _ => return refuse_ticket_http(scope, lifetime_refused()).await,
+    };
+    let replaceable: Option<(Vec<u8>, i64)> = if existing.is_none() {
+        let open: Option<(Vec<u8>, i64, Option<i64>)> = sqlx::query_as("SELECT session_id_hash,session_incarnation,active_connection_id FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND state='open' FOR UPDATE")
+            .bind(p.vault).bind(p.device).fetch_optional(scope.stage().await?).await?;
+        match open {
+            Some((session, incarnation, None)) => Some((session, incarnation)),
+            Some(_) => return refuse_ticket_http(scope, ticket_rate_limited()).await,
+            None => None,
+        }
+    } else {
+        None
+    };
+    let accepted_at: String = sqlx::query_scalar("SELECT clock_timestamp()::text")
+        .fetch_one(scope.stage().await?)
+        .await?;
+    if let Some(incarnation) = existing {
+        let active: bool = sqlx::query_scalar("SELECT lease_until>$5::timestamptz FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND session_incarnation=$4")
+            .bind(p.vault).bind(p.device).bind(session).bind(incarnation).bind(&accepted_at)
+            .fetch_one(scope.stage().await?).await?;
+        if !active {
+            terminalize_ticket_http(scope, p, session, incarnation, &accepted_at, "terminal")
+                .await?;
+            commit_ticket_http(scope).await?;
+            return Ok(Err(lifetime_refused()));
+        }
+    } else {
+        let retained: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2",
+        )
+        .bind(p.vault)
+        .bind(p.device)
+        .fetch_one(scope.stage().await?)
+        .await?;
+        if retained >= 32 {
+            return refuse_ticket_http(scope, ticket_rate_limited()).await;
+        }
+    }
+    let (issued, created): (i64, i64) = sqlx::query_as("SELECT count(*) FILTER (WHERE event_kind='ticket_issue'),count(*) FILTER (WHERE event_kind='session_create') FROM live_ticket_admission_events WHERE vault_id=$1 AND device_id=$2 AND created_at>$3::timestamptz-interval '60 seconds'")
+        .bind(p.vault).bind(p.device).bind(&accepted_at).fetch_one(scope.stage().await?).await?;
+    if issued >= LIVE_TICKET_SESSION_LIMIT
+        || (existing.is_none() && created >= LIVE_TICKET_SESSION_LIMIT)
+    {
+        return refuse_ticket_http(scope, ticket_rate_limited()).await;
+    }
+    let replaced_hash = replaceable.as_ref().map(|(hash, _)| hash.as_slice());
+    let unused: i64 = sqlx::query_scalar("SELECT count(*) FROM live_tickets WHERE vault_id=$1 AND device_id=$2 AND consumed_at IS NULL AND expires_at>$3::timestamptz AND ($4::bytea IS NULL OR session_id_hash<>$4)")
+        .bind(p.vault).bind(p.device).bind(&accepted_at).bind(replaced_hash)
+        .fetch_one(scope.stage().await?).await?;
+    if unused >= 2 {
+        return refuse_ticket_http(scope, ticket_rate_limited()).await;
+    }
+    let incarnation = if let Some(incarnation) = existing {
+        incarnation
+    } else {
+        let incarnation = match crate::live_ticket_authority::allocate_session_incarnation(
+            scope.stage().await?,
+            p.vault,
+            p.device,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(crate::live_ticket_authority::AllocationError::Exhausted) => {
+                return refuse_ticket_http(scope, lifetime_refused()).await;
+            }
+            Err(crate::live_ticket_authority::AllocationError::Database(error)) => {
+                return Err(error.into());
+            }
+        };
+        if let Some((old_session, old_incarnation)) = replaceable {
+            terminalize_ticket_http(
+                scope,
+                p,
+                &old_session,
+                old_incarnation,
+                &accepted_at,
+                "terminal",
+            )
+            .await?;
+        }
+        sqlx::query("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,session_incarnation,state,created_at,lease_until) VALUES($1,$2,$3,$4,'open',$5::timestamptz,$5::timestamptz+interval '90 seconds')")
+            .bind(p.vault).bind(p.device).bind(session).bind(incarnation).bind(&accepted_at)
+            .execute(scope.stage().await?).await?;
+        incarnation
+    };
+    sqlx::query("UPDATE live_ticket_sessions SET lease_until=$5::timestamptz+interval '90 seconds' WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND session_incarnation=$4 AND state='open'")
+        .bind(p.vault).bind(p.device).bind(session).bind(incarnation).bind(&accepted_at)
+        .execute(scope.stage().await?).await?;
+    let expires_at_ms: i64 = sqlx::query_scalar("INSERT INTO live_tickets(ticket_digest,vault_id,device_id,session_id_hash,session_incarnation,issued_at,expires_at) VALUES($1,$2,$3,$4,$5,$6::timestamptz,$6::timestamptz+interval '30 seconds') RETURNING (extract(epoch FROM expires_at)*1000)::bigint")
+        .bind(Sha256::digest(ticket).as_slice()).bind(p.vault).bind(p.device).bind(session).bind(incarnation).bind(&accepted_at)
+        .fetch_one(scope.stage().await?).await?;
+    sqlx::query("INSERT INTO live_ticket_admission_events(event_id,vault_id,device_id,event_kind,created_at) VALUES($1,$2,$3,'ticket_issue',$4::timestamptz)")
+        .bind(Uuid::new_v4()).bind(p.vault).bind(p.device).bind(&accepted_at)
+        .execute(scope.stage().await?).await?;
+    if existing.is_none() {
+        sqlx::query("INSERT INTO live_ticket_admission_events(event_id,vault_id,device_id,event_kind,created_at) VALUES($1,$2,$3,'session_create',$4::timestamptz)")
+            .bind(Uuid::new_v4()).bind(p.vault).bind(p.device).bind(&accepted_at)
+            .execute(scope.stage().await?).await?;
+    }
+    commit_ticket_http(scope).await?;
+    Ok(Ok(LiveTicketResponse {
+        ticket: URL_SAFE_NO_PAD.encode(ticket),
+        expires_at_ms,
+        lifetime_handle: encode_live_ticket_lifetime_handle(incarnation),
+    }))
+}
+
+fn ticket_rate_limited() -> ApiError {
+    ApiError(StatusCode::TOO_MANY_REQUESTS, "live_ticket_rate_limited")
+}
+
+fn admit_ticket_http_attempt(
+    state: &ApiState,
+    p: &Principal,
+    peer: Option<IpAddr>,
+) -> ApiResult<()> {
+    if state
+        .live_ticket_http_limiter
+        .lock()
+        .expect("ticket HTTP limiter lock poisoned")
+        .allow(DeviceId(p.device), peer)
+    {
+        Ok(())
+    } else {
+        Err(ticket_rate_limited())
+    }
+}
+
+async fn close_live_ticket_session(
+    State(state): State<ApiState>,
+    PeerAddress(peer): PeerAddress,
+    headers: HeaderMap,
+    Json(request): Json<LiveTicketRequest>,
+) -> ApiResult<StatusCode> {
+    let deadline = ticket_http_deadline(&state);
+    let session = live_ticket_session_hash(&request.session_id)?;
+    let incarnation = required_lifetime_handle(&request.lifetime_handle)?;
+    let p = await_ticket_http(
+        deadline,
+        authenticated_without_presence(&state, &headers, Operation::Sync),
+    )
+    .await?;
+    admit_ticket_http_attempt(&state, &p, peer)?;
+    let session_id: [u8; 16] = URL_SAFE_NO_PAD
+        .decode(&request.session_id)
+        .expect("live_ticket_session_hash validated session ID")
+        .try_into()
+        .expect("live_ticket_session_hash validated session length");
+    let principal = p.clone();
+    let workflow: TicketWorkflow<ApiResult<Option<crate::live::LiveTicketIdentity>>> = Box::new(
+        move |scope| {
+            Box::pin(async move {
+                let p = &principal;
+                if !begin_ticket_http_device(scope, p).await? {
+                    return refuse_ticket_http(
+                        scope,
+                        ApiError(StatusCode::UNAUTHORIZED, "invalid_bearer"),
+                    )
+                    .await;
+                }
+                let current: Option<(String, i64, Option<i64>)> = sqlx::query_as("SELECT state,session_incarnation,active_connection_id FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 FOR UPDATE")
+                .bind(p.vault).bind(p.device).bind(&session).fetch_optional(scope.stage().await?).await?;
+                if !matches!(current, Some((ref state, current_incarnation, _)) if state == "open" && current_incarnation == incarnation)
+                {
+                    return refuse_ticket_http(scope, lifetime_refused()).await;
+                }
+                let accepted_at: String = sqlx::query_scalar("SELECT clock_timestamp()::text")
+                    .fetch_one(scope.stage().await?)
+                    .await?;
+                terminalize_ticket_http(scope, p, &session, incarnation, &accepted_at, "closed")
+                    .await?;
+                let ticket = current.and_then(|(_, _, connection_id)| {
+                    connection_id.map(|connection_id| {
+                        crate::live::LiveTicketIdentity::new(session_id, incarnation, connection_id)
+                    })
+                });
+                commit_ticket_http(scope).await?;
+                Ok(Ok(ticket))
+            })
+        },
+    );
+    let ticket =
+        run_ticket_http_work(&state.live_ticket_work, &state.db, deadline, workflow).await?;
+    if let Some(ticket) = ticket {
+        publish_committed_ticket_control(
+            &state,
+            &p,
+            ticket,
+            crate::live::LiveControlKind::Close,
+            deadline,
+        )
+        .await;
+    }
+    await_ticket_http(deadline, async {
+        touch_authenticated_presence(&state, &p).await;
+        Ok(())
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn publish_committed_ticket_control(
+    state: &ApiState,
+    p: &Principal,
+    ticket: crate::live::LiveTicketIdentity,
+    kind: crate::live::LiveControlKind,
+    deadline: OperationDeadline,
+) {
+    let Some(remaining) = deadline.remaining() else {
+        return;
+    };
+    state
+        .live_hub
+        .cancel_ticket_exact(VaultId(p.vault), DeviceId(p.device), ticket);
+    #[cfg(test)]
+    let backend = state
+        .live_backend_override
+        .clone()
+        .unwrap_or_else(|| state.live_backend.clone());
+    #[cfg(not(test))]
+    let backend: Arc<dyn crate::live::LiveBackend> = state.live_backend.clone();
+    // A missed control is repaired by exact durable revalidation, never a retry
+    // of the committed authority mutation.
+    let _ = tokio::time::timeout(
+        remaining.min(Duration::from_millis(250)),
+        backend.publish_control(VaultId(p.vault), DeviceId(p.device), ticket, kind),
+    )
+    .await;
+}
+
+async fn live_websocket(
+    State(state): State<ApiState>,
+    PeerAddress(peer): PeerAddress,
+    headers: HeaderMap,
+    lease: Option<Extension<crate::serving::ConnectionLease>>,
+    shutdown: Option<Extension<tokio::sync::watch::Receiver<bool>>>,
+    upgrade: WebSocketUpgrade,
+) -> ApiResult<Response> {
+    let http_deadline = ticket_http_deadline(&state);
+    let mode = match crate::live_ticket_upgrade::classify_live_upgrade(
+        &headers,
+        state.live_trusted_origin.as_ref(),
+    ) {
+        Err(crate::live_ticket_upgrade::UpgradeRejection::ProtocolInvalid)
+            if !headers.contains_key("authorization")
+                && !headers.contains_key("sec-websocket-protocol") =>
+        {
+            authenticated(&state, &headers, Operation::Sync).await?;
+            unreachable!("missing credentials cannot authenticate")
+        }
+        Ok(mode) => mode,
+        Err(rejection) => {
+            return Err({
+                let status = match rejection {
+                    crate::live_ticket_upgrade::UpgradeRejection::ProtocolInvalid
+                    | crate::live_ticket_upgrade::UpgradeRejection::AuthModeMixed => {
+                        StatusCode::BAD_REQUEST
+                    }
+                    crate::live_ticket_upgrade::UpgradeRejection::OriginForbidden => {
+                        StatusCode::FORBIDDEN
+                    }
+                    crate::live_ticket_upgrade::UpgradeRejection::Unsupported => {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    }
+                };
+                ApiError(status, rejection.code())
+            });
+        }
+    };
+    let membership_capable = membership_capability(&headers, &mode)?;
+    let (principal, ticket, protocol) = match mode {
+        crate::live_ticket_upgrade::UpgradeMode::Bearer => (
+            authenticated(&state, &headers, Operation::Sync).await?,
+            None,
+            None,
+        ),
+        crate::live_ticket_upgrade::UpgradeMode::Ticket {
+            session_id,
+            secret,
+            protocol_token,
+        } => {
+            let consumed = consume_live_ticket_owned(
+                &state.live_ticket_work,
+                &state.db,
+                http_deadline,
+                session_id,
+                secret,
+            )
+            .await?;
+            if let Some(replaced) = consumed.replaced {
+                publish_committed_ticket_control(
+                    &state,
+                    &consumed.principal,
+                    replaced,
+                    crate::live::LiveControlKind::Replace,
+                    http_deadline,
+                )
+                .await;
+            }
+            await_ticket_http(http_deadline, async {
+                let active = still_active(&state, &consumed.principal)
+                    .await
+                    .map_err(|error| database_unavailable(&error, "live_ticket_recheck"))?;
+                if !active {
+                    return Err(ApiError(StatusCode::UNAUTHORIZED, "live_ticket_invalid"));
+                }
+                authorize(&state, &consumed.principal, Operation::Sync).await
+            })
+            .await?;
+            (
+                consumed.principal,
+                Some(crate::live::LiveTicketIdentity::new(
+                    consumed.session_id,
+                    consumed.session_incarnation,
+                    consumed.connection_id,
+                )),
+                Some(protocol_token),
+            )
+        }
+    };
+    #[cfg(test)]
+    let backend = state
+        .live_backend_override
+        .clone()
+        .unwrap_or_else(|| state.live_backend.clone());
+    #[cfg(not(test))]
+    let backend: Arc<dyn crate::live::LiveBackend> = state.live_backend.clone();
+    let ready = if cfg!(test) {
+        *state.live_readiness.borrow()
+    } else {
+        state.live_backend.is_ready()
+    };
+    if !ready {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "live_unavailable",
+        ));
+    }
+    if !state
+        .live_upgrade_limiter
+        .lock()
+        .expect("live upgrade limiter lock poisoned")
+        .allow(DeviceId(principal.device), peer)
+    {
+        return Err(ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "live_upgrade_rate_limited",
+        ));
+    }
+    let readiness = state.live_readiness.clone();
+    let lease = lease.map(|Extension(lease)| lease);
+    let shutdown = shutdown.map(|Extension(shutdown)| shutdown);
+    let upgrade = upgrade.max_message_size(8_192).max_frame_size(8_192);
+    let upgrade = match protocol {
+        Some(protocol) => upgrade.protocols([protocol]),
+        None => upgrade,
+    };
+    if ticket.is_some() {
+        http_deadline
+            .remaining()
+            .ok_or_else(ticket_http_unavailable)?;
+    }
+    Ok(upgrade
+        .on_upgrade(move |socket| {
+            live_session(
+                socket,
+                state,
+                principal,
+                peer,
+                backend,
+                readiness,
+                LiveSessionLifetime {
+                    lease,
+                    shutdown,
+                    ticket,
+                    membership_capable,
+                },
+            )
+        })
+        .into_response())
+}
+
+const MEMBERSHIP_CAPABILITY_HEADER: &str = "x-peppy-live-capabilities";
+const MEMBERSHIP_CAPABILITY: &str = "membership-version-v1";
+
+fn membership_capability(
+    headers: &HeaderMap,
+    mode: &crate::live_ticket_upgrade::UpgradeMode,
+) -> ApiResult<bool> {
+    let values: Vec<_> = headers
+        .get_all(MEMBERSHIP_CAPABILITY_HEADER)
+        .iter()
+        .collect();
+    if values.is_empty() {
+        return Ok(false);
+    }
+    if !matches!(mode, crate::live_ticket_upgrade::UpgradeMode::Bearer)
+        || values.len() != 1
+        || values[0].to_str().ok() != Some(MEMBERSHIP_CAPABILITY)
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "live_membership_capability_invalid",
+        ));
+    }
+    Ok(true)
+}
+
+#[derive(Clone, Copy)]
+enum MembershipSnapshotFailure {
+    PolicyDenied,
+    InactiveCredential,
+    Database(&'static str),
+    InvalidSnapshot,
+    Deadline,
+    Cancelled,
+    Unavailable,
+}
+
+impl MembershipSnapshotFailure {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::PolicyDenied => "policy_denied",
+            Self::InactiveCredential => "inactive_credential",
+            Self::Database(kind) => kind,
+            Self::InvalidSnapshot => "invalid_snapshot",
+            Self::Deadline => "deadline",
+            Self::Cancelled => "cancelled",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+fn membership_database_failure(error: &sqlx::Error) -> MembershipSnapshotFailure {
+    MembershipSnapshotFailure::Database(database_error_kind(error))
+}
+
+fn record_membership_snapshot_failure(failure: MembershipSnapshotFailure) {
+    tracing::warn!(
+        operation = "live_membership_snapshot",
+        kind = failure.kind(),
+        "live membership snapshot failed"
+    );
+}
+
+async fn membership_snapshot(
+    state: &ApiState,
+    principal: &Principal,
+    connection_id: &str,
+) -> Result<MembershipBootstrapV1, MembershipSnapshotFailure> {
+    authorize(state, principal, Operation::Sync)
+        .await
+        .map_err(|_| MembershipSnapshotFailure::PolicyDenied)?;
+    let mut transaction = scope::begin_read_only_repeatable(&state.db, principal.vault)
+        .await
+        .map_err(|error| membership_database_failure(&error))?;
+    let active: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM devices d JOIN device_credentials c ON c.vault_id=d.vault_id AND c.device_id=d.device_id WHERE d.vault_id=$1 AND d.device_id=$2 AND c.token_digest=$3 AND d.revoked_at IS NULL AND c.revoked_at IS NULL",
+    )
+    .bind(principal.vault)
+    .bind(principal.device)
+    .bind(&principal.token_digest)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|error| membership_database_failure(&error))?;
+    active.ok_or(MembershipSnapshotFailure::InactiveCredential)?;
+    let version: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(principal.vault)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|error| membership_database_failure(&error))?
+            .ok_or(MembershipSnapshotFailure::InvalidSnapshot)?;
+    #[cfg(test)]
+    if let Some(gate) = &state.live_ticket_test_hooks.membership_after_version {
+        gate.enter_after(1).await;
+    }
+    let rows = sqlx::query("SELECT device_id, revoked_at IS NOT NULL AS revoked, key_epoch::bigint AS key_epoch, role::text AS role FROM devices WHERE vault_id=$1 ORDER BY device_id")
+        .bind(principal.vault)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|error| membership_database_failure(&error))?;
+    let mut roster = Vec::with_capacity(rows.len());
+    for row in rows {
+        let role = match row
+            .try_get::<String, _>("role")
+            .map_err(|_| MembershipSnapshotFailure::InvalidSnapshot)?
+            .as_str()
+        {
+            "owner" => MembershipRoleV1::Owner,
+            "gateway" => MembershipRoleV1::Gateway,
+            "device" => MembershipRoleV1::Device,
+            _ => return Err(MembershipSnapshotFailure::InvalidSnapshot),
+        };
+        let key_epoch = u32::try_from(
+            row.try_get::<i64, _>("key_epoch")
+                .map_err(|_| MembershipSnapshotFailure::InvalidSnapshot)?,
+        )
+        .map_err(|_| MembershipSnapshotFailure::InvalidSnapshot)?;
+        if key_epoch == 0 {
+            return Err(MembershipSnapshotFailure::InvalidSnapshot);
+        }
+        roster.push(MembershipDeviceV1 {
+            device_id: DeviceId(
+                row.try_get("device_id")
+                    .map_err(|_| MembershipSnapshotFailure::InvalidSnapshot)?,
+            ),
+            revoked: row
+                .try_get("revoked")
+                .map_err(|_| MembershipSnapshotFailure::InvalidSnapshot)?,
+            key_epoch,
+            role,
+        });
+    }
+    if roster.len() > peppy_protocol::MAX_MEMBERSHIP_ROSTER_ENTRIES {
+        return Err(MembershipSnapshotFailure::InvalidSnapshot);
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|error| membership_database_failure(&error))?;
+    Ok(MembershipBootstrapV1 {
+        r#type: "membership_bootstrap".into(),
+        version: MEMBERSHIP_PROTOCOL_VERSION,
+        connection_id: connection_id.into(),
+        membership_version: MembershipVersionV1::parse(&version.to_string())
+            .map_err(|_| MembershipSnapshotFailure::InvalidSnapshot)?,
+        roster,
+    })
+}
+
+async fn membership_snapshot_wait(
+    state: &ApiState,
+    principal: &Principal,
+    connection_id: &str,
+    deadline: OperationDeadline,
+    cancellation: &mut tokio::sync::watch::Receiver<bool>,
+    readiness: &mut tokio::sync::watch::Receiver<bool>,
+    shutdown: &mut Option<tokio::sync::watch::Receiver<bool>>,
+) -> Option<MembershipBootstrapV1> {
+    let result = if *cancellation.borrow_and_update()
+        || shutdown
+            .as_mut()
+            .is_some_and(|receiver| *receiver.borrow_and_update())
+    {
+        Err(MembershipSnapshotFailure::Cancelled)
+    } else if !*readiness.borrow_and_update() {
+        Err(MembershipSnapshotFailure::Unavailable)
+    } else if let Some(remaining) = deadline.remaining() {
+        tokio::select! {
+            biased;
+            _ = cancellation.changed() => Err(MembershipSnapshotFailure::Cancelled),
+            _ = wait_for_shutdown(shutdown) => Err(MembershipSnapshotFailure::Cancelled),
+            _ = readiness.changed() => Err(MembershipSnapshotFailure::Unavailable),
+            result = tokio::time::timeout(remaining, membership_snapshot(state, principal, connection_id)) => {
+                result.unwrap_or(Err(MembershipSnapshotFailure::Deadline))
+            },
+        }
+    } else {
+        Err(MembershipSnapshotFailure::Deadline)
+    };
+    match result {
+        Ok(snapshot) => Some(snapshot),
+        Err(failure) => {
+            record_membership_snapshot_failure(failure);
+            None
+        }
+    }
+}
+
+fn membership_control_shaped(text: &str) -> bool {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|value| value.get("type")?.as_str().map(str::to_owned))
+        .is_some_and(|kind| kind.starts_with("membership_"))
+}
+
+async fn live_session(
+    mut socket: WebSocket,
+    state: ApiState,
+    principal: Principal,
+    peer: Option<IpAddr>,
+    backend: Arc<dyn crate::live::LiveBackend>,
+    mut readiness: tokio::sync::watch::Receiver<bool>,
+    lifetime: LiveSessionLifetime,
+) {
+    let LiveSessionLifetime {
+        lease,
+        mut shutdown,
+        ticket,
+        membership_capable,
+    } = lifetime;
+    let operation_deadline = ticket.map(|_| live_ticket_operation_deadline(&state));
+    let registration = match ticket {
+        Some(ticket) => {
+            let deadline = operation_deadline.expect("ticket session has an operation deadline");
+            let snapshot = state
+                .live_hub
+                .ticket_snapshot(VaultId(principal.vault), DeviceId(principal.device));
+            match live_ticket_revalidate(
+                &state,
+                &principal,
+                ticket,
+                false,
+                deadline,
+                None,
+                &mut readiness,
+                &mut shutdown,
+            )
+            .await
+            {
+                LiveRevalidation::Authorized => {}
+                LiveRevalidation::Unauthorized => {
+                    live_close(&mut socket, 1008, "live_unauthorized").await;
+                    drop(lease);
+                    return;
+                }
+                LiveRevalidation::Unavailable => {
+                    live_close(&mut socket, 1011, "live_unavailable").await;
+                    drop(lease);
+                    return;
+                }
+                LiveRevalidation::Cancelled => {
+                    drop(lease);
+                    return;
+                }
+            }
+            if let Some(status) = live_ticket_after_validation_hook(
+                &state,
+                deadline,
+                None,
+                &mut readiness,
+                &mut shutdown,
+            )
+            .await
+            {
+                match status {
+                    LiveRevalidation::Unavailable => {
+                        live_close(&mut socket, 1011, "live_unavailable").await
+                    }
+                    LiveRevalidation::Unauthorized => {
+                        live_close(&mut socket, 1008, "live_unauthorized").await
+                    }
+                    LiveRevalidation::Cancelled => {}
+                    LiveRevalidation::Authorized => unreachable!(),
+                }
+                drop(lease);
+                return;
+            }
+            match state.live_hub.register_ticket_if_current(
+                VaultId(principal.vault),
+                DeviceId(principal.device),
+                snapshot,
+                ticket,
+            ) {
+                Ok(registration) => registration,
+                Err(crate::live::LiveTicketInstallRefusal::ChangedEpoch) => {
+                    let snapshot = state
+                        .live_hub
+                        .ticket_snapshot(VaultId(principal.vault), DeviceId(principal.device));
+                    match live_ticket_revalidate(
+                        &state,
+                        &principal,
+                        ticket,
+                        false,
+                        deadline,
+                        None,
+                        &mut readiness,
+                        &mut shutdown,
+                    )
+                    .await
+                    {
+                        LiveRevalidation::Authorized => {}
+                        LiveRevalidation::Unauthorized => {
+                            live_close(&mut socket, 1008, "live_unauthorized").await;
+                            drop(lease);
+                            return;
+                        }
+                        LiveRevalidation::Unavailable => {
+                            live_close(&mut socket, 1011, "live_unavailable").await;
+                            drop(lease);
+                            return;
+                        }
+                        LiveRevalidation::Cancelled => {
+                            drop(lease);
+                            return;
+                        }
+                    }
+                    if let Some(status) = live_ticket_after_validation_hook(
+                        &state,
+                        deadline,
+                        None,
+                        &mut readiness,
+                        &mut shutdown,
+                    )
+                    .await
+                    {
+                        if matches!(status, LiveRevalidation::Unavailable) {
+                            live_close(&mut socket, 1011, "live_unavailable").await;
+                        }
+                        drop(lease);
+                        return;
+                    }
+                    match state.live_hub.register_ticket_if_current(
+                        VaultId(principal.vault),
+                        DeviceId(principal.device),
+                        snapshot,
+                        ticket,
+                    ) {
+                        Ok(registration) => registration,
+                        Err(_) => {
+                            live_close(&mut socket, 1008, "live_unauthorized").await;
+                            drop(lease);
+                            return;
+                        }
+                    }
+                }
+                Err(crate::live::LiveTicketInstallRefusal::CurrentOrNewerConnection) => {
+                    live_close(&mut socket, 1008, "live_unauthorized").await;
+                    drop(lease);
+                    return;
+                }
+            }
+        }
+        None => state
+            .live_hub
+            .register(VaultId(principal.vault), DeviceId(principal.device)),
+    };
+    let generation = registration.generation;
+    live_session_inner(
+        socket,
+        LiveSession {
+            state: state.clone(),
+            principal: principal.clone(),
+            peer,
+            backend,
+            generation,
+            ticket,
+            operation_deadline,
+            outgoing: registration.receiver,
+            cancellation: registration.cancellation,
+            readiness,
+            shutdown,
+            membership_capable,
+        },
+    )
+    .await;
+    match ticket {
+        Some(ticket) => state.live_hub.cancel_ticket_exact(
+            VaultId(principal.vault),
+            DeviceId(principal.device),
+            ticket,
+        ),
+        None => state.live_hub.unregister(
+            VaultId(principal.vault),
+            DeviceId(principal.device),
+            generation,
+        ),
+    }
+    drop(lease);
+}
+
+async fn live_session_inner(mut socket: WebSocket, session: LiveSession) {
+    let LiveSession {
+        state,
+        principal,
+        peer,
+        backend,
+        generation,
+        ticket,
+        operation_deadline,
+        mut outgoing,
+        mut cancellation,
+        mut readiness,
+        mut shutdown,
+        membership_capable,
+    } = session;
+    let hello = match serde_json::to_string(&LiveHelloV2::new()) {
+        Ok(hello) => hello,
+        Err(_) => return live_close(&mut socket, 1011, "live_unavailable").await,
+    };
+    if !matches!(
+        live_send(
+            &mut socket,
+            Message::Text(hello.into()),
+            operation_deadline,
+            &mut cancellation,
+            &mut readiness,
+            &mut shutdown,
+        )
+        .await,
+        LiveWait::Complete
+    ) {
+        return;
+    }
+    let membership_connection_id =
+        membership_capable.then(|| URL_SAFE_NO_PAD.encode(Uuid::new_v4().as_bytes()));
+    if let Some(connection_id) = membership_connection_id.as_deref() {
+        let membership_deadline = live_ticket_operation_deadline(&state);
+        let Some(bootstrap) = membership_snapshot_wait(
+            &state,
+            &principal,
+            connection_id,
+            membership_deadline,
+            &mut cancellation,
+            &mut readiness,
+            &mut shutdown,
+        )
+        .await
+        else {
+            return live_close(&mut socket, 1011, "live_unavailable").await;
+        };
+        let Ok(bootstrap) = serde_json::to_string(&MembershipControlV1::Bootstrap(bootstrap))
+        else {
+            return live_close(&mut socket, 1011, "live_unavailable").await;
+        };
+        if !matches!(
+            live_send(
+                &mut socket,
+                Message::Text(bootstrap.into()),
+                Some(membership_deadline),
+                &mut cancellation,
+                &mut readiness,
+                &mut shutdown
+            )
+            .await,
+            LiveWait::Complete
+        ) {
+            return;
+        }
+    }
+    let recheck_interval = live_recheck_interval(&state);
+    let mut recheck = tokio::time::interval_at(
+        tokio::time::Instant::now() + recheck_interval,
+        recheck_interval,
+    );
+    let mut challenge: Option<Vec<u8>> = None;
+    loop {
+        tokio::select! {
+            _ = wait_for_shutdown(&mut shutdown) => return,
+            changed = cancellation.changed() => {
+                let _ = changed;
+                return;
+            }
+            changed = readiness.changed() => {
+                let _ = changed;
+                if !*readiness.borrow_and_update() {
+                    return live_close(&mut socket, 1011, "live_unavailable").await;
+                }
+            }
+            _ = recheck.tick() => {
+                let deadline = ticket.map(|_| live_ticket_recheck_operation_deadline(&state));
+                let revalidation = match ticket {
+                    Some(ticket) => live_ticket_revalidate(
+                        &state,
+                        &principal,
+                        ticket,
+                        true,
+                        deadline.expect("ticket check has an operation deadline"),
+                        Some(&mut cancellation),
+                        &mut readiness,
+                        &mut shutdown,
+                    ).await,
+                    None => live_revalidate(&state, &principal, &mut cancellation, &mut readiness).await,
+                };
+                match revalidation {
+                LiveRevalidation::Authorized => {
+                    if challenge.is_some() {
+                        return;
+                    }
+                    let token = Uuid::new_v4().as_bytes().to_vec();
+                    if !matches!(live_send(&mut socket, Message::Ping(token.clone().into()), deadline, &mut cancellation, &mut readiness, &mut shutdown).await, LiveWait::Complete) {
+                        return;
+                    }
+                    challenge = Some(token);
+                }
+                LiveRevalidation::Unauthorized => return live_close(&mut socket, 1008, "live_unauthorized").await,
+                LiveRevalidation::Unavailable => return live_close(&mut socket, 1011, "live_unavailable").await,
+                    LiveRevalidation::Cancelled => return,
+                }
+            }
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Close(_))) | None => return,
+                Some(Err(_)) => return live_close(&mut socket, 1008, "invalid_live_frame").await,
+                Some(Ok(Message::Ping(payload))) => {
+                    if !matches!(live_send(&mut socket, Message::Pong(payload), None, &mut cancellation, &mut readiness, &mut shutdown).await, LiveWait::Complete) { return; }
+                }
+                Some(Ok(Message::Pong(payload))) => {
+                    if challenge.as_ref().is_some_and(|token| token.as_slice() == payload.as_ref()) {
+                        challenge = None;
+                    }
+                }
+                Some(Ok(Message::Binary(_))) => return live_close(&mut socket, 1008, "invalid_live_frame").await,
+                Some(Ok(Message::Text(text))) => {
+                    if let Some(connection_id) = membership_connection_id.as_deref()
+                        && membership_control_shaped(&text)
+                    {
+                        match MembershipControlV1::parse(text.as_bytes()) {
+                            Ok(MembershipControlV1::Challenge(challenge)) if challenge.connection_id == connection_id => {
+                                let allowed = state.live_rate_limiter.lock().expect("live rate limiter lock poisoned")
+                                    .allow(DeviceId(principal.device), peer);
+                                if !allowed {
+                                    return live_close(&mut socket, 1008, "live_rate_limited").await;
+                                }
+                                let membership_deadline = live_ticket_operation_deadline(&state);
+                                let Some(response) = membership_snapshot_wait(
+                                    &state,
+                                    &principal,
+                                    connection_id,
+                                    membership_deadline,
+                                    &mut cancellation,
+                                    &mut readiness,
+                                    &mut shutdown,
+                                ).await else {
+                                    return live_close(&mut socket, 1011, "live_unavailable").await;
+                                };
+                                let response = MembershipControlV1::Response(peppy_protocol::MembershipResponseV1 {
+                                    r#type: "membership_response".into(),
+                                    version: MEMBERSHIP_PROTOCOL_VERSION,
+                                    connection_id: connection_id.into(),
+                                    challenge_id: challenge.challenge_id,
+                                    membership_version: response.membership_version,
+                                    roster: response.roster,
+                                });
+                                let Ok(response) = serde_json::to_string(&response) else {
+                                    return live_close(&mut socket, 1011, "live_unavailable").await;
+                                };
+                                if !matches!(live_send(&mut socket, Message::Text(response.into()), Some(membership_deadline), &mut cancellation, &mut readiness, &mut shutdown).await, LiveWait::Complete) { return; }
+                                continue;
+                            }
+                            Ok(_) | Err(_) => return live_close(&mut socket, 1008, "invalid_live_frame").await,
+                        }
+                    }
+                    let Ok(frame) = serde_json::from_str::<LiveFrameV2>(&text) else {
+                        return live_close(&mut socket, 1008, "invalid_live_frame").await;
+                    };
+                    let allowed = state.live_rate_limiter.lock().expect("live rate limiter lock poisoned")
+                        .allow(DeviceId(principal.device), peer);
+                    if !allowed {
+                        return live_close(&mut socket, 1008, "live_rate_limited").await;
+                    }
+                    let now_ms = live_now_ms();
+                    match crate::live::LiveHub::validate_frame(DeviceId(principal.device), &frame, now_ms) {
+                        Ok(()) => {}
+                        Err(crate::live::LiveReject::Expired | crate::live::LiveReject::FutureTimestamp) => continue,
+                        Err(crate::live::LiveReject::InvalidFrame | crate::live::LiveReject::SenderMismatch) => {
+                            return live_close(&mut socket, 1008, "invalid_live_frame").await;
+                        }
+                    }
+                    let deadline = ticket.map(|_| live_ticket_operation_deadline(&state));
+                    if let Some(ticket) = ticket {
+                        let deadline = deadline.expect("ticket frame has an operation deadline");
+                        match live_ticket_revalidate(
+                            &state,
+                            &principal,
+                            ticket,
+                            false,
+                            deadline,
+                            Some(&mut cancellation),
+                            &mut readiness,
+                            &mut shutdown,
+                        ).await {
+                            LiveRevalidation::Authorized => {}
+                            LiveRevalidation::Unauthorized => return live_close(&mut socket, 1008, "live_unauthorized").await,
+                            LiveRevalidation::Unavailable => return live_close(&mut socket, 1011, "live_unavailable").await,
+                            LiveRevalidation::Cancelled => return,
+                        }
+                        #[cfg(test)]
+                        if let Some(status) = live_ticket_after_validation_hook(
+                            &state,
+                            deadline,
+                            Some(&mut cancellation),
+                            &mut readiness,
+                            &mut shutdown,
+                        )
+                        .await
+                        {
+                            match status {
+                                LiveRevalidation::Unavailable => return live_close(&mut socket, 1011, "live_unavailable").await,
+                                LiveRevalidation::Cancelled => return,
+                                LiveRevalidation::Authorized | LiveRevalidation::Unauthorized => unreachable!(),
+                            }
+                        }
+                        if let Some(status) = live_ticket_signal_status(
+                            deadline,
+                            Some(&mut cancellation),
+                            &mut readiness,
+                            &mut shutdown,
+                        ) {
+                            match status {
+                                LiveRevalidation::Unavailable => return live_close(&mut socket, 1011, "live_unavailable").await,
+                                LiveRevalidation::Cancelled => return,
+                                LiveRevalidation::Authorized | LiveRevalidation::Unauthorized => unreachable!(),
+                            }
+                        }
+                    }
+                    match live_publish(
+                        backend.as_ref(),
+                        VaultId(principal.vault),
+                        frame.clone(),
+                        deadline,
+                        &mut cancellation,
+                        &mut readiness,
+                        &mut shutdown,
+                        #[cfg(test)]
+                        state.live_publish_timeout,
+                    )
+                    .await
+                    {
+                        LiveWait::Complete => {}
+                        LiveWait::Cancelled => return,
+                        LiveWait::Unavailable => {
+                            return live_close(&mut socket, 1011, "live_unavailable").await;
+                        }
+                    }
+                    if *cancellation.borrow_and_update() {
+                        return;
+                    }
+                    // The backend was available when this frame was accepted;
+                    // local fan-out is only a latency optimization. The hub
+                    // fences it to this still-current socket generation.
+                    let _ = state.live_hub.forward_current(
+                        VaultId(principal.vault),
+                        DeviceId(principal.device),
+                        generation,
+                        frame,
+                        live_now_ms(),
+                    );
+                }
+            },
+            frame = outgoing.recv() => match frame {
+                Some(frame) if live_frame_is_current(&frame, live_now_ms()) => {
+                    let deadline = ticket.map(|_| live_ticket_operation_deadline(&state));
+                    if let Some(ticket) = ticket {
+                        let deadline = deadline.expect("ticket delivery has an operation deadline");
+                        match live_ticket_revalidate(
+                            &state,
+                            &principal,
+                            ticket,
+                            false,
+                            deadline,
+                            Some(&mut cancellation),
+                            &mut readiness,
+                            &mut shutdown,
+                        ).await {
+                            LiveRevalidation::Authorized => {}
+                            LiveRevalidation::Unauthorized => return live_close(&mut socket, 1008, "live_unauthorized").await,
+                            LiveRevalidation::Unavailable => return live_close(&mut socket, 1011, "live_unavailable").await,
+                            LiveRevalidation::Cancelled => return,
+                        }
+                        if let Some(status) = live_ticket_signal_status(
+                            deadline,
+                            Some(&mut cancellation),
+                            &mut readiness,
+                            &mut shutdown,
+                        ) {
+                            match status {
+                                LiveRevalidation::Unavailable => return live_close(&mut socket, 1011, "live_unavailable").await,
+                                LiveRevalidation::Cancelled => return,
+                                LiveRevalidation::Authorized | LiveRevalidation::Unauthorized => unreachable!(),
+                            }
+                        }
+                    }
+                    let Some(frame_deadline) =
+                        live_frame_delivery_deadline(&frame, live_now_ms_for(&state))
+                    else {
+                        continue;
+                    };
+                    let Some(frame_remaining) = frame_deadline.remaining() else {
+                        continue;
+                    };
+                    let deadline = match deadline {
+                        Some(deadline) => match deadline.remaining() {
+                            Some(remaining) => {
+                                Some(OperationDeadline::after(bounded_live_delivery_timeout(
+                                    remaining,
+                                    frame_remaining,
+                                )))
+                            }
+                            None => return,
+                        },
+                        None => Some(OperationDeadline::after(bounded_live_delivery_timeout(
+                            Duration::from_secs(5),
+                            frame_remaining,
+                        ))),
+                    };
+                    let Ok(frame) = serde_json::to_string(&frame) else { continue; };
+                    if !matches!(live_send(&mut socket, Message::Text(frame.into()), deadline, &mut cancellation, &mut readiness, &mut shutdown).await, LiveWait::Complete) { return; }
+                }
+                Some(_) => continue,
+                None => return,
+            },
+        }
+    }
+}
+
+struct LiveSession {
+    state: ApiState,
+    principal: Principal,
+    peer: Option<IpAddr>,
+    backend: Arc<dyn crate::live::LiveBackend>,
+    generation: u64,
+    ticket: Option<crate::live::LiveTicketIdentity>,
+    operation_deadline: Option<OperationDeadline>,
+    outgoing: tokio::sync::mpsc::Receiver<LiveFrameV2>,
+    cancellation: tokio::sync::watch::Receiver<bool>,
+    readiness: tokio::sync::watch::Receiver<bool>,
+    shutdown: Option<tokio::sync::watch::Receiver<bool>>,
+    membership_capable: bool,
+}
+
+struct LiveSessionLifetime {
+    lease: Option<crate::serving::ConnectionLease>,
+    shutdown: Option<tokio::sync::watch::Receiver<bool>>,
+    ticket: Option<crate::live::LiveTicketIdentity>,
+    membership_capable: bool,
+}
+
+fn live_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn live_frame_is_current(frame: &LiveFrameV2, now_ms: u64) -> bool {
+    crate::live::LiveHub::validate_current(frame, now_ms).is_ok()
+}
+
+fn live_frame_delivery_deadline(frame: &LiveFrameV2, now_ms: u64) -> Option<OperationDeadline> {
+    let expires_at_ms = frame.expires_at_ms.parse::<u64>().ok()?;
+    let remaining_ms = expires_at_ms.checked_sub(now_ms)?;
+    (remaining_ms > 0).then(|| OperationDeadline::after(Duration::from_millis(remaining_ms)))
+}
+
+fn bounded_live_delivery_timeout(existing: Duration, frame_remaining: Duration) -> Duration {
+    existing.min(frame_remaining)
+}
+
+fn live_now_ms_for(state: &ApiState) -> u64 {
+    #[cfg(test)]
+    if let Some(clock_ms) = &state.live_ticket_test_hooks.clock_ms {
+        return clock_ms.load(std::sync::atomic::Ordering::SeqCst);
+    }
+    #[cfg(not(test))]
+    let _ = state;
+    live_now_ms()
+}
+
+async fn live_close(socket: &mut WebSocket, code: u16, reason: &'static str) {
+    let _ = tokio::time::timeout(Duration::from_secs(5), ws_close(socket, code, reason)).await;
+}
+
+fn live_effect_remaining(
+    deadline: Option<OperationDeadline>,
+    fallback: Duration,
+) -> Option<Duration> {
+    match deadline {
+        Some(deadline) => deadline.remaining(),
+        None => Some(fallback),
+    }
+}
+
+async fn live_send(
+    socket: &mut WebSocket,
+    message: Message,
+    deadline: Option<OperationDeadline>,
+    cancellation: &mut tokio::sync::watch::Receiver<bool>,
+    readiness: &mut tokio::sync::watch::Receiver<bool>,
+    shutdown: &mut Option<tokio::sync::watch::Receiver<bool>>,
+) -> LiveWait {
+    if *cancellation.borrow_and_update() {
+        return LiveWait::Cancelled;
+    }
+    if shutdown
+        .as_mut()
+        .is_some_and(|value| *value.borrow_and_update())
+    {
+        return LiveWait::Cancelled;
+    }
+    if !*readiness.borrow_and_update() {
+        return LiveWait::Unavailable;
+    }
+    let Some(remaining) = live_effect_remaining(deadline, Duration::from_secs(5)) else {
+        return LiveWait::Unavailable;
+    };
+    tokio::select! {
+        biased;
+        _ = cancellation.changed() => LiveWait::Cancelled,
+        _ = wait_for_shutdown(shutdown) => LiveWait::Cancelled,
+        _ = readiness.changed() => LiveWait::Unavailable,
+        result = tokio::time::timeout(remaining, socket.send(message)) => {
+            if matches!(result, Ok(Ok(()))) { LiveWait::Complete } else { LiveWait::Unavailable }
+        },
+    }
+}
+
+const LIVE_PUBLISH_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg_attr(
+    test,
+    expect(
+        clippy::too_many_arguments,
+        reason = "test timeout accompanies the independent live stop signals"
+    )
+)]
+async fn live_publish(
+    backend: &dyn crate::live::LiveBackend,
+    vault_id: VaultId,
+    frame: LiveFrameV2,
+    deadline: Option<OperationDeadline>,
+    cancellation: &mut tokio::sync::watch::Receiver<bool>,
+    readiness: &mut tokio::sync::watch::Receiver<bool>,
+    shutdown: &mut Option<tokio::sync::watch::Receiver<bool>>,
+    #[cfg(test)] publish_timeout: Duration,
+) -> LiveWait {
+    if *cancellation.borrow_and_update() {
+        return LiveWait::Cancelled;
+    }
+    if shutdown
+        .as_mut()
+        .is_some_and(|value| *value.borrow_and_update())
+    {
+        return LiveWait::Cancelled;
+    }
+    if !*readiness.borrow_and_update() {
+        return LiveWait::Unavailable;
+    }
+    let Some(remaining) = live_effect_remaining(
+        deadline,
+        #[cfg(test)]
+        publish_timeout,
+        #[cfg(not(test))]
+        LIVE_PUBLISH_TIMEOUT,
+    ) else {
+        return LiveWait::Unavailable;
+    };
+    tokio::select! {
+        biased;
+        _ = cancellation.changed() => LiveWait::Cancelled,
+        _ = wait_for_shutdown(shutdown) => LiveWait::Cancelled,
+        _ = readiness.changed() => LiveWait::Unavailable,
+        result = tokio::time::timeout(remaining, backend.publish(vault_id, frame)) => {
+            if matches!(result, Ok(Ok(()))) { LiveWait::Complete } else { LiveWait::Unavailable }
+        },
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LiveWait {
+    Complete,
+    Cancelled,
+    Unavailable,
+}
+
+enum LiveRevalidation {
+    Authorized,
+    Unauthorized,
+    Unavailable,
+    Cancelled,
+}
+
+#[cfg(test)]
+const LIVE_RECHECK_INTERVAL: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
+const LIVE_RECHECK_INTERVAL: Duration = Duration::from_secs(20);
+
+fn live_recheck_interval(_state: &ApiState) -> Duration {
+    #[cfg(test)]
+    if let Some(interval) = _state.live_ticket_test_hooks.recheck_interval {
+        return interval;
+    }
+    LIVE_RECHECK_INTERVAL
+}
+
+struct TicketWorkCancellationGuard(Option<tokio::sync::watch::Sender<bool>>);
+
+impl TicketWorkCancellationGuard {
+    fn cancel(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(true);
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TicketWorkCancellationGuard {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+const LIVE_TICKET_OPERATION_BUDGET: Duration = Duration::from_secs(5);
+const LIVE_TICKET_LEASE_DURATION: Duration = Duration::from_secs(90);
+
+fn live_ticket_operation_deadline(_state: &ApiState) -> OperationDeadline {
+    #[cfg(test)]
+    if let Some(budget) = _state.live_ticket_test_hooks.operation_budget {
+        return OperationDeadline::after(budget);
+    }
+    OperationDeadline::after(LIVE_TICKET_OPERATION_BUDGET)
+}
+
+fn live_ticket_recheck_operation_deadline(state: &ApiState) -> OperationDeadline {
+    #[cfg(test)]
+    if let Some(budget) = state.live_ticket_test_hooks.recheck_operation_budget {
+        return OperationDeadline::after(budget);
+    }
+    live_ticket_operation_deadline(state)
+}
+
+fn live_ticket_lease_duration(_state: &ApiState) -> Duration {
+    #[cfg(test)]
+    if let Some(duration) = _state.live_ticket_test_hooks.lease_duration {
+        return duration;
+    }
+    LIVE_TICKET_LEASE_DURATION
+}
+
+async fn live_ticket_after_validation_hook(
+    state: &ApiState,
+    deadline: OperationDeadline,
+    cancellation: Option<&mut tokio::sync::watch::Receiver<bool>>,
+    readiness: &mut tokio::sync::watch::Receiver<bool>,
+    shutdown: &mut Option<tokio::sync::watch::Receiver<bool>>,
+) -> Option<LiveRevalidation> {
+    #[cfg(not(test))]
+    {
+        let _ = (state, deadline, cancellation, readiness, shutdown);
+        None
+    }
+    #[cfg(test)]
+    {
+        let mut cancellation = cancellation;
+        let Some(gate) = state.live_ticket_test_hooks.after_validation.as_ref() else {
+            return live_ticket_signal_status(
+                deadline,
+                cancellation.as_deref_mut(),
+                readiness,
+                shutdown,
+            );
+        };
+        let Some(remaining) = deadline.remaining() else {
+            return Some(LiveRevalidation::Unavailable);
+        };
+        let wait = gate.enter();
+        if let Some(cancellation) = cancellation.as_deref_mut() {
+            tokio::select! {
+                biased;
+                changed = cancellation.changed() => {
+                    let _ = changed;
+                    return Some(LiveRevalidation::Cancelled);
+                }
+                _ = wait_for_shutdown(shutdown) => return Some(LiveRevalidation::Cancelled),
+                changed = readiness.changed() => {
+                    let _ = changed;
+                    return Some(LiveRevalidation::Unavailable);
+                }
+                _ = tokio::time::sleep(remaining) => return Some(LiveRevalidation::Unavailable),
+                _ = wait => {}
+            }
+        } else {
+            tokio::select! {
+                biased;
+                _ = wait_for_shutdown(shutdown) => return Some(LiveRevalidation::Cancelled),
+                changed = readiness.changed() => {
+                    let _ = changed;
+                    return Some(LiveRevalidation::Unavailable);
+                }
+                _ = tokio::time::sleep(remaining) => return Some(LiveRevalidation::Unavailable),
+                _ = wait => {}
+            }
+        }
+        live_ticket_signal_status(deadline, cancellation, readiness, shutdown)
+    }
+}
+
+fn live_ticket_signal_status(
+    deadline: OperationDeadline,
+    cancellation: Option<&mut tokio::sync::watch::Receiver<bool>>,
+    readiness: &mut tokio::sync::watch::Receiver<bool>,
+    shutdown: &mut Option<tokio::sync::watch::Receiver<bool>>,
+) -> Option<LiveRevalidation> {
+    if cancellation.is_some_and(|value| *value.borrow_and_update()) {
+        return Some(LiveRevalidation::Cancelled);
+    }
+    if shutdown
+        .as_mut()
+        .is_some_and(|value| *value.borrow_and_update())
+    {
+        return Some(LiveRevalidation::Cancelled);
+    }
+    if !*readiness.borrow_and_update() || deadline.remaining().is_none() {
+        return Some(LiveRevalidation::Unavailable);
+    }
+    None
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "ticket validation keeps each independent stop signal explicit"
+)]
+async fn live_ticket_revalidate(
+    state: &ApiState,
+    principal: &Principal,
+    ticket: crate::live::LiveTicketIdentity,
+    renew: bool,
+    deadline: OperationDeadline,
+    mut cancellation: Option<&mut tokio::sync::watch::Receiver<bool>>,
+    readiness: &mut tokio::sync::watch::Receiver<bool>,
+    shutdown: &mut Option<tokio::sync::watch::Receiver<bool>>,
+) -> LiveRevalidation {
+    if let Some(status) =
+        live_ticket_signal_status(deadline, cancellation.as_deref_mut(), readiness, shutdown)
+    {
+        return status;
+    }
+
+    // The role and exact credential presented at ticket consumption are checked
+    // together under the device/credential lock. Another active credential for
+    // the same device cannot keep a revoked socket authorized.
+    let authorization = state.policy.authorize(
+        AccessPrincipal {
+            vault_id: principal.vault,
+            device_id: principal.device,
+            role: principal.role.clone(),
+        },
+        Operation::Sync,
+    );
+    let Some(remaining) = deadline.remaining() else {
+        return LiveRevalidation::Unavailable;
+    };
+    let authorized = if let Some(cancellation) = cancellation.as_deref_mut() {
+        tokio::select! {
+            biased;
+            changed = cancellation.changed() => {
+                let _ = changed;
+                return LiveRevalidation::Cancelled;
+            }
+            _ = wait_for_shutdown(shutdown) => return LiveRevalidation::Cancelled,
+            changed = readiness.changed() => {
+                let _ = changed;
+                return LiveRevalidation::Unavailable;
+            }
+            result = tokio::time::timeout(remaining, authorization) => match result {
+                Ok(value) => value,
+                Err(_) => return LiveRevalidation::Unavailable,
+            },
+        }
+    } else {
+        tokio::select! {
+            biased;
+            _ = wait_for_shutdown(shutdown) => return LiveRevalidation::Cancelled,
+            changed = readiness.changed() => {
+                let _ = changed;
+                return LiveRevalidation::Unavailable;
+            }
+            result = tokio::time::timeout(remaining, authorization) => match result {
+                Ok(value) => value,
+                Err(_) => return LiveRevalidation::Unavailable,
+            },
+        }
+    };
+    if let Some(status) =
+        live_ticket_signal_status(deadline, cancellation.as_deref_mut(), readiness, shutdown)
+    {
+        return status;
+    }
+    if !authorized {
+        return LiveRevalidation::Unauthorized;
+    }
+
+    let (work_cancel, work_cancellation) = tokio::sync::watch::channel(false);
+    #[cfg(test)]
+    state
+        .live_ticket_test_hooks
+        .work_probe
+        .record_receiver(work_cancellation.clone());
+    let mut cancellation_guard = TicketWorkCancellationGuard(Some(work_cancel));
+    let expected_role = principal.role.clone();
+    let expected_token_digest = principal.token_digest.clone();
+    let vault = principal.vault;
+    let device = principal.device;
+    let session_hash = ticket.session_hash().to_vec();
+    let lease_duration_millis = i64::try_from(live_ticket_lease_duration(state).as_millis())
+        .expect("live ticket lease duration fits in PostgreSQL interval milliseconds");
+    #[cfg(test)]
+    let test_hooks = state.live_ticket_test_hooks.clone();
+    let workflow: TicketWorkflow<bool> = Box::new(move |scope| {
+        Box::pin(async move {
+            #[cfg(test)]
+            let _workflow_drop_probe = LiveTicketWorkflowDropProbe(test_hooks.work_probe.clone());
+            scope.stage().await?.execute("BEGIN").await?;
+            sqlx::query("SELECT set_config('peppy.vault_id',$1,true)")
+                .bind(vault.to_string())
+                .execute(scope.stage().await?)
+                .await?;
+            scope
+                .claim_device(TenantDevice {
+                    vault_id: vault,
+                    device_id: device,
+                })
+                .await?;
+            #[cfg(test)]
+            if let Some(gate) = test_hooks.after_device_claim.as_ref() {
+                gate.enter().await;
+            }
+            #[cfg(test)]
+            test_hooks
+                .credential_query_started
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let current_role: Option<String> = sqlx::query_scalar("SELECT d.role FROM devices d JOIN device_credentials c ON c.vault_id=d.vault_id AND c.device_id=d.device_id WHERE d.vault_id=$1 AND d.device_id=$2 AND c.token_digest=$3 AND d.revoked_at IS NULL AND c.revoked_at IS NULL FOR UPDATE OF d,c")
+                .bind(vault)
+                .bind(device)
+                .bind(&expected_token_digest)
+                .fetch_optional(scope.stage().await?)
+                .await?;
+            #[cfg(test)]
+            test_hooks
+                .session_query_started
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let current: Option<(String, i64, Option<i64>)> = sqlx::query_as("SELECT state,session_incarnation,active_connection_id FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 FOR UPDATE")
+                .bind(vault)
+                .bind(device)
+                .bind(&session_hash)
+                .fetch_optional(scope.stage().await?)
+                .await?;
+            let sample_started = std::time::Instant::now();
+            let sampled_at: String = sqlx::query_scalar("SELECT clock_timestamp()::text")
+                .fetch_one(scope.stage().await?)
+                .await?;
+            let sample_finished = std::time::Instant::now();
+            debug_assert!(sample_finished >= sample_started);
+            #[cfg(test)]
+            {
+                test_hooks
+                    .sampled_at
+                    .lock()
+                    .expect("sample record lock poisoned")
+                    .push(sampled_at.clone());
+                if let Some(gate) = test_hooks.after_sample.as_ref() {
+                    gate.enter().await;
+                }
+            }
+            let exact_open = matches!(
+                current,
+                Some((ref state, incarnation, Some(connection)))
+                    if state == "open"
+                        && incarnation == ticket.session_incarnation()
+                        && connection == ticket.connection_id()
+            );
+            if current_role.as_deref() != Some(expected_role.as_str()) || !exact_open {
+                scope.stage().await?.execute("ROLLBACK").await?;
+                scope.settled();
+                return Ok(false);
+            }
+            let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM live_ticket_sessions WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND session_incarnation=$4 AND active_connection_id=$5 AND state='open' AND lease_until>$6::timestamptz)")
+                .bind(vault)
+                .bind(device)
+                .bind(&session_hash)
+                .bind(ticket.session_incarnation())
+                .bind(ticket.connection_id())
+                .bind(&sampled_at)
+                .fetch_one(scope.stage().await?)
+                .await?;
+            if !valid {
+                scope.stage().await?.execute("ROLLBACK").await?;
+                scope.settled();
+                return Ok(false);
+            }
+            if renew {
+                #[cfg(test)]
+                test_hooks
+                    .renewal_update_started
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let updated = sqlx::query("UPDATE live_ticket_sessions SET lease_until=$6::timestamptz+($7*interval '1 millisecond') WHERE vault_id=$1 AND device_id=$2 AND session_id_hash=$3 AND session_incarnation=$4 AND active_connection_id=$5 AND state='open' AND lease_until>$6::timestamptz")
+                    .bind(vault)
+                    .bind(device)
+                    .bind(&session_hash)
+                    .bind(ticket.session_incarnation())
+                    .bind(ticket.connection_id())
+                    .bind(&sampled_at)
+                    .bind(lease_duration_millis)
+                    .execute(scope.stage().await?)
+                    .await?;
+                if updated.rows_affected() != 1 {
+                    scope.stage().await?.execute("ROLLBACK").await?;
+                    scope.settled();
+                    return Ok(false);
+                }
+            }
+            #[cfg(test)]
+            {
+                if let Some(gate) = test_hooks.before_commit.as_ref() {
+                    gate.enter().await;
+                }
+                test_hooks
+                    .commit_started
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            scope.stage().await?.execute("COMMIT").await?;
+            #[cfg(test)]
+            if let Some(gate) = test_hooks.after_commit.as_ref() {
+                gate.enter().await;
+            }
+            scope.settled();
+            Ok(true)
+        })
+    });
+    let Ok(work) =
+        state
+            .live_ticket_work
+            .spawn(state.db.clone(), deadline, work_cancellation, workflow)
+    else {
+        return LiveRevalidation::Unavailable;
+    };
+    let outcome = if let Some(cancellation) = cancellation.as_deref_mut() {
+        tokio::select! {
+            biased;
+            changed = cancellation.changed() => {
+                let _ = changed;
+                return LiveRevalidation::Cancelled;
+            }
+            _ = wait_for_shutdown(shutdown) => return LiveRevalidation::Cancelled,
+            changed = readiness.changed() => {
+                let _ = changed;
+                return LiveRevalidation::Unavailable;
+            }
+            result = work.outcome() => result,
+        }
+    } else {
+        tokio::select! {
+            biased;
+            _ = wait_for_shutdown(shutdown) => return LiveRevalidation::Cancelled,
+            changed = readiness.changed() => {
+                let _ = changed;
+                return LiveRevalidation::Unavailable;
+            }
+            result = work.outcome() => result,
+        }
+    };
+    cancellation_guard.disarm();
+    if let Some(status) = live_ticket_signal_status(deadline, cancellation, readiness, shutdown) {
+        return status;
+    }
+    match outcome {
+        Ok(true) => LiveRevalidation::Authorized,
+        Ok(false) => LiveRevalidation::Unauthorized,
+        Err(TicketDbWorkError::Cancelled) => LiveRevalidation::Cancelled,
+        Err(error) => {
+            let _ = ticket_work_unavailable(&error, "live_ticket_revalidate");
+            LiveRevalidation::Unavailable
+        }
+    }
+}
+
+async fn live_revalidate(
+    state: &ApiState,
+    principal: &Principal,
+    cancellation: &mut tokio::sync::watch::Receiver<bool>,
+    readiness: &mut tokio::sync::watch::Receiver<bool>,
+) -> LiveRevalidation {
+    if *cancellation.borrow_and_update() {
+        return LiveRevalidation::Cancelled;
+    }
+    if !*readiness.borrow_and_update() {
+        return LiveRevalidation::Unavailable;
+    }
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        match still_active(state, principal).await {
+            Ok(false) => Ok(false),
+            Ok(true) => authorize(state, principal, Operation::Sync)
+                .await
+                .map(|_| true),
+            Err(_) => Err(ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "live_unavailable",
+            )),
+        }
+    })
+    .await;
+    if *cancellation.borrow_and_update() {
+        return LiveRevalidation::Cancelled;
+    }
+    if !*readiness.borrow_and_update() {
+        return LiveRevalidation::Unavailable;
+    }
+    match result {
+        Ok(Ok(true)) => LiveRevalidation::Authorized,
+        Ok(Ok(false)) | Ok(Err(ApiError(StatusCode::FORBIDDEN, _))) => {
+            LiveRevalidation::Unauthorized
+        }
+        Ok(Err(_)) | Err(_) => LiveRevalidation::Unavailable,
+    }
+}
+
+/// WebSocket close codes. Clients reconnect and resume on 4429, take a
+/// snapshot on 4409, stop on 4401, and upgrade on 4426.
+mod close {
+    pub const INVALID_HELLO: u16 = 4400;
+    pub const REVOKED: u16 = 4401;
+    pub const HELLO_TIMEOUT: u16 = 4408;
+    pub const RESYNC_REQUIRED: u16 = 4409;
+    pub const UNSUPPORTED_VERSION: u16 = 4426;
+    pub const BACKPRESSURE: u16 = 4429;
+    pub const SERVER_ERROR: u16 = 1011;
+}
+const WS_PROTOCOL_VERSION: u64 = 1;
+const WS_REPLAY_PAGE: i64 = 100;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeartbeatAction {
+    SendChallenge,
+    Disconnect,
+}
+
+fn heartbeat_action(has_outstanding_challenge: bool) -> HeartbeatAction {
+    if has_outstanding_challenge {
+        HeartbeatAction::Disconnect
+    } else {
+        HeartbeatAction::SendChallenge
+    }
 }
 
 async fn ws_close(socket: &mut WebSocket, code: u16, reason: &'static str) {
@@ -3240,8 +5766,40 @@ async fn send_replay(
 }
 
 #[cfg(test)]
+mod live_socket_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_recipient_frame_has_no_delivery_deadline() {
+        let frame = LiveFrameV2 {
+            protocol_version: peppy_protocol::EPHEMERAL_V2_PROTOCOL_VERSION,
+            kind: peppy_protocol::EphemeralSignalV2Kind::Typing,
+            sender_device_id: DeviceId(Uuid::new_v4()),
+            key_epoch: 1,
+            session_id: Uuid::new_v4().to_string(),
+            sent_at_ms: "1".into(),
+            expires_at_ms: "2".into(),
+            sequence: "1".into(),
+            ciphertext_b64: STANDARD.encode([1_u8]),
+        };
+
+        assert!(live_frame_delivery_deadline(&frame, 3).is_none());
+    }
+
+    #[test]
+    fn live_delivery_timeout_uses_the_smaller_send_and_frame_bounds() {
+        assert_eq!(
+            bounded_live_delivery_timeout(Duration::from_secs(5), Duration::from_secs(15)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            bounded_live_delivery_timeout(Duration::from_secs(5), Duration::from_millis(20)),
+            Duration::from_millis(20)
+        );
+    }
 
     #[test]
     fn heartbeat_disconnects_before_replacing_an_unanswered_challenge() {

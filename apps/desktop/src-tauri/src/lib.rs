@@ -46,10 +46,12 @@ mod activation_session_tests;
 mod draft_command_tests;
 mod hosted;
 mod lifecycle;
+#[allow(dead_code)]
+pub(crate) mod live_typing;
 mod login_item;
 mod material_state;
-mod media;
 mod mcp;
+mod media;
 mod net;
 mod notification_activation;
 mod notification_icon;
@@ -58,6 +60,8 @@ mod notification_persistence;
 mod notifications;
 mod origin;
 mod purchases;
+#[cfg(test)]
+mod rcs_snapshot_tests;
 mod recents;
 #[cfg(test)]
 mod recents_command_tests;
@@ -182,7 +186,7 @@ pub struct AppState {
     session: tokio::sync::Mutex<Option<Arc<Session>>>,
     /// Serializes session retirement and opening without holding `session` across a worker drain.
     session_open_lock: tokio::sync::Mutex<()>,
-    composer_scopes: Mutex<HashMap<String, composer_scope::MovedScope>>,
+    pub(crate) composer_scopes: Mutex<HashMap<String, composer_scope::MovedScope>>,
     enrollment: Mutex<enrollment::Controller>,
     /// Serializes credential import and post-dialog credential export against configuration changes.
     import_lock: tokio::sync::Mutex<()>,
@@ -220,6 +224,8 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "open_external_url",
     "save_draft",
     "send_draft",
+    "send_typing",
+    "set_typing_sharing",
     "mark_seen",
     "pick_attachments",
     "prepare_pasted_attachment",
@@ -243,6 +249,35 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "resolve_draft_conflict",
     "acknowledge_draft_notice",
 ];
+
+#[cfg(test)]
+#[test]
+fn typing_commands_are_acl_granted_to_main_and_composer_windows() {
+    const APP_MANIFEST: &str = include_str!("../build.rs");
+    const MAIN_CAPABILITY: &str = include_str!("../capabilities/default.json");
+    const COMPOSER_CAPABILITY: &str = include_str!("../capabilities/composer.json");
+
+    for command in ["send_typing", "set_typing_sharing"] {
+        assert!(
+            APP_MANIFEST.contains(&format!("\"{command}\",")),
+            "{command} must be declared in the app manifest"
+        );
+
+        let permission = format!("\"allow-{}\"", command.replace('_', "-"));
+        assert!(
+            MAIN_CAPABILITY.contains(&permission),
+            "{command} must be granted to the main window"
+        );
+        assert!(
+            COMPOSER_CAPABILITY.contains(&permission),
+            "{command} must be granted to composer windows"
+        );
+        assert!(
+            COMPOSER_COMMANDS.contains(&command),
+            "{command} must be listed as a composer command"
+        );
+    }
+}
 
 fn window_error() -> BridgeError {
     BridgeError::new(
@@ -989,6 +1024,7 @@ fn empty_snapshot(origin: Option<String>) -> Snapshot {
         contact_sync: None,
         tone_overrides: None,
         sync_progress: None,
+        rcs_status: None,
     }
 }
 
@@ -2113,12 +2149,12 @@ async fn unlock_with(
     blocking(move || {
         match s.client.unlock(&profile, &header, &passphrase) {
             Err(peppy_client_core::Error::InvalidProfile) => {
-                s.mismatch.store(true, Ordering::Relaxed);
+                s.set_mismatch(true);
                 return Err(core_error(peppy_client_core::Error::InvalidProfile));
             }
             other => other.map_err(core_error)?,
         }
-        s.mismatch.store(false, Ordering::Relaxed);
+        s.set_mismatch(false);
         // The server reports this epoch as current; local work must be sealed under it.
         if s.client
             .key_status()
@@ -2140,7 +2176,7 @@ async fn unlock_with(
     .await?;
     let binding = session.binding.clone();
     state.update_config(|config| config.add_cached_epoch(&binding, epoch))?;
-    session.set_status(|status| status.vault = Some(VaultSummary { epoch, fingerprint }));
+    session.set_security_status(|status| status.vault = Some(VaultSummary { epoch, fingerprint }));
     // The renderer refreshes only on state events; the claim path notifies before this unlock.
     session.notify();
     session.request_work();
@@ -6055,6 +6091,7 @@ pub fn run() {
                 std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
                     .map_err(|_| "could not protect native app data")?;
             }
+            live_typing::install_events(app.handle());
             notification_icon::recover_at_startup(app.handle());
             let handle = app.handle().clone();
             // State hints only; no payload, no focus or window changes.
@@ -6479,6 +6516,8 @@ pub fn run() {
         resolve_draft_conflict,
         acknowledge_draft_notice,
         send_draft,
+        live_typing::send_typing,
+        live_typing::set_typing_sharing,
         mark_seen,
         mark_all_read,
         pick_attachments,

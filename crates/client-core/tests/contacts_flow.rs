@@ -204,7 +204,10 @@ fn capture_reaches_peer_sanitized_with_core_minted_revisions() {
     // A lower generation is rejected.
     assert!(p
         .owner
-        .capture_contact_book(&json!({"schema_version": 1, "book": book(&p.owner_cfg, "0", "auto"), "contacts": []}).to_string())
+        .capture_contact_book(
+            &json!({"schema_version": 1, "book": book(&p.owner_cfg, "0", "auto"), "contacts": []})
+                .to_string()
+        )
         .is_err());
 
     p.deliver(true);

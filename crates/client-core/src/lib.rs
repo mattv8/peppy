@@ -37,6 +37,12 @@ mod conversation_tones;
 mod deferred_media;
 mod device_succession;
 mod draft_sync;
+mod ephemeral;
+mod ephemeral_v2;
+mod ephemeral_v2_control;
+mod ephemeral_v2_decode;
+mod ephemeral_v2_policy;
+mod ephemeral_v2_session;
 mod gateway_settings;
 mod history_import;
 mod initial_replay;
@@ -49,7 +55,17 @@ mod message_history_requests;
 mod message_origin;
 mod notification_preferences;
 mod sender_blocklist;
+#[cfg(feature = "test-support")]
+mod test_support;
 pub use deferred_media::{DeferredMediaRequestReport, DeferredMediaStatus, DeferredOriginal};
+pub use ephemeral::{
+    MAX_TYPING_ROSTER, TYPING_START_INTERVAL_MS, TYPING_STARTS_PER_MINUTE, TypingOrigin,
+    TypingState, TypingView,
+};
+pub use ephemeral_v2::{
+    LiveAction, LiveClock, LiveEnableContext, LiveEnableGeneration, LiveError, LiveExecutor,
+    LiveOutbound, LiveOutcome, PeerSessionUpdate,
+};
 mod mcp_commands;
 pub use draft_sync::{
     DraftAttachmentState, DraftConflictVersion, DraftNotice, DraftPush, DraftPushOutcome,
@@ -63,9 +79,16 @@ mod mms_backfill;
 mod mms_identity;
 mod notifications;
 mod phone_read;
+mod rcs_capability;
+mod rcs_mapping;
+mod rcs_native;
+mod rcs_receive;
+mod rcs_send;
+mod rcs_target;
 mod sms_acquisition;
 mod sms_reconciliation;
 mod snapshot_projection;
+mod vault_identity;
 pub use attachment_retention::{
     AttachmentRetentionClass, AttachmentRetentionState, AttachmentUploadRetention,
     AttachmentUseKind, AttachmentUseOperationKind, AttachmentUseResponse, AttachmentUseState,
@@ -101,6 +124,7 @@ use peppy_crypto::enrollment::{
     EncryptedHandoff, EnrollmentContext, EnrollmentPurpose, EnrollmentRole, HandoffRootPackage,
     TransferKeypair, VerifiedHandoff,
 };
+use peppy_crypto::vault_identity::RcsIdentityKey;
 use peppy_crypto::{
     CryptoError, EncryptedEnvelope, KeyPurpose, PurposeKey, compaction_hmac, decrypt,
     derive_draft_purpose_key, derive_purpose_key, derive_root_key, encrypt,
@@ -112,27 +136,59 @@ pub use peppy_domain::{
     EnvelopeId, MessageId, MessageRecord, SendState, SourceSequence, VaultId,
 };
 pub use peppy_protocol::{
-    CompactionMetadata, CompactionReference, Envelope, EnvelopePurpose, GatewayRoute,
+    CompactionMetadata, CompactionReference, Envelope, EnvelopePurpose, EphemeralSignalV1,
+    EphemeralSignalV2, GatewayRoute,
 };
 use peppy_protocol::{MAX_CIPHERTEXT_BYTES, MAX_COMPACTION_SUPERSEDES, PROTOCOL_VERSION};
 pub use phone_read::{
     PHONE_READ_EFFECT_TTL_MS, PhoneReadCandidate, PhoneReadEffect, PhoneReadTransport,
     ProviderRowRef,
 };
+pub use rcs_capability::{
+    RCS_CAPABILITY_KEEPALIVE_MS, RCS_CAPABILITY_PUBLISH_BATCH, RCS_CAPABILITY_STALE_MS,
+    RcsCapabilityState, RcsEligibility, RcsEligibilityProjection, RcsLinkEligibilityPayload,
+    RcsLinkStatusEvent, RcsLinkStatusPayload, RcsLinkStatusProjection,
+};
+pub use rcs_mapping::{
+    RCS_MAPPING_FRESHNESS_MS, RCS_MAPPING_PROOF_VERSION, RcsConversationType, RcsLinkState,
+    RcsMapping, RcsMappingClass, RcsMappingObservation, RcsMappingOutcome, RcsMappingProof,
+    RcsMappingRefusal, RcsParticipantObservation, RcsSendMode,
+};
+pub use rcs_native::{
+    LocalRcsTargetSnapshot, NativeCarrierRouteBinding, NativeOwnNumberSource,
+    NativeRcsCommitProjection, NativeRcsEvidence, NativeRcsLifetime, NativeRcsOutgoing,
+    NativeRcsParticipant, NativeRcsPreparation, NativeRcsPrepareRequest, NativeRcsSimPayload,
+    NativeRcsTargetClass, NativeSettingsCurrentness, NativeSettingsProvenance,
+    PendingNativeRcsCommand, restricted_native_rcs_handoff_schema,
+};
+pub use rcs_receive::{
+    RcsContextExpectation, RcsConversationMetadata, RcsConversationTransport, RcsCutover,
+    RcsIdentityOutcome, RcsMessageStatusProjection, RcsObservationProvenance,
+    RcsOwnerUnlinkCutoverCandidate, RcsOwnership, RcsProjectedRecord, RcsProjectedStatus,
+    RcsProviderDetector, RcsProviderRow, RcsProviderRowRoute, RcsReceiveAlert, RcsReceiveCode,
+    RcsReceiveContext, RcsReceiveOutcome, RcsReceiveOwner, RcsReceiveState, RcsStatusApplication,
+    RcsUnlinkCutoverGenerations,
+};
+pub use rcs_send::{CarrierOnlyProof, RcsPermit};
+pub use rcs_target::{RcsTargetClassification, RcsTargetDecision, ValidatedCarrierRouteContext};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 pub use snapshot_projection::{SnapshotProjectionState, SnapshotProjectionStatus};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
 };
 use thiserror::Error;
+pub use vault_identity::{
+    VaultIdentityAdoption, VaultIdentityPendingMaterial, VaultIdentityReadiness,
+    VaultIdentitySnapshot, VaultIdentitySnapshotState,
+};
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 50;
+const SCHEMA_VERSION: i64 = 52;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -279,6 +335,8 @@ pub enum Error {
     DraftNotSynced,
     #[error("no send attempt was recorded for this command")]
     NoAttempt,
+    #[error("a send attempt was already recorded with state {0:?}")]
+    AlreadyAttempted(SendState),
     #[error("illegal send-state transition {from:?} -> {to:?}")]
     IllegalTransition { from: SendState, to: SendState },
     #[error("native key cache is malformed, altered, or was not recorded by this device")]
@@ -337,6 +395,16 @@ pub struct MessagePayload {
     #[serde(default)]
     pub mms_context: Option<MmsContext>,
 }
+
+/// Revision of the core-owned RCS identity canonicalization contract.
+pub const RCS_CANONICALIZER_REVISION: u32 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RcsContextTuple {
+    pub link_generation: u64,
+    pub session_generation: u64,
+    pub context_revision: u64,
+}
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Transport {
@@ -350,10 +418,32 @@ pub enum Direction {
     Incoming,
     Outgoing,
 }
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RcsMessageStatus {
+    Sending,
+    Sent,
+    Failed,
+    Delivered,
+    Read,
+}
 /// Canonical encrypted inner wire. Native code never parses this; it only moves envelopes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PrivatePayload {
+    RcsConversationMetadata(RcsConversationMetadata),
+    RcsMessageReported {
+        message_id: MessageId,
+        rcs_reported: bool,
+    },
+    RcsMessageStatus {
+        message_id: MessageId,
+        status: RcsMessageStatus,
+        rcs_reported: bool,
+    },
+    RcsLinkStatus(RcsLinkStatusPayload),
+    RcsLinkEligibility(RcsLinkEligibilityPayload),
     MmsDeferredPreview {
         message: MessagePayload,
         originals: Vec<DeferredOriginal>,
@@ -836,6 +926,14 @@ pub struct ReceivedCommand {
     pub subscription_id: String,
     pub message: MessagePayload,
 }
+/// A received send command awaiting route-neutral automatic admission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingAutomaticCommand {
+    pub command_id: CommandId,
+    /// The original legacy SIM route when present; this is a hint, not carrier authority.
+    pub original_subscription_id: Option<String>,
+    pub message: MessagePayload,
+}
 // Returned once per carrier send; a flat record keeps the future UniFFI enum simple.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -845,6 +943,16 @@ pub enum PermitDecision {
     /// An attempt already exists. `OutcomeUnknown` requires reconciliation, never a resend.
     AlreadyAttempted(SendState),
     Blocked(PermitBlock),
+}
+/// Route-neutral automatic admission for upgraded gateways. Legacy carrier wire data remains
+/// unchanged; the final local transport is frozen with the attempt.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AutomaticPermitDecision {
+    Carrier(ReceivedCommand),
+    Rcs(RcsPermit),
+    Blocked(PermitBlock),
+    AlreadyAttempted(SendState),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PermitBlock {
@@ -860,6 +968,14 @@ pub enum PermitBlock {
     Historical,
     /// This gateway was restored from backup/import; no new carrier work may start.
     RestoreGuarded,
+    /// The command belongs to a linked transport and cannot reach the carrier executor.
+    RouteUnavailable,
+    /// A route was not present or could not be finalized locally.
+    UnknownRoute,
+    /// The local mapping proof is missing, stale, or no longer exact.
+    MappingUnproven,
+    /// Linked gateways need a fresh local carrier-only result before carrier work.
+    CarrierOnlyProofUnavailable,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendResult {
@@ -1098,6 +1214,13 @@ pub(crate) struct Store {
     db_key: Zeroizing<[u8; 32]>,
     keys: BTreeMap<u32, EpochKeys>,
     active_epoch: Option<u32>,
+    identity_recovery_keys: BTreeMap<u32, PurposeKey>,
+    identity_bootstrap_epochs: BTreeSet<u32>,
+    staged_pending: Option<vault_identity::StagedPending>,
+    staged_identity: Option<vault_identity::StagedAnchor>,
+    rcs_identity_key: Option<RcsIdentityKey>,
+    ephemeral: ephemeral::EphemeralTypingState,
+    ephemeral_v2: ephemeral_v2::EphemeralV2State,
     pub(crate) media_dir: PathBuf,
     pub(crate) media_cache: media_cache::MediaCacheState,
 }
@@ -1139,6 +1262,488 @@ pub enum ContactBookSelection {
 }
 
 impl Client {
+    pub fn device_id(&self) -> Result<DeviceId, Error> {
+        Ok(self.lock()?.config.device_id)
+    }
+
+    /// Verifies host facts and atomically stores a local-only exact mapping proof.
+    /// The proof digest is computed by core; host-provided digests are never accepted.
+    pub fn verify_rcs_mapping(
+        &self,
+        observation: &RcsMappingObservation,
+        now_ms: i64,
+    ) -> Result<RcsMappingOutcome, Error> {
+        let mut store = self.lock()?;
+        let transaction = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let outcome = rcs_mapping::verify_and_store(&transaction, observation, now_ms)?;
+        transaction.commit()?;
+        Ok(outcome)
+    }
+
+    /// Records an owner-requested unlink context. Incidental link errors and absent context never
+    /// authorize carrier fallback after this client has observed linked state.
+    pub fn update_rcs_context(
+        &self,
+        observation: &RcsMappingObservation,
+        now_ms: i64,
+    ) -> Result<(), Error> {
+        if observation.link_state != RcsLinkState::Unlinked {
+            return Err(Error::InvalidRequest("explicit unlink context required"));
+        }
+        now_ms
+            .checked_sub(observation.observed_at_ms)
+            .filter(|age| (0..=RCS_MAPPING_FRESHNESS_MS).contains(age))
+            .ok_or(Error::InvalidRequest("unlink context is not current"))?;
+        let mut store = self.lock()?;
+        let transaction = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let outcome = rcs_mapping::verify_and_store(&transaction, observation, now_ms)?;
+        if !matches!(
+            outcome,
+            RcsMappingOutcome::Refused(
+                RcsMappingRefusal::LinkUnavailable | RcsMappingRefusal::GoogleConversationAmbiguous
+            )
+        ) {
+            return Err(Error::InvalidRequest("unlink context is not current"));
+        }
+        if !rcs_mapping::context_is_current(
+            &transaction,
+            observation.link_generation,
+            observation.session_generation,
+            observation.context_revision,
+            false,
+        )? {
+            return Err(Error::InvalidRequest("unlink context is not current"));
+        }
+        let (context, lifecycle_generation) =
+            rcs_mapping::explicit_unlink_context(&transaction, observation.observed_at_ms, now_ms)?;
+        rcs_send::record_intentional_unlink(&transaction, context, lifecycle_generation)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Records that the owner durably completed an explicit unlink or reset.
+    /// Incidental observed lifecycle changes cannot invoke this trusted path.
+    pub fn record_rcs_explicit_unlink_completed(
+        &self,
+        observed_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let transaction = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (context, lifecycle_generation) =
+            rcs_mapping::explicit_unlink_context(&transaction, observed_at_ms, now_ms)?;
+        rcs_send::record_intentional_unlink(&transaction, context, lifecycle_generation)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Returns only a current local mapping; invalidated mappings never authorize a route.
+    pub fn rcs_mapping(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<RcsMapping>, Error> {
+        rcs_mapping::get(&self.lock()?.conn, conversation_id)
+    }
+
+    /// Publishes at most one gateway status and 100 content-free conversation projections.
+    /// Google identifiers and mapping proof material are deliberately not accepted here.
+    pub fn publish_rcs_capability(
+        &self,
+        status: &RcsLinkStatusEvent,
+        eligibility: &[RcsEligibilityProjection],
+        now_ms: i64,
+    ) -> Result<usize, Error> {
+        if eligibility.len() > RCS_CAPABILITY_PUBLISH_BATCH {
+            return Err(Error::InvalidRequest(
+                "RCS capability batch exceeds the maximum",
+            ));
+        }
+        if status.observed_at_ms > now_ms {
+            return Err(Error::InvalidRequest("future RCS capability status"));
+        }
+        if eligibility
+            .iter()
+            .any(|projection| projection.observed_at_ms > now_ms)
+        {
+            return Err(Error::InvalidRequest("future RCS eligibility projection"));
+        }
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        if status.gateway_device_id != ctx.device_id || !rcs_capability::valid_status(status) {
+            return Err(Error::InvalidRequest("invalid RCS capability status"));
+        }
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut published = 0;
+        if publish_rcs_capability_payload(
+            &tx,
+            &ctx,
+            &PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
+                status: status.clone(),
+            }),
+            format!("status:{}", status.gateway_device_id),
+            status.capability_revision,
+            now_ms,
+        )? {
+            published += 1;
+        }
+        for projection in eligibility {
+            if projection.gateway_device_id != ctx.device_id
+                || !rcs_capability::valid_eligibility(projection)
+            {
+                return Err(Error::InvalidRequest("invalid RCS eligibility projection"));
+            }
+            if publish_rcs_capability_payload(
+                &tx,
+                &ctx,
+                &PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
+                    eligibility: projection.clone(),
+                }),
+                format!(
+                    "eligibility:{}:{}",
+                    projection.gateway_device_id, projection.conversation_id
+                ),
+                projection.mapping_revision,
+                now_ms,
+            )? {
+                published += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(published)
+    }
+
+    /// Re-evaluates content-free eligibility from core-owned lifecycle and exact mappings.
+    /// Native callers select conversations only; eligibility, features, time, and revisions are
+    /// assigned atomically by core.
+    pub fn publish_rcs_eligibility_from_lifecycle(
+        &self,
+        conversation_ids: &[ConversationId],
+        now_ms: i64,
+    ) -> Result<usize, Error> {
+        if conversation_ids.len() > RCS_CAPABILITY_PUBLISH_BATCH {
+            return Err(Error::InvalidRequest(
+                "RCS capability batch exceeds the maximum",
+            ));
+        }
+        if !(0..i64::MAX).contains(&now_ms) {
+            return Err(Error::InvalidRequest(
+                "invalid RCS eligibility observation time",
+            ));
+        }
+        let unique = conversation_ids.iter().copied().collect::<HashSet<_>>();
+        if unique.len() != conversation_ids.len() {
+            return Err(Error::InvalidRequest(
+                "duplicate RCS eligibility conversation",
+            ));
+        }
+
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let lifecycle = rcs_mapping::recorded_link_lifecycle_metadata(&tx)?;
+        let status = rcs_capability::status_projection(&tx, ctx.device_id, now_ms)?;
+        let linked = lifecycle.as_ref().is_some_and(|lifecycle| {
+            lifecycle.state == RcsCapabilityState::Linked
+                && status.as_ref().is_some_and(|status| {
+                    status.current && status.status.state == RcsCapabilityState::Linked
+                })
+        });
+        let feature_bits = status
+            .as_ref()
+            .filter(|status| linked && status.status.state == RcsCapabilityState::Linked)
+            .map_or(0, |status| status.status.feature_bits);
+        let mut published = 0;
+        for conversation_id in conversation_ids {
+            let mapping = linked
+                .then(|| rcs_mapping::get(&tx, *conversation_id))
+                .transpose()?
+                .flatten();
+            let eligibility = if !linked {
+                RcsEligibility::Unknown
+            } else if mapping.is_some() {
+                RcsEligibility::Eligible
+            } else {
+                RcsEligibility::NotEligible
+            };
+            let identity = format!("eligibility:{}:{}", ctx.device_id, conversation_id);
+            let previous_revision = tx
+                .query_row(
+                    "SELECT revision FROM rcs_capability_published WHERE identity=?",
+                    [&identity],
+                    |row| row.get::<_, u64>(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            let revision = previous_revision
+                .checked_add(1)
+                .filter(|revision| *revision <= i64::MAX as u64)
+                .ok_or(Error::InvalidRequest("RCS eligibility revision exhausted"))?;
+            let projection = RcsEligibilityProjection {
+                conversation_id: *conversation_id,
+                eligibility,
+                feature_bits,
+                mapping_revision: revision,
+                observed_at_ms: now_ms,
+                gateway_device_id: ctx.device_id,
+            };
+            if publish_rcs_capability_payload(
+                &tx,
+                &ctx,
+                &PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
+                    eligibility: projection,
+                }),
+                identity,
+                revision,
+                now_ms,
+            )? {
+                published += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(published)
+    }
+
+    /// Durably records host link lifecycle before exposing its content-free capability status.
+    pub fn record_rcs_link_lifecycle(
+        &self,
+        state: RcsCapabilityState,
+        availability: bool,
+        health: bool,
+        phone_responsive: bool,
+        observed_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<(), Error> {
+        if observed_at_ms > now_ms {
+            return Err(Error::InvalidRequest("future RCS link lifecycle"));
+        }
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let previous_state = rcs_mapping::recorded_link_lifecycle(&tx)?;
+        let state_changed = rcs_mapping::record_link_lifecycle(&tx, state, observed_at_ms)?;
+        if state_changed {
+            if matches!(
+                state,
+                RcsCapabilityState::SignedOut
+                    | RcsCapabilityState::NeedsRelink
+                    | RcsCapabilityState::Unlinked
+            ) {
+                rcs_mapping::invalidate_all_mappings(&tx, "link_lifecycle_terminal")?;
+                rcs_mapping::clear_accepted_carrier_route(&tx)?;
+            }
+            tx.execute(
+                "DELETE FROM metadata WHERE k LIKE 'rcs_carrier_only_proof_v1/%'",
+                [],
+            )?;
+        }
+        let identity = format!("status:{}", ctx.device_id);
+        let previous_revision = tx
+            .query_row(
+                "SELECT revision FROM rcs_capability_published WHERE identity=?",
+                [&identity],
+                |row| row.get::<_, u64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        let revision = previous_revision
+            .checked_add(1)
+            .ok_or(Error::InvalidRequest("RCS capability revision exhausted"))?;
+        let linked_since_ms = if state == RcsCapabilityState::Linked {
+            if previous_state == Some(RcsCapabilityState::Linked) {
+                rcs_capability::linked_since(&tx, ctx.device_id)?.unwrap_or(observed_at_ms)
+            } else {
+                rcs_capability::next_linked_since(&tx, ctx.device_id, observed_at_ms)?
+            }
+        } else {
+            0
+        };
+        if state == RcsCapabilityState::Linked {
+            rcs_capability::record_linked_since(&tx, ctx.device_id, linked_since_ms)?;
+        }
+        let status = RcsLinkStatusEvent {
+            gateway_device_id: ctx.device_id,
+            state,
+            availability,
+            health,
+            phone_responsive,
+            observed_at_ms,
+            capability_revision: revision,
+            feature_bits: 0,
+            linked_since_ms: (state == RcsCapabilityState::Linked).then_some(linked_since_ms),
+        };
+        publish_rcs_capability_payload(
+            &tx,
+            &ctx,
+            &PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload { status }),
+            identity,
+            revision,
+            now_ms,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Returns the current content-free capability gate for automatic RCS dispatch.
+    pub fn rcs_gateway_supported(
+        &self,
+        gateway_device_id: DeviceId,
+        now_ms: i64,
+    ) -> Result<bool, Error> {
+        rcs_capability::current_gateway(&self.lock()?.conn, gateway_device_id, now_ms)
+    }
+
+    /// Sanitized link status for bindings. `current=false` is unknown for capability consumers.
+    pub fn rcs_link_status(
+        &self,
+        gateway_device_id: DeviceId,
+        now_ms: i64,
+    ) -> Result<Option<RcsLinkStatusProjection>, Error> {
+        rcs_capability::status_projection(&self.lock()?.conn, gateway_device_id, now_ms)
+    }
+
+    /// A stale peer projection is intentionally returned as `Unknown`, never as send authority.
+    pub fn rcs_eligibility_projection(
+        &self,
+        conversation_id: ConversationId,
+        gateway_device_id: DeviceId,
+        now_ms: i64,
+    ) -> Result<Option<RcsEligibilityProjection>, Error> {
+        rcs_capability::projection(
+            &self.lock()?.conn,
+            conversation_id,
+            gateway_device_id,
+            now_ms,
+        )
+    }
+
+    /// Stores a completed local carrier-only lookup bound to the current linked context.
+    pub fn record_carrier_only_proof(
+        &self,
+        proof: &CarrierOnlyProof,
+        now_ms: i64,
+    ) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let transaction = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        rcs_send::record_carrier_only_proof(&transaction, proof, now_ms)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn carrier_route_context(
+        &self,
+        subscription_id: &str,
+    ) -> Result<Option<ValidatedCarrierRouteContext>, Error> {
+        rcs_mapping::carrier_route_context(&self.lock()?.conn, Some(subscription_id))
+    }
+
+    pub fn classify_and_commit_rcs_target(
+        &self,
+        conversation_id: ConversationId,
+        recipient: &str,
+        snapshot_json: &str,
+        now_ms: i64,
+    ) -> Result<RcsTargetDecision, Error> {
+        let mut store = self.lock()?;
+        let transaction = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(route) = rcs_mapping::current_carrier_route_context(&transaction, now_ms)? else {
+            return Ok(RcsTargetClassification::Unknown {
+                snapshot_token: None,
+            });
+        };
+        let decision = rcs_target::classify_rcs_target(
+            &transaction,
+            conversation_id,
+            recipient,
+            route,
+            snapshot_json,
+            now_ms,
+        );
+        if let RcsTargetClassification::NotFoundComplete { carrier_only_proof } = &decision {
+            rcs_target::commit_complete_absence(&transaction, carrier_only_proof, now_ms)?;
+        }
+        transaction.commit()?;
+        Ok(decision)
+    }
+    /// Returns whether current, content-free RCS evidence permits a typing signal for a
+    /// conversation. It is a gate only; it does not create durable state or grant send authority.
+    pub fn typing_signal_allowed(
+        &self,
+        conversation_id: ConversationId,
+        gateway_device_id: DeviceId,
+        now_ms: i64,
+    ) -> Result<bool, Error> {
+        Ok(matches!(
+            self.rcs_eligibility_projection(conversation_id, gateway_device_id, now_ms)?,
+            Some(RcsEligibilityProjection {
+                eligibility: RcsEligibility::Eligible,
+                ..
+            })
+        ))
+    }
+
+    /// Seals a short-lived signal only under the active event epoch. The caller explicitly
+    /// chooses each action; no preference or pending signal is persisted.
+    pub fn seal_typing_signal(
+        &self,
+        conversation_id: ConversationId,
+        gateway_device_id: DeviceId,
+        origin: TypingOrigin,
+        state: TypingState,
+        now_ms: i64,
+    ) -> Result<Option<EphemeralSignalV1>, Error> {
+        if !self.typing_signal_allowed(conversation_id, gateway_device_id, now_ms)? {
+            return Ok(None);
+        }
+        let mut store = self.lock()?;
+        let epoch = store.active_epoch.ok_or(Error::KeysUnavailable)?;
+        let vault_id = store.config.vault_id;
+        let device_id = store.config.device_id;
+        let Store {
+            keys, ephemeral, ..
+        } = &mut *store;
+        let key = &keys.get(&epoch).ok_or(Error::KeysUnavailable)?.event;
+        ephemeral.seal(
+            ephemeral::SealContext {
+                key,
+                vault_id,
+                sender_device_id: device_id,
+                key_epoch: epoch,
+            },
+            ephemeral::SealRequest {
+                conversation_id,
+                origin,
+                state,
+                now_ms,
+            },
+        )
+    }
+
+    /// Opens an authenticated signal from the bounded transient roster. Invalid, stale,
+    /// unauthenticated, or out-of-order signals are discarded without a durable record.
+    pub fn open_typing_signal(
+        &self,
+        signal: &EphemeralSignalV1,
+        trusted_devices: &[DeviceId],
+        received_at_ms: i64,
+    ) -> Result<Option<TypingView>, Error> {
+        let mut store = self.lock()?;
+        let vault_id = store.config.vault_id;
+        let Store {
+            keys, ephemeral, ..
+        } = &mut *store;
+        Ok(ephemeral.open(keys, vault_id, signal, trusted_devices, received_at_ms))
+    }
+
     /// Opens (or shares) the per-canonical-path owner. A second open must present the same key
     /// and identity. A wrong key is reported, never treated as a new database.
     pub fn open(config: ClientConfig, db_key: DatabaseKey) -> Result<Self, Error> {
@@ -1168,6 +1773,13 @@ impl Client {
             db_key: Zeroizing::new(*db_key.0),
             keys: BTreeMap::new(),
             active_epoch: None,
+            identity_recovery_keys: BTreeMap::new(),
+            identity_bootstrap_epochs: BTreeSet::new(),
+            staged_pending: None,
+            staged_identity: None,
+            rcs_identity_key: None,
+            ephemeral: ephemeral::EphemeralTypingState::default(),
+            ephemeral_v2: ephemeral_v2::EphemeralV2State::default(),
             media_dir,
             media_cache: media_cache::MediaCacheState::default(),
         };
@@ -1179,6 +1791,71 @@ impl Client {
         client.cleanup_terminal_mms_parts()?;
         registry.insert(path, Arc::downgrade(&client.0));
         Ok(client)
+    }
+
+    pub fn vault_identity_snapshot(&self) -> Result<VaultIdentitySnapshot, Error> {
+        let store = self.lock()?;
+        vault_identity::snapshot(&store)
+    }
+    pub fn vault_identity_readiness(&self) -> Result<VaultIdentityReadiness, Error> {
+        let store = self.lock()?;
+        let snapshot = vault_identity::snapshot(&store)?;
+        Ok(if snapshot.ready {
+            VaultIdentityReadiness::Ready {
+                key_epoch: snapshot.key_epoch.ok_or(Error::Database)?,
+                operation_id: snapshot.operation_id.ok_or(Error::Database)?,
+            }
+        } else {
+            VaultIdentityReadiness::Unavailable {
+                code: snapshot
+                    .unavailable_code
+                    .unwrap_or_else(|| vault_identity::IDENTITY_UNAVAILABLE.into()),
+            }
+        })
+    }
+    pub fn begin_vault_identity_establishment(
+        &self,
+    ) -> Result<VaultIdentityPendingMaterial, Error> {
+        let mut store = self.lock()?;
+        vault_identity::begin(&mut store)
+    }
+    pub fn confirm_vault_identity_pending_durable(
+        &self,
+        operation_id: String,
+    ) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        vault_identity::confirm(&mut store, &operation_id)
+    }
+    pub fn adopt_vault_identity(
+        &self,
+        status_json: String,
+    ) -> Result<VaultIdentityAdoption, Error> {
+        let mut store = self.lock()?;
+        vault_identity::adopt(&mut store, &status_json)
+    }
+    pub fn commit_vault_identity_acceptance(&self, operation_id: String) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        vault_identity::commit(&mut store, &operation_id)
+    }
+    pub fn restore_vault_identity_from_protected(&self, bytes: Vec<u8>) -> Result<(), Error> {
+        let bytes = Zeroizing::new(bytes);
+        let mut store = self.lock()?;
+        vault_identity::restore(&mut store, &bytes)
+    }
+    pub fn export_vault_identity_recovery_key_for_native_storage(
+        &self,
+        epoch: u32,
+    ) -> Result<Vec<u8>, Error> {
+        let store = self.lock()?;
+        vault_identity::export_recovery_key(&store, epoch)
+    }
+    pub fn import_vault_identity_recovery_key_from_native_storage(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Result<(), Error> {
+        let bytes = Zeroizing::new(bytes);
+        let mut store = self.lock()?;
+        vault_identity::import_recovery_key(&mut store, &bytes)
     }
 
     /// Enables automatic protected-use creation only after the host negotiated protocol v1 for
@@ -1561,6 +2238,7 @@ impl Client {
         })?;
         let derive =
             |purpose| derive_purpose_key(&root, profile, purpose).map_err(|_| Error::Crypto);
+        let identity_recovery_key = derive(KeyPurpose::VaultIdentityRecovery)?;
         let keys = EpochKeys {
             profile: profile.clone(),
             fingerprint: profile.fingerprint().map_err(|_| Error::Crypto)?,
@@ -1608,6 +2286,9 @@ impl Client {
         tx.commit()?;
         s.active_epoch = Some(active);
         s.keys.insert(profile.key_epoch, keys);
+        s.identity_recovery_keys
+            .insert(profile.key_epoch, identity_recovery_key);
+        s.identity_bootstrap_epochs.insert(profile.key_epoch);
         recover_decoder_revision(
             &s.conn,
             &Ctx {
@@ -1656,6 +2337,7 @@ impl Client {
         let command = derive(KeyPurpose::Command)?;
         let event = derive(KeyPurpose::Event)?;
         let compaction = derive(KeyPurpose::Compaction)?;
+        let identity_recovery_key = derive(KeyPurpose::VaultIdentityRecovery)?;
         let local_identity_seal = LocalIdentitySealCapability {
             key: derive(KeyPurpose::LocalWrap)?,
             verified_header: header.clone(),
@@ -1713,6 +2395,9 @@ impl Client {
         tx.commit()?;
         s.active_epoch.get_or_insert(profile.key_epoch);
         s.keys.insert(profile.key_epoch, keys);
+        s.identity_recovery_keys
+            .insert(profile.key_epoch, identity_recovery_key);
+        s.identity_bootstrap_epochs.insert(profile.key_epoch);
         recover_decoder_revision(
             &s.conn,
             &Ctx {
@@ -1766,10 +2451,84 @@ impl Client {
         seal_pending(&tx, &ctx, MAX_SEAL_BATCH)?;
         tx.commit()?;
         s.active_epoch = Some(epoch);
+        s.ephemeral.clear();
         for keys in s.keys.values_mut() {
             keys.local_identity_seal = None;
         }
         Ok(())
+    }
+
+    /// Clears process-only typing state when the host locks its session. Restarting also creates
+    /// a fresh empty state; this method never writes the database.
+    pub fn clear_ephemeral_typing(&self) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        store.ephemeral.clear();
+        store.ephemeral_v2.disable();
+        Ok(())
+    }
+
+    /// Enables a fresh, memory-only v2 typing incarnation from trusted host context.
+    pub fn enable_live_typing(
+        &self,
+        context: LiveEnableContext,
+        clock: LiveClock,
+    ) -> Result<LiveEnableGeneration, LiveError> {
+        let mut store = self.lock().map_err(|_| LiveError::InvalidContext)?;
+        ephemeral_v2::enable(&mut store, context, clock)
+    }
+
+    /// Retires v2 typing state without consulting a clock or writing SQLite.
+    pub fn disable_live_typing(&self) -> Result<(), Error> {
+        self.lock()?.ephemeral_v2.disable();
+        Ok(())
+    }
+
+    /// Enables or suppresses outbound live typing frames for this enabled incarnation.
+    pub fn set_typing_sharing(&self, enabled: bool) -> Result<(), LiveError> {
+        let mut store = self.lock().map_err(|_| LiveError::InvalidContext)?;
+        ephemeral_v2::set_sharing(&mut store, enabled)
+    }
+
+    /// Seals v2 typing only after checking fresh eligibility under the Store lock. The returned
+    /// frame is an opaque detached copy: hosts must recheck its generation before transmit; it is
+    /// not itself single-use authority or a host publication fence.
+    pub fn seal_typing_signal_v2(
+        &self,
+        conversation_id: ConversationId,
+        gateway_device_id: DeviceId,
+        origin: peppy_protocol::TypingOriginV2,
+        state: peppy_protocol::TypingStateV2,
+        clock: LiveClock,
+    ) -> Result<Option<LiveOutbound>, LiveError> {
+        let mut store = self.lock().map_err(|_| LiveError::InvalidContext)?;
+        ephemeral_v2::seal(
+            &mut store,
+            conversation_id,
+            gateway_device_id,
+            origin,
+            state,
+            clock,
+        )
+    }
+
+    /// Opens an authenticated v2 live typing frame under the current enabled incarnation.
+    pub fn open_typing_signal_v2(
+        &self,
+        signal: &EphemeralSignalV2,
+        clock: LiveClock,
+    ) -> Result<LiveOutcome, LiveError> {
+        let mut store = self.lock().map_err(|_| LiveError::InvalidContext)?;
+        ephemeral_v2::open(&mut store, signal, clock)
+    }
+
+    /// Opens a serialized v2 live typing frame with the same admission semantics as typed input.
+    pub fn open_typing_signal_v2_json(
+        &self,
+        frame_json: &str,
+        clock: LiveClock,
+    ) -> Result<LiveOutcome, LiveError> {
+        let mut store = self.lock().map_err(|_| LiveError::InvalidContext)?;
+        ephemeral_v2::open_json(&mut store, frame_json, clock)
     }
 
     /// Exports both purpose keys of an unlocked epoch for OS secure storage. The root key and
@@ -2927,7 +3686,10 @@ fn validate_outgoing(sms: &OutgoingSms, route: &GatewayRoute) -> Result<(), Erro
     };
     require_address(recipient)?;
     require_body(&sms.body, false)?;
-    require_subscription(route)
+    match route {
+        GatewayRoute::Carrier { .. } => require_subscription(route),
+        GatewayRoute::RcsLink { .. } => Ok(()),
+    }
 }
 fn validate_outgoing_mms(
     recipients: &[String],
@@ -2952,13 +3714,18 @@ fn validate_outgoing_mms(
     require_subscription(route)
 }
 fn require_subscription(route: &GatewayRoute) -> Result<(), Error> {
-    if route.subscription_id.is_empty() || route.subscription_id.len() > MAX_SUBSCRIPTION_BYTES {
+    let GatewayRoute::Carrier {
+        subscription_id, ..
+    } = route
+    else {
+        return Err(Error::InvalidRequest("carrier route required"));
+    };
+    if subscription_id.is_empty() || subscription_id.len() > MAX_SUBSCRIPTION_BYTES {
         return Err(Error::InvalidRequest("subscription id"));
     }
     Ok(())
 }
 
-/// Writes the outgoing message, command binding and command outbox row for a validated SMS.
 /// Writes the outgoing message, command binding and command outbox row for a validated SMS
 /// (no attachments) or MMS (attachments prepared on this device).
 fn queue_sms(
@@ -3015,9 +3782,15 @@ fn queue_message(
         mms_context: None,
     };
     let message_id = payload.record.message_id;
+    let gateway_device_id = match route {
+        GatewayRoute::Carrier {
+            gateway_device_id, ..
+        }
+        | GatewayRoute::RcsLink { gateway_device_id } => *gateway_device_id,
+    };
     let command_id = preset_command_id.unwrap_or_else(CommandId::new);
     if insert_message(tx, &payload)? != Inserted::New
-        || !record_command(tx, command_id, message_id, route.gateway_device_id)?
+        || !record_command(tx, command_id, message_id, gateway_device_id)?
     {
         return Err(Error::Database);
     }
@@ -3312,7 +4085,7 @@ impl Client {
             Vec::new()
         } else {
             let mut query = tx.prepare(&format!(
-                "SELECT LENGTH(wire),cursor,wire,historical FROM journal WHERE status='pending' AND cursor<=?1 AND key_epoch IN ({epochs}) ORDER BY cursor LIMIT ?2"
+                "SELECT LENGTH(wire),cursor,wire,historical FROM journal INDEXED BY journal_apply_eligible WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated' AND cursor<=?1 AND key_epoch IN ({epochs}) ORDER BY cursor LIMIT ?2"
             ))?;
             take_within_budget(
                 query.query(params![ceiling, to_i64(limit as u64)?])?,
@@ -3321,7 +4094,14 @@ impl Client {
             )?
         };
         for (cursor, wire, historical) in rows {
-            if let Some(suppression) = &suppression
+            let ordinary_rcs = match snapshot_projection::rcs_live_apply(&tx, &ctx, cursor, &wire)?
+            {
+                Some(snapshot_projection::RcsLiveApply::Defer) => continue,
+                Some(snapshot_projection::RcsLiveApply::ApplyOrdinary) => true,
+                None => false,
+            };
+            if !ordinary_rcs
+                && let Some(suppression) = &suppression
                 && let Some(reason) = suppression.decision(&tx, &ctx, cursor, &wire)?
             {
                 match reason {
@@ -3358,7 +4138,7 @@ impl Client {
         }
         let waiting: i64 = tx.query_row(
             &format!(
-                "SELECT COUNT(*) FROM journal WHERE status='pending' AND cursor<=?1 AND key_epoch NOT IN ({epochs})"
+                "SELECT COUNT(*) FROM journal WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated' AND cursor<=?1 AND key_epoch NOT IN ({epochs})"
             ),
             params![ceiling],
             |r| r.get(0),
@@ -3401,7 +4181,7 @@ impl Client {
             exists(
                 &store.conn,
                 &format!(
-                    "SELECT 1 FROM journal WHERE status='pending' AND key_epoch IN ({epochs}) LIMIT 1"
+                    "SELECT 1 FROM journal INDEXED BY journal_apply_eligible WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated' AND key_epoch IN ({epochs}) LIMIT 1"
                 ),
             )?
         };
@@ -3458,7 +4238,7 @@ impl Client {
             return Ok(Vec::new());
         }
         let mut query = s.conn.prepare(
-            "SELECT l.command_id,l.subscription_id,l.payload FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE a.command_id IS NULL AND l.historical=0 AND l.key_epoch=? ORDER BY l.local_order",
+            "SELECT l.command_id,l.subscription_id,l.payload FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE a.command_id IS NULL AND l.historical=0 AND l.subscription_id<>'' AND l.key_epoch=? ORDER BY l.local_order",
         )?;
         let rows = query
             .query_map(params![active], |r| {
@@ -3480,8 +4260,57 @@ impl Client {
             .collect()
     }
 
+    /// Candidate RCS-link commands for the trusted native coordinator.
+    ///
+    /// This list grants no transport authority. Each candidate must still pass
+    /// mapping verification and native admission before an effect.
+    pub fn pending_native_rcs_commands(&self) -> Result<Vec<PendingNativeRcsCommand>, Error> {
+        let store = self.lock()?;
+        rcs_native::pending_commands(&store.conn, store.active_epoch)
+    }
+
+    /// Lists unattempted received commands for automatic routing without granting a transport
+    /// permit. Callers must use `begin_automatic_send_attempt` before any host effect.
+    pub fn pending_automatic_commands(&self) -> Result<Vec<PendingAutomaticCommand>, Error> {
+        let s = self.lock()?;
+        let Some(active) = s.active_epoch else {
+            return Ok(Vec::new());
+        };
+        let mut query = s.conn.prepare(
+            "SELECT l.command_id,l.subscription_id,l.payload FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE a.command_id IS NULL AND l.historical=0 AND l.key_epoch=? ORDER BY l.local_order",
+        )?;
+        let rows = query
+            .query_map(params![active], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(id, subscription_id, payload)| {
+                Ok(PendingAutomaticCommand {
+                    command_id: parse(&id)?,
+                    original_subscription_id: (!subscription_id.is_empty())
+                        .then_some(subscription_id),
+                    message: localize(&s.conn, decode(payload.as_bytes())?)?.0,
+                })
+            })
+            .collect()
+    }
+
     /// Durably records an attempt before the native host touches the carrier API.
     pub fn begin_send_attempt(&self, command_id: CommandId) -> Result<PermitDecision, Error> {
+        self.begin_send_attempt_at(command_id, notifications::now_ms())
+    }
+
+    /// Route-aware carrier admission with caller-supplied wall time for deterministic hosts/tests.
+    pub fn begin_send_attempt_at(
+        &self,
+        command_id: CommandId,
+        now_ms: i64,
+    ) -> Result<PermitDecision, Error> {
         let mut guard = self.lock()?;
         let active = guard.active_epoch;
         let tx = guard
@@ -3497,6 +4326,9 @@ impl Client {
         let Some((epoch, subscription_id, payload, historical)) = ledger else {
             return Ok(PermitDecision::Blocked(PermitBlock::NotReceived));
         };
+        if subscription_id.is_empty() {
+            return Ok(PermitDecision::Blocked(PermitBlock::RouteUnavailable));
+        }
         // Known attempts keep reporting their recorded (or unknown) outcome.
         if let Some(state) = attempt_state(&tx, command_id)? {
             return Ok(PermitDecision::AlreadyAttempted(state));
@@ -3518,30 +4350,618 @@ impl Client {
         if !media_ready {
             return Ok(PermitDecision::Blocked(PermitBlock::MediaUnavailable));
         }
-        let retention_blocked: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM attachment_retention_requirements r WHERE r.command_id=?1 AND (NOT EXISTS(SELECT 1 FROM attachment_retention_effects e WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind) OR EXISTS(SELECT 1 FROM attachment_retention_effects e JOIN attachment_retention_uses u ON u.use_id=e.use_id WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind AND (u.registered=0 OR u.released=1 OR u.suppressed=1 OR u.reconciliation_required=1))))",
-            [command_id.to_string()],
-            |row| row.get(0),
+        let carrier_admission = rcs_send::carrier_admission(
+            &tx,
+            message.record.conversation_id,
+            &message.recipients,
+            message.transport,
+            &subscription_id,
+            now_ms,
         )?;
-        if retention_blocked {
+        if matches!(
+            carrier_admission,
+            rcs_send::CarrierAdmission::InvalidateProof
+        ) {
+            rcs_send::invalidate_carrier_only_proof(&tx, message.record.conversation_id)?;
+            tx.commit()?;
+            return Ok(PermitDecision::Blocked(
+                PermitBlock::CarrierOnlyProofUnavailable,
+            ));
+        }
+        if !matches!(
+            carrier_admission,
+            rcs_send::CarrierAdmission::Permitted
+                | rcs_send::CarrierAdmission::ShortCodeSms
+                | rcs_send::CarrierAdmission::GroupMmsPreM4
+        ) {
+            return Ok(PermitDecision::Blocked(
+                PermitBlock::CarrierOnlyProofUnavailable,
+            ));
+        }
+        if send_retention_blocked(&tx, command_id)? {
             return Ok(PermitDecision::Blocked(PermitBlock::MediaUnavailable));
         }
         // The attempt time is the gateway's best evidence for the provider row the platform
         // writes when it submits this text; queue time on another device is not.
-        tx.execute(
-            "INSERT INTO attempts(command_id,state,attempted_at_ms) VALUES(?,?,?)",
-            params![
-                command_id.to_string(),
-                state_code(SendState::AttemptRecorded),
-                notifications::now_ms()
-            ],
-        )?;
+        record_finalized_attempt(&tx, command_id, "carrier", now_ms)?;
         tx.commit()?;
         Ok(PermitDecision::Permit(ReceivedCommand {
             command_id,
             subscription_id,
             message,
         }))
+    }
+
+    /// Captures a received command's exact stored mapping without authorizing a send.
+    /// The native host must obtain current observations and consume this preparation at begin.
+    pub fn prepare_native_rcs_send(
+        &self,
+        command_id: CommandId,
+        now_ms: i64,
+    ) -> Result<NativeRcsPreparation, Error> {
+        let mut guard = self.lock()?;
+        let active = guard.active_epoch;
+        let tx = guard.conn.transaction()?;
+        let message = unattempted_rcs_message(&tx, active, command_id)?;
+        require_native_rcs_body(&message.body)?;
+        let mapping = rcs_mapping::get(&tx, message.record.conversation_id)?
+            .ok_or(Error::InvalidRequest("mapping unproven"))?;
+        if mapping.proof_version != RCS_MAPPING_PROOF_VERSION
+            || mapping.class != RcsMappingClass::OneToOne
+            || !now_ms
+                .checked_sub(mapping.verified_at_ms)
+                .is_some_and(|age| (0..=RCS_MAPPING_FRESHNESS_MS).contains(&age))
+        {
+            return Err(Error::InvalidRequest("mapping unproven"));
+        }
+        require_exact_rcs_recipient(&message, &mapping)?;
+        tx.commit()?;
+        Ok(NativeRcsPreparation::new(command_id, mapping))
+    }
+
+    /// Consumes advisory preparation and issues the full native projection only after admission.
+    /// Its caller must keep the projection on the trusted native path, not a renderer JSON API.
+    pub fn begin_native_rcs_send(
+        &self,
+        preparation: NativeRcsPreparation,
+        observation: &RcsMappingObservation,
+        now_ms: i64,
+    ) -> Result<NativeRcsCommitProjection, Error> {
+        let (command_id, prepared_mapping) = preparation.into_parts();
+        let mut guard = self.lock()?;
+        let active = guard.active_epoch;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let permit = admit_rcs_send(
+            tx,
+            active,
+            command_id,
+            Some(&prepared_mapping),
+            observation,
+            now_ms,
+        )?;
+        Ok(permit.native_commit_projection())
+    }
+
+    /// Durably records a linked-transport attempt and returns its local-only permit.
+    pub fn begin_rcs_send_attempt(
+        &self,
+        command_id: CommandId,
+        observation: &RcsMappingObservation,
+        now_ms: i64,
+    ) -> Result<RcsPermit, Error> {
+        let mut guard = self.lock()?;
+        let active = guard.active_epoch;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        admit_rcs_send(tx, active, command_id, None, observation, now_ms)
+    }
+
+    pub fn next_rcs_context_tuple(
+        &self,
+        go_runtime_id: &str,
+        go_run_generation: u64,
+        go_stream_epoch: u64,
+        go_pairing_evidence_id: &str,
+    ) -> Result<RcsContextTuple, Error> {
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tuple = rcs_mapping::next_rcs_context_tuple(
+            &tx,
+            go_runtime_id,
+            go_run_generation,
+            go_stream_epoch,
+            go_pairing_evidence_id,
+        )?;
+        tx.commit()?;
+        Ok(tuple)
+    }
+
+    pub fn next_rcs_mapping_revision(&self, conversation_id: ConversationId) -> Result<u64, Error> {
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let revision = rcs_mapping::next_rcs_mapping_revision(&tx, conversation_id)?;
+        tx.commit()?;
+        Ok(revision)
+    }
+
+    /// Highest `messages.local_order` (insertion order, AUTOINCREMENT), or 0 when empty.
+    pub fn latest_message_local_order(&self) -> Result<i64, Error> {
+        let store = self.lock()?;
+        store
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(local_order), 0) FROM messages",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Error::from)
+    }
+
+    /// Bounded rows after `after`, returning incoming messages and the last examined order.
+    pub fn incoming_messages_after(&self, after: i64, limit: usize) -> Result<IncomingPage, Error> {
+        let store = self.lock()?;
+        let limit = limit.clamp(1, MAX_HISTORY_PAGE);
+        // Scan a bounded interleave so outgoing-only tails advance webhook cursors.
+        let scan_limit = i64::try_from(limit.saturating_mul(5)).map_err(|_| Error::Database)?;
+        let mut query = store.conn.prepare(
+            "SELECT local_order,payload FROM messages WHERE local_order>?1 ORDER BY local_order LIMIT ?2",
+        )?;
+        let mut scanned_through = after;
+        let mut messages = Vec::new();
+        for row in query.query_map(params![after, scan_limit], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (local_order, payload) = row?;
+            scanned_through = local_order;
+            let payload: MessagePayload = decode(payload.as_bytes())?;
+            if payload.direction == Direction::Incoming {
+                messages.push((local_order, payload));
+                if messages.len() == limit {
+                    break;
+                }
+            }
+        }
+        Ok(IncomingPage {
+            messages,
+            scanned_through,
+        })
+    }
+
+    /// Atomically selects and freezes the only executable transport for an upgraded gateway.
+    /// A supplied mapping observation is strict: a contradictory or incomplete observation never
+    /// falls back to carrier authority.
+    pub fn begin_automatic_send_attempt(
+        &self,
+        command_id: CommandId,
+        observation: Option<&RcsMappingObservation>,
+        now_ms: i64,
+    ) -> Result<AutomaticPermitDecision, Error> {
+        let mut guard = self.lock()?;
+        let active = guard.active_epoch;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let ledger: Option<(u32, String, String, bool)> = tx
+            .query_row(
+                "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
+                [command_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((epoch, subscription_id, payload, historical)) = ledger else {
+            return Ok(AutomaticPermitDecision::Blocked(PermitBlock::NotReceived));
+        };
+        if let Some(state) = attempt_state(&tx, command_id)? {
+            return Ok(AutomaticPermitDecision::AlreadyAttempted(state));
+        }
+        if restore_guarded(&tx)? {
+            return Ok(AutomaticPermitDecision::Blocked(
+                PermitBlock::RestoreGuarded,
+            ));
+        }
+        if historical {
+            return Ok(AutomaticPermitDecision::Blocked(PermitBlock::Historical));
+        }
+        match active {
+            Some(active) if epoch == active => {}
+            Some(active) if epoch < active => {
+                return Ok(AutomaticPermitDecision::Blocked(PermitBlock::StaleEpoch));
+            }
+            _ => {
+                return Ok(AutomaticPermitDecision::Blocked(
+                    PermitBlock::EpochNotActive,
+                ));
+            }
+        }
+        let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
+        if !media_ready {
+            invalidate_automatic_carrier_proof_if_contradicted(
+                &tx,
+                &subscription_id,
+                &message,
+                observation,
+                now_ms,
+            )?;
+            tx.commit()?;
+            return Ok(AutomaticPermitDecision::Blocked(
+                PermitBlock::MediaUnavailable,
+            ));
+        }
+        if send_retention_blocked(&tx, command_id)? {
+            invalidate_automatic_carrier_proof_if_contradicted(
+                &tx,
+                &subscription_id,
+                &message,
+                observation,
+                now_ms,
+            )?;
+            tx.commit()?;
+            return Ok(AutomaticPermitDecision::Blocked(
+                PermitBlock::MediaUnavailable,
+            ));
+        }
+        if subscription_id.is_empty() {
+            let Some(observation) = observation else {
+                return Ok(AutomaticPermitDecision::Blocked(
+                    PermitBlock::MappingUnproven,
+                ));
+            };
+            let decision = match automatic_rcs_permit(&tx, command_id, message, observation, now_ms)
+            {
+                Ok(permit) => AutomaticPermitDecision::Rcs(permit),
+                Err(Error::InvalidRequest(_)) => {
+                    AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
+                }
+                Err(error) => return Err(error),
+            };
+            tx.commit()?;
+            return Ok(decision);
+        }
+        if let Some(observation) = observation {
+            let conversation_id = message.record.conversation_id;
+            if subscription_id != observation.selected_sim_id {
+                rcs_send::invalidate_carrier_only_proof(&tx, conversation_id)?;
+                tx.commit()?;
+                return Ok(AutomaticPermitDecision::Blocked(
+                    PermitBlock::MappingUnproven,
+                ));
+            }
+            let decision = match automatic_rcs_permit(&tx, command_id, message, observation, now_ms)
+            {
+                Ok(permit) => AutomaticPermitDecision::Rcs(permit),
+                Err(Error::InvalidRequest(_)) => {
+                    rcs_send::invalidate_carrier_only_proof(&tx, conversation_id)?;
+                    AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
+                }
+                Err(error) => return Err(error),
+            };
+            tx.commit()?;
+            return Ok(decision);
+        }
+        if rcs_mapping::current_link_state(&tx)?.is_none() {
+            return Ok(AutomaticPermitDecision::Blocked(
+                PermitBlock::MappingUnproven,
+            ));
+        }
+        let admission = rcs_send::carrier_admission(
+            &tx,
+            message.record.conversation_id,
+            &message.recipients,
+            message.transport,
+            &subscription_id,
+            now_ms,
+        )?;
+        if matches!(admission, rcs_send::CarrierAdmission::InvalidateProof) {
+            rcs_send::invalidate_carrier_only_proof(&tx, message.record.conversation_id)?;
+            tx.commit()?;
+            return Ok(AutomaticPermitDecision::Blocked(
+                PermitBlock::CarrierOnlyProofUnavailable,
+            ));
+        }
+        if !matches!(
+            admission,
+            rcs_send::CarrierAdmission::Permitted
+                | rcs_send::CarrierAdmission::ShortCodeSms
+                | rcs_send::CarrierAdmission::GroupMmsPreM4
+        ) {
+            return Ok(AutomaticPermitDecision::Blocked(
+                PermitBlock::CarrierOnlyProofUnavailable,
+            ));
+        }
+        record_finalized_attempt(&tx, command_id, "carrier", now_ms)?;
+        tx.commit()?;
+        Ok(AutomaticPermitDecision::Carrier(ReceivedCommand {
+            command_id,
+            subscription_id,
+            message,
+        }))
+    }
+
+    /// Records an upstream acknowledgement as local ledger metadata, never as delivery state.
+    pub fn record_rcs_transport_ack(
+        &self,
+        command_id: CommandId,
+        ack_at_ms: i64,
+        code: &str,
+    ) -> Result<(), Error> {
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if attempt_state(&tx, command_id)?.is_none() {
+            return Err(Error::NoAttempt);
+        }
+        if tx.execute(
+            "UPDATE rcs_send_ledger SET transport_ack_at_ms=?,transport_ack_code=? WHERE command_id=?",
+            params![ack_at_ms, code, command_id.to_string()],
+        )? == 0 {
+            return Err(Error::NoAttempt);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Records only the successful hand-off to the linked transport.
+    pub fn record_rcs_submitted(&self, command_id: CommandId) -> Result<SendState, Error> {
+        self.require_rcs_attempt(command_id)?;
+        self.record_send_result(command_id, SendResult::Submitted)
+    }
+
+    /// Records trusted native proof that the exact RCS attempt had no transport effect.
+    pub fn record_native_rcs_pre_effect_refusal(
+        &self,
+        command_id: CommandId,
+        tmp_id: &str,
+        google_conversation_id: &str,
+    ) -> Result<SendState, Error> {
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let matched: Option<()> = tx
+            .query_row(
+                "SELECT 1 FROM attempts a JOIN rcs_send_ledger r ON r.command_id=a.command_id WHERE a.command_id=? AND a.finalized_transport='rcs' AND r.tmp_id=? AND r.google_conversation_id=?",
+                params![command_id.to_string(), tmp_id, google_conversation_id],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if matched.is_none() {
+            return Err(Error::NoAttempt);
+        }
+        let acknowledged: Option<i64> = tx.query_row(
+            "SELECT transport_ack_at_ms FROM rcs_send_ledger WHERE command_id=?",
+            [command_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if acknowledged.is_some() {
+            return Err(Error::InvalidRequest("RCS transport already acknowledged"));
+        }
+        let current = attempt_state(&tx, command_id)?.ok_or(Error::NoAttempt)?;
+        if current == SendState::FailedBeforeSubmission {
+            return Ok(current);
+        }
+        if current != SendState::AttemptRecorded {
+            return Err(Error::IllegalTransition {
+                from: current,
+                to: SendState::FailedBeforeSubmission,
+            });
+        }
+        tx.execute(
+            "UPDATE attempts SET state=? WHERE command_id=?",
+            params![
+                state_code(SendState::FailedBeforeSubmission),
+                command_id.to_string()
+            ],
+        )?;
+        emit_status(&tx, &ctx, command_id, SendState::FailedBeforeSubmission)?;
+        tx.commit()?;
+        Ok(SendState::FailedBeforeSubmission)
+    }
+
+    /// Records uncertainty for one exact native RCS attempt without authorizing a retry.
+    pub fn record_native_rcs_outcome_unknown(
+        &self,
+        command_id: CommandId,
+        tmp_id: &str,
+        google_conversation_id: &str,
+    ) -> Result<SendState, Error> {
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let matched: Option<()> = tx
+            .query_row(
+                "SELECT 1 FROM attempts a JOIN rcs_send_ledger r ON r.command_id=a.command_id WHERE a.command_id=? AND a.finalized_transport='rcs' AND r.tmp_id=? AND r.google_conversation_id=?",
+                params![command_id.to_string(), tmp_id, google_conversation_id],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if matched.is_none() {
+            return Err(Error::NoAttempt);
+        }
+        let current = attempt_state(&tx, command_id)?.ok_or(Error::NoAttempt)?;
+        if current != SendState::AttemptRecorded {
+            return Ok(current);
+        }
+        tx.execute(
+            "UPDATE attempts SET state=? WHERE command_id=?",
+            params![
+                state_code(SendState::OutcomeUnknown),
+                command_id.to_string()
+            ],
+        )?;
+        emit_status(&tx, &ctx, command_id, SendState::OutcomeUnknown)?;
+        tx.commit()?;
+        Ok(SendState::OutcomeUnknown)
+    }
+
+    /// Creates a new local RCS command after the original attempt is explicitly known unknown.
+    /// The new command has no permit until it is received through the normal command ledger.
+    pub fn resend_rcs_outcome_unknown(&self, command_id: CommandId) -> Result<QueuedSend, Error> {
+        let mut guard = self.lock()?;
+        let gateway_device_id = guard.config.device_id;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if attempt_state(&tx, command_id)? != Some(SendState::OutcomeUnknown) {
+            return Err(Error::AlreadyAttempted(
+                attempt_state(&tx, command_id)?.ok_or(Error::NoAttempt)?,
+            ));
+        }
+        let (payload, revision, digest, google_conversation_id): (String, u64, Vec<u8>, String) =
+            tx.query_row(
+                "SELECT l.payload,r.mapping_revision,r.proof_digest,r.google_conversation_id FROM command_ledger l JOIN attempts a ON a.command_id=l.command_id JOIN rcs_send_ledger r ON r.command_id=l.command_id WHERE l.command_id=? AND a.finalized_transport='rcs'",
+                [command_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+        let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
+        if !media_ready
+            || message.transport != Transport::Sms
+            || !message.record.attachments.is_empty()
+        {
+            return Err(Error::InvalidRequest("RCS text required"));
+        }
+        let route = GatewayRoute::RcsLink { gateway_device_id };
+        let resend = OutgoingSms {
+            conversation_id: message.record.conversation_id,
+            recipients: message.recipients,
+            body: message.body,
+        };
+        validate_outgoing(&resend, &route)?;
+        let queued = queue_sms(&tx, &ctx, resend, &route, &[])?;
+        tx.execute(
+            "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms,retry_of_command_id) VALUES(?,?,?,?,?,?,?)",
+            params![
+                queued.command_id.to_string(),
+                uuid::Uuid::new_v4().to_string(),
+                revision,
+                digest,
+                google_conversation_id,
+                notifications::now_ms(),
+                command_id.to_string()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(queued)
+    }
+
+    /// Reopens only an RCS attempt proven not to have reached the transport, with the same route.
+    pub fn retry_rcs_failed_before_submission(
+        &self,
+        command_id: CommandId,
+        observation: &RcsMappingObservation,
+        now_ms: i64,
+    ) -> Result<RcsPermit, Error> {
+        let mut guard = self.lock()?;
+        let active = guard.active_epoch;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if attempt_state(&tx, command_id)? != Some(SendState::FailedBeforeSubmission) {
+            return Err(Error::AlreadyAttempted(
+                attempt_state(&tx, command_id)?.ok_or(Error::NoAttempt)?,
+            ));
+        }
+        let (epoch, historical, payload, tmp_id): (u32, bool, String, String) = tx.query_row(
+            "SELECT l.key_epoch,l.historical,l.payload,r.tmp_id FROM command_ledger l JOIN attempts a ON a.command_id=l.command_id JOIN rcs_send_ledger r ON r.command_id=l.command_id WHERE l.command_id=? AND a.finalized_transport='rcs'",
+            [command_id.to_string()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                ))
+            },
+        )?;
+        require_received_command_eligible(&tx, active, epoch, historical)?;
+        let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
+        if !media_ready
+            || message.transport != Transport::Sms
+            || !message.record.attachments.is_empty()
+        {
+            return Err(Error::InvalidRequest("RCS text required"));
+        }
+        let Some(mapping) =
+            exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)?
+        else {
+            commit_mapping_refusal(tx)?;
+            return Err(Error::InvalidRequest("mapping unproven"));
+        };
+        require_exact_rcs_recipient(&message, &mapping)?;
+        if !rcs_send::has_same_rcs_target_identity(&tx, command_id, &mapping, observation)? {
+            return Err(Error::InvalidRequest("mapping changed"));
+        }
+        tx.execute(
+            "UPDATE attempts SET state=?,attempted_at_ms=? WHERE command_id=?",
+            params![
+                state_code(SendState::AttemptRecorded),
+                now_ms,
+                command_id.to_string()
+            ],
+        )?;
+        tx.execute(
+            "UPDATE rcs_send_ledger SET mapping_revision=?,proof_digest=?,google_conversation_id=? WHERE command_id=?",
+            params![
+                mapping.mapping_revision,
+                mapping.proof.digest.as_slice(),
+                mapping.google_conversation_id,
+                command_id.to_string()
+            ],
+        )?;
+        let permit = rcs_permit(command_id, message, tmp_id, &mapping, observation)?;
+        tx.commit()?;
+        Ok(permit)
+    }
+
+    /// Applies evidence only when both local identifiers match; an absent result changes nothing.
+    pub fn reconcile_rcs_tmp_id(
+        &self,
+        tmp_id: &str,
+        google_conversation_id: &str,
+        evidence: Option<SendResult>,
+    ) -> Result<Option<SendState>, Error> {
+        let command_id: Option<String> = self.lock()?.conn.query_row(
+            "SELECT command_id FROM rcs_send_ledger WHERE tmp_id=? AND google_conversation_id=?",
+            params![tmp_id, google_conversation_id],
+            |row| row.get(0),
+        ).optional()?;
+        let Some(command_id) = command_id else {
+            return Ok(None);
+        };
+        let Some(evidence) = evidence else {
+            let command_id = parse(&command_id)?;
+            return attempt_state(&self.lock()?.conn, command_id);
+        };
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let state = reconcile_rcs_tmp_id_in_transaction(
+            &tx,
+            &ctx,
+            tmp_id,
+            google_conversation_id,
+            evidence,
+        )?;
+        tx.commit()?;
+        Ok(state)
+    }
+
+    fn require_rcs_attempt(&self, command_id: CommandId) -> Result<(), Error> {
+        let exists: bool = self.lock()?.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attempts WHERE command_id=? AND finalized_transport='rcs')",
+            [command_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if exists {
+            Ok(())
+        } else {
+            Err(Error::NoAttempt)
+        }
     }
 
     /// Records native carrier evidence and queues an encrypted `SendStatus`. Repeating the
@@ -3672,49 +5092,6 @@ impl Client {
             .optional()?
             .map(|row| message_from_row(&s.conn, row))
             .transpose()
-    }
-
-    /// Highest `messages.local_order` (insertion order, AUTOINCREMENT), or 0 when empty.
-    pub fn latest_message_local_order(&self) -> Result<i64, Error> {
-        let store = self.lock()?;
-        store
-            .conn
-            .query_row(
-                "SELECT COALESCE(MAX(local_order), 0) FROM messages",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(Error::from)
-    }
-
-    /// Bounded rows after `after`, returning incoming messages and the last examined order.
-    pub fn incoming_messages_after(&self, after: i64, limit: usize) -> Result<IncomingPage, Error> {
-        let store = self.lock()?;
-        let limit = limit.clamp(1, MAX_HISTORY_PAGE);
-        // Scan a bounded interleave so outgoing-only tails advance webhook cursors.
-        let scan_limit = i64::try_from(limit.saturating_mul(5)).map_err(|_| Error::Database)?;
-        let mut query = store.conn.prepare(
-            "SELECT local_order,payload FROM messages WHERE local_order>?1 ORDER BY local_order LIMIT ?2",
-        )?;
-        let mut scanned_through = after;
-        let mut messages = Vec::new();
-        for row in query.query_map(params![after, scan_limit], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })? {
-            let (local_order, payload) = row?;
-            scanned_through = local_order;
-            let payload: MessagePayload = decode(payload.as_bytes())?;
-            if payload.direction == Direction::Incoming {
-                messages.push((local_order, payload));
-                if messages.len() == limit {
-                    break;
-                }
-            }
-        }
-        Ok(IncomingPage {
-            messages,
-            scanned_through,
-        })
     }
 
     /// Returns one validated, decrypted message by its durable ID.
@@ -5010,6 +6387,7 @@ fn journal_record(
         .optional()?;
     if let Some(existing) = existing {
         return if existing == wire {
+            snapshot_projection::release_snapshot_origin_at_cursor(tx, cursor)?;
             Ok(IngestResult::Duplicate)
         } else {
             Err(Error::Conflict)
@@ -5028,6 +6406,11 @@ fn journal_record(
             // Published records are committed history awaiting drain.
             (Some(staged), true) => {
                 return if staged == wire {
+                    snapshot_projection::observe_ordinary_snapshot_replay(
+                        tx,
+                        generation.number,
+                        cursor,
+                    )?;
                     Ok(IngestResult::Duplicate)
                 } else {
                     Err(Error::Conflict)
@@ -5060,6 +6443,14 @@ fn journal_record(
             reason
         ],
     )?;
+    if matches!(result, IngestResult::Duplicate)
+        && let Some(envelope) = envelope
+    {
+        snapshot_projection::release_snapshot_origins_for_envelope(
+            tx,
+            &envelope.envelope_id.to_string(),
+        )?;
+    }
     Ok(result)
 }
 
@@ -5213,7 +6604,7 @@ fn waiting_for_keys(
     let received = to_i64(received)?;
     let waiting: i64 = if keys.is_empty() {
         conn.query_row(
-            "SELECT COUNT(*) FROM journal WHERE status='pending' AND cursor<=?",
+            "SELECT COUNT(*) FROM journal WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated' AND cursor<=?",
             params![received],
             |row| row.get(0),
         )?
@@ -5225,7 +6616,7 @@ fn waiting_for_keys(
             .join(",");
         conn.query_row(
             &format!(
-                "SELECT COUNT(*) FROM journal WHERE status='pending' AND cursor<=?1 AND (key_epoch IS NULL OR key_epoch NOT IN ({epochs}))"
+                "SELECT COUNT(*) FROM journal WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated' AND cursor<=?1 AND (key_epoch IS NULL OR key_epoch NOT IN ({epochs}))"
             ),
             params![received],
             |row| row.get(0),
@@ -5432,6 +6823,19 @@ fn drain_snapshot(
                 status,
                 reason
             ])?;
+            if projected {
+                snapshot_projection::record_snapshot_import_origin(
+                    conn,
+                    generation.number,
+                    cursor,
+                )?;
+                snapshot_projection::consume_ordinary_snapshot_replay(
+                    conn,
+                    generation.number,
+                    cursor,
+                )?;
+                snapshot_projection::isolate_snapshot_rcs_event(conn, ctx, cursor, &wire)?;
+            }
         }
         if projected {
             snapshot_projection::retain(conn, generation.number, cursor, &wire)?;
@@ -5537,6 +6941,7 @@ CREATE TABLE journal(cursor INTEGER PRIMARY KEY, envelope_id TEXT, key_epoch INT
   status TEXT NOT NULL CHECK(status IN ('pending','applied','duplicate','quarantined')), reason TEXT);
 CREATE INDEX journal_envelope ON journal(envelope_id);
 CREATE INDEX journal_pending ON journal(status, key_epoch, cursor);
+CREATE INDEX journal_apply_eligible ON journal(key_epoch,cursor) WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated';
 CREATE TABLE outbox(seq INTEGER PRIMARY KEY, envelope_id TEXT NOT NULL UNIQUE, command_id TEXT UNIQUE,
    purpose TEXT NOT NULL CHECK(purpose IN ('command','event')), route TEXT, plain BLOB, wire BLOB,
    state TEXT NOT NULL CHECK(state IN ('unsealed','queued','acknowledged')));
@@ -6017,7 +7422,7 @@ INSERT OR IGNORE INTO draft_sync_meta(id,cursor,supported) VALUES(1,'0',1);
 ";
 /// Version 46 -> 47: last accepted draft content for three-way draft merges.
 /// This is local SQLCipher state, with the same at-rest protection as compose drafts.
-const MIGRATION_47: &str = "
+const DRAFT_MERGE_MIGRATION: &str = "
 CREATE TABLE IF NOT EXISTS draft_sync_merge_bases(
   draft_id TEXT PRIMARY KEY, text TEXT NOT NULL, recipients TEXT NOT NULL,
   attachment_ids TEXT NOT NULL, route TEXT
@@ -6027,7 +7432,7 @@ CREATE TABLE IF NOT EXISTS draft_sync_merge_fallbacks(
 );
 ";
 /// Version 47 -> 48: durable evidence that a draft revision PUT may have reached the server.
-const MIGRATION_48: &str = "
+const DRAFT_PUSH_MIGRATION: &str = "
 CREATE TABLE IF NOT EXISTS draft_push_attempts(
   draft_id TEXT NOT NULL, revision_id TEXT NOT NULL,
   PRIMARY KEY(draft_id, revision_id)
@@ -6037,8 +7442,11 @@ CREATE TABLE IF NOT EXISTS draft_sync_quarantines(
   PRIMARY KEY(draft_id, revision_id)
 );
 ";
-fn apply_migration_48(conn: &Connection, legacy_pending_is_ambiguous: bool) -> Result<(), Error> {
-    conn.execute_batch(MIGRATION_48)?;
+fn apply_draft_push_migration(
+    conn: &Connection,
+    legacy_pending_is_ambiguous: bool,
+) -> Result<(), Error> {
+    conn.execute_batch(DRAFT_PUSH_MIGRATION)?;
     if legacy_pending_is_ambiguous {
         conn.execute(
             "INSERT OR IGNORE INTO draft_push_attempts(draft_id,revision_id) SELECT draft_id,pending_revision_id FROM draft_sync WHERE pending_revision_id IS NOT NULL AND pending_sealed_record IS NOT NULL",
@@ -6047,8 +7455,8 @@ fn apply_migration_48(conn: &Connection, legacy_pending_is_ambiguous: bool) -> R
     }
     Ok(())
 }
-fn apply_migration_47(conn: &Connection) -> Result<(), Error> {
-    conn.execute_batch(MIGRATION_47)?;
+fn apply_draft_merge_migration(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(DRAFT_MERGE_MIGRATION)?;
     add_column_if_missing(
         conn,
         "draft_sync",
@@ -6062,8 +7470,19 @@ fn apply_notification_preferences_migration(conn: &Connection) -> Result<(), Err
         "show_source INTEGER NOT NULL DEFAULT 0",
     )
 }
+const VAULT_IDENTITY_MIGRATION: &str = "
+CREATE TABLE IF NOT EXISTS vault_identity_state(
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  state TEXT NOT NULL CHECK(state IN ('pending','accepted','conflict')),
+  operation_id TEXT NOT NULL,
+  key_epoch INTEGER NOT NULL CHECK(key_epoch>0),
+  profile_fingerprint TEXT NOT NULL,
+  pin BLOB NOT NULL CHECK(length(pin)=32),
+  conflict_evidence BLOB,
+  updated_at_ms INTEGER NOT NULL
+);";
 /// Version 49 -> 50: MCP attachment cleanup intents (idempotent; safe on every repaired layout).
-const MIGRATION_50: &str = "
+const MCP_CLEANUP_MIGRATION: &str = "
 CREATE TABLE IF NOT EXISTS attachment_cleanup_intents(attachment_id TEXT PRIMARY KEY);
 ";
 fn apply_migration_45(conn: &Connection) -> Result<(), Error> {
@@ -6072,6 +7491,120 @@ fn apply_migration_45(conn: &Connection) -> Result<(), Error> {
         "sender_unblock_requests",
         "key_epoch INTEGER NOT NULL DEFAULT 0",
     )
+}
+const RCS_MIGRATION_46: &str = "
+CREATE TABLE IF NOT EXISTS rcs_conversation_mappings(
+  peppy_conversation_id TEXT PRIMARY KEY,
+  google_conversation_id TEXT NOT NULL,
+  class TEXT NOT NULL CHECK(class IN ('one_to_one','self_chat')),
+  proof_version INTEGER NOT NULL,
+  proof_hash BLOB NOT NULL CHECK(length(proof_hash)=32),
+  mapping_revision INTEGER NOT NULL,
+  verified_at_ms INTEGER NOT NULL,
+  invalidated_at_ms INTEGER,
+  invalidation_code TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS rcs_mappings_google_active ON rcs_conversation_mappings(google_conversation_id) WHERE invalidated_at_ms IS NULL;
+CREATE TABLE IF NOT EXISTS rcs_mapping_proofs(
+  peppy_conversation_id TEXT NOT NULL REFERENCES rcs_conversation_mappings(peppy_conversation_id),
+  mapping_revision INTEGER NOT NULL,
+  canonical_participant TEXT NOT NULL,
+  identity_region TEXT NOT NULL,
+  own_identity TEXT NOT NULL,
+  PRIMARY KEY(peppy_conversation_id,mapping_revision)
+);
+CREATE TABLE IF NOT EXISTS rcs_send_ledger(
+  command_id TEXT PRIMARY KEY,
+  tmp_id TEXT NOT NULL UNIQUE,
+  mapping_revision INTEGER NOT NULL,
+  proof_digest BLOB NOT NULL CHECK(length(proof_digest)=32),
+  google_conversation_id TEXT NOT NULL,
+  attempted_at_ms INTEGER NOT NULL,
+  transport_ack_at_ms INTEGER,
+  transport_ack_code TEXT,
+  retry_of_command_id TEXT
+);
+";
+/// Version 46 -> 47: freeze the executed transport independently from legacy wire routing.
+/// Version 47 -> 48: content-free RCS capability projections and publication cadence.
+const RCS_MIGRATION_48: &str = "
+CREATE TABLE IF NOT EXISTS rcs_link_status_projection(
+  gateway_device_id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('linked','unlinked','needs_relink','signed_out','unavailable')),
+  availability INTEGER NOT NULL, health INTEGER NOT NULL, phone_responsive INTEGER NOT NULL,
+  observed_at_ms INTEGER NOT NULL, capability_revision INTEGER NOT NULL, feature_bits INTEGER NOT NULL, producer_sequence INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rcs_link_eligibility_projection(
+  gateway_device_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+  eligibility TEXT NOT NULL CHECK(eligibility IN ('eligible','not_eligible','unknown')), feature_bits INTEGER NOT NULL,
+  mapping_revision INTEGER NOT NULL, observed_at_ms INTEGER NOT NULL, producer_sequence INTEGER NOT NULL,
+  PRIMARY KEY(gateway_device_id,conversation_id)
+);
+CREATE TABLE IF NOT EXISTS rcs_capability_published(
+  identity TEXT PRIMARY KEY, revision INTEGER NOT NULL, body TEXT NOT NULL, published_at_ms INTEGER NOT NULL
+);
+";
+/// Version 48 -> 49: local-only RCS receive ownership and immutable identities.
+const RCS_MIGRATION_49: &str = "
+CREATE TABLE IF NOT EXISTS rcs_lane_ownership(
+  conversation_id TEXT PRIMARY KEY,
+  owner TEXT NOT NULL CHECK(owner IN ('link','provider')),
+  ownership_generation INTEGER NOT NULL CHECK(ownership_generation > 0),
+  history_token TEXT,
+  detector_floor INTEGER NOT NULL,
+  proof_time_ms INTEGER NOT NULL,
+  observed_detector_high_water INTEGER NOT NULL,
+  alert_code TEXT CHECK(alert_code IN ('ambiguous_provider_window','detector_overflow','gateway_unavailable'))
+);
+CREATE INDEX IF NOT EXISTS rcs_lane_ownership_owner_generation ON rcs_lane_ownership(owner,ownership_generation);
+CREATE TABLE IF NOT EXISTS rcs_message_identities(
+  google_message_id TEXT NOT NULL,
+  google_conversation_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  ownership_generation INTEGER NOT NULL,
+  message_id TEXT,
+  PRIMARY KEY(google_message_id,google_conversation_id)
+);
+CREATE TABLE IF NOT EXISTS rcs_provider_detectors(
+  conversation_id TEXT NOT NULL,
+  provider_row_id INTEGER NOT NULL,
+  provider_thread_id INTEGER NOT NULL,
+  provider_type INTEGER NOT NULL,
+  observed_at_ms INTEGER NOT NULL,
+  observed_generation INTEGER NOT NULL,
+  resolved INTEGER NOT NULL DEFAULT 0 CHECK(resolved IN (0,1)),
+  PRIMARY KEY(conversation_id,provider_row_id)
+);
+CREATE INDEX IF NOT EXISTS rcs_provider_detectors_unresolved ON rcs_provider_detectors(conversation_id,resolved,provider_row_id);
+CREATE TABLE IF NOT EXISTS rcs_message_status(
+  message_id TEXT PRIMARY KEY,
+  status_rank INTEGER NOT NULL CHECK(status_rank BETWEEN 0 AND 5),
+  rcs_reported INTEGER NOT NULL CHECK(rcs_reported IN (0,1))
+);
+CREATE TABLE IF NOT EXISTS rcs_conversation_metadata(
+  conversation_id TEXT PRIMARY KEY,
+  transport TEXT NOT NULL CHECK(transport='rcs'),
+  rcs_encryption INTEGER CHECK(rcs_encryption IN (0,1)),
+  rcs_history_gap INTEGER NOT NULL CHECK(rcs_history_gap IN (0,1)),
+  logical_revision INTEGER NOT NULL CHECK(logical_revision > 0),
+  writer_device_id TEXT NOT NULL,
+  producer_device_id TEXT NOT NULL,
+  source_sequence INTEGER NOT NULL
+);
+";
+fn apply_rcs_union_migrations(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(RCS_MIGRATION_46)?;
+    add_column_if_missing(
+        conn,
+        "attempts",
+        "finalized_transport TEXT CHECK(finalized_transport IN ('carrier','rcs'))",
+    )?;
+    conn.execute(
+        "UPDATE attempts SET finalized_transport=CASE WHEN EXISTS(SELECT 1 FROM rcs_send_ledger r WHERE r.command_id=attempts.command_id) THEN 'rcs' ELSE 'carrier' END WHERE finalized_transport IS NULL",
+        [],
+    )?;
+    conn.execute_batch(RCS_MIGRATION_48)?;
+    conn.execute_batch(RCS_MIGRATION_49)?;
+    Ok(())
 }
 
 fn apply_migration_42(conn: &Connection) -> Result<(), Error> {
@@ -6251,9 +7784,11 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             apply_migration_45(&tx)?;
             apply_notification_preferences_migration(&tx)?;
             tx.execute_batch(DRAFT_SYNC_MIGRATION)?;
-            apply_migration_47(&tx)?;
-            apply_migration_48(&tx, false)?;
-            tx.execute_batch(MIGRATION_50)?;
+            apply_draft_merge_migration(&tx)?;
+            apply_draft_push_migration(&tx, false)?;
+            tx.execute_batch(MCP_CLEANUP_MIGRATION)?;
+            apply_rcs_union_migrations(&tx)?;
+            tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -6262,7 +7797,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=49)) => {
+        Some(version @ (4..=51)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -6383,14 +7918,16 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             if version <= 44 {
                 apply_migration_45(&tx)?;
             }
-            // Versions 46–48 identify incompatible production and feature layouts. Repair the
+            // Versions 46–51 identify incompatible production and feature layouts. Repair the
             // union by actual table/column presence rather than by the ambiguous version number.
             apply_notification_preferences_migration(&tx)?;
             let had_push_attempts = table_exists(&tx, "draft_push_attempts")?;
             tx.execute_batch(DRAFT_SYNC_MIGRATION)?;
-            apply_migration_47(&tx)?;
-            apply_migration_48(&tx, !had_push_attempts)?;
-            tx.execute_batch(MIGRATION_50)?;
+            apply_draft_merge_migration(&tx)?;
+            apply_draft_push_migration(&tx, !had_push_attempts)?;
+            tx.execute_batch(MCP_CLEANUP_MIGRATION)?;
+            apply_rcs_union_migrations(&tx)?;
+            tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
@@ -6405,6 +7942,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     deferred_media::initialize(conn)?;
     initialize_battery_lookup_indexes(conn)?;
     mms_identity::install_query_indexes(conn)?;
+    install_snapshot_apply_index(conn)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for (key, value) in [
         ("vault_id", store.config.vault_id.to_string()),
@@ -6446,6 +7984,13 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
         emit_status(&tx, &ctx, parse(&id)?, SendState::OutcomeUnknown)?;
     }
     tx.commit()?;
+    Ok(())
+}
+
+fn install_snapshot_apply_index(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS journal_apply_eligible ON journal(key_epoch,cursor) WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated';",
+    )?;
     Ok(())
 }
 
@@ -6992,6 +8537,14 @@ fn classify(
             "UPDATE outbox SET state='acknowledged' WHERE envelope_id=?",
             params![id],
         )?;
+        let journaled: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM journal WHERE envelope_id=?)",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if !journaled && is_self_addressed_explicit_rcs_resend(conn, ctx, envelope)? {
+            return Ok(IngestResult::Journaled);
+        }
         return Ok(IngestResult::Duplicate);
     }
     let (same, any): (bool, bool) = conn.query_row(
@@ -7006,6 +8559,30 @@ fn classify(
     } else {
         Ok(IngestResult::Quarantined(Q::EnvelopeConflict))
     }
+}
+
+fn is_self_addressed_explicit_rcs_resend(
+    conn: &Connection,
+    ctx: &Ctx,
+    envelope: &Envelope,
+) -> Result<bool, Error> {
+    let (Some(command_id), Some(GatewayRoute::RcsLink { gateway_device_id })) =
+        (envelope.command_id, envelope.route.as_ref())
+    else {
+        return Ok(false);
+    };
+    if envelope.purpose != EnvelopePurpose::Command {
+        return Ok(false);
+    };
+    if *gateway_device_id != ctx.device_id {
+        return Ok(false);
+    }
+    let resend: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rcs_send_ledger WHERE command_id=? AND retry_of_command_id IS NOT NULL)",
+        [command_id.to_string()],
+        |row| row.get(0),
+    )?;
+    Ok(resend)
 }
 
 /// Result of authenticating and decoding one stored envelope.
@@ -7078,7 +8655,12 @@ fn open_payload(ctx: &Ctx, envelope: &Envelope) -> Result<Opened, QuarantineReas
 fn is_known_private_payload_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "message"
+        "rcs_conversation_metadata"
+            | "rcs_message_reported"
+            | "rcs_message_status"
+            | "rcs_link_status"
+            | "rcs_link_eligibility"
+            | "message"
             | "send_command"
             | "mms_message"
             | "mms_deferred_preview"
@@ -7161,6 +8743,55 @@ fn apply_record(
         other => (other, Vec::new(), Vec::new()),
     };
     match (envelope.purpose, payload) {
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::RcsMessageReported {
+                message_id,
+                rcs_reported,
+            },
+        ) => {
+            rcs_receive::apply_replicated_reported(conn, message_id, rcs_reported)?;
+        }
+        (EnvelopePurpose::Event, PrivatePayload::RcsConversationMetadata(metadata)) => {
+            if !rcs_receive::apply_replicated_metadata(
+                conn,
+                &metadata,
+                producer,
+                envelope.producer_sequence.0,
+            )? {
+                return Ok(Some(Q::InvalidPayload));
+            }
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::RcsMessageStatus {
+                message_id,
+                status,
+                rcs_reported,
+            },
+        ) => {
+            rcs_receive::apply_replicated_status(conn, message_id, status, rcs_reported)?;
+        }
+        (EnvelopePurpose::Event, PrivatePayload::RcsLinkStatus(status)) => {
+            if !rcs_capability::apply_status(
+                conn,
+                &status.status,
+                producer,
+                envelope.producer_sequence.0,
+            )? {
+                return Ok(Some(Q::InvalidPayload));
+            }
+        }
+        (EnvelopePurpose::Event, PrivatePayload::RcsLinkEligibility(eligibility)) => {
+            if !rcs_capability::apply_eligibility(
+                conn,
+                &eligibility.eligibility,
+                producer,
+                envelope.producer_sequence.0,
+            )? {
+                return Ok(Some(Q::InvalidPayload));
+            }
+        }
         (
             EnvelopePurpose::Event,
             PrivatePayload::MmsMediaFailure {
@@ -7283,18 +8914,27 @@ fn apply_record(
                     new_attachment_ids.push(descriptor.attachment_id);
                 }
             }
+            let (gateway_device_id, subscription_id) = match route {
+                GatewayRoute::Carrier {
+                    gateway_device_id,
+                    subscription_id,
+                } => (*gateway_device_id, subscription_id.as_str()),
+                // `command_ledger` predates tagged routes. An empty subscription is an internal,
+                // durable RCS marker; no carrier permit accepts it.
+                GatewayRoute::RcsLink { gateway_device_id } => (*gateway_device_id, ""),
+            };
             if !store_remote_media(conn, &media)?
                 || insert_message(conn, &message)? == Inserted::Conflict
                 || !record_command(
                     conn,
                     command_id,
                     message.record.message_id,
-                    route.gateway_device_id,
+                    gateway_device_id,
                 )?
             {
                 return Ok(Some(Q::PayloadConflict));
             }
-            if route.gateway_device_id == ctx.device_id {
+            if gateway_device_id == ctx.device_id {
                 let attachment_ids = media
                     .iter()
                     .map(|descriptor| descriptor.attachment_id)
@@ -7319,7 +8959,7 @@ fn apply_record(
                 }
                 let inserted = conn.execute(
                     "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload,retired,historical) VALUES(?,?,?,?,?,?) ON CONFLICT(command_id) DO NOTHING",
-                    params![command_id.to_string(), envelope.key_epoch, route.subscription_id, encoded, retired, historical],
+                    params![command_id.to_string(), envelope.key_epoch, subscription_id, encoded, retired, historical],
                 )?;
                 if !historical && !retired {
                     for attachment_id in attachment_ids {
@@ -7940,6 +9580,67 @@ fn emit_status(
         state,
         status_at_ms,
     )
+}
+
+fn publish_rcs_capability_payload(
+    conn: &Connection,
+    ctx: &Ctx,
+    payload: &PrivatePayload,
+    identity: String,
+    revision: u64,
+    now_ms: i64,
+) -> Result<bool, Error> {
+    let body = serde_json::to_string(payload).map_err(|_| Error::Database)?;
+    let previous: Option<(u64, String, i64)> = conn
+        .query_row(
+            "SELECT revision,body,published_at_ms FROM rcs_capability_published WHERE identity=?",
+            [&identity],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if let Some((previous_revision, previous_body, published_at_ms)) = previous {
+        if revision < previous_revision || (revision == previous_revision && previous_body != body)
+        {
+            return Err(Error::InvalidRequest(
+                "nonmonotonic RCS capability revision",
+            ));
+        }
+        if revision == previous_revision
+            && now_ms.saturating_sub(published_at_ms) < RCS_CAPABILITY_KEEPALIVE_MS
+        {
+            return Ok(false);
+        }
+    }
+    let (_, sequence) = enqueue(conn, ctx, EnvelopePurpose::Event, None, None, payload)?;
+    match payload {
+        PrivatePayload::RcsLinkStatus(status) => {
+            rcs_capability::apply_status(conn, &status.status, ctx.device_id, sequence)?;
+            rcs_capability::record_observed_at(
+                conn,
+                status.status.gateway_device_id,
+                status.status.observed_at_ms,
+            )?;
+        }
+        PrivatePayload::RcsLinkEligibility(eligibility) => {
+            rcs_capability::apply_eligibility(
+                conn,
+                &eligibility.eligibility,
+                ctx.device_id,
+                sequence,
+            )?;
+            rcs_capability::record_observed_at(
+                conn,
+                eligibility.eligibility.gateway_device_id,
+                eligibility.eligibility.observed_at_ms,
+            )?;
+        }
+        _ => return Err(Error::Database),
+    }
+    conn.execute(
+        "INSERT INTO rcs_capability_published(identity,revision,body,published_at_ms) VALUES(?,?,?,?) ON CONFLICT(identity) DO UPDATE SET revision=excluded.revision,body=excluded.body,published_at_ms=excluded.published_at_ms",
+        params![identity, revision, body, now_ms],
+    )?;
+    Ok(true)
 }
 
 /// Allocates the durable producer sequence and envelope ID, stores the private payload, and seals
@@ -8669,6 +10370,16 @@ fn compaction_group(
         ]
     };
     Ok(Some(match payload {
+        PrivatePayload::RcsMessageStatus { message_id, .. } => (
+            b"rcs-message-status",
+            vec![message_id.to_string().into_bytes()],
+            false,
+        ),
+        PrivatePayload::RcsMessageReported { message_id, .. } => (
+            b"rcs-message-reported",
+            vec![message_id.to_string().into_bytes()],
+            false,
+        ),
         PrivatePayload::NotificationPosted { notification } => (
             b"notification" as &[u8],
             target(&notification.target),
@@ -8727,6 +10438,32 @@ fn compaction_group(
         PrivatePayload::NotificationPreferences { .. } => {
             (b"notification-preferences", vec![b"vault".to_vec()], false)
         }
+        PrivatePayload::RcsConversationMetadata(metadata) => (
+            b"rcs-conversation-metadata",
+            vec![metadata.conversation_id.to_string().into_bytes()],
+            false,
+        ),
+        PrivatePayload::RcsLinkStatus(status) => (
+            b"rcs-link-status",
+            vec![status.status.gateway_device_id.to_string().into_bytes()],
+            false,
+        ),
+        PrivatePayload::RcsLinkEligibility(eligibility) => (
+            b"rcs-link-eligibility",
+            vec![
+                eligibility
+                    .eligibility
+                    .gateway_device_id
+                    .to_string()
+                    .into_bytes(),
+                eligibility
+                    .eligibility
+                    .conversation_id
+                    .to_string()
+                    .into_bytes(),
+            ],
+            false,
+        ),
         PrivatePayload::ContactBookState { book } => {
             (b"contact-book", vec![text(book, "id")?], false)
         }
@@ -8812,6 +10549,12 @@ fn compaction_group(
 /// request and all its results. Dismissals are standalone terminal roots.
 fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
     match payload {
+        PrivatePayload::RcsMessageStatus { message_id, .. } => {
+            Some(format!("rcs-message-status:{message_id}"))
+        }
+        PrivatePayload::RcsMessageReported { message_id, .. } => {
+            Some(format!("rcs-message-reported:{message_id}"))
+        }
         PrivatePayload::NotificationPosted { notification } => Some(format!(
             "notification:{}:{}",
             notification.target.source_device_id, notification.target.notification_key
@@ -8841,6 +10584,18 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
         PrivatePayload::NotificationPreferences { .. } => {
             Some(notification_preferences::IDENTITY.to_owned())
         }
+        PrivatePayload::RcsConversationMetadata(metadata) => Some(format!(
+            "rcs-conversation-metadata:{}",
+            metadata.conversation_id
+        )),
+        PrivatePayload::RcsLinkStatus(status) => Some(format!(
+            "rcs-link-status:{}",
+            status.status.gateway_device_id
+        )),
+        PrivatePayload::RcsLinkEligibility(eligibility) => Some(format!(
+            "rcs-link-eligibility:{}:{}",
+            eligibility.eligibility.gateway_device_id, eligibility.eligibility.conversation_id
+        )),
         PrivatePayload::ContactBookState { book } => book
             .get("id")
             .and_then(serde_json::Value::as_str)
@@ -8909,10 +10664,10 @@ fn serialize_authenticated_payload(
 fn parse_authenticated_payload(
     plain: &[u8],
 ) -> Result<(PrivatePayload, Option<CompactionMetadata>), serde_json::Error> {
-    let value: serde_json::Value = serde_json::from_slice(plain)?;
+    let mut value: serde_json::Value = serde_json::from_slice(plain)?;
     let compaction = value
-        .get("compaction")
-        .cloned()
+        .as_object_mut()
+        .and_then(|object| object.remove("compaction"))
         .map(serde_json::from_value)
         .transpose()?;
     Ok((serde_json::from_value(value)?, compaction))
@@ -9210,6 +10965,37 @@ pub(crate) fn outbox_priority(purpose: EnvelopePurpose, payload: &PrivatePayload
     }
 }
 
+pub(crate) fn reconcile_rcs_tmp_id_in_transaction(
+    conn: &Connection,
+    ctx: &Ctx,
+    tmp_id: &str,
+    google_conversation_id: &str,
+    evidence: SendResult,
+) -> Result<Option<SendState>, Error> {
+    let command_id: Option<String> = conn
+        .query_row(
+            "SELECT command_id FROM rcs_send_ledger WHERE tmp_id=? AND google_conversation_id=?",
+            params![tmp_id, google_conversation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(command_id) = command_id else {
+        return Ok(None);
+    };
+    let command_id = parse(&command_id)?;
+    let current = attempt_state(conn, command_id)?.ok_or(Error::NoAttempt)?;
+    let next = SendState::from(evidence);
+    if current == next || !legal_transition(current, next) {
+        return Ok(Some(current));
+    }
+    conn.execute(
+        "UPDATE attempts SET state=? WHERE command_id=?",
+        params![state_code(next), command_id.to_string()],
+    )?;
+    emit_status(conn, ctx, command_id, next)?;
+    Ok(Some(next))
+}
+
 fn attempt_state(conn: &Connection, command_id: CommandId) -> Result<Option<SendState>, Error> {
     conn.query_row(
         "SELECT state FROM attempts WHERE command_id=?",
@@ -9219,6 +11005,258 @@ fn attempt_state(conn: &Connection, command_id: CommandId) -> Result<Option<Send
     .optional()?
     .map(|state| decode_state(&state))
     .transpose()
+}
+
+fn unattempted_rcs_message(
+    conn: &Connection,
+    active_epoch: Option<u32>,
+    command_id: CommandId,
+) -> Result<MessagePayload, Error> {
+    let ledger: Option<(u32, String, String, bool)> = conn
+        .query_row(
+            "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
+            [command_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((epoch, subscription_id, payload, historical)) = ledger else {
+        return Err(Error::NotFound);
+    };
+    if !subscription_id.is_empty() {
+        return Err(Error::InvalidRequest("RCS route required"));
+    }
+    if let Some(state) = attempt_state(conn, command_id)? {
+        return Err(Error::AlreadyAttempted(state));
+    }
+    require_received_command_eligible(conn, active_epoch, epoch, historical)?;
+    let (message, media_ready) = localize(conn, decode(payload.as_bytes())?)?;
+    if !media_ready || message.transport != Transport::Sms || !message.record.attachments.is_empty()
+    {
+        return Err(Error::InvalidRequest("RCS text required"));
+    }
+    if send_retention_blocked(conn, command_id)? {
+        return Err(Error::InvalidRequest("RCS media unavailable"));
+    }
+    Ok(message)
+}
+
+fn admit_rcs_send(
+    tx: rusqlite::Transaction<'_>,
+    active_epoch: Option<u32>,
+    command_id: CommandId,
+    prepared_mapping: Option<&RcsMapping>,
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+) -> Result<RcsPermit, Error> {
+    let message = unattempted_rcs_message(&tx, active_epoch, command_id)?;
+    require_native_rcs_body(&message.body)?;
+    if let Some(prepared_mapping) = prepared_mapping
+        && rcs_mapping::get(&tx, message.record.conversation_id)?.as_ref() != Some(prepared_mapping)
+    {
+        return Err(Error::InvalidRequest("mapping changed"));
+    }
+    let Some(mapping) =
+        exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)?
+    else {
+        commit_mapping_refusal(tx)?;
+        return Err(Error::InvalidRequest("mapping unproven"));
+    };
+    require_exact_rcs_recipient(&message, &mapping)?;
+    let tmp_id = finalize_rcs_admission(&tx, command_id, &mapping, observation, now_ms)?;
+    let permit = rcs_permit(command_id, message, tmp_id, &mapping, observation)?;
+    tx.commit()?;
+    Ok(permit)
+}
+
+fn require_native_rcs_body(body: &str) -> Result<(), Error> {
+    (1..=4096)
+        .contains(&body.len())
+        .then_some(())
+        .ok_or(Error::InvalidRequest("RCS body out of bounds"))
+}
+
+fn require_received_command_eligible(
+    conn: &Connection,
+    active_epoch: Option<u32>,
+    command_epoch: u32,
+    historical: bool,
+) -> Result<(), Error> {
+    if restore_guarded(conn)? {
+        return Err(Error::InvalidRequest("restore guarded"));
+    }
+    if historical {
+        return Err(Error::InvalidRequest("historical command"));
+    }
+    match active_epoch {
+        Some(active) if command_epoch == active => Ok(()),
+        Some(active) if command_epoch < active => Err(Error::InvalidRequest("stale epoch")),
+        _ => Err(Error::InvalidRequest("epoch not active")),
+    }
+}
+
+fn require_exact_rcs_recipient(
+    message: &MessagePayload,
+    mapping: &RcsMapping,
+) -> Result<(), Error> {
+    let [recipient] = message.recipients.as_slice() else {
+        return Err(Error::InvalidRequest("RCS requires one proven recipient"));
+    };
+    if rcs_mapping::canonical_recipient(recipient).as_deref()
+        != Some(mapping.proof.canonical_participant.as_str())
+    {
+        return Err(Error::InvalidRequest("RCS recipient is not proven"));
+    }
+    Ok(())
+}
+
+fn exact_rcs_mapping(
+    conn: &Connection,
+    conversation_id: ConversationId,
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+) -> Result<Option<RcsMapping>, Error> {
+    if rcs_mapping::recorded_link_lifecycle(conn)?
+        .is_some_and(|state| state != RcsCapabilityState::Linked)
+    {
+        return Ok(None);
+    }
+    let Some(mapping) = rcs_mapping::get(conn, conversation_id)? else {
+        return Ok(None);
+    };
+    if !rcs_mapping::admission_observation_targets_mapping(&mapping, observation, now_ms)
+        || !rcs_mapping::admission_context_is_v2(conn)?
+    {
+        return Ok(None);
+    }
+    if rcs_mapping::update_context(conn, observation)? != rcs_mapping::ContextUpdate::Unchanged {
+        return Ok(None);
+    }
+    match rcs_mapping::mapping_observation_status(conn, &mapping, observation, now_ms)? {
+        rcs_mapping::MappingObservationStatus::Exact => Ok(Some(mapping)),
+        rcs_mapping::MappingObservationStatus::CurrentWithdrawal => {
+            rcs_mapping::invalidate_mapping(
+                conn,
+                conversation_id,
+                "current_observation_withdrawn",
+            )?;
+            Ok(None)
+        }
+        rcs_mapping::MappingObservationStatus::Mismatch => Ok(None),
+    }
+}
+
+fn commit_mapping_refusal(tx: rusqlite::Transaction<'_>) -> Result<(), Error> {
+    tx.commit()?;
+    Ok(())
+}
+
+fn record_finalized_attempt(
+    conn: &Connection,
+    command_id: CommandId,
+    transport: &str,
+    now_ms: i64,
+) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO attempts(command_id,state,attempted_at_ms,finalized_transport) VALUES(?,?,?,?)",
+        params![
+            command_id.to_string(),
+            state_code(SendState::AttemptRecorded),
+            now_ms,
+            transport
+        ],
+    )?;
+    Ok(())
+}
+
+fn send_retention_blocked(conn: &Connection, command_id: CommandId) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM attachment_retention_requirements r WHERE r.command_id=?1 AND (NOT EXISTS(SELECT 1 FROM attachment_retention_effects e WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind) OR EXISTS(SELECT 1 FROM attachment_retention_effects e JOIN attachment_retention_uses u ON u.use_id=e.use_id WHERE e.envelope_id=r.envelope_id AND e.attachment_id=r.attachment_id AND e.kind=r.kind AND (u.registered=0 OR u.released=1 OR u.suppressed=1 OR u.reconciliation_required=1))))",
+        [command_id.to_string()],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+fn invalidate_automatic_carrier_proof_if_contradicted(
+    tx: &Connection,
+    subscription_id: &str,
+    message: &MessagePayload,
+    observation: Option<&RcsMappingObservation>,
+    now_ms: i64,
+) -> Result<(), Error> {
+    let Some(observation) = observation else {
+        return Ok(());
+    };
+    if subscription_id.is_empty() {
+        return Ok(());
+    }
+    let mapping_is_exact = subscription_id == observation.selected_sim_id
+        && exact_rcs_mapping(tx, message.record.conversation_id, observation, now_ms)?
+            .is_some_and(|mapping| require_exact_rcs_recipient(message, &mapping).is_ok());
+    if !mapping_is_exact {
+        rcs_send::invalidate_carrier_only_proof(tx, message.record.conversation_id)?;
+    }
+    Ok(())
+}
+
+fn automatic_rcs_permit(
+    tx: &Connection,
+    command_id: CommandId,
+    message: MessagePayload,
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+) -> Result<RcsPermit, Error> {
+    if message.transport != Transport::Sms || !message.record.attachments.is_empty() {
+        return Err(Error::InvalidRequest("RCS text required"));
+    }
+    let mapping = exact_rcs_mapping(tx, message.record.conversation_id, observation, now_ms)?
+        .ok_or(Error::InvalidRequest("mapping unproven"))?;
+    require_exact_rcs_recipient(&message, &mapping)?;
+    let tmp_id = finalize_rcs_admission(tx, command_id, &mapping, observation, now_ms)?;
+    rcs_permit(command_id, message, tmp_id, &mapping, observation)
+}
+
+fn finalize_rcs_admission(
+    tx: &Connection,
+    command_id: CommandId,
+    mapping: &RcsMapping,
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+) -> Result<String, Error> {
+    let existing_tmp_id: Option<String> = tx
+        .query_row(
+            "SELECT tmp_id FROM rcs_send_ledger WHERE command_id=?",
+            [command_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let tmp_id = existing_tmp_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    rcs_send::record_rcs_target_identity(tx, command_id, mapping, observation)?;
+    record_finalized_attempt(tx, command_id, "rcs", now_ms)?;
+    if existing_tmp_id.is_some() {
+        tx.execute(
+            "UPDATE rcs_send_ledger SET mapping_revision=?,proof_digest=?,google_conversation_id=?,attempted_at_ms=? WHERE command_id=?",
+            params![mapping.mapping_revision, mapping.proof.digest.as_slice(), mapping.google_conversation_id, now_ms, command_id.to_string()],
+        )?;
+    } else {
+        tx.execute(
+            "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms) VALUES(?,?,?,?,?,?)",
+            params![command_id.to_string(), tmp_id, mapping.mapping_revision, mapping.proof.digest.as_slice(), mapping.google_conversation_id, now_ms],
+        )?;
+    }
+    Ok(tmp_id)
+}
+
+fn rcs_permit(
+    command_id: CommandId,
+    message: MessagePayload,
+    tmp_id: String,
+    mapping: &RcsMapping,
+    observation: &RcsMappingObservation,
+) -> Result<RcsPermit, Error> {
+    RcsPermit::from_admission(command_id, message, tmp_id, mapping, observation)
 }
 
 fn pinned_profile(conn: &Connection, epoch: u32) -> Result<Option<KeyProfile>, Error> {
@@ -9275,7 +11313,7 @@ fn valid_message(message: &MessagePayload, producer: DeviceId) -> bool {
                 message.record.attachments.len() <= MAX_MMS_ATTACHMENTS
                     && (!message.body.is_empty() || !message.record.attachments.is_empty())
             }
-            Transport::Rcs => false,
+            Transport::Rcs => message.record.attachments.is_empty(),
         }
         && message.body.len() <= MAX_BODY_BYTES
         && message
@@ -9290,8 +11328,14 @@ fn valid_message(message: &MessagePayload, producer: DeviceId) -> bool {
             .as_ref()
             .is_none_or(|id| !id.is_empty() && id.len() <= MAX_PROVIDER_ID_BYTES)
         && match message.direction {
-            Direction::Incoming => message.sender_address.as_deref().is_some_and(address_ok),
+            Direction::Incoming => {
+                message.transport == Transport::Rcs
+                    || message.sender_address.as_deref().is_some_and(address_ok)
+            }
             Direction::Outgoing => {
+                if message.transport == Transport::Rcs && message.recipients.is_empty() {
+                    return true;
+                }
                 let limit = match message.transport {
                     Transport::Mms => MAX_MMS_RECIPIENTS,
                     _ => 1,
@@ -10120,6 +12164,316 @@ mod tests {
     use std::time::Instant;
     use uuid::Uuid;
 
+    #[test]
+    fn native_rcs_body_bounds_are_utf8_byte_bounds() {
+        assert!(require_native_rcs_body(&"é".repeat(2_048)).is_ok());
+        assert!(matches!(
+            require_native_rcs_body(""),
+            Err(Error::InvalidRequest("RCS body out of bounds"))
+        ));
+        assert!(matches!(
+            require_native_rcs_body(&"é".repeat(2_049)),
+            Err(Error::InvalidRequest("RCS body out of bounds"))
+        ));
+    }
+
+    fn drop_post_v45_objects(conn: &Connection) {
+        conn.execute_batch(
+            "DROP TABLE rcs_mapping_proofs;
+              DROP TABLE rcs_conversation_mappings;
+              DROP TABLE rcs_send_ledger;
+              DROP TABLE rcs_link_status_projection;
+              DROP TABLE rcs_link_eligibility_projection;
+              DROP TABLE rcs_capability_published;
+              DROP TABLE rcs_message_status;
+              DROP TABLE rcs_lane_ownership;
+              DROP TABLE rcs_conversation_metadata;
+              DROP TABLE rcs_message_identities;
+              DROP TABLE rcs_provider_detectors;
+              ALTER TABLE attempts DROP COLUMN finalized_transport;",
+        )
+        .unwrap();
+    }
+
+    fn schema_shape(conn: &Connection) -> Vec<(String, Vec<String>)> {
+        let mut tables = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+            .unwrap();
+        tables
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|table| {
+                let table = table.unwrap();
+                let mut columns = conn
+                    .prepare(&format!("PRAGMA table_info({table})"))
+                    .unwrap();
+                let columns = columns
+                    .query_map([], |row| row.get::<_, String>(1))
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .collect();
+                (table, columns)
+            })
+            .collect()
+    }
+
+    fn downgrade_union_fixture(conn: &Connection, version: i64, drop_rcs: bool, drop_drafts: bool) {
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        if drop_rcs {
+            drop_post_v45_objects(conn);
+        }
+        if drop_drafts {
+            for table in [
+                "draft_sync_conflicts",
+                "draft_sync_terminals",
+                "draft_send_intents",
+                "draft_sync_revisions",
+                "draft_media_references",
+                "draft_sync_resurrections",
+                "draft_sync_resurrection_attachments",
+                "draft_attachment_failures",
+                "draft_sync_meta",
+                "draft_sync_merge_bases",
+                "draft_sync_merge_fallbacks",
+                "draft_push_attempts",
+                "draft_sync_quarantines",
+                "draft_sync",
+                "attachment_cleanup_intents",
+            ] {
+                conn.execute_batch(&format!("DROP TABLE IF EXISTS {table};"))
+                    .unwrap();
+            }
+        }
+        conn.execute_batch("DROP TABLE IF EXISTS vault_identity_state;")
+            .unwrap();
+        conn.execute("UPDATE schema_meta SET version=?", [version])
+            .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+    }
+
+    #[test]
+    fn production_feature_and_base_layouts_converge_to_schema_52() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let mut shapes = Vec::new();
+        for (name, version, drop_rcs, drop_drafts) in [
+            ("fresh", 52, false, false),
+            ("production-50", 50, true, false),
+            ("branch-51", 51, false, true),
+            ("base-46", 46, true, true),
+        ] {
+            let config = ClientConfig {
+                database_path: directory.path().join(format!("{name}.db")),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            };
+            let key = || DatabaseKey::new(&[52; 32]).unwrap();
+            let client = Client::open(config.clone(), key()).unwrap();
+            if name != "fresh" {
+                let store = client.lock().unwrap();
+                downgrade_union_fixture(&store.conn, version, drop_rcs, drop_drafts);
+            }
+            drop(client);
+            let reopened = Client::open(config, key()).unwrap();
+            let store = reopened.lock().unwrap();
+            let upgraded_version: i64 = store
+                .conn
+                .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(upgraded_version, 52, "{name}");
+            shapes.push((name, schema_shape(&store.conn)));
+        }
+        for (name, shape) in &shapes[1..] {
+            assert_eq!(shape, &shapes[0].1, "{name} did not converge");
+        }
+    }
+
+    type RcsMappingRow = (
+        String,
+        String,
+        i64,
+        Vec<u8>,
+        i64,
+        i64,
+        Option<i64>,
+        Option<String>,
+    );
+    type RcsSendLedgerRow = (
+        String,
+        i64,
+        Vec<u8>,
+        String,
+        i64,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    );
+
+    #[test]
+    fn version_48_upgrade_preserves_rows_and_rejects_downgrade() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("schema-49.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let client = Client::open(config.clone(), DatabaseKey::new(&[17; 32]).unwrap()).unwrap();
+        let mapping_conversation = ConversationId::new().to_string();
+        let command_id = CommandId::new().to_string();
+        let gateway_device_id = DeviceId::new().to_string();
+        {
+            let store = client.lock().unwrap();
+            store.conn.execute(
+                "INSERT INTO rcs_conversation_mappings VALUES(?1,'google-conversation','one_to_one',2,?2,7,10,NULL,NULL)",
+                params![mapping_conversation.as_str(), vec![1_u8; 32]],
+            ).unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO rcs_mapping_proofs VALUES(?1,7,'participant','region','self')",
+                    [mapping_conversation.as_str()],
+                )
+                .unwrap();
+            store.conn.execute(
+                "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload,historical) VALUES(?1,0,'sim','{}',0)",
+                [command_id.as_str()],
+            ).unwrap();
+            store.conn.execute(
+                "INSERT INTO attempts(command_id,state,attempted_at_ms,finalized_transport) VALUES(?1,'attempt_recorded',11,'rcs')",
+                [command_id.as_str()],
+            ).unwrap();
+            store.conn.execute(
+                "INSERT INTO rcs_send_ledger VALUES(?1,'tmp',7,?2,'google-conversation',12,13,'ack',NULL)",
+                params![command_id.as_str(), vec![1_u8; 32]],
+            ).unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO rcs_link_status_projection VALUES(?1,'linked',1,1,1,14,15,16,17)",
+                    [gateway_device_id.as_str()],
+                )
+                .unwrap();
+            store.conn.execute(
+                "INSERT INTO rcs_link_eligibility_projection VALUES(?1,?2,'eligible',18,7,19,20)",
+                params![gateway_device_id.as_str(), mapping_conversation.as_str()],
+            ).unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO rcs_capability_published VALUES('identity',21,'{}',22)",
+                    [],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "DROP TABLE rcs_message_status;
+                     DROP TABLE rcs_lane_ownership;
+                     DROP TABLE rcs_conversation_metadata;
+                 DROP TABLE rcs_message_identities;
+                 DROP TABLE rcs_provider_detectors;
+                 UPDATE schema_meta SET version=48;",
+                )
+                .unwrap();
+        }
+        drop(client);
+        let upgraded = Client::open(config.clone(), DatabaseKey::new(&[17; 32]).unwrap()).unwrap();
+        let store = upgraded.lock().unwrap();
+        let mapping: RcsMappingRow = store
+            .conn
+            .query_row(
+                "SELECT google_conversation_id,class,proof_version,proof_hash,mapping_revision,verified_at_ms,invalidated_at_ms,invalidation_code FROM rcs_conversation_mappings WHERE peppy_conversation_id=?",
+                [mapping_conversation.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            mapping,
+            (
+                "google-conversation".into(),
+                "one_to_one".into(),
+                2,
+                vec![1; 32],
+                7,
+                10,
+                None,
+                None
+            )
+        );
+        let proof: (i64, String, String, String) = store.conn.query_row(
+            "SELECT mapping_revision,canonical_participant,identity_region,own_identity FROM rcs_mapping_proofs WHERE peppy_conversation_id=?",
+            [mapping_conversation.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).unwrap();
+        assert_eq!(
+            proof,
+            (7, "participant".into(), "region".into(), "self".into())
+        );
+        let ledger: RcsSendLedgerRow = store.conn.query_row(
+            "SELECT tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms,transport_ack_at_ms,transport_ack_code,retry_of_command_id FROM rcs_send_ledger WHERE command_id=?",
+            [command_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+        ).unwrap();
+        assert_eq!(
+            ledger,
+            (
+                "tmp".into(),
+                7,
+                vec![1; 32],
+                "google-conversation".into(),
+                12,
+                Some(13),
+                Some("ack".into()),
+                None
+            )
+        );
+        let status: (String, i64, i64, i64, i64, i64, i64, i64) = store.conn.query_row(
+            "SELECT state,availability,health,phone_responsive,observed_at_ms,capability_revision,feature_bits,producer_sequence FROM rcs_link_status_projection WHERE gateway_device_id=?",
+            [gateway_device_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+        ).unwrap();
+        assert_eq!(status, ("linked".into(), 1, 1, 1, 14, 15, 16, 17));
+        let eligibility: (String, i64, i64, i64, i64) = store.conn.query_row(
+            "SELECT eligibility,feature_bits,mapping_revision,observed_at_ms,producer_sequence FROM rcs_link_eligibility_projection WHERE gateway_device_id=? AND conversation_id=?",
+            params![gateway_device_id, mapping_conversation],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).unwrap();
+        assert_eq!(eligibility, ("eligible".into(), 18, 7, 19, 20));
+        let published: (i64, String, i64) = store.conn.query_row(
+            "SELECT revision,body,published_at_ms FROM rcs_capability_published WHERE identity='identity'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(published, (21, "{}".into(), 22));
+        let finalized_transport: String = store
+            .conn
+            .query_row(
+                "SELECT finalized_transport FROM attempts WHERE command_id=?",
+                [command_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(finalized_transport, "rcs");
+        let table: String = store
+            .conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='rcs_lane_ownership'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table, "rcs_lane_ownership");
+        store
+            .conn
+            .execute("UPDATE schema_meta SET version=?", [SCHEMA_VERSION + 1])
+            .unwrap();
+        drop(store);
+        drop(upgraded);
+        assert!(matches!(
+            Client::open(config, DatabaseKey::new(&[17; 32]).unwrap()),
+            Err(Error::UnsupportedSchema)
+        ));
+    }
+
     fn webhook_test_client() -> (tempfile::TempDir, Client) {
         let directory = tempfile::tempdir().unwrap();
         let client = Client::open(
@@ -10321,6 +12675,7 @@ mod tests {
                 "INSERT INTO sender_unblock_requests(request_id,conversation_id,target_device_id,numbers,status,historical,created_at_ms) VALUES(?,?,?,?, 'pending',0,1)",
                 params![request_id.to_string(), ConversationId::new().to_string(), DeviceId::new().to_string(), "[\"+15555550100\"]"],
             ).unwrap();
+            drop_post_v45_objects(&store.conn);
             store
                 .conn
                 .execute("UPDATE schema_meta SET version=44", [])
@@ -10336,6 +12691,215 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).unwrap();
         assert_eq!((version, epoch), (SCHEMA_VERSION, 0));
+    }
+
+    #[test]
+    fn migration_47_backfills_only_real_attempts_from_the_rcs_ledger() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("schema-46.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = DatabaseKey::new(&[46; 32]).unwrap();
+        let client = Client::open(config.clone(), key).unwrap();
+        let carrier = CommandId::new();
+        let rcs = CommandId::new();
+        let preallocated = CommandId::new();
+        {
+            let store = client.lock().unwrap();
+            for command_id in [carrier, rcs] {
+                store.conn.execute(
+                    "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload,historical) VALUES(?,0,'sim','{}',0)",
+                    [command_id.to_string()],
+                ).unwrap();
+                store.conn.execute(
+                    "INSERT INTO attempts(command_id,state,attempted_at_ms,finalized_transport) VALUES(?,'attempt_recorded',0,'carrier')",
+                    [command_id.to_string()],
+                ).unwrap();
+            }
+            for command_id in [rcs, preallocated] {
+                store.conn.execute(
+                    "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms) VALUES(?,?,1,?,'google',0)",
+                    params![command_id.to_string(), uuid::Uuid::new_v4().to_string(), vec![0_u8; 32]],
+                ).unwrap();
+            }
+            store
+                .conn
+                .execute_batch(
+                    "DROP TABLE rcs_link_status_projection;
+                 DROP TABLE rcs_link_eligibility_projection;
+                 DROP TABLE rcs_capability_published;
+                 DROP TABLE rcs_provider_detectors;
+                 DROP TABLE rcs_message_identities;
+                 DROP TABLE rcs_message_status;
+                 DROP TABLE rcs_lane_ownership;
+                 DROP TABLE rcs_conversation_metadata;
+                 ALTER TABLE attempts DROP COLUMN finalized_transport;
+                 UPDATE schema_meta SET version=46;",
+                )
+                .unwrap();
+        }
+        drop(client);
+
+        let reopened = Client::open(config.clone(), DatabaseKey::new(&[46; 32]).unwrap()).unwrap();
+        drop(reopened);
+        let conn = Connection::open(&config.database_path).unwrap();
+        apply_database_key(&conn, &DatabaseKey::new(&[46; 32]).unwrap()).unwrap();
+        let transport = |command_id: CommandId| {
+            conn.query_row(
+                "SELECT finalized_transport FROM attempts WHERE command_id=?",
+                [command_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(transport(carrier), "carrier");
+        assert_eq!(transport(rcs), "rcs");
+        let preallocated_attempts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM attempts WHERE command_id=?",
+                [preallocated.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preallocated_attempts, 0);
+    }
+
+    #[test]
+    fn production_46_upgrade_installs_rcs_schema_without_losing_preferences() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("production-46.db"),
+            vault_id,
+            device_id: DeviceId::new(),
+        };
+        let key = || DatabaseKey::new(&[50; 32]).unwrap();
+        let client = Client::open(config.clone(), key()).unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let preferences = NotificationPreferences {
+            preview: NotificationPreview::Hidden,
+            show_source: true,
+            ..Default::default()
+        };
+        client
+            .set_notification_preferences(preferences.clone())
+            .unwrap();
+        let command_id = CommandId::new();
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload,historical) VALUES(?,0,'sim','{}',0)",
+                    [command_id.to_string()],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO attempts(command_id,state,attempted_at_ms,finalized_transport) VALUES(?,'attempt_recorded',0,'carrier')",
+                    [command_id.to_string()],
+                )
+                .unwrap();
+            drop_post_v45_objects(&store.conn);
+            store
+                .conn
+                .execute("UPDATE schema_meta SET version=46", [])
+                .unwrap();
+        }
+        drop(client);
+
+        let upgraded = Client::open(config, key()).unwrap();
+        let store = upgraded.lock().unwrap();
+        let (version, show_source, transport): (i64, bool, String) = store
+            .conn
+            .query_row(
+                "SELECT (SELECT version FROM schema_meta),
+                        (SELECT show_source FROM notification_preferences WHERE id=1),
+                        (SELECT finalized_transport FROM attempts WHERE command_id=?)",
+                [command_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(show_source);
+        assert_eq!(transport, "carrier");
+        for table in [
+            "rcs_conversation_mappings",
+            "rcs_mapping_proofs",
+            "rcs_send_ledger",
+            "rcs_link_status_projection",
+            "rcs_link_eligibility_projection",
+            "rcs_capability_published",
+            "rcs_lane_ownership",
+            "rcs_message_identities",
+            "rcs_provider_detectors",
+            "rcs_message_status",
+            "rcs_conversation_metadata",
+        ] {
+            assert!(table_exists(&store.conn, table).unwrap(), "missing {table}");
+        }
+    }
+
+    #[test]
+    fn feature_49_upgrade_preserves_rcs_rows_and_adds_show_source() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("feature-49.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = || DatabaseKey::new(&[49; 32]).unwrap();
+        let client = Client::open(config.clone(), key()).unwrap();
+        let conversation_id = ConversationId::new().to_string();
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO rcs_conversation_mappings(peppy_conversation_id,google_conversation_id,class,proof_version,proof_hash,mapping_revision,verified_at_ms) VALUES(?,'google','one_to_one',1,?,1,0)",
+                    params![conversation_id, vec![0_u8; 32]],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "ALTER TABLE notification_preferences DROP COLUMN show_source;
+                     UPDATE schema_meta SET version=49;",
+                )
+                .unwrap();
+        }
+        drop(client);
+
+        let upgraded = Client::open(config, key()).unwrap();
+        let store = upgraded.lock().unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT version FROM schema_meta", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        assert!(column_exists(&store.conn, "notification_preferences", "show_source").unwrap());
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM rcs_conversation_mappings",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -10648,6 +13212,7 @@ mod tests {
                 "INSERT INTO projection_notifications(generation,source_device_id,notification_key,lifetime,instance,package_name,app_name,app_icon_png_base64,title,text,category,posted_at,dismissible,removed,source_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 params![8_i64, source, "staged", uuid::Uuid::new_v4().to_string(), "instance", "com.example.mail", "Mail", "old-icon", "Staged title", "Staged text", "mail", 43_i64, 1_i64, 0_i64, 8_i64],
             ).unwrap();
+            drop_post_v45_objects(&store.conn);
             store
                 .conn
                 .execute_batch(
@@ -11083,6 +13648,7 @@ mod tests {
             .unwrap();
         {
             let store = client.lock().unwrap();
+            drop_post_v45_objects(&store.conn);
             store
                 .conn
                 .execute_batch(
@@ -11610,6 +14176,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(actual, definition);
             }
+            drop_post_v45_objects(&store.conn);
             store
                 .conn
                 .execute_batch(
@@ -12075,6 +14642,7 @@ mod tests {
             let client = Client::open(config.clone(), key()).unwrap();
             let mut store = client.lock().unwrap();
             // Recreate the baseline-35 shape: no priority column and no history seed column.
+            drop_post_v45_objects(&store.conn);
             store
                 .conn
                 .execute_batch(
@@ -12274,6 +14842,7 @@ mod tests {
                 .unwrap();
             // This mirrors the existing version-33 fixture: the schema is current except for
             // artifacts introduced by the simulated upgrade.
+            drop_post_v45_objects(&store.conn);
             store
                 .conn
                 .execute_batch(
@@ -12666,6 +15235,67 @@ mod tests {
             fresh.attachment_info(info.attachment_id).unwrap().state,
             AttachmentState::PendingUpload
         );
+    }
+
+    #[test]
+    fn authenticated_malformed_rcs_events_are_invalid_but_unknown_events_are_tolerated() {
+        use peppy_crypto::{create_vault_check_header, derive_root_key};
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let event_key = derive_purpose_key(&root, &profile, KeyPurpose::Event).unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: dir.path().join("d.db"),
+                vault_id,
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[5; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let mut store = client.lock().unwrap();
+        let (_, ctx) = store.parts();
+        for kind in [
+            "rcs_message_status",
+            "rcs_message_reported",
+            "future_unknown_event",
+        ] {
+            let mut envelope = Envelope {
+                protocol_version: PROTOCOL_VERSION,
+                envelope_id: EnvelopeId::new(),
+                command_id: None,
+                vault_id,
+                producer_device_id: DeviceId::new(),
+                producer_sequence: SourceSequence(1),
+                key_epoch: 1,
+                crypto_suite: profile.crypto_suite,
+                profile_fingerprint: profile.fingerprint().unwrap(),
+                purpose: EnvelopePurpose::Event,
+                route: None,
+                compaction: None,
+                origin_tag: None,
+                ciphertext: Vec::new(),
+            };
+            // Known RCS kinds require fields absent here. Encrypt raw JSON to exercise
+            // receiver classification, without the producer's strict payload decoder.
+            let plain = serde_json::to_vec(&serde_json::json!({ "kind": kind })).unwrap();
+            envelope.ciphertext =
+                seal_frame(&encrypt(&event_key, &envelope.aad_bytes().unwrap(), &plain).unwrap());
+            let opened = open_payload(&ctx, &envelope);
+            if kind == "future_unknown_event" {
+                assert!(matches!(opened, Ok(Opened::UnknownEvent)), "{kind}");
+            } else {
+                assert!(
+                    matches!(opened, Err(QuarantineReason::InvalidPayload)),
+                    "{kind}"
+                );
+            }
+        }
     }
 
     /// Apply-level MMS validation: authenticated payloads with inconsistent media are
@@ -13334,7 +15964,7 @@ mod tests {
                     attachment_ids: vec![],
                     subject: None,
                 },
-                GatewayRoute {
+                GatewayRoute::Carrier {
                     gateway_device_id: target_cfg.device_id,
                     subscription_id: "sim-1".into(),
                 },
@@ -14767,7 +17397,38 @@ mod tests {
     }
 
     #[test]
-    fn migration_46_resumes_and_promotes_an_authentic_v45_preference_projection() {
+    fn isolated_snapshot_rcs_rows_do_not_starve_actionable_journal_query() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        install_snapshot_apply_index(&conn).unwrap();
+        conn.execute_batch(&format!(
+            "WITH RECURSIVE held(cursor) AS (VALUES(1) UNION ALL SELECT cursor+1 FROM held WHERE cursor<1000)
+             INSERT INTO journal(cursor,key_epoch,wire,status,reason)
+             SELECT cursor,1,X'01','pending','{}' FROM held;
+             INSERT INTO journal(cursor,key_epoch,wire,status,reason) VALUES(1001,1,X'02','pending',NULL);",
+            snapshot_projection::RCS_ISOLATED_REASON
+        ))
+        .unwrap();
+        let cursor: i64 = conn
+            .query_row(
+                "SELECT cursor FROM journal INDEXED BY journal_apply_eligible WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated' AND key_epoch=1 ORDER BY cursor LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cursor, 1001);
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT cursor FROM journal INDEXED BY journal_apply_eligible WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated' AND key_epoch=1 ORDER BY cursor LIMIT 1",
+                [],
+                |row| row.get(3),
+        )
+        .unwrap();
+        assert!(plan.contains("journal_apply_eligible"), "{plan}");
+    }
+
+    #[test]
+    fn migration_50_resumes_and_promotes_an_authentic_v45_preference_projection() {
         let directory = tempfile::TempDir::new().unwrap();
         let vault_id = VaultId::new();
         let profile = KeyProfile::new(vault_id.0, 1).unwrap();
@@ -14935,6 +17596,7 @@ mod tests {
                     "staging".into(),
                 )
             );
+            drop_post_v45_objects(&store.conn);
             store
                 .conn
                 .execute_batch(
@@ -15020,5 +17682,63 @@ mod tests {
         drop(store);
         drop(upgraded);
         Client::open(target_config, key()).unwrap();
+    }
+
+    #[test]
+    fn installed_rcs_identity_key_matches_independent_known_answer() {
+        use sha2::{Digest, Sha256};
+
+        let directory = tempfile::tempdir().unwrap();
+        let vault = VaultId(Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap());
+        let operation = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let owner = Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
+        let scope = Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("rcs-identity-vector.db"),
+            vault_id: vault,
+            device_id: DeviceId(owner),
+        };
+        let client = Client::open(config, DatabaseKey::new(&[42; 32]).unwrap()).unwrap();
+        let seed: Vec<u8> = (0_u8..32).collect();
+        let mut commitment = Sha256::new();
+        commitment.update(b"peppy-vault-identity-commitment-v1\0");
+        commitment.update(1_u16.to_be_bytes());
+        commitment.update(vault.0.as_bytes());
+        commitment.update(&seed);
+        let mut protected = Vec::new();
+        protected.extend_from_slice(b"peppy-vault-identity-anchor-v1\0");
+        protected.extend_from_slice(&1_u16.to_be_bytes());
+        protected.extend_from_slice(&1_u16.to_be_bytes());
+        protected.extend_from_slice(vault.0.as_bytes());
+        protected.extend_from_slice(operation.as_bytes());
+        protected.extend_from_slice(owner.as_bytes());
+        protected.extend_from_slice(&seed);
+        protected.extend_from_slice(&commitment.finalize());
+        let mut pin = Sha256::new();
+        pin.update(b"peppy-vault-identity-anchor-pin-v1\0");
+        pin.update(&protected);
+        {
+            let store = client.lock().unwrap();
+            store.conn.execute(
+                "INSERT INTO vault_identity_state(id,state,operation_id,key_epoch,profile_fingerprint,pin,conflict_evidence,updated_at_ms) VALUES(1,'accepted',?,1,?, ?,NULL,0)",
+                params![operation.to_string(), "a".repeat(64), pin.finalize().as_slice()],
+            ).unwrap();
+        }
+        client
+            .restore_vault_identity_from_protected(protected)
+            .unwrap();
+        let store = client.lock().unwrap();
+        let identity = vault_identity::rcs_identity_key(&store)
+            .unwrap()
+            .message_identity(scope, "conversation", "message")
+            .unwrap();
+        assert_eq!(
+            identity.digest(),
+            &[
+                0x50, 0xb7, 0x5d, 0x0e, 0x70, 0x48, 0x68, 0xef, 0x17, 0x89, 0x77, 0xa2, 0xa6, 0xe8,
+                0xf5, 0xe2, 0xab, 0xda, 0xb3, 0xe9, 0xe6, 0xc1, 0x8b, 0x3d, 0x69, 0xd0, 0xac, 0xa8,
+                0xf0, 0xb5, 0x4e, 0x51,
+            ]
+        );
     }
 }

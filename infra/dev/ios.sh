@@ -154,7 +154,7 @@ build() {
   local generated="$BUILD_SCRATCH/generated-swift" compiler_wrapper="$BUILD_SCRATCH/clang"
   mkdir -p "$generated"
   cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen --target-dir "$RUST_ARTIFACTS" -- generate \
-    --library "$RUST_ARTIFACTS/debug/libpeppy_mobile_bindings.dylib" --language swift --out-dir "$generated"
+    --no-format --library "$RUST_ARTIFACTS/debug/libpeppy_mobile_bindings.dylib" --language swift --out-dir "$generated"
   if ! diff -ru --exclude=module.modulemap "$SOURCE_ROOT/apps/ios/Generated" "$generated"; then
     fail "Generated iOS bindings drift from Rust source; regenerate Swift bindings using the command in CONTRIBUTING.md > iOS Simulator workflow before building."
   fi

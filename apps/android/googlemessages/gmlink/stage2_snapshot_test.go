@@ -1,0 +1,637 @@
+package gmlink
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sync"
+	"testing"
+
+	"go.mau.fi/mautrix-gmessages/pkg/libgm"
+	"go.mau.fi/mautrix-gmessages/pkg/libgm/events"
+	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
+	"google.golang.org/protobuf/proto"
+)
+
+func stage2Participant(number string, visible, me bool) *gmproto.Participant {
+	return &gmproto.Participant{IsVisible: visible, IsMe: me, ID: &gmproto.SmallInfo{Number: number}}
+}
+
+func stage2Conversation(id string, participants ...*gmproto.Participant) *gmproto.Conversation {
+	return &gmproto.Conversation{ConversationID: id, Type: gmproto.ConversationType_RCS, Status: gmproto.ConversationStatus_ACTIVE, Participants: participants}
+}
+
+func stage2Code(t *testing.T, result string) string {
+	t.Helper()
+	var decoded conversationResult
+	if err := json.Unmarshal([]byte(result), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	return decoded.Code
+}
+
+func stage2SeedCompleteIndex(t *testing.T, link *Link, conversations ...*gmproto.Conversation) (uint64, uint64) {
+	t.Helper()
+	link.mu.Lock()
+	link.generation, link.runGeneration, link.streamEpoch = 7, 7, 3
+	link.ownerVerification = &ownerVerification{generation: 7}
+	link.mu.Unlock()
+	revision, ok := link.beginConversationIndexRefreshFor(7, 3)
+	if !ok || !link.replaceConversationIndexFor(7, 3, revision, conversations) {
+		t.Fatal("complete conversation index was not published")
+	}
+	return 7, 3
+}
+
+func TestConversationLookupRequiresCompleteSnapshot(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	setTestOwnerVerification(link)
+	if code := stage2Code(t, link.ResolveExistingConversation("missing-target")); code != "conversation_lookup_unknown" {
+		t.Fatalf("lookup code = %s", code)
+	}
+	stage2SeedCompleteIndex(t, link)
+	if code := stage2Code(t, link.ResolveExistingConversation("missing-target")); code != "conversation_not_found_complete" {
+		t.Fatalf("complete miss code = %s", code)
+	}
+}
+
+func TestPartialOrCancelledScanNeverProvesCompleteAbsence(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	generation, streamEpoch := stage2SeedCompleteIndex(t, link)
+	if _, ok := link.beginConversationIndexRefreshFor(generation, streamEpoch); !ok {
+		t.Fatal("refresh did not start")
+	}
+	calls := 0
+	_, code := scanConversationPages(context.Background(), func(_ context.Context, _ *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+		calls++
+		if calls == 1 {
+			return &gmproto.ListConversationsResponse{Cursor: &gmproto.Cursor{LastItemID: "next"}}, nil
+		}
+		return nil, context.Canceled
+	})
+	if code != "conversation_lookup_failed" {
+		t.Fatalf("scan code = %s", code)
+	}
+	if code := stage2Code(t, link.ResolveExistingConversation("missing-target")); code != "conversation_lookup_unknown" {
+		t.Fatalf("partial scan lookup code = %s", code)
+	}
+}
+
+func TestRepeatedCursorIsBoundedIncomplete(t *testing.T) {
+	cursor := &gmproto.Cursor{LastItemID: "same", LastItemTimestamp: 42}
+	_, code := scanConversationPages(context.Background(), func(_ context.Context, _ *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+		return &gmproto.ListConversationsResponse{Cursor: cursor}, nil
+	})
+	if code != "conversation_lookup_incomplete" {
+		t.Fatalf("scan code = %s", code)
+	}
+}
+
+func TestMultiPageScanPreservesDistinctCandidates(t *testing.T) {
+	calls := make(map[gmproto.ListConversationsRequest_Folder]int)
+	conversations, code := scanConversationPages(context.Background(), func(_ context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+		folder := request.GetFolder()
+		calls[folder]++
+		if folder != gmproto.ListConversationsRequest_INBOX {
+			return &gmproto.ListConversationsResponse{}, nil
+		}
+		if calls[folder] == 1 {
+			return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{stage2Conversation("first", stage2Participant("first-target", true, false))}, Cursor: &gmproto.Cursor{LastItemID: "next"}}, nil
+		}
+		return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{stage2Conversation("second", stage2Participant("second-target", true, false))}}, nil
+	})
+	if code != "" || len(conversations) != 2 || conversations[0].GetConversationID() != "first" || conversations[1].GetConversationID() != "second" {
+		t.Fatalf("scan code = %q, conversations = %+v", code, conversations)
+	}
+}
+
+func TestScanConversationPagesRejectsAmbiguousCandidates(t *testing.T) {
+	first := stage2Conversation("first", stage2Participant("first-target", true, false))
+	for _, test := range []struct {
+		name string
+		load conversationPageLoader
+	}{
+		{
+			name: "missing id",
+			load: func(_ context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+				if request.GetFolder() == gmproto.ListConversationsRequest_INBOX {
+					return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{{}}}, nil
+				}
+				return &gmproto.ListConversationsResponse{}, nil
+			},
+		},
+		{
+			name: "conflicting later page",
+			load: func(_ context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+				if request.GetFolder() != gmproto.ListConversationsRequest_INBOX {
+					return &gmproto.ListConversationsResponse{}, nil
+				}
+				if request.GetCursor() == nil {
+					return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{first}, Cursor: &gmproto.Cursor{LastItemID: "next"}}, nil
+				}
+				return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{stage2Conversation("first", stage2Participant("changed-target", true, false))}}, nil
+			},
+		},
+		{
+			name: "conflicting folder",
+			load: func(_ context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+				switch request.GetFolder() {
+				case gmproto.ListConversationsRequest_INBOX:
+					return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{first}}, nil
+				case gmproto.ListConversationsRequest_ARCHIVE:
+					return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{stage2Conversation("first", stage2Participant("changed-target", true, false))}}, nil
+				default:
+					return &gmproto.ListConversationsResponse{}, nil
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			conversations, code := scanConversationPages(context.Background(), test.load)
+			if code != "conversation_lookup_incomplete" || conversations != nil {
+				t.Fatalf("scan code = %q, conversations = %+v", code, conversations)
+			}
+		})
+	}
+}
+
+func TestScanConversationPagesAcceptsIdenticalDuplicates(t *testing.T) {
+	conversation := stage2Conversation("first", stage2Participant("first-target", true, false))
+	conversations, code := scanConversationPages(context.Background(), func(_ context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+		switch request.GetFolder() {
+		case gmproto.ListConversationsRequest_INBOX, gmproto.ListConversationsRequest_ARCHIVE:
+			return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{conversation}}, nil
+		default:
+			return &gmproto.ListConversationsResponse{}, nil
+		}
+	})
+	if code != "" || len(conversations) != 1 || !proto.Equal(conversations[0], conversation) {
+		t.Fatalf("scan code = %q, conversations = %+v", code, conversations)
+	}
+}
+
+func TestOldGenerationScanCannotPublishCompleteSnapshot(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	generation, streamEpoch := stage2SeedCompleteIndex(t, link)
+	revision, ok := link.beginConversationIndexRefreshFor(generation, streamEpoch)
+	if !ok {
+		t.Fatal("refresh did not start")
+	}
+	link.mu.Lock()
+	link.revokeLocked()
+	link.ownerVerification = &ownerVerification{generation: link.generation}
+	link.mu.Unlock()
+	if link.replaceConversationIndexFor(generation, streamEpoch, revision, []*gmproto.Conversation{stage2Conversation("stale", stage2Participant("stale-target", true, false))}) {
+		t.Fatal("old generation published a complete snapshot")
+	}
+	if code := stage2Code(t, link.ResolveExistingConversation("stale-target")); code != "conversation_lookup_unknown" {
+		t.Fatalf("lookup code = %s", code)
+	}
+}
+
+func TestStreamGapInvalidatesCompleteSnapshot(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	generation, _ := stage2SeedCompleteIndex(t, link)
+	link.queueEventFor(generation, &events.StreamGap{})
+	link.mu.Lock()
+	complete := link.conversationIndexComplete
+	link.mu.Unlock()
+	if complete {
+		t.Fatal("stream gap retained complete snapshot")
+	}
+}
+
+func TestCorrelationOverflowIsStickyAndInvalidatesSnapshot(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	stage2SeedCompleteIndex(t, link)
+	link.mu.Lock()
+	for index := 0; index <= conversationEventLimit; index++ {
+		link.recordConversationEventLocked(fmt.Sprintf("conversation-%d", index))
+	}
+	link.recordConversationEventLocked("after-overflow")
+	complete := link.conversationIndexComplete
+	events := append([]conversationEvent(nil), link.conversationEvents...)
+	link.mu.Unlock()
+	if complete {
+		t.Fatal("correlation overflow retained complete snapshot")
+	}
+	if len(events) != 1 || events[0].Code != "conversation_resync" || events[0].GoogleConversationID != "" {
+		t.Fatalf("overflow events = %+v", events)
+	}
+}
+
+func TestExactTargetIgnoresGroupAndNonVisibleParticipants(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	stage2SeedCompleteIndex(t, link,
+		stage2Conversation("group", stage2Participant("target", true, false), stage2Participant("other", true, false)),
+		stage2Conversation("hidden", stage2Participant("target", false, false), stage2Participant("other", true, false)),
+	)
+	if code := stage2Code(t, link.ResolveExistingConversation("target")); code != "conversation_lookup_unknown" {
+		t.Fatalf("ineligible target code = %s", code)
+	}
+	revision, ok := link.beginConversationIndexRefreshFor(7, 3)
+	if !ok || !link.replaceConversationIndexFor(7, 3, revision, []*gmproto.Conversation{
+		stage2Conversation("exact", stage2Participant("", true, true), stage2Participant("target", true, false), stage2Participant("ignored", false, false)),
+	}) {
+		t.Fatal("exact snapshot was not published")
+	}
+	result := link.ResolveExistingConversation("target")
+	var decoded conversationResult
+	if err := json.Unmarshal([]byte(result), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Code != "conversation_found" || decoded.GoogleConversationID != "exact" {
+		t.Fatalf("lookup result = %s", result)
+	}
+}
+
+func TestPublishedCandidatesOwnClonedRawFacts(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	conversation := stage2Conversation("exact", stage2Participant("original-target", true, false))
+	stage2SeedCompleteIndex(t, link, conversation)
+	conversation.Participants[0].ID.Number = "mutated-target"
+	link.mu.Lock()
+	summary := link.conversationCandidates["original-target"][0]
+	raw := summary.conversation.GetParticipants()[0].GetID().GetNumber()
+	link.mu.Unlock()
+	if raw != "original-target" {
+		t.Fatalf("stored raw participant = %q", raw)
+	}
+}
+
+func TestSnapshotRemainsConsistentUnderConcurrentEvents(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	generation, streamEpoch := stage2SeedCompleteIndex(t, link,
+		stage2Conversation("stable", stage2Participant("stable-target", true, false)),
+		stage2Conversation("changing", stage2Participant("target-a", true, false)),
+	)
+	var wait sync.WaitGroup
+	failures := make(chan string, 1)
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		for index := 0; index < conversationEventLimit/2; index++ {
+			target := "target-a"
+			if index%2 == 0 {
+				target = "target-b"
+			}
+			link.recordConversationEventFor(generation, libgm.StreamSource{}, streamEpoch, stage2Conversation("changing", stage2Participant(target, true, false)))
+		}
+	}()
+	go func() {
+		defer wait.Done()
+		for index := 0; index < 500; index++ {
+			var result conversationResult
+			err := json.Unmarshal([]byte(link.ResolveExistingConversation("stable-target")), &result)
+			if err != nil || (result.Code != "conversation_found" && result.Code != "conversation_lookup_unknown") {
+				select {
+				case failures <- fmt.Sprintf("stable lookup = %+v error=%v", result, err):
+				default:
+				}
+				return
+			}
+		}
+	}()
+	wait.Wait()
+	select {
+	case failure := <-failures:
+		t.Fatal(failure)
+	default:
+	}
+}
+
+func TestConversationItemOverflowIsBoundedIncomplete(t *testing.T) {
+	conversations := make([]*gmproto.Conversation, 0, conversationItemLimit+1)
+	for index := 0; index <= conversationItemLimit; index++ {
+		conversations = append(conversations, stage2Conversation(fmt.Sprintf("conversation-%d", index), stage2Participant(fmt.Sprintf("target-%d", index), true, false)))
+	}
+	calls := 0
+	_, code := scanConversationPages(context.Background(), func(_ context.Context, _ *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+		calls++
+		if calls == 1 {
+			return &gmproto.ListConversationsResponse{Conversations: conversations}, nil
+		}
+		return &gmproto.ListConversationsResponse{}, nil
+	})
+	if code != "conversation_lookup_incomplete" {
+		t.Fatalf("scan code = %s", code)
+	}
+}
+
+func TestDirectGapSignalsInvalidateCompleteSnapshot(t *testing.T) {
+	for name, event := range map[string]any{
+		"stream gap":        &events.StreamGap{},
+		"temporary error":   &events.ListenTemporaryError{},
+		"no data":           &events.NoDataReceived{},
+		"session reset":     &events.ActiveSessionSet{},
+		"phone unavailable": &events.PhoneNotResponding{},
+		"bare settings":     &gmproto.Settings{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			link, _ := openSafetyLink(t, nil)
+			stage2SeedCompleteIndex(t, link)
+			link.queueEvent(event)
+			link.mu.Lock()
+			complete := link.conversationIndexComplete
+			link.mu.Unlock()
+			if complete {
+				t.Fatal("gap signal retained complete snapshot")
+			}
+		})
+	}
+}
+
+func stage2LinkWithoutEventConsumer() *Link {
+	return &Link{
+		changes:                make(chan any, 64),
+		conversationCandidates: make(map[string][]conversationSummary),
+		conversationTargets:    make(map[string][]string),
+		conversationRecords:    make(map[string]*gmproto.Conversation),
+	}
+}
+
+func TestAcceptedConversationEventFencesScanBeforeConsumerDrain(t *testing.T) {
+	link := stage2LinkWithoutEventConsumer()
+	generation, streamEpoch := stage2SeedCompleteIndex(t, link)
+	revision, ok := link.beginConversationIndexRefreshFor(generation, streamEpoch)
+	if !ok {
+		t.Fatal("refresh did not start")
+	}
+	link.queueEventFor(generation, stage2Conversation("contradiction", stage2Participant("target", true, false)))
+	if link.replaceConversationIndexFor(generation, streamEpoch, revision, nil) {
+		t.Fatal("scan published while an accepted conversation event remained unapplied")
+	}
+	if code := stage2Code(t, link.ResolveExistingConversation("target")); code != "conversation_lookup_unknown" {
+		t.Fatalf("lookup code = %s", code)
+	}
+}
+
+func TestQueuedPreScanConversationCannotOverwriteNewerSnapshot(t *testing.T) {
+	link := stage2LinkWithoutEventConsumer()
+	generation, streamEpoch := stage2SeedCompleteIndex(t, link)
+	link.queueEventFor(generation, stage2Conversation("same-id", stage2Participant("old-target", true, false)))
+	revision, ok := link.beginConversationIndexRefreshFor(generation, streamEpoch)
+	if !ok {
+		t.Fatal("refresh did not start")
+	}
+	if link.replaceConversationIndexFor(generation, streamEpoch, revision, []*gmproto.Conversation{
+		stage2Conversation("same-id", stage2Participant("new-target", true, false)),
+	}) {
+		t.Fatal("scan published over an unapplied pre-scan event")
+	}
+	link.consumeQueuedEvent(<-link.changes)
+	if link.replaceConversationIndexFor(generation, streamEpoch, revision, nil) {
+		t.Fatal("scan published after its revision was superseded by the queued event")
+	}
+	freshRevision, ok := link.beginConversationIndexRefreshFor(generation, streamEpoch)
+	if !ok || !link.replaceConversationIndexFor(generation, streamEpoch, freshRevision, []*gmproto.Conversation{
+		stage2Conversation("same-id", stage2Participant("new-target", true, false)),
+	}) {
+		t.Fatal("newer snapshot did not publish after the queue drained")
+	}
+	if code := stage2Code(t, link.ResolveExistingConversation("old-target")); code != "conversation_lookup_unknown" {
+		t.Fatalf("old target lookup code = %s", code)
+	}
+	if code := stage2Code(t, link.ResolveExistingConversation("new-target")); code != "conversation_found" {
+		t.Fatalf("new target lookup code = %s", code)
+	}
+}
+
+func TestEquivalentNumberFormatsNeverProveCompleteAbsenceOrUniqueness(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	stage2SeedCompleteIndex(t, link,
+		stage2Conversation("formatted", stage2Participant("(202) 555-0123", true, false)),
+	)
+	if code := stage2Code(t, link.ResolveExistingConversation("+12025550123")); code != "conversation_lookup_unknown" {
+		t.Fatalf("equivalent-format miss code = %s", code)
+	}
+	stage2SeedCompleteIndex(t, link,
+		stage2Conversation("exact", stage2Participant("+12025550123", true, false)),
+		stage2Conversation("formatted", stage2Participant("(202) 555-0123", true, false)),
+	)
+	if code := stage2Code(t, link.ResolveExistingConversation("+12025550123")); code != "conversation_lookup_unknown" {
+		t.Fatalf("potential false uniqueness code = %s", code)
+	}
+}
+
+func TestFinalPageSuccessAfterCancellationIsRejected(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	_, code := scanConversationPages(ctx, func(_ context.Context, _ *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+		calls++
+		if calls == 3 {
+			cancel()
+		}
+		return &gmproto.ListConversationsResponse{}, nil
+	})
+	if code != "conversation_lookup_failed" {
+		t.Fatalf("scan code = %s", code)
+	}
+}
+
+func TestCancellationAtPublicationBoundaryRejectsSnapshot(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	generation, streamEpoch := stage2SeedCompleteIndex(t, link)
+	revision, ok := link.beginConversationIndexRefreshFor(generation, streamEpoch)
+	if !ok {
+		t.Fatal("refresh did not start")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if link.replaceConversationIndexForContext(ctx, generation, streamEpoch, revision, nil) {
+		t.Fatal("cancelled operation published a complete snapshot")
+	}
+	if code := stage2Code(t, link.ResolveExistingConversation("target")); code != "conversation_lookup_unknown" {
+		t.Fatalf("lookup code = %s", code)
+	}
+}
+
+func TestSelfChatIsUnsupportedWithoutCarrierProof(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	stage2SeedCompleteIndex(t, link,
+		stage2Conversation("self-chat", stage2Participant("own-target", true, true)),
+	)
+	if code := stage2Code(t, link.ResolveExistingConversation("own-target")); code != "conversation_unsupported" {
+		t.Fatalf("self-chat lookup code = %s", code)
+	}
+	link.mu.Lock()
+	summaries := append([]conversationSummary(nil), link.conversationCandidates["own-target"]...)
+	link.mu.Unlock()
+	if len(summaries) != 1 || !summaries[0].self || summaries[0].conversation == nil {
+		t.Fatalf("self-chat facts were not preserved: %+v", summaries)
+	}
+}
+
+func TestConversationResyncRemainsStickyAcrossDrainsUntilReplacement(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	generation, streamEpoch := stage2SeedCompleteIndex(t, link)
+	link.mu.Lock()
+	for index := 0; index <= conversationEventLimit; index++ {
+		link.recordConversationEventLocked(fmt.Sprintf("conversation-%d", index))
+	}
+	link.mu.Unlock()
+	for drain := 0; drain < 2; drain++ {
+		if got := link.DrainConversationEvents(); got != `[{"code":"conversation_resync","google_conversation_id":""}]` {
+			t.Fatalf("drain %d = %s", drain, got)
+		}
+	}
+	revision, ok := link.beginConversationIndexRefreshFor(generation, streamEpoch)
+	if !ok || !link.replaceConversationIndexFor(generation, streamEpoch, revision, nil) {
+		t.Fatal("replacement did not clear resync requirement")
+	}
+	if got := link.DrainConversationEvents(); got != `null` {
+		t.Fatalf("post-replacement drain = %s", got)
+	}
+}
+
+func TestSoleNumberlessPeerMakesCompleteLookupUnknown(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	stage2SeedCompleteIndex(t, link, &gmproto.Conversation{
+		ConversationID: "numberless-peer",
+		Type:           gmproto.ConversationType_RCS,
+		Status:         gmproto.ConversationStatus_ACTIVE,
+		Participants: []*gmproto.Participant{{
+			IsVisible: true,
+			ID: &gmproto.SmallInfo{
+				ParticipantID: "participant-without-number",
+				Type:          gmproto.IdentifierType_PHONE,
+			},
+		}},
+	})
+	if code := stage2Code(t, link.ResolveExistingConversation("any-target")); code != "conversation_lookup_unknown" {
+		t.Fatalf("numberless peer lookup code = %s", code)
+	}
+}
+
+func TestConversationCandidateSnapshotExportsEveryRawRecord(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	stage2SeedCompleteIndex(t, link,
+		&gmproto.Conversation{
+			ConversationID: "eligible",
+			Type:           gmproto.ConversationType_RCS,
+			Status:         gmproto.ConversationStatus_ACTIVE,
+			Participants: []*gmproto.Participant{
+				{IsVisible: true, ID: &gmproto.SmallInfo{ParticipantID: "peer-id", Type: gmproto.IdentifierType_PHONE, Number: "+12025550123"}, FormattedNumber: "(202) 555-0123"},
+				{IsVisible: false, IsMe: true, ID: &gmproto.SmallInfo{ParticipantID: "self-id", Type: gmproto.IdentifierType_PHONE}},
+			},
+		},
+		&gmproto.Conversation{
+			ConversationID: "numberless",
+			Type:           gmproto.ConversationType_RCS,
+			Status:         gmproto.ConversationStatus_ACTIVE,
+			Participants: []*gmproto.Participant{{
+				IsVisible: true,
+				ID:        &gmproto.SmallInfo{ParticipantID: "numberless-id", Type: gmproto.IdentifierType_PHONE},
+			}},
+		},
+		&gmproto.Conversation{
+			ConversationID: "group",
+			Type:           gmproto.ConversationType_RCS,
+			Status:         gmproto.ConversationStatus_ACTIVE,
+			Participants: []*gmproto.Participant{
+				{IsVisible: true, ID: &gmproto.SmallInfo{ParticipantID: "group-a", Type: gmproto.IdentifierType_PHONE, Number: "+12025550001"}},
+				{IsVisible: true, ID: &gmproto.SmallInfo{ParticipantID: "group-b", Type: gmproto.IdentifierType_PHONE, Number: "+12025550002"}},
+			},
+		},
+		&gmproto.Conversation{
+			ConversationID: "self-chat",
+			Type:           gmproto.ConversationType_RCS,
+			Status:         gmproto.ConversationStatus_ACTIVE,
+			Participants: []*gmproto.Participant{{
+				IsVisible: true,
+				IsMe:      true,
+				ID:        &gmproto.SmallInfo{ParticipantID: "self-only", Type: gmproto.IdentifierType_PHONE, Number: "+12025550999"},
+			}},
+		},
+	)
+	var snapshot struct {
+		Code          string `json:"code"`
+		SnapshotToken string `json:"snapshot_token"`
+		Generation    uint64 `json:"generation"`
+		StreamEpoch   uint64 `json:"stream_epoch"`
+		Revision      uint64 `json:"revision"`
+		Complete      bool   `json:"complete"`
+		Conversations []struct {
+			GoogleConversationID string `json:"google_conversation_id"`
+			ConversationType     int32  `json:"conversation_type"`
+			ConversationStatus   int32  `json:"conversation_status"`
+			Classification       string `json:"classification"`
+			Group                bool   `json:"group"`
+			VisibleNonSelfCount  int    `json:"visible_non_self_count"`
+			Participants         []struct {
+				ParticipantID        string `json:"participant_id"`
+				IdentifierType       int32  `json:"identifier_type"`
+				RawNumber            string `json:"raw_number"`
+				FormattedNumber      string `json:"formatted_number"`
+				ParticipantIDPresent bool   `json:"participant_id_present"`
+				NumberPresent        bool   `json:"number_present"`
+				Visible              bool   `json:"visible"`
+				Self                 bool   `json:"self"`
+			} `json:"participants"`
+		} `json:"conversations"`
+	}
+	if err := json.Unmarshal([]byte(link.ConversationCandidateSnapshot()), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Code != "conversation_candidate_snapshot" || !snapshot.Complete || snapshot.SnapshotToken == "" || snapshot.Generation != 7 || snapshot.StreamEpoch != 3 || snapshot.Revision == 0 {
+		t.Fatalf("snapshot envelope = %+v", snapshot)
+	}
+	if len(snapshot.Conversations) != 4 || snapshot.Conversations[0].GoogleConversationID != "eligible" || snapshot.Conversations[1].GoogleConversationID != "group" || snapshot.Conversations[2].GoogleConversationID != "numberless" || snapshot.Conversations[3].GoogleConversationID != "self-chat" {
+		t.Fatalf("snapshot conversations = %+v", snapshot.Conversations)
+	}
+	eligible := snapshot.Conversations[0]
+	if eligible.Classification != "eligible" || eligible.Group || eligible.VisibleNonSelfCount != 1 || len(eligible.Participants) != 2 {
+		t.Fatalf("eligible record = %+v", eligible)
+	}
+	peer := eligible.Participants[0]
+	if peer.ParticipantID != "peer-id" || peer.IdentifierType != int32(gmproto.IdentifierType_PHONE) || peer.RawNumber != "+12025550123" || peer.FormattedNumber != "(202) 555-0123" || !peer.ParticipantIDPresent || !peer.NumberPresent || !peer.Visible || peer.Self {
+		t.Fatalf("eligible peer = %+v", peer)
+	}
+	group := snapshot.Conversations[1]
+	if group.Classification != "unsupported" || !group.Group || group.VisibleNonSelfCount != 2 {
+		t.Fatalf("group record = %+v", group)
+	}
+	numberless := snapshot.Conversations[2]
+	if numberless.Classification != "unknown" || numberless.Group || numberless.VisibleNonSelfCount != 1 || len(numberless.Participants) != 1 {
+		t.Fatalf("numberless record = %+v", numberless)
+	}
+	missing := numberless.Participants[0]
+	if missing.ParticipantID != "numberless-id" || !missing.ParticipantIDPresent || missing.NumberPresent || missing.RawNumber != "" || !missing.Visible || missing.Self {
+		t.Fatalf("numberless peer = %+v", missing)
+	}
+	selfChat := snapshot.Conversations[3]
+	if selfChat.Classification != "unsupported" || selfChat.Group || selfChat.VisibleNonSelfCount != 0 || len(selfChat.Participants) != 1 || !selfChat.Participants[0].Self {
+		t.Fatalf("self-chat record = %+v", selfChat)
+	}
+}
+
+func TestConversationCandidateSnapshotRequiresCurrentCompleteness(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	generation, streamEpoch := stage2SeedCompleteIndex(t, link,
+		stage2Conversation("eligible", stage2Participant("target", true, false)),
+	)
+	if _, ok := link.beginConversationIndexRefreshFor(generation, streamEpoch); !ok {
+		t.Fatal("refresh did not start")
+	}
+	want := `{"code":"conversation_candidate_snapshot_unavailable","snapshot_token":"","generation":0,"stream_epoch":0,"revision":0,"complete":false,"conversations":[]}`
+	if got := link.ConversationCandidateSnapshot(); got != want {
+		t.Fatalf("incomplete snapshot export = %s", got)
+	}
+}
+
+func TestNumberlessSelfOnlyRecordBlocksCompleteAbsence(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	stage2SeedCompleteIndex(t, link, &gmproto.Conversation{
+		ConversationID: "numberless-self",
+		Type:           gmproto.ConversationType_RCS,
+		Status:         gmproto.ConversationStatus_ACTIVE,
+		Participants: []*gmproto.Participant{{
+			IsVisible: true,
+			IsMe:      true,
+			ID:        &gmproto.SmallInfo{ParticipantID: "self-without-number", Type: gmproto.IdentifierType_PHONE},
+		}},
+	})
+	if code := stage2Code(t, link.ResolveExistingConversation("own-number")); code != "conversation_lookup_unknown" {
+		t.Fatalf("numberless self lookup code = %s", code)
+	}
+}

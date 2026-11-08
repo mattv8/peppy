@@ -111,7 +111,7 @@ fn route_only_save_keeps_retired_identity_until_an_authored_save_rotates_it() {
                 text: cleared.text.clone(),
                 recipients: cleared.recipients.clone(),
                 attachment_ids: cleared.attachment_ids.clone(),
-                route: Some(GatewayRoute {
+                route: Some(GatewayRoute::Carrier {
                     gateway_device_id: config.device_id,
                     subscription_id: "sim-2".into(),
                 }),

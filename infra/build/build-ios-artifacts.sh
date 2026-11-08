@@ -18,7 +18,7 @@ cargo build -p peppy-mobile-bindings --locked
 generated_tmp=$(mktemp -d "${TMPDIR:-/tmp}/peppy-ios-generated.XXXXXX")
 trap 'rm -rf "$generated_tmp"' EXIT
 cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- \
-  generate --library target/debug/libpeppy_mobile_bindings.dylib --language swift --out-dir "$generated_tmp"
+  generate --no-format --library target/debug/libpeppy_mobile_bindings.dylib --language swift --out-dir "$generated_tmp"
 if ! diff -ru --exclude=module.modulemap "apps/ios/Generated" "$generated_tmp"; then
   echo 'Generated iOS bindings drift from the Rust source; regenerate apps/ios/Generated before building artifacts.' >&2
   exit 1

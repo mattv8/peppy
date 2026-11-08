@@ -3,7 +3,7 @@ use std::env;
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
-const UP: [&str; 29] = [
+const UP: [&str; 34] = [
     include_str!("../migrations/0001_foundation.sql"),
     include_str!("../migrations/0002_messaging.sql"),
     include_str!("../migrations/0003_pairing_proofs.sql"),
@@ -33,9 +33,14 @@ const UP: [&str; 29] = [
     include_str!("../migrations/0027_mcp.sql"),
     include_str!("../migrations/0028_mcp_oauth.sql"),
     include_str!("../migrations/0029_mcp_cleanup_jobs.sql"),
+    include_str!("../migrations/0030_live_ticket_sessions.sql"),
+    include_str!("../migrations/0031_membership_versions.sql"),
+    include_str!("../migrations/0032_live_ticket_cleanup_indexes.sql"),
+    include_str!("../migrations/0033_live_ticket_admission_events.sql"),
+    include_str!("../migrations/0034_vault_identity.sql"),
 ];
 
-const DOWN: [&str; 29] = [
+const DOWN: [&str; 34] = [
     include_str!("../migrations/down/0001_foundation.down.sql"),
     include_str!("../migrations/down/0002_messaging.down.sql"),
     include_str!("../migrations/down/0003_pairing_proofs.down.sql"),
@@ -65,6 +70,11 @@ const DOWN: [&str; 29] = [
     include_str!("../migrations/down/0027_mcp.down.sql"),
     include_str!("../migrations/down/0028_mcp_oauth.down.sql"),
     include_str!("../migrations/down/0029_mcp_cleanup_jobs.down.sql"),
+    include_str!("../migrations/down/0030_live_ticket_sessions.down.sql"),
+    include_str!("../migrations/down/0031_membership_versions.down.sql"),
+    include_str!("../migrations/down/0032_live_ticket_cleanup_indexes.down.sql"),
+    include_str!("../migrations/down/0033_live_ticket_admission_events.down.sql"),
+    include_str!("../migrations/down/0034_vault_identity.down.sql"),
 ];
 
 #[tokio::test]
@@ -136,7 +146,7 @@ async fn migrations_round_trip_in_an_isolated_schema() {
 
 const DRAFT_BASE_SEED: &str = "
     INSERT INTO vaults(vault_id, public_key_profile, encrypted_vault_check_header, key_epoch, profile_fingerprint)
-    VALUES ('00000000-0000-0000-0000-000000000030', '{}', '\\x01', 1, repeat('d', 64));
+    VALUES ('00000000-0000-0000-0000-000000000030', '{}', '\\x01', 1, repeat('d', 64)) ON CONFLICT (vault_id) DO NOTHING;
     INSERT INTO devices(vault_id, device_id, role, public_key, profile_fingerprint, key_epoch)
     VALUES ('00000000-0000-0000-0000-000000000030', '00000000-0000-0000-0000-000000000031', 'device', '{}', repeat('d', 64), 1);
 ";
@@ -251,6 +261,30 @@ async fn assert_latest_schema(database: &mut PgConnection) {
     assert!(index_exists(database, "draft_terminals_change_seq").await);
     assert!(index_exists(database, "encrypted_records_origin_tag_unique").await);
     assert!(index_exists(database, "compacted_records_origin_tag_unique").await);
+    assert!(table_exists(database, "membership_versions").await);
+    assert!(function_exists(database, "membership_version_invalidate").await);
+    assert!(index_exists(database, "live_tickets_expiry_reap_idx").await);
+    assert!(index_exists(database, "live_tickets_consumed_reap_idx").await);
+    assert!(index_exists(database, "live_ticket_sessions_tombstone_reap_idx").await);
+    assert!(table_exists(database, "live_ticket_admission_events").await);
+    assert!(
+        index_exists(
+            database,
+            "live_ticket_admission_events_device_kind_created_idx"
+        )
+        .await
+    );
+    assert!(index_exists(database, "live_ticket_admission_events_created_at_idx").await);
+    let version: i64 = sqlx::query_scalar(
+        "SELECT version FROM membership_versions WHERE vault_id = '00000000-0000-0000-0000-000000000030'",
+    )
+    .fetch_one(&mut *database)
+    .await
+    .unwrap();
+    assert_eq!(
+        version, 1,
+        "backfill creates protocol-valid membership tokens"
+    );
 }
 
 async fn seed_populated_downgrade_case(database: &mut PgConnection, version: usize) {
@@ -302,6 +336,13 @@ async fn seed_populated_downgrade_case(database: &mut PgConnection, version: usi
                 INSERT INTO vault_invites(id, token_digest, created_by, state, expires_at) VALUES ('00000000-0000-0000-0000-000000000024', decode(repeat('04', 32), 'hex'), '00000000-0000-0000-0000-000000000020', 'used', now() + interval '1 hour');
                 INSERT INTO vault_requests(id, invite_id, display_name, client_kind, secret_digest, state, expires_at) VALUES ('00000000-0000-0000-0000-000000000025', '00000000-0000-0000-0000-000000000024', 'requester', 'desktop', decode(repeat('05', 32), 'hex'), 'pending', now() + interval '1 hour');
             ").await;
+        }
+        29 => {
+            run(database, "
+                INSERT INTO vaults(vault_id, public_key_profile, encrypted_vault_check_header, key_epoch, profile_fingerprint)
+                VALUES ('00000000-0000-0000-0000-000000000030', '{}', '\\x01', 1, repeat('d', 64));
+            ")
+            .await;
         }
         _ => {}
     }

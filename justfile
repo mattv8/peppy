@@ -176,6 +176,7 @@ contracts-check:
     cargo run --locked -p peppy-desktop-api --bin generate-search-contracts -- --check
     cargo run --locked -p peppy-desktop-api --bin generate-attachment-retention-contracts -- --check
     cargo run --locked -p peppy-desktop-api --bin generate-account-access-contracts -- --check
+    cargo run --locked -p peppy-desktop-api --bin generate-rcs-status-contracts -- --check
     cargo run --locked -p peppy-hosted-api --bin generate-mcp-contracts -- --check
     cargo run --locked -p peppy-hosted-api --bin export-web-schema -- --check
 
@@ -187,8 +188,8 @@ desktop-test:
 
 ffi-smoke:
     cargo build -p peppy-mobile-bindings --locked
-    cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- generate --library target/debug/libpeppy_mobile_bindings.dylib --language kotlin --out-dir apps/android/app/src/main/java
-    cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- generate --library target/debug/libpeppy_mobile_bindings.dylib --language swift --out-dir apps/ios/Generated
+    cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- generate --no-format --library target/debug/libpeppy_mobile_bindings.dylib --language kotlin --out-dir apps/android/app/src/main/java
+    cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- generate --no-format --library target/debug/libpeppy_mobile_bindings.dylib --language swift --out-dir apps/ios/Generated
     cargo test -p peppy-mobile-bindings --locked
     cd apps/ios && DYLD_LIBRARY_PATH="$PWD/../../target/debug" swift run PeppyMobileSmoke
 

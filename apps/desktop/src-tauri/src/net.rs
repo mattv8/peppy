@@ -247,7 +247,9 @@ impl Api {
         body: &B,
         account_session: Option<&str>,
     ) -> Result<T, NetError> {
-        let mut request = self.retention_mutation(self.http.post(self.url(path))).json(body);
+        let mut request = self
+            .retention_mutation(self.http.post(self.url(path)))
+            .json(body);
         if let Some(account_session) = account_session {
             request = request.header("Peppy-Account-Session", account_session);
         }

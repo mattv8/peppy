@@ -143,6 +143,7 @@ fn config() -> Config {
         mcp_worker_url: None,
         mcp_worker_token_file: None,
         web_client: None,
+        web_live_trusted_origin: None,
     }
 }
 
@@ -379,6 +380,7 @@ async fn route_authority_inventory_is_complete_and_device_routes_reject_bad_bear
         (Method::GET, "/v1/snapshot/records?high_water=0".to_owned()),
         (Method::GET, "/v1/commands/pending".to_owned()),
         (Method::GET, "/v1/vault/key-profiles".to_owned()),
+        (Method::GET, "/v1/vault/identity".to_owned()),
         (Method::GET, "/v1/attachments/usage".to_owned()),
         (Method::GET, "/v1/drafts?after=0".to_owned()),
         (Method::GET, format!("/v1/attachments/{attachment}")),
@@ -455,6 +457,17 @@ async fn route_authority_inventory_is_complete_and_device_routes_reject_bad_bear
             Method::POST,
             "/v1/vault/key-profiles/1/activate".to_owned(),
             json!({}),
+        ),
+        (
+            Method::POST,
+            "/v1/vault/identity".to_owned(),
+            json!({
+                "protocol_version": 1,
+                "operation_id": attachment,
+                "key_epoch": 1,
+                "profile_fingerprint": "0".repeat(64),
+                "recovery_record": STANDARD.encode([0_u8; 266]),
+            }),
         ),
         (
             Method::POST,
@@ -869,6 +882,21 @@ async fn route_authority_inventory_is_complete_and_device_routes_reject_bad_bear
             "public challenge; no admission without proof",
         ),
         (
+            "GET",
+            "/v1/live",
+            "bearer or one-use ticket WebSocket authentication",
+        ),
+        (
+            "POST",
+            "/v1/live/tickets",
+            "live readiness is checked before bearer authentication",
+        ),
+        (
+            "DELETE",
+            "/v1/live/tickets",
+            "live ticket session bearer authentication",
+        ),
+        (
             "POST",
             "/v1/enrollment/challenges/{enrollment_id}/complete",
             "admission and device signatures",
@@ -980,7 +1008,7 @@ fn production_route_sources() -> Vec<(std::path::PathBuf, String)> {
 }
 
 fn declared_route_pairs(source: &str) -> Vec<(String, String)> {
-    let mut remaining = source.split("#[cfg(test)]").next().unwrap();
+    let mut remaining = source.split("\n#[cfg(test)]\nmod ").next().unwrap();
     let mut pairs = Vec::new();
     while let Some(start) = remaining.find(".route(") {
         let arguments = &remaining[start + ".route(".len()..];
@@ -1068,6 +1096,14 @@ fn declared_route_pairs(source: &str) -> Vec<(String, String)> {
         remaining = &arguments[end + 1..];
     }
     pairs
+}
+
+#[test]
+fn route_inventory_keeps_routes_after_inline_test_configuration() {
+    let pairs = declared_route_pairs(
+        "fn build(#[cfg(test)] override_value: Option<()>) { Router::new().route(\"/one\", get(read)); }\n#[cfg(test)]\nmod tests { Router::new().route(\"/test-only\", get(read)); }",
+    );
+    assert_eq!(pairs, vec![route_key("GET", "/one")]);
 }
 
 #[test]

@@ -64,7 +64,7 @@ pub fn catch_up_initial_replay(client: &Client, high_water: u64) {
     assert!(client.initial_replay_caught_up().unwrap());
 }
 pub fn route(gateway: &ClientConfig) -> GatewayRoute {
-    GatewayRoute {
+    GatewayRoute::Carrier {
         gateway_device_id: gateway.device_id,
         subscription_id: "sim-1".into(),
     }

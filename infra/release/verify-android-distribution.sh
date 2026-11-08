@@ -7,9 +7,18 @@ set +x
   exit 2
 }
 
+google_messages_link_expected=${PEPPY_GOOGLE_MESSAGES_LINK_EXPECTED:-}
+case "$google_messages_link_expected" in
+  true|false) ;;
+  *) echo 'PEPPY_GOOGLE_MESSAGES_LINK_EXPECTED must be true or false' >&2; exit 2 ;;
+esac
+
 direct_apk=$1
 play_aab=$2
 symbols_archive=$3
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+license_inventory="$script_dir/../../apps/android/googlemessages/license-inventory.json"
+[ -f "$license_inventory" ] || { echo "license inventory not found: $license_inventory" >&2; exit 1; }
 for artifact in "$direct_apk" "$play_aab" "$symbols_archive"; do
   [ -f "$artifact" ] || { echo "artifact not found: $artifact" >&2; exit 1; }
 done
@@ -56,6 +65,131 @@ for manifest_path, expected_distribution in EXPECTED:
             f"{expected_distribution} manifest distribution metadata must be exactly "
             f"{expected_distribution!r}; got {distributions!r}"
         )
+PY
+
+play_apks=()
+materialize_play_apks() {
+  local mode=$1 archive="$temporary_dir/$1.apks" directory="$temporary_dir/$1-apks" initial_count=${#play_apks[@]}
+  shift
+  java -jar "$bundletool_jar" build-apks --bundle="$play_aab" --output="$archive" "$@" || {
+    echo "could not materialize $mode APKs from Play AAB" >&2
+    exit 1
+  }
+  mkdir "$directory"
+  unzip -q "$archive" -d "$directory" || {
+    echo "could not extract $mode APKs materialized from Play AAB" >&2
+    exit 1
+  }
+  while IFS= read -r -d '' apk; do
+    play_apks+=("$apk")
+  done < <(find "$directory" -type f -name '*.apk' -print0)
+  [ "${#play_apks[@]}" -gt "$initial_count" ] || {
+    echo "bundletool did not materialize any $mode APKs from Play AAB" >&2
+    exit 1
+  }
+}
+
+materialize_play_apks universal --mode=universal
+materialize_play_apks default
+python3 - "$direct_apk" "$play_aab" "$google_messages_link_expected" "$license_inventory" "${play_apks[@]}" <<'PY'
+import json
+import pathlib
+import re
+import sys
+import zipfile
+
+DIRECT_ABIS = ("arm64-v8a", "x86_64")
+DEX_PATTERN = re.compile(r"(?:base/)?dex/classes\d*\.dex$|classes\d*\.dex$")
+GOJNI_PATTERN = re.compile(r"(?:base/)?lib/[^/]+/libgojni\.so$")
+DEX_PREFIX = b"Ldev/peppy/gmlink/"
+AGPL_TEXT = b"GNU AFFERO GENERAL PUBLIC LICENSE"
+GOOGLE_MESSAGES_NOTICE = b"Third-party notices for the Google Messages link"
+GOOGLE_MESSAGES_NOTICE_FILENAME = "NOTICE-google-messages.txt"
+
+
+def required_license_assets(inventory_path):
+    try:
+        modules = json.loads(inventory_path.read_text())["modules"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise SystemExit(f"could not read Google Messages license inventory: {error}")
+    assets = set()
+    for module in modules:
+        if not module.get("distributed"):
+            continue
+        asset = module.get("asset")
+        if not isinstance(asset, str) or not asset:
+            raise SystemExit("distributed Google Messages module has no license asset")
+        assets.add(f"assets/third_party/{asset}")
+        exception = module.get("licenseExceptions")
+        if exception is not None:
+            exception_asset = exception.get("asset")
+            if not isinstance(exception_asset, str) or not exception_asset:
+                raise SystemExit("Google Messages license exception has no asset")
+            assets.add(f"assets/third_party/{exception_asset}")
+    return assets
+
+
+LICENSE_ASSETS = required_license_assets(pathlib.Path(sys.argv[4]))
+DIRECT_ASSETS = (
+    "assets/third_party/AGPL-3.0.txt",
+    "assets/third_party/NOTICE-google-messages.txt",
+    *sorted(LICENSE_ASSETS - {"assets/third_party/AGPL-3.0.txt"}),
+)
+
+
+def contents(archive_path):
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            return {entry.filename: archive.read(entry) for entry in archive.infolist() if not entry.is_dir()}
+    except (OSError, zipfile.BadZipFile) as error:
+        raise SystemExit(f"could not inspect archive {archive_path}: {error}")
+
+
+def dex_contains(entries):
+    return any(DEX_PATTERN.fullmatch(name) and DEX_PREFIX in content for name, content in entries.items())
+
+
+def prohibited(entries):
+    if any(GOJNI_PATTERN.fullmatch(name) for name in entries):
+        return "libgojni.so"
+    if dex_contains(entries):
+        return "dev/peppy/gmlink/ dex classes"
+    if any(AGPL_TEXT in content for content in entries.values()):
+        return "AGPL text"
+    if any(
+        pathlib.PurePosixPath(name).name == GOOGLE_MESSAGES_NOTICE_FILENAME
+        or GOOGLE_MESSAGES_NOTICE in content
+        for name, content in entries.items()
+    ):
+        return "Google Messages notice content"
+    if any(asset in entries for asset in LICENSE_ASSETS):
+        return "Google Messages license asset"
+    return None
+
+
+direct_entries = contents(pathlib.Path(sys.argv[1]))
+if sys.argv[3] == "true":
+    for abi in DIRECT_ABIS:
+        required_library = f"lib/{abi}/libgojni.so"
+        if required_library not in direct_entries:
+            raise SystemExit(f"direct APK is missing {required_library}")
+    if not dex_contains(direct_entries):
+        raise SystemExit("direct APK is missing dev/peppy/gmlink/ dex classes")
+    for asset in DIRECT_ASSETS:
+        if asset not in direct_entries:
+            raise SystemExit(f"direct APK is missing {asset}")
+else:
+    found = prohibited(direct_entries)
+    if found:
+        raise SystemExit(f"direct APK contains {found}")
+
+play_archives = (("Play AAB", pathlib.Path(sys.argv[2])),) + tuple(
+    (f"Play APK {pathlib.Path(path).name}", pathlib.Path(path)) for path in sys.argv[5:]
+)
+for label, archive_path in play_archives:
+    found = prohibited(contents(archive_path))
+    if found:
+        raise SystemExit(f"{label} contains {found}")
 PY
 
 symbol_tool=${LLVM_NM:-}
@@ -111,4 +245,4 @@ for library in "${symbol_libraries[@]}"; do
   }
 done
 
-echo 'Android distribution manifests and native symbols verified'
+echo 'Android distribution manifests, composition, and native symbols verified'

@@ -93,6 +93,7 @@ describe("pasted attachment bridge", () => {
 
 describe("bridge subscriptions", () => {
   beforeEach(() => {
+    invokeMock.mockClear();
     eventMock.handler = undefined;
     eventMock.stop.mockReset();
     eventMock.windowStop.mockReset();
@@ -251,6 +252,30 @@ describe("bridge subscriptions", () => {
 
     finishRegistration?.(eventMock.windowStop);
     await expect(subscription?.ready).resolves.toBeUndefined();
+    expect(eventMock.windowStop).toHaveBeenCalledOnce();
+  });
+
+  it("exposes typing commands with the declared native arguments", async () => {
+    await tauriBridge.send_typing?.({ conversationId: "conversation-id", state: "started" });
+    await tauriBridge.set_typing_sharing?.({ enabled: false });
+
+    expect(invokeMock).toHaveBeenCalledWith("send_typing", { conversationId: "conversation-id", state: "started" });
+    expect(invokeMock).toHaveBeenCalledWith("set_typing_sharing", { enabled: false });
+  });
+
+  it("delivers validated typing events and unsubscribes", async () => {
+    const listener = vi.fn();
+    const subscription = tauriBridge.subscribe_typing?.(listener);
+    await subscription?.ready;
+    const handler = eventMock.windowHandlers.get("peppy://typing");
+
+    handler?.({ payload: { conversationId: "conversation-id", state: "started", expiresAtMs: "123" } });
+    handler?.({ payload: { conversationId: "conversation-id", state: "stopped" } });
+    handler?.({ payload: { conversationId: "conversation-id", state: "started", expiresAtMs: 123 } });
+    handler?.({ payload: { conversationId: "conversation-id", state: "started", origin: "vault_device" } });
+
+    expect(listener).toHaveBeenCalledTimes(2);
+    subscription?.();
     expect(eventMock.windowStop).toHaveBeenCalledOnce();
   });
 

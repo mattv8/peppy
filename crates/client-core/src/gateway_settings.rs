@@ -97,6 +97,21 @@ impl Client {
         }
     }
 
+    /// RCS is not a platform-wide claim: it is available only while this gateway's current
+    /// content-free link capability record remains fresh. It authorizes no transport effect.
+    pub fn gateway_capabilities_with_rcs_link(
+        &self,
+        platform: GatewayPlatform,
+        facts: GatewayHostFacts,
+        now_ms: i64,
+    ) -> Result<GatewayCapabilities, Error> {
+        let mut capabilities = Self::gateway_capabilities(platform, facts);
+        let store = self.lock()?;
+        capabilities.rcs_supported = platform == GatewayPlatform::Android
+            && super::rcs_capability::current_gateway(&store.conn, store.config.device_id, now_ms)?;
+        Ok(capabilities)
+    }
+
     pub fn gateway_policy_decision(
         &self,
         platform: GatewayPlatform,

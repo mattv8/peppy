@@ -68,9 +68,13 @@ fn roll_back_migrations_after_version_25(conn: &rusqlite::Connection) {
          ALTER TABLE mms_acquisition_parts DROP COLUMN width;
          DROP TABLE attachment_demand;
          DROP TABLE message_media_meta;
-         ALTER TABLE send_status DROP COLUMN status_at_ms;",
+          ALTER TABLE send_status DROP COLUMN status_at_ms;",
     )
     .unwrap();
+    if column_exists(conn, "attempts", "finalized_transport") {
+        conn.execute_batch("ALTER TABLE attempts DROP COLUMN finalized_transport;")
+            .unwrap();
+    }
 }
 
 const NOTIFICATION_REPLY_SPIKE_DDL: &str = "
@@ -96,6 +100,11 @@ fn encrypted_connection(config: &ClientConfig) -> rusqlite::Connection {
     conn
 }
 
+fn schema_version(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+        .unwrap()
+}
+
 fn table_exists(conn: &rusqlite::Connection, table: &str) -> bool {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
@@ -103,6 +112,51 @@ fn table_exists(conn: &rusqlite::Connection, table: &str) -> bool {
         |row| row.get(0),
     )
     .unwrap()
+}
+
+fn index_exists(conn: &rusqlite::Connection, index: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?)",
+        [index],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn assert_rcs_mapping_schema(conn: &rusqlite::Connection) {
+    for table in [
+        "rcs_conversation_mappings",
+        "rcs_mapping_proofs",
+        "rcs_send_ledger",
+    ] {
+        assert!(table_exists(conn, table), "missing {table}");
+    }
+    assert!(index_exists(conn, "rcs_mappings_google_active"));
+    for table in [
+        "rcs_link_status_projection",
+        "rcs_link_eligibility_projection",
+        "rcs_capability_published",
+    ] {
+        assert!(table_exists(conn, table), "missing {table}");
+    }
+}
+
+fn remove_rcs_mapping_schema(conn: &rusqlite::Connection) {
+    conn.execute_batch(
+        "DROP TABLE rcs_provider_detectors;
+         DROP TABLE rcs_message_identities;
+         DROP TABLE rcs_message_status;
+         DROP TABLE rcs_lane_ownership;
+         DROP TABLE rcs_conversation_metadata;
+         DROP TABLE rcs_send_ledger;
+         DROP TABLE rcs_mapping_proofs;
+         DROP TABLE rcs_conversation_mappings;
+         ALTER TABLE attempts DROP COLUMN finalized_transport;
+         DROP TABLE rcs_capability_published;
+         DROP TABLE rcs_link_eligibility_projection;
+         DROP TABLE rcs_link_status_projection;",
+    )
+    .unwrap();
 }
 
 fn column_exists(conn: &rusqlite::Connection, table: &str, column: &str) -> bool {
@@ -135,13 +189,7 @@ fn assert_notification_reply_spike_removed(conn: &rusqlite::Connection) {
         "gateway_settings",
         "reply_via_google_messages_enabled"
     ));
-    assert!(!conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='notification_reply_submissions_match')",
-            [],
-            |row| row.get::<_, bool>(0),
-        )
-        .unwrap());
+    assert!(!index_exists(conn, "notification_reply_submissions_match"));
 }
 
 #[test]
@@ -163,6 +211,8 @@ fn notification_reply_spike_version_43_repairs_and_upgrades() {
     drop(client);
 
     let conn = encrypted_connection(&config);
+    let expected_schema_version = schema_version(&conn);
+    remove_rcs_mapping_schema(&conn);
     conn.execute_batch(
         "DROP TABLE conversation_folders;
          DROP INDEX sender_unblock_requests_conversation;
@@ -191,12 +241,13 @@ fn notification_reply_spike_version_43_repairs_and_upgrades() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        50
+        expected_schema_version
     );
     assert!(table_exists(&conn, "conversation_folders"));
     assert!(table_exists(&conn, "sender_blocklists"));
     assert!(column_exists(&conn, "sender_unblock_requests", "key_epoch"));
     assert_notification_reply_spike_removed(&conn);
+    assert_rcs_mapping_schema(&conn);
 }
 
 #[test]
@@ -207,6 +258,7 @@ fn notification_reply_spike_repairs_already_upgraded_database() {
     drop(open(&config));
 
     let conn = encrypted_connection(&config);
+    let expected_schema_version = schema_version(&conn);
     conn.execute_batch("DROP TABLE conversation_folders;")
         .unwrap();
     add_notification_reply_spike(&conn);
@@ -219,10 +271,11 @@ fn notification_reply_spike_repairs_already_upgraded_database() {
         conn.query_row("SELECT version FROM schema_meta", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        50
+        expected_schema_version
     );
     assert!(table_exists(&conn, "conversation_folders"));
     assert_notification_reply_spike_removed(&conn);
+    assert_rcs_mapping_schema(&conn);
 }
 
 #[test]
@@ -252,6 +305,275 @@ fn notification_reply_repair_leaves_normal_database_untouched() {
         .unwrap(),
         "archived"
     );
+    assert_rcs_mapping_schema(&conn);
+}
+
+#[test]
+fn version_45_upgrade_adds_rcs_mapping_schema_without_resetting_preferences() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&dir, "gateway-v45-upgrade", &vault);
+    let client = open(&config);
+    let settings = GatewaySettings {
+        mirroring_enabled: true,
+        mirroring_wifi_only: true,
+        skip_silent: false,
+        sms_sync_enabled: false,
+        mms_sync_enabled: true,
+        media_wifi_only: false,
+        phone_read_enabled: true,
+    };
+    client.set_gateway_settings(settings.clone()).unwrap();
+    drop(client);
+
+    let conn = encrypted_connection(&config);
+    let expected_schema_version = schema_version(&conn);
+    remove_rcs_mapping_schema(&conn);
+    conn.execute("UPDATE schema_meta SET version=45", [])
+        .unwrap();
+    drop(conn);
+
+    let upgraded = open(&config);
+    assert_eq!(upgraded.gateway_settings().unwrap(), settings);
+    drop(upgraded);
+
+    let conn = encrypted_connection(&config);
+    assert_eq!(
+        conn.query_row("SELECT version FROM schema_meta", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        expected_schema_version
+    );
+    assert_eq!(
+        conn.query_row("SELECT v FROM metadata WHERE k='device_id'", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap(),
+        config.device_id.to_string()
+    );
+    assert_rcs_mapping_schema(&conn);
+}
+
+#[test]
+fn version_47_upgrade_adds_only_capability_tables_and_preserves_rcs_state() {
+    let rcs_command = CommandId(uuid::Uuid::from_u128(0x4701)).to_string();
+    let carrier_command = CommandId(uuid::Uuid::from_u128(0x4702)).to_string();
+    let conversation = ConversationId(uuid::Uuid::from_u128(0x4703)).to_string();
+    let tmp_id = uuid::Uuid::from_u128(0x4704).to_string();
+    let proof_hash = [0x47_u8; 32];
+    let proof_digest = [0x48_u8; 32];
+    // Explicit column lists include every durable v47 field, including nullable outcomes.
+    let state_rows = |conn: &rusqlite::Connection| {
+        let mappings = conn
+            .prepare("SELECT peppy_conversation_id,google_conversation_id,class,proof_version,proof_hash,mapping_revision,verified_at_ms,invalidated_at_ms,invalidation_code FROM rcs_conversation_mappings ORDER BY peppy_conversation_id")
+            .unwrap()
+            .query_map([], |row| Ok((
+                row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?, row.get::<_, i64>(3)?,
+                row.get::<_, Vec<u8>>(4)?, row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?, row.get::<_, Option<i64>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+            )))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let proofs = conn
+            .prepare("SELECT peppy_conversation_id,mapping_revision,canonical_participant,identity_region,own_identity FROM rcs_mapping_proofs ORDER BY peppy_conversation_id,mapping_revision")
+            .unwrap()
+            .query_map([], |row| Ok((
+                row.get::<_, String>(0)?, row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?, row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            )))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let commands = conn
+            .prepare("SELECT local_order,command_id,key_epoch,subscription_id,payload,retired,historical FROM command_ledger ORDER BY local_order")
+            .unwrap()
+            .query_map([], |row| Ok((
+                row.get::<_, i64>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?, row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?, row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+            )))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let attempts = conn
+            .prepare("SELECT command_id,state,attempted_at_ms,finalized_transport FROM attempts ORDER BY command_id")
+            .unwrap()
+            .query_map([], |row| Ok((
+                row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?, row.get::<_, Option<String>>(3)?,
+            )))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let sends = conn
+            .prepare("SELECT command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms,transport_ack_at_ms,transport_ack_code,retry_of_command_id FROM rcs_send_ledger ORDER BY command_id")
+            .unwrap()
+            .query_map([], |row| Ok((
+                row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?, row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, String>(4)?, row.get::<_, i64>(5)?,
+                row.get::<_, Option<i64>>(6)?, row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+            )))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        (mappings, proofs, commands, attempts, sends)
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&dir, "gateway-v47-upgrade", &vault);
+    let client = open(&config);
+    let settings = GatewaySettings {
+        mirroring_enabled: true,
+        ..GatewaySettings::default()
+    };
+    client.set_gateway_settings(settings.clone()).unwrap();
+    drop(client);
+    let conn = encrypted_connection(&config);
+    let expected_schema_version = schema_version(&conn);
+    conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+    conn.execute(
+        "INSERT INTO rcs_conversation_mappings(peppy_conversation_id,google_conversation_id,class,proof_version,proof_hash,mapping_revision,verified_at_ms) VALUES(?,?,?,?,?,?,?)",
+        rusqlite::params![conversation, "fixture-google", "one_to_one", 2, &proof_hash[..], 7, 1000],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO rcs_mapping_proofs(peppy_conversation_id,mapping_revision,canonical_participant,identity_region,own_identity) VALUES(?,?,?,?,?)",
+        rusqlite::params![conversation, 7, "raw:fixture-peer", "ZZ", "raw:fixture-own"],
+    )
+    .unwrap();
+    for (command, subscription, state, transport, attempted_at_ms) in [
+        (&rcs_command, "", "delivered", "rcs", 1100_i64),
+        (
+            &carrier_command,
+            "android-subscription-1",
+            "sent",
+            "carrier",
+            1200_i64,
+        ),
+    ] {
+        conn.execute(
+            "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload) VALUES(?,?,?,?)",
+            rusqlite::params![command, 1, subscription, "{}"],
+        )
+        .unwrap();
+        // Terminal states prevent open-time recovery from converting these to outcome_unknown.
+        conn.execute(
+            "INSERT INTO attempts(command_id,state,attempted_at_ms,finalized_transport) VALUES(?,?,?,?)",
+            rusqlite::params![command, state, attempted_at_ms, transport],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms,transport_ack_at_ms,transport_ack_code) VALUES(?,?,?,?,?,?,?,?)",
+        rusqlite::params![rcs_command, tmp_id, 7, &proof_digest[..], "fixture-google", 1100, 1150, "fixture-ack-delivered"],
+    )
+    .unwrap();
+    let before = state_rows(&conn);
+    assert_eq!(
+        (
+            before.0.len(),
+            before.1.len(),
+            before.2.len(),
+            before.3.len(),
+            before.4.len()
+        ),
+        (1, 1, 2, 2, 1),
+        "the v47 preservation fixture must contain existing RCS and carrier state"
+    );
+    conn.execute_batch(
+        "DROP TABLE rcs_provider_detectors;
+         DROP TABLE rcs_message_identities;
+         DROP TABLE rcs_message_status;
+         DROP TABLE rcs_lane_ownership;
+         DROP TABLE rcs_conversation_metadata;
+         DROP TABLE rcs_capability_published;
+         DROP TABLE rcs_link_eligibility_projection;
+         DROP TABLE rcs_link_status_projection;
+         UPDATE schema_meta SET version=47;",
+    )
+    .unwrap();
+    drop(conn);
+    let upgraded = open(&config);
+    assert_eq!(upgraded.gateway_settings().unwrap(), settings);
+    drop(upgraded);
+    let conn = encrypted_connection(&config);
+    assert_eq!(
+        conn.query_row("SELECT version FROM schema_meta", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        expected_schema_version
+    );
+    assert_rcs_mapping_schema(&conn);
+    assert!(
+        table_exists(&conn, "vault_identity_state"),
+        "the later v51 migration must add its table independently of the v47 capability step"
+    );
+    let after = state_rows(&conn);
+    assert_eq!(
+        (
+            after.0.len(),
+            after.1.len(),
+            after.2.len(),
+            after.3.len(),
+            after.4.len()
+        ),
+        (1, 1, 2, 2, 1),
+        "migration must not delete or create existing v47 state"
+    );
+    assert_eq!(
+        after, before,
+        "migration must preserve every v47 field exactly"
+    );
+}
+
+#[test]
+fn future_schema_version_is_rejected_without_resetting_preferences() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&dir, "gateway-future-version-rejected", &vault);
+    let client = open(&config);
+    let settings = GatewaySettings {
+        mirroring_enabled: true,
+        ..GatewaySettings::default()
+    };
+    client.set_gateway_settings(settings.clone()).unwrap();
+    drop(client);
+
+    let conn = encrypted_connection(&config);
+    let future_schema_version = schema_version(&conn) + 1;
+    conn.execute("UPDATE schema_meta SET version=?", [future_schema_version])
+        .unwrap();
+    drop(conn);
+
+    assert!(matches!(
+        Client::open(config.clone(), DatabaseKey::new(&DB_KEY).unwrap()),
+        Err(Error::UnsupportedSchema)
+    ));
+
+    let conn = encrypted_connection(&config);
+    assert_eq!(
+        conn.query_row("SELECT version FROM schema_meta", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        future_schema_version
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT mirroring_enabled FROM gateway_settings WHERE id=1",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap(),
+        settings.mirroring_enabled
+    );
+    assert_rcs_mapping_schema(&conn);
 }
 
 #[test]
@@ -467,6 +789,7 @@ fn version_25_upgrade_adds_null_status_time_without_resetting_status() {
         "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
     )
     .unwrap();
+    let expected_schema_version = schema_version(&conn);
     conn.execute(
         "INSERT INTO send_status(command_id,producer_device_id,producer_sequence,state) VALUES(?,?,?,?)",
         rusqlite::params![
@@ -477,6 +800,7 @@ fn version_25_upgrade_adds_null_status_time_without_resetting_status() {
         ],
     )
     .unwrap();
+    remove_rcs_mapping_schema(&conn);
     roll_back_migrations_after_version_25(&conn);
     conn.execute("UPDATE schema_meta SET version=25", [])
         .unwrap();
@@ -500,7 +824,7 @@ fn version_25_upgrade_adds_null_status_time_without_resetting_status() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(version, 50);
+    assert_eq!(version, expected_schema_version);
     assert_eq!(status, (42, "sent".into(), None));
 }
 
@@ -519,6 +843,7 @@ fn version_17_upgrade_seeds_legacy_policy_only_once() {
         "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
     )
     .unwrap();
+    remove_rcs_mapping_schema(&conn);
     roll_back_migrations_after_version_25(&conn);
     conn.execute_batch(
         "DROP TABLE gateway_settings; DROP TABLE outbox_attachments; \

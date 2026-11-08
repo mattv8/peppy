@@ -1,8 +1,9 @@
 use super::*;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use peppy_client_core::{
-    Cursor, DraftPushOutcome, DraftTerminalReasonCore, EnvelopeId, IngestResult, MAX_REPLAY_PAGE,
-    RawReplayRecord, RawSnapshotRecord, RemoteDraftChange, SnapshotProgress, SnapshotPurpose,
+    Cursor, DraftPushOutcome, DraftTerminalReasonCore, EnvelopeId, GatewayRoute, IngestResult,
+    MAX_REPLAY_PAGE, RawReplayRecord, RawSnapshotRecord, RemoteDraftChange, SnapshotProgress,
+    SnapshotPurpose,
 };
 use peppy_hosted_api::drafts::{
     DraftChange, DraftChangesResponse, DraftTerminalReason, PutDraftRevisionRequest,
@@ -353,8 +354,20 @@ impl BrowserCore {
                         .iter()
                         .map(ToString::to_string)
                         .collect(),
-                    gateway_id: Some(route.gateway_device_id.to_string()),
-                    sim_id: Some(route.subscription_id.clone()),
+                    gateway_id: Some(match route {
+                        GatewayRoute::Carrier {
+                            gateway_device_id, ..
+                        }
+                        | GatewayRoute::RcsLink { gateway_device_id } => {
+                            gateway_device_id.to_string()
+                        }
+                    }),
+                    sim_id: match route {
+                        GatewayRoute::Carrier {
+                            subscription_id, ..
+                        } => Some(subscription_id.clone()),
+                        GatewayRoute::RcsLink { .. } => None,
+                    },
                     expected_revision: expected_revision.to_string(),
                 };
                 let gateways = self

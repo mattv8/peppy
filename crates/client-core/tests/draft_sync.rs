@@ -312,7 +312,7 @@ fn fresh_schema_50_contains_the_production_and_draft_layouts() {
                 row.get::<_, i64>(0)
             })
             .unwrap(),
-        50
+        52
     );
     assert!(column_exists(
         &connection,
@@ -388,7 +388,7 @@ fn production_schema_46_keeps_legacy_drafts_and_adds_the_feature_schema() {
             .query_row("SELECT version FROM schema_meta", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        50
+        52
     );
     assert_eq!(
         connection
@@ -499,7 +499,7 @@ fn feature_schema_46_backfills_pending_drafts_and_repairs_notification_preferenc
                 row.get::<_, i64>(0)
             })
             .unwrap(),
-        50
+        52
     );
     assert!(column_exists(
         &connection,
@@ -583,7 +583,7 @@ fn feature_schema_48_preserves_attempt_evidence_without_backfilling_never_attemp
             .query_row("SELECT version FROM schema_meta", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        50
+        52
     );
     assert!(
         !connection

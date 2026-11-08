@@ -123,7 +123,7 @@ class CiTestRunnerTests(unittest.TestCase):
             "cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml --config deny.toml check licenses bans sources advisories",
             "bash infra/dev/android.sh test",
             "bash-env PEPPY_ANDROID_BUILD_BACKEND=docker",
-            f"cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- generate --library {self.repository_root / target_dir}/debug/libpeppy_mobile_bindings.dylib --language swift",
+            f"cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- generate --no-format --library {self.repository_root / target_dir}/debug/libpeppy_mobile_bindings.dylib --language swift",
             f"swift test -Xlinker -L -Xlinker {self.repository_root / target_dir}/debug --no-parallel",
             f"swift run -Xlinker -L -Xlinker {self.repository_root / target_dir}/debug PeppyMobileSmoke",
             "swift-env DATABASE_URL=postgres://original",

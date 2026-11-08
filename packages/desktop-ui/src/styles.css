@@ -1232,7 +1232,7 @@ select:focus-visible {
 .peppy-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 #attachment-storage-heading-row { display: flex; align-items: center; gap: 4px; }
-.attachment-storage-info-button {
+.attachment-storage-info-button, .info-button {
   display: inline-grid;
   place-items: center;
   width: 28px;
@@ -1243,8 +1243,8 @@ select:focus-visible {
   background: transparent;
   color: var(--peppy-text-secondary);
 }
-.attachment-storage-info-button:hover { background: var(--peppy-surface-hover); }
-.attachment-storage-info-button:focus-visible { outline: 2px solid var(--peppy-focus-ring, var(--peppy-accent)); outline-offset: 2px; }
+.attachment-storage-info-button:hover, .info-button:hover { background: var(--peppy-surface-hover); }
+.attachment-storage-info-button:focus-visible, .info-button:focus-visible { outline: 2px solid var(--peppy-focus-ring, var(--peppy-accent)); outline-offset: 2px; }
 #attachment-storage-info-body { display: grid; gap: 12px; }
 [data-attachment-storage-capacity-row] { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .attachment-storage-learn-more { padding: 0; border: 0; background: transparent; color: var(--peppy-accent); text-decoration: underline; }
@@ -1262,7 +1262,7 @@ select:focus-visible {
 #attachment-storage-addon-skeleton { min-height: 44px; padding: 8px; border-radius: var(--peppy-radius-sm); background: var(--peppy-surface-active); }
 
 @media (pointer: coarse) {
-  .attachment-storage-info-button, .link-button, #billing-elsewhere-manage, #attachment-storage-addon-manage, #attachment-storage-addon-retry, #hosted-store-retry, #hosted-restore-button, #hosted-plan-options .primary-button { min-width: 44px; min-height: 44px; }
+  .attachment-storage-info-button, .info-button, .link-button, #billing-elsewhere-manage, #attachment-storage-addon-manage, #attachment-storage-addon-retry, #hosted-store-retry, #hosted-restore-button, #hosted-plan-options .primary-button { min-width: 44px; min-height: 44px; }
   #composer-toolbar button, .attachment-remove, .attachment-retry { min-width: 48px; min-height: 48px; }
   .attachment-chip { grid-template-columns: minmax(0, 1fr) 48px; }
   .attachment-remove { width: 48px; height: 48px; }
@@ -1296,7 +1296,7 @@ select:focus-visible {
   .conversation-pin, .conversation-popout, .conversation-folder-action, .conversation-delete { color: ButtonText; }
   .conversation-folder-action[aria-expanded="true"], .conversation-folder-action.pending { outline: 1px solid ButtonText; outline-offset: -1px; }
   .conversation-delete.confirming { background: Highlight; color: HighlightText; }
-  .attachment-storage-info-button:focus-visible, .attachment-storage-learn-more:focus-visible, .link-button:focus-visible, #billing-elsewhere-manage:focus-visible, #attachment-storage-addon-manage:focus-visible, #attachment-storage-addon-retry:focus-visible, #hosted-store-retry:focus-visible, #hosted-restore-button:focus-visible, #hosted-plan-options .primary-button:focus-visible { outline-color: Highlight; }
+  .attachment-storage-info-button:focus-visible, .info-button:focus-visible, .attachment-storage-learn-more:focus-visible, .link-button:focus-visible, #billing-elsewhere-manage:focus-visible, #attachment-storage-addon-manage:focus-visible, #attachment-storage-addon-retry:focus-visible, #hosted-store-retry:focus-visible, #hosted-restore-button:focus-visible, #hosted-plan-options .primary-button:focus-visible { outline-color: Highlight; }
   #billing-elsewhere-notice, #attachment-storage-addons, #hosted-store-plan-options, #attachment-storage-addon-options > li, #hosted-plan-options > li, #attachment-storage-addon-skeleton { border-color: CanvasText; background: Canvas; color: CanvasText; box-shadow: none; }
   [data-tone="warning"] { border-color: Highlight; background: Canvas; color: CanvasText; }
   .conversation-copy .conversation-delete-warning { color: CanvasText; }

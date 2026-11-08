@@ -59,8 +59,8 @@ check_generated_bindings() {
     swift_dir="$bindings_scratch/swift"
     mkdir -p "$kotlin_dir" "$swift_dir"
     cargo build -p peppy-mobile-bindings --locked
-    cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- generate --library "$TARGET_DIR/debug/libpeppy_mobile_bindings.dylib" --language kotlin --out-dir "$kotlin_dir"
-    cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- generate --library "$TARGET_DIR/debug/libpeppy_mobile_bindings.dylib" --language swift --out-dir "$swift_dir"
+    cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- generate --no-format --library "$TARGET_DIR/debug/libpeppy_mobile_bindings.dylib" --language kotlin --out-dir "$kotlin_dir"
+    cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- generate --no-format --library "$TARGET_DIR/debug/libpeppy_mobile_bindings.dylib" --language swift --out-dir "$swift_dir"
     diff -ru apps/android/app/src/main/java/uniffi "$kotlin_dir/uniffi"
     diff -ru --exclude=module.modulemap apps/ios/Generated "$swift_dir"
     cargo test -p peppy-mobile-bindings --locked

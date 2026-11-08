@@ -2,12 +2,15 @@
 //! serialized: no credentials, tokens, keys, file keys, raw paths or core records.
 use peppy_client_core::{
     AppFilter, AttachmentId, AttachmentInfo, AttachmentState, Client, ComposeDraft,
-    ConversationFolder, ConversationFolderReason, DeferredMediaStatus, Direction, Error, MediaPage,
-    MediaPageAround, Message, MessageId, MirroredNotification, SendState, SenderUnblockStatus,
-    Transport,
+    ConversationFolder, ConversationFolderReason, DeferredMediaStatus, Direction, Error,
+    GatewayRoute, MediaPage, MediaPageAround, Message, MessageId, MirroredNotification, SendState,
+    SenderUnblockStatus, Transport,
 };
 pub use peppy_client_core::{NotificationPreferences, NotificationPreview as Preview};
 use serde::{Deserialize, Serialize};
+pub mod rcs_receive;
+#[cfg(test)]
+mod rcs_receive_privacy_tests;
 use std::collections::BTreeMap;
 
 pub mod account_access;
@@ -20,6 +23,8 @@ pub mod images;
 pub mod mms_plan;
 pub mod notification_activation;
 pub use notification_activation::*;
+pub mod rcs_status;
+pub use rcs_status::*;
 pub mod search;
 pub use search::*;
 pub mod search_history;
@@ -68,6 +73,9 @@ pub struct Snapshot {
     /// Durable replay frontiers only. Hosts omit this until their sync lane can provide it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync_progress: Option<SyncProgress>,
+    /// Bounded, read-only RCS display state. Omitted while locked or unsupported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rcs_status: Option<RcsStatusSnapshot>,
 }
 
 /// Sanitized, exact replay status. Cursors and snapshot counts remain decimal strings so JS never
@@ -224,6 +232,10 @@ pub struct ConversationView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unblock: Option<SenderUnblockStatus>,
     pub can_unblock: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rcs_encryption: Option<bool>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rcs_history_gap: bool,
 }
 
 #[derive(Serialize)]
@@ -258,6 +270,8 @@ pub struct MessageView {
     pub subject: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub participants: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rcs_reported: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -717,6 +731,7 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
             }
             (!values.is_empty()).then_some(values)
         },
+        rcs_reported: false,
     }
 }
 
@@ -737,15 +752,19 @@ pub fn draft_view(draft: &ComposeDraft) -> DraftView {
             .iter()
             .map(ToString::to_string)
             .collect(),
+        gateway_id: draft.route.as_ref().map(|route| match route {
+            GatewayRoute::Carrier {
+                gateway_device_id, ..
+            }
+            | GatewayRoute::RcsLink { gateway_device_id } => gateway_device_id.to_string(),
+        }),
+        sim_id: draft.route.as_ref().and_then(|route| match route {
+            GatewayRoute::Carrier {
+                subscription_id, ..
+            } => Some(subscription_id.clone()),
+            GatewayRoute::RcsLink { .. } => None,
+        }),
         attachments: None,
-        gateway_id: draft
-            .route
-            .as_ref()
-            .map(|route| route.gateway_device_id.to_string()),
-        sim_id: draft
-            .route
-            .as_ref()
-            .map(|route| route.subscription_id.clone()),
         revision: draft.revision.to_string(),
         sync: None,
     }
@@ -784,14 +803,18 @@ pub fn draft_view_with_sync(client: &Client, draft: &ComposeDraft) -> Result<Dra
                     .map(|id| id.to_string())
                     .collect(),
                 recipient_ids: conflict.recipient_ids,
-                gateway_id: conflict
-                    .route
-                    .as_ref()
-                    .map(|route| route.gateway_device_id.to_string()),
-                sim_id: conflict
-                    .route
-                    .as_ref()
-                    .map(|route| route.subscription_id.clone()),
+                gateway_id: conflict.route.as_ref().map(|route| match route {
+                    GatewayRoute::Carrier {
+                        gateway_device_id, ..
+                    }
+                    | GatewayRoute::RcsLink { gateway_device_id } => gateway_device_id.to_string(),
+                }),
+                sim_id: conflict.route.as_ref().and_then(|route| match route {
+                    GatewayRoute::Carrier {
+                        subscription_id, ..
+                    } => Some(subscription_id.clone()),
+                    GatewayRoute::RcsLink { .. } => None,
+                }),
             })
             .collect(),
         notice: status.notice.map(|notice| match notice {
@@ -852,6 +875,8 @@ mod tests {
             folder_reason: Some(ConversationFolderReason::Marked),
             unblock: Some(SenderUnblockStatus::Failed),
             can_unblock: true,
+            rcs_encryption: Some(true),
+            rcs_history_gap: true,
         };
 
         let value = serde_json::to_value(view).unwrap();
@@ -860,6 +885,12 @@ mod tests {
         assert_eq!(value["folderReason"], "marked");
         assert_eq!(value["unblock"], "failed");
         assert_eq!(value["canUnblock"], true);
+        assert_eq!(value["rcsEncryption"], true);
+        assert_eq!(value["rcsHistoryGap"], true);
+        let serialized = value.to_string();
+        for forbidden in ["google", "cursor", "detector", "provider", "tmp"] {
+            assert!(!serialized.contains(forbidden));
+        }
     }
 
     #[test]

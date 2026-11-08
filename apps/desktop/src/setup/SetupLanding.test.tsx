@@ -105,7 +105,7 @@ describe("SetupLanding", () => {
     expect(confirm).toHaveFocus();
     fireEvent.click(confirm);
     await waitFor(() => expect(bridge.enrollment_start_over).toHaveBeenCalledOnce());
-    expect(document.getElementById("enrollment-resume-notice")).not.toBeInTheDocument();
+    await waitFor(() => expect(document.getElementById("enrollment-resume-notice")).not.toBeInTheDocument());
     await waitFor(() => expect(screen.getByRole("button", { name: "Create server" })).toHaveFocus());
   });
 

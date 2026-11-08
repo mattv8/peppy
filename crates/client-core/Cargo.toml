@@ -5,9 +5,44 @@ edition = "2024"
 publish = false
 autotests = false
 
+[features]
+test-support = []
+
 [[test]]
 name = "integration"
 path = "tests/integration.rs"
+
+[[test]]
+name = "ephemeral"
+path = "tests/ephemeral.rs"
+
+[[test]]
+name = "ephemeral_v2_runtime"
+path = "tests/ephemeral_v2_runtime.rs"
+
+[[test]]
+name = "ephemeral_v2_receive"
+path = "tests/ephemeral_v2_receive.rs"
+
+[[test]]
+name = "rcs_receive"
+path = "tests/rcs_receive.rs"
+
+[[test]]
+name = "rcs_status"
+path = "tests/rcs_status.rs"
+
+[[test]]
+name = "rcs_receive_regressions"
+path = "tests/rcs_receive_regressions.rs"
+
+[[test]]
+name = "rcs_target"
+path = "tests/rcs_target.rs"
+
+[[test]]
+name = "rcs_carrier_regressions"
+path = "tests/rcs_carrier_regressions.rs"
 
 [dependencies]
 base64.workspace = true
@@ -18,6 +53,7 @@ peppy-protocol.workspace = true
 rusqlite = { version = "=0.32.1", features = ["bundled-sqlcipher"] }
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 uuid.workspace = true

@@ -1,0 +1,372 @@
+{
+  "schemaVersion": 1,
+  "modules": [
+    {
+      "path": "filippo.io/edwards25519",
+      "version": "v1.2.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": false
+    },
+    {
+      "path": "github.com/DATA-DOG/go-sqlmock",
+      "version": "v1.5.2",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": false
+    },
+    {
+      "path": "github.com/coder/websocket",
+      "version": "v1.8.15",
+      "licenseFile": "LICENSE.txt",
+      "licenseFamily": "Other",
+      "distributed": false
+    },
+    {
+      "path": "github.com/coreos/go-systemd/v22",
+      "version": "v22.7.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "Apache-2.0",
+      "distributed": false
+    },
+    {
+      "path": "github.com/golang/protobuf",
+      "version": "v1.5.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": false
+    },
+    {
+      "path": "github.com/google/go-cmp",
+      "version": "v0.7.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": false
+    },
+    {
+      "path": "github.com/google/uuid",
+      "version": "v1.6.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": true,
+      "asset": "BSD-3-Clause-google-uuid.txt",
+      "licenseSha256": "0a8d61ed3cbfd5312326e8126c31ce9c627a283adc99131b56896d29ada04b2d"
+    },
+    {
+      "path": "github.com/kr/pretty",
+      "version": "v0.3.1",
+      "licenseFile": "License",
+      "licenseFamily": "MIT",
+      "distributed": false
+    },
+    {
+      "path": "github.com/lib/pq",
+      "version": "v1.12.3",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "MIT",
+      "distributed": false
+    },
+    {
+      "path": "github.com/mattn/go-colorable",
+      "version": "v0.1.14",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "MIT",
+      "distributed": true,
+      "asset": "MIT-go-colorable.txt",
+      "licenseSha256": "88a2379b3ca34bf5c57127aff9dcb802bbb60ece0805cdbda65b3bd115f971d9"
+    },
+    {
+      "path": "github.com/mattn/go-isatty",
+      "version": "v0.0.20",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "MIT",
+      "distributed": true,
+      "asset": "MIT-go-isatty.txt",
+      "licenseSha256": "08eab1118c80885fa1fa6a6dd7303f65a379fcb3733e063d20d1bbc2c76e6fa1"
+    },
+    {
+      "path": "github.com/mattn/go-sqlite3",
+      "version": "v1.14.52",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "MIT",
+      "distributed": false
+    },
+    {
+      "path": "github.com/petermattis/goid",
+      "version": "v0.0.0-20260918085751-abfca077860b",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "Apache-2.0",
+      "distributed": false
+    },
+    {
+      "path": "github.com/pkg/errors",
+      "version": "v0.9.1",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": false
+    },
+    {
+      "path": "github.com/rogpeppe/go-internal",
+      "version": "v1.10.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": false
+    },
+    {
+      "path": "github.com/rs/xid",
+      "version": "v1.6.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "MIT",
+      "distributed": false
+    },
+    {
+      "path": "github.com/rs/zerolog",
+      "version": "v1.35.1",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "MIT",
+      "distributed": true,
+      "asset": "MIT-zerolog.txt",
+      "licenseSha256": "1b8f6b05dd66f6eec835515706886cb01bf00358cb9312301ed6ad23d6b2d008"
+    },
+    {
+      "path": "github.com/skip2/go-qrcode",
+      "version": "v0.0.0-20200617195104-da1b6568686e",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "MIT",
+      "distributed": false
+    },
+    {
+      "path": "github.com/stretchr/testify",
+      "version": "v1.12.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "MIT",
+      "distributed": false
+    },
+    {
+      "path": "github.com/tidwall/gjson",
+      "version": "v1.20.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "MIT",
+      "distributed": false
+    },
+    {
+      "path": "github.com/tidwall/match",
+      "version": "v1.1.1",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "MIT",
+      "distributed": false
+    },
+    {
+      "path": "github.com/tidwall/pretty",
+      "version": "v1.2.1",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "MIT",
+      "distributed": false
+    },
+    {
+      "path": "github.com/tidwall/sjson",
+      "version": "v1.2.5",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "MIT",
+      "distributed": false
+    },
+    {
+      "path": "github.com/yuin/goldmark",
+      "version": "v1.8.6",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "MIT",
+      "distributed": false
+    },
+    {
+      "path": "go.mau.fi/mautrix-gmessages",
+      "version": "v0.2610.1-0.20261103213626-d9140a5e807e",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "AGPL-3.0-or-later",
+      "distributed": true,
+      "asset": "AGPL-3.0.txt",
+      "licenseSha256": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
+      "licenseExceptions": {
+        "file": "LICENSE.exceptions",
+        "asset": "LICENSE-exceptions-google-messages.txt",
+        "sha256": "4f5f3460d711c9e7821abfa07e961932491242c23c8b9012dfedee6ad3f0f3a8"
+      }
+    },
+    {
+      "path": "go.mau.fi/util",
+      "version": "v0.11.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "MPL-2.0",
+      "distributed": true,
+      "asset": "MPL-2.0.txt",
+      "licenseSha256": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5"
+    },
+    {
+      "path": "go.mau.fi/zeroconfig",
+      "version": "v0.2.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "MPL-2.0",
+      "distributed": false
+    },
+    {
+      "path": "golang.org/x/crypto",
+      "version": "v0.58.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": true,
+      "asset": "BSD-3-Clause-go-x-and-mobile.txt",
+      "licenseSha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+    },
+    {
+      "path": "golang.org/x/exp",
+      "version": "v0.0.0-20261014143641-f0251eb4aa3e",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": true,
+      "asset": "BSD-3-Clause-go-x-and-mobile.txt",
+      "licenseSha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+    },
+    {
+      "path": "golang.org/x/exp/shiny",
+      "version": "v0.0.0-20261009195045-ca0d7ba23607",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": false
+    },
+    {
+      "path": "golang.org/x/image",
+      "version": "v0.47.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": false
+    },
+    {
+      "path": "golang.org/x/mobile",
+      "version": "v0.0.0-20261011034528-197770444867",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": true,
+      "asset": "BSD-3-Clause-go-x-and-mobile.txt",
+      "licenseSha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+    },
+    {
+      "path": "golang.org/x/mod",
+      "version": "v0.42.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": false
+    },
+    {
+      "path": "golang.org/x/net",
+      "version": "v0.61.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": true,
+      "asset": "BSD-3-Clause-go-x-and-mobile.txt",
+      "licenseSha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+    },
+    {
+      "path": "golang.org/x/sync",
+      "version": "v0.24.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": false
+    },
+    {
+      "path": "golang.org/x/sys",
+      "version": "v0.49.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": true,
+      "asset": "BSD-3-Clause-go-x-and-mobile.txt",
+      "licenseSha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+    },
+    {
+      "path": "golang.org/x/telemetry",
+      "version": "v0.0.0-20261009151841-97e8ea77aa2a",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": false
+    },
+    {
+      "path": "golang.org/x/term",
+      "version": "v0.47.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": false
+    },
+    {
+      "path": "golang.org/x/text",
+      "version": "v0.43.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": true,
+      "asset": "BSD-3-Clause-go-x-and-mobile.txt",
+      "licenseSha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+    },
+    {
+      "path": "golang.org/x/tools",
+      "version": "v0.52.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": false
+    },
+    {
+      "path": "golang.org/x/tools/go/expect",
+      "version": "v0.1.1-deprecated",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": false
+    },
+    {
+      "path": "golang.org/x/tools/go/packages/packagestest",
+      "version": "v0.1.1-deprecated",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": false
+    },
+    {
+      "path": "google.golang.org/protobuf",
+      "version": "v1.36.12",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": true,
+      "asset": "BSD-3-Clause-google-protobuf.txt",
+      "licenseSha256": "4835612df0098ca95f8e7d9e3bffcb02358d435dbb38057c844c99d7f725eb20"
+    },
+    {
+      "path": "gopkg.in/check.v1",
+      "version": "v1.0.0-20201130134442-10cb98267c6c",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "BSD-3-Clause",
+      "distributed": false
+    },
+    {
+      "path": "gopkg.in/natefinch/lumberjack.v2",
+      "version": "v2.2.1",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "MIT",
+      "distributed": false
+    },
+    {
+      "path": "gopkg.in/yaml.v3",
+      "version": "v3.0.1",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "Apache-2.0",
+      "distributed": false
+    },
+    {
+      "path": "maunium.net/go/mauflag",
+      "version": "v1.0.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "Other",
+      "distributed": false
+    },
+    {
+      "path": "maunium.net/go/mautrix",
+      "version": "v0.32.0",
+      "licenseFile": "LICENSE",
+      "licenseFamily": "MPL-2.0",
+      "distributed": false
+    }
+  ]
+}

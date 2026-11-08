@@ -1,0 +1,77 @@
+package dev.peppy.mobile.diagnostics
+
+import java.io.File
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
+class GoogleMessagesLinkDiagnosticsTest {
+    private val stablePairs = listOf(
+        "link" to "pair_ok", "link" to "pair_failed", "link" to "pair_no_phone", "link" to "cookie_refused",
+        "link" to "pair_multiple_phones", "link" to "pair_wrong_emoji", "link" to "pair_cancelled",
+        "link" to "pair_timeout", "link" to "account_mismatch", "link" to "relink_needed",
+        "link" to "relink_ok", "link" to "relink_failed", "link" to "signed_out",
+        "link" to "unlinked", "link" to "unlink_remote_failed", "link" to "persist_failed",
+        "link" to "reset_local", "link" to "event_overflow", "link" to "stale_webview_wiped",
+        "link" to "stale_webview_wipe_failed", "link" to "signin_cancelled", "link" to "signin_blocked",
+        "link" to "signin_incomplete", "link" to "pair_declined",
+        "conn" to "ready", "conn" to "temporary_error", "conn" to "recovered",
+        "conn" to "phone_not_responding", "conn" to "phone_responding", "conn" to "no_data",
+        "browser" to "active", "browser" to "inactive", "session" to "active_session_set",
+        "health" to "ok", "health" to "failed", "conversation" to "updated",
+    )
+
+    @Test fun everyPairRecordsOnlyItsStableNumericReason() {
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { error("CPU unused") }, records::add) {
+            stablePairs.forEach { (kind, code) -> recordGoogleMessagesLinkEvent(kind, code, Long.MAX_VALUE) }
+        }
+        assertEquals(36, records.size)
+        records.forEachIndexed { index, record ->
+            assertEquals("event=27 session=1 timestamp_ms=10 trace=0 29=${index + 1}", record)
+        }
+        assertEquals(27L, SyncTraceEvent.GM_LINK.code)
+        assertEquals(SyncTraceEvent.entries.size, SyncTraceEvent.entries.map { it.code }.toSet().size)
+    }
+
+    @Test fun goEventVocabularyExactlyMatchesTheClosedMapping() {
+        val root = generateSequence(File(requireNotNull(System.getProperty("user.dir")))) { it.parentFile }
+            .first { File(it, "apps/android/googlemessages/gmlink/events.go").isFile }
+        val goSource = File(root, "apps/android/googlemessages/gmlink/events.go").readText()
+        val goPairs = Regex("""\{"([^"]+)",\s*"([^"]+)"}""").findAll(goSource)
+            .map { it.groupValues[1] to it.groupValues[2] }.toSet()
+        assertTrue(goPairs.isNotEmpty())
+        assertEquals(goPairs, GoogleMessagesLinkDiagnosticReason.codes.keys)
+        assertEquals(stablePairs.toSet(), GoogleMessagesLinkDiagnosticReason.codes.keys)
+    }
+
+    @Test fun unknownMalformedAndMismatchedPairsRecordOnlyUnknown() {
+        val records = mutableListOf<String>()
+        val unknownPairs = listOf(
+            "link" to "unknown", "link" to "new_code", "conn" to "pair_ok", "unknown" to "pair_ok",
+            "link" to "", "link" to "bad-code", "link" to "pair_ok\n", "link" to "UPPER",
+            "link" to "a".repeat(41), "link\n" to "pair_ok", "stop_code" to "bad code",
+        )
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            unknownPairs.forEach { (kind, code) -> recordGoogleMessagesLinkEvent(kind, code, Long.MIN_VALUE) }
+        }
+        assertEquals(List(unknownPairs.size) { "event=27 session=1 timestamp_ms=10 trace=0 29=0" }, records)
+    }
+
+    @Test fun disabledRecordingDoesNotReadClockOrCallSink() {
+        SyncDiagnostics.withTestConfiguration(false, { error("clock unused") }, { error("CPU unused") }, { error("sink unused") }) {
+            recordGoogleMessagesLinkEvent("link", "pair_ok", 1L)
+        }
+    }
+
+    @Test fun throwingSinkCannotEscapeTheRecorder() {
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, { error("sink failure") }) {
+            recordGoogleMessagesLinkEvent("link", "pair_ok", 1L)
+        }
+    }
+}

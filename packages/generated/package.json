@@ -9,6 +9,7 @@
     "./notification-activation": "./src/notification-activation.ts",
     "./attachment-retention": "./src/attachment-retention.ts",
     "./account-access": "./src/account-access.ts",
+    "./rcs-status": "./src/rcs-status.ts",
     "./mcp": "./src/mcp.ts"
   }
 }

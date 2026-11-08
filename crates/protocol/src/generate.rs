@@ -1,4 +1,9 @@
-use crate::{Envelope, PairingQrRecord};
+use crate::{
+    ChallengePlaintextV2, Envelope, EphemeralSignalV1, EphemeralSignalV2, EstablishVaultIdentityV1,
+    LiveHelloV1, LiveHelloV2, MembershipBootstrapV1, MembershipChallengeV1, MembershipControlV1,
+    MembershipDeviceV1, MembershipHintV1, MembershipResponseV1, PairingQrRecord,
+    SessionAckPlaintextV2, TypingPlaintextV2, VaultIdentityStatusV1,
+};
 use schemars::schema_for;
 use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, fs, io, path::Path};
@@ -13,9 +18,86 @@ pub fn generate_contracts() -> GeneratedContracts {
     let envelope = serde_json::to_value(schema_for!(Envelope)).expect("Envelope schema serializes");
     let pairing =
         serde_json::to_value(schema_for!(PairingQrRecord)).expect("Pairing schema serializes");
+    let ephemeral = serde_json::to_value(schema_for!(EphemeralSignalV1))
+        .expect("ephemeral signal schema serializes");
+    let ephemeral_v2 = serde_json::to_value(schema_for!(EphemeralSignalV2))
+        .expect("ephemeral v2 signal schema serializes");
+    let hello_v2 =
+        serde_json::to_value(schema_for!(LiveHelloV2)).expect("live hello v2 schema serializes");
+    let typing_plaintext_v2 = serde_json::to_value(schema_for!(TypingPlaintextV2))
+        .expect("typing plaintext v2 schema serializes");
+    let challenge_plaintext_v2 = serde_json::to_value(schema_for!(ChallengePlaintextV2))
+        .expect("challenge plaintext v2 schema serializes");
+    let session_ack_plaintext_v2 = serde_json::to_value(schema_for!(SessionAckPlaintextV2))
+        .expect("session ack plaintext v2 schema serializes");
+    let membership_device = serde_json::to_value(schema_for!(MembershipDeviceV1))
+        .expect("membership device schema serializes");
+    let membership_bootstrap = serde_json::to_value(schema_for!(MembershipBootstrapV1))
+        .expect("membership bootstrap schema serializes");
+    let membership_challenge = serde_json::to_value(schema_for!(MembershipChallengeV1))
+        .expect("membership challenge schema serializes");
+    let membership_response = serde_json::to_value(schema_for!(MembershipResponseV1))
+        .expect("membership response schema serializes");
+    let membership_hint = serde_json::to_value(schema_for!(MembershipHintV1))
+        .expect("membership hint schema serializes");
+    let membership_control = serde_json::to_value(schema_for!(MembershipControlV1))
+        .expect("membership control schema serializes");
+    let vault_identity_establish = serde_json::to_value(schema_for!(EstablishVaultIdentityV1))
+        .expect("vault identity establish schema serializes");
+    let vault_identity_status = serde_json::to_value(schema_for!(VaultIdentityStatusV1))
+        .expect("vault identity status schema serializes");
     let mut components = BTreeMap::new();
     components.extend(extract_components("Envelope", envelope));
     components.extend(extract_components("PairingQrRecord", pairing));
+    components.extend(extract_components("EphemeralSignalV1", ephemeral));
+    components.extend(extract_components("EphemeralSignalV2", ephemeral_v2));
+    let hello =
+        serde_json::to_value(schema_for!(LiveHelloV1)).expect("live hello schema serializes");
+    components.extend(extract_components("LiveHelloV1", hello));
+    components.extend(extract_components("LiveHelloV2", hello_v2));
+    components.extend(extract_components("TypingPlaintextV2", typing_plaintext_v2));
+    components.extend(extract_components(
+        "ChallengePlaintextV2",
+        challenge_plaintext_v2,
+    ));
+    components.extend(extract_components(
+        "SessionAckPlaintextV2",
+        session_ack_plaintext_v2,
+    ));
+    components.extend(extract_components("MembershipDeviceV1", membership_device));
+    components.extend(extract_components(
+        "MembershipBootstrapV1",
+        membership_bootstrap,
+    ));
+    components.extend(extract_components(
+        "MembershipChallengeV1",
+        membership_challenge,
+    ));
+    components.extend(extract_components(
+        "MembershipResponseV1",
+        membership_response,
+    ));
+    components.extend(extract_components("MembershipHintV1", membership_hint));
+    components.extend(extract_components(
+        "MembershipControlV1",
+        membership_control,
+    ));
+    components.extend(extract_components(
+        "EstablishVaultIdentityV1",
+        vault_identity_establish,
+    ));
+    components.extend(extract_components(
+        "VaultIdentityStatusV1",
+        vault_identity_status,
+    ));
+    components.insert(
+        "LiveFrameV1".into(),
+        json!({"$ref": "#/components/schemas/EphemeralSignalV1"}),
+    );
+    components.insert(
+        "LiveFrameV2".into(),
+        json!({"$ref": "#/components/schemas/EphemeralSignalV2"}),
+    );
     let mut component_value = serde_json::to_value(&components).expect("components serialize");
     rewrite_refs(&mut component_value);
     let openapi = pretty(
@@ -117,6 +199,14 @@ fn schema_to_ts(schema: &Value) -> String {
             .next()
             .map(type_name)
             .unwrap_or_else(|| "unknown".into());
+    }
+    if let Some(value) = schema.get("const") {
+        if let Some(value) = value.as_str() {
+            return format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"));
+        }
+        if value.is_number() || value.is_boolean() {
+            return value.to_string();
+        }
     }
     if let Some(values) = schema.get("enum").and_then(Value::as_array) {
         return values

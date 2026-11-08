@@ -78,6 +78,31 @@ fn imported_sms_plan_is_paused(client: &Client) -> bool {
         .paused
 }
 
+fn schema_version(connection: &rusqlite::Connection) -> i64 {
+    connection
+        .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+        .unwrap()
+}
+
+fn remove_rcs_mapping_schema(connection: &rusqlite::Connection) {
+    connection
+        .execute_batch(
+            "DROP TABLE rcs_provider_detectors;
+              DROP TABLE rcs_message_identities;
+              DROP TABLE rcs_message_status;
+              DROP TABLE rcs_lane_ownership;
+              DROP TABLE rcs_conversation_metadata;
+              DROP TABLE rcs_send_ledger;
+              DROP TABLE rcs_mapping_proofs;
+              DROP TABLE rcs_conversation_mappings;
+               ALTER TABLE attempts DROP COLUMN finalized_transport;
+               DROP TABLE rcs_capability_published;
+               DROP TABLE rcs_link_eligibility_projection;
+               DROP TABLE rcs_link_status_projection;",
+        )
+        .unwrap();
+}
+
 fn capture_events(client: &Client, count: usize) {
     for id in 0..count {
         client
@@ -139,10 +164,11 @@ fn version_39_upgrade_adds_phone_read_defaults_and_reinstalls_history_backpressu
             "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
         )
         .unwrap();
+    let expected_schema_version = schema_version(&connection);
     let version: i64 = connection
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 50);
+    assert_eq!(version, 52);
     let outbox_index: String = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
@@ -154,6 +180,7 @@ fn version_39_upgrade_adds_phone_read_defaults_and_reinstalls_history_backpressu
         outbox_index.contains("(envelope_id,compaction,purpose,state)"),
         "{outbox_index}"
     );
+    remove_rcs_mapping_schema(&connection);
     connection
         .execute_batch(
             "DROP INDEX outbox_pending_events_history;
@@ -175,6 +202,7 @@ fn version_39_upgrade_adds_phone_read_defaults_and_reinstalls_history_backpressu
             "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
         )
         .unwrap();
+    assert_eq!(schema_version(&connection), expected_schema_version);
     let index_count: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('outbox_pending_events_history','contact_photo_registrations_unacknowledged')",
@@ -245,10 +273,11 @@ fn version_36_reinstalls_history_backpressure_indexes_on_reopen() {
             "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
         )
         .unwrap();
+    let expected_schema_version = schema_version(&connection);
     let version: i64 = connection
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 50);
+    assert_eq!(version, 52);
     let outbox_index: String = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
@@ -276,6 +305,7 @@ fn version_36_reinstalls_history_backpressure_indexes_on_reopen() {
             "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
         )
         .unwrap();
+    assert_eq!(schema_version(&connection), expected_schema_version);
     let index_count: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('outbox_pending_events_history','contact_photo_registrations_unacknowledged')",
@@ -371,6 +401,7 @@ fn version_31_upgrade_preserves_partial_floors_completed_scopes_and_descending_p
             "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
         )
         .unwrap();
+    remove_rcs_mapping_schema(&connection);
     connection
         .execute_batch(
             "

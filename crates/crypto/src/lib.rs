@@ -29,6 +29,7 @@ pub const ROOT_KEY_BYTES: usize = 32;
 pub const KDF_OPSLIMIT: u64 = 3;
 pub const KDF_MEMLIMIT: usize = 256 * 1024 * 1024;
 pub const STREAM_CHUNK_BYTES: usize = 64 * 1024;
+pub mod vault_identity;
 const VAULT_CHECK: &[u8] = b"peppy-vault-check-v1";
 static SODIUM_READY: OnceLock<Result<(), ()>> = OnceLock::new();
 fn ensure_sodium() -> Result<(), CryptoError> {
@@ -162,6 +163,8 @@ pub enum KeyPurpose {
     LocalWrap,
     /// Tester registry envelopes bound to an authenticated vault profile.
     TesterRegistry,
+    /// Recovery wrappers for the vault's immutable identity anchor.
+    VaultIdentityRecovery,
     /// Encrypted compose-draft records. This purpose is intentionally separate from envelopes.
     Draft,
 }
@@ -174,6 +177,7 @@ impl KeyPurpose {
             Self::Compaction => 4,
             Self::LocalWrap => 5,
             Self::TesterRegistry => 6,
+            Self::VaultIdentityRecovery => 8,
             Self::Draft => 7,
         }
     }
@@ -569,6 +573,31 @@ fn read_frame(input: &mut impl Read) -> Result<Vec<u8>, CryptoError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::KeyPurpose;
+
+    #[test]
+    fn key_purpose_discriminants_are_unique_and_draft_remains_seven() {
+        let purposes = [
+            KeyPurpose::Command,
+            KeyPurpose::Event,
+            KeyPurpose::Header,
+            KeyPurpose::Compaction,
+            KeyPurpose::LocalWrap,
+            KeyPurpose::TesterRegistry,
+            KeyPurpose::Draft,
+            KeyPurpose::VaultIdentityRecovery,
+        ];
+        let mut ids = std::collections::BTreeSet::new();
+        for purpose in purposes {
+            assert!(
+                ids.insert(purpose.id()),
+                "duplicate key purpose {}",
+                purpose.id()
+            );
+        }
+        assert_eq!(KeyPurpose::Draft.id(), 7);
+    }
+
     use super::promote_noclobber;
     use std::fs;
     use uuid::Uuid;

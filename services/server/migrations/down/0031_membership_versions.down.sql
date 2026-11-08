@@ -1,0 +1,9 @@
+DROP TRIGGER vault_admission_keys_invalidate_membership_version ON vault_admission_keys;
+DROP TRIGGER vault_key_profiles_invalidate_membership_version ON vault_key_profiles;
+DROP TRIGGER device_credentials_invalidate_membership_version ON device_credentials;
+DROP TRIGGER devices_invalidate_membership_version ON devices;
+DROP TRIGGER vaults_invalidate_membership_version ON vaults;
+DROP TRIGGER vaults_initialize_membership_version ON vaults;
+DROP FUNCTION membership_version_invalidate();
+DROP FUNCTION membership_version_initialize();
+DROP TABLE membership_versions;

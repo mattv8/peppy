@@ -36,6 +36,8 @@
     "allow-resolve-draft-conflict",
     "allow-acknowledge-draft-notice",
     "allow-send-draft",
+    "allow-send-typing",
+    "allow-set-typing-sharing",
     "allow-mark-seen",
     "allow-mark-all-read",
     "allow-pick-attachments",

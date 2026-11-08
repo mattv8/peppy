@@ -9,6 +9,10 @@ Agent reference for security-sensitive behavior. Preserve these boundaries when 
 - Every passphrase holder has equal cryptographic authority. Revoking a device credential does not revoke the shared secret. Rotation requires activating a new epoch on participating clients and retaining history keys. A gateway rejects commands from a retired epoch.
 - Setup code authorizes first claim, administrator password authorizes management, and the vault secret authorizes vault data and admission. Keep those authorities distinct. Gateways record carrier attempts durably and never resend an attempt with an unknown carrier outcome.
 - Copying a client database back behind the application is not detectable. Device bearer credentials authorize storage writes and retention operations. Encryption does not protect ciphertext availability from a compromised authorized credential; revocation and operator backups remain separate controls.
+- A client database restored from before an RCS send attempt can admit a new
+  permit for that command. A copy with an in-flight attempt reopens as
+  `OutcomeUnknown` and is never resent; do not restore an older copy over a
+  live device. See [RCS restore tests](../crates/client-core/tests/rcs_restore.rs).
 
 ## Attachments and public copies
 

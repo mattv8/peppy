@@ -107,6 +107,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   color: var(--peppy-text-primary);
 }
 .settings-check { display: flex; gap: 6px; align-items: center; font-size: 12px; }
+.settings-check-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .head-panel-shell { width: 100%; min-width: 0; }
 #head-panel-header { position: relative; z-index: 2; display: flex; min-height: 36px; align-items: center; gap: 6px; padding: 0 8px; background: var(--peppy-accent); color: var(--peppy-accent-text); }
 #head-panel-header::before { position: absolute; top: -7px; left: 20px; width: 14px; height: 14px; content: ""; background: var(--peppy-accent); transform: rotate(45deg); }
@@ -277,11 +278,11 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 .mark-all-read-toast-dismiss:hover { background: var(--peppy-surface-hover); }
 #conversation-folder-confirmation, #sender-unblock-confirmation { position: fixed; overflow: auto; }
 #conversation-folder-confirmation .conversation-folder-confirmation-note, #sender-unblock-confirmation .conversation-folder-confirmation-note { color: var(--peppy-text-secondary); font-size: 11px; }
-#conversation-spam-notice { flex: none; min-height: 16px; box-sizing: border-box; margin: 0; padding: 6px 12px; border-bottom: 1px solid var(--peppy-border); background: var(--peppy-surface-chrome); color: var(--peppy-text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+#conversation-spam-notice, #conversation-rcs-notice { flex: none; min-height: 16px; box-sizing: border-box; margin: 0; padding: 6px 12px; border-bottom: 1px solid var(--peppy-border); background: var(--peppy-surface-chrome); color: var(--peppy-text-secondary); font-size: 12px; overflow-wrap: anywhere; }
 /* The live region stays mounted for reliable announcements but takes no space while empty. */
-#conversation-spam-notice:empty { min-height: 0; padding: 0; border: 0; background: none; }
+#conversation-spam-notice:empty, #conversation-rcs-notice:empty { min-height: 0; padding: 0; border: 0; background: none; }
 @media (max-width: 640px) { #mark-all-read-confirmation { right: 0; left: auto; } }
-@media (forced-colors: active) { #mark-all-read-confirmation, #conversation-folder-confirmation, #sender-unblock-confirmation, #conversation-spam-notice, .mark-all-read-toast, .mark-all-read-toast-dismiss { border-color: CanvasText; background: Canvas; color: CanvasText; box-shadow: none; } }
+@media (forced-colors: active) { #mark-all-read-confirmation, #conversation-folder-confirmation, #sender-unblock-confirmation, #conversation-spam-notice, #conversation-rcs-notice, .mark-all-read-toast, .mark-all-read-toast-dismiss { border-color: CanvasText; background: Canvas; color: CanvasText; box-shadow: none; } }
 #conversation-folder-switcher { position: relative; display: flex; flex: none; min-height: 36px; box-sizing: border-box; align-items: center; padding: 4px 8px; border-bottom: 1px solid var(--peppy-border); }
 #conversation-folder-trigger { display: flex; min-width: 0; max-width: 100%; height: var(--peppy-control-height); align-items: center; gap: 4px; border: 0; border-radius: var(--peppy-control-radius); background: transparent; color: var(--peppy-text-primary); font-size: 13px; font-weight: 600; }
 #conversation-folder-trigger:hover { background: var(--peppy-surface-hover); }
@@ -669,6 +670,7 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
 .message-meta[data-status="failed-confirmed"] { color: var(--peppy-error-text); }
 .message-meta[data-status="unknown"] { color: var(--peppy-warning-text); }
 .message-meta-separator { color: var(--peppy-text-muted); }
+.message-meta [data-message-route-hint] { margin: 0; flex: 1 0 100%; }
 .message-bubble .message-subject {
   color: var(--peppy-text-secondary);
   font-size: 11px;
@@ -702,6 +704,35 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
 .header-copy-details {
   display: grid;
 }
+[data-header-title-row] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+[data-header-title-row] [data-header-title] { flex: 0 1 auto; min-width: 6ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#conversation-rcs-badge, #conversation-rcs-e2ee-badge {
+  flex: none;
+  border: 1px solid var(--peppy-accent);
+  border-radius: var(--peppy-radius-pill);
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+#conversation-rcs-e2ee-badge { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; border-color: var(--peppy-border-strong); }
+#typing-indicator { display: inline-flex; align-items: center; gap: 6px; color: var(--peppy-text-secondary); font-size: 12px; white-space: nowrap; }
+#typing-indicator[hidden] { display: none; }
+.composer-toolbar-spacer { display: flex; min-width: 0; overflow: hidden; }
+#typing-indicator-label { overflow: hidden; text-overflow: ellipsis; }
+#typing-indicator-dots { display: inline-flex; gap: 3px; }
+#typing-indicator-dots i { width: 4px; height: 4px; border-radius: var(--peppy-radius-pill); background: currentColor; animation: typing-dot 1200ms ease-in-out infinite; }
+#typing-indicator-dots i:nth-child(2) { animation-delay: 160ms; }
+#typing-indicator-dots i:nth-child(3) { animation-delay: 320ms; }
+@keyframes typing-dot { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { #typing-indicator-dots i { animation: none; opacity: .7; } }
+@media (forced-colors: active) { #typing-indicator-dots i { background: CanvasText; } }
 .header-copy-details small {
   color: var(--peppy-text-secondary);
   font-size: 11px;
@@ -1136,6 +1167,9 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   :is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"]:checked + span::before {
     background: HighlightText;
   }
+}
+@media (forced-colors: active) {
+  #conversation-rcs-badge, #conversation-rcs-e2ee-badge { border-color: CanvasText; color: CanvasText; }
 }
 .settings-control-row label {
   display: grid;

@@ -314,7 +314,7 @@ async fn refresh_vault(session: &Arc<Session>) -> BridgeResult<()> {
     )
     .await?;
     let (profile, _) = vault_header(&vault)?;
-    session.set_status(|status| {
+    session.set_security_status(|status| {
         status.vault = Some(VaultSummary {
             epoch: profile.key_epoch,
             fingerprint: vault.profile_fingerprint.clone(),
@@ -334,28 +334,44 @@ pub async fn refresh_gateways(session: &Arc<Session>) -> BridgeResult<()> {
         .get_json("/v1/capabilities", MAX_JSON_BYTES)
         .await
         .map_err(sync_net_error)?;
-    let views = gateway_views(&devices, &capabilities);
-    let device_role = extract_device_role(&devices, &session.binding.device_id);
-    let changed = {
-        let mut status = session.status.lock().unwrap_or_else(|p| p.into_inner());
-        let changed =
-            !status.gateways_known || status.gateways != views || status.device_role != device_role;
-        status.gateways = views.clone();
-        status.gateways_known = true;
-        status.device_role = device_role;
-        status.revoked_device_ids = devices
+    apply_gateway_refresh(session, &devices, &capabilities);
+    Ok(())
+}
+
+pub(crate) fn apply_gateway_refresh(
+    session: &Session,
+    devices: &DevicesResponse,
+    capabilities: &CapabilitiesResponse,
+) {
+    let views = gateway_views(devices, capabilities);
+    let device_role = extract_device_role(devices, &session.binding.device_id);
+    let rcs_roster_validated = device_role.is_some();
+    let rcs_live_roster = if rcs_roster_validated {
+        devices
             .devices
             .iter()
-            .filter(|device| device.revoked)
+            .filter(|device| !device.revoked)
             .map(|device| device.device_id.clone())
-            .collect();
-        changed
+            .collect()
+    } else {
+        Vec::new()
     };
-    if changed {
-        session.persist_gateways(&views);
-        session.notify();
-    }
-    Ok(())
+    let revoked_device_ids = devices
+        .devices
+        .iter()
+        .filter(|device| device.revoked)
+        .map(|device| device.device_id.clone())
+        .collect();
+    session.live_typing.submit_gateway_refresh(
+        session,
+        crate::live_typing::GatewayRefresh {
+            gateways: views,
+            device_role,
+            rcs_roster_validated,
+            rcs_live_roster,
+            revoked_device_ids,
+        },
+    );
 }
 
 /// Drains published snapshot records and applies journaled records in bounded steps, yielding
@@ -2055,7 +2071,7 @@ fn revoke(session: &Arc<Session>) {
     session.notify();
 }
 
-fn jitter(base: Duration) -> Duration {
+pub(crate) fn jitter(base: Duration) -> Duration {
     let mut bytes = [0u8; 2];
     let _ = getrandom::fill(&mut bytes);
     base + base.mul_f64(f64::from(u16::from_le_bytes(bytes)) / f64::from(u16::MAX) / 4.0)
@@ -3206,6 +3222,7 @@ pub fn start(session: &Arc<Session>) {
     }));
     session.track_worker(tokio::spawn(worker(session.clone())));
     session.track_worker(tokio::spawn(live(session.clone())));
+    crate::live_typing::start(session.clone());
 }
 
 async fn join_workers(workers: &mut [tokio::task::JoinHandle<()>], duration: Duration) -> bool {
@@ -3299,5 +3316,30 @@ mod drain_tests {
 
         assert!(!drain_all(Duration::from_millis(1)).await);
         assert!(drain_all(Duration::from_secs(1)).await);
+    }
+
+    #[test]
+    fn gateway_refresh_keeps_only_authenticated_non_revoked_roster_members() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = open(&fixture, &fixture.binding, &[]);
+        let active_peer = uuid::Uuid::new_v4().to_string();
+        let revoked_peer = uuid::Uuid::new_v4().to_string();
+        let devices: DevicesResponse = serde_json::from_value(serde_json::json!({"devices": [
+            {"device_id": fixture.binding.device_id, "role": "device", "revoked": false},
+            {"device_id": active_peer, "role": "gateway", "revoked": false},
+            {"device_id": revoked_peer, "role": "device", "revoked": true}
+        ]}))
+        .unwrap();
+        let capabilities: CapabilitiesResponse =
+            serde_json::from_value(serde_json::json!({"capabilities": []})).unwrap();
+
+        apply_gateway_refresh(&session, &devices, &capabilities);
+
+        let status = session.status.lock().unwrap();
+        assert!(status.rcs_roster_validated);
+        assert_eq!(
+            status.rcs_live_roster,
+            vec![fixture.binding.device_id, active_peer]
+        );
     }
 }

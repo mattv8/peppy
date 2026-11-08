@@ -53,6 +53,11 @@ mod notifications;
 mod phone_read;
 mod phone_read_ingest;
 mod provider_archive;
+mod rcs_capability;
+mod rcs_mapping;
+mod rcs_native_pending;
+mod rcs_restore;
+mod rcs_send;
 mod recipient_identity;
 mod repair_dedup;
 mod replay_batch;
@@ -62,3 +67,6 @@ mod sms_acquisition;
 mod sms_flow;
 mod sms_repair;
 mod snapshot_projection;
+
+mod schema_upgrade_matrix;
+mod vault_identity_behaviour;

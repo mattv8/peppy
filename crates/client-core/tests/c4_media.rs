@@ -441,7 +441,7 @@ fn incoming_mms_metadata_before_bytes_keeps_unread_stable() {
                 attachment_ids: vec![info.attachment_id],
                 subject: None,
             },
-            GatewayRoute {
+            GatewayRoute::Carrier {
                 gateway_device_id: DeviceId::new(),
                 subscription_id: "sim-1".into()
             },

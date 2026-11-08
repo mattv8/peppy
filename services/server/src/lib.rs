@@ -5,6 +5,12 @@ pub mod draft_retention;
 pub mod enrollment;
 pub mod health;
 pub mod instance;
+pub(crate) mod live;
+pub(crate) mod live_postgres;
+pub(crate) mod live_ticket_authority;
+pub(crate) mod live_ticket_maintenance;
+pub mod live_ticket_upgrade;
+pub(crate) mod live_ticket_work;
 pub mod presence;
 pub mod rls;
 pub mod scope;
@@ -13,6 +19,24 @@ pub mod storage;
 pub mod web_client;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
+
+/// Minimal ticket-consumption result for database integration tests.
+#[doc(hidden)]
+pub struct ConsumedTicketIds {
+    pub vault_id: uuid::Uuid,
+    pub device_id: uuid::Uuid,
+    pub session_id: [u8; 16],
+}
+
+/// Exercises the resolver-first ticket consume path without exposing credentials.
+#[doc(hidden)]
+pub async fn __test_consume_live_ticket(
+    pool: &PgPool,
+    session_id: [u8; 16],
+    secret: [u8; 32],
+) -> Result<ConsumedTicketIds, &'static str> {
+    api::__test_consume_live_ticket(pool, session_id, secret).await
+}
 
 /// Serves a router while attaching each TCP peer address to request extensions.
 pub async fn serve<S>(
@@ -165,12 +189,12 @@ impl ServerBuilder {
         let health = HealthState::from_database(&self.config, self.runtime_db.clone()).await?;
         if rls_enforced {
             let maintenance_db = self.maintenance_db.as_ref().expect("checked above");
+            rls::validate_live_ticket_runtime_capabilities(&self.runtime_db).await?;
+            rls::validate_maintenance_role(maintenance_db).await?;
             if self.row_security {
                 rls::validate_admission_runtime_privileges(&self.runtime_db).await?;
-                rls::validate_admission_maintenance_privileges(maintenance_db).await?;
             } else {
                 rls::validate_runtime_role(&self.runtime_db, true).await?;
-                rls::validate_maintenance_role(maintenance_db).await?;
             }
         }
         let maintenance_db = self

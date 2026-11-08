@@ -5,14 +5,23 @@ use axum::{
     body::Body,
     http::{Method, Request, Response, StatusCode},
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use http_body_util::BodyExt;
 use libsodium_rs::crypto_sign;
-use peppy_crypto::KeyProfile;
-use peppy_server::{ServerBuilder, config::Config, rls};
+use peppy_crypto::{
+    KeyProfile, create_vault_check_header, derive_root_key,
+    vault_identity::{
+        VaultIdentityAnchor, VaultIdentityRecoveryRecord, derive_vault_identity_recovery_key,
+    },
+};
+use peppy_protocol::VAULT_IDENTITY_PROTOCOL_VERSION;
+use peppy_server::{ServerBuilder, api::create_owner, config::Config, rls};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{PgConnection, PgPool, postgres::PgPoolOptions};
 use tower::ServiceExt;
 use url::Url;
 use uuid::Uuid;
@@ -125,6 +134,7 @@ impl Fixture {
             mcp_worker_url: None,
             mcp_worker_token_file: None,
             web_client: None,
+            web_live_trusted_origin: None,
         }
     }
 
@@ -214,6 +224,9 @@ async fn community_runtime_is_rls_scoped_and_control_plane_http_flows_work() {
     let fixture = Fixture::new().await;
 
     rls::validate_runtime_role(&fixture.runtime, true)
+        .await
+        .unwrap();
+    rls::validate_runtime_role(&fixture.runtime, false)
         .await
         .unwrap();
     rls::validate_maintenance_role(&fixture.maintenance)
@@ -597,6 +610,233 @@ async fn community_runtime_is_rls_scoped_and_control_plane_http_flows_work() {
 }
 
 #[tokio::test]
+async fn vault_identity_routes_use_the_runtime_role_and_survive_vault_cascade() {
+    let fixture = Fixture::new().await;
+    rls::validate_runtime_role(&fixture.runtime, true)
+        .await
+        .unwrap();
+    rls::validate_maintenance_role(&fixture.maintenance)
+        .await
+        .unwrap();
+    let runtime_privileges: (bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT has_table_privilege($1, 'vault_identity_establishments', 'SELECT'), has_table_privilege($1, 'vault_identity_establishments', 'INSERT'), has_table_privilege($1, 'vault_identity_establishments', 'UPDATE'), has_table_privilege($1, 'vault_identity_establishments', 'DELETE')",
+    )
+    .bind(&fixture.runtime_role)
+    .fetch_one(&fixture.migration)
+    .await
+    .unwrap();
+    assert_eq!(runtime_privileges, (true, true, false, false));
+    let maintenance_privileges: (bool, bool, bool) = sqlx::query_as(
+        "SELECT has_table_privilege($1, 'vault_identity_establishments', 'SELECT'), has_table_privilege($1, 'vault_identity_establishments', 'INSERT'), has_table_privilege($1, 'vault_identity_establishments', 'DELETE')",
+    )
+    .bind(&fixture.maintenance_role)
+    .fetch_one(&fixture.migration)
+    .await
+    .unwrap();
+    assert_eq!(maintenance_privileges, (true, false, false));
+
+    let vault = Uuid::new_v4();
+    let profile = KeyProfile::new(vault, 1).unwrap();
+    let root = derive_root_key(ADMIN_PASSWORD, &profile).unwrap();
+    let header = create_vault_check_header(&root, profile.clone()).unwrap();
+    let owner = create_owner(
+        &fixture.migration,
+        serde_json::to_value(&profile).unwrap(),
+        serde_json::to_vec(&header).unwrap(),
+        profile.fingerprint().unwrap(),
+        1,
+    )
+    .await
+    .unwrap();
+    let operation = Uuid::new_v4();
+    let recovery_key = derive_vault_identity_recovery_key(&root, &profile).unwrap();
+    let anchor = VaultIdentityAnchor::generate(vault, operation, owner.device_id).unwrap();
+    let recovery = VaultIdentityRecoveryRecord::wrap(&anchor, &recovery_key, &profile).unwrap();
+    let request = json!({
+        "protocol_version": VAULT_IDENTITY_PROTOCOL_VERSION,
+        "operation_id": operation,
+        "key_epoch": 1,
+        "profile_fingerprint": profile.fingerprint().unwrap(),
+        "recovery_record": STANDARD.encode(recovery.encode()),
+    });
+    let app = fixture.app().await;
+
+    let establish = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/vault/identity")
+                .header("authorization", format!("Bearer {}", owner.device_token))
+                .header("content-type", "application/json")
+                .body(Body::from(request.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(establish.status(), StatusCode::CREATED);
+
+    let get = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/vault/identity")
+                .header("authorization", format!("Bearer {}", owner.device_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(
+        response_body(get).await["operation_id"],
+        operation.to_string()
+    );
+
+    let delete = app
+        .oneshot(
+            Request::delete("/v1/vault")
+                .header("authorization", format!("Bearer {}", owner.device_token))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"vault_id": vault}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM vault_identity_establishments WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&fixture.migration)
+            .await
+            .unwrap();
+    assert_eq!(
+        remaining, 0,
+        "vault cascade removes the established identity"
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn live_ticket_resolver_and_consume_are_runtime_scoped() {
+    let fixture = Fixture::new().await;
+    let vault_a = Uuid::new_v4();
+    let vault_b = Uuid::new_v4();
+    let device = Uuid::new_v4();
+    let session = [31_u8; 16];
+    let secret = [32_u8; 32];
+    let session_hash = Sha256::digest(session).to_vec();
+    let ticket_digest = Sha256::digest(secret).to_vec();
+    for (vault, username) in [(vault_a, "ownera"), (vault_b, "ownerb")] {
+        sqlx::query("INSERT INTO vaults(vault_id,public_key_profile,encrypted_vault_check_header,key_epoch,profile_fingerprint) VALUES($1,'{}',$2,1,$3)")
+            .bind(vault).bind([1_u8].as_slice()).bind("f".repeat(64)).execute(&fixture.migration).await.unwrap();
+        sqlx::query("INSERT INTO vault_owners(vault_id,username,password_hash,is_admin,operation_id,request_digest) VALUES($1,$2,'hash',FALSE,$3,$4)")
+            .bind(vault).bind(username).bind(Uuid::new_v4()).bind([8_u8; 32].as_slice()).execute(&fixture.migration).await.unwrap();
+    }
+    sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,'device','{}',$3,1)")
+        .bind(vault_a).bind(device).bind("f".repeat(64)).execute(&fixture.migration).await.unwrap();
+    sqlx::query("INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES($1,$2,$3)")
+        .bind([9_u8; 32].as_slice())
+        .bind(vault_a)
+        .bind(device)
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,state,lease_until) VALUES($1,$2,$3,'open',clock_timestamp()+interval '90 seconds')")
+        .bind(vault_a).bind(device).bind(&session_hash).execute(&fixture.migration).await.unwrap();
+    sqlx::query("INSERT INTO live_tickets(ticket_digest,vault_id,device_id,session_id_hash,issued_at,expires_at) VALUES($1,$2,$3,$4,clock_timestamp(),clock_timestamp()+interval '30 seconds')")
+        .bind(&ticket_digest).bind(vault_a).bind(device).bind(&session_hash).execute(&fixture.migration).await.unwrap();
+    let resolved: Option<Uuid> =
+        sqlx::query_scalar("SELECT vault_id FROM community_resolve_live_ticket_vault($1)")
+            .bind(&ticket_digest)
+            .fetch_optional(&fixture.runtime)
+            .await
+            .unwrap();
+    assert_eq!(resolved, Some(vault_a));
+    let mut b = fixture.runtime.begin().await.unwrap();
+    sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+        .bind(vault_b.to_string())
+        .execute(&mut *b)
+        .await
+        .unwrap();
+    let hidden: Option<i32> =
+        sqlx::query_scalar("SELECT 1 FROM live_tickets WHERE ticket_digest=$1")
+            .bind(&ticket_digest)
+            .fetch_optional(&mut *b)
+            .await
+            .unwrap();
+    assert_eq!(hidden, None);
+    b.commit().await.unwrap();
+    let consumed = peppy_server::__test_consume_live_ticket(&fixture.runtime, session, secret)
+        .await
+        .unwrap();
+    assert_eq!(
+        (consumed.vault_id, consumed.device_id, consumed.session_id),
+        (vault_a, device, session)
+    );
+
+    let maintenance_device = Uuid::new_v4();
+    sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,'device','{}',$3,1)")
+        .bind(vault_b)
+        .bind(maintenance_device)
+        .bind("f".repeat(64))
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+    for (vault, device, session_hash, ticket_digest) in [
+        (vault_a, device, vec![41_u8; 32], vec![42_u8; 32]),
+        (
+            vault_b,
+            maintenance_device,
+            vec![43_u8; 32],
+            vec![44_u8; 32],
+        ),
+    ] {
+        sqlx::query("INSERT INTO live_ticket_sessions(vault_id,device_id,session_id_hash,state,lease_until) VALUES($1,$2,$3,'open',clock_timestamp()-interval '1 second')")
+            .bind(vault)
+            .bind(device)
+            .bind(&session_hash)
+            .execute(&fixture.migration)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO live_tickets(ticket_digest,vault_id,device_id,session_id_hash,issued_at,expires_at) VALUES($1,$2,$3,$4,clock_timestamp()-interval '2 seconds',clock_timestamp()-interval '1 second')")
+            .bind(ticket_digest)
+            .bind(vault)
+            .bind(device)
+            .bind(session_hash)
+            .execute(&fixture.migration)
+            .await
+            .unwrap();
+    }
+    let mut server = ServerBuilder::community(fixture.config(), fixture.runtime.clone())
+        .maintenance_database(fixture.maintenance.clone())
+        .rls_enforced(true)
+        .setup_token(SETUP_TOKEN)
+        .build()
+        .await
+        .unwrap();
+    server.start_maintenance().unwrap();
+    for _ in 0..50 {
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM live_tickets WHERE ticket_digest = ANY($1)")
+                .bind(vec![vec![42_u8; 32], vec![44_u8; 32]])
+                .fetch_one(&fixture.migration)
+                .await
+                .unwrap();
+        if remaining == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM live_tickets WHERE ticket_digest = ANY($1)")
+            .bind(vec![vec![42_u8; 32], vec![44_u8; 32]])
+            .fetch_one(&fixture.migration)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 0, "maintenance reaper must cross vault RLS");
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn mcp_cleanup_queue_is_maintenance_only_and_oauth_sweep_is_executable() {
     let fixture = Fixture::new().await;
     for statement in [
@@ -754,6 +994,53 @@ async fn runtime_cleanup_triggers_ignore_a_temporary_queue_shadow() {
 async fn startup_validation_rejects_grant_policy_and_execute_drift() {
     let fixture = Fixture::new().await;
 
+    sqlx::query(&format!(
+        "GRANT UPDATE ON vault_identity_establishments TO {}",
+        fixture.runtime_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    assert!(
+        rls::validate_runtime_role(&fixture.runtime, true)
+            .await
+            .is_err()
+    );
+    rls::grant_runtime_privileges(&fixture.migration, &fixture.runtime_role)
+        .await
+        .unwrap();
+    sqlx::query(&format!(
+        "REVOKE INSERT ON vault_identity_establishments FROM {}",
+        fixture.runtime_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    assert!(
+        rls::validate_runtime_role(&fixture.runtime, true)
+            .await
+            .is_err()
+    );
+    rls::grant_runtime_privileges(&fixture.migration, &fixture.runtime_role)
+        .await
+        .unwrap();
+
+    sqlx::query(&format!(
+        "GRANT INSERT ON vault_identity_establishments TO {}",
+        fixture.maintenance_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    assert!(
+        rls::validate_maintenance_role(&fixture.maintenance)
+            .await
+            .is_err()
+    );
+    rls::grant_maintenance_privileges(&fixture.migration, &fixture.maintenance_role)
+        .await
+        .unwrap();
+
     sqlx::query("CREATE TABLE unexpected_runtime_table(id integer)")
         .execute(&fixture.migration)
         .await
@@ -886,6 +1173,25 @@ async fn startup_validation_rejects_grant_policy_and_execute_drift() {
         .await
         .unwrap();
 
+    sqlx::query(&format!(
+        "GRANT TRUNCATE ON devices TO {}",
+        fixture.maintenance_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    assert!(
+        rls::validate_maintenance_role(&fixture.maintenance)
+            .await
+            .is_err()
+    );
+    rls::grant_maintenance_privileges(&fixture.migration, &fixture.maintenance_role)
+        .await
+        .unwrap();
+    rls::validate_maintenance_role(&fixture.maintenance)
+        .await
+        .unwrap();
+
     fixture.cleanup().await;
 }
 
@@ -931,6 +1237,66 @@ async fn hosted_mode_missing_runtime_admission_grants_fails_closed_and_correct_g
         .unwrap();
 
     drop(server);
+
+    sqlx::raw_sql(&format!(
+        "REVOKE EXECUTE ON FUNCTION community_resolve_live_ticket_vault(bytea) FROM {}",
+        fixture.runtime_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    let error = ServerBuilder::new(fixture.config(), fixture.runtime.clone())
+        .setup_token(SETUP_TOKEN)
+        .row_security(true)
+        .maintenance_database(fixture.maintenance.clone())
+        .build()
+        .await
+        .err()
+        .expect("hosted startup must reject a missing ticket resolver grant");
+    assert!(error.to_string().contains("live ticket resolver execute"));
+    rls::grant_runtime_privileges(&fixture.migration, &fixture.runtime_role)
+        .await
+        .unwrap();
+
+    sqlx::raw_sql(&format!(
+        "REVOKE DELETE ON TABLE live_tickets FROM {}",
+        fixture.runtime_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    let error = ServerBuilder::new(fixture.config(), fixture.runtime.clone())
+        .setup_token(SETUP_TOKEN)
+        .row_security(true)
+        .maintenance_database(fixture.maintenance.clone())
+        .build()
+        .await
+        .err()
+        .expect("hosted startup must reject missing live-ticket runtime DML");
+    assert!(error.to_string().contains("live ticket runtime DML"));
+    rls::grant_runtime_privileges(&fixture.migration, &fixture.runtime_role)
+        .await
+        .unwrap();
+
+    sqlx::raw_sql(&format!(
+        "REVOKE DELETE ON TABLE live_tickets FROM {}",
+        fixture.maintenance_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    let error = ServerBuilder::new(fixture.config(), fixture.runtime.clone())
+        .setup_token(SETUP_TOKEN)
+        .row_security(true)
+        .maintenance_database(fixture.maintenance.clone())
+        .build()
+        .await
+        .err()
+        .expect("hosted startup must reject missing live-ticket maintenance DML");
+    assert!(error.to_string().contains("requires tenant DML"));
+    rls::grant_maintenance_privileges(&fixture.migration, &fixture.maintenance_role)
+        .await
+        .unwrap();
     fixture.cleanup().await;
 }
 
@@ -1004,6 +1370,163 @@ async fn policy_rewritten_true_fails_closed() {
 }
 
 #[tokio::test]
+async fn live_ticket_admission_events_are_runtime_scoped_and_independent_of_ticket_retention() {
+    let fixture = Fixture::new().await;
+    let vault_a = Uuid::new_v4();
+    let vault_b = Uuid::new_v4();
+    let device_a = Uuid::new_v4();
+    let device_b = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault_a)).await;
+    fixture.run_owner(&vault_insert(vault_b)).await;
+    fixture.run_owner(&device_insert(vault_a, device_a)).await;
+    fixture.run_owner(&device_insert(vault_b, device_b)).await;
+
+    rls::validate_runtime_role(&fixture.runtime, true)
+        .await
+        .unwrap();
+    rls::validate_maintenance_role(&fixture.maintenance)
+        .await
+        .unwrap();
+
+    let event_id = Uuid::new_v4();
+    fixture
+        .apply(
+            Writer::Runtime,
+            vault_a,
+            &format!(
+                "INSERT INTO live_ticket_admission_events(event_id, vault_id, device_id, event_kind, created_at) VALUES('{event_id}', '{vault_a}', '{device_a}', 'ticket_issue', clock_timestamp())"
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(fixture
+        .apply(
+            Writer::Runtime,
+            vault_a,
+            &format!(
+                "INSERT INTO live_ticket_admission_events(event_id, vault_id, device_id, event_kind, created_at) VALUES('{}', '{vault_b}', '{device_b}', 'ticket_issue', clock_timestamp())",
+                Uuid::new_v4()
+            ),
+        )
+        .await
+        .is_err());
+    for sql in [
+        format!(
+            "INSERT INTO live_ticket_admission_events(event_id, vault_id, device_id, event_kind, created_at) VALUES('{}', '{vault_a}', '{device_a}', 'invalid', clock_timestamp())",
+            Uuid::new_v4()
+        ),
+        format!(
+            "INSERT INTO live_ticket_admission_events(event_id, vault_id, device_id, event_kind, created_at) VALUES('{}', '{vault_a}', '{}', 'ticket_issue', clock_timestamp())",
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        ),
+        format!(
+            "INSERT INTO live_ticket_admission_events(event_id, vault_id, device_id, event_kind) VALUES('{}', '{vault_a}', '{device_a}', 'ticket_issue')",
+            Uuid::new_v4()
+        ),
+    ] {
+        assert!(fixture.apply(Writer::Runtime, vault_a, &sql).await.is_err());
+    }
+
+    let session_hash = vec![7_u8; 32];
+    fixture
+        .run_owner(&format!(
+            "INSERT INTO live_ticket_sessions(vault_id, device_id, session_id_hash, state, closed_at) VALUES('{vault_a}', '{device_a}', decode('{}', 'hex'), 'closed', now())",
+            hex::encode(&session_hash)
+        ))
+        .await;
+    fixture
+        .run_owner(&format!(
+            "INSERT INTO live_tickets(ticket_digest, vault_id, device_id, session_id_hash, issued_at, expires_at) VALUES(decode('{}', 'hex'), '{vault_a}', '{device_a}', decode('{}', 'hex'), now(), now()+interval '1 minute')",
+            "01".repeat(32),
+            hex::encode(&session_hash)
+        ))
+        .await;
+    fixture
+        .run_owner(&format!(
+            "DELETE FROM live_tickets WHERE vault_id='{vault_a}'; DELETE FROM live_ticket_sessions WHERE vault_id='{vault_a}'"
+        ))
+        .await;
+    let retained: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM live_ticket_admission_events WHERE event_id=$1")
+            .bind(event_id)
+            .fetch_one(&fixture.migration)
+            .await
+            .unwrap();
+    assert_eq!(retained, 1);
+
+    let mut other_vault = fixture.runtime.begin().await.unwrap();
+    sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+        .bind(vault_b.to_string())
+        .execute(&mut *other_vault)
+        .await
+        .unwrap();
+    let visible: i64 = sqlx::query_scalar("SELECT count(*) FROM live_ticket_admission_events")
+        .fetch_one(&mut *other_vault)
+        .await
+        .unwrap();
+    assert_eq!(visible, 0);
+    other_vault.commit().await.unwrap();
+    for privilege in ["SELECT", "INSERT"] {
+        sqlx::raw_sql(&format!(
+            "REVOKE {privilege} ON TABLE live_ticket_admission_events FROM {}",
+            fixture.runtime_role
+        ))
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+        assert!(
+            rls::validate_runtime_role(&fixture.runtime, false)
+                .await
+                .is_err()
+        );
+        assert!(
+            rls::validate_runtime_role(&fixture.runtime, true)
+                .await
+                .is_err()
+        );
+        sqlx::raw_sql(&format!(
+            "GRANT {privilege} ON TABLE live_ticket_admission_events TO {}",
+            fixture.runtime_role
+        ))
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+    }
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn live_ticket_admission_event_migration_round_trips() {
+    let fixture = Fixture::new().await;
+    sqlx::raw_sql(include_str!(
+        "../migrations/down/0033_live_ticket_admission_events.down.sql"
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    let absent: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('live_ticket_admission_events')::text")
+            .fetch_one(&fixture.migration)
+            .await
+            .unwrap();
+    assert!(absent.is_none());
+    sqlx::raw_sql(include_str!(
+        "../migrations/0033_live_ticket_admission_events.sql"
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    let restored: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('live_ticket_admission_events')::text")
+            .fetch_one(&fixture.migration)
+            .await
+            .unwrap();
+    assert_eq!(restored.as_deref(), Some("live_ticket_admission_events"));
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn extra_true_policy_fails_closed() {
     let fixture = Fixture::new().await;
 
@@ -1030,6 +1553,1037 @@ async fn valid_source_community_policies_pass() {
     rls::validate_runtime_role(&fixture.runtime, true)
         .await
         .unwrap();
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_versions_are_trigger_owned_and_rls_read_only() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    let device = Uuid::new_v4();
+    sqlx::query("INSERT INTO vaults(vault_id,public_key_profile,encrypted_vault_check_header,key_epoch,profile_fingerprint) VALUES($1,'{}',$2,1,$3)")
+        .bind(vault)
+        .bind([1_u8].as_slice())
+        .bind("f".repeat(64))
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+    let initial: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&fixture.migration)
+            .await
+            .unwrap();
+    assert_eq!(
+        initial, 1,
+        "vault creation initializes the version atomically"
+    );
+
+    let mut shadow_runtime = fixture.runtime.begin().await.unwrap();
+    sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+        .bind(vault.to_string())
+        .execute(&mut *shadow_runtime)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TEMP TABLE membership_versions(vault_id uuid, version bigint)")
+        .execute(&mut *shadow_runtime)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO membership_versions VALUES($1, 100)")
+        .bind(vault)
+        .execute(&mut *shadow_runtime)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,'device','{}',$3,1)")
+        .bind(vault)
+        .bind(Uuid::new_v4())
+        .bind("f".repeat(64))
+        .execute(&mut *shadow_runtime)
+        .await
+        .unwrap();
+    let shadow_version: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&mut *shadow_runtime)
+            .await
+            .unwrap();
+    assert_eq!(shadow_version, 100, "temporary shadow is never touched");
+    sqlx::query("DROP TABLE membership_versions")
+        .execute(&mut *shadow_runtime)
+        .await
+        .unwrap();
+    shadow_runtime.commit().await.unwrap();
+    let after_shadow: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&fixture.migration)
+            .await
+            .unwrap();
+    assert_eq!(
+        after_shadow,
+        initial + 1,
+        "real version table is invalidated"
+    );
+
+    let mut runtime = fixture.runtime.begin().await.unwrap();
+    sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+        .bind(vault.to_string())
+        .execute(&mut *runtime)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch,name) VALUES($1,$2,'device','{}',$3,1,'first')")
+        .bind(vault)
+        .bind(device)
+        .bind("f".repeat(64))
+        .execute(&mut *runtime)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES($1,$2,$3)")
+        .bind([2_u8; 32].as_slice())
+        .bind(vault)
+        .bind(device)
+        .execute(&mut *runtime)
+        .await
+        .unwrap();
+    let bumped: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&mut *runtime)
+            .await
+            .unwrap();
+    assert_eq!(
+        bumped,
+        after_shadow + 2,
+        "device and active credential mutations invalidate membership"
+    );
+    sqlx::query("UPDATE devices SET name='renamed' WHERE vault_id=$1 AND device_id=$2")
+        .bind(vault)
+        .bind(device)
+        .execute(&mut *runtime)
+        .await
+        .unwrap();
+    let unchanged: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&mut *runtime)
+            .await
+            .unwrap();
+    assert_eq!(
+        unchanged, bumped,
+        "display-name changes do not invalidate membership"
+    );
+    runtime.commit().await.unwrap();
+
+    let mut forbidden_runtime = fixture.runtime.begin().await.unwrap();
+    sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+        .bind(vault.to_string())
+        .execute(&mut *forbidden_runtime)
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query("UPDATE membership_versions SET version=0 WHERE vault_id=$1")
+            .bind(vault)
+            .execute(&mut *forbidden_runtime)
+            .await
+            .is_err()
+    );
+    forbidden_runtime.rollback().await.unwrap();
+
+    assert!(
+        sqlx::query("UPDATE membership_versions SET version=0 WHERE vault_id=$1")
+            .bind(vault)
+            .execute(&fixture.maintenance)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("ALTER TABLE devices DISABLE TRIGGER devices_invalidate_membership_version")
+            .execute(&fixture.runtime)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("ALTER TABLE devices DISABLE TRIGGER devices_invalidate_membership_version")
+            .execute(&fixture.maintenance)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("TRUNCATE membership_versions")
+            .execute(&fixture.runtime)
+            .await
+            .is_err()
+    );
+
+    sqlx::query(
+        "UPDATE devices SET revoked_at=clock_timestamp() WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(vault)
+    .bind(device)
+    .execute(&fixture.maintenance)
+    .await
+    .unwrap();
+    let after_maintenance: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&fixture.maintenance)
+            .await
+            .unwrap();
+    assert_eq!(
+        after_maintenance,
+        bumped + 1,
+        "BYPASSRLS maintenance still fires triggers"
+    );
+
+    sqlx::query("DELETE FROM device_credentials WHERE vault_id=$1")
+        .bind(vault)
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM devices WHERE vault_id=$1")
+        .bind(vault)
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM vaults WHERE vault_id=$1")
+        .bind(vault)
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&fixture.migration)
+            .await
+            .unwrap();
+    assert_eq!(
+        remaining, 0,
+        "vault cascade removes the version without trigger failures"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn admission_verifier_updates_invalidate_membership() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    sqlx::query("INSERT INTO vaults(vault_id,public_key_profile,encrypted_vault_check_header,key_epoch,profile_fingerprint) VALUES($1,'{}',$2,1,$3)")
+        .bind(vault)
+        .bind([1_u8].as_slice())
+        .bind("f".repeat(64))
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+    let mut runtime = fixture.runtime.begin().await.unwrap();
+    sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+        .bind(vault.to_string())
+        .execute(&mut *runtime)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO vault_admission_keys(vault_id,key_epoch,profile_fingerprint,admission_public_key) VALUES($1,1,$2,$3)")
+        .bind(vault)
+        .bind("f".repeat(64))
+        .bind([2_u8; 32].as_slice())
+        .execute(&mut *runtime)
+        .await
+        .unwrap();
+    let before: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&mut *runtime)
+            .await
+            .unwrap();
+    sqlx::query(
+        "UPDATE vault_admission_keys SET admission_public_key=$2 WHERE vault_id=$1 AND key_epoch=1",
+    )
+    .bind(vault)
+    .bind([3_u8; 32].as_slice())
+    .execute(&mut *runtime)
+    .await
+    .unwrap();
+    let after: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&mut *runtime)
+            .await
+            .unwrap();
+    assert_eq!(after, before + 1);
+    runtime.commit().await.unwrap();
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn cross_vault_credential_rebind_invalidates_both_vaults() {
+    let fixture = Fixture::new().await;
+    let vault_a = Uuid::new_v4();
+    let vault_b = Uuid::new_v4();
+    let device_a = Uuid::new_v4();
+    let device_b = Uuid::new_v4();
+    for (vault, device) in [(vault_a, device_a), (vault_b, device_b)] {
+        sqlx::query("INSERT INTO vaults(vault_id,public_key_profile,encrypted_vault_check_header,key_epoch,profile_fingerprint) VALUES($1,'{}',$2,1,$3)")
+            .bind(vault)
+            .bind([1_u8].as_slice())
+            .bind("f".repeat(64))
+            .execute(&fixture.migration)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,'device','{}',$3,1)")
+            .bind(vault)
+            .bind(device)
+            .bind("f".repeat(64))
+            .execute(&fixture.migration)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES($1,$2,$3)")
+        .bind([4_u8; 32].as_slice())
+        .bind(vault_a)
+        .bind(device_a)
+        .execute(&fixture.maintenance)
+        .await
+        .unwrap();
+    let before_a: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault_a)
+            .fetch_one(&fixture.maintenance)
+            .await
+            .unwrap();
+    let before_b: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault_b)
+            .fetch_one(&fixture.maintenance)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE device_credentials SET vault_id=$2, device_id=$3 WHERE token_digest=$1")
+        .bind([4_u8; 32].as_slice())
+        .bind(vault_b)
+        .bind(device_b)
+        .execute(&fixture.maintenance)
+        .await
+        .unwrap();
+    let after_a: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault_a)
+            .fetch_one(&fixture.maintenance)
+            .await
+            .unwrap();
+    let after_b: i64 =
+        sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+            .bind(vault_b)
+            .fetch_one(&fixture.maintenance)
+            .await
+            .unwrap();
+    assert_eq!(after_a, before_a + 1);
+    assert_eq!(after_b, before_b + 1);
+    fixture.cleanup().await;
+}
+
+#[derive(Clone, Copy)]
+enum Writer {
+    Owner,
+    Runtime,
+}
+
+struct MembershipCase {
+    label: &'static str,
+    writer: Writer,
+    sql: String,
+    bump: i64,
+}
+
+fn vault_insert(vault: Uuid) -> String {
+    format!(
+        "INSERT INTO vaults(vault_id,public_key_profile,encrypted_vault_check_header,key_epoch,profile_fingerprint) \
+         VALUES('{vault}','{{}}',decode('01','hex'),1,repeat('f',64))"
+    )
+}
+
+fn device_insert(vault: Uuid, device: Uuid) -> String {
+    format!(
+        "INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) \
+         VALUES('{vault}','{device}','device','{{}}',repeat('f',64),1)"
+    )
+}
+
+async fn token_in(connection: &mut PgConnection, vault: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT version FROM membership_versions WHERE vault_id=$1")
+        .bind(vault)
+        .fetch_one(connection)
+        .await
+        .unwrap()
+}
+
+impl Fixture {
+    fn writer(&self, writer: Writer) -> &PgPool {
+        match writer {
+            Writer::Owner => &self.migration,
+            Writer::Runtime => &self.runtime,
+        }
+    }
+
+    async fn run_owner(&self, sql: &str) {
+        sqlx::raw_sql(sql).execute(&self.migration).await.unwrap();
+    }
+
+    async fn token(&self, vault: Uuid) -> i64 {
+        let mut connection = self.migration.acquire().await.unwrap();
+        token_in(&mut connection, vault).await
+    }
+
+    /// Commits `sql` as `writer`, scoped to `vault` the way request handlers are.
+    async fn apply(&self, writer: Writer, vault: Uuid, sql: &str) -> Result<(), sqlx::Error> {
+        let mut transaction = self.writer(writer).begin().await?;
+        sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+            .bind(vault.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::raw_sql(sql).execute(&mut *transaction).await?;
+        transaction.commit().await
+    }
+
+    /// Runs `sql` as the owner with the named triggers dropped, returns the token delta, then rolls back.
+    async fn token_delta_without(&self, vault: Uuid, dropped: &[(&str, &str)], sql: &str) -> i64 {
+        let mut transaction = self.migration.begin().await.unwrap();
+        for (trigger, table) in dropped {
+            sqlx::raw_sql(&format!("DROP TRIGGER {trigger} ON {table}"))
+                .execute(&mut *transaction)
+                .await
+                .unwrap();
+        }
+        let before = token_in(&mut transaction, vault).await;
+        sqlx::raw_sql(sql).execute(&mut *transaction).await.unwrap();
+        let after = token_in(&mut transaction, vault).await;
+        transaction.rollback().await.unwrap();
+        after - before
+    }
+
+    /// Each mutation must bump the token exactly as declared, and must not bump
+    /// once its protected trigger is absent. Discrimination runs before the
+    /// committed run so it never observes a state the commit has already changed.
+    async fn assert_protected(
+        &self,
+        vault: Uuid,
+        dropped: &[(&str, &str)],
+        cases: &[MembershipCase],
+    ) {
+        for case in cases {
+            assert_eq!(
+                self.token_delta_without(vault, dropped, &case.sql).await,
+                0,
+                "{}: token must not move without the protected trigger",
+                case.label
+            );
+            let before = self.token(vault).await;
+            self.apply(case.writer, vault, &case.sql)
+                .await
+                .unwrap_or_else(|error| panic!("{}: {error}", case.label));
+            assert_eq!(
+                self.token(vault).await - before,
+                case.bump,
+                "{}: token delta",
+                case.label
+            );
+        }
+    }
+
+    async fn assert_unchanged(&self, vault: Uuid, writer: Writer, label: &str, sql: &str) {
+        let before = self.token(vault).await;
+        self.apply(writer, vault, sql)
+            .await
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+        assert_eq!(self.token(vault).await, before, "{label}");
+    }
+}
+
+#[tokio::test]
+async fn membership_vault_triggers_bump_and_discriminate() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+
+    let mut transaction = fixture.migration.begin().await.unwrap();
+    sqlx::raw_sql("DROP TRIGGER vaults_initialize_membership_version ON vaults")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    sqlx::raw_sql(&vault_insert(vault))
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM membership_versions WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_one(&mut *transaction)
+            .await
+            .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(rows, 0, "without the initializer no token row is created");
+
+    fixture.run_owner(&vault_insert(vault)).await;
+    assert_eq!(
+        fixture.token(vault).await,
+        1,
+        "vault creation initializes the token"
+    );
+
+    fixture
+        .assert_protected(
+            vault,
+            &[("vaults_invalidate_membership_version", "vaults")],
+            &[
+                MembershipCase {
+                    label: "vault profile fingerprint",
+                    writer: Writer::Owner,
+                    sql: format!(
+                        "UPDATE vaults SET profile_fingerprint=repeat('e',64) WHERE vault_id='{vault}'"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "vault check header",
+                    writer: Writer::Owner,
+                    sql: format!(
+                        "UPDATE vaults SET encrypted_vault_check_header=decode('02','hex') WHERE vault_id='{vault}'"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "vault public key profile",
+                    writer: Writer::Owner,
+                    sql: format!(
+                        "UPDATE vaults SET public_key_profile='{{\"epoch\":2}}' WHERE vault_id='{vault}'"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "vault key epoch",
+                    writer: Writer::Owner,
+                    sql: format!("UPDATE vaults SET key_epoch=2 WHERE vault_id='{vault}'"),
+                    bump: 1,
+                },
+            ],
+        )
+        .await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_device_triggers_bump_and_discriminate() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    let device = Uuid::new_v4();
+    let added = Uuid::new_v4();
+    let removed = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault)).await;
+    fixture.run_owner(&device_insert(vault, device)).await;
+    fixture.run_owner(&device_insert(vault, removed)).await;
+
+    fixture
+        .assert_protected(
+            vault,
+            &[("devices_invalidate_membership_version", "devices")],
+            &[
+                MembershipCase {
+                    label: "device insert",
+                    writer: Writer::Runtime,
+                    sql: device_insert(vault, added),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "device role",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "UPDATE devices SET role='gateway' WHERE vault_id='{vault}' AND device_id='{device}'"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "device profile fingerprint",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "UPDATE devices SET profile_fingerprint=repeat('e',64) WHERE vault_id='{vault}' AND device_id='{device}'"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "device revocation",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "UPDATE devices SET revoked_at=clock_timestamp() WHERE vault_id='{vault}' AND device_id='{added}'"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "device delete",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "DELETE FROM devices WHERE vault_id='{vault}' AND device_id='{removed}'"
+                    ),
+                    bump: 1,
+                },
+            ],
+        )
+        .await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_device_credential_triggers_bump_and_discriminate() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    let device = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault)).await;
+    fixture.run_owner(&device_insert(vault, device)).await;
+
+    fixture
+        .assert_protected(
+            vault,
+            &[(
+                "device_credentials_invalidate_membership_version",
+                "device_credentials",
+            )],
+            &[
+                MembershipCase {
+                    label: "credential insert",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES(decode(repeat('02',32),'hex'),'{vault}','{device}')"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "credential digest rotation",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "UPDATE device_credentials SET token_digest=decode(repeat('03',32),'hex') WHERE vault_id='{vault}' AND token_digest=decode(repeat('02',32),'hex')"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "credential revocation",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "UPDATE device_credentials SET revoked_at=clock_timestamp() WHERE vault_id='{vault}' AND token_digest=decode(repeat('03',32),'hex')"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "credential delete",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "DELETE FROM device_credentials WHERE vault_id='{vault}' AND token_digest=decode(repeat('03',32),'hex')"
+                    ),
+                    bump: 1,
+                },
+            ],
+        )
+        .await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_key_profile_triggers_bump_and_discriminate() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault)).await;
+
+    let profile_insert = format!(
+        "INSERT INTO vault_key_profiles(vault_id,key_epoch,public_key_profile,encrypted_vault_check_header,profile_fingerprint) \
+         VALUES('{vault}',2,'{{}}',decode('03','hex'),repeat('e',64))"
+    );
+    fixture
+        .assert_protected(
+            vault,
+            &[(
+                "vault_key_profiles_invalidate_membership_version",
+                "vault_key_profiles",
+            )],
+            &[MembershipCase {
+                label: "key profile insert",
+                writer: Writer::Owner,
+                sql: profile_insert,
+                bump: 1,
+            }],
+        )
+        .await;
+
+    // The immutability guard rejects profile deletion; the membership trigger
+    // must still bump on delete if that guard is ever absent.
+    let profile_delete =
+        format!("DELETE FROM vault_key_profiles WHERE vault_id='{vault}' AND key_epoch=2");
+    let rejected = fixture
+        .apply(Writer::Owner, vault, &profile_delete)
+        .await
+        .expect_err("guarded profile delete must fail");
+    assert!(rejected.to_string().contains("immutable"), "{rejected}");
+    let guard = ("vault_key_profiles_immutable", "vault_key_profiles");
+    let membership = (
+        "vault_key_profiles_invalidate_membership_version",
+        "vault_key_profiles",
+    );
+    assert_eq!(
+        fixture
+            .token_delta_without(vault, &[guard], &profile_delete)
+            .await,
+        1,
+        "profile delete bumps the token when only the guard is absent"
+    );
+    assert_eq!(
+        fixture
+            .token_delta_without(vault, &[guard, membership], &profile_delete)
+            .await,
+        0,
+        "profile delete does not bump the token without the membership trigger"
+    );
+    assert_eq!(
+        fixture.token(vault).await,
+        2,
+        "rejected delete leaves the token unchanged"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_admission_key_triggers_bump_and_discriminate() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault)).await;
+
+    fixture
+        .assert_protected(
+            vault,
+            &[(
+                "vault_admission_keys_invalidate_membership_version",
+                "vault_admission_keys",
+            )],
+            &[
+                MembershipCase {
+                    label: "admission key insert",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "INSERT INTO vault_admission_keys(vault_id,key_epoch,profile_fingerprint,admission_public_key) VALUES('{vault}',1,repeat('f',64),decode(repeat('02',32),'hex'))"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "admission verifier update",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "UPDATE vault_admission_keys SET admission_public_key=decode(repeat('03',32),'hex') WHERE vault_id='{vault}' AND key_epoch=1"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "admission key epoch rebind",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "UPDATE vault_admission_keys SET key_epoch=2 WHERE vault_id='{vault}' AND key_epoch=1"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "admission profile fingerprint rebind",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "UPDATE vault_admission_keys SET profile_fingerprint=repeat('e',64) WHERE vault_id='{vault}' AND key_epoch=2"
+                    ),
+                    bump: 1,
+                },
+                MembershipCase {
+                    label: "admission key delete",
+                    writer: Writer::Runtime,
+                    sql: format!(
+                        "DELETE FROM vault_admission_keys WHERE vault_id='{vault}' AND key_epoch=2"
+                    ),
+                    bump: 1,
+                },
+            ],
+        )
+        .await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_excluded_mutations_leave_token_unchanged() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    let device = Uuid::new_v4();
+    let phone = Uuid::new_v4();
+    let computer = Uuid::new_v4();
+    let recipient = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault)).await;
+    fixture.run_owner(&device_insert(vault, device)).await;
+    fixture
+        .run_owner(&format!(
+            "INSERT INTO vault_key_profiles(vault_id,key_epoch,public_key_profile,encrypted_vault_check_header,profile_fingerprint) \
+             VALUES('{vault}',1,'{{}}',decode('01','hex'),repeat('f',64))"
+        ))
+        .await;
+    let before = fixture.token(vault).await;
+
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Runtime,
+            "device display name",
+            &format!(
+                "UPDATE devices SET name='renamed' WHERE vault_id='{vault}' AND device_id='{device}'"
+            ),
+        )
+        .await;
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Runtime,
+            "device presence insert",
+            &format!(
+                "INSERT INTO device_presence(vault_id,device_id,last_seen_at) VALUES('{vault}','{device}',clock_timestamp())"
+            ),
+        )
+        .await;
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Runtime,
+            "device presence update",
+            &format!(
+                "UPDATE device_presence SET last_seen_at=clock_timestamp() WHERE vault_id='{vault}' AND device_id='{device}'"
+            ),
+        )
+        .await;
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Runtime,
+            "waiting phone invitation create",
+            &format!(
+                "INSERT INTO phone_invitations(id,vault_id,owner_device_id,origin,method,token_digest,owner_transfer_public_key,profile_fingerprint,key_epoch,state,expires_at) \
+                 VALUES('{phone}','{vault}','{device}','https://peppy.test','transfer',decode(repeat('0a',32),'hex'),decode(repeat('0b',32),'hex'),repeat('f',64),1,'waiting',clock_timestamp()+interval '1 hour')"
+            ),
+        )
+        .await;
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Runtime,
+            "waiting phone invitation cleanup",
+            &format!("DELETE FROM phone_invitations WHERE vault_id='{vault}' AND id='{phone}'"),
+        )
+        .await;
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Runtime,
+            "waiting computer enrollment create",
+            &format!(
+                "INSERT INTO computer_enrollments(id,vault_id,owner_device_id,origin,claim_token_digest,server_nonce,recipient_device_id,recipient_kind,recipient_name,recipient_signing_public_key,recipient_transfer_public_key,recipient_credential_digest,recipient_commitment,profile_fingerprint,key_epoch,state,expires_at) \
+                 VALUES('{computer}','{vault}','{device}','https://peppy.test',decode(repeat('0c',32),'hex'),decode(repeat('0d',32),'hex'),'{recipient}','browser','Laptop',decode(repeat('0e',32),'hex'),decode(repeat('0f',32),'hex'),decode(repeat('10',32),'hex'),decode(repeat('11',32),'hex'),repeat('f',64),1,'waiting',clock_timestamp()+interval '1 hour')"
+            ),
+        )
+        .await;
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Runtime,
+            "waiting computer enrollment cleanup",
+            &format!(
+                "DELETE FROM computer_enrollments WHERE vault_id='{vault}' AND id='{computer}'"
+            ),
+        )
+        .await;
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Owner,
+            "key profile activation",
+            &format!(
+                "UPDATE vault_key_profiles SET activated_at=clock_timestamp() WHERE vault_id='{vault}' AND key_epoch=1"
+            ),
+        )
+        .await;
+    fixture
+        .assert_unchanged(
+            vault,
+            Writer::Owner,
+            "vault no-op epoch assignment",
+            &format!("UPDATE vaults SET key_epoch=key_epoch WHERE vault_id='{vault}'"),
+        )
+        .await;
+    assert_eq!(
+        fixture.token(vault).await,
+        before,
+        "excluded mutations never move the token"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_mutations_fail_closed_without_token_row_or_counter() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault)).await;
+    fixture
+        .run_owner(&device_insert(vault, Uuid::new_v4()))
+        .await;
+    let token_before = fixture.token(vault).await;
+
+    let device_mutation = device_insert(vault, Uuid::new_v4());
+    let vault_mutation = format!("UPDATE vaults SET key_epoch=2 WHERE vault_id='{vault}'");
+    let preludes = [
+        (
+            "missing token row",
+            format!("DELETE FROM membership_versions WHERE vault_id='{vault}'"),
+        ),
+        (
+            "exhausted token",
+            format!(
+                "UPDATE membership_versions SET version=9223372036854775807 WHERE vault_id='{vault}'"
+            ),
+        ),
+    ];
+    for (label, prelude) in &preludes {
+        for mutation in [&device_mutation, &vault_mutation] {
+            let mut transaction = fixture.migration.begin().await.unwrap();
+            sqlx::raw_sql(prelude)
+                .execute(&mut *transaction)
+                .await
+                .unwrap();
+            let error = sqlx::raw_sql(mutation)
+                .execute(&mut *transaction)
+                .await
+                .expect_err(label);
+            assert!(
+                error
+                    .to_string()
+                    .contains("membership version missing or exhausted"),
+                "{label}: {error}"
+            );
+            transaction.rollback().await.unwrap();
+        }
+    }
+    assert_eq!(
+        fixture.token(vault).await,
+        token_before,
+        "failed mutations leave the committed token unchanged"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_vault_delete_cascades_children_without_token_errors() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault)).await;
+    fixture
+        .run_owner(&format!(
+            "INSERT INTO vault_admission_keys(vault_id,key_epoch,profile_fingerprint,admission_public_key) \
+             VALUES('{vault}',1,repeat('f',64),decode(repeat('02',32),'hex'))"
+        ))
+        .await;
+    assert_eq!(
+        fixture.token(vault).await,
+        2,
+        "admission child bumped before cascade"
+    );
+
+    fixture
+        .run_owner(&format!("DELETE FROM vaults WHERE vault_id='{vault}'"))
+        .await;
+
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM membership_versions WHERE vault_id=$1) \
+              + (SELECT count(*) FROM vault_admission_keys WHERE vault_id=$1)",
+    )
+    .bind(vault)
+    .fetch_one(&fixture.migration)
+    .await
+    .unwrap();
+    assert_eq!(
+        remaining, 0,
+        "vault delete cascades token and admission children"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_cross_vault_device_move_invalidates_both_vaults() {
+    let fixture = Fixture::new().await;
+    let source = Uuid::new_v4();
+    let destination = Uuid::new_v4();
+    let device = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(source)).await;
+    fixture.run_owner(&vault_insert(destination)).await;
+    fixture.run_owner(&device_insert(source, device)).await;
+    // The device insert trigger creates a retention dependent that blocks the move.
+    fixture
+        .run_owner(&format!(
+            "DELETE FROM attachment_retention_devices WHERE vault_id='{source}' AND device_id='{device}'"
+        ))
+        .await;
+    let source_before = fixture.token(source).await;
+    let destination_before = fixture.token(destination).await;
+
+    fixture
+        .run_owner(&format!(
+            "UPDATE devices SET vault_id='{destination}' WHERE vault_id='{source}' AND device_id='{device}'"
+        ))
+        .await;
+
+    assert_eq!(
+        fixture.token(source).await - source_before,
+        1,
+        "source loses the device"
+    );
+    assert_eq!(
+        fixture.token(destination).await - destination_before,
+        1,
+        "destination gains the device"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn membership_token_is_tenant_scoped_and_not_publicly_executable() {
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(vault)).await;
+    fixture.run_owner(&vault_insert(other)).await;
+
+    let mut transaction = fixture.runtime.begin().await.unwrap();
+    sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+        .bind(vault.to_string())
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let own: i64 = sqlx::query_scalar("SELECT count(*) FROM membership_versions WHERE vault_id=$1")
+        .bind(vault)
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
+    let foreign: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM membership_versions WHERE vault_id=$1")
+            .bind(other)
+            .fetch_one(&mut *transaction)
+            .await
+            .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(own, 1, "runtime reads its own token");
+    assert_eq!(foreign, 0, "runtime cannot read another vault's token");
+
+    let executable: bool = sqlx::query_scalar(
+        "SELECT has_function_privilege('public', 'membership_version_invalidate()', 'EXECUTE') \
+             OR has_function_privilege('public', 'membership_version_initialize()', 'EXECUTE') \
+             OR has_function_privilege($1, 'membership_version_invalidate()', 'EXECUTE') \
+             OR has_function_privilege($1, 'membership_version_initialize()', 'EXECUTE')",
+    )
+    .bind(&fixture.runtime_role)
+    .fetch_one(&fixture.migration)
+    .await
+    .unwrap();
+    assert!(
+        !executable,
+        "token trigger functions are not directly executable by PUBLIC or runtime"
+    );
     fixture.cleanup().await;
 }
 
@@ -1078,4 +2632,148 @@ fn community_migration_revokes_all_prescope_resolvers_from_public() {
 fn role_identifiers_cannot_escape_dynamic_grants() {
     assert!(rls::role_identifier("peppy_runtime").is_ok());
     assert!(rls::role_identifier("peppy_runtime; GRANT ALL").is_err());
+}
+
+#[tokio::test]
+async fn membership_exchange_uses_transaction_local_scope_with_runtime_role() {
+    use futures_util::{SinkExt, StreamExt};
+    use peppy_protocol::{MEMBERSHIP_PROTOCOL_VERSION, MembershipChallengeV1, MembershipControlV1};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{Message, client::IntoClientRequest},
+    };
+
+    async fn text(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> String {
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                Message::Text(value) => return value.to_string(),
+                Message::Ping(value) => socket.send(Message::Pong(value)).await.unwrap(),
+                Message::Pong(_) => {}
+                frame => panic!("expected text frame, got {frame:?}"),
+            }
+        }
+    }
+
+    let fixture = Fixture::new().await;
+    let vault = Uuid::new_v4();
+    let profile = KeyProfile::new(vault, 1).unwrap();
+    let owner = create_owner(
+        &fixture.migration,
+        serde_json::to_value(&profile).unwrap(),
+        vec![9_u8; 48],
+        profile.fingerprint().unwrap(),
+        1,
+    )
+    .await
+    .unwrap();
+    let foreign_vault = Uuid::new_v4();
+    let foreign_profile = KeyProfile::new(foreign_vault, 1).unwrap();
+    let foreign = create_owner(
+        &fixture.migration,
+        serde_json::to_value(&foreign_profile).unwrap(),
+        vec![8_u8; 48],
+        foreign_profile.fingerprint().unwrap(),
+        1,
+    )
+    .await
+    .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = fixture.app().await;
+    let task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let connect = async {
+        loop {
+            let mut request = format!("ws://{address}/v1/live")
+                .into_client_request()
+                .unwrap();
+            request.headers_mut().insert(
+                "authorization",
+                format!("Bearer {}", owner.device_token).parse().unwrap(),
+            );
+            request.headers_mut().insert(
+                "x-peppy-live-capabilities",
+                "membership-version-v1".parse().unwrap(),
+            );
+            match connect_async(request).await {
+                Ok(connected) => break connected,
+                Err(tokio_tungstenite::tungstenite::Error::Http(response))
+                    if response.status() == StatusCode::SERVICE_UNAVAILABLE
+                        && response.body().as_deref()
+                            == Some(br#"{"code":"live_unavailable"}"#) =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("live websocket upgrade failed: {error:?}"),
+            }
+        }
+    };
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(5), connect)
+        .await
+        .expect("PostgreSQL live backend did not become ready");
+    let hello: Value = serde_json::from_str(&text(&mut socket).await).unwrap();
+    assert_eq!(hello["type"], "hello");
+    let MembershipControlV1::Bootstrap(bootstrap) =
+        MembershipControlV1::parse(text(&mut socket).await.as_bytes()).unwrap()
+    else {
+        panic!("runtime role did not return membership bootstrap");
+    };
+    assert!(
+        bootstrap
+            .roster
+            .iter()
+            .any(|device| device.device_id.0 == owner.device_id)
+    );
+    assert!(
+        !bootstrap
+            .roster
+            .iter()
+            .any(|device| device.device_id.0 == foreign.device_id)
+    );
+
+    let challenge = MembershipControlV1::Challenge(MembershipChallengeV1 {
+        r#type: "membership_challenge".into(),
+        version: MEMBERSHIP_PROTOCOL_VERSION,
+        connection_id: bootstrap.connection_id,
+        challenge_id: URL_SAFE_NO_PAD.encode([77_u8; 16]),
+    });
+    socket
+        .send(Message::Text(
+            serde_json::to_string(&challenge).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+    let MembershipControlV1::Response(response) =
+        MembershipControlV1::parse(text(&mut socket).await.as_bytes()).unwrap()
+    else {
+        panic!("runtime role did not return membership response");
+    };
+    assert!(
+        response
+            .roster
+            .iter()
+            .any(|device| device.device_id.0 == owner.device_id)
+    );
+    assert!(
+        !response
+            .roster
+            .iter()
+            .any(|device| device.device_id.0 == foreign.device_id)
+    );
+
+    task.abort();
+    let _ = task.await;
+    fixture.cleanup().await;
 }
