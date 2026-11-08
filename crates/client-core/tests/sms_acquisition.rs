@@ -198,6 +198,25 @@ fn identical_provider_rows_with_distinct_provider_ids_are_preserved() {
 }
 
 #[test]
+fn completed_provider_acquisition_reobservation_is_a_read_only_no_op() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "client", &vault), &vault);
+    let input = provider_input("complete", "same", Some(10), None);
+    let expected = client.begin_sms_acquisition(input.clone()).unwrap();
+    let captured = client
+        .complete_sms_acquisition(&expected.acquisition_id)
+        .unwrap();
+
+    let repeated = client.begin_sms_acquisition(input).unwrap();
+    assert_eq!(repeated.acquisition_id, expected.acquisition_id);
+    assert_eq!(repeated.conversation_id, expected.conversation_id);
+    assert_eq!(repeated.input, expected.input);
+    assert_eq!(repeated.state, SmsAcquisitionState::Complete);
+    assert_eq!(client.messages(captured.conversation_id).unwrap().len(), 1);
+}
+
+#[test]
 fn timestamped_history_is_paginated_by_timestamp_not_arrival_order() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
@@ -688,23 +707,23 @@ fn reconciliation_sweep_discovers_reused_or_decreased_ids_without_resetting_hist
     let config = config(&dir, "client", &vault);
     let client = unlocked(&config, &vault);
     let original = client
-        .begin_sms_acquisition(provider_input("42", "original", Some(100), None))
+        .begin_sms_acquisition(provider_input("242", "original", Some(100), None))
         .unwrap();
     let captured = client
         .complete_sms_acquisition(&original.acquisition_id)
         .unwrap();
     client
-        .plan_sms_scans("install-1", "provider", "42")
+        .plan_sms_scans("install-1", "provider", "242")
         .unwrap();
     client
-        .ack_sms_scan_exhausted("install-1", "provider", true, "42")
+        .ack_sms_scan_exhausted("install-1", "provider", true, "242")
         .unwrap();
 
     // The first sweep is deferred one interval: initial history already observed every row.
     let start = 1_800_000_000_000;
     assert_eq!(
         client
-            .plan_sms_reconciliation_at("install-1", "provider", "42", None, start)
+            .plan_sms_reconciliation_at("install-1", "provider", "242", None, start)
             .unwrap(),
         None
     );
@@ -712,29 +731,29 @@ fn reconciliation_sweep_discovers_reused_or_decreased_ids_without_resetting_hist
         .plan_sms_reconciliation_at(
             "install-1",
             "provider",
-            "42",
+            "242",
             None,
             start + SMS_RECONCILIATION_INTERVAL_MS,
         )
         .unwrap()
         .unwrap();
     assert_eq!(first_sweep.cursor, None);
-    assert_eq!(first_sweep.upper_bound, "42");
-    assert_eq!(first_sweep.history_upper_bound.as_deref(), Some("42"));
+    assert_eq!(first_sweep.upper_bound, "242");
+    assert_eq!(first_sweep.history_upper_bound.as_deref(), Some("242"));
     let replacement = client
-        .begin_sms_acquisition(provider_input("42", "replacement", Some(200), None))
+        .begin_sms_acquisition(provider_input("242", "replacement", Some(200), None))
         .unwrap();
     let replacement_capture = client
         .complete_sms_acquisition(&replacement.acquisition_id)
         .unwrap();
     assert_ne!(captured.message_id, replacement_capture.message_id);
     client
-        .complete_sms_reconciliation("install-1", "provider", "42", Some("42"), true)
+        .complete_sms_reconciliation("install-1", "provider", "242", Some("242"), true)
         .unwrap();
     // A completed sweep does not restart on every pass.
     assert_eq!(
         client
-            .plan_sms_reconciliation("install-1", "provider", "42", None)
+            .plan_sms_reconciliation("install-1", "provider", "242", None)
             .unwrap(),
         None
     );
