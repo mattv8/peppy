@@ -1557,6 +1557,93 @@ async fn valid_source_community_policies_pass() {
 }
 
 #[tokio::test]
+async fn column_privilege_drift_is_detected_and_repaired_by_grants() {
+    let fixture = Fixture::new().await;
+
+    sqlx::query(&format!(
+        "GRANT UPDATE (version) ON membership_versions TO {}",
+        fixture.runtime_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    assert!(matches!(
+        rls::validate_runtime_role(&fixture.runtime, true).await,
+        Err(rls::RlsError::UnsafeRuntimeRole(
+            "membership version grant is missing or unsafe"
+        ))
+    ));
+    rls::grant_runtime_privileges(&fixture.migration, &fixture.runtime_role)
+        .await
+        .unwrap();
+    rls::validate_runtime_role(&fixture.runtime, true)
+        .await
+        .unwrap();
+
+    sqlx::query(&format!(
+        "GRANT UPDATE (key_epoch) ON vault_identity_establishments TO {}",
+        fixture.runtime_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    assert!(matches!(
+        rls::validate_runtime_role(&fixture.runtime, true).await,
+        Err(rls::RlsError::UnsafeRuntimeRole(
+            "vault identity grant is missing or unsafe"
+        ))
+    ));
+    rls::grant_runtime_privileges(&fixture.migration, &fixture.runtime_role)
+        .await
+        .unwrap();
+    rls::validate_runtime_role(&fixture.runtime, true)
+        .await
+        .unwrap();
+
+    sqlx::query(&format!(
+        "GRANT INSERT (recovery_record) ON vault_identity_establishments TO {}",
+        fixture.maintenance_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    assert!(matches!(
+        rls::validate_maintenance_role(&fixture.maintenance).await,
+        Err(rls::RlsError::UnsafeMaintenanceRole(
+            "vault identity grant is unsafe"
+        ))
+    ));
+    rls::grant_maintenance_privileges(&fixture.migration, &fixture.maintenance_role)
+        .await
+        .unwrap();
+    rls::validate_maintenance_role(&fixture.maintenance)
+        .await
+        .unwrap();
+
+    sqlx::query(&format!(
+        "GRANT UPDATE (version) ON membership_versions TO {}",
+        fixture.maintenance_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    assert!(matches!(
+        rls::validate_maintenance_role(&fixture.maintenance).await,
+        Err(rls::RlsError::UnsafeMaintenanceRole(
+            "membership version grant is unsafe"
+        ))
+    ));
+    rls::grant_maintenance_privileges(&fixture.migration, &fixture.maintenance_role)
+        .await
+        .unwrap();
+    rls::validate_maintenance_role(&fixture.maintenance)
+        .await
+        .unwrap();
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn membership_versions_are_trigger_owned_and_rls_read_only() {
     let fixture = Fixture::new().await;
     let vault = Uuid::new_v4();

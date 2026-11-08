@@ -350,7 +350,7 @@ pub async fn validate_runtime_role(pool: &PgPool, community: bool) -> Result<(),
 
 async fn validate_membership_version_runtime_privileges(pool: &PgPool) -> Result<(), RlsError> {
     let safe: bool = sqlx::query_scalar(
-        "SELECT relrowsecurity AND NOT relforcerowsecurity AND has_table_privilege(current_user, oid, 'SELECT') AND NOT has_table_privilege(current_user, oid, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = $1",
+        "SELECT relrowsecurity AND NOT relforcerowsecurity AND has_table_privilege(current_user, oid, 'SELECT') AND NOT has_table_privilege(current_user, oid, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') AND NOT has_any_column_privilege(current_user, oid, 'INSERT, UPDATE, REFERENCES') FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = $1",
     )
     .bind(MEMBERSHIP_VERSION_TABLE)
     .fetch_optional(pool)
@@ -366,7 +366,7 @@ async fn validate_membership_version_runtime_privileges(pool: &PgPool) -> Result
 
 async fn validate_vault_identity_runtime_privileges(pool: &PgPool) -> Result<(), RlsError> {
     let safe: bool = sqlx::query_scalar(
-        "SELECT relrowsecurity AND NOT relforcerowsecurity AND has_table_privilege(current_user, oid, 'SELECT') AND has_table_privilege(current_user, oid, 'INSERT') AND NOT has_table_privilege(current_user, oid, 'UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = $1",
+        "SELECT relrowsecurity AND NOT relforcerowsecurity AND has_table_privilege(current_user, oid, 'SELECT') AND has_table_privilege(current_user, oid, 'INSERT') AND NOT has_table_privilege(current_user, oid, 'UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') AND NOT has_any_column_privilege(current_user, oid, 'UPDATE, REFERENCES') FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = $1",
     )
     .bind(VAULT_IDENTITY_TABLE)
     .fetch_optional(pool)
@@ -657,7 +657,7 @@ pub async fn validate_maintenance_role(pool: &PgPool) -> Result<(), RlsError> {
 
 async fn validate_membership_version_maintenance_privileges(pool: &PgPool) -> Result<(), RlsError> {
     let safe: bool = sqlx::query_scalar(
-        "SELECT has_table_privilege(current_user, 'membership_versions', 'SELECT') AND NOT has_table_privilege(current_user, 'membership_versions', 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')",
+        "SELECT has_table_privilege(current_user, 'membership_versions', 'SELECT') AND NOT has_table_privilege(current_user, 'membership_versions', 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') AND NOT has_any_column_privilege(current_user, 'membership_versions', 'INSERT, UPDATE, REFERENCES')",
     )
     .fetch_one(pool)
     .await?;
@@ -671,7 +671,7 @@ async fn validate_membership_version_maintenance_privileges(pool: &PgPool) -> Re
 
 async fn validate_vault_identity_maintenance_privileges(pool: &PgPool) -> Result<(), RlsError> {
     let safe: bool = sqlx::query_scalar(
-        "SELECT has_table_privilege(current_user, $1, 'SELECT') AND NOT has_table_privilege(current_user, $1, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')",
+        "SELECT has_table_privilege(current_user, $1, 'SELECT') AND NOT has_table_privilege(current_user, $1, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') AND NOT has_any_column_privilege(current_user, $1, 'INSERT, UPDATE, REFERENCES')",
     )
     .bind(VAULT_IDENTITY_TABLE)
     .fetch_one(pool)
