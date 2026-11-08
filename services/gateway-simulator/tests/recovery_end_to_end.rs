@@ -329,6 +329,7 @@ async fn start_router(fixture: &ComposeFixture, migrate: bool) -> RouterRuntime 
         mcp_worker_url: None,
         mcp_worker_token_file: None,
         web_client: None,
+        web_live_trusted_origin: None,
     };
     let pool = PgPoolOptions::new()
         .max_connections(5)
@@ -404,7 +405,7 @@ fn core_client(root: &Path, name: &str, vault: &VaultFixture, device_id: DeviceI
 }
 
 fn route(gateway_device_id: DeviceId) -> GatewayRoute {
-    GatewayRoute {
+    GatewayRoute::Carrier {
         gateway_device_id,
         subscription_id: "recovery-sim-1".into(),
     }

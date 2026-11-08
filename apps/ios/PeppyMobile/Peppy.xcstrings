@@ -1,6 +1,56 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "peppy.typing_indicator_direct": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Typing"
+          }
+        }
+      }
+    },
+    "peppy.typing_indicator_group": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Someone is typing"
+          }
+        }
+      }
+    },
+    "peppy.typing_announce_direct": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The other person is typing"
+          }
+        }
+      }
+    },
+    "peppy.typing_share_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show others when I am typing"
+          }
+        }
+      }
+    },
+    "peppy.typing_share_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In chats that use your Google Messages link, the other person sees that you are typing. Their view may take a few seconds to clear after you stop."
+          }
+        }
+      }
+    },
     "peppy.toggle_android_account_loading": {
       "localizations": {
         "en": {
@@ -1051,6 +1101,106 @@
         }
       }
     },
+    "peppy.about_license_agpl_3_0": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GNU Affero General Public License v3.0"
+          }
+        }
+      }
+    },
+    "peppy.about_license_mpl_2_0": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mozilla Public License 2.0"
+          }
+        }
+      }
+    },
+    "peppy.about_license_google_messages": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Messages link notices"
+          }
+        }
+      }
+    },
+    "peppy.about_license_google_messages_exceptions": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Messages link license exceptions"
+          }
+        }
+      }
+    },
+    "peppy.about_license_google_uuid": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "google/uuid — BSD 3-Clause License"
+          }
+        }
+      }
+    },
+    "peppy.about_license_go_x_and_mobile": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Go x/mobile and x modules — BSD 3-Clause License"
+          }
+        }
+      }
+    },
+    "peppy.about_license_google_protobuf": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Protocol Buffers — BSD 3-Clause License"
+          }
+        }
+      }
+    },
+    "peppy.about_license_go_colorable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "go-colorable — MIT License"
+          }
+        }
+      }
+    },
+    "peppy.about_license_go_isatty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "go-isatty — MIT License"
+          }
+        }
+      }
+    },
+    "peppy.about_license_zerolog": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "zerolog — MIT License"
+          }
+        }
+      }
+    },
     "peppy.about_loading": {
       "localizations": {
         "en": {
@@ -1316,7 +1466,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This can copy only messages the phone provider exposes. Peppy cannot grant this access. If it is not allowed, copy the command and run it with external Android Debug Bridge (adb). It does not add RCS sending support. Replies still use SMS or MMS. Phone and app versions can expose only some RCS content."
+            "value": "This can copy only messages the phone provider exposes. Peppy cannot grant this access. If it is not allowed, copy the command and run it with external Android Debug Bridge (adb). It does not change how replies are sent. Phone and app versions can expose only some RCS content."
           }
         }
       }
@@ -1436,7 +1586,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Recover RCS and MMS content your messaging app restricts. Peppy cannot send RCS."
+            "value": "Recover RCS and MMS content your messaging app restricts. This does not change how replies are sent."
           }
         }
       }
@@ -1606,7 +1756,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Peppy does not become your default messaging app. This does not add RCS sending or guarantee any message history. Replies still use SMS or MMS."
+            "value": "Peppy does not become your default messaging app. This does not change how replies are sent or guarantee any message history."
           }
         }
       }
@@ -2831,6 +2981,16 @@
         }
       }
     },
+    "peppy.setting_update_error": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not update this setting. Try again."
+          }
+        }
+      }
+    },
     "peppy.toggle_android_phone_read_access_denied": {
       "localizations": {
         "en": {
@@ -3016,7 +3176,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "iOS cannot capture or send carrier SMS/MMS. Use an Android phone for carrier messaging. RCS is unavailable."
+            "value": "iOS cannot capture or send carrier SMS/MMS. Use an Android phone for carrier messaging. This iPhone cannot send or receive RCS."
           }
         }
       }
@@ -3231,16 +3391,6 @@
         }
       }
     },
-    "peppy.help_android_messaging_limits": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "MMS messages sync after the phone finishes downloading them and uploading encrypted copies.\n\nRCS requires a verified carrier or OEM integration and is not available in this build.\n\nAndroid can delay background sync in Doze or battery saver. Force-stopping Peppy pauses capture until you open it again. Some one-time-code texts may not reach companion apps."
-          }
-        }
-      }
-    },
     "peppy.help_android_mms_capture": {
       "localizations": {
         "en": {
@@ -3296,7 +3446,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Best effort. Messages you read in your phone's messaging app are marked read in Peppy, including after time away. SMS always counts; MMS counts when MMS sync is on. This needs SMS sync and SMS read access. Reading an SMS in Peppy can also mark it read on your phone, which needs notification access and Android 9 or later. Peppy never marks messages unread. RCS conversations are stored privately by your messaging app and cannot be read by Peppy. When marking SMS read on your phone, Peppy skips ambiguous or unseen conversations, and pending phone attempts expire after one day."
+            "value": "Best effort. Messages you read in your phone's messaging app are marked read in Peppy, including after time away. SMS always counts; MMS counts when MMS sync is on. This needs SMS sync and SMS read access. Reading an SMS in Peppy can also mark it read on your phone, which needs notification access and Android 9 or later. Peppy never marks messages unread. This setting covers SMS and MMS only. It does not track RCS conversations in your messaging app. When marking SMS read on your phone, Peppy skips ambiguous or unseen conversations, and pending phone attempts expire after one day."
           }
         }
       }
@@ -3981,6 +4131,1066 @@
         }
       }
     },
+    "peppy.google_messages_link_notif_channel_name": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Messages link"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notif_channel_desc": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Shows while Peppy keeps the Google Messages link connected."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notif_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Messages link"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notif_text_pairing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for you to confirm on this phone."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notif_text_connected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connected."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notif_text_phone_not_responding": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone not responding."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notif_text_reconnecting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reconnecting…"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notif_text_attention": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The link needs attention. Open Peppy."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_replaces_browser": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linking replaces any Messages for Web browser session you keep open on this account."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_signin_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in to Google"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_signin_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading Google sign-in…"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_signin_blocked_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google may refuse sign-in in an app."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_signin_blocked_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google blocked sign-in"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_signin_load_error": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not load Google's sign-in page. Check your connection and try again."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_confirm_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish linking"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_confirm_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You are signed in. Nothing is saved if you cancel."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_confirm_check_only_phone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only this phone has Google Messages on this account"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_confirm_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Link this phone"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_confirm_not_ready": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy cannot start linking right now. Close this screen and check the link in Settings."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Messages link"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking the link…"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_load_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy could not read the link status."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_working": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Working…"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_dismiss": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Got it"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_status_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Status"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_status_unlinked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not linked"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_status_pairing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linking…"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_status_linked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linked"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_status_needs_relink": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Needs re-link"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_status_signed_out": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Signed out"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_status_unreadable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cannot read link data"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_unlinked_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Link Peppy to Google Messages on this phone. Peppy can then use Google Messages for chats that support it. Peppy does not become your messaging app."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_action_link": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Link Google Messages"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_start_blocked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy could not clear old sign-in data, so it cannot start. Close and reopen Peppy, then try again."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_pairing_connecting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connecting to Google. This can take a few seconds."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_pairing_emoji_instruction": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Google Messages on this phone and tap this emoji."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_pairing_emoji_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy waits until you confirm. Tapping a different emoji stops the link."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_linked_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy keeps a connection to Google Messages open on this phone, so it can use Google Messages for chats that support it. Your Google sign-in stays on this phone."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_connection_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connection"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_connection_connected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connected"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_connection_phone_not_responding": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone not responding"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_connection_unconfirmed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not confirmed"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_connection_not_running": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not connected"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_remote_help_attention": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Peppy on that phone, find Google Messages link, and follow the steps there."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_remote_help_unresponsive": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make sure that phone is online and Google Messages is not stopped."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_remote_help_unconfirmed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy has not had a recent answer from the link on that phone. Some chats may wait to send until it does."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_help_phone_not_responding": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Messages on this phone is not answering. Make sure the phone is online and Google Messages is not stopped, then tap Check now."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_help_unconfirmed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy has not confirmed a working connection yet. Tap Check now."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_help_not_running": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy is not holding the connection right now. It tries again by itself, or tap Reconnect."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_last_ok_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last answer from Google Messages"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_last_ok_never": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not yet"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_action_check_now": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check now"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_checking": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking…"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_check_ok": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check passed. Google Messages answered."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_check_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check failed. Google Messages did not answer. Peppy keeps trying."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_action_reconnect": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reconnect"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_action_unlink": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlink"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_action_relink": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Re-link"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_action_sign_in_again": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in again"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_action_remove_local": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove link from this phone"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_action_reset": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reset link"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_needs_relink_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Messages ended this connection. Re-link to continue. You do not need to sign in again, but you will confirm an emoji."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_signed_out_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google ended this sign-in, so Peppy deleted its saved sign-in. This can happen if you removed the link in Google Messages or changed your Google account. Sign in again to link."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_unreadable_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy cannot read the link it saved on this phone. This can happen after a security change on the phone. Reset the link to start over."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_battery_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep the link running"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_battery_subtitle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android may stop the link when Peppy is in the background. Set Peppy to Unrestricted to help keep it connected."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_battery_sheet_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android can pause Peppy when it is not on screen, which can break the link. Open the battery list, choose Peppy and set it to Unrestricted. Peppy does not change this for you. Names vary by phone maker. This may reduce breaks but does not guarantee the link stays connected."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notifications_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notifications are off. The link still runs, but Android hides its ongoing notification."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_consent_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Link Google Messages?"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_consent_p_signin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy opens Google's sign-in page here in the app. You type your password into Google's page, not into Peppy."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_consent_p_storage": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy keeps the sign-in only on this phone, encrypted with a key in Android's secure storage. It is never sent to Peppy's server."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_consent_p_account": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use the Google account that you use in Google Messages on this phone."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_consent_p_emoji": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Then Google Messages asks you to tap a matching emoji on this phone. Peppy shows the emoji."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_consent_p_notification": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy keeps the link open with an ongoing notification. Android may ask to allow notifications. If you say no, linking still works but you will not see the notification."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_consent_p_browser": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linking replaces any Messages for Web browser session you keep open on this account."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_consent_p_scope": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linking lets Peppy use Google Messages on this phone for chats that support it. Peppy may send and receive messages in those chats through Google Messages. They pass through Google as they do in Google Messages, and Peppy syncs them to your other Peppy devices like your other messages. Peppy does not become your messaging app."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_consent_p_remove": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You can unlink any time here, or remove the device in Google Messages under Device pairing."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_consent_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "I understand, continue"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_relink_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Re-link Google Messages?"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_relink_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy asks Google to pair again using the sign-in it saved. You confirm an emoji in Google Messages on this phone."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_relink_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Re-link"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_unlink_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlink Google Messages?"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_unlink_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy asks Google to remove this link, then deletes its saved link data from this phone and stops connecting. You can link again later."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_unlink_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlink"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_remove_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove the link from this phone?"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_remove_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy deletes its saved link data from this phone and stops connecting. It does not tell Google, so the link may stay listed in Google Messages."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_remove_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove from this phone"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_reset_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reset the link?"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_reset_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy cannot read the saved link, so it cannot ask Google to remove it. Resetting deletes the unreadable data from this phone. It does not tell Google."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_reset_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reset link"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_manual_removal_steps": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "To remove it yourself, open Google Messages, then Device pairing, and remove the device you linked with Peppy. Keep any devices you still use."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_removed_local": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy deleted the link data from this phone. If the link is still listed in Google Messages, remove it there under Device pairing."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_unlink_remote_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy deleted its link data, but Google did not confirm the unlink. The link may still be listed in Google Messages. Remove it under Device pairing."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_unknown": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linking stopped. Try again."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_pair_no_phone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google did not find a phone with Google Messages on this account. Make sure Google Messages is set up on this phone with the same Google account, then try again."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_pair_multiple_phones": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "More than one phone uses Google Messages with this account, so Peppy did not link. Stop using it on the other phone, then try again."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_pair_wrong_emoji": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That was not the matching emoji, so linking stopped. Start again and tap the emoji Peppy shows."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_pair_cancelled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linking was cancelled."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_pair_timeout": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linking took too long, so Peppy stopped. Start again and confirm the emoji sooner."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_account_mismatch": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You signed in with a different Google account than the one Google Messages uses on this phone. Sign in again with that account."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_pair_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linking did not finish. Nothing was saved. Try again."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_relink_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Re-linking did not finish. Try again, or remove the link from this phone and link again."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_persist_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy could not save the link data on this phone, so it stopped. Close and reopen Peppy. If this keeps happening, unlink and link again."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_signin_blocked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google blocked sign-in in this app. Peppy cannot get around that, so it cannot link this phone right now. Try again later."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_signin_incomplete": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign-in did not finish, so nothing was saved. Try again."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_unlinked_done": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlinked. Peppy deleted its link data from this phone."
+          }
+        }
+      }
+    },
     "peppy.remote_messaging_notifications_disabled": {
       "localizations": {
         "en": {
@@ -4056,7 +5266,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Peppy can keep read status in step between your phone's messaging app and Peppy.\n\nFrom your phone: when you read an SMS or downloaded MMS in your messaging app, Peppy marks that one message read in Peppy and on your other devices. This only reads the message's read flag. It does not change your phone's messages, and dismissing a notification does not count as reading. It also catches up after time away, but only for messages Peppy already captured and still shows as unread. It needs SMS sync and SMS read access, and MMS needs MMS sync. Notification access is not needed. RCS messages are kept privately by your messaging app and cannot be read by Peppy.\n\nFrom Peppy: when you read an SMS in Peppy, Peppy can ask your phone's messaging app to use its own mark-read action. This is best effort, covers SMS only, and needs notification access and Android 9 or later. It updates the messaging app's read status for the whole conversation, and a message arriving at that moment or RCS messages Peppy cannot inspect may also be marked read. It acts only when exact message-time evidence is unambiguous; time is not a guaranteed conversation identity. Notification access can see all notifications, but this path inspects only the current default messaging app. Older reads in Peppy are not sent to your phone.\n\nRead status syncs encrypted through your configured server to your authorized devices, like your other messages. Peppy never marks messages unread."
+            "value": "Peppy can keep read status in step between your phone's messaging app and Peppy.\n\nFrom your phone: when you read an SMS or downloaded MMS in your messaging app, Peppy marks that one message read in Peppy and on your other devices. This only reads the message's read flag. It does not change your phone's messages, and dismissing a notification does not count as reading. It also catches up after time away, but only for messages Peppy already captured and still shows as unread. It needs SMS sync and SMS read access, and MMS needs MMS sync. Notification access is not needed. This covers SMS and MMS only. It does not track RCS messages in your messaging app.\n\nFrom Peppy: when you read an SMS in Peppy, Peppy can ask your phone's messaging app to use its own mark-read action. This is best effort, covers SMS only, and needs notification access and Android 9 or later. It updates the messaging app's read status for the whole conversation, and a message arriving at that moment, or an RCS message this setting does not track, may also be marked read. It acts only when exact message-time evidence is unambiguous; time is not a guaranteed conversation identity. Notification access can see all notifications, but this path inspects only the current default messaging app. Older reads in Peppy are not sent to your phone.\n\nRead status syncs encrypted through your configured server to your authorized devices, like your other messages. Peppy never marks messages unread."
           }
         }
       }
@@ -4507,16 +5717,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Carrier messaging is unavailable on this device"
-          }
-        }
-      }
-    },
-    "peppy.rcs_unavailable": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "RCS is unavailable"
           }
         }
       }

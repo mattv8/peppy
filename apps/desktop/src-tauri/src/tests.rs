@@ -12,11 +12,17 @@ use crate::{
     session::{open_session, DraftInput, Notifier, Session},
 };
 use peppy_client_core::{
-    ComposeDraftUpdate, DeviceId, Direction, GatewayRoute, IncomingSms, KeyProfile,
-    MmsAcquisitionInput, MmsSource, OutgoingSms, Transport, VaultCheckHeader,
+    Client, ClientConfig, ComposeDraftUpdate, Cursor, DatabaseKey, DeviceId, Direction,
+    GatewayRoute, IncomingSms, KeyProfile, MmsAcquisitionInput, MmsSource, OutgoingSms,
+    RcsCapabilityState, RcsEligibility, RcsEligibilityProjection, RcsLinkStatusEvent, Transport,
+    VaultCheckHeader,
 };
 use peppy_crypto::{create_vault_check_header, derive_root_key};
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[test]
 fn restart_marker_preserves_visible_windows_and_backgrounds_hidden_windows() {
@@ -200,6 +206,371 @@ pub(crate) fn gateway(id: &str, sms: bool, mms: bool) -> GatewayView {
         mms_limit_source: mms.then_some("fallback".into()),
         mms_max_recipients: mms.then_some(20),
     }
+}
+
+#[test]
+fn native_snapshot_projects_current_rcs_only_for_the_selected_existing_conversation() {
+    let fixture = fixture();
+    let session = open(&fixture, &fixture.binding, &[]);
+    unlock(&session, &fixture);
+    let conversation = session
+        .client
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "+15555550101".into(),
+            body: "message".into(),
+            provider_message_id: Some("rcs-snapshot".into()),
+            imported: false,
+        })
+        .unwrap()
+        .conversation_id;
+    let gateway_id = uuid::Uuid::new_v4().to_string();
+    let gateway_device_id = gateway_id.parse().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap();
+    let gateway_dir = tempfile::tempdir().unwrap();
+    let gateway_client = Client::open(
+        ClientConfig {
+            database_path: gateway_dir.path().join("gateway.db"),
+            vault_id: fixture.binding.vault_id.parse().unwrap(),
+            device_id: gateway_device_id,
+        },
+        DatabaseKey::new(&[3; 32]).unwrap(),
+    )
+    .unwrap();
+    gateway_client
+        .unlock(&fixture.profile, &fixture.header, PHRASE)
+        .unwrap();
+    gateway_client
+        .publish_rcs_capability(
+            &RcsLinkStatusEvent {
+                gateway_device_id,
+                state: RcsCapabilityState::Linked,
+                availability: true,
+                health: true,
+                phone_responsive: true,
+                observed_at_ms: now,
+                capability_revision: 1,
+                feature_bits: 1,
+                linked_since_ms: Some(now),
+            },
+            &[RcsEligibilityProjection {
+                conversation_id: conversation,
+                eligibility: RcsEligibility::Eligible,
+                feature_bits: 1,
+                mapping_revision: 1,
+                observed_at_ms: now,
+                gateway_device_id,
+            }],
+            now,
+        )
+        .unwrap();
+    for (index, envelope) in gateway_client.pending_outbox().unwrap().iter().enumerate() {
+        session
+            .client
+            .ingest(envelope, Cursor(index as u64 + 1))
+            .unwrap();
+    }
+    session.client.apply_pending(100).unwrap();
+    let mut gateway_view = gateway(&gateway_id, true, false);
+    gateway_view.simulated = false;
+    session.set_status(|status| {
+        status.gateways = vec![gateway_view];
+    });
+    let outbox_before_snapshot = session.client.pending_outbox_count().unwrap();
+
+    let cached_snapshot = session
+        .snapshot(
+            Some(&conversation.to_string()),
+            None,
+            crate::head(),
+            None,
+            Default::default(),
+        )
+        .unwrap()
+        .0;
+    assert!(cached_snapshot.rcs_status.is_none());
+
+    let active_roster = serde_json::json!({"devices":[
+        {"device_id":fixture.binding.device_id,"role":"device","revoked":false},
+        {"device_id":gateway_id,"role":"gateway","revoked":false}
+    ]});
+    let active_capabilities = serde_json::json!({"capabilities":[{
+        "device_id":gateway_id,"simulator":false,
+        "capabilities":{"sims":[{"subscription_id":"sim-1","sms":"available","mms":"unavailable"}]}
+    }]});
+    crate::sync::apply_gateway_refresh(
+        &session,
+        &serde_json::from_value(active_roster).unwrap(),
+        &serde_json::from_value(active_capabilities.clone()).unwrap(),
+    );
+
+    let snapshot = session
+        .snapshot(
+            Some(&conversation.to_string()),
+            None,
+            crate::head(),
+            None,
+            Default::default(),
+        )
+        .unwrap()
+        .0;
+    let rcs = snapshot.rcs_status.unwrap();
+    assert_eq!(rcs.gateways[0].gateway_id, gateway_id);
+    assert_eq!(
+        rcs.eligibilities[0].conversation_id,
+        conversation.to_string()
+    );
+    assert_eq!(
+        rcs.eligibilities[0].eligibility,
+        peppy_desktop_api::RcsEligibilityState::Eligible
+    );
+
+    let missing_self = serde_json::json!({"devices":[
+        {"device_id":gateway_id,"role":"gateway","revoked":false}
+    ]});
+    crate::sync::apply_gateway_refresh(
+        &session,
+        &serde_json::from_value(missing_self).unwrap(),
+        &serde_json::from_value(active_capabilities.clone()).unwrap(),
+    );
+    assert!(session
+        .snapshot(
+            Some(&conversation.to_string()),
+            None,
+            crate::head(),
+            None,
+            Default::default()
+        )
+        .unwrap()
+        .0
+        .rcs_status
+        .is_none());
+
+    let revoked_self = serde_json::json!({"devices":[
+        {"device_id":fixture.binding.device_id,"role":"device","revoked":true},
+        {"device_id":gateway_id,"role":"gateway","revoked":false}
+    ]});
+    crate::sync::apply_gateway_refresh(
+        &session,
+        &serde_json::from_value(revoked_self).unwrap(),
+        &serde_json::from_value(active_capabilities.clone()).unwrap(),
+    );
+    assert!(session
+        .snapshot(
+            Some(&conversation.to_string()),
+            None,
+            crate::head(),
+            None,
+            Default::default()
+        )
+        .unwrap()
+        .0
+        .rcs_status
+        .is_none());
+
+    let revoked_gateway = serde_json::json!({"devices":[
+        {"device_id":fixture.binding.device_id,"role":"device","revoked":false},
+        {"device_id":gateway_id,"role":"gateway","revoked":true}
+    ]});
+    crate::sync::apply_gateway_refresh(
+        &session,
+        &serde_json::from_value(revoked_gateway).unwrap(),
+        &serde_json::from_value(active_capabilities).unwrap(),
+    );
+    assert!(session
+        .snapshot(
+            Some(&conversation.to_string()),
+            None,
+            crate::head(),
+            None,
+            Default::default()
+        )
+        .unwrap()
+        .0
+        .rcs_status
+        .is_none());
+    let active_roster = serde_json::json!({"devices":[
+        {"device_id":fixture.binding.device_id,"role":"device","revoked":false},
+        {"device_id":gateway_id,"role":"gateway","revoked":false}
+    ]});
+    let active_capabilities = serde_json::json!({"capabilities":[{
+        "device_id":gateway_id,"simulator":false,
+        "capabilities":{"sims":[{"subscription_id":"sim-1","sms":"available","mms":"unavailable"}]}
+    }]});
+    crate::sync::apply_gateway_refresh(
+        &session,
+        &serde_json::from_value(active_roster).unwrap(),
+        &serde_json::from_value(active_capabilities).unwrap(),
+    );
+    for invalid_conversation in [
+        uuid::Uuid::new_v4().to_string(),
+        "not-a-conversation".into(),
+    ] {
+        let snapshot = session
+            .snapshot(
+                Some(&invalid_conversation),
+                None,
+                crate::head(),
+                None,
+                Default::default(),
+            )
+            .unwrap()
+            .0;
+        assert!(snapshot.rcs_status.unwrap().eligibilities.is_empty());
+    }
+    assert_eq!(
+        session.client.pending_outbox_count().unwrap(),
+        outbox_before_snapshot
+    );
+}
+
+#[test]
+fn native_snapshot_does_not_project_rcs_eligibility_for_an_implicit_draft_only_selection() {
+    let fixture = fixture();
+    let session = open(&fixture, &fixture.binding, &[]);
+    unlock(&session, &fixture);
+    let draft = session
+        .save_draft(&input("new", "", "draft", &["+15555550101"], "0"))
+        .unwrap();
+    let conversation = draft.conversation_id.parse().unwrap();
+    let gateway_id = fixture.binding.device_id.clone();
+    let gateway_device_id = gateway_id.parse().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap();
+    session
+        .client
+        .publish_rcs_capability(
+            &RcsLinkStatusEvent {
+                gateway_device_id,
+                state: RcsCapabilityState::Linked,
+                availability: true,
+                health: true,
+                phone_responsive: true,
+                observed_at_ms: now,
+                capability_revision: 1,
+                feature_bits: 1,
+                linked_since_ms: Some(now),
+            },
+            &[RcsEligibilityProjection {
+                conversation_id: conversation,
+                eligibility: RcsEligibility::Eligible,
+                feature_bits: 1,
+                mapping_revision: 1,
+                observed_at_ms: now,
+                gateway_device_id,
+            }],
+            now,
+        )
+        .unwrap();
+    let mut gateway_view = gateway(&gateway_id, true, false);
+    gateway_view.simulated = false;
+    session.set_status(|status| {
+        status.gateways = vec![gateway_view];
+        status.rcs_roster_validated = true;
+    });
+    let outbox_before_snapshot = session.client.pending_outbox_count().unwrap();
+
+    let snapshot = session
+        .snapshot(None, None, crate::head(), None, Default::default())
+        .unwrap()
+        .0;
+
+    assert!(snapshot.rcs_status.unwrap().eligibilities.is_empty());
+    assert_eq!(
+        session.client.pending_outbox_count().unwrap(),
+        outbox_before_snapshot
+    );
+}
+
+#[test]
+fn native_snapshot_hides_rcs_status_unless_encryption_is_displayed_unlocked() {
+    let fixture = fixture();
+    let session = open(&fixture, &fixture.binding, &[]);
+    unlock(&session, &fixture);
+    let draft = session
+        .save_draft(&input("new", "", "draft", &["+15555550101"], "0"))
+        .unwrap();
+    let conversation = draft.conversation_id.parse().unwrap();
+    let gateway_id = fixture.binding.device_id.clone();
+    let gateway_device_id = gateway_id.parse().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap();
+    session
+        .client
+        .publish_rcs_capability(
+            &RcsLinkStatusEvent {
+                gateway_device_id,
+                state: RcsCapabilityState::Linked,
+                availability: true,
+                health: true,
+                phone_responsive: true,
+                observed_at_ms: now,
+                capability_revision: 1,
+                feature_bits: 1,
+                linked_since_ms: Some(now),
+            },
+            &[RcsEligibilityProjection {
+                conversation_id: conversation,
+                eligibility: RcsEligibility::Eligible,
+                feature_bits: 1,
+                mapping_revision: 1,
+                observed_at_ms: now,
+                gateway_device_id,
+            }],
+            now,
+        )
+        .unwrap();
+    let mut gateway_view = gateway(&gateway_id, true, false);
+    gateway_view.simulated = false;
+    session.set_status(|status| {
+        status.gateways = vec![gateway_view];
+        status.rcs_roster_validated = true;
+    });
+    let rcs_status = || {
+        session
+            .snapshot(None, None, crate::head(), None, Default::default())
+            .unwrap()
+            .0
+            .rcs_status
+    };
+
+    assert!(
+        rcs_status().is_some(),
+        "unlocked positive control must keep rcs_status"
+    );
+
+    session
+        .mismatch
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(rcs_status().is_none(), "mismatch must hide rcs_status");
+    session
+        .mismatch
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    let active_epoch = session.client.key_status().unwrap().active_epoch.unwrap();
+    session.set_status(|status| {
+        status.vault = Some(crate::session::VaultSummary {
+            epoch: active_epoch + 1,
+            fingerprint: "synthetic-fingerprint".into(),
+        });
+    });
+    assert!(
+        rcs_status().is_none(),
+        "server-ahead epoch must hide rcs_status"
+    );
 }
 
 fn assert_sanitized(json: &str, dir: &Path) {
@@ -1314,7 +1685,7 @@ fn snapshot_pending_count_is_exact_beyond_the_old_batch_cap() {
             imported: false,
         })
         .unwrap();
-    let route = GatewayRoute {
+    let route = GatewayRoute::Carrier {
         gateway_device_id: DeviceId::new(),
         subscription_id: "sim-1".into(),
     };

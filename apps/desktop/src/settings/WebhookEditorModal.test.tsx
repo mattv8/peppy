@@ -465,7 +465,7 @@ describe("WebhookEditorModal", () => {
       expect(await screen.findByText(/New secret created/)).toBeInTheDocument();
       expect(secretValue()).toBe("whsec_rotated");
       expect(document.getElementById("webhook-rotate-confirm")).not.toBeInTheDocument();
-      expect(document.getElementById("webhook-secret-value")).toHaveFocus();
+      await waitFor(() => expect(document.getElementById("webhook-secret-value")).toHaveFocus());
       expect(confirm).not.toHaveBeenCalled();
     });
 

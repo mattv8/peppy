@@ -104,7 +104,7 @@ pub fn normalize_recipient(value: &str) -> Result<String, ComposeError> {
     }
 }
 fn parse_route(gateway: &str, sim: &str) -> Result<GatewayRoute, ComposeError> {
-    Ok(GatewayRoute {
+    Ok(GatewayRoute::Carrier {
         gateway_device_id: DeviceId::from_str(gateway)
             .map_err(|_| ui("invalid-route", "The phone ID is invalid."))?,
         subscription_id: sim.to_owned(),
@@ -918,7 +918,10 @@ mod tests {
             .unwrap();
         assert_eq!(prepared.expected_revision, stored.revision.to_string());
         assert_eq!(prepared.recipient_ids, ["+14155552671"]);
-        assert_eq!(stored.route.as_ref().unwrap().subscription_id, "sim");
+        assert!(matches!(
+            stored.route.as_ref(),
+            Some(GatewayRoute::Carrier { subscription_id, .. }) if subscription_id == "sim"
+        ));
         assert_eq!(
             fixture
                 .client

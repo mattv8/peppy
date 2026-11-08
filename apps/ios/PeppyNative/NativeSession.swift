@@ -24,6 +24,130 @@ public struct DeviceRosterItem: Identifiable, Equatable, Sendable {
     public let keyEpoch: UInt32
 }
 
+public enum GoogleMessagesLinkStatus: Equatable, Sendable {
+    case connected
+    case phoneNotResponding
+    case unconfirmed
+    case needsRelink
+    case signedOut
+
+    public var valueKey: String {
+        switch self {
+        case .connected: "google_messages_link_connection_connected"
+        case .phoneNotResponding: "google_messages_link_connection_phone_not_responding"
+        case .unconfirmed: "google_messages_link_connection_unconfirmed"
+        case .needsRelink: "google_messages_link_status_needs_relink"
+        case .signedOut: "google_messages_link_status_signed_out"
+        }
+    }
+
+    public var helpKey: String? {
+        switch self {
+        case .connected: nil
+        case .phoneNotResponding: "google_messages_link_remote_help_unresponsive"
+        case .unconfirmed: "google_messages_link_remote_help_unconfirmed"
+        case .needsRelink, .signedOut: "google_messages_link_remote_help_attention"
+        }
+    }
+
+    public var needsAttention: Bool {
+        switch self {
+        case .phoneNotResponding, .needsRelink, .signedOut: true
+        case .connected, .unconfirmed: false
+        }
+    }
+
+}
+
+public struct GoogleMessagesLinkPresentation: Equatable, Sendable {
+    public let status: GoogleMessagesLinkStatus
+    public let expiresAtMs: Int64?
+
+    func expired(at nowMs: Int64) -> Self {
+        guard let expiresAtMs, nowMs >= expiresAtMs else { return self }
+        return Self(status: .unconfirmed, expiresAtMs: nil)
+    }
+
+    static func presentation(for status: NativeRcsLinkStatus?) -> Self? {
+        guard let status else { return nil }
+        guard status.state != .unlinked, status.state != .unavailable else { return nil }
+        guard status.current,
+              let expiresAtMs = status.expiresAtMs,
+              expiresAtMs > 0
+        else {
+            return Self(status: .unconfirmed, expiresAtMs: nil)
+        }
+
+        switch status.state {
+        case .linked:
+            let presentation: GoogleMessagesLinkStatus
+            if !status.phoneResponsive { presentation = .phoneNotResponding }
+            else if !status.availability || !status.health { presentation = .unconfirmed }
+            else { presentation = .connected }
+            return Self(status: presentation, expiresAtMs: expiresAtMs)
+        case .needsRelink: return Self(status: .needsRelink, expiresAtMs: expiresAtMs)
+        case .signedOut: return Self(status: .signedOut, expiresAtMs: expiresAtMs)
+        case .unlinked, .unavailable: return nil
+        }
+    }
+
+    static func presentation(
+        for device: DeviceRosterItem,
+        currentDeviceID: String?,
+        status: NativeRcsLinkStatus?
+    ) -> Self? {
+        guard device.role == "gateway" || device.role == "owner",
+              !device.revoked, device.id != currentDeviceID else { return nil }
+        return presentation(for: status)
+    }
+}
+
+public enum GoogleMessagesLinkDeadlineWake: Equatable, Sendable {
+    case wait(milliseconds: Int64)
+    case expire
+
+    static func next(deadlineMs: Int64?, nowMs: Int64) -> Self {
+        guard let deadlineMs, deadlineMs > 0, nowMs >= 0 else { return .expire }
+        guard nowMs < deadlineMs else { return .expire }
+        return .wait(milliseconds: deadlineMs - nowMs)
+    }
+
+    static func taskKey(deadlineMs: Int64?, isForeground: Bool) -> String {
+        "\(isForeground)-\(deadlineMs.map(String.init) ?? "none")"
+    }
+}
+
+public struct GoogleMessagesLinkStatusRequest: Equatable, Sendable {
+    let identityKey: String?
+    let rosterRevision: Int
+    let generation: Int
+    let keysUnlocked: Bool
+
+    func accepts(
+        identityKey: String?,
+        rosterRevision: Int,
+        generation: Int,
+        keysUnlocked: Bool
+    ) -> Bool {
+        self.identityKey == identityKey
+            && self.rosterRevision == rosterRevision
+            && self.generation == generation
+            && self.keysUnlocked == keysUnlocked
+    }
+}
+
+public struct DeviceRosterRefreshRequest: Equatable, Sendable {
+    let identityKey: String?
+    let generation: Int
+    let keysUnlocked: Bool
+
+    func accepts(identityKey: String?, generation: Int, keysUnlocked: Bool) -> Bool {
+        self.identityKey == identityKey
+            && self.generation == generation
+            && self.keysUnlocked == keysUnlocked
+    }
+}
+
 public struct PhoneEnrollmentStatus: Equatable, Sendable {
     public let verificationCode: String?
     public let awaitingOwner: Bool
@@ -829,6 +953,29 @@ public actor NativeSession {
                   let epoch = UInt32(exactly: try item.integer("key_epoch")) else { throw ClientError.invalidResponse("device roster") }
             return DeviceRosterItem(id: id, role: try item.string("role"), revoked: item["revoked"] as? Bool ?? false, keyEpoch: epoch)
         }
+    }
+
+    /// Reads Rust's display-only capability projection through this actor. It never creates a
+    /// carrier permit or starts a send attempt.
+    public func googleMessagesLinkStatuses(
+        for devices: [DeviceRosterItem],
+        currentDeviceID: String?
+    ) -> [String: GoogleMessagesLinkPresentation] {
+        guard let client else { return [:] }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1_000)
+
+        var values: [String: GoogleMessagesLinkPresentation] = [:]
+        for device in devices where (device.role == "gateway" || device.role == "owner") && !device.revoked && device.id != currentDeviceID {
+            let status = try? client.rcsLinkStatus(gatewayDeviceId: device.id, nowMs: nowMs)
+            if let presentation = GoogleMessagesLinkPresentation.presentation(
+                for: device,
+                currentDeviceID: currentDeviceID,
+                status: status
+            ) {
+                values[device.id] = presentation
+            }
+        }
+        return values
     }
 
     public func revokeDevice(_ deviceId: String) async throws -> SessionStatus {

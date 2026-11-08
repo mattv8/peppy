@@ -1037,9 +1037,21 @@ mod tests {
                  DROP TRIGGER addresses_search_insert;
                  DROP TRIGGER addresses_search_update;
                  DROP TRIGGER addresses_search_delete;
-                 DROP INDEX messages_search_metadata;
-                 DROP TABLE local_search_fts;
-                 DELETE FROM metadata WHERE k IN ('search_remaining','search_generation','search_backfill_highwater','search_backfill_watermark');
+                  DROP INDEX messages_search_metadata;
+                  DROP TABLE local_search_fts;
+                   DROP TABLE rcs_mapping_proofs;
+                   DROP TABLE rcs_conversation_mappings;
+                   DROP TABLE rcs_send_ledger;
+                    DROP TABLE rcs_link_status_projection;
+                    DROP TABLE rcs_link_eligibility_projection;
+                    DROP TABLE rcs_capability_published;
+                   DROP TABLE rcs_provider_detectors;
+                   DROP TABLE rcs_message_identities;
+                   DROP TABLE rcs_message_status;
+                   DROP TABLE rcs_lane_ownership;
+                   DROP TABLE rcs_conversation_metadata;
+                   ALTER TABLE attempts DROP COLUMN finalized_transport;
+                   DELETE FROM metadata WHERE k IN ('search_remaining','search_generation','search_backfill_highwater','search_backfill_watermark');
                  UPDATE schema_meta SET version=34;",
             ).unwrap();
             let mut insert = store.conn.prepare(

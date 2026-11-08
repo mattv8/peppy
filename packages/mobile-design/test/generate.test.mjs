@@ -308,12 +308,104 @@ test("desktop override keys are catalog keys or explicit desktop-only additions"
   }
 });
 
+test("RCS badge and typing sharing copy remain scoped to their supported clients", () => {
+  const shared = ["typing_share_label", "typing_share_hint"];
+  const desktopOnly = ["rcs_badge_label", "rcs_badge_description"];
+
+  for (const key of shared) {
+    assert.ok(catalog[key]);
+    assert.ok(nativeCatalog[key]);
+  }
+  for (const key of desktopOnly) {
+    assert.ok(desktopCatalog[key]);
+    assert.ok(desktopOnlyKeys.includes(key));
+    assert.ok(!(key in nativeCatalog));
+  }
+});
+
+test("RCS message and encryption copy is desktop-only, contiguous, and wording-clean", () => {
+  const keys = [
+    "rcs_badge_label",
+    "rcs_badge_description",
+    "rcs_message_failed_reported",
+    "rcs_message_failed_unreported",
+    "rcs_message_unknown_hint",
+    "rcs_history_gap_notice",
+    "rcs_e2ee_badge_label",
+    "rcs_e2ee_badge_description",
+  ];
+  const maturity = /experimental|beta|preview|early access|labs|trial|unstable/i;
+  const lines = readFileSync(path("packages/mobile-design/src/catalog.mjs"), "utf8").split("\n");
+  const positions = keys.map(key => lines.findIndex(line => line.startsWith(`  ${key}:`)));
+
+  for (const key of keys) {
+    assert.ok(desktopCatalog[key], `${key} must exist in desktop copy`);
+    assert.ok(desktopOnlyKeys.includes(key), `${key} must be listed in desktopOnlyKeys`);
+    assert.ok(!(key in catalog), `${key} must be absent from the shared catalog`);
+    assert.ok(!(key in nativeCatalog), `${key} must be absent from native copy`);
+    assert.doesNotMatch(desktopCatalog[key], /[%{]/, `${key} must not contain % or {`);
+    assert.doesNotMatch(desktopCatalog[key], maturity, `${key} must avoid maturity wording`);
+  }
+  for (const key of keys.filter(key => key !== "rcs_badge_label" && key !== "rcs_badge_description")) {
+    assert.doesNotMatch(desktopCatalog[key], /\bRCS\b/, `${key} must not name RCS`);
+  }
+  assert.ok(positions.every(position => position >= 0), "every RCS key must be a catalog line");
+  assert.equal(Math.max(...positions) - Math.min(...positions), keys.length - 1, "RCS keys must form one contiguous block");
+  assert.match(desktopCatalog.rcs_e2ee_badge_label, /^Google: end-to-end encrypted$/);
+});
+
 test("retired desktop overrides fall back to shared copy", () => {
   const desktop = readFileSync(path("apps/desktop/src/generated/peppyCopy.ts"), "utf8");
   for (const key of ["hosted_subscribe_restore", "hosted_subscribe_legal", "hosted_purchase_pending_body"]) {
     assert.ok(!(key in desktopOverrides), `${key} must not be a desktop override`);
     assert.equal(desktopCatalog[key], catalog[key]);
     assert.ok(desktop.includes(`${key}: ${JSON.stringify(catalog[key])},`), `desktop copy must use the shared ${key}`);
+  }
+});
+
+test("Google Messages link copy avoids protocol and maturity claims", () => {
+  const maturityTerms = ["experi" + "mental", "be" + "ta", "pre" + "view", "early " + "access", "la" + "bs", "tri" + "al", "un" + "stable"];
+  const maturityPattern = new RegExp(`\\b(${maturityTerms.join("|")})\\b`, "i");
+  for (const [key, value] of Object.entries(catalog)) {
+    if (!key.startsWith("google_messages_link_")) continue;
+    assert.doesNotMatch(value, /\bRCS\b/i, `${key} must not name a protocol`);
+    assert.doesNotMatch(value, maturityPattern, `${key} must use production-ready copy`);
+  }
+});
+
+test("Google Messages link copy does not deny sending or reading", () => {
+  for (const key of ["google_messages_link_unlinked_body", "google_messages_link_linked_body", "google_messages_link_consent_p_scope"]) {
+    assert.doesNotMatch(catalog[key], /(does not|doesn't|cannot) send or read|not send or read/i, `${key} must not deny sending or reading`);
+  }
+});
+
+test("RCS-adjacent shared copy stays neutral about link availability", () => {
+  const keys = [
+    "mms_restricted_help",
+    "advanced_features_restricted_desc",
+    "restricted_setup_consent_p_scope",
+    "help_android_phone_read",
+    "phone_read_disclosure",
+    "help_ios_carrier_unavailable",
+  ];
+  const prohibited = /cannot send RCS|does not add RCS sending|Replies still use SMS or MMS|cannot be read by Peppy|RCS is unavailable|not available in this build/i;
+
+  for (const key of keys) assert.doesNotMatch(catalog[key], prohibited, `${key} must not deny RCS outside link settings`);
+});
+
+test("Google Messages link device status help is generated for the Peppy table", () => {
+  const copy = {
+    google_messages_link_remote_help_attention: "Open Peppy on that phone, find Google Messages link, and follow the steps there.",
+    google_messages_link_remote_help_unresponsive: "Make sure that phone is online and Google Messages is not stopped.",
+    google_messages_link_remote_help_unconfirmed: "Peppy has not had a recent answer from the link on that phone. Some chats may wait to send until it does.",
+  };
+  const ios = JSON.parse(readFileSync(path("apps/ios/PeppyMobile/Peppy.xcstrings"), "utf8"));
+
+  for (const [key, value] of Object.entries(copy)) {
+    assert.equal(catalog[key], value);
+    assert.equal(nativeCatalog[key], value);
+    assert.equal(ios.strings[`peppy.${key}`].localizations.en.stringUnit.value, value);
+    assert.doesNotMatch(value, /\bRCS\b/i);
   }
 });
 

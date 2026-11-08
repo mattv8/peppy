@@ -192,6 +192,7 @@ impl Fixture {
             mcp_worker_url: Some(Url::parse(&format!("http://{worker_addr}/")).unwrap()),
             mcp_worker_token_file: Some(control_token.path().into()),
             web_client: None,
+            web_live_trusted_origin: None,
         };
         let router = ServerBuilder::new(config, pool.clone())
             .access_policy(policy)

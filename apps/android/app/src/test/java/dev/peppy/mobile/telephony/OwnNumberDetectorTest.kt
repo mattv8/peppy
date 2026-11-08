@@ -60,6 +60,55 @@ class OwnNumberDetectorTest {
     }
 
     @Test
+    fun rawObservationPreservesFormattedOsValueAndItsActualSource() {
+        val route = SimRoute("android-subscription-7", 7, "Default SMS SIM")
+        val raw = "+1 (555) 555-0100"
+        assertEquals(
+            OwnNumberRawObservation(raw, OwnNumberRawSource.SubscriptionManagerPhoneNumber),
+            OwnNumberDetector.observeRaw(
+                route,
+                apiLevel = 33,
+                access = { true },
+                source = RawOwnNumberSource { subscriptionId ->
+                    assertEquals(7, subscriptionId)
+                    raw
+                },
+                line1 = { error("line1 must not be read when SubscriptionManager has a value") },
+            ),
+        )
+    }
+
+    @Test
+    fun rawObservationPrefersApi33PhoneNumberAndFallsBackToSubscriptionLine1() {
+        val route = SimRoute("android-subscription-7", 7, "Default SMS SIM")
+        assertEquals(
+            OwnNumberRawObservation("+15555550100", OwnNumberRawSource.SubscriptionManagerPhoneNumber),
+            OwnNumberDetector.observeRaw(route, apiLevel = 33, access = { true }, source = RawOwnNumberSource { "+15555550100" }, line1 = { error("not used") }),
+        )
+        assertEquals(
+            OwnNumberRawObservation("555-0100", OwnNumberRawSource.TelephonyLine1Number),
+            OwnNumberDetector.observeRaw(route, apiLevel = 33, access = { true }, source = RawOwnNumberSource { "" }, line1 = { subscriptionId ->
+                assertEquals(7, subscriptionId)
+                "555-0100"
+            }),
+        )
+        assertEquals(
+            OwnNumberRawObservation("555-0101", OwnNumberRawSource.TelephonyLine1Number),
+            OwnNumberDetector.observeRaw(route, apiLevel = 32, access = { true }, source = RawOwnNumberSource { error("pre-33 must not read SubscriptionManager") }, line1 = { "555-0101" }),
+        )
+    }
+
+    @Test
+    fun rawObservationFailsClosedForUnavailableDeniedAndThrowingReads() {
+        val route = SimRoute("android-subscription-7", 7, "Default SMS SIM")
+        assertNull(OwnNumberDetector.observeRaw(route, apiLevel = 33, access = { false }, source = RawOwnNumberSource { error("must not read") }, line1 = { error("must not read") }))
+        assertNull(OwnNumberDetector.observeRaw(route, apiLevel = 33, access = { true }, source = RawOwnNumberSource { null }, line1 = { null }))
+        listOf<RuntimeException>(SecurityException(), IllegalStateException(), UnsupportedOperationException()).forEach { error ->
+            assertNull(OwnNumberDetector.observeRaw(route, apiLevel = 33, access = { true }, source = RawOwnNumberSource { throw error }, line1 = { error("must not fall back after a throwing read") }))
+        }
+    }
+
+    @Test
     fun syncWritesOnlyDetectedNumbers() {
         val route = SimRoute("android-subscription-7", 7, "Default SMS SIM")
         val writes = mutableListOf<Pair<String, String>>()

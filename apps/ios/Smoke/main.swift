@@ -46,6 +46,15 @@ precondition(newlySeen)
 try reopened.dispose()
 
 do {
+    _ = try gatewayPrepareNativeRcsSend(
+        client: reopened, commandId: UUID().uuidString, nowMs: 1_000
+    )
+    fatalError("closed NativeClient unexpectedly accepted native RCS preparation")
+} catch MobileBindingsError.Closed {
+    // The generated factory must preserve native-client admission across FFI.
+}
+
+do {
     _ = try reopened.listConversations()
     fatalError("closed NativeClient unexpectedly accepted a read")
 } catch MobileBindingsError.Closed {

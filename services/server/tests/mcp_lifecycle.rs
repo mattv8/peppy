@@ -494,6 +494,7 @@ async fn webhook_routes_treat_cleanup_pending_devices_as_unavailable() {
         .await
         .unwrap();
     let worker = fake_worker().await;
+    *worker.state.revoke_status.lock().await = StatusCode::SERVICE_UNAVAILABLE;
     let worker_config_lock = worker_config_lock().lock().await;
     let router = router_for_worker(fixture.pool.clone(), &worker, &worker_config_lock);
 

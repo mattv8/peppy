@@ -166,7 +166,7 @@ mod tests {
         }
     }
     fn route() -> GatewayRoute {
-        GatewayRoute {
+        GatewayRoute::Carrier {
             gateway_device_id: DeviceId::new(),
             subscription_id: "sim-1".into(),
         }

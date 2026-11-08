@@ -142,7 +142,8 @@ object NativeGateway {
     @Volatile
     internal var secretBox: SecretBox = KeystoreSecretBox
 
-    private val lock = Any()
+    @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
+    private val lock: java.lang.Object = java.lang.Object()
     /** Serializes passphrase unlocks; never held while the owner [lock] is needed by receivers. */
     private val unlockLock = Any()
     private var client: NativeClient? = null
@@ -150,6 +151,20 @@ object NativeGateway {
     /** Incremented whenever the open client or its vault material is replaced. */
     private var generation = 0L
     private var producerReadyGeneration = -1L
+    private var nextLeaseId = 0L
+    private val sendRevokers = mutableMapOf<Long, MutableMap<Long, () -> Unit>>()
+    private var retirement: Retirement? = null
+    @VisibleForTesting internal var persistenceDecisionHook: (() -> Unit)? = null
+
+    private enum class RetirementState { REVOKING, REVOCATION_FAILED, COMMIT_FAILED }
+
+    private data class Retirement(
+        val generation: Long,
+        val client: NativeClient?,
+        val revokers: List<() -> Unit>,
+        val durableCommitRequired: Boolean = false,
+        var state: RetirementState = RetirementState.REVOKING,
+    )
 
     private data class Identity(val origin: String, val vaultId: String, val deviceId: String) {
         fun encode() = "$origin\n$vaultId\n$deviceId"
@@ -162,6 +177,71 @@ object NativeGateway {
         val generation: Long,
     )
 
+    /** Captures this exact open owner and arms the ticket revoker in the same lock section. */
+    internal fun acquireRcsSendLease(context: Context, ticketId: String, revoke: () -> Unit): RcsGatewayLease? = synchronized(lock) {
+        if (ticketId.isEmpty() || retirement != null) return null
+        val opened = client ?: return null
+        identity(prefs(context)) ?: return null
+        val leaseId = ++nextLeaseId
+        val capturedGeneration = generation
+        sendRevokers.getOrPut(capturedGeneration) { mutableMapOf() }[leaseId] = revoke
+        RcsGatewayLease(opened, capturedGeneration) {
+            synchronized(lock) { sendRevokers[capturedGeneration]?.remove(leaseId) }
+        }
+    }
+
+    private fun waitForRetirement(): Boolean = synchronized(lock) {
+        while (retirement?.state == RetirementState.REVOKING) {
+            try {
+                lock.wait()
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+        }
+        true
+    }
+
+    private fun reserveRetirement(): Retirement? = synchronized(lock) {
+        retirement?.let { pending ->
+            if (pending.state == RetirementState.REVOKING) return null
+            pending.state = RetirementState.REVOKING
+            return pending
+        }
+        Retirement(generation, client, sendRevokers.remove(generation)?.values?.toList().orEmpty()).also { retirement = it }
+    }
+
+    /** Calls Go-only revokers without the owner lock; every registered ticket gets a chance. */
+    private fun revoke(retirement: Retirement): Boolean {
+        var succeeded = true
+        retirement.revokers.forEach {
+            try {
+                it()
+            } catch (_: Exception) {
+                succeeded = false
+            }
+        }
+        return succeeded
+    }
+
+    private fun failRetirement(token: Retirement) = synchronized(lock) {
+        check(retirement === token)
+        check(generation == token.generation && client === token.client)
+        token.state = RetirementState.REVOCATION_FAILED
+        lock.notifyAll()
+    }
+
+    private fun finishRetirement(token: Retirement) = synchronized(lock) {
+        check(retirement === token)
+        check(generation == token.generation && client === token.client)
+        client?.dispose()
+        client = null
+        sharedKeysReady = false
+        generation++
+        retirement = null
+        lock.notifyAll()
+    }
+
     fun databaseFile(context: Context) = File(context.noBackupFilesDir, DATABASE_NAME)
 
     /** Opens (once) the SQLCipher database. Does not imply the shared vault keys are available. */
@@ -172,6 +252,7 @@ object NativeGateway {
     }
 
     private fun openUnchecked(context: Context): NativeClient? = synchronized(lock) {
+        if (retirement != null) return null
         client?.let { return it }
         val prefs = prefs(context)
         val identity = identity(prefs) ?: return null
@@ -357,14 +438,36 @@ object NativeGateway {
      * private app storage: it prevents a new pairing from ever opening the old device database,
      * while retaining the ciphertext and its Keystore-wrapped key for support/recovery.
      */
-    internal fun archiveEnrollment(context: Context): Boolean = synchronized(lock) {
-        val prefs = prefs(context)
-        val identity = identity(prefs) ?: return false
-        if (!ContactSyncPreferences(context).disableForIdentityTeardown()) return false
-        val archive = File(context.noBackupFilesDir, "peppy-archives/${archiveId(identity)}")
-        val staging = File(archive.parentFile, ".${archive.name}.staging")
-        if (staging.exists()) return false
-        try {
+    internal fun archiveEnrollment(context: Context): Boolean {
+        var token: Retirement? = null
+        while (token == null) {
+            val reserved = synchronized(lock) {
+                val prefs = prefs(context)
+                val identity = identity(prefs) ?: return false
+                val archive = File(context.noBackupFilesDir, "peppy-archives/${archiveId(identity)}")
+                val staging = File(archive.parentFile, ".${archive.name}.staging")
+                if (staging.exists() || !ContactSyncPreferences(context).disableForIdentityTeardown()) return false
+                reserveRetirement()
+            }
+            if (reserved != null) {
+                token = reserved
+                continue
+            }
+            if (!waitForRetirement()) return false
+        }
+        val retirementToken = checkNotNull(token)
+        if (!revoke(retirementToken)) {
+            // Keep the exact owner fenced so a later explicit mutation can retry every revoker.
+            failRetirement(retirementToken)
+            return false
+        }
+        return synchronized(lock) {
+            if (retirement !== retirementToken || generation != retirementToken.generation || client !== retirementToken.client) return@synchronized false
+            val prefs = prefs(context)
+            val identity = identity(prefs) ?: return@synchronized false
+            val archive = File(context.noBackupFilesDir, "peppy-archives/${archiveId(identity)}")
+            val staging = File(archive.parentFile, ".${archive.name}.staging")
+            try {
             // Quiesce the client before inspecting SQLite's database/WAL pair.  Copying while a
             // worker can append a WAL frame could make an archive that is internally inconsistent.
             client?.dispose(); client = null; sharedKeysReady = false; generation++
@@ -396,10 +499,13 @@ object NativeGateway {
             ServerReachabilityState.clear()
             RemoteMessagingService.stop(context)
             true
-        } catch (_: IOException) {
-            false
-        } finally {
-            if (staging.exists()) staging.deleteRecursively()
+            } catch (_: IOException) {
+                false
+            } finally {
+                if (staging.exists()) staging.deleteRecursively()
+                retirement = null
+                lock.notifyAll()
+            }
         }
     }
 
@@ -491,70 +597,161 @@ object NativeGateway {
      * different binding is refused, and a re-import of the same binding never touches the
      * database key. A first import refuses if any database file or key record already exists.
      */
-    internal fun persistVerified(context: Context, credential: DeviceCredential, material: VaultMaterial, beforeCommit: () -> Boolean = { true }): ImportResult =
-        synchronized(lock) {
-            if (!beforeCommit()) return ImportResult.IDENTITY_MISMATCH
-            val prefs = prefs(context)
-            val requested = Identity(credential.origin, credential.vaultId, credential.deviceId)
-            val existing = identity(prefs)
-            val editor = prefs.edit()
-            var invalidateClient = false
-            var bindingChanged = existing == null
-            val result = try {
-                if (existing != null) {
-                    if (existing != requested) return ImportResult.IDENTITY_MISMATCH
-                    // The wrapped key must still open (Keystore entry intact); never replace it.
-                    val key = prefs.getString(P_DB_KEY, null)?.let { secretBox.open(P_DB_KEY, it) }
-                        ?: return ImportResult.EXISTING_DATA_WITHOUT_KEY
-                    key.fill(0)
-                    val profileChanged = openString(prefs, P_PROFILE) != material.profileJson ||
-                        openString(prefs, P_HEADER) != material.headerJson
-                    val tokenChanged = openString(prefs, P_TOKEN) != credential.deviceToken
-                    bindingChanged = profileChanged || tokenChanged
-                    if (profileChanged) {
-                        // New vault material may mean a new epoch: require a fresh passphrase unlock.
-                        editor.remove(P_KEY_CACHE)
-                        invalidateClient = true
+    internal fun persistVerified(context: Context, credential: DeviceCredential, material: VaultMaterial, beforeCommit: () -> Boolean = { true }): ImportResult {
+        while (true) {
+            val decision = synchronized(lock) {
+                when {
+                    retirement != null -> reserveRetirement()?.let { RetirementDecision(token = it) }
+                        ?: RetirementDecision(wait = true)
+                    wouldChangeGeneration(context, credential, material) ->
+                        RetirementDecision(token = checkNotNull(reserveRetirement()))
+                    else -> {
+                        persistenceDecisionHook?.invoke()
+                        RetirementDecision(result = persistVerifiedLocked(context, credential, material, beforeCommit, null))
                     }
-                    ImportResult.UPDATED
-                } else {
-                    if (prefs.contains(P_DB_KEY) || prefs.contains(P_KEY_CACHE) || hasDatabaseFiles(context)) {
-                        return ImportResult.EXISTING_DATA_WITHOUT_KEY
-                    }
-                    check(client == null)
-                    val key = ByteArray(DATABASE_KEY_BYTES).also(SecureRandom()::nextBytes)
-                    try {
-                        editor.putString(P_DB_KEY, secretBox.seal(P_DB_KEY, key))
-                    } finally {
-                        key.fill(0)
-                    }
-                    editor.putString(P_IDENTITY, requested.encode())
-                    ImportResult.IMPORTED
                 }
-            } catch (_: GeneralSecurityException) {
-                return ImportResult.STORAGE_ERROR
-            } catch (_: IllegalStateException) {
+            }
+            decision.result?.let { return it }
+            if (decision.wait) {
+                if (!waitForRetirement()) return ImportResult.STORAGE_ERROR
+                continue
+            }
+            val token = decision.token
+            if (token != null && !revoke(token)) {
+                failRetirement(token)
                 return ImportResult.STORAGE_ERROR
             }
-            try {
-                editor.putString(P_TOKEN, secretBox.seal(P_TOKEN, credential.deviceToken.toByteArray(Charsets.UTF_8)))
-                    .putString(P_PROFILE, secretBox.seal(P_PROFILE, material.profileJson.toByteArray(Charsets.UTF_8)))
-                    .putString(P_HEADER, secretBox.seal(P_HEADER, material.headerJson.toByteArray(Charsets.UTF_8)))
-            } catch (_: GeneralSecurityException) {
-                return ImportResult.STORAGE_ERROR
+            return synchronized(lock) {
+                if (token != null && (retirement !== token || generation != token.generation || client !== token.client)) {
+                    return@synchronized ImportResult.STORAGE_ERROR
+                }
+                var result: ImportResult? = null
+                try {
+                    persistVerifiedLocked(context, credential, material, beforeCommit, token).also { result = it }
+                } finally {
+                    if (token != null && retirement === token) {
+                        if (token.durableCommitRequired && result !in setOf(ImportResult.IMPORTED, ImportResult.UPDATED)) {
+                            token.state = RetirementState.COMMIT_FAILED
+                        } else {
+                            retirement = null
+                        }
+                        lock.notifyAll()
+                    }
+                }
             }
-            if (!editor.commit()) return ImportResult.STORAGE_ERROR
-            if (bindingChanged) generation++
-            if (invalidateClient) {
-                client?.dispose()
-                client = null
-                sharedKeysReady = false
-            }
-            RelayWakeRuntime.enrollmentChanged(context)
-            // A new database always bootstraps from a snapshot before any live replay or effect.
-            if (result == ImportResult.IMPORTED) GatewayStateStore(context).startBootstrap()
-            result
         }
+    }
+
+    /** Runs under [lock] after any required retirement has fenced the captured owner. */
+    private fun persistVerifiedLocked(
+        context: Context,
+        credential: DeviceCredential,
+        material: VaultMaterial,
+        beforeCommit: () -> Boolean,
+        retirementToken: Retirement?,
+    ): ImportResult {
+        if (!beforeCommit()) return ImportResult.IDENTITY_MISMATCH
+        val prefs = prefs(context)
+        val requested = Identity(credential.origin, credential.vaultId, credential.deviceId)
+        val existing = identity(prefs)
+        val editor = prefs.edit()
+        var invalidateClient = false
+        var bindingChanged = existing == null
+        val result = try {
+            if (existing != null) {
+                if (existing != requested) return ImportResult.IDENTITY_MISMATCH
+                // The wrapped key must still open (Keystore entry intact); never replace it.
+                val key = prefs.getString(P_DB_KEY, null)?.let { secretBox.open(P_DB_KEY, it) }
+                    ?: return ImportResult.EXISTING_DATA_WITHOUT_KEY
+                key.fill(0)
+                val profileChanged = openString(prefs, P_PROFILE) != material.profileJson ||
+                    openString(prefs, P_HEADER) != material.headerJson
+                val tokenChanged = openString(prefs, P_TOKEN) != credential.deviceToken
+                bindingChanged = profileChanged || tokenChanged
+                if (profileChanged) {
+                    // New vault material may mean a new epoch: require a fresh passphrase unlock.
+                    editor.remove(P_KEY_CACHE)
+                    invalidateClient = true
+                }
+                ImportResult.UPDATED
+            } else {
+                if (prefs.contains(P_DB_KEY) || prefs.contains(P_KEY_CACHE) || hasDatabaseFiles(context)) {
+                    return ImportResult.EXISTING_DATA_WITHOUT_KEY
+                }
+                check(client == null)
+                val key = ByteArray(DATABASE_KEY_BYTES).also(SecureRandom()::nextBytes)
+                try {
+                    editor.putString(P_DB_KEY, secretBox.seal(P_DB_KEY, key))
+                } finally {
+                    key.fill(0)
+                }
+                editor.putString(P_IDENTITY, requested.encode())
+                ImportResult.IMPORTED
+            }
+        } catch (_: GeneralSecurityException) {
+            return ImportResult.STORAGE_ERROR
+        } catch (_: IllegalStateException) {
+            return ImportResult.STORAGE_ERROR
+        }
+        try {
+            editor.putString(P_TOKEN, secretBox.seal(P_TOKEN, credential.deviceToken.toByteArray(Charsets.UTF_8)))
+                .putString(P_PROFILE, secretBox.seal(P_PROFILE, material.profileJson.toByteArray(Charsets.UTF_8)))
+                .putString(P_HEADER, secretBox.seal(P_HEADER, material.headerJson.toByteArray(Charsets.UTF_8)))
+        } catch (_: GeneralSecurityException) {
+            return ImportResult.STORAGE_ERROR
+        }
+        if (!editor.commit()) {
+            if (bindingChanged) retainFailedRetirementAfterCommit(checkNotNull(retirementToken))
+            return ImportResult.STORAGE_ERROR
+        }
+        if (bindingChanged) generation++
+        if (invalidateClient) {
+            client?.dispose()
+            client = null
+            sharedKeysReady = false
+        }
+        RelayWakeRuntime.enrollmentChanged(context)
+        // A new database always bootstraps from a snapshot before any live replay or effect.
+        if (result == ImportResult.IMPORTED) GatewayStateStore(context).startBootstrap()
+        return result
+    }
+
+    private fun retainFailedRetirementAfterCommit(token: Retirement) = synchronized(lock) {
+        check(retirement === token)
+        check(generation == token.generation && client === token.client)
+        client?.dispose()
+        client = null
+        sharedKeysReady = false
+        generation++
+        retirement = Retirement(
+            generation = generation,
+            client = null,
+            revokers = emptyList(),
+            durableCommitRequired = true,
+            state = RetirementState.COMMIT_FAILED,
+        )
+        lock.notifyAll()
+    }
+
+    private data class RetirementDecision(
+        val wait: Boolean = false,
+        val token: Retirement? = null,
+        val result: ImportResult? = null,
+    )
+
+    /** This is a preflight only; the commit path revalidates every condition after waiting. */
+    private fun wouldChangeGeneration(context: Context, credential: DeviceCredential, material: VaultMaterial): Boolean {
+        val prefs = prefs(context)
+        val existing = identity(prefs) ?: return true
+        if (existing != Identity(credential.origin, credential.vaultId, credential.deviceId)) return false
+        return try {
+            openString(prefs, P_PROFILE) != material.profileJson ||
+                openString(prefs, P_HEADER) != material.headerJson ||
+                openString(prefs, P_TOKEN) != credential.deviceToken
+        } catch (_: GeneralSecurityException) {
+            false
+        }
+    }
 
     /**
      * Unlocks with the EXISTING shared vault passphrase (the one set when the vault was created),
@@ -723,11 +920,26 @@ object NativeGateway {
 
     /** Simulates process death for tests: drops the in-memory owner without touching storage. */
     @VisibleForTesting
-    internal fun closeForTest() = synchronized(lock) {
-        client?.dispose()
-        client = null
-        sharedKeysReady = false
-        generation++
+    internal fun closeForTest() {
+        var token: Retirement? = null
+        while (token == null) {
+            val reserved = synchronized(lock) {
+                if (retirement?.state == RetirementState.COMMIT_FAILED) return
+                reserveRetirement()
+            }
+            if (reserved != null) {
+                token = reserved
+                continue
+            }
+            if (!waitForRetirement()) return
+        }
+        val retirementToken = checkNotNull(token)
+        // Test teardown uses the production retirement path so no captured ticket survives a reset.
+        if (!revoke(retirementToken)) {
+            failRetirement(retirementToken)
+            return
+        }
+        finishRetirement(retirementToken)
     }
 
     private fun importCachedKeys(prefs: SharedPreferences, opened: NativeClient): Boolean {

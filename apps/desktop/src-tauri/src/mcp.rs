@@ -252,25 +252,51 @@ pub async fn mcp_enable(
     let approval = serde_json::from_str::<serde_json::Value>(&approval)
         .map_err(|_| BridgeError::host_state())?;
     let status: ComputerEnrollmentStatus = mcp_account_post(
-        &state, &session, &hosted, account_generation,
-        &format!("/v1/enrollment/computers/{invitation_id}/approve"), &approval,
+        &state,
+        &session,
+        &hosted,
+        account_generation,
+        &format!("/v1/enrollment/computers/{invitation_id}/approve"),
+        &approval,
         account.as_deref().map(String::as_str),
-    ).await?;
+    )
+    .await?;
     let activation: McpWorkerActivateResponse = mcp_account_post(
-        &state, &session, &hosted, account_generation, "/v1/mcp/device/activate",
-        &McpHostActivationRequest { operation_id: prepared.operation_id, status: status.clone() },
+        &state,
+        &session,
+        &hosted,
+        account_generation,
+        "/v1/mcp/device/activate",
+        &McpHostActivationRequest {
+            operation_id: prepared.operation_id,
+            status: status.clone(),
+        },
         account.as_deref().map(String::as_str),
-    ).await?;
+    )
+    .await?;
     let admission: AdmissionComplete = mcp_account_post(
-        &state, &session, &hosted, account_generation,
-        &format!("/v1/enrollment/computers/{invitation_id}/confirm"), &activation.confirm,
+        &state,
+        &session,
+        &hosted,
+        account_generation,
+        &format!("/v1/enrollment/computers/{invitation_id}/confirm"),
+        &activation.confirm,
         account.as_deref().map(String::as_str),
-    ).await?;
+    )
+    .await?;
     let result = mcp_account_post(
-        &state, &session, &hosted, account_generation, "/v1/mcp/device/complete",
-        &McpHostCompletionRequest { operation_id: prepared.operation_id, admission: admission.clone() },
+        &state,
+        &session,
+        &hosted,
+        account_generation,
+        "/v1/mcp/device/complete",
+        &McpHostCompletionRequest {
+            operation_id: prepared.operation_id,
+            admission: admission.clone(),
+        },
         account.as_deref().map(String::as_str),
-    ).await?;
+    )
+    .await?;
     Ok(result)
 }
 
@@ -532,7 +558,10 @@ fn validate_webhook_input(input: &WebhookInput) -> BridgeResult<()> {
         .len()
         > 64 * 1024
     {
-        return Err(BridgeError::new("invalid-request", "The webhook input is too large."));
+        return Err(BridgeError::new(
+            "invalid-request",
+            "The webhook input is too large.",
+        ));
     }
     Ok(())
 }
@@ -726,7 +755,11 @@ mod tests {
     async fn delayed_account_effect(
         path: &'static str,
         replace_account: bool,
-    ) -> (BridgeError, Vec<String>, std::sync::Arc<crate::session::Session>) {
+    ) -> (
+        BridgeError,
+        Vec<String>,
+        std::sync::Arc<crate::session::Session>,
+    ) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -777,7 +810,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let revision = hosted.capture_mcp_account_session("account-a").await.unwrap();
+        let revision = hosted
+            .capture_mcp_account_session("account-a")
+            .await
+            .unwrap();
         let request_state = state.clone();
         let request_session = session.clone();
         let request_hosted = hosted.clone();
@@ -834,7 +870,8 @@ mod tests {
 
     #[tokio::test]
     async fn sign_out_during_final_complete_aborts_without_affecting_device_session() {
-        let (error, requests, session) = delayed_account_effect("/v1/mcp/device/complete", false).await;
+        let (error, requests, session) =
+            delayed_account_effect("/v1/mcp/device/complete", false).await;
 
         assert_eq!(error.code, "hosted-account-changed");
         assert!(requests[0].starts_with("POST /v1/mcp/device/complete HTTP/1.1\r\n"));

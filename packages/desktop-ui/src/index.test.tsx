@@ -901,6 +901,34 @@ describe("desktop UI controls", () => {
     expect(changed).toHaveBeenCalledWith("hi");
   });
 
+  it("hides the SMS counter without adding transport controls", () => {
+    render(<Composer draft={"a".repeat(161)} attachments={[]} sendSupported onDraftChange={() => {}} onSend={() => {}} gatewaySlot={<span id="gateway-slot" />} hideSmsCounter />);
+
+    expect(document.querySelector("#sms-counter")).toBeNull();
+    const toolbar = document.getElementById("composer-toolbar")!;
+    expect(toolbar.children).toHaveLength(5);
+    expect(toolbar.children[0]).toHaveAttribute("aria-label", "Add attachment");
+    expect(toolbar.children[1]).toHaveAttribute("id", "gateway-slot");
+    expect(toolbar.children[2]).toHaveClass("composer-toolbar-spacer");
+    expect(toolbar.children[3]).toHaveAttribute("id", "shift-enter-hint");
+    expect(toolbar.children[4]).toHaveAttribute("aria-label", "Send");
+    expect(screen.queryByRole("button", { name: /route|transport|send as/i })).toBeNull();
+  });
+
+  it("exposes the typing sender state on the shared composer", () => {
+    render(<Composer draft="" attachments={[]} sendSupported onDraftChange={() => {}} onSend={() => {}} typingSendState="active" />);
+    expect(document.getElementById("shared-composer")).toHaveAttribute("data-typing-send", "active");
+  });
+
+  it("keeps typing content in the toolbar typing slot", () => {
+    render(<Composer draft="" attachments={[]} sendSupported onDraftChange={() => {}} onSend={() => {}} typingSlot={<span id="typing-indicator" />} />);
+
+    const slot = document.getElementById("composer-typing-slot");
+    expect(slot).toBeInTheDocument();
+    expect(slot).toHaveClass("composer-toolbar-spacer");
+    expect(slot).toContainElement(document.getElementById("typing-indicator"));
+  });
+
   it("allows attachment-only sends and explains why sending is unavailable", () => {
     const sent = vi.fn();
     const { rerender } = render(

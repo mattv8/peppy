@@ -280,6 +280,22 @@ pub fn message_window_view<T>(
     }
 }
 
+pub fn try_message_window_view<T, E>(
+    window: MessageWindow,
+    mut message_view: impl FnMut(Message) -> Result<T, E>,
+) -> Result<MessageWindowView<T>, E> {
+    Ok(MessageWindowView {
+        conversation_id: window.conversation_id,
+        messages: window
+            .messages
+            .into_iter()
+            .map(&mut message_view)
+            .collect::<Result<_, _>>()?,
+        has_older: window.has_older,
+        has_newer: window.has_newer,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,14 +399,31 @@ mod tests {
             send_state: None,
             status_at_ms: None,
         };
-        let window = message_window_view(
-            MessageWindow {
-                conversation_id: message.payload.record.conversation_id.to_string(),
-                messages: vec![message],
-                has_older: true,
-                has_newer: false,
-            },
-            |message| message_view(&message, vec![]),
+        let source = MessageWindow {
+            conversation_id: message.payload.record.conversation_id.to_string(),
+            messages: vec![message.clone(), message.clone(), message],
+            has_older: true,
+            has_newer: false,
+        };
+        let fallible = try_message_window_view(source.clone(), |message| {
+            Ok::<_, &'static str>(message_view(&message, vec![]))
+        })
+        .unwrap();
+        let mut calls = 0;
+        let rejected = try_message_window_view(source.clone(), |message| {
+            calls += 1;
+            if calls == 2 {
+                Err("projection-failed")
+            } else {
+                Ok(message_view(&message, vec![]))
+            }
+        });
+        assert_eq!(rejected.err(), Some("projection-failed"));
+        assert_eq!(calls, 2);
+        let window = message_window_view(source, |message| message_view(&message, vec![]));
+        assert_eq!(
+            serde_json::to_value(fallible).unwrap(),
+            serde_json::to_value(&window).unwrap()
         );
 
         let value = serde_json::to_value(window).unwrap();

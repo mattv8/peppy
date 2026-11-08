@@ -1,0 +1,1 @@
+DROP TABLE live_ticket_admission_events;

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="google_messages_link_signin_loading" type="id" />
+    <item name="google_messages_link_signin_host" type="id" />
+    <item name="google_messages_link_confirm_screen" type="id" />
+</resources>

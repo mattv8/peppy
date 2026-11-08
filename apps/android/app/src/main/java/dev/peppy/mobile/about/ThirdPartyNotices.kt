@@ -30,8 +30,13 @@ internal class AssetThirdPartyNotices private constructor(
         const val NOTICE_FILE = "NOTICE.txt"
 
         private val knownOrder = listOf(
-            "LGPL-3.0.txt", "LGPL-2.1.txt", "GPL-3.0.txt", "Apache-2.0.txt", "BSD-3-Clause.txt", "MIT.txt",
+            "AGPL-3.0.txt", "LICENSE-exceptions-google-messages.txt", "NOTICE-google-messages.txt",
+            "LGPL-3.0.txt", "LGPL-2.1.txt", "GPL-3.0.txt", "MPL-2.0.txt",
+            "Apache-2.0.txt", "BSD-3-Clause.txt", "MIT.txt",
             "BouncyCastle-LICENSE.txt", "Conscrypt-NOTICE.txt", "BoringSSL-LICENSE.txt",
+            "BSD-3-Clause-google-uuid.txt",
+            "BSD-3-Clause-go-x-and-mobile.txt", "BSD-3-Clause-google-protobuf.txt",
+            "MIT-go-colorable.txt", "MIT-go-isatty.txt", "MIT-zerolog.txt",
         )
         private val labels = mapOf(
             "LGPL-3.0.txt" to R.string.peppy_about_license_lgpl_3_0,
@@ -43,6 +48,16 @@ internal class AssetThirdPartyNotices private constructor(
             "BouncyCastle-LICENSE.txt" to R.string.peppy_about_license_bouncy_castle,
             "Conscrypt-NOTICE.txt" to R.string.peppy_about_license_conscrypt,
             "BoringSSL-LICENSE.txt" to R.string.peppy_about_license_boringssl,
+            "AGPL-3.0.txt" to R.string.peppy_about_license_agpl_3_0,
+            "LICENSE-exceptions-google-messages.txt" to R.string.peppy_about_license_google_messages_exceptions,
+            "MPL-2.0.txt" to R.string.peppy_about_license_mpl_2_0,
+            "NOTICE-google-messages.txt" to R.string.peppy_about_license_google_messages,
+            "BSD-3-Clause-google-uuid.txt" to R.string.peppy_about_license_google_uuid,
+            "BSD-3-Clause-go-x-and-mobile.txt" to R.string.peppy_about_license_go_x_and_mobile,
+            "BSD-3-Clause-google-protobuf.txt" to R.string.peppy_about_license_google_protobuf,
+            "MIT-go-colorable.txt" to R.string.peppy_about_license_go_colorable,
+            "MIT-go-isatty.txt" to R.string.peppy_about_license_go_isatty,
+            "MIT-zerolog.txt" to R.string.peppy_about_license_zerolog,
         )
 
         fun openOrNull(assets: AssetManager): ThirdPartyNotices? {

@@ -3,8 +3,8 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use peppy_domain::{CommandId, DeviceId, EnvelopeId, SourceSequence, VaultId};
-use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser::SerializeStruct};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fmt;
@@ -25,10 +25,116 @@ pub enum EnvelopePurpose {
     Event,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct GatewayRoute {
-    pub gateway_device_id: DeviceId,
-    pub subscription_id: String,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GatewayRoute {
+    Carrier {
+        gateway_device_id: DeviceId,
+        subscription_id: String,
+    },
+    RcsLink {
+        gateway_device_id: DeviceId,
+    },
+}
+
+impl Serialize for GatewayRoute {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Carrier {
+                gateway_device_id,
+                subscription_id,
+            } => {
+                let mut route = serializer.serialize_struct("GatewayRoute", 2)?;
+                route.serialize_field("gateway_device_id", gateway_device_id)?;
+                route.serialize_field("subscription_id", subscription_id)?;
+                route.end()
+            }
+            Self::RcsLink { gateway_device_id } => {
+                let mut route = serializer.serialize_struct("GatewayRoute", 2)?;
+                route.serialize_field("kind", "rcs_link")?;
+                route.serialize_field("gateway_device_id", gateway_device_id)?;
+                route.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for GatewayRoute {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct CarrierRoute {
+            gateway_device_id: DeviceId,
+            subscription_id: String,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RcsLinkRoute {
+            kind: RcsLinkKind,
+            gateway_device_id: DeviceId,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum RcsLinkKind {
+            RcsLink,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Route {
+            RcsLink(RcsLinkRoute),
+            Carrier(CarrierRoute),
+        }
+
+        match Route::deserialize(deserializer)? {
+            Route::Carrier(route) => Ok(Self::Carrier {
+                gateway_device_id: route.gateway_device_id,
+                subscription_id: route.subscription_id,
+            }),
+            Route::RcsLink(RcsLinkRoute {
+                kind: RcsLinkKind::RcsLink,
+                gateway_device_id,
+            }) => Ok(Self::RcsLink { gateway_device_id }),
+        }
+    }
+}
+
+impl JsonSchema for GatewayRoute {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "GatewayRoute".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "gateway_device_id": { "type": "string", "format": "uuid" },
+                        "subscription_id": { "type": "string" }
+                    },
+                    "required": ["gateway_device_id", "subscription_id"]
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "kind": { "const": "rcs_link" },
+                        "gateway_device_id": { "type": "string", "format": "uuid" }
+                    },
+                    "required": ["kind", "gateway_device_id"]
+                }
+            ]
+        })
+    }
 }
 
 /// Opaque, unauthenticated-to-the-server compaction bookkeeping. Its exact
@@ -158,9 +264,13 @@ impl Envelope {
             (EnvelopePurpose::Command, true, None) => Err(EnvelopeError::RouteRequired),
             (EnvelopePurpose::Event, true, _) => Err(EnvelopeError::UnexpectedCommandId),
             (EnvelopePurpose::Event, false, Some(_)) => Err(EnvelopeError::UnexpectedRoute),
-            (_, _, Some(route))
-                if route.subscription_id.is_empty() || route.subscription_id.len() > 512 =>
-            {
+            (
+                _,
+                _,
+                Some(GatewayRoute::Carrier {
+                    subscription_id, ..
+                }),
+            ) if subscription_id.is_empty() || subscription_id.len() > 512 => {
                 Err(EnvelopeError::InvalidSubscription)
             }
             _ => Ok(()),
@@ -207,10 +317,12 @@ impl Envelope {
     pub fn aad_bytes(&self) -> Result<Vec<u8>, EnvelopeError> {
         self.validate_header()?;
         let mut output = Vec::with_capacity(
-            192 + self
-                .route
-                .as_ref()
-                .map_or(0, |route| route.subscription_id.len()),
+            192 + self.route.as_ref().map_or(0, |route| match route {
+                GatewayRoute::Carrier {
+                    subscription_id, ..
+                } => subscription_id.len(),
+                GatewayRoute::RcsLink { .. } => 0,
+            }),
         );
         output.extend_from_slice(b"peppy-envelope-aad-v1\0");
         output.extend_from_slice(&self.protocol_version.to_be_bytes());
@@ -233,10 +345,19 @@ impl Envelope {
             None => output.push(0),
         }
         match &self.route {
-            Some(route) => {
+            Some(GatewayRoute::Carrier {
+                gateway_device_id,
+                subscription_id,
+            }) => {
                 output.push(1);
-                output.extend_from_slice(route.gateway_device_id.0.as_bytes());
-                write_string(&mut output, &route.subscription_id);
+                output.extend_from_slice(gateway_device_id.0.as_bytes());
+                write_string(&mut output, subscription_id);
+            }
+            Some(GatewayRoute::RcsLink { gateway_device_id }) => {
+                // Route-presence is its discriminant: 0 = none, 1 = carrier, 2 = RCS link.
+                // Carrier remains byte-for-byte compatible with the legacy route encoding.
+                output.push(2);
+                output.extend_from_slice(gateway_device_id.0.as_bytes());
             }
             None => output.push(0),
         }

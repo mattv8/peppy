@@ -1,6 +1,9 @@
 package dev.peppy.mobile
 
 import android.content.Context
+import androidx.work.Configuration
+import androidx.work.testing.SynchronousExecutor
+import androidx.work.testing.WorkManagerTestInitHelper
 import dev.peppy.mobile.gateway.GatewayStateStore
 import dev.peppy.mobile.gateway.GatewayTestBase
 import dev.peppy.mobile.gateway.ImportResult
@@ -303,6 +306,10 @@ class SecureImportTest : GatewayTestBase() {
 
     @Test
     fun archiveAfterRevokePreservesOldCiphertextAndAllowsNewEnrollment() {
+        WorkManagerTestInitHelper.initializeTestWorkManager(
+            context,
+            Configuration.Builder().setExecutor(SynchronousExecutor()).build(),
+        )
         assertEquals(ImportResult.IMPORTED, enroll())
         assertNotNull(NativeGateway.open(context))
         val database = NativeGateway.databaseFile(context)

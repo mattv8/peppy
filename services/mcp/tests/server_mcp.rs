@@ -160,6 +160,7 @@ async fn run_owner_enrollment_smoke() {
         mcp_worker_url: Some(worker_origin.parse().unwrap()),
         mcp_worker_token_file: Some(token_file.clone()),
         web_client: None,
+        web_live_trusted_origin: None,
     };
     let maintenance_pool = PgPoolOptions::new()
         .max_connections(2)

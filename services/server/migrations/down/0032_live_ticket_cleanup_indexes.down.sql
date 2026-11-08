@@ -1,0 +1,3 @@
+DROP INDEX live_ticket_sessions_tombstone_reap_idx;
+DROP INDEX live_tickets_consumed_reap_idx;
+DROP INDEX live_tickets_expiry_reap_idx;

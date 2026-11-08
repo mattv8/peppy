@@ -43,6 +43,9 @@ impl BrowserCore {
                 return Err(invalid());
             }
             self.context.connection = Some(input.connection);
+            if !matches!(self.context.connection.as_deref(), Some("offline")) {
+                self.context.rcs_roster_validated = false;
+            }
             return Ok(
                 json!({"connection": self.context.connection, "deviceRole": self.context.device_role, "gateways": self.context.gateways}),
             );
@@ -58,9 +61,13 @@ impl BrowserCore {
             return Err(invalid());
         }
         let device_id = self.own_context_device_id()?;
-        let role = gateways::extract_device_role(&devices, &device_id).ok_or_else(|| {
-            Failure::new("device-revoked", "This browser device is no longer active.")
-        })?;
+        let Some(role) = gateways::extract_device_role(&devices, &device_id) else {
+            self.context.rcs_roster_validated = false;
+            return Err(Failure::new(
+                "device-revoked",
+                "This browser device is no longer active.",
+            ));
+        };
         if !matches!(role.as_str(), "owner" | "device" | "gateway") {
             return Err(invalid());
         }
@@ -75,6 +82,7 @@ impl BrowserCore {
             .filter(|device| device.revoked)
             .map(|device| device.device_id.clone())
             .collect();
+        self.context.rcs_roster_validated = true;
         self.gateways_known = true;
         serde_json::to_value(
             json!({"connection": self.context.connection, "deviceRole": role, "gateways": views}),
@@ -166,6 +174,7 @@ mod tests {
             let result = error(&mut core, context(devices, json!({"capabilities":[]})));
             assert_eq!(result["code"], "device-revoked");
             assert!(core.context.gateways.is_none());
+            assert!(!core.context.rcs_roster_validated);
         }
     }
 

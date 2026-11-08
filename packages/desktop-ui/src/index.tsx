@@ -1364,6 +1364,7 @@ export function RecipientPicker({
   );
 }
 
+export const COMPOSER_TEXTAREA_ID = "composer-textarea";
 export function mapSelectionThroughEdit(oldText: string, newText: string, position: number): number {
   if (!oldText) return newText.length;
   if (position >= oldText.length) return newText.length;
@@ -1414,6 +1415,9 @@ export function Composer({
   placeholder,
   composerUserSized = false,
   maxAutoGrowHeight = 176,
+  hideSmsCounter = false,
+  typingSlot,
+  typingSendState = "idle",
   platform,
   attachmentLayout = "tiles",
   attachmentHeaderDetail,
@@ -1443,6 +1447,9 @@ export function Composer({
   composerUserSized?: boolean;
   /** CSS max-height: 176px remains the hard ceiling (8 lines); this can only lower auto-grow. */
   maxAutoGrowHeight?: number;
+  hideSmsCounter?: boolean;
+  typingSlot?: ReactNode;
+  typingSendState?: "idle" | "active" | "suppressed";
   platform?: "macos" | "windows" | "linux";
   attachmentLayout?: AttachmentLayout;
   attachmentHeaderDetail?: ReactNode;
@@ -1554,6 +1561,7 @@ export function Composer({
       id="shared-composer"
       className="composer"
       aria-label="Message composer"
+      data-typing-send={typingSendState}
     >
       <div id="composer-field">
         <div id="composer-banner-row" hidden={!bannerSlot}>
@@ -1566,7 +1574,7 @@ export function Composer({
         </label>
         <textarea
           ref={textareaRef}
-          id="composer-textarea"
+          id={COMPOSER_TEXTAREA_ID}
           aria-label="Message"
           value={isComposing ? compositionValueRef.current ?? draft : draft}
           readOnly={readOnly}
@@ -1636,8 +1644,8 @@ export function Composer({
           <Paperclip size={16} aria-hidden />
         </button>
         {gatewaySlot}
-        <div className="composer-toolbar-spacer" />
-        {counter && (
+        <div id="composer-typing-slot" className="composer-toolbar-spacer">{typingSlot}</div>
+        {!hideSmsCounter && counter && (
           <span id="sms-counter" aria-live="polite" aria-label="SMS character count">
             {counter}
           </span>

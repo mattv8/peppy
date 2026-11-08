@@ -134,8 +134,15 @@ describe("ContactsView", () => {
   ])("keeps remaining field identity after removing an earlier row: %s", async (add, remove, list) => {
     const { container } = render(<ContactsView />);
     fireEvent.click(await screen.findByLabelText("New contact"));
-    if (add === "Add address") fireEvent.click(container.querySelector('[data-form-disclosure="addresses"] > summary')!);
-    fireEvent.click(screen.getByLabelText(add));
+    if (add === "Add address") {
+      const summary = await waitFor(() => {
+        const element = container.querySelector('[data-form-disclosure="addresses"] > summary');
+        expect(element).not.toBeNull();
+        return element!;
+      });
+      fireEvent.click(summary);
+    }
+    fireEvent.click(await screen.findByLabelText(add));
     fireEvent.click(screen.getByLabelText(add));
     const second = container.querySelectorAll(`${list} > li`)[1];
     expect(second).toBeTruthy();

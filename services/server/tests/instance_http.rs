@@ -103,22 +103,28 @@ impl Fixture {
             .router()
     }
 
-    async fn hosted_app(&self) -> (Router, PgPool, String) {
-        let role = format!("instance_http_runtime_{}", Uuid::new_v4().simple());
-        let password = Uuid::new_v4().simple().to_string();
+    async fn hosted_app(&self) -> (Router, PgPool, PgPool, String, String) {
+        let runtime_role = format!("instance_http_runtime_{}", Uuid::new_v4().simple());
+        let runtime_password = Uuid::new_v4().simple().to_string();
+        let maintenance_role = format!("instance_http_maintenance_{}", Uuid::new_v4().simple());
+        let maintenance_password = Uuid::new_v4().simple().to_string();
         sqlx::raw_sql(&format!(
-            "CREATE ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS NOCREATEROLE"
+            "CREATE ROLE {runtime_role} LOGIN PASSWORD '{runtime_password}' NOSUPERUSER NOBYPASSRLS NOCREATEROLE; \
+             CREATE ROLE {maintenance_role} LOGIN PASSWORD '{maintenance_password}' NOSUPERUSER BYPASSRLS NOCREATEROLE"
         ))
         .execute(&self.pool)
         .await
         .unwrap();
-        peppy_server::rls::grant_runtime_privileges(&self.pool, &role)
+        peppy_server::rls::grant_runtime_privileges(&self.pool, &runtime_role)
+            .await
+            .unwrap();
+        peppy_server::rls::grant_maintenance_privileges(&self.pool, &maintenance_role)
             .await
             .unwrap();
 
         let mut runtime_url: Url = test_database_url().parse().unwrap();
-        runtime_url.set_username(&role).unwrap();
-        runtime_url.set_password(Some(&password)).unwrap();
+        runtime_url.set_username(&runtime_role).unwrap();
+        runtime_url.set_password(Some(&runtime_password)).unwrap();
         runtime_url
             .query_pairs_mut()
             .append_pair("options", &format!("-csearch_path={}", self.schema));
@@ -127,17 +133,32 @@ impl Fixture {
             .connect(runtime_url.as_str())
             .await
             .unwrap();
+
+        let mut maintenance_url: Url = test_database_url().parse().unwrap();
+        maintenance_url.set_username(&maintenance_role).unwrap();
+        maintenance_url
+            .set_password(Some(&maintenance_password))
+            .unwrap();
+        maintenance_url
+            .query_pairs_mut()
+            .append_pair("options", &format!("-csearch_path={}", self.schema));
+        let maintenance = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(maintenance_url.as_str())
+            .await
+            .unwrap();
+
         let mut server_config = config(self.pool.clone());
         server_config.database_url = runtime_url.to_string();
         let app = ServerBuilder::new(server_config, runtime.clone())
             .setup_token(SETUP_TOKEN)
             .row_security(true)
-            .maintenance_database(self.pool.clone())
+            .maintenance_database(maintenance.clone())
             .build()
             .await
             .unwrap()
             .router();
-        (app, runtime, role)
+        (app, runtime, maintenance, runtime_role, maintenance_role)
     }
 
     async fn drop_runtime_role(&self, role: &str) {
@@ -178,6 +199,7 @@ fn config(_pool: PgPool) -> Config {
         mcp_worker_url: None,
         mcp_worker_token_file: None,
         web_client: None,
+        web_live_trusted_origin: None,
     }
 }
 
@@ -1202,7 +1224,7 @@ async fn browser_claim_login_logout_and_revoke_enforce_cookie_origin_and_csrf_co
 #[tokio::test]
 async fn hosted_router_does_not_mount_community_instance_routes() {
     let fixture = Fixture::new().await;
-    let (app, runtime, role) = fixture.hosted_app().await;
+    let (app, runtime, maintenance, runtime_role, maintenance_role) = fixture.hosted_app().await;
     for (method, path) in [
         (Method::GET, "/v1/instance"),
         (Method::POST, "/v1/instance/claim"),
@@ -1232,7 +1254,9 @@ async fn hosted_router_does_not_mount_community_instance_routes() {
     }
     drop(app);
     runtime.close().await;
-    fixture.drop_runtime_role(&role).await;
+    maintenance.close().await;
+    fixture.drop_runtime_role(&runtime_role).await;
+    fixture.drop_runtime_role(&maintenance_role).await;
     fixture.cleanup().await;
 }
 

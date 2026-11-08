@@ -15,8 +15,8 @@ use crate::{
 };
 use peppy_client_core::{
     AttachmentId, AttachmentInfo, Client, ClientConfig, ConversationFolder, ConversationId, Cursor,
-    DatabaseKey, DeviceId, DraftId, MediaCursor, MediaMetadata, Message, MessageId, NativeKeyCache,
-    ReplayProgress, VaultId,
+    DatabaseKey, DeviceId, DraftId, GatewayRoute, MediaCursor, MediaMetadata, Message, MessageId,
+    NativeKeyCache, ReplayProgress, VaultId,
 };
 use peppy_desktop_api::compose::{self, ComposeError};
 use std::{
@@ -28,6 +28,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock, Weak,
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -101,6 +102,9 @@ pub struct NetStatus {
     pub revoked: bool,
     pub gateways: Vec<GatewayView>,
     pub gateways_known: bool,
+    pub rcs_roster_validated: bool,
+    /// Authenticated, non-revoked device IDs from the latest gateway refresh.
+    pub rcs_live_roster: Vec<String>,
     pub vault: Option<VaultSummary>,
     pub device_role: Option<String>,
     pub revoked_device_ids: HashSet<String>,
@@ -113,6 +117,7 @@ pub struct Session {
     pub api: Api,
     pub data_dir: PathBuf,
     pub status: Mutex<NetStatus>,
+    pub(crate) live_typing: crate::live_typing::LiveTypingHost,
     previews: Mutex<BoundedCache>,
     avatars: Mutex<BoundedCache>,
     pub transfer_errors: Mutex<HashMap<AttachmentId, String>>,
@@ -121,6 +126,8 @@ pub struct Session {
     pub work_wake: Notify,
     /// Wakes a pending reconnect wait (for example after unlock).
     pub reconnect_wake: Notify,
+    /// Wakes the live-typing supervisor to re-evaluate its runtime context.
+    pub(crate) live_context_wake: Notify,
     /// Wakes the live supervisor for an explicitly requested bounded inbound replay.
     pub replay_wake: Notify,
     pub cancel: CancellationToken,
@@ -312,6 +319,17 @@ impl Drop for Session {
     }
 }
 
+/// Projects one chat's RCS facts for the snapshot. A failed read claims nothing, so it cannot fail
+/// the snapshot for the other conversations.
+pub(crate) fn rcs_conversation_flags(
+    metadata: Result<Option<peppy_client_core::RcsConversationMetadata>, peppy_client_core::Error>,
+) -> (Option<bool>, bool) {
+    match metadata {
+        Ok(Some(metadata)) => (metadata.rcs_encryption, metadata.rcs_history_gap),
+        Ok(None) | Err(_) => (None, false),
+    }
+}
+
 fn host() -> BridgeError {
     BridgeError::host_state()
 }
@@ -488,12 +506,14 @@ pub fn open_session(
         api,
         data_dir,
         status: Mutex::new(status),
+        live_typing: crate::live_typing::LiveTypingHost::default(),
         previews: Mutex::new(BoundedCache::new(MAX_PREVIEW_CACHE)),
         avatars: Mutex::new(BoundedCache::new(MAX_AVATAR_CACHE)),
         transfer_errors: Mutex::new(HashMap::new()),
         download_retries: Mutex::new(HashMap::new()),
         work_wake: Notify::new(),
         reconnect_wake: Notify::new(),
+        live_context_wake: Notify::new(),
         replay_wake: Notify::new(),
         cancel: CancellationToken::new(),
         attachment_retention_negotiated: AtomicBool::new(false),
@@ -765,7 +785,15 @@ impl Session {
 
     pub fn notify(&self) {
         self.deferred_follow_up.reset();
+        self.live_context_wake.notify_one();
         (self.notifier)();
+    }
+
+    pub(crate) fn set_mismatch(&self, mismatch: bool) {
+        let changed = self.mismatch.swap(mismatch, Ordering::AcqRel) != mismatch;
+        if changed {
+            self.live_context_wake.notify_one();
+        }
     }
 
     /// Reads the committed replay frontiers for the next sanitized snapshot.
@@ -1472,12 +1500,13 @@ impl Session {
         budget: &mut usize,
         hydration: &mut DeferredHydration,
         eligible: Option<&HashSet<AttachmentId>>,
-    ) -> Vec<dto::MessageView> {
+    ) -> BridgeResult<Vec<dto::MessageView>> {
         let mut retention_states = HashMap::new();
         messages
             .iter()
             .map(|message| {
-                dto::message_view(
+                dto::rcs_receive::message_view(
+                    &self.client,
                     message,
                     self.attachment_views(
                         message,
@@ -1487,6 +1516,7 @@ impl Session {
                         &mut retention_states,
                     ),
                 )
+                .map_err(core_error)
             })
             .collect()
     }
@@ -1505,7 +1535,7 @@ impl Session {
             .messages_page(conversation, Some(anchor), INITIAL_HISTORY_MESSAGES)
             .map_err(core_error)?;
         let (mut budget, mut hydration) = (MAX_PREVIEWS_PER_SNAPSHOT, DeferredHydration::default());
-        let messages = self.message_views(page.messages, &mut budget, &mut hydration, None);
+        let messages = self.message_views(page.messages, &mut budget, &mut hydration, None)?;
         Ok(HistoryPage {
             conversation_id: conversation.to_string(),
             messages,
@@ -1523,19 +1553,13 @@ impl Session {
             .map_err(core_error)?;
         let mut budget = MAX_PREVIEWS_PER_SNAPSHOT;
         let mut hydration = DeferredHydration::default();
-        let mut retention_states = HashMap::new();
-        Ok(peppy_desktop_api::message_window_view(window, |message| {
-            dto::message_view(
-                &message,
-                self.attachment_views(
-                    &message,
-                    &mut budget,
-                    &mut hydration,
-                    None,
-                    &mut retention_states,
-                ),
-            )
-        }))
+        let messages = self.message_views(window.messages, &mut budget, &mut hydration, None)?;
+        Ok(peppy_desktop_api::MessageWindowView {
+            conversation_id: window.conversation_id,
+            messages,
+            has_older: window.has_older,
+            has_newer: window.has_newer,
+        })
     }
 
     pub fn media_page(
@@ -1692,10 +1716,11 @@ impl Session {
             .map(|c| c.conversation_id)
             .chain(drafts.iter().map(|d| d.conversation_id))
             .collect();
-        let requested = requested
+        let explicitly_requested = requested.is_some();
+        let requested_conversation = requested
             .and_then(|id| ConversationId::from_str(id).ok())
             .filter(|id| known.contains(id));
-        let active = requested
+        let active = requested_conversation
             .or_else(|| conversations.first().map(|c| c.conversation_id))
             .or_else(|| drafts.first().map(|d| d.conversation_id));
         let (mut budget, mut hydration) = (MAX_PREVIEWS_PER_SNAPSHOT, DeferredHydration::default());
@@ -1731,7 +1756,7 @@ impl Session {
             let (message_views, has_older_messages) = if !metadata_only
                 && Some(conversation.conversation_id) == active
             {
-                let history_from_message_id = (requested.is_some()
+                let history_from_message_id = (requested_conversation.is_some()
                     && Some(conversation.conversation_id) == active)
                     .then_some(history_from_message_id)
                     .flatten();
@@ -1758,7 +1783,7 @@ impl Session {
                 .map_err(core_error)?;
                 let eligible = snapshot_preview_ids(&messages);
                 (
-                    self.message_views(messages, &mut budget, &mut hydration, Some(&eligible)),
+                    self.message_views(messages, &mut budget, &mut hydration, Some(&eligible))?,
                     Some(has_more),
                 )
             } else {
@@ -1768,6 +1793,10 @@ impl Session {
                 .client
                 .mms_reply_context(conversation.conversation_id)
                 .ok();
+            let (rcs_encryption, rcs_history_gap) = rcs_conversation_flags(
+                self.client
+                    .rcs_conversation_metadata(conversation.conversation_id),
+            );
             views.push(ConversationView {
                 id: conversation.conversation_id.to_string(),
                 name,
@@ -1785,6 +1814,8 @@ impl Session {
                 folder_reason: conversation.folder_reason,
                 unblock: conversation.unblock,
                 can_unblock: conversation.can_unblock,
+                rcs_encryption,
+                rcs_history_gap,
             });
         }
         let listed: HashSet<ConversationId> =
@@ -1816,6 +1847,8 @@ impl Session {
                 folder_reason: None,
                 unblock: None,
                 can_unblock: false,
+                rcs_encryption: None,
+                rcs_history_gap: false,
             });
         }
         let draft = active
@@ -1835,6 +1868,7 @@ impl Session {
             status.vault.as_ref(),
             &keys,
         );
+        let displayed_unlocked = matches!(encryption_state, EncryptionState::Unlocked { .. });
         let encryption = match encryption_state {
             EncryptionState::Mismatch => dto::Encryption {
                 state: "mismatch",
@@ -1874,6 +1908,28 @@ impl Session {
             }
         };
         drop(status);
+        let rcs_status = {
+            let status = self
+                .status
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            dto::rcs_status::snapshot_at(
+                &self.client,
+                &status.gateways,
+                &status.revoked_device_ids,
+                dto::rcs_status::SnapshotAccess {
+                    active_conversation: active,
+                    active_is_existing: active.is_some_and(|id| {
+                        conversations.iter().any(|item| item.conversation_id == id)
+                    }) && (!explicitly_requested
+                        || requested_conversation.is_some()),
+                    roster_validated: status.rcs_roster_validated,
+                    unlocked: displayed_unlocked,
+                    now_ms: now_ms(),
+                },
+            )
+            .map_err(core_error)?
+        };
         let mut addresses: Vec<(String, Option<String>)> = Vec::new();
         for view in &views {
             for address in view.participants.iter().flatten().chain([&view.name]) {
@@ -1881,10 +1937,12 @@ impl Session {
             }
         }
         for draft in &drafts {
-            let source = draft
-                .route
-                .as_ref()
-                .map(|r| r.gateway_device_id.to_string());
+            let source = draft.route.as_ref().map(|route| match route {
+                GatewayRoute::Carrier {
+                    gateway_device_id, ..
+                }
+                | GatewayRoute::RcsLink { gateway_device_id } => gateway_device_id.to_string(),
+            });
             for recipient in &draft.recipients {
                 addresses.push((recipient.clone(), source.clone()));
             }
@@ -1925,6 +1983,7 @@ impl Session {
             contact_sync: contacts.sync,
             tone_overrides,
             sync_progress: Some(sync_progress),
+            rcs_status,
         };
         Ok((snapshot, hydration))
     }
@@ -1992,6 +2051,19 @@ impl Session {
                 .unwrap_or_else(|poison| poison.into_inner()),
         );
     }
+
+    pub(crate) fn set_security_status(&self, update: impl FnOnce(&mut NetStatus)) {
+        self.set_status(update);
+        self.live_context_wake.notify_one();
+    }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or(i64::MAX)
 }
 
 fn snapshot_preview_ids(messages: &[Message]) -> HashSet<AttachmentId> {

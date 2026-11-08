@@ -1432,7 +1432,7 @@ mod fake_http_tests {
                     recipients: vec!["+15555550100".into()],
                     body: "SIMULATED redirect".into(),
                 },
-                GatewayRoute {
+                GatewayRoute::Carrier {
                     gateway_device_id: DeviceId::new(),
                     subscription_id: "simulated-route-1".into(),
                 },
@@ -1611,7 +1611,7 @@ mod fake_http_tests {
                     recipients: vec!["+15555550100".into()],
                     body: "SIMULATED foreign route".into(),
                 },
-                GatewayRoute {
+                GatewayRoute::Carrier {
                     gateway_device_id: gateway_id,
                     subscription_id: "sim-foreign".into(),
                 },

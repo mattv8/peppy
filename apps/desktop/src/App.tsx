@@ -128,7 +128,6 @@ import { ConversationFolderSwitcher } from "./conversation/ConversationFolderSwi
 import { SenderUnblockConfirmation } from "./conversation/SenderUnblockConfirmation";
 import { ConversationSpamNotice } from "./conversation/ConversationSpamNotice";
 import { SenderUnblockNotice, type SenderUnblockNoticeState } from "./conversation/SenderUnblockNotice";
-import { peppyCopy } from "./generated/peppyCopy";
 import { MediaLightbox } from "./media/MediaLightbox";
 import { MediaPanel, type MediaPageItem as GalleryMediaPageItem } from "./media/MediaPanel";
 import { MediaGrid } from "./media/MediaGrid";
@@ -144,7 +143,16 @@ import { DETACHED_HISTORY_LIMIT, boundedAroundMessages, mergeDetachedMessages, s
 
 import { GatewayPicker } from "./setup/GatewayPicker";
 import { installHostedSessionRenewal } from "./bridge/hostedSessionRenewal";
-import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readComposerAttachmentLayout, readGroupSenderAvatars } from "./shell/layout-persistence";
+import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readComposerAttachmentLayout, readGroupSenderAvatars, readShareTyping } from "./shell/layout-persistence";
+import { RcsBadge } from "./rcs/RcsBadge";
+import { ConversationRcsNotice } from "./rcs/ConversationRcsNotice";
+import { RcsMessageMeta } from "./rcs/RcsMessageMeta";
+import { rcsSendBlock } from "./rcs/rcsRoute";
+import { useRcsRoute } from "./rcs/useRcsRoute";
+import { TypingAnnouncer, TypingIndicator } from "./typing/TypingIndicator";
+import { useTypingDisplay } from "./typing/useTypingDisplay";
+import { useTypingSender } from "./typing/useTypingSender";
+import { peppyCopy } from "./generated/peppyCopy";
 import { CORAL_ACCENT_INDEX, accentAttribute, accentSwatchColor } from "./shell/accent-color";
 import { useAccentColor } from "./shell/useAccentColor";
 import { senderLabel, senderRunEdges } from "./sender/attribution";
@@ -276,9 +284,15 @@ const STATUS_LABEL: Record<MessageStatus, string> = {
   "failed-before-submit": "Failed before submit",
   "failed-confirmed": "Failed",
   unknown: "Unknown delivery state — not retried",
+  read: "Read",
 };
 
 const TIMELESS_OUTGOING_STATUSES = new Set<MessageStatus>(["queued-local", "server-accepted"]);
+
+function rcsComposerReason(block: ReturnType<typeof rcsSendBlock>): string | undefined {
+  if (block.kind === "unproven") return peppyCopy.rcs_composer_reason_unproven;
+  return block.kind === "link" ? peppyCopy.rcs_composer_reason_link : undefined;
+}
 
 type MessageTime = {
   displayedTime?: string;
@@ -671,7 +685,9 @@ function MessageMeta({ message, hideTime = false }: { message: MessageView; hide
   const formattedTime = formatDateTime(displayedTime);
   const isoTime = isoDateTime(displayedTime);
   const deliveryConfirmed = message.status === "delivery-confirmed";
-  const phoneHistory = message.sender === "self" && !message.status && Boolean(formattedTime);
+  const rcsMessage = message.transport === "rcs";
+  const read = rcsMessage && message.status === "read";
+  const phoneHistory = !rcsMessage && message.sender === "self" && !message.status && Boolean(formattedTime);
   const compactStatus = message.status && ["gateway-persisted", "preparing", "submitted", "sent"].includes(message.status);
   const statusLabel = message.status ? STATUS_LABEL[message.status] : undefined;
   const validTime = Boolean(formattedTime && isoTime);
@@ -683,17 +699,19 @@ function MessageMeta({ message, hideTime = false }: { message: MessageView; hide
     : deliveryTimeUnavailable
       ? "Delivery confirmed; time unavailable"
       : "Delivery confirmed";
-  const statusIcon = message.status === "sent" ? <Check size={10} aria-hidden /> : <Clock size={10} aria-hidden />;
-  const showTextStatus = !deliveryConfirmed && Boolean(message.status) && (!compactStatus || !validTime);
+  const statusIcon = message.status === "sent" ? <Check size={10} aria-hidden /> : message.status === "read" ? <CheckCheck size={10} aria-hidden /> : <Clock size={10} aria-hidden />;
+  const showTextStatus = !read && !deliveryConfirmed && Boolean(statusLabel) && (!compactStatus || !validTime);
   const showCompactStatus = !deliveryConfirmed && Boolean(compactStatus && validTime);
-  if (!showTextStatus && !showTime && !showCompactStatus && !deliveryConfirmed && !phoneHistory) return null;
-  return <div className="message-meta" data-message-meta={message.id} data-status={message.status}>
+  if (!showTextStatus && !showTime && !showCompactStatus && !deliveryConfirmed && !phoneHistory && !read) return null;
+  return <div className="message-meta" data-message-meta={message.id} data-status={message.status} aria-live={rcsMessage ? "off" : undefined}>
     {showTextStatus && <span className="message-meta-status">{["failed-before-submit", "failed-confirmed"].includes(message.status!) ? <X size={10} aria-hidden /> : message.status === "unknown" ? <TriangleAlert size={10} aria-hidden /> : statusIcon}{statusLabel}</span>}
-    {showTextStatus && showTime && <span className="message-meta-separator" aria-hidden>·</span>}
+    {read && <RcsMessageMeta messageId={message.id} status={message.status} statusLabel={STATUS_LABEL[message.status!]} />}
+    {(showTextStatus || read) && showTime && <span className="message-meta-separator" aria-hidden>·</span>}
     {showTime && <time dateTime={isoTime}>{formattedTime}</time>}
     {showCompactStatus && <span className="message-meta-status" role="img" aria-label={statusLabel} title={statusLabel}>{statusIcon}</span>}
     {deliveryConfirmed && <span className="message-meta-status" role="img" aria-label={deliveryLabel} title={deliveryLabel}><CheckCheck size={10} aria-hidden /></span>}
     {phoneHistory && <span className="message-meta-status" role="img" aria-label="From phone history" title="From phone history" data-message-phone-icon={message.id}><Smartphone size={10} aria-hidden /></span>}
+    {rcsMessage && !read && <RcsMessageMeta messageId={message.id} status={message.status} rcsReported={message.rcsReported} statusLabel={message.status ? STATUS_LABEL[message.status] : ""} />}
   </div>;
 }
 
@@ -1148,6 +1166,9 @@ function SettingsView({
   canRevealVaultSecret = false,
   serverOffline = false,
   accountReadOnly = false,
+  typingShare,
+  typingShareError = false,
+  onTypingShare,
   requestedSection,
   onRequestedSectionConsumed,
   onAccountDeleted,
@@ -1197,6 +1218,9 @@ function SettingsView({
   canRevealVaultSecret?: boolean;
   serverOffline?: boolean;
   accountReadOnly?: boolean;
+  typingShare?: boolean;
+  typingShareError?: boolean;
+  onTypingShare(enabled: boolean): void;
   requestedSection?: string;
   onRequestedSectionConsumed?(): void;
   onAccountDeleted(result: { outcome: "deleted" | "pending"; provider: "none" | "stripe" | "apple" }): void;
@@ -1555,7 +1579,7 @@ function SettingsView({
         {browserHost ? <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} manageStorageUrl={accountUrl} /> : <HostedAccountSettings sessionScopeId={sessionScopeId} onAccountDeleted={onAccountDeleted} />}
       </section>}
       <AdvancedSettings sessionKey={sessionScopeId ?? "unavailable"} unlocked={encryption === "unlocked"} serverOffline={serverOffline} onOpenDevices={() => { selectSection("devices"); window.setTimeout(() => document.getElementById("mcp-custody-review")?.focus(), 0); }} />
-      <PrivacySettings browserHost={browserHost} />
+      <PrivacySettings browserHost={browserHost} typingShare={typingShare === undefined ? undefined : { enabled: typingShare, onChange: onTypingShare, error: typingShareError }} />
       </div>
       </div>
     </section>
@@ -1828,6 +1852,24 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }
   });
   const [compactTimestamps, setCompactTimestamps] = useState(readCompactTimestamps);
+  const [shareTyping, setShareTyping] = useState(readShareTyping);
+  const [typingShareError, setTypingShareError] = useState(false);
+  const typingShareRequest = useRef(0);
+  const confirmedTypingShare = useRef(shareTyping);
+  const typingLinkAvailable = Boolean(snapshot?.rcsStatus?.gateways.some((gateway) => gateway.state !== "unlinked"));
+  useEffect(() => {
+    void bridge.set_typing_sharing?.({ enabled: readShareTyping() }).catch(() => undefined);
+  }, [bridge.set_typing_sharing, typingLinkAvailable]);
+  useEffect(() => {
+    const syncShareTyping = (event: StorageEvent) => {
+      if (event.key !== "peppy.layout.v1") return;
+      const enabled = readShareTyping();
+      setShareTyping(enabled);
+      void bridge.set_typing_sharing?.({ enabled }).catch(() => undefined);
+    };
+    window.addEventListener("storage", syncShareTyping);
+    return () => window.removeEventListener("storage", syncShareTyping);
+  }, [bridge.set_typing_sharing]);
   const [attachmentLayout, setAttachmentLayout] = useState<AttachmentLayout>(readComposerAttachmentLayout);
   const [groupSenderAvatars, setGroupSenderAvatars] = useState(readGroupSenderAvatars);
   useEffect(() => {
@@ -2215,6 +2257,25 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const changeCompactTimestamps = (enabled: boolean) => {
     setCompactTimestamps(enabled);
     persistLayout({ compactTimestamps: enabled });
+  };
+  const changeTypingShare = (enabled: boolean) => {
+    const request = ++typingShareRequest.current;
+    setShareTyping(enabled);
+    setTypingShareError(false);
+    if (!persistLayout({ shareTyping: enabled })) {
+      setShareTyping(confirmedTypingShare.current);
+      setTypingShareError(true);
+      return;
+    }
+    void bridge.set_typing_sharing?.({ enabled }).then(() => {
+      confirmedTypingShare.current = enabled;
+    }).catch(() => {
+      if (request !== typingShareRequest.current) return;
+      persistLayout({ shareTyping: confirmedTypingShare.current });
+      setShareTyping(confirmedTypingShare.current);
+      setTypingShareError(true);
+    });
+    if (!enabled) typingSender.noteSend();
   };
   const changeAttachmentLayout = (layout: AttachmentLayout) => {
     setAttachmentLayout(layout);
@@ -3486,6 +3547,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const content = slot?.content ?? blankContent();
   const gateways = snapshot?.gateways ?? [];
   const route = resolveRoute(content, gateways);
+  const rcsRoute = useRcsRoute({
+    snapshot: snapshot ?? undefined,
+    activeConversationId: active?.id,
+    gatewayId: route.kind === "route" ? route.gateway.id : undefined,
+    locked: Boolean(appLock?.locked),
+  });
+  const rcsBlock = rcsRoute.block;
   const mmsRequired = requiresMms(content, active);
   const routeRecipients = recipientCount(content, active);
   const estimateBytes = draftEstimateBytes(content, attachmentViews);
@@ -3503,6 +3571,37 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     (newComposeKey !== null && store.resolve(newComposeKey) === slotKey) ||
     active?.draftOnly === true
   );
+  const pendingRecipientReason = "finish adding the recipient before sending";
+  const effectivePendingRecipient = pendingRecipient && isNewConversation;
+  const rcsBlockReason = rcsComposerReason(rcsBlock);
+  const routeUnavailableReason = effectivePendingRecipient ? pendingRecipientReason : problem ?? rcsBlockReason;
+  const draftHydrated = Boolean(slotKey && store.isHydrated(slotKey));
+  const composerReadOnly = Boolean(slotKey && !draftHydrated && !isLocalDraftKey(slotKey));
+  const conversationSurfaceVisible = Boolean(composerConversation) || activeView === "conversations";
+  const latestIncomingMessageId = useMemo(
+    () => active?.messages.reduce<string | undefined>((latest, message) => message.sender === "other" ? message.id : latest, undefined),
+    [active?.messages],
+  );
+  const typingSender = useTypingSender({
+    bridge,
+    conversationId: active?.id,
+    current: rcsRoute.current,
+    existing: Boolean(active && slotKey && !isLocalDraftKey(slotKey) && !active.draftOnly),
+    sendSupported: Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !routeUnavailableReason && !sending,
+    readOnly: composerReadOnly,
+    visible: conversationSurfaceVisible,
+    sharingEnabled: shareTyping,
+  });
+  const isGroup = (active?.participants?.length ?? 0) > 1;
+  const typing = useTypingDisplay({
+    bridge,
+    conversationId: active?.id,
+    current: rcsRoute.current && conversationSurfaceVisible,
+    localUserTyping: typingSender.state === "active",
+    incomingMessageId: latestIncomingMessageId,
+    connected: snapshot?.connection.state === "connected",
+    direct: !isGroup,
+  });
 
   const edit = (patch: Partial<DraftContent>) => {
     if (!slotKey || deletingId === slotKey || resolvingDraftConflict) return;
@@ -3883,6 +3982,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       );
       if (blocked || chosen.kind !== "route")
         return setComposerNotice(current.key, `Not sent: ${blocked ?? "choose a phone and SIM"}.`);
+      const rcsBlocked = rcsSendBlock({ snapshot: latestSnapshot ?? undefined, activeConversationId: current.conversationId, gatewayId: chosen.gateway.id, nowMs: Date.now(), locked: Boolean(appLockRef.current?.locked) });
+      if (rcsBlocked.kind !== "none") {
+        const reason = rcsComposerReason(rcsBlocked)!;
+        return setComposerNotice(current.key, `Not sent: ${reason}.`);
+      }
       const sendContent = { ...current.content, recipientIds: [...current.content.recipientIds], attachmentIds: [...current.content.attachmentIds] };
       const restoreUnsent = async () => {
         const next = store.get(current.key)?.content ?? blankContent();
@@ -4626,17 +4730,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         ? { text: fileSize(estimateBytes), tone: "default" as const }
         : mmsHeaderSize(estimateBytes, mmsLimitBytes)
     : undefined;
-  const pendingRecipientReason = "finish adding the recipient before sending";
-  const effectivePendingRecipient = pendingRecipient && isNewConversation;
-  const unavailableReason = effectivePendingRecipient ? pendingRecipientReason : draftSendBlock ?? problem;
+  const unavailableReason = effectivePendingRecipient ? pendingRecipientReason : draftSendBlock ?? problem ?? rcsBlockReason;
   const mainWindowRouteRecovery = headPanel && !effectivePendingRecipient && (
     (route.kind === "none" && gateways.length > 0) || route.kind === "stale"
   );
   const composerUnavailableReason = mainWindowRouteRecovery
     ? `${unavailableReason} in the main window`
     : unavailableReason;
-  const draftHydrated = Boolean(slotKey && store.isHydrated(slotKey));
-  const composerReadOnly = Boolean(slotKey && !draftHydrated && !isLocalDraftKey(slotKey));
   const composerResizeHandle = (
     <ResizeHandle
       id="handle-h2"
@@ -4822,11 +4922,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         draft={content.text}
         attachments={attachments}
         sendSupported={Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending && !resolvingDraftConflict}
+        hideSmsCounter={rcsRoute.current || rcsBlock.kind !== "none"}
+        typingSlot={<><TypingIndicator visible={typing.visible} scope={isGroup ? "group" : "direct"} label={isGroup ? peppyCopy.typing_indicator_group : peppyCopy.typing_indicator_direct} /><TypingAnnouncer text={typing.announcement ? isGroup ? peppyCopy.typing_indicator_group : peppyCopy.typing_announce_direct : ""} /></>}
+        typingSendState={typingSender.state}
         unavailableReason={resolvingDraftConflict ? "resolving draft conflict…" : sending ? "sending…" : draftSubscriptionError ? "draft updates unavailable; retry setup" : composerReadOnly ? "draft is loading" : composerUnavailableReason}
         readOnly={composerReadOnly || resolvingDraftConflict}
         placeholder={composerReadOnly ? "Loading draft…" : undefined}
-        onDraftChange={(text) => edit({ text })}
-        onSend={() => void send()}
+        onDraftChange={(text) => { typingSender.noteInput(text); edit({ text }); }}
+        onSend={() => { typingSender.noteSend(); void send(); }}
         onAddAttachment={slotKey && !composerReadOnly && !resolvingDraftConflict ? () => void addAttachment() : undefined}
         onPasteImages={slotKey && !composerReadOnly && !resolvingDraftConflict ? files => void addPastedAttachments(files) : undefined}
         onRemoveAttachment={slotKey && !composerReadOnly && !resolvingDraftConflict ? (id) => edit({ attachmentIds: content.attachmentIds.filter((attachmentId) => attachmentId !== id) }) : undefined}
@@ -4867,6 +4970,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             <span id="unavailable-hint" className={unavailableReason === draftSendBlock && failedDraftAttachment ? "sr-only" : undefined} hidden={!unavailableReason || hasDraftConflicts}>
               {unavailableReason && <>Sending unavailable: {composerUnavailableReason}</>}
             </span>
+            <div id="composer-route-notice" role="status" data-route-block={rcsBlock.kind === "link" ? `link-${rcsBlock.help}` : rcsBlock.kind}>
+              {rcsBlock.kind !== "none" && <p id="composer-route-help">{rcsBlock.kind === "unproven" ? peppyCopy.rcs_composer_help_unproven : rcsBlock.help === "relink" ? peppyCopy.rcs_composer_help_relink : peppyCopy.rcs_composer_help_phone} {peppyCopy.rcs_composer_draft_kept}</p>}
+            </div>
+            {mmsLimitShown && route.kind === "route" && (
+              <span className="mms-limit" data-mms-limit-source={route.gateway.mmsLimitSource ?? "fallback"}>
+                {fileSize(estimateBytes)} used · {fileSize(route.gateway.mmsMaxBytes ?? 300 * 1024)} limit ({route.gateway.mmsLimitSource === "carrier" ? "carrier" : "fallback"}) · up to {Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)} recipients
+              </span>
+            )}
             <DraftNotice notice={visibleDraftNotice} noticeKey={slotKey} onAction={onDraftNoticeAction} busy={sending || noticeActionBusy} />
             <DraftSyncStatus
               draft={activeDraftView}
@@ -5357,7 +5468,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 <h1 data-header-title>Contacts</h1>
               ) : (
                 <div className="header-copy-details">
-                  <b data-header-title>{revoked ? "Set up Peppy" : title ?? (showSetup ? "Set up Peppy" : "Peppy")}</b>
+                  <div data-header-title-row><b data-header-title>{revoked ? "Set up Peppy" : title ?? (showSetup ? "Set up Peppy" : "Peppy")}</b>{!revoked && !headPanel && rcsRoute.current && <RcsBadge encryptionReported={active?.rcsEncryption === true} />}</div>
                   {active?.participants && <small data-conversation-participants>{active.participants.map((part) => displayAddressName(part, resolution)).join(", ")}</small>}
                 </div>
               )}
@@ -5425,6 +5536,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             </button>}
           </header>
           {!settingsOpen && !notificationsOpen && !contactsOpen && active && <ConversationSpamNotice folder={active.folder} folderReason={active.folderReason} unblock={active.unblock} />}
+          {!settingsOpen && !notificationsOpen && !contactsOpen && active && <ConversationRcsNotice historyGap={active.rcsHistoryGap} />}
           {senderUnblockConfirmation && <SenderUnblockConfirmation
             name={senderUnblockConfirmation.name}
             canUnblock={senderUnblockConfirmation.canUnblock}
@@ -5485,7 +5597,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               accountUrl={accountUrl}
               canRevealVaultSecret={!browserHost && snapshot?.deviceRole === "owner" && snapshot.connection.state === "connected"}
                serverOffline={serverOffline}
-                accountReadOnly={accountReadOnly}
+               accountReadOnly={accountReadOnly}
+               typingShare={typingLinkAvailable && bridge.send_typing ? shareTyping : undefined}
+               typingShareError={typingShareError}
+               onTypingShare={changeTypingShare}
                 requestedSection={notificationSettingsRequested ? "notifications" : undefined}
                 onRequestedSectionConsumed={() => setNotificationSettingsRequested(false)}
                 onAccountDeleted={result => {

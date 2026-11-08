@@ -550,7 +550,7 @@ fn select_route_from_views(
             );
         }
     };
-    Ok(GatewayRoute {
+    Ok(GatewayRoute::Carrier {
         gateway_device_id: peppy_client_core::DeviceId::from_str(&view.id).map_err(|_| {
             error_result(
                 "no_gateway",
@@ -1131,7 +1131,7 @@ mod tests {
             recipients: vec!["15551234567".into()],
             body: "reply".into(),
             attachment_ids: Vec::new(),
-            route: GatewayRoute {
+            route: GatewayRoute::Carrier {
                 gateway_device_id: DeviceId::new(),
                 subscription_id: "sim-1".into(),
             },
@@ -1199,7 +1199,7 @@ mod tests {
                     recipients: vec!["15551234567".into()],
                     body: "\"\\\n".repeat(16 * 1024),
                     attachment_ids: Vec::new(),
-                    route: GatewayRoute {
+                    route: GatewayRoute::Carrier {
                         gateway_device_id: DeviceId::new(),
                         subscription_id: "sim-1".into(),
                     },
@@ -1277,7 +1277,7 @@ mod tests {
                 recipients: vec!["15551234567".into()],
                 body: "image".into(),
                 attachment_ids: vec![attachment.attachment_id],
-                route: GatewayRoute {
+                route: GatewayRoute::Carrier {
                     gateway_device_id: DeviceId::new(),
                     subscription_id: "sim-1".into(),
                 },

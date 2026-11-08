@@ -38,6 +38,10 @@ final class AppModel {
     private(set) var attachmentStorageRefreshing = false
     private(set) var attachmentStorageIsStale = false
     private(set) var devices: [DeviceRosterItem] = []
+    private(set) var googleMessagesLinkStatuses: [String: GoogleMessagesLinkPresentation] = [:]
+    private var deviceRosterRevision = 0
+    private var deviceRefreshGeneration = 0
+    private var linkStatusRequestGeneration = 0
     private(set) var devicesLoaded = false
     private(set) var relay: RelayWakeClient?
     var relayOrigin = UserDefaults.standard.string(forKey: "peppy.relay-origin") ?? ""
@@ -141,7 +145,9 @@ final class AppModel {
     }
 
     func refresh() async {
+        let previousIdentity = status.identity
         await run(.refreshing) { try await $0.refreshEnrollment() }
+        if status.identity == previousIdentity, lastError == nil { await refreshDevices() }
     }
 
     /// Invoked only from the visible Account settings surface or its explicit refresh control.
@@ -418,9 +424,98 @@ final class AppModel {
     }
 
     func refreshDevices() async {
-        defer { devicesLoaded = true }
-        do { devices = try await session.devices() }
-        catch { lastError = (error as? ClientError)?.userMessage ?? "Could not load devices." }
+        let requestGeneration = deviceRefreshGeneration &+ 1
+        deviceRefreshGeneration = requestGeneration
+        let request = DeviceRosterRefreshRequest(
+            identityKey: googleMessagesLinkIdentityKey,
+            generation: requestGeneration,
+            keysUnlocked: status.keysUnlocked
+        )
+        defer {
+            if request.accepts(
+                identityKey: googleMessagesLinkIdentityKey,
+                generation: deviceRefreshGeneration,
+                keysUnlocked: status.keysUnlocked
+            ) {
+                devicesLoaded = true
+            }
+        }
+        do {
+            let nextDevices = try await session.devices()
+            guard request.accepts(
+                identityKey: googleMessagesLinkIdentityKey,
+                generation: deviceRefreshGeneration,
+                keysUnlocked: status.keysUnlocked
+            ) else { return }
+            devices = nextDevices
+            deviceRosterRevision &+= 1
+            await refreshGoogleMessagesLinkStatuses()
+        }
+        catch {
+            guard request.accepts(
+                identityKey: googleMessagesLinkIdentityKey,
+                generation: deviceRefreshGeneration,
+                keysUnlocked: status.keysUnlocked
+            ) else { return }
+            lastError = (error as? ClientError)?.userMessage ?? "Could not load devices."
+        }
+    }
+
+    func googleMessagesLinkStatus(for device: DeviceRosterItem) -> GoogleMessagesLinkPresentation? {
+        googleMessagesLinkStatuses[device.id]
+    }
+
+    var googleMessagesLinkStatusDeadline: Int64? {
+        googleMessagesLinkStatuses.values.compactMap(\.expiresAtMs).min()
+    }
+
+    func expireGoogleMessagesLinkStatuses(at nowMs: Int64) {
+        guard nowMs >= 0 else {
+            googleMessagesLinkStatuses = googleMessagesLinkStatuses.mapValues { _ in
+                GoogleMessagesLinkPresentation(status: .unconfirmed, expiresAtMs: nil)
+            }
+            return
+        }
+        googleMessagesLinkStatuses = googleMessagesLinkStatuses.mapValues { $0.expired(at: nowMs) }
+    }
+
+    private func refreshGoogleMessagesLinkStatuses() async {
+        guard let identity = status.identity else {
+            invalidateGoogleMessagesLinkStatuses()
+            return
+        }
+        let requestGeneration = linkStatusRequestGeneration &+ 1
+        linkStatusRequestGeneration = requestGeneration
+        let request = GoogleMessagesLinkStatusRequest(
+            identityKey: googleMessagesLinkIdentityKey,
+            rosterRevision: deviceRosterRevision,
+            generation: requestGeneration,
+            keysUnlocked: status.keysUnlocked
+        )
+        let roster = devices
+        let values = await session.googleMessagesLinkStatuses(
+            for: roster,
+            currentDeviceID: identity.deviceId
+        )
+        guard request.accepts(
+            identityKey: googleMessagesLinkIdentityKey,
+            rosterRevision: deviceRosterRevision,
+            generation: linkStatusRequestGeneration,
+            keysUnlocked: status.keysUnlocked
+        )
+        else { return }
+        googleMessagesLinkStatuses = values
+    }
+
+    private var googleMessagesLinkIdentityKey: String? {
+        status.identity.map { "\($0.origin)|\($0.vaultId)|\($0.deviceId)" }
+    }
+
+    private func invalidateGoogleMessagesLinkStatuses() {
+        deviceRefreshGeneration &+= 1
+        linkStatusRequestGeneration &+= 1
+        deviceRosterRevision &+= 1
+        googleMessagesLinkStatuses = [:]
     }
 
     func revokeDevice(_ id: String) async {
@@ -457,6 +552,7 @@ final class AppModel {
         lastSync = nil
         lastSyncDate = nil
         devices = []
+        invalidateGoogleMessagesLinkStatuses()
         serverReachability = .unknown
         clearAttachmentStorage()
     }
@@ -719,6 +815,7 @@ final class AppModel {
             lastError = (error as? ClientError)?.userMessage ?? "Sync failed."
         }
         if let opened = try? await session.open() { setStatus(opened) }
+        await refreshGoogleMessagesLinkStatuses()
         await publishServerReachability()
         await runContactsPass(.foreground)
     }
@@ -800,7 +897,12 @@ final class AppModel {
     }
 
     private func setStatus(_ nextStatus: SessionStatus) {
-        if status.identity != nextStatus.identity { clearAttachmentStorage() }
+        if status.identity != nextStatus.identity || status.keysUnlocked != nextStatus.keysUnlocked {
+            clearAttachmentStorage()
+            devices = []
+            devicesLoaded = false
+            invalidateGoogleMessagesLinkStatuses()
+        }
         status = nextStatus
     }
 

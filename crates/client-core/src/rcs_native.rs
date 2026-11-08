@@ -1,0 +1,283 @@
+//! Restricted local-native RCS handoff contract.
+//!
+//! These records are intentionally separate from vault events and shared conversation DTOs. They
+//! are the only JSON-schema-capable projection an Android transport may receive after core has
+//! admitted an RCS attempt.
+use crate::{
+    CommandId, ConversationId, Error, RcsCapabilityState, RcsConversationType, RcsMapping,
+    RcsMappingObservation, RcsSendMode, rcs_mapping,
+};
+use rusqlite::{Connection, params};
+use schemars::{JsonSchema, schema_for};
+use serde::{Deserialize, Serialize};
+
+pub const NATIVE_RCS_COMMAND_PAGE_SIZE: usize = 100;
+
+/// A received RCS-link command that may be observed by the trusted native coordinator.
+/// This is only a candidate; prepare and begin remain the transport-admission boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingNativeRcsCommand {
+    pub command_id: CommandId,
+    pub conversation_id: ConversationId,
+    pub recipient: String,
+}
+
+pub(crate) fn pending_commands(
+    conn: &Connection,
+    active_epoch: Option<u32>,
+) -> Result<Vec<PendingNativeRcsCommand>, Error> {
+    if rcs_mapping::recorded_link_lifecycle(conn)? != Some(RcsCapabilityState::Linked) {
+        return Ok(Vec::new());
+    }
+    let Some(active_epoch) = active_epoch else {
+        return Ok(Vec::new());
+    };
+    let mut query = conn.prepare(
+        "SELECT l.local_order,l.command_id FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE a.command_id IS NULL AND l.historical=0 AND l.subscription_id='' AND l.key_epoch=? AND (l.local_order>? OR (l.local_order=? AND l.command_id>?)) ORDER BY l.local_order,l.command_id LIMIT ?",
+    )?;
+    // The client store mutex prevents ledger growth during this scan. Each batch advances the
+    // keyset cursor, so one call examines at most the qualifying raw rows present on entry.
+    let mut cursor = (i64::MIN, String::new());
+    let mut candidates = Vec::new();
+    while candidates.len() < NATIVE_RCS_COMMAND_PAGE_SIZE {
+        let rows = query
+            .query_map(
+                params![
+                    active_epoch,
+                    cursor.0,
+                    cursor.0,
+                    cursor.1,
+                    NATIVE_RCS_COMMAND_PAGE_SIZE as i64
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let Some(last) = rows.last() else {
+            break;
+        };
+        cursor = last.clone();
+        let exhausted = rows.len() < NATIVE_RCS_COMMAND_PAGE_SIZE;
+        for (_, command_id) in rows {
+            if let Some(candidate) = candidate(conn, active_epoch, command_id)? {
+                candidates.push(candidate);
+                if candidates.len() == NATIVE_RCS_COMMAND_PAGE_SIZE {
+                    break;
+                }
+            }
+        }
+        if exhausted {
+            break;
+        }
+    }
+    Ok(candidates)
+}
+
+fn candidate(
+    conn: &Connection,
+    active_epoch: u32,
+    command_id: String,
+) -> Result<Option<PendingNativeRcsCommand>, Error> {
+    let command_id = command_id
+        .parse()
+        .map_err(|_| Error::InvalidRequest("invalid command id"))?;
+    let message = match crate::unattempted_rcs_message(conn, Some(active_epoch), command_id) {
+        Ok(message) => message,
+        Err(Error::AlreadyAttempted(_) | Error::InvalidRequest(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(mapping) = rcs_mapping::get(conn, message.record.conversation_id)? else {
+        return Ok(None);
+    };
+    if crate::require_exact_rcs_recipient(&message, &mapping).is_err() {
+        return Ok(None);
+    }
+    let [recipient] = message.recipients.as_slice() else {
+        return Ok(None);
+    };
+    Ok(Some(PendingNativeRcsCommand {
+        command_id,
+        conversation_id: message.record.conversation_id,
+        recipient: recipient.clone(),
+    }))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NativeRcsLifetime {
+    pub runtime_id: String,
+    pub run_generation: u64,
+    pub link_generation: u64,
+    pub session_generation: u64,
+    pub context_revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NativeRcsParticipant {
+    pub identity: String,
+    pub google_participant_id: String,
+    pub identifier_type: i32,
+    pub is_visible: bool,
+    pub is_me: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum NativeOwnNumberSource {
+    SubscriptionManagerPhoneNumber,
+    TelephonyLine1Number,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NativeCarrierRouteBinding {
+    pub carrier_route_id: String,
+    pub android_subscription_id: i32,
+    pub is_current_default_sms: bool,
+    pub own_number_raw: String,
+    pub own_number_source: NativeOwnNumberSource,
+    pub route_observed_at_ms: i64,
+    pub route_context_revision: u64,
+    pub same_handset_evidence_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NativeRcsSimPayload {
+    pub two: i32,
+    pub sim_number: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NativeRcsOutgoing {
+    pub outgoing_id: String,
+    pub sim_participant_id: String,
+    pub own_identity_raw: String,
+    pub sim_payload: NativeRcsSimPayload,
+    pub rcs_chats_enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum NativeSettingsProvenance {
+    CurrentEvent,
+    OldEvent,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum NativeSettingsCurrentness {
+    ContinuousVerifiedFeed,
+    Unproven,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NativeRcsEvidence {
+    pub lifetime: NativeRcsLifetime,
+    pub lookup_id: String,
+    pub lookup_complete: bool,
+    pub google_candidate_count: u32,
+    pub settings_revision: u64,
+    pub settings_provenance: NativeSettingsProvenance,
+    pub settings_observed_at_ms: i64,
+    pub settings_stream_epoch: u64,
+    pub settings_currentness: NativeSettingsCurrentness,
+    /// Every current Google settings SIM record; this is never a shared DTO.
+    pub current_settings_sims: Vec<NativeRcsOutgoing>,
+    pub settings_validated_at_ms: i64,
+    pub conversation_observed_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum NativeRcsTargetClass {
+    OneToOne,
+    SelfChat,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LocalRcsTargetSnapshot {
+    pub proof_version: u32,
+    pub peppy_conversation_id: String,
+    pub google_conversation_id: String,
+    pub conversation_type: RcsConversationType,
+    pub status: String,
+    pub send_mode: RcsSendMode,
+    pub read_only: bool,
+    pub default_outgoing: bool,
+    pub participants: Vec<NativeRcsParticipant>,
+    pub class: NativeRcsTargetClass,
+    pub canonical_recipient: String,
+    pub canonical_own_identity: String,
+    pub identity_region: String,
+    pub canonicalizer_revision: u32,
+    pub selected_sim_id: String,
+    pub carrier_binding: NativeCarrierRouteBinding,
+    pub outgoing: NativeRcsOutgoing,
+    pub evidence: NativeRcsEvidence,
+}
+
+/// Private commit input emitted only by core from a durable `RcsPermit`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NativeRcsCommitProjection {
+    pub command_id: String,
+    pub tmp_id: String,
+    pub mapping_revision: u64,
+    pub proof_version: u32,
+    pub proof_digest: Vec<u8>,
+    pub message_body: String,
+    pub target: LocalRcsTargetSnapshot,
+}
+
+/// Core-owned input for asking the native host to observe one exact local RCS target.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NativeRcsPrepareRequest {
+    pub command_id: String,
+    pub peppy_conversation_id: String,
+    pub canonical_recipient: String,
+}
+
+/// Core-owned native RCS preparation that retains the complete verified mapping.
+pub struct NativeRcsPreparation {
+    command_id: CommandId,
+    request: NativeRcsPrepareRequest,
+    mapping: RcsMapping,
+}
+
+impl NativeRcsPreparation {
+    pub(crate) fn new(command_id: CommandId, mapping: RcsMapping) -> Self {
+        let request = NativeRcsPrepareRequest {
+            command_id: command_id.to_string(),
+            peppy_conversation_id: mapping.conversation_id.to_string(),
+            canonical_recipient: mapping.proof.canonical_participant.clone(),
+        };
+        Self {
+            command_id,
+            request,
+            mapping,
+        }
+    }
+
+    pub fn request(&self) -> &NativeRcsPrepareRequest {
+        &self.request
+    }
+
+    pub fn mapping(&self) -> &RcsMapping {
+        &self.mapping
+    }
+
+    pub(crate) fn into_parts(self) -> (CommandId, RcsMapping) {
+        (self.command_id, self.mapping)
+    }
+}
+
+/// Schema bundle for the restricted local-native handoff only; it is not an event or public relay API.
+pub fn restricted_native_rcs_handoff_schema() -> serde_json::Value {
+    serde_json::json!({
+        "prepare_request": schema_for!(NativeRcsPrepareRequest),
+        "prepare_observation": schema_for!(RcsMappingObservation),
+        "commit_projection": schema_for!(NativeRcsCommitProjection),
+    })
+}
