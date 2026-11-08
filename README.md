@@ -121,6 +121,12 @@ For eligible Peppy Hosted enrollment, Background updates register automatically 
 
 Diagnostics are off by default. On a test phone, enable **Settings → Diagnostics** to record bounded numeric timing and counters locally, then turn it off after collecting a trace. **Share log** creates a bounded private snapshot. Peppy does not collect logcat, message bodies, phone or provider IDs, URLs, credentials, response bodies, or exception text. Emulator tests and APK builds do not establish carrier, FCM, store, physical-network, latency, or battery behavior.
 
+#### Google Messages link (experimental)
+
+Link Peppy to Google Messages through an optional Android sideload integration using libgm, a Google Messages for Web client library. This gives Peppy a path to RCS through Google Messages without replacing your default messaging app or relying on restricted Android message-provider access. Google credentials stay encrypted on your phone.
+
+Full RCS support is still in development: production send/receive activation remains disabled, and the current send implementation targets existing one-to-one text conversations. Group and media support are not yet established. Play builds exclude this integration.
+
 ### Desktop
 
 Install stable macOS, Windows, or Linux release artifacts from [GitHub Releases](https://github.com/mattv8/peppy/releases). Enter the server address to discover its setup state. The desktop client can make the first self-hosted claim, sign in as an administrator, or enroll with a shared secret. It keeps passwords and vault secrets in native dialogs. The setup and recovery rules match [First-run setup and device connections](#first-run-setup-and-device-connections) and [Recover from an unwanted first claim](#recover-from-an-unwanted-first-claim).
