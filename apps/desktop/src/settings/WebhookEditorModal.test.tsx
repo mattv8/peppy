@@ -266,7 +266,7 @@ describe("WebhookEditorModal", () => {
       renderEditor();
       await createWithUrl();
 
-      expect(document.getElementById("webhook-secret-copy")).toHaveFocus();
+      await waitFor(() => expect(document.getElementById("webhook-secret-copy")).toHaveFocus());
       expect(screen.queryByText(/once/i)).not.toBeInTheDocument();
     });
 
