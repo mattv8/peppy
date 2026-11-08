@@ -722,7 +722,7 @@ describe("McpDeviceSettings", () => {
       const confirm = within(dialog).getByRole("button", { name: "Confirm revoke Claude (0f1e2d3c)" });
       fireEvent.click(confirm);
       expect(await within(dialog).findByRole("alert")).toHaveTextContent("Could not reach the configured server.");
-      expect(confirm).toHaveFocus();
+      await waitFor(() => expect(confirm).toHaveFocus());
     });
 
     it("announces a completed revoke, not progress, when a refresh removed the grant first", async () => {
