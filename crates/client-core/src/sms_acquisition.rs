@@ -18,6 +18,7 @@ const RECOVERY_RECORD_RESERVE: u64 = 10_000;
 const RECOVERY_BYTE_RESERVE: u64 = 64 * 1024 * 1024;
 /// Completed full-provider reconciliation sweeps restart at most this often.
 pub const SMS_RECONCILIATION_INTERVAL_MS: i64 = 6 * 60 * 60 * 1000;
+const LOCAL_REUSE_WINDOW: u64 = 200;
 
 /// Host reason codes for provider rows that are not (yet) messages: drafts and failed sends stay
 /// rechecked, but neither fill the pending queue nor report as reconciliation work.
@@ -181,6 +182,12 @@ impl Client {
         let input = normalized(input);
         let representable = validate_content(&input).is_ok();
         let mut guard = self.lock()?;
+        // The store mutex serializes writers, so this completed row cannot change before return.
+        if let Some(existing) = by_source(&guard.conn, &input)?
+            && existing.state == SmsAcquisitionState::Complete
+        {
+            return Ok(existing);
+        }
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(existing) = by_source(&tx, &input)? {
@@ -660,43 +667,55 @@ impl Client {
             observed_high_water,
             live_anchor_fingerprint,
         )?;
+        let full_sweep_due =
+            completed.is_none_or(|at| now_ms.saturating_sub(at) >= SMS_RECONCILIATION_INTERVAL_MS);
         let (mut cursor, upper_bound) = if !upper_bound.is_empty() {
             (cursor, upper_bound)
-        } else if !reused
-            && completed
-                .is_some_and(|at| now_ms.saturating_sub(at) < SMS_RECONCILIATION_INTERVAL_MS)
-        {
+        } else if reused.is_none() && !full_sweep_due {
             tx.commit()?;
             return Ok(None);
         } else {
-            tx.execute(
-                "UPDATE sms_reconciliation_scans SET scan_cursor=NULL,upper_bound=?,completed_at_ms=NULL WHERE source_generation=? AND subscription_id=?",
-                params![observed_high_water, generation, scope],
-            )?;
-            // After a high-water regression the sweep covers every row up to the observed mark;
-            // the live scan resumes above it so later rows with reused lower IDs are not skipped.
-            let live: Option<String> = tx
-                .query_row(
-                    "SELECT provider_message_id FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? AND imported=0",
-                    params![generation, scope],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if live
-                .as_deref()
-                .map(crate::history_import::stored_provider_id)
-                .transpose()?
-                .is_some_and(|live| {
-                    live > crate::history_import::canonical_provider_id(observed_high_water)
-                        .expect("validated SMS reconciliation bound")
-                })
-            {
+            let local_cursor = if full_sweep_due {
+                None
+            } else {
+                match reused {
+                    Some(ProviderIdReuse::AnchorMismatch { live }) => {
+                        Some(live.saturating_sub(LOCAL_REUSE_WINDOW))
+                    }
+                    Some(ProviderIdReuse::HighWaterRegression { live, high_water })
+                        if live - high_water <= LOCAL_REUSE_WINDOW =>
+                    {
+                        tx.execute(
+                            "UPDATE sms_scan_checkpoints SET provider_message_id=? WHERE source_generation=? AND subscription_id=? AND imported=0",
+                            params![observed_high_water, generation, scope],
+                        )?;
+                        Some(high_water.saturating_sub(LOCAL_REUSE_WINDOW))
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(cursor) = local_cursor {
+                let cursor = (cursor != 0).then(|| cursor.to_string());
                 tx.execute(
-                    "UPDATE sms_scan_checkpoints SET provider_message_id=? WHERE source_generation=? AND subscription_id=? AND imported=0",
+                    "UPDATE sms_reconciliation_scans SET scan_cursor=?,upper_bound=? WHERE source_generation=? AND subscription_id=?",
+                    params![cursor, observed_high_water, generation, scope],
+                )?;
+                (cursor, observed_high_water.to_owned())
+            } else {
+                tx.execute(
+                    "UPDATE sms_reconciliation_scans SET scan_cursor=NULL,upper_bound=?,completed_at_ms=NULL WHERE source_generation=? AND subscription_id=?",
                     params![observed_high_water, generation, scope],
                 )?;
+                // After a high-water regression the sweep covers every row up to the observed mark;
+                // the live scan resumes above it so later rows with reused lower IDs are not skipped.
+                if let Some(ProviderIdReuse::HighWaterRegression { .. }) = reused {
+                    tx.execute(
+                        "UPDATE sms_scan_checkpoints SET provider_message_id=? WHERE source_generation=? AND subscription_id=? AND imported=0",
+                        params![observed_high_water, generation, scope],
+                    )?;
+                }
+                (None, observed_high_water.to_owned())
             }
-            (None, observed_high_water.to_owned())
         };
         let history: Option<(String, bool)> = tx
             .query_row(
@@ -752,7 +771,7 @@ impl Client {
         normalize_stored_history_state(&guard.conn, generation, scope)?;
         if exhausted {
             guard.conn.execute(
-                "UPDATE sms_reconciliation_scans SET scan_cursor=NULL,upper_bound='',completed_at_ms=? WHERE source_generation=? AND subscription_id=? AND upper_bound=?",
+                "UPDATE sms_reconciliation_scans SET scan_cursor=NULL,upper_bound='',completed_at_ms=COALESCE(completed_at_ms,?) WHERE source_generation=? AND subscription_id=? AND upper_bound=?",
                 params![crate::notifications::now_ms(), generation, scope, upper_bound],
             )?;
         } else {
@@ -931,13 +950,19 @@ fn normalize_stored_history_state(
 /// Reused provider IDs are evident when the high-water mark falls below the live checkpoint, or
 /// when the row now at the live checkpoint carries evidence different from what was acquired for
 /// that ID. A checkpoint row never acquired yet (a fresh baseline) is not evidence of reuse.
+#[derive(Clone, Copy)]
+enum ProviderIdReuse {
+    AnchorMismatch { live: u64 },
+    HighWaterRegression { live: u64, high_water: u64 },
+}
+
 fn provider_ids_reused(
     conn: &Connection,
     generation: &str,
     scope: &str,
     observed_high_water: &str,
     live_anchor_fingerprint: Option<&str>,
-) -> Result<bool, Error> {
+) -> Result<Option<ProviderIdReuse>, Error> {
     let Some(live) = conn
         .query_row(
             "SELECT provider_message_id FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? AND imported=0",
@@ -946,23 +971,26 @@ fn provider_ids_reused(
         )
         .optional()?
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let live = crate::history_import::stored_provider_id(&live)?;
     let high_water = crate::history_import::canonical_provider_id(observed_high_water)
         .ok_or(Error::InvalidRequest("SMS reconciliation bound"))?;
     if high_water < live {
-        return Ok(true);
+        return Ok(Some(ProviderIdReuse::HighWaterRegression {
+            live,
+            high_water,
+        }));
     }
     let Some(anchor) = live_anchor_fingerprint else {
-        return Ok(false);
+        return Ok(None);
     };
     let (known, seen): (bool, bool) = conn.query_row(
         "SELECT COALESCE(MAX(source_row_fingerprint=?3),0),COUNT(*)>0 FROM sms_acquisitions WHERE source_generation=?1 AND provider_message_id=?2",
         params![generation, live.to_string(), anchor],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    Ok(seen && !known)
+    Ok((seen && !known).then_some(ProviderIdReuse::AnchorMismatch { live }))
 }
 
 /// Finds the message an `SMS_RECEIVED` broadcast duplicates: a redelivery (same broadcast ID),
@@ -1700,6 +1728,122 @@ mod tests {
                 .map(|acquisition| acquisition.acquisition_id)
                 .collect::<Vec<_>>(),
             pending_ids
+        );
+    }
+
+    #[test]
+    fn local_reconciliation_exhaustion_preserves_the_full_sweep_schedule() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+        client
+            .lock()
+            .unwrap()
+            .conn
+            .execute(
+                "INSERT INTO sms_reconciliation_scans(source_generation,subscription_id,scan_cursor,upper_bound,completed_at_ms) VALUES(?,?,NULL,?,?)",
+                params!["install", "provider", "205", 1234],
+            )
+            .unwrap();
+
+        client
+            .complete_sms_reconciliation("install", "provider", "205", Some("5"), true)
+            .unwrap();
+
+        let completed_at_ms: Option<i64> = client
+            .lock()
+            .unwrap()
+            .conn
+            .query_row(
+                "SELECT completed_at_ms FROM sms_reconciliation_scans WHERE source_generation=? AND subscription_id=?",
+                params!["install", "provider"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(completed_at_ms, Some(1234));
+    }
+
+    fn prepare_overdue_reconciliation(client: &Client) {
+        client.plan_sms_scans("install", "provider", "205").unwrap();
+        client
+            .set_sms_scan_checkpoint("install", "provider", false, "205")
+            .unwrap();
+        assert_eq!(
+            client
+                .plan_sms_reconciliation_at("install", "provider", "205", None, 0)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn overdue_anchor_mismatch_starts_and_stamps_a_full_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+        prepare_overdue_reconciliation(&client);
+        let mut row = history_row(205);
+        row.imported = false;
+        row.source.subscription_id = "provider".into();
+        client.begin_sms_acquisition(row).unwrap();
+
+        let plan = client
+            .plan_sms_reconciliation_at(
+                "install",
+                "provider",
+                "205",
+                Some("replacement"),
+                SMS_RECONCILIATION_INTERVAL_MS,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(plan.cursor.is_none() || plan.cursor == plan.history_upper_bound);
+        client
+            .complete_sms_reconciliation(
+                "install",
+                "provider",
+                &plan.upper_bound,
+                plan.cursor.as_deref(),
+                true,
+            )
+            .unwrap();
+
+        let completed_at_ms: Option<i64> = client
+            .lock()
+            .unwrap()
+            .conn
+            .query_row(
+                "SELECT completed_at_ms FROM sms_reconciliation_scans WHERE source_generation=? AND subscription_id=?",
+                params!["install", "provider"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(completed_at_ms.is_some());
+    }
+
+    #[test]
+    fn overdue_small_regression_starts_a_full_sweep_and_resets_live_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+        prepare_overdue_reconciliation(&client);
+
+        let plan = client
+            .plan_sms_reconciliation_at(
+                "install",
+                "provider",
+                "204",
+                None,
+                SMS_RECONCILIATION_INTERVAL_MS,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(plan.cursor.is_none() || plan.cursor == plan.history_upper_bound);
+        let live = client.plan_sms_scans("install", "provider", "204").unwrap();
+        assert_eq!(
+            live.iter()
+                .find(|plan| !plan.imported)
+                .unwrap()
+                .checkpoint
+                .as_deref(),
+            Some("204")
         );
     }
 }

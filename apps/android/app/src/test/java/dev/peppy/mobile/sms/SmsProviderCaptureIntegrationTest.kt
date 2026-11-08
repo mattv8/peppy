@@ -6,8 +6,14 @@ import androidx.work.testing.SynchronousExecutor
 import androidx.work.testing.WorkManagerTestInitHelper
 import dev.peppy.mobile.IncomingCapture
 import dev.peppy.mobile.IncomingSmsPart
+import dev.peppy.mobile.SmsAcquisition
+import dev.peppy.mobile.SmsAcquisitionInput
+import dev.peppy.mobile.SmsAcquisitionState
 import dev.peppy.mobile.SmsCapture
+import dev.peppy.mobile.SmsCaptureCapacityException
+import dev.peppy.mobile.SmsCaptureCore
 import dev.peppy.mobile.SmsCaptureSummary
+import dev.peppy.mobile.SmsCompletion
 import dev.peppy.mobile.SmsReconciliationPlan
 import dev.peppy.mobile.gateway.GatewayTestBase
 import dev.peppy.mobile.gateway.nextTestRecipient
@@ -32,6 +38,8 @@ import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.NativePermitState
 import uniffi.peppy_mobile_bindings.NativeSmsAcquisition
 import uniffi.peppy_mobile_bindings.NativeSmsAcquisitionState
+import uniffi.peppy_mobile_bindings.NativeSmsProviderAcquisitionInput
+import uniffi.peppy_mobile_bindings.NativeSmsReconciliationPlan
 import uniffi.peppy_mobile_bindings.NativeSmsScanPlan
 
 
@@ -84,6 +92,123 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
         creator: String?,
         thread: Long = 1,
     ): Array<Any?> = arrayOf(id, thread, 1L, address, body, date, dateSent, type, 1L, 1L, -1L, creator)
+
+    private fun reconciliationClient(
+        upperBound: Long,
+        state: NativeSmsAcquisitionState = NativeSmsAcquisitionState.COMPLETE,
+        completions: MutableList<String?>,
+    ): NativeClientInterface = Proxy.newProxyInstance(javaClass.classLoader, arrayOf(NativeClientInterface::class.java)) { _, method, arguments ->
+        val args = arguments?.toList().orEmpty()
+        when (method.name) {
+            "planSmsScansWithHistoryConditions" -> emptyList<NativeSmsScanPlan>()
+            "planSmsReconciliation" -> NativeSmsReconciliationPlan("reconcile", SmsCapture.PROVIDER_SCOPE, "0", upperBound.toString(), null)
+            "smsAcquisitionsAfter" -> emptyList<NativeSmsAcquisition>()
+            "beginSmsProviderAcquisition" -> {
+                val input = args.single() as NativeSmsProviderAcquisitionInput
+                NativeSmsAcquisition(input.source.providerMessageId, "conversation", input, state, null)
+            }
+            "completeSmsAcquisition" -> NativeCaptured("message", "conversation", false)
+            "completeSmsReconciliation" -> {
+                completions += args[3] as String?
+                null
+            }
+            "setSmsProviderError" -> null
+            else -> error("unexpected ${method.name}")
+        }
+    } as NativeClientInterface
+
+    private fun reconciliationCapture(
+        upperBound: Long,
+        state: NativeSmsAcquisitionState = NativeSmsAcquisitionState.COMPLETE,
+        shouldYield: () -> Boolean = { false },
+        nanoTime: () -> Long = System::nanoTime,
+        coreFactory: (NativeClientInterface) -> SmsCaptureCore = ::NativeSmsCaptureCore,
+    ): Pair<SmsCaptureSummary, List<String?>> {
+        val completions = mutableListOf<String?>()
+        val summary = SmsNativeCapture.capture(
+            reconciliationClient(upperBound, state, completions),
+            AndroidSmsCaptureProvider(context),
+            "reconcile",
+            shouldYield = shouldYield,
+            nanoTime = nanoTime,
+            coreFactory = coreFactory,
+        )
+        return summary to completions
+    }
+
+    @Test fun reconciliationAdvancesMultipleEmptyPagesInOnePass() {
+        (1L..125L).forEach { id -> provider.rows += row(id, 1, "+14155552671", "row $id", id, id, MESSAGES_APP) }
+
+        val (summary, completions) = reconciliationCapture(125)
+
+        assertFalse(summary.more)
+        assertEquals(listOf("50", "100", "125"), completions)
+    }
+
+    @Test fun reconciliationYieldsAfterCompletingTheCurrentPage() {
+        (1L..100L).forEach { id -> provider.rows += row(id, 1, "+14155552671", "row $id", id, id, MESSAGES_APP) }
+        var yields = false
+
+        val (summary, completions) = reconciliationCapture(100, shouldYield = { yields = true; yields })
+
+        assertTrue(summary.more)
+        assertEquals(listOf("50"), completions)
+    }
+
+    @Test fun reconciliationStopsAtTheSharedDeadline() {
+        (1L..100L).forEach { id -> provider.rows += row(id, 1, "+14155552671", "row $id", id, id, MESSAGES_APP) }
+        var calls = 0
+        val nanoTime = { if (++calls > 51) 5_000_000_000L else 0L }
+
+        val (summary, completions) = reconciliationCapture(100, nanoTime = nanoTime)
+
+        assertTrue(summary.more)
+        assertEquals(listOf("50"), completions)
+    }
+
+    @Test fun reconciliationStopsAfterACapturedPage() {
+        (1L..100L).forEach { id -> provider.rows += row(id, 1, "+14155552671", "row $id", id, id, MESSAGES_APP) }
+
+        val (summary, completions) = reconciliationCapture(100, NativeSmsAcquisitionState.PENDING)
+
+        assertEquals(50, summary.captured)
+        assertTrue(summary.more)
+        assertEquals(listOf("50"), completions)
+    }
+
+    @Test fun reconciliationDoesNotContinueAfterExhaustion() {
+        (1L..49L).forEach { id -> provider.rows += row(id, 1, "+14155552671", "row $id", id, id, MESSAGES_APP) }
+
+        val (summary, completions) = reconciliationCapture(49)
+
+        assertFalse(summary.more)
+        assertEquals(listOf("49"), completions)
+    }
+
+    @Test fun reconciliationCapacityBackpressureDoesNotRequestAContinuation() {
+        (1L..100L).forEach { id -> provider.rows += row(id, 1, "+14155552671", "row $id", id, id, MESSAGES_APP) }
+        val blockedCore = object : SmsCaptureCore {
+            override fun acquisitions(afterId: String?, limit: Int) = emptyList<SmsAcquisition>()
+            override fun begin(input: SmsAcquisitionInput): SmsAcquisition = throw SmsCaptureCapacityException()
+            override fun complete(id: String): SmsCompletion = error("unreachable")
+            override fun setState(id: String, state: SmsAcquisitionState, reason: String?) = error("unreachable")
+            override fun setCheckpoint(sourceGeneration: String, subscription: String, imported: Boolean, providerId: String) = error("unreachable")
+        }
+
+        val (summary, completions) = reconciliationCapture(100, coreFactory = { blockedCore })
+
+        assertFalse(summary.more)
+        assertEquals(listOf(null), completions)
+    }
+
+    @Test fun reconciliationDurablePausedAcquisitionStillAdvances() {
+        (1L..100L).forEach { id -> provider.rows += row(id, 1, "+14155552671", "row $id", id, id, MESSAGES_APP) }
+
+        val (summary, completions) = reconciliationCapture(100, NativeSmsAcquisitionState.PAUSED)
+
+        assertTrue(summary.more)
+        assertEquals(listOf("50"), completions)
+    }
 
     @Test fun admittedHistoryCapturesNinetyNineRowsAndReportsTheProbeObservation() {
         grant(Manifest.permission.READ_SMS)

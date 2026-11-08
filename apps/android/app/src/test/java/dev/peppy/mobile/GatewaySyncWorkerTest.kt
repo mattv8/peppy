@@ -53,6 +53,39 @@ class GatewaySyncWorkerTest : GatewayTestBase() {
         assertEquals(schedulingState, WorkInfo.State.ENQUEUED, queued.single().state)
     }
 
+    @Test fun periodicPassWithoutCaptureHintDoesNotQueueCaptureAndEnsuresPeriodicWork() {
+        WorkManagerTestInitHelper.initializeTestWorkManager(
+            context,
+            Configuration.Builder().setExecutor(SynchronousExecutor()).build(),
+        )
+        assertEquals(ImportResult.IMPORTED, enroll())
+        assertNull(NativeGateway.session(context))
+        grant(Manifest.permission.READ_SMS)
+        GatewayWork.ensurePeriodic(context)
+        val workManager = WorkManager.getInstance(context)
+        val periodicGateway = workManager.getWorkInfosForUniqueWork(GatewayWork.PERIODIC_NAME)
+            .get(5, TimeUnit.SECONDS)
+            .single()
+        GatewayWork.beginPass(context)
+
+        val result = TestListenableWorkerBuilder<GatewaySyncWorker>(context)
+            .setId(periodicGateway.id)
+            .build()
+            .startWork()
+            .get(5, TimeUnit.SECONDS)
+
+        assertEquals(ListenableWorker.Result.success(), result)
+        val queuedSms = workManager.getWorkInfosForUniqueWork(SmsCaptureWork.NAME).get(5, TimeUnit.SECONDS)
+        val queuedMms = workManager.getWorkInfosForUniqueWork(MmsCaptureWork.NAME).get(5, TimeUnit.SECONDS)
+        val periodicSms = workManager.getWorkInfosForUniqueWork(SmsCaptureWork.PERIODIC_NAME).get(5, TimeUnit.SECONDS)
+        val periodicMms = workManager.getWorkInfosForUniqueWork(MmsCaptureWork.PERIODIC_NAME).get(5, TimeUnit.SECONDS)
+        val schedulingState = "queuedSms=$queuedSms queuedMms=$queuedMms periodicSms=$periodicSms periodicMms=$periodicMms"
+        assertTrue(schedulingState, queuedSms.isEmpty())
+        assertTrue(schedulingState, queuedMms.isEmpty())
+        assertEquals(schedulingState, 1, periodicSms.size)
+        assertEquals(schedulingState, 1, periodicMms.size)
+    }
+
     @After fun resetCaptureScheduling() {
         SmsCaptureWork.takeHintCount()
         GatewayWork.finishPass()

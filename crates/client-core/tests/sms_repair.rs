@@ -614,8 +614,8 @@ fn ia_reused_ids_trigger_a_prompt_sweep_without_a_restart_storm() {
     let client = unlocked(&config(&dir, "gateway", &vault), &vault);
     let scope = "android-sms-provider";
     client.plan_sms_scans(GENERATION, scope, "0").unwrap();
-    // Live rows 1..=5 captured and checkpointed.
-    for id in 1..=5 {
+    // Live rows 201..=205 captured and checkpointed.
+    for id in 201..=205 {
         capture(
             &client,
             row(
@@ -630,68 +630,105 @@ fn ia_reused_ids_trigger_a_prompt_sweep_without_a_restart_storm() {
             .set_sms_scan_checkpoint(GENERATION, scope, false, &id.to_string())
             .unwrap();
     }
-    completed_sweep(&client, "5");
+    completed_sweep(&client, "205");
     // Unchanged state: neither a missing anchor nor the known anchor restarts a sweep.
     for _ in 0..3 {
         assert_eq!(
             client
-                .plan_sms_reconciliation(GENERATION, scope, "5", None)
+                .plan_sms_reconciliation(GENERATION, scope, "205", None)
                 .unwrap(),
             None
         );
         assert_eq!(
             client
-                .plan_sms_reconciliation(GENERATION, scope, "5", Some("fp:5:Some(1700000000005)"))
+                .plan_sms_reconciliation(
+                    GENERATION,
+                    scope,
+                    "205",
+                    Some("fp:205:Some(1700000000205)")
+                )
                 .unwrap(),
             None
         );
     }
 
-    // Same high-water, replaced anchor row (row 5 deleted, new send reused ID 5).
+    // Same high-water, replaced anchor row (row 205 deleted, new send reused ID 205).
     let replaced = client
-        .plan_sms_reconciliation(GENERATION, scope, "5", Some("fp:5:replacement"))
+        .plan_sms_reconciliation(GENERATION, scope, "205", Some("fp:205:replacement"))
         .unwrap();
     assert_eq!(
         replaced.as_ref().map(|plan| plan.upper_bound.as_str()),
-        Some("5")
+        Some("205")
     );
+    assert_eq!(replaced.and_then(|plan| plan.cursor), Some("5".into()));
     // The sweep's own re-observation acquires the new row; after it completes no storm follows.
     let mut reobserved = row(
-        "5",
+        "205",
         Direction::Outgoing,
         "reused",
         Some(1_700_000_100_000),
         Some(0),
     );
-    reobserved.source_row_fingerprint = "fp:5:replacement".into();
+    reobserved.source_row_fingerprint = "fp:205:replacement".into();
     capture(&client, reobserved);
     client
-        .complete_sms_reconciliation(GENERATION, scope, "5", None, true)
+        .complete_sms_reconciliation(GENERATION, scope, "205", Some("5"), true)
+        .unwrap();
+
+    // Updating the checkpoint row in place also starts only a local sweep.
+    let changed_date = client
+        .plan_sms_reconciliation(GENERATION, scope, "205", Some("fp:205:date-changed"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(changed_date.cursor.as_deref(), Some("5"));
+    let mut reobserved = row(
+        "205",
+        Direction::Outgoing,
+        "reused",
+        Some(1_700_000_200_000),
+        Some(0),
+    );
+    reobserved.source_row_fingerprint = "fp:205:date-changed".into();
+    capture(&client, reobserved);
+    client
+        .complete_sms_reconciliation(GENERATION, scope, "205", Some("5"), true)
         .unwrap();
     for _ in 0..3 {
         assert_eq!(
             client
-                .plan_sms_reconciliation(GENERATION, scope, "5", Some("fp:5:replacement"))
+                .plan_sms_reconciliation(GENERATION, scope, "205", Some("fp:205:date-changed"))
                 .unwrap(),
             None
         );
     }
 
-    // High-water regression (rows deleted, IDs restart lower): prompt sweep, live resumes at 3.
+    // A small high-water regression resets live but stays within the local repair window.
     let regressed = client
-        .plan_sms_reconciliation(GENERATION, scope, "3", None)
+        .plan_sms_reconciliation(GENERATION, scope, "204", None)
         .unwrap()
         .unwrap();
-    assert_eq!(regressed.upper_bound, "3");
-    let live = client.plan_sms_scans(GENERATION, scope, "3").unwrap();
+    assert_eq!(regressed.cursor.as_deref(), Some("4"));
+    assert_eq!(regressed.upper_bound, "204");
+    let live = client.plan_sms_scans(GENERATION, scope, "204").unwrap();
     assert_eq!(
         live.iter()
             .find(|plan| !plan.imported)
             .unwrap()
             .checkpoint
             .as_deref(),
-        Some("3")
+        Some("204")
     );
+    client
+        .complete_sms_reconciliation(GENERATION, scope, "204", Some("4"), true)
+        .unwrap();
+
+    // A larger regression retains the full sweep from the beginning.
+    let regressed = client
+        .plan_sms_reconciliation(GENERATION, scope, "3", None)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(regressed.cursor.as_deref(), None | Some("0")));
+    assert_eq!(regressed.upper_bound, "3");
     client
         .complete_sms_reconciliation(GENERATION, scope, "3", None, true)
         .unwrap();

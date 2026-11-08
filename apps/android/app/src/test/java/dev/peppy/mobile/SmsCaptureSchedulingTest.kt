@@ -50,6 +50,8 @@ class SmsCaptureSchedulingTest {
     private var readSmsPermissionBeforeTest: Boolean? = null
     private lateinit var productionPhoneReadRunner: PhoneReadCaptureRunner
     private lateinit var productionPhoneReadApplied: (Context) -> Unit
+    private lateinit var productionPhoneReadClock: () -> Long
+    private var productionPhoneReadLastRun: Long? = null
 
     @Before fun setUpWorkManager() {
         workerExecutor = Executors.newSingleThreadExecutor()
@@ -64,6 +66,10 @@ class SmsCaptureSchedulingTest {
         SmsCaptureWork.runner = null
         productionPhoneReadRunner = PhoneReadCaptureWork.runner
         productionPhoneReadApplied = PhoneReadCaptureWork.onApplied
+        productionPhoneReadClock = PhoneReadCaptureWork.clockMs
+        productionPhoneReadLastRun = PhoneReadCaptureWork.lastRunMs
+        PhoneReadCaptureWork.lastRunMs = null
+        PhoneReadCaptureWork.clockMs = System::currentTimeMillis
     }
 
     @After fun tearDownWorkManager() {
@@ -75,6 +81,8 @@ class SmsCaptureSchedulingTest {
         SmsCaptureWork.runner = null
         PhoneReadCaptureWork.runner = productionPhoneReadRunner
         PhoneReadCaptureWork.onApplied = productionPhoneReadApplied
+        PhoneReadCaptureWork.clockMs = productionPhoneReadClock
+        PhoneReadCaptureWork.lastRunMs = productionPhoneReadLastRun
     }
 
     @Test fun debounceCapsContinuousNotificationsAtThreeSeconds() {
@@ -233,6 +241,26 @@ class SmsCaptureSchedulingTest {
         assertEquals(androidx.work.ListenableWorker.Result.success(), result)
         assertEquals(1, phoneReadRuns)
         assertEquals(1, syncRequests)
+    }
+
+    @Test fun phoneReadWaitsForTheFinalPassUnlessItsStarvationBoundExpires() {
+        var now = 1L
+        var phoneReadRuns = 0
+        PhoneReadCaptureWork.clockMs = { now }
+        PhoneReadCaptureWork.lastRunMs = 0L
+        SmsCaptureWork.runner = SmsCaptureRunner { SmsCaptureSummary(more = true) }
+        PhoneReadCaptureWork.runner = PhoneReadCaptureRunner { phoneReadRuns++; false }
+
+        TestListenableWorkerBuilder<SmsCaptureWorker>(context).build().startWork().get()
+        assertEquals(0, phoneReadRuns)
+
+        now = 60_000L
+        TestListenableWorkerBuilder<SmsCaptureWorker>(context).build().startWork().get()
+        assertEquals(1, phoneReadRuns)
+
+        SmsCaptureWork.runner = SmsCaptureRunner { SmsCaptureSummary() }
+        TestListenableWorkerBuilder<SmsCaptureWorker>(context).build().startWork().get()
+        assertEquals(2, phoneReadRuns)
     }
 
     @Test fun phoneReadFailureDoesNotSuppressCaptureContinuation() {

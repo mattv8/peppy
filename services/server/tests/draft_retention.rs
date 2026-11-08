@@ -1412,15 +1412,24 @@ async fn expiry_revisits_a_draft_image_after_its_public_copy_stops_protecting_it
         .execute(&s.pool)
         .await
         .unwrap();
-    expire_due(&s.pool, 10).await.unwrap();
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM attachments WHERE vault_id=$1 AND attachment_id=$2)",
-    )
-    .bind(s.vault)
-    .bind(attachment)
-    .fetch_one(&s.pool)
-    .await
-    .unwrap();
+    // Background maintenance may hold the vault lock (expire_due skips it) or run from a
+    // snapshot taken before the retirement, so retry until a pass observes the retired copy.
+    let mut exists = true;
+    for _ in 0..200 {
+        expire_due(&s.pool, 10).await.unwrap();
+        exists = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM attachments WHERE vault_id=$1 AND attachment_id=$2)",
+        )
+        .bind(s.vault)
+        .bind(attachment)
+        .fetch_one(&s.pool)
+        .await
+        .unwrap();
+        if !exists {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert!(
         !exists,
         "an unheld attachment is revisited without a due branch"
