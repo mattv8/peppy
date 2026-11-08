@@ -13,6 +13,11 @@ This reference records non-obvious Peppy domain constraints.
 
 ## Ownership boundaries
 
+- Server, hosted-api, crypto, migration, row-security, startup-check,
+  vendored-dependency, or privacy-policy-relevant changes require a companion
+  `peppy-platform` pull request that passes private CI against the public
+  branch head before the public pull request merges. See
+  [platform companion pull requests](infra.md#platform-companion-pull-requests).
 - Rust core is the sole owner of local SQLite/SQLCipher and durable
   domain/protocol state. Native hosts own transport, OS scheduling, secure
   storage, cancellation, and carrier effects. Shared React views receive
