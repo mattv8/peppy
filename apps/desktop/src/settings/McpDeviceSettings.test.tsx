@@ -590,7 +590,7 @@ describe("McpDeviceSettings", () => {
       fireEvent.click(await within(dialog).findByRole("button", { name: "Revoke Claude (0f1e2d3c)" }));
       fireEvent.click(within(dialog).getByRole("button", { name: "Confirm revoke Claude (0f1e2d3c)" }));
       await waitFor(() => expect(bridge.mcp_revoke_grant).toHaveBeenCalledWith(GRANT.id));
-      expect(within(dialog).getByRole("heading", { name: "Authorized clients" })).toHaveFocus();
+      await waitFor(() => expect(within(dialog).getByRole("heading", { name: "Authorized clients" })).toHaveFocus());
       expect(document.getElementById("mcp-grant-status")).toHaveTextContent("Revoked Claude (0f1e2d3c).");
       expect(await within(dialog).findByText(/No authorized clients yet/)).toBeInTheDocument();
     });
