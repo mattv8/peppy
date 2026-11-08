@@ -11,10 +11,9 @@ services:
     <<: *mcp-image
     user: "0:0"
     entrypoint: ["/bin/sh", "-ec"]
-    command: >-
-      mkdir -p /var/lib/peppy-mcp /run/peppy-mcp &&
-      chown 10001:10001 /var/lib/peppy-mcp /run/peppy-mcp &&
-      chmod 0700 /var/lib/peppy-mcp /run/peppy-mcp
+    # A one-element list keeps the script intact; Compose splits a string command into argv words.
+    command:
+      - mkdir -p /var/lib/peppy-mcp /run/peppy-mcp && chown 10001:10001 /var/lib/peppy-mcp /run/peppy-mcp && chmod 0700 /var/lib/peppy-mcp /run/peppy-mcp
     volumes:
       - mcp-state:/var/lib/peppy-mcp
       - mcp-control:/run/peppy-mcp
