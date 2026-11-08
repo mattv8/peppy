@@ -7115,7 +7115,7 @@ describe("desktop app lock", () => {
 
     await act(async () => { hint?.(); });
     const unlock = await screen.findByRole("button", { name: "Unlock" });
-    expect(unlock).toHaveFocus();
+    await waitFor(() => expect(unlock).toHaveFocus());
     await waitFor(() => expect(bridge.get_app_lock_status).toHaveBeenCalledTimes(2));
 
     initialStatus.resolve({ enabled: false, locked: false, storageAvailable: true, pending: false });

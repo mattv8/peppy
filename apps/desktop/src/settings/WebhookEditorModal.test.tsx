@@ -78,7 +78,7 @@ describe("WebhookEditorModal", () => {
       fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
       expect(await screen.findByRole("alert")).toHaveTextContent("Enter a valid URL.");
-      expect(screen.getByLabelText("Endpoint URL")).toHaveFocus();
+      await waitFor(() => expect(screen.getByLabelText("Endpoint URL")).toHaveFocus());
       expect(screen.getByLabelText("Endpoint URL")).toHaveAttribute("aria-invalid", "true");
       expect(bridge.webhook_create).not.toHaveBeenCalled();
     });
@@ -266,7 +266,7 @@ describe("WebhookEditorModal", () => {
       renderEditor();
       await createWithUrl();
 
-      expect(document.getElementById("webhook-secret-copy")).toHaveFocus();
+      await waitFor(() => expect(document.getElementById("webhook-secret-copy")).toHaveFocus());
       expect(screen.queryByText(/once/i)).not.toBeInTheDocument();
     });
 
@@ -383,7 +383,7 @@ describe("WebhookEditorModal", () => {
 
       expect(await screen.findByText("Use 80 characters or fewer.")).toBeInTheDocument();
       expect(screen.getByLabelText("Name (optional)")).toHaveAttribute("aria-invalid", "true");
-      expect(screen.getByLabelText("Name (optional)")).toHaveFocus();
+      await waitFor(() => expect(screen.getByLabelText("Name (optional)")).toHaveFocus());
     });
 
     it("maps a filter code to the chip input and its error", async () => {

@@ -559,7 +559,7 @@ describe("McpDeviceSettings", () => {
       const dialog = await openDetailsDialog();
       fireEvent.click(await within(dialog).findByRole("button", { name: "Revoke Claude (0f1e2d3c)" }));
       expect(within(dialog).getByText(CONFIRM_CONSEQUENCE)).toBeInTheDocument();
-      expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus();
+      await waitFor(() => expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus());
       expect(bridge.mcp_revoke_grant).not.toHaveBeenCalled();
     });
 
