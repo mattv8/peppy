@@ -3,6 +3,9 @@
 The private sibling `peppy-platform` owns hosted identity, tester authorization
 and billing policy. Public community hosting does not acquire those authorities.
 See its `README.md` for the separately authorized maintenance cutover procedure.
+Public changes to server roles, grants, migrations, or startup checks need a
+companion pull request there; see
+[platform companion pull requests](infra.md#platform-companion-pull-requests).
 
 ## Encryption and lookup reference
 
