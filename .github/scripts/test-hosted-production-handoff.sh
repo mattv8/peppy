@@ -157,7 +157,7 @@ expect_line "$not_queued_stderr" 'Hosted production dispatch failed: private wor
 notifier_job="$temp_dir/notifier-job.yml"
 awk '/^  notify-hosted-production:/{inside=1} /^  stable-release:/{inside=0} inside' "$WORKFLOW" > "$notifier_job"
 expect_line "$notifier_job" '  notify-hosted-production:'
-expect_line "$notifier_job" '    needs: [gate, publish-production-server, publish-production-relay]'
+expect_line "$notifier_job" '    needs: [gate, publish-production-server, publish-production-relay, publish-production-mcp]'
 expect_line "$notifier_job" '    environment: production'
 expect_line "$notifier_job" '      contents: read'
 checkout_uses="$(grep -E '^[[:space:]]+uses: actions/checkout@' "$notifier_job" || true)"

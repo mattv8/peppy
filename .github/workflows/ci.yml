@@ -777,8 +777,8 @@ jobs:
       sha: ${{ github.sha }}
     secrets: inherit
   notify-hosted-production:
-    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success' && needs.publish-production-server.result == 'success' && needs.publish-production-relay.result == 'success'"
-    needs: [gate, publish-production-server, publish-production-relay]
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success' && needs.publish-production-server.result == 'success' && needs.publish-production-relay.result == 'success' && needs.publish-production-mcp.result == 'success'"
+    needs: [gate, publish-production-server, publish-production-relay, publish-production-mcp]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

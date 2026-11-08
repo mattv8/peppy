@@ -53,8 +53,8 @@ assert.call(android_packaging_flags == expected_android_packaging_flags, 'public
 android_packaging_tasks = android_packaging_command.select { |token| token.start_with?(':') }
 assert.call(android_packaging_tasks == %w[:app:verifyReleaseManifestSecurity :app:lintDebug :app:lintSideload :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleSideload :app:verifySideloadGoogleMessagesLink], 'public CI Android packaging must verify the merged release manifest, sideload link, linting, and debug artifacts')
 handoff = ci_jobs.fetch('notify-hosted-production')
-assert.call(handoff.fetch('if') == "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success' && needs.publish-production-server.result == 'success' && needs.publish-production-relay.result == 'success'", 'hosted dispatch must require a successful production push gate and both publishers')
-assert.call(handoff.fetch('needs').sort == %w[gate publish-production-relay publish-production-server], 'hosted dispatch must wait for the gate and both publishers')
+assert.call(handoff.fetch('if') == "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success' && needs.publish-production-server.result == 'success' && needs.publish-production-relay.result == 'success' && needs.publish-production-mcp.result == 'success'", 'hosted dispatch must require a successful production push gate and all three publishers')
+assert.call(handoff.fetch('needs').sort == %w[gate publish-production-mcp publish-production-relay publish-production-server], 'hosted dispatch must wait for the gate and all three publishers, because hosted builds require the MCP image')
 publish_job_names = %w[
   publish-prerelease
   publish-prerelease-android
@@ -210,7 +210,7 @@ end
 
 stable = ci_jobs.fetch('stable-release')
 assert.call(stable.fetch('needs').sort == %w[gate publish-production-mcp publish-production-relay publish-production-server version], 'stable release must wait for the gate and all three edge publishers')
-assert.call(ci_jobs.fetch('notify-hosted-production').fetch('needs').sort == %w[gate publish-production-relay publish-production-server], 'hosted dispatch must keep its server and relay payload contract')
+assert.call(ci_jobs.fetch('notify-hosted-production').fetch('needs').sort == %w[gate publish-production-mcp publish-production-relay publish-production-server], 'hosted dispatch must keep its server and relay payload contract and wait for the MCP image')
 assert.call(stable.fetch('permissions') == { 'contents' => 'write', 'actions' => 'read', 'attestations' => 'write', 'id-token' => 'write' }, 'stable release must grant its nested publisher provenance permissions')
 assert.call(stable.fetch('concurrency').fetch('group') == 'stable-release', 'automatic stable release must serialize with manual release')
 assert.call(stable.fetch('with') == { 'bump' => 'auto', 'version' => '', 'dry_run' => false }, 'automatic release must use the safe automatic inputs')
