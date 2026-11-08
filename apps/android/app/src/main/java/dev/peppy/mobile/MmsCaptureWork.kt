@@ -196,6 +196,7 @@ object MmsCaptureWork {
     internal fun runWorkerPass(
         context: Context,
         inputData: Data,
+        onSuccess: (MmsCaptureSummary) -> Unit = {},
         run: (manualRecheck: Boolean, providerChanged: Boolean) -> MmsCaptureSummary,
     ): ListenableWorker.Result {
         val managedWork = isManagedData(inputData)
@@ -206,6 +207,7 @@ object MmsCaptureWork {
             consumedHint = MmsCaptureHints.consumeProviderChange(context)
             val result = run(inputData.getBoolean(MANUAL_RECHECK, false), consumedHint)
             handleResult(context, result)
+            onSuccess(result)
             completed = true
             return ListenableWorker.Result.success()
         } catch (error: CancellationException) {
@@ -226,12 +228,20 @@ class MmsCaptureWorker(context: Context, params: WorkerParameters) : CoroutineWo
     override suspend fun doWork(): Result = PASS.withLock {
         withContext(Dispatchers.IO) {
             val job = currentCoroutineContext()[kotlinx.coroutines.Job]
-            val result = MmsCaptureWork.runWorkerPass(applicationContext, inputData) { manualRecheck, providerChanged ->
-                MmsCaptureWork.runner.run(applicationContext, manualRecheck, providerChanged).also {
-                    job?.ensureActive()
-                }
+            var more = false
+            val result = MmsCaptureWork.runWorkerPass(
+                applicationContext,
+                inputData,
+                onSuccess = { more = it.more },
+                run = { manualRecheck, providerChanged ->
+                    MmsCaptureWork.runner.run(applicationContext, manualRecheck, providerChanged).also {
+                        job?.ensureActive()
+                    }
+                },
+            )
+            if (result == ListenableWorker.Result.success() && PhoneReadCaptureWork.shouldRun(more)) {
+                PhoneReadCaptureWork.run(applicationContext)
             }
-            if (result == ListenableWorker.Result.success()) PhoneReadCaptureWork.run(applicationContext)
             result
         }
     }

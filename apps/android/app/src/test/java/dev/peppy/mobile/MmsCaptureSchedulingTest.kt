@@ -39,11 +39,17 @@ class MmsCaptureSchedulingTest {
     private lateinit var productionRunner: MmsCaptureRunner
     private lateinit var productionPhoneReadRunner: PhoneReadCaptureRunner
     private lateinit var productionPhoneReadApplied: (Context) -> Unit
+    private lateinit var productionPhoneReadClock: () -> Long
+    private var productionPhoneReadLastRun: Long? = null
 
     @Before fun setUpWorkManager() {
         productionRunner = MmsCaptureWork.runner
         productionPhoneReadRunner = PhoneReadCaptureWork.runner
         productionPhoneReadApplied = PhoneReadCaptureWork.onApplied
+        productionPhoneReadClock = PhoneReadCaptureWork.clockMs
+        productionPhoneReadLastRun = PhoneReadCaptureWork.lastRunMs
+        PhoneReadCaptureWork.lastRunMs = null
+        PhoneReadCaptureWork.clockMs = System::currentTimeMillis
         MmsCaptureWork.hintScheduler.resetForTest()
         workerExecutor = Executors.newSingleThreadExecutor()
         WorkManagerTestInitHelper.initializeTestWorkManager(
@@ -60,6 +66,8 @@ class MmsCaptureSchedulingTest {
         MmsCaptureWork.runner = productionRunner
         PhoneReadCaptureWork.runner = productionPhoneReadRunner
         PhoneReadCaptureWork.onApplied = productionPhoneReadApplied
+        PhoneReadCaptureWork.clockMs = productionPhoneReadClock
+        PhoneReadCaptureWork.lastRunMs = productionPhoneReadLastRun
         MmsCaptureWork.hintScheduler.resetForTest()
         WorkManagerTestInitHelper.closeWorkDatabase()
         workerExecutor.shutdownNow()
@@ -103,6 +111,21 @@ class MmsCaptureSchedulingTest {
         assertEquals(ListenableWorker.Result.success(), result)
         assertEquals(1, phoneReadRuns)
         assertEquals(1, syncRequests)
+    }
+
+    @Test fun phoneReadSkipsMmsContinuationsAndRunsWhenThePassCompletes() {
+        var phoneReadRuns = 0
+        PhoneReadCaptureWork.lastRunMs = 0L
+        PhoneReadCaptureWork.clockMs = { 1L }
+        PhoneReadCaptureWork.runner = PhoneReadCaptureRunner { phoneReadRuns++; false }
+        MmsCaptureWork.runner = MmsCaptureRunner { _, _, _ -> summary(more = true) }
+
+        TestListenableWorkerBuilder<MmsCaptureWorker>(context).build().startWork().get()
+        assertEquals(0, phoneReadRuns)
+
+        MmsCaptureWork.runner = MmsCaptureRunner { _, _, _ -> summary(more = false) }
+        TestListenableWorkerBuilder<MmsCaptureWorker>(context).build().startWork().get()
+        assertEquals(1, phoneReadRuns)
     }
 
     @Test fun phoneReadFailureDoesNotSuppressCaptureContinuation() {

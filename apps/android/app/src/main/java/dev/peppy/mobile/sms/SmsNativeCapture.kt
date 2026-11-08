@@ -44,6 +44,10 @@ import uniffi.peppy_mobile_bindings.NativeSmsSource
  */
 internal object SmsNativeCapture : SmsCaptureRunner {
     override fun run(context: Context): SmsCaptureSummary {
+        return run(context) { false }
+    }
+
+    override fun run(context: Context, shouldYield: () -> Boolean): SmsCaptureSummary {
         if (!smsReadGranted(context) || !GatewayPolicyHost(context).permitsSmsCapture()) return SmsCaptureSummary()
         val client = NativeGateway.open(context) ?: return SmsCaptureSummary()
         val summary = capture(
@@ -52,6 +56,7 @@ internal object SmsNativeCapture : SmsCaptureRunner {
             MmsPreferences(context).sourceGeneration,
             historyImportConditions(context),
             onControlPublished = { GatewayWork.enqueueAfterCapture(context.applicationContext) },
+            shouldYield = shouldYield,
         )
         if (shouldScheduleGatewayUpload(summary)) {
             if (SyncDiagnostics.enabled) {
@@ -70,6 +75,9 @@ internal object SmsNativeCapture : SmsCaptureRunner {
         generation: String,
         conditions: NativeHistoryImportConditions = NativeHistoryImportConditions(false, false),
         onControlPublished: () -> Unit = {},
+        shouldYield: () -> Boolean = { false },
+        nanoTime: () -> Long = System::nanoTime,
+        coreFactory: (NativeClientInterface) -> SmsCaptureCore = ::NativeSmsCaptureCore,
     ): SmsCaptureSummary {
         val scope = SmsCapture.PROVIDER_SCOPE
         reader.beginDiagnosticPass()
@@ -77,7 +85,7 @@ internal object SmsNativeCapture : SmsCaptureRunner {
             val highWater = reader.highWater().toString()
             val plans = client.planSmsScansWithHistoryConditions(generation, scope, highWater, conditions)
             val history = MessageHistoryRequestCoordinator(client, onControlPublished)
-            val core = NativeSmsCaptureCore(client)
+            val core = coreFactory(client)
             val allowHistoryContinuation = conditions.unmeteredNetwork || conditions.charging
             var recheckPending = true
             var summary = SmsCaptureSummary()
@@ -152,24 +160,42 @@ internal object SmsNativeCapture : SmsCaptureRunner {
                 ?.let(reader::read)?.let(SmsCapture::sourceRowFingerprint)
             val reconciliation = client.planSmsReconciliation(generation, scope, highWater, anchor)
             if (reconciliation != null) {
-                val result = captureTimed(SyncDiagnosticStage.SMS_RECONCILIATION) {
-                    SmsCapture.reconcile(reconciliation.toCapturePlan(), core, reader)
+                val plansCaptured = summary.captured
+                val moreBeforeReconciliation = summary.more
+                val deadline = nanoTime() + RECONCILIATION_LOOP_BUDGET_NANOS
+                var plan = reconciliation.toCapturePlan()
+                var more = false
+                while (true) {
+                    val result = captureTimed(SyncDiagnosticStage.SMS_RECONCILIATION) {
+                        SmsCapture.reconcile(plan, core, reader, nanoTime, deadline)
+                    }
+                    summary += result.summary
+                    captureProgress(SyncDiagnosticStage.SMS_RECONCILIATION, result.summary)
+                    recordPlanCompletion(PLAN_RECONCILIATION, imported = false, result.summary)
+                    if (result.summary.providerError) {
+                        client.setSmsProviderError(generation, scope, true)
+                        return summary
+                    }
+                    if (result.summary.coreError) return summary
+                    client.completeSmsReconciliation(
+                        reconciliation.sourceGeneration,
+                        reconciliation.subscriptionId,
+                        reconciliation.upperBound,
+                        result.cursor.takeIf { it > 0 }?.toString(),
+                        result.exhausted,
+                    )
+                    if (result.exhausted) break
+                    if (!result.summary.advanced || result.cursor <= plan.cursor || result.summary.paused > 0) {
+                        more = result.summary.more
+                        break
+                    }
+                    if (plansCaptured > 0 || result.summary.captured > 0 || shouldYield() || nanoTime() >= deadline || result.summary.unavailable > 0) {
+                        more = true
+                        break
+                    }
+                    plan = plan.copy(cursor = result.cursor)
                 }
-                summary += result.summary
-                captureProgress(SyncDiagnosticStage.SMS_RECONCILIATION, result.summary)
-                recordPlanCompletion(PLAN_RECONCILIATION, imported = false, result.summary)
-                if (result.summary.providerError) {
-                    client.setSmsProviderError(generation, scope, true)
-                    return summary
-                }
-                if (result.summary.coreError) return summary
-                client.completeSmsReconciliation(
-                    reconciliation.sourceGeneration,
-                    reconciliation.subscriptionId,
-                    reconciliation.upperBound,
-                    result.cursor.takeIf { it > 0 }?.toString(),
-                    result.exhausted,
-                )
+                summary = summary.copy(more = moreBeforeReconciliation || more)
             }
             client.setSmsProviderError(generation, scope, false)
             summary
@@ -214,6 +240,7 @@ private fun recordPlanCompletion(category: Long, imported: Boolean, summary: Sms
 private const val PLAN_LIVE = 0L
 private const val PLAN_HISTORY = 1L
 private const val PLAN_RECONCILIATION = 2L
+private const val RECONCILIATION_LOOP_BUDGET_NANOS = 5_000_000_000L
 
 internal fun shouldScheduleGatewayUpload(summary: SmsCaptureSummary): Boolean = summary.captured > 0
 

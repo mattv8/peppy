@@ -26,6 +26,7 @@ import dev.peppy.mobile.telephony.SimRoutes
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -147,6 +148,8 @@ data class SmsCaptureSummary(
 /** Host-owned binding from scheduled Android work to the generated core adapter. */
 internal fun interface SmsCaptureRunner {
     fun run(context: Context): SmsCaptureSummary
+
+    fun run(context: Context, shouldYield: () -> Boolean): SmsCaptureSummary = run(context)
 }
 
 /** Offline provider scheduling; a missing generated adapter retries rather than claiming capture succeeded. */
@@ -172,6 +175,8 @@ object SmsCaptureWork {
     }
 
     internal fun takeHint(): Boolean = takeHintCount() > 0
+
+    internal fun hasPendingHint(): Boolean = hintCount.get() > 0
 
     internal fun takeHintCount(): Int = hintCount.getAndSet(0)
 
@@ -246,9 +251,17 @@ internal object PhoneReadCaptureWork {
         NativeGateway.open(context)?.let { PhoneReadIngest.run(context, it) } ?: false
     }
     @Volatile internal var onApplied: (Context) -> Unit = { GatewayWork.enqueueAfterCapture(it) }
+    @Volatile internal var lastRunMs: Long? = null
+    @Volatile internal var clockMs: () -> Long = System::currentTimeMillis
+
+    fun shouldRun(continuationExpected: Boolean, nowMs: Long = clockMs()): Boolean {
+        val lastRun = lastRunMs
+        return !continuationExpected || lastRun == null || nowMs - lastRun >= PHONE_READ_MAX_DEFERRAL_MS
+    }
 
     suspend fun run(context: Context): Boolean {
         val app = context.applicationContext
+        lastRunMs = clockMs()
         val applied = try {
             runInterruptible { runner.run(app) }
         } catch (error: CancellationException) {
@@ -269,6 +282,7 @@ internal object PhoneReadCaptureWork {
 }
 
 private const val CAPTURE_DELAY_MS = 15_000L
+private const val PHONE_READ_MAX_DEFERRAL_MS = 60_000L
 
 private data class CaptureDiagnosticRequest(val traceId: Long, val session: Long, val enqueuedMs: Long, val source: Long) {
     fun data(): Data = Data.Builder()
@@ -281,6 +295,7 @@ private data class CaptureDiagnosticRequest(val traceId: Long, val session: Long
 
 class SmsCaptureWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        val job = currentCoroutineContext()[kotlinx.coroutines.Job]
         SmsCaptureWork.serialized {
             val consumedHints = SmsCaptureWork.takeHintCount()
             val diagnostic = if (SyncDiagnostics.enabled) captureDiagnosticInput() else null
@@ -296,6 +311,7 @@ class SmsCaptureWorker(context: Context, params: WorkerParameters) : CoroutineWo
                     outcome = WORK_OUTCOME_RETRY
                     return@serialized Result.retry()
                 }
+                val shouldYield = { SmsCaptureWork.hasPendingHint() || job?.isActive == false }
                 val summary = if (diagnostic != null) {
                     SyncDiagnostics.withTrace(traceId) {
                         SyncDiagnostics.record(
@@ -306,12 +322,16 @@ class SmsCaptureWorker(context: Context, params: WorkerParameters) : CoroutineWo
                             SyncTraceField.COUNT to consumedHints.toLong(),
                             *(diagnostic.delayFields()),
                         )
-                        runner.run(applicationContext)
+                        runner.run(applicationContext, shouldYield)
                     }
                 } else {
-                    runner.run(applicationContext)
+                    runner.run(applicationContext, shouldYield)
                 }
-                PhoneReadCaptureWork.run(applicationContext)
+                val continuationExpected =
+                    (summary.more && !summary.providerError && !summary.coreError) || SmsCaptureWork.hasPendingHint()
+                if (PhoneReadCaptureWork.shouldRun(continuationExpected)) {
+                    PhoneReadCaptureWork.run(applicationContext)
+                }
                 if (diagnostic != null) {
                     SyncDiagnostics.withTrace(traceId) {
                         SyncDiagnostics.record(
@@ -436,8 +456,9 @@ internal object SmsCapture {
         core: SmsCaptureCore,
         provider: SmsCaptureProvider,
         nanoTime: () -> Long = System::nanoTime,
+        deadlineNanos: Long? = null,
     ): SmsReconciliationResult {
-        val deadline = nanoTime() + PASS_BUDGET_NANOS
+        val deadline = deadlineNanos ?: nanoTime() + PASS_BUDGET_NANOS
         fun expired() = nanoTime() >= deadline
         return try {
             val page = provider.page(plan.cursor, PAGE)
