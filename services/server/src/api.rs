@@ -1,8 +1,10 @@
 mod account_access;
 pub(crate) mod admission;
 mod attachments;
+mod drafts;
 mod instance;
 mod key_profiles;
+mod mcp;
 mod sync;
 mod vault_identity;
 
@@ -447,12 +449,14 @@ pub(super) struct ApiState {
     pub(super) db: PgPool,
     committed: tokio::sync::broadcast::Sender<(Uuid, i64)>,
     presence_changed: tokio::sync::broadcast::Sender<Uuid>,
+    drafts_changed: tokio::sync::broadcast::Sender<Uuid>,
     presence_touches: Arc<std::sync::Mutex<HashMap<(Uuid, Uuid), std::time::Instant>>>,
     storage: Option<Storage>,
     vault_attachment_quota_bytes: i64,
     upload_slots: Arc<tokio::sync::Semaphore>,
     options: Arc<TransportOptions>,
     instance_account_admissions: Arc<tokio::sync::Mutex<admission::LocalAdmissions>>,
+    mcp_oauth_admissions: Arc<tokio::sync::Mutex<admission::LocalAdmissions>>,
     instance_password_slots: Arc<tokio::sync::Semaphore>,
     pub(super) instance_events: tokio::sync::broadcast::Sender<()>,
     pub(super) event_stream_slots: Arc<tokio::sync::Semaphore>,
@@ -479,6 +483,16 @@ pub(super) struct ApiState {
     live_rate_limiter: Arc<std::sync::Mutex<crate::live::LiveRateLimiter>>,
     live_upgrade_limiter: Arc<std::sync::Mutex<crate::live::LiveRateLimiter>>,
     live_ticket_http_limiter: Arc<std::sync::Mutex<crate::live::LiveRateLimiter>>,
+    pub(super) mcp_worker: Option<McpWorkerClient>,
+    pub(super) enrollment_authorization: Arc<dyn EnrollmentAuthorization>,
+    pub(super) mcp_consent_origin: Option<String>,
+}
+
+#[derive(Clone)]
+pub(super) struct McpWorkerClient {
+    pub(super) url: url::Url,
+    pub(super) token_file: std::path::PathBuf,
+    pub(super) client: reqwest::Client,
 }
 struct PeerAddress(Option<IpAddr>);
 
@@ -649,12 +663,15 @@ pub(crate) struct Maintenance {
     storage: Option<Storage>,
     options: TransportOptions,
     relay_url: Option<url::Url>,
+    mcp_worker: Option<McpWorkerClient>,
 }
 
 impl Maintenance {
     pub(crate) fn start(self) {
         sync::spawn_maintenance(self.db.clone(), &self.committed, self.storage, self.options);
         spawn_instance_maintenance(self.db.clone());
+        mcp::spawn_oauth_maintenance(self.db.clone());
+        mcp::spawn_cleanup_maintenance(self.db.clone(), self.mcp_worker.clone());
         if let Some(relay_url) = self.relay_url {
             spawn_wake_maintenance(self.db, &self.committed, relay_url);
         }
@@ -780,6 +797,7 @@ fn build_router_with_live_backend(
     } = authorization;
     let (committed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
     let (presence_changed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
+    let (drafts_changed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
     let storage = initialized_storage;
     let relay_url =
         explicit_relay_url.or_else(|| config.as_ref().and_then(|config| config.relay_url.clone()));
@@ -798,6 +816,36 @@ fn build_router_with_live_backend(
     let live_trusted_origin = config
         .as_ref()
         .and_then(|config| config.web_live_trusted_origin.clone());
+    let mcp_worker = config
+        .as_ref()
+        .and_then(|config| {
+            config
+                .mcp_worker_url
+                .clone()
+                .zip(config.mcp_worker_token_file.clone())
+        })
+        .map(|(url, token_file)| McpWorkerClient {
+            url,
+            token_file,
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("fixed worker client configuration is valid"),
+        });
+    let mcp_consent_origin = config.as_ref().and_then(|config| {
+        let api = config.public_api_url.as_ref()?;
+        let web = config.web_client.as_ref()?;
+        let api_host = api.host_str()?;
+        let host = web.host.trim_end_matches('.');
+        if web.serves_all_hosts() || host.eq_ignore_ascii_case(api_host) {
+            let mut origin = api.clone();
+            origin.set_host(Some(host)).ok()?;
+            Some(origin.origin().ascii_serialization())
+        } else {
+            Some(format!("{}://{}", api.scheme(), host))
+        }
+    });
     let push_config_response = push_advertisement
         .response()
         .expect("router requires a validated push configuration");
@@ -850,6 +898,7 @@ fn build_router_with_live_backend(
             put(register_wake_route).delete(revoke_wake_route),
         )
         .route("/v1/devices", get(devices))
+        .merge(mcp::routes())
         .route(
             "/v1/capabilities",
             get(capabilities).post(update_capabilities),
@@ -864,6 +913,13 @@ fn build_router_with_live_backend(
         .route("/v1/snapshot", get(sync::snapshot_start))
         .route("/v1/snapshot/records", get(sync::snapshot_records))
         .route("/v1/commands/pending", get(sync::pending_commands))
+        .route("/v1/drafts", get(drafts::list))
+        .route(
+            "/v1/drafts/{draft_id}/revisions/{revision_id}",
+            put(drafts::put),
+        )
+        .route("/v1/drafts/{draft_id}/send", post(drafts::send))
+        .route("/v1/drafts/{draft_id}/discard", post(drafts::discard))
         .route(
             "/v1/vault/key-profiles",
             get(key_profiles::list).post(key_profiles::register),
@@ -942,6 +998,7 @@ fn build_router_with_live_backend(
         db: db.clone(),
         committed: committed.clone(),
         presence_changed,
+        drafts_changed,
         presence_touches: Arc::new(std::sync::Mutex::new(HashMap::new())),
         storage: storage.clone(),
         vault_attachment_quota_bytes,
@@ -950,6 +1007,7 @@ fn build_router_with_live_backend(
         instance_account_admissions: Arc::new(tokio::sync::Mutex::new(
             admission::LocalAdmissions::new(),
         )),
+        mcp_oauth_admissions: Arc::new(tokio::sync::Mutex::new(admission::LocalAdmissions::new())),
         instance_password_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         instance_events: tokio::sync::broadcast::channel(64).0,
         event_stream_slots: Arc::new(tokio::sync::Semaphore::new(32)),
@@ -984,6 +1042,9 @@ fn build_router_with_live_backend(
         live_ticket_http_limiter: Arc::new(std::sync::Mutex::new(
             crate::live::LiveRateLimiter::with_limit(30),
         )),
+        mcp_worker: mcp_worker.clone(),
+        enrollment_authorization: enrollment_authorization.clone(),
+        mcp_consent_origin,
     };
     #[cfg(test)]
     if let Some(observer) = live_state_observer {
@@ -1053,6 +1114,7 @@ fn build_router_with_live_backend(
             storage,
             options,
             relay_url,
+            mcp_worker: mcp_worker.clone(),
         },
     ))
 }
@@ -2342,6 +2404,22 @@ async fn revoke_device(
         .execute(&mut *tx)
         .await
         .map_err(|error| database_unavailable(&error, "revoke_device"))?;
+    // MCP grants are fenced at the same roster-revocation linearization point.
+    // The worker cleanup is intentionally durable and retried out-of-process.
+    sqlx::query("UPDATE mcp_devices SET cleanup_pending=TRUE WHERE vault_id=$1 AND device_id=$2")
+        .bind(p.vault)
+        .bind(device_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "revoke_mcp_device"))?;
+    sqlx::query(
+        "UPDATE mcp_grants SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2 AND revoked_at IS NULL",
+    )
+    .bind(p.vault)
+    .bind(device_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| database_unavailable(&error, "revoke_mcp_grants"))?;
     sqlx::query(
         "UPDATE device_credentials SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2",
     )
@@ -3036,6 +3114,83 @@ struct LiveTicketResponse {
     ticket: String,
     expires_at_ms: i64,
     lifetime_handle: String,
+}
+
+const DRAFT_HINT_COOLDOWN: Duration = Duration::from_millis(500);
+
+#[derive(Default)]
+struct DraftHintCoalescer {
+    cooldown_until: Option<tokio::time::Instant>,
+    pending: bool,
+}
+
+impl DraftHintCoalescer {
+    fn notice(&mut self, now: tokio::time::Instant) -> bool {
+        if self
+            .cooldown_until
+            .is_none_or(|cooldown_until| now >= cooldown_until)
+        {
+            self.cooldown_until = None;
+            self.pending = false;
+            true
+        } else {
+            self.pending = true;
+            false
+        }
+    }
+
+    fn sent(&mut self, completed_at: tokio::time::Instant) -> tokio::time::Instant {
+        let cooldown_until = completed_at + DRAFT_HINT_COOLDOWN;
+        self.cooldown_until = Some(cooldown_until);
+        cooldown_until
+    }
+
+    fn timeout_expired(&mut self, now: tokio::time::Instant) -> bool {
+        let Some(cooldown_until) = self.cooldown_until else {
+            return false;
+        };
+        if now < cooldown_until {
+            return false;
+        }
+        self.cooldown_until = None;
+        std::mem::take(&mut self.pending)
+    }
+
+    fn cooling_down(&self) -> bool {
+        self.cooldown_until.is_some()
+    }
+}
+
+async fn websocket(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    lease: Option<Extension<crate::serving::ConnectionLease>>,
+    shutdown: Option<Extension<tokio::sync::watch::Receiver<bool>>>,
+    upgrade: WebSocketUpgrade,
+) -> ApiResult<axum::response::Response> {
+    let principal = authenticated(&s, &headers, Operation::Sync).await?;
+    // Subscribe before replay so a commit between replay and live is never missed.
+    let receiver = s.committed.subscribe();
+    let presence_receiver = s.presence_changed.subscribe();
+    let drafts_receiver = s.drafts_changed.subscribe();
+    let lease = lease.map(|Extension(lease)| lease);
+    let shutdown = shutdown.map(|Extension(shutdown)| shutdown);
+    Ok(upgrade
+        .max_message_size(1_100_000)
+        .max_frame_size(1_100_000)
+        .on_upgrade(move |socket| {
+            ws_session(
+                socket,
+                s,
+                principal,
+                receiver,
+                presence_receiver,
+                drafts_receiver,
+                lease,
+                shutdown,
+            )
+        })
+        .into_response())
 }
 
 fn lifetime_refused() -> ApiError {
@@ -5210,36 +5365,6 @@ fn heartbeat_action(has_outstanding_challenge: bool) -> HeartbeatAction {
     }
 }
 
-async fn websocket(
-    State(s): State<ApiState>,
-    headers: HeaderMap,
-    lease: Option<Extension<crate::serving::ConnectionLease>>,
-    shutdown: Option<Extension<tokio::sync::watch::Receiver<bool>>>,
-    upgrade: WebSocketUpgrade,
-) -> ApiResult<axum::response::Response> {
-    let principal = authenticated(&s, &headers, Operation::Sync).await?;
-    // Subscribe before replay so a commit between replay and live is never missed.
-    let receiver = s.committed.subscribe();
-    let presence_receiver = s.presence_changed.subscribe();
-    let lease = lease.map(|Extension(lease)| lease);
-    let shutdown = shutdown.map(|Extension(shutdown)| shutdown);
-    Ok(upgrade
-        .max_message_size(1_100_000)
-        .max_frame_size(1_100_000)
-        .on_upgrade(move |socket| {
-            ws_session(
-                socket,
-                s,
-                principal,
-                receiver,
-                presence_receiver,
-                lease,
-                shutdown,
-            )
-        })
-        .into_response())
-}
-
 async fn ws_close(socket: &mut WebSocket, code: u16, reason: &'static str) {
     let _ = socket
         .send(Message::Close(Some(CloseFrame {
@@ -5318,12 +5443,14 @@ async fn read_hello(socket: &mut WebSocket, timeout: Duration) -> Result<i64, He
         .ok_or(Rejected(close::INVALID_HELLO, "invalid_hello"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ws_session(
     socket: WebSocket,
     state: ApiState,
     principal: Principal,
     notices: tokio::sync::broadcast::Receiver<(Uuid, i64)>,
     presence_notices: tokio::sync::broadcast::Receiver<Uuid>,
+    drafts_notices: tokio::sync::broadcast::Receiver<Uuid>,
     lease: Option<crate::serving::ConnectionLease>,
     shutdown: Option<tokio::sync::watch::Receiver<bool>>,
 ) {
@@ -5333,6 +5460,7 @@ async fn ws_session(
         principal,
         notices,
         presence_notices,
+        drafts_notices,
         shutdown,
     )
     .await;
@@ -5345,6 +5473,7 @@ async fn ws_session_inner(
     principal: Principal,
     mut notices: tokio::sync::broadcast::Receiver<(Uuid, i64)>,
     mut presence_notices: tokio::sync::broadcast::Receiver<Uuid>,
+    mut drafts_notices: tokio::sync::broadcast::Receiver<Uuid>,
     mut shutdown: Option<tokio::sync::watch::Receiver<bool>>,
 ) {
     let options = Arc::clone(&state.options);
@@ -5378,7 +5507,7 @@ async fn ws_session_inner(
         "resume_cursor": cursor.to_string(),
         "high_water_cursor": high_water.to_string(),
         "replay_floor_cursor": replay_floor.to_string(),
-        "frame_types": ["ready", "event", "resync_required", "presence_changed"],
+        "frame_types": ["ready", "event", "resync_required", "presence_changed", "drafts_changed"],
     });
     if let Err(stop) = send_frame(&mut socket, ready.to_string(), options.send_timeout).await {
         return stop.close(&mut socket).await;
@@ -5411,6 +5540,8 @@ async fn ws_session_inner(
     // Broadcast is only a latency hint; committed rows are the durable source.
     let mut durable_replay = tokio::time::interval(options.durable_replay_interval);
     durable_replay.tick().await;
+    let mut draft_hint_coalescer = DraftHintCoalescer::default();
+    let mut draft_hint_cooldown = Box::pin(tokio::time::sleep(Duration::from_secs(3_600)));
     loop {
         let stop = tokio::select! {
             _ = wait_for_shutdown(&mut shutdown) => WsStop::Disconnected,
@@ -5507,6 +5638,41 @@ async fn ws_session_inner(
                     if presence_active { close_presence(&state, &principal, connection_id).await; }
                     return
                 },
+            },
+            draft_notice = drafts_notices.recv() => {
+                match draft_notice {
+                    Ok(vault) if vault == principal.vault => {}
+                    Ok(_) => continue,
+                    // The channel carries hints only; after lag, one local hint
+                    // is enough to prompt the receiver to pull its durable state.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        if presence_active { close_presence(&state, &principal, connection_id).await; }
+                        return
+                    }
+                }
+                if !draft_hint_coalescer.notice(tokio::time::Instant::now()) {
+                    continue;
+                }
+                if send_frame(&mut socket, json!({"type":"drafts_changed"}).to_string(), options.send_timeout).await.is_err() {
+                    WsStop::Disconnected
+                } else {
+                    let cooldown_until = draft_hint_coalescer.sent(tokio::time::Instant::now());
+                    draft_hint_cooldown.as_mut().reset(cooldown_until);
+                    continue
+                }
+            },
+            _ = &mut draft_hint_cooldown, if draft_hint_coalescer.cooling_down() => {
+                if !draft_hint_coalescer.timeout_expired(tokio::time::Instant::now()) {
+                    continue;
+                }
+                if send_frame(&mut socket, json!({"type":"drafts_changed"}).to_string(), options.send_timeout).await.is_err() {
+                    WsStop::Disconnected
+                } else {
+                    let cooldown_until = draft_hint_coalescer.sent(tokio::time::Instant::now());
+                    draft_hint_cooldown.as_mut().reset(cooldown_until);
+                    continue
+                }
             },
         };
         if presence_active {
@@ -5639,6 +5805,51 @@ mod tests {
     fn heartbeat_disconnects_before_replacing_an_unanswered_challenge() {
         assert_eq!(heartbeat_action(false), HeartbeatAction::SendChallenge);
         assert_eq!(heartbeat_action(true), HeartbeatAction::Disconnect);
+    }
+
+    #[test]
+    fn draft_hint_coalescer_enforces_leading_and_trailing_windows() {
+        let start = tokio::time::Instant::now();
+        let mut coalescer = DraftHintCoalescer::default();
+
+        assert!(coalescer.notice(start));
+        coalescer.sent(start);
+        for _ in 0..100 {
+            assert!(!coalescer.notice(start + Duration::from_millis(100)));
+        }
+        assert!(!coalescer.notice(start + Duration::from_millis(499)));
+        assert!(!coalescer.timeout_expired(start + Duration::from_millis(499)));
+        assert!(coalescer.timeout_expired(start + Duration::from_millis(500)));
+
+        coalescer.sent(start + Duration::from_millis(500));
+        assert!(!coalescer.notice(start + Duration::from_millis(500)));
+        assert!(!coalescer.timeout_expired(start + Duration::from_millis(999)));
+        assert!(coalescer.timeout_expired(start + Duration::from_millis(1_000)));
+    }
+
+    #[test]
+    fn draft_hint_coalescer_has_no_trailing_send_without_a_pending_notice() {
+        let start = tokio::time::Instant::now();
+        let mut coalescer = DraftHintCoalescer::default();
+
+        assert!(coalescer.notice(start));
+        coalescer.sent(start);
+        assert!(!coalescer.timeout_expired(start + Duration::from_millis(500)));
+        assert!(coalescer.notice(start + Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn draft_hint_cooldown_starts_after_send_completion() {
+        let notice_at = tokio::time::Instant::now();
+        let send_completed_at = notice_at + Duration::from_millis(100);
+        let mut coalescer = DraftHintCoalescer::default();
+
+        assert!(coalescer.notice(notice_at));
+        coalescer.sent(send_completed_at);
+        assert!(!coalescer.notice(send_completed_at));
+        assert!(!coalescer.timeout_expired(notice_at + Duration::from_millis(500)));
+        assert!(!coalescer.timeout_expired(notice_at + Duration::from_millis(599)));
+        assert!(coalescer.timeout_expired(notice_at + Duration::from_millis(600)));
     }
 
     #[test]

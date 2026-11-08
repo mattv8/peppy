@@ -196,6 +196,8 @@ fn config(_pool: PgPool) -> Config {
         trusted_proxy_cidrs: Vec::new(),
         replay_retention: Duration::from_secs(7 * 86_400),
         relay_url: None,
+        mcp_worker_url: None,
+        mcp_worker_token_file: None,
         web_client: None,
         web_live_trusted_origin: None,
     }

@@ -64,6 +64,7 @@ BUILD_ROOTS = (
     BuildRoot("crates/browser-bindings", ("container_image",)),
     BuildRoot("services/server", ("container_image",)),
     BuildRoot("services/push-relay", ("container_image",)),
+    BuildRoot("services/mcp", ("container_image",)),
 )
 
 # (negated, compiled glob); a later pattern overrides an earlier match, as in path filters.

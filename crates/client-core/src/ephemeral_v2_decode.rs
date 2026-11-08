@@ -152,6 +152,7 @@ mod tests {
                 fingerprint: profile.fingerprint().unwrap(),
                 command: derive(KeyPurpose::Command),
                 event: derive(KeyPurpose::Event),
+                draft: None,
                 compaction: None,
                 local_identity_seal: None,
                 handoff: None,

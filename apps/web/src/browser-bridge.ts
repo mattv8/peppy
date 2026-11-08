@@ -6,7 +6,7 @@ import type {
   MessageWindowRequest, NotificationCheck, NotificationPreferences, NotificationTarget, PublicCopy,
   RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput, StartHistorySearchInput,
   BillingSummaryView, HostedSignInProvider, PurchaseOptions, StartupStatus, StoreProduct,
-  AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult, ConversationFolder, NotificationPersistence, NotificationPersistenceSettings,
+  AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult, ConversationFolder, NotificationPersistence, NotificationPersistenceSettings, PastedImage,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { DEFAULT_NOTIFICATION_PERSISTENCE, notificationPersistence } from "@peppy/desktop-ui/bridge-contracts";
 import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
@@ -352,6 +352,8 @@ export class BrowserBridge implements DesktopBridge {
     window.addEventListener("blur", this.refreshNotificationContext);
     window.addEventListener("storage", this.refreshNotificationContextOnStorage);
     document.addEventListener("visibilitychange", this.refreshNotificationContext);
+    document.addEventListener("visibilitychange", this.flushDraftSyncWhenHidden);
+    window.addEventListener("pagehide", this.flushDraftSync);
   }
 
   public onStopped(listener: (reason: string) => void): () => void {
@@ -401,6 +403,8 @@ export class BrowserBridge implements DesktopBridge {
     window.removeEventListener("blur", this.refreshNotificationContext);
     window.removeEventListener("storage", this.refreshNotificationContextOnStorage);
     document.removeEventListener("visibilitychange", this.refreshNotificationContext);
+    document.removeEventListener("visibilitychange", this.flushDraftSyncWhenHidden);
+    window.removeEventListener("pagehide", this.flushDraftSync);
     this.stoppedListeners.forEach((listener) => listener(reason));
     this.port.close();
   }
@@ -440,6 +444,13 @@ export class BrowserBridge implements DesktopBridge {
   private readonly refreshNotificationContext = (): void => {
     if (!this.notificationContext || this.stopped) return;
     void this.call("set_notification_context", this.notificationContextArgs()).catch(() => undefined);
+  };
+  private readonly flushDraftSyncWhenHidden = (): void => {
+    if (document.visibilityState === "hidden") this.flushDraftSync();
+  };
+  private readonly flushDraftSync = (): void => {
+    if (this.stopped) return;
+    void this.call("flush_draft_sync").catch(() => undefined);
   };
   private readonly refreshNotificationContextOnStorage = (event: StorageEvent): void => {
     if (event.key === null || event.key === NOTIFICATION_PERSISTENCE_KEY) this.refreshNotificationContext();
@@ -545,6 +556,20 @@ export class BrowserBridge implements DesktopBridge {
   public request_contact_repair(): Promise<ContactSyncStatus> { return this.call("request_contact_repair"); }
   public list_devices(): Promise<DeviceRosterView> { return this.call("list_devices"); }
   public revoke_device(deviceId: string): Promise<void> { return this.call("revoke_device", { deviceId }); }
+  public mcp_status(): Promise<import("@peppy/desktop-ui/bridge-contracts").McpDeviceStatus> { return this.call("mcp_status"); }
+  public mcp_enable(): Promise<import("@peppy/desktop-ui/bridge-contracts").McpDeviceStatus> { return this.call("mcp_enable"); }
+  public mcp_grants(): Promise<import("@peppy/desktop-ui/bridge-contracts").McpGrantView[]> { return this.call("mcp_grants"); }
+  public mcp_revoke_grant(id: string): Promise<void> { return this.call("mcp_revoke_grant", { id }); }
+  public webhooks_list(): Promise<import("@peppy/desktop-ui/bridge-contracts").WebhookList> { return this.call("webhooks_list"); }
+  public webhook_create(input: import("@peppy/desktop-ui/bridge-contracts").WebhookInput): Promise<import("@peppy/desktop-ui/bridge-contracts").WebhookCreated> { return this.call("webhook_create", { input }); }
+  public webhook_update(id: string, input: import("@peppy/desktop-ui/bridge-contracts").WebhookInput): Promise<import("@peppy/desktop-ui/bridge-contracts").WebhookView> { return this.call("webhook_update", { id, input }); }
+  public webhook_delete(id: string): Promise<void> { return this.call("webhook_delete", { id }); }
+  public webhook_reveal_secret(id: string): Promise<import("@peppy/desktop-ui/bridge-contracts").WebhookSecret> { return this.call("webhook_reveal_secret", { id }); }
+  public webhook_rotate_secret(id: string): Promise<import("@peppy/desktop-ui/bridge-contracts").WebhookSecret> { return this.call("webhook_rotate_secret", { id }); }
+  public webhook_test(id: string): Promise<import("@peppy/desktop-ui/bridge-contracts").WebhookTestResult> { return this.call("webhook_test", { id }); }
+  public mcp_authorization(id: string): Promise<import("@peppy/desktop-ui/bridge-contracts").McpAuthorizationView> { return this.call("mcp_authorization", { id }); }
+  public mcp_approve_authorization(id: string, scopes: import("@peppy/desktop-ui/bridge-contracts").McpScope[]): Promise<import("@peppy/desktop-ui/bridge-contracts").McpAuthorizationDecision> { return this.call("mcp_approve_authorization", { id, scopes }); }
+  public mcp_deny_authorization(id: string): Promise<import("@peppy/desktop-ui/bridge-contracts").McpAuthorizationDecision> { return this.call("mcp_deny_authorization", { id }); }
   public request_contact_sync(bookId: string): Promise<ContactScanStatus> { return this.call("request_contact_sync", { bookId }); }
   public get_contact_sync_request(bookId: string): Promise<ContactScanStatus | null> { return this.call("get_contact_sync_request", { bookId }); }
   public list_restorable_contacts(bookId: string): Promise<RestorableContact[]> { return this.call("list_restorable_contacts", { bookId }); }
@@ -580,6 +605,19 @@ export class BrowserBridge implements DesktopBridge {
     if (files.some((file) => file.size > MAX_FILE_BYTES)) throw new BrowserBridgeError("attachment-too-large", "Attachments must be 32 MiB or smaller.");
     return Promise.all(files.map(async (file) => { const bytes = await file.arrayBuffer(); return this.call<AttachmentView>("prepare_attachment", { bytes, displayName: file.name, mediaType: file.type || "application/octet-stream" }, [bytes]); }));
   }
+  public async prepare_pasted_attachments(files: PastedImage[]) {
+    const prepared = await Promise.allSettled(files.map(({ bytes, name, mediaType }) => {
+      if (!IMAGE_TYPES.has(mediaType)) return Promise.reject(new BrowserBridgeError("invalid-attachment", "Only PNG, JPEG, GIF, and WebP images can be pasted."));
+      if (bytes.byteLength > MAX_FILE_BYTES) return Promise.reject(new BrowserBridgeError("attachment-too-large", "Images must be 32 MiB or smaller."));
+      return this.call<AttachmentView>("prepare_attachment", { bytes, displayName: name, mediaType }, [bytes]);
+    }));
+    return {
+      views: prepared.flatMap(result => result.status === "fulfilled" ? [result.value] : []),
+      failures: prepared.flatMap(result => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : "Could not add pasted image."] : []),
+    };
+  }
+  public resolve_draft_conflict(input: { draftId: string; keepBranchId: string | null }): Promise<Draft> { return this.call("resolve_draft_conflict", input); }
+  public acknowledge_draft_notice(draftId: string): Promise<void> { return this.call("acknowledge_draft_notice", { draftId }); }
   public retry_attachment(id: string): Promise<void> { return this.call("retry_attachment", { id }); }
   public attachment_retention_state(attachmentId: string): Promise<AttachmentRetentionStateDto> { return this.call("attachment_retention_state", { attachmentId }); }
   public attachment_retention_status(): Promise<AttachmentRetentionStatusResult> { return this.call("attachment_retention_status"); }

@@ -57,7 +57,8 @@ Before you reopen access or carrier processing:
   [`raw_live_ticket_table_restore_revives_a_consumed_ticket_and_reuses_authority`](../../services/server/src/api/live_socket_tests/backup_restore_tests.rs).
 - Reapply device and public-link revocations that occurred after the backup, or replace affected device credentials. An old dump can make a revoked token or public image link valid again.
 - Reconcile post-backup key-profile activations from trusted recovery material and establish a trusted owner credential.
-- Resynchronize every existing client or enroll it with a fresh device identity. Peppy has no restore-generation marker, so a reused cursor range can make an old client miss records without an automatic resync signal.
+- Resynchronize every existing client or enroll it with a fresh device identity. A restore can roll a vault's replay cursor back to the backup-time value. Peppy has no restore-generation marker, so a client that kept a cursor from after the backup can miss records without an automatic resync signal.
+- Draft state in the dump is the state at backup time. It can include draft branches and private attachments that expired or were deleted after the backup, so reconcile drafts as described above.
 - Keep old client stores while you reconcile drafts, unuploaded records, encrypted attachments, and carrier attempts. A gateway restored from a client backup needs the restore guard and a fresh enrollment before carrier execution. Do not clear an uncertain attempt to resume sending.
 - Never restore an older client database over a live device. Core cannot detect
   a database rollback: a copy taken before an RCS send attempt can admit a new

@@ -25,6 +25,7 @@ uuid.workspace = true
 zeroize.workspace = true
 url.workspace = true
 libsodium-rs.workspace = true
+time = { version = "0.3", features = ["parsing"] }
 
 [target.'cfg(target_os = "emscripten")'.dependencies]
 rusqlite = { version = "=0.32.1", features = ["bundled-sqlcipher-vendored-openssl"] }

@@ -260,6 +260,23 @@ fn update_activity_reporting_is_allowed_from_main_and_composer_windows() {
     );
 }
 
+#[test]
+fn raw_pasted_attachment_invoke_is_allowed_only_from_main_and_composer_windows() {
+    let command = "prepare_pasted_attachment";
+    let permission = allow(command);
+    let main = permissions(include_str!("../capabilities/default.json"));
+    let composer = permissions(include_str!("../capabilities/composer.json"));
+    let media = permissions(include_str!("../capabilities/media.json"));
+
+    assert_eq!(
+        command_window_risk(command),
+        CommandWindowRisk::MainAndComposer
+    );
+    assert!(main.contains(&permission));
+    assert!(composer.contains(&permission));
+    assert!(!media.contains(&permission));
+}
+
 /// Explicit window-risk registry. New commands default to main-only, the least-privileged window.
 fn command_window_risk(command: &str) -> CommandWindowRisk {
     if [
@@ -277,6 +294,9 @@ fn command_window_risk(command: &str) -> CommandWindowRisk {
         CommandWindowRisk::MainComposerAndMedia
     } else if ["close_composer", "close_head_panel", "open_media_viewer"].contains(&command) {
         CommandWindowRisk::Composer
+    } else if ["resolve_draft_conflict", "acknowledge_draft_notice"].contains(&command) {
+        // Their handlers resolve the draft's conversation and enforce the composer scope.
+        CommandWindowRisk::MainAndComposer
     } else if command == "report_update_activity" || crate::COMPOSER_COMMANDS.contains(&command) {
         CommandWindowRisk::MainAndComposer
     } else {
@@ -329,6 +349,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
     let purchases = include_str!("purchases.rs");
     let enrollment = include_str!("enrollment.rs");
     let computer_enrollment = include_str!("enrollment/computer.rs");
+    let mcp = include_str!("mcp.rs");
     let history_search = include_str!("search_history.rs");
     let notification_activation = include_str!("notification_activation.rs");
     let live_typing = include_str!("live_typing.rs");
@@ -347,6 +368,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
                     purchases,
                     enrollment,
                     computer_enrollment,
+                    mcp,
                     history_search,
                     notification_activation,
                     live_typing,
@@ -519,6 +541,8 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "close_composer",
         "close_head_panel",
         "open_media_viewer",
+        "resolve_draft_conflict",
+        "acknowledge_draft_notice",
     ] {
         assert!(
             !media.contains(&allow(forbidden)),
@@ -614,12 +638,98 @@ fn device_management_commands_are_registered_for_the_main_window_only() {
 }
 
 #[test]
+fn mcp_management_commands_are_main_window_only() {
+    let commands = declared_commands();
+    let registered = include_str!("lib.rs");
+    let mcp = include_str!("mcp.rs");
+    let main = permissions(include_str!("../capabilities/default.json"));
+    let composer = permissions(include_str!("../capabilities/composer.json"));
+    let media = permissions(include_str!("../capabilities/media.json"));
+
+    for command in [
+        "mcp_status",
+        "mcp_enable",
+        "mcp_grants",
+        "mcp_revoke_grant",
+        "webhooks_list",
+        "webhook_create",
+        "webhook_update",
+        "webhook_delete",
+        "webhook_reveal_secret",
+        "webhook_rotate_secret",
+        "webhook_test",
+        "mcp_authorization",
+        "mcp_approve_authorization",
+        "mcp_deny_authorization",
+    ] {
+        assert!(
+            commands.contains(&command.to_owned()),
+            "{command} is not declared"
+        );
+        assert!(
+            registered.contains(&format!("mcp::{command},")),
+            "{command} is not registered"
+        );
+        assert!(main.contains(&allow(command)), "main lacks {command}");
+        assert!(
+            !composer.contains(&allow(command)),
+            "composer can call {command}"
+        );
+        assert!(!media.contains(&allow(command)), "media can call {command}");
+        let definition = mcp
+            .split(&format!("pub async fn {command}("))
+            .nth(1)
+            .unwrap()
+            .split("\n}")
+            .next()
+            .unwrap();
+        assert!(definition.contains("crate::require_main(window.label())?;"));
+    }
+}
+
+#[test]
 fn runtime_window_checks_back_the_acl() {
     assert!(crate::require_main("main").is_ok());
     assert_eq!(
         crate::require_main("composer-any").unwrap_err().code,
         "window-context"
     );
+}
+
+#[tokio::test]
+async fn draft_notice_commands_enforce_the_composer_draft_conversation_scope() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    session
+        .client
+        .unlock(&fixture.profile, &fixture.header, PHRASE)
+        .unwrap();
+    let state = AppState::new(
+        fixture.dir.path().to_path_buf(),
+        Arc::new(MemoryStore::default()),
+        noop(),
+    );
+    let own = session.client.recipientless_compose_draft().unwrap();
+    let other = session.client.create_compose_draft(None).unwrap();
+    let composer = format!("composer-{}", own.conversation_id);
+
+    assert!(
+        crate::require_draft_notice_window_scope(&state, "main", &session, own.draft_id,)
+            .await
+            .is_ok()
+    );
+    assert!(
+        crate::require_draft_notice_window_scope(&state, &composer, &session, own.draft_id,)
+            .await
+            .is_ok()
+    );
+    for label in [&composer[..], "media-forged-0"] {
+        let error =
+            crate::require_draft_notice_window_scope(&state, label, &session, other.draft_id)
+                .await
+                .unwrap_err();
+        assert_eq!(error.code, "window-context");
+    }
 }
 
 #[test]

@@ -25,6 +25,7 @@ hyper-util = { version = "=0.1.21", features = ["server", "tokio", "service"] }
 ipnet.workspace = true
 libsodium-rs.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
+rmcp = { version = "=3.9.0", features = ["server", "transport-streamable-http-server"] }
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 sqlx = { workspace = true, features = ["uuid"] }

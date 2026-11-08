@@ -255,8 +255,8 @@ jobs:
       PEPPY_ANDROID_KEY_ALIAS: ${{ secrets.PEPPY_ANDROID_KEY_ALIAS }}
       PEPPY_ANDROID_KEY_PASSWORD: ${{ secrets.PEPPY_ANDROID_KEY_PASSWORD }}
   publish:
-    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' && needs.publish-server-image.result == 'success' && needs.publish-relay-image.result == 'success' }}
-    needs: [prepare, signing, artifacts, publish-server-image, publish-relay-image]
+    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' && needs.publish-server-image.result == 'success' && needs.publish-relay-image.result == 'success' && needs.publish-mcp-image.result == 'success' }}
+    needs: [prepare, signing, artifacts, publish-server-image, publish-relay-image, publish-mcp-image]
     permissions:
       contents: write
       attestations: write
@@ -309,6 +309,18 @@ jobs:
       image: hub.docker.visnovsky.us/library/peppy-push-relay
       context: .
       dockerfile: infra/docker/push-relay.Dockerfile
+      tag: ${{ needs.prepare.outputs.version }}
+      environment: production
+      sha: ${{ needs.prepare.outputs.sha }}
+    secrets: inherit
+  publish-mcp-image:
+    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' }}
+    needs: [prepare, signing, artifacts]
+    uses: ./.github/workflows/publish-community-image.yml
+    with:
+      image: hub.docker.visnovsky.us/library/peppy-mcp
+      context: .
+      dockerfile: infra/docker/mcp.Dockerfile
       tag: ${{ needs.prepare.outputs.version }}
       environment: production
       sha: ${{ needs.prepare.outputs.sha }}

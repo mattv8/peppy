@@ -36,6 +36,7 @@ mod conversation_pinning;
 mod conversation_tones;
 mod deferred_media;
 mod device_succession;
+mod draft_sync;
 mod ephemeral;
 mod ephemeral_v2;
 mod ephemeral_v2_control;
@@ -65,6 +66,13 @@ pub use ephemeral_v2::{
     LiveAction, LiveClock, LiveEnableContext, LiveEnableGeneration, LiveError, LiveExecutor,
     LiveOutbound, LiveOutcome, PeerSessionUpdate,
 };
+mod mcp_commands;
+pub use draft_sync::{
+    DraftAttachmentState, DraftConflictVersion, DraftNotice, DraftPush, DraftPushOutcome,
+    DraftRecordAttachmentV1, DraftRecordV1, DraftSendGate, DraftSyncState, DraftSyncStatus,
+    DraftTerminalReasonCore, DraftTransferDirection, DraftUpload, RemoteDraftChange,
+    RemoteDraftSend,
+};
 mod media_paging;
 mod mms;
 mod mms_backfill;
@@ -93,6 +101,7 @@ pub use gateway_settings::{
     GatewayCapabilities, GatewayHostFacts, GatewayPlatform, GatewayPolicyDecision, GatewaySettings,
 };
 pub use local_search::*;
+pub use mcp_commands::{McpCommand, McpQueuedCommand};
 use media::STREAM_VERSION;
 pub use media::{
     AttachmentInfo, AttachmentState, CipherObject, MediaDescriptor, NativePlaintextFile,
@@ -112,14 +121,14 @@ pub use mms_backfill::{
 };
 use peppy_crypto::FileKey;
 use peppy_crypto::enrollment::{
-    EncryptedHandoff, EnrollmentContext, EnrollmentRole, HandoffRootPackage, TransferKeypair,
-    VerifiedHandoff,
+    EncryptedHandoff, EnrollmentContext, EnrollmentPurpose, EnrollmentRole, HandoffRootPackage,
+    TransferKeypair, VerifiedHandoff,
 };
 use peppy_crypto::vault_identity::RcsIdentityKey;
 use peppy_crypto::{
     CryptoError, EncryptedEnvelope, KeyPurpose, PurposeKey, compaction_hmac, decrypt,
-    derive_purpose_key, derive_root_key, encrypt, profile_fingerprint_bytes,
-    verify_vault_check_header,
+    derive_draft_purpose_key, derive_purpose_key, derive_root_key, encrypt,
+    profile_fingerprint_bytes, verify_vault_check_header,
 };
 pub use peppy_crypto::{KeyProfile, VaultCheckHeader};
 pub use peppy_domain::{
@@ -179,13 +188,13 @@ pub use vault_identity::{
 };
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 51;
+const SCHEMA_VERSION: i64 = 52;
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 /// Shared encrypted MMS content format understood by upgraded gateways.
-pub const MMS_CONTENT_VERSION: u32 = 3;
+pub const MMS_CONTENT_VERSION: u32 = 4;
 
 /// An eligible attachment download with its durable demand classification.
 ///
@@ -241,7 +250,7 @@ const MAX_DRAFT_ATTACHMENTS: usize = MAX_MMS_ATTACHMENTS;
 const KEY_CACHE_MAGIC: &[u8; 4] = b"PPKC";
 const KEY_CACHE_VERSION: u8 = 2;
 const FINGERPRINT_HEX_BYTES: usize = 64;
-// magic | version | vault | device | epoch | profile fingerprint (hex) | command key | event key | compaction key
+// magic | version | vault | device | epoch | profile fingerprint (hex) | command | event | compaction key
 const KEY_CACHE_BYTES: usize = 4 + 1 + 16 + 16 + 4 + FINGERPRINT_HEX_BYTES + 32 + 32 + 32;
 const LEGACY_KEY_CACHE_BYTES: usize = KEY_CACHE_BYTES - 32;
 const KEY_CACHE_CHECK_DOMAIN: &[u8] = b"peppy-native-key-cache-check-v1\0";
@@ -322,6 +331,8 @@ pub enum Error {
     RecipientlessDraftExists,
     #[error("moving this draft would exceed a compose limit")]
     DraftMergeOverflow,
+    #[error("synced draft must be pushed before sending")]
+    DraftNotSynced,
     #[error("no send attempt was recorded for this command")]
     NoAttempt,
     #[error("a send attempt was already recorded with state {0:?}")]
@@ -822,6 +833,12 @@ pub struct MessagePage {
     pub messages: Vec<Message>,
     pub has_more: bool,
 }
+/// A bounded incoming-message scan and the durable order through which it examined rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IncomingPage {
+    pub messages: Vec<(i64, MessagePayload)>,
+    pub scanned_through: i64,
+}
 /// Exclusive, durable newest-first media-page anchor. Attachment position disambiguates a MMS.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaCursor {
@@ -1155,6 +1172,13 @@ pub struct ComposeDraft {
     pub route: Option<GatewayRoute>,
     pub revision: u64,
 }
+
+/// The durable grouping for a split MMS draft send.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftSendParts {
+    pub caption: bool,
+    pub image_groups: Vec<Vec<AttachmentId>>,
+}
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ComposeDraftUpdate {
     pub text: String,
@@ -1173,6 +1197,7 @@ struct EpochKeys {
     fingerprint: String,
     command: PurposeKey,
     event: PurposeKey,
+    draft: Option<PurposeKey>,
     /// V1 native caches did not carry this derived key. They remain decrypt-compatible,
     /// but must not produce compactable events until a V2 cache or passphrase unlock.
     compaction: Option<PurposeKey>,
@@ -2219,6 +2244,7 @@ impl Client {
             fingerprint: profile.fingerprint().map_err(|_| Error::Crypto)?,
             command: derive(KeyPurpose::Command)?,
             event: derive(KeyPurpose::Event)?,
+            draft: None,
             compaction: Some(derive(KeyPurpose::Compaction)?),
             local_identity_seal: None,
             handoff: Some(
@@ -2227,6 +2253,9 @@ impl Client {
             ),
         };
         let mut guard = self.lock()?;
+        let draft = derive_draft_purpose_key(&keys.event, profile).map_err(|_| Error::Crypto)?;
+        let mut keys = keys;
+        keys.draft = Some(draft);
         let s = &mut *guard;
         let tx = s
             .conn
@@ -2325,12 +2354,16 @@ impl Client {
             fingerprint: profile.fingerprint().map_err(|_| Error::Crypto)?,
             command,
             event,
+            draft: None,
             compaction: Some(compaction),
             local_identity_seal: Some(local_identity_seal),
             profile: profile.clone(),
             handoff,
         };
         let mut guard = self.lock()?;
+        let draft = derive_draft_purpose_key(&keys.event, &profile).map_err(|_| Error::Crypto)?;
+        let mut keys = keys;
+        keys.draft = Some(draft);
         let s = &mut *guard;
         if profile.vault_id != s.config.vault_id.0 {
             return Err(Error::InvalidProfile);
@@ -2578,6 +2611,7 @@ impl Client {
             .as_ref()
             .map(|key| import(key, KeyPurpose::Compaction))
             .transpose()?;
+        let draft = derive_draft_purpose_key(&event, &profile).map_err(|_| Error::Crypto)?;
         let handoff = s.keys.get_mut(&epoch).and_then(|existing| {
             (existing.profile == profile)
                 .then(|| existing.handoff.take())
@@ -2587,6 +2621,7 @@ impl Client {
             fingerprint: fingerprint.to_owned(),
             command,
             event,
+            draft: Some(draft),
             compaction,
             local_identity_seal: None,
             profile: profile.clone(),
@@ -2612,6 +2647,17 @@ impl Client {
             active_epoch: s.active_epoch,
             unlocked_epochs: s.keys.keys().copied().collect(),
         })
+    }
+
+    /// Read-only metadata for the epoch currently pinned by this local client.
+    /// It exposes neither key material nor a capability to activate an epoch.
+    pub fn active_key_profile(&self) -> Result<KeyProfile, Error> {
+        let s = self.lock()?;
+        let epoch = s.active_epoch.ok_or(Error::KeysUnavailable)?;
+        s.keys
+            .get(&epoch)
+            .map(|keys| keys.profile.clone())
+            .ok_or(Error::KeysUnavailable)
     }
 
     /// Seals browser-local identity plaintext once with a just-imported verified vault epoch. This
@@ -2663,6 +2709,40 @@ impl Client {
         sender: &TransferKeypair,
         context: &EnrollmentContext,
     ) -> Result<EncryptedHandoff, Error> {
+        let s = self.lock()?;
+        let epoch = s.active_epoch.ok_or(Error::KeysUnavailable)?;
+        if context.vault_id != s.config.vault_id.0 || context.key_epoch != epoch {
+            return Err(Error::InvalidProfile);
+        }
+        let keys = s.keys.get(&epoch).ok_or(Error::KeysUnavailable)?;
+        if keys.profile.vault_id != context.vault_id
+            || keys.profile.key_epoch != context.key_epoch
+            || profile_fingerprint_bytes(&keys.profile).map_err(|_| Error::Crypto)?
+                != context.fingerprint
+        {
+            return Err(Error::InvalidProfile);
+        }
+        keys.handoff
+            .as_ref()
+            .ok_or(Error::KeysUnavailable)?
+            .seal(sender, &context.recipient_transfer_public_key, context)
+            .map_err(|_| Error::Crypto)
+    }
+
+    /// Seals a computer enrollment handoff only for an ordinary recipient device from the active
+    /// epoch's verified root capability. The enrollment context must come from authenticated local
+    /// enrollment validation, never renderer or server input directly.
+    pub fn seal_computer_handoff(
+        &self,
+        sender: &TransferKeypair,
+        context: &EnrollmentContext,
+    ) -> Result<EncryptedHandoff, Error> {
+        if context.purpose != EnrollmentPurpose::Computer
+            || context.role != EnrollmentRole::Device
+            || context.device_id.is_nil()
+        {
+            return Err(Error::InvalidProfile);
+        }
         let s = self.lock()?;
         let epoch = s.active_epoch.ok_or(Error::KeysUnavailable)?;
         if context.vault_id != s.config.vault_id.0 || context.key_epoch != epoch {
@@ -3006,9 +3086,10 @@ impl Client {
             &ctx,
             sms,
             &route,
-            &mms.attachment_ids,
+            local_references(&tx, &mms.attachment_ids)?,
             Transport::Mms,
             mms.subject,
+            None,
         )?;
         tx.commit()?;
         Ok(queued)
@@ -3174,6 +3255,7 @@ impl Client {
             return Err(Error::DraftNotDiscardable);
         }
         let attachments = draft.attachment_ids.clone();
+        draft_sync::queue_discard_if_synced(&tx, draft_id)?;
         tx.execute(
             "DELETE FROM compose_drafts WHERE draft_id=?",
             params![draft_id.to_string()],
@@ -3208,11 +3290,18 @@ impl Client {
             require_subscription(route)?;
         }
         let mut s = self.lock()?;
+        let draft_key = s.active_epoch.and_then(|epoch| {
+            s.keys
+                .get(&epoch)
+                .and_then(|keys| keys.draft.clone())
+                .map(|key| (epoch, key))
+        });
+        let vault_id = s.config.vault_id;
         let tx = s
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some(current) = load_compose_draft(&tx, "draft_id", &draft_id.to_string())? else {
-            return Err(moved_draft(&tx, draft_id)?.unwrap_or(Error::NotFound));
+            return Err(unavailable_draft_error(&tx, draft_id)?);
         };
         if current.revision != expected_revision {
             return Err(Error::StaleDraft {
@@ -3246,7 +3335,19 @@ impl Client {
             )?;
             if let Some(conversation_id) = target.or(source_has_messages.then(ConversationId::new))
             {
-                let moved = move_compose_draft(&tx, current, update, conversation_id)?;
+                let (mut moved, previous) =
+                    move_compose_draft(&tx, current, update, conversation_id)?;
+                draft_sync::queue_discard_if_synced(&tx, draft_id)?;
+                if let Some((draft_epoch, draft_key)) = draft_key {
+                    moved = draft_sync::record_local_save(
+                        &tx,
+                        &previous,
+                        moved,
+                        vault_id,
+                        draft_epoch,
+                        &draft_key,
+                    )?;
+                }
                 tx.commit()?;
                 return Ok(moved);
             }
@@ -3263,8 +3364,7 @@ impl Client {
                 draft_id.to_string()
             ],
         )?;
-        tx.commit()?;
-        Ok(ComposeDraft {
+        let mut next_draft = ComposeDraft {
             draft_id,
             conversation_id: current.conversation_id,
             text: update.text,
@@ -3272,7 +3372,19 @@ impl Client {
             attachment_ids: update.attachment_ids,
             route: update.route,
             revision: next,
-        })
+        };
+        if let Some((draft_epoch, draft_key)) = draft_key {
+            next_draft = draft_sync::record_local_save(
+                &tx,
+                &current,
+                next_draft,
+                vault_id,
+                draft_epoch,
+                &draft_key,
+            )?;
+        }
+        tx.commit()?;
+        Ok(next_draft)
     }
 
     /// Rechecks a draft immediately before a host send. A late request against an old ID is never
@@ -3285,7 +3397,7 @@ impl Client {
         let guard = self.lock()?;
         let Some(draft) = load_compose_draft(&guard.conn, "draft_id", &draft_id.to_string())?
         else {
-            return Err(moved_draft(&guard.conn, draft_id)?.unwrap_or(Error::NotFound));
+            return Err(unavailable_draft_error(&guard.conn, draft_id)?);
         };
         if draft.revision != expected_revision {
             return Err(Error::StaleDraft {
@@ -3303,7 +3415,7 @@ impl Client {
         draft_id: DraftId,
         expected_revision: u64,
     ) -> Result<QueuedSend, Error> {
-        self.send_compose_draft_impl(draft_id, expected_revision, None)
+        self.send_compose_draft_impl(draft_id, expected_revision, None, None, None, None)
     }
 
     /// Sends only if transport classification still matches the caller's preflight decision.
@@ -3314,7 +3426,57 @@ impl Client {
         expected_revision: u64,
         expected_transport: Transport,
     ) -> Result<QueuedSend, Error> {
-        self.send_compose_draft_impl(draft_id, expected_revision, Some(expected_transport))
+        self.send_compose_draft_impl(
+            draft_id,
+            expected_revision,
+            Some(expected_transport),
+            None,
+            None,
+            None,
+        )
+    }
+
+    pub fn send_compose_draft_with_parts(
+        &self,
+        draft_id: DraftId,
+        expected_revision: u64,
+        parts: DraftSendParts,
+    ) -> Result<QueuedSend, Error> {
+        self.send_compose_draft_impl(
+            draft_id,
+            expected_revision,
+            Some(Transport::Mms),
+            None,
+            None,
+            Some(&parts),
+        )
+    }
+
+    /// Classifies an MCP send without changing local state.
+    pub fn mcp_send_transport(
+        &self,
+        conversation_id: ConversationId,
+        recipients: &[String],
+        attachments: &[AttachmentId],
+    ) -> Result<Transport, Error> {
+        let store = self.lock()?;
+        classify_outgoing_transport(&store.conn, conversation_id, recipients, attachments)
+    }
+
+    /// Returns the recipients used when replying to a stored message.
+    pub fn reply_recipients(&self, message_id: MessageId) -> Result<Vec<String>, Error> {
+        let message = self.message_by_id(message_id)?.ok_or(Error::NotFound)?;
+        match (message.payload.transport, message.payload.direction) {
+            (_, Direction::Outgoing) => Ok(message.payload.recipients),
+            (Transport::Mms, Direction::Incoming) => self
+                .mms_reply_context(message.payload.record.conversation_id)
+                .map(|context| context.recipients),
+            (_, Direction::Incoming) => message
+                .payload
+                .sender_address
+                .map(|sender| vec![sender])
+                .ok_or(Error::NotFound),
+        }
     }
 
     fn send_compose_draft_impl(
@@ -3322,77 +3484,199 @@ impl Client {
         draft_id: DraftId,
         expected_revision: u64,
         expected_transport: Option<Transport>,
+        preset_command_id: Option<CommandId>,
+        stored_snapshot: Option<ComposeDraft>,
+        parts: Option<&DraftSendParts>,
     ) -> Result<QueuedSend, Error> {
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let Some(draft) = load_compose_draft(&tx, "draft_id", &draft_id.to_string())? else {
-            return Err(moved_draft(&tx, draft_id)?.unwrap_or(Error::NotFound));
-        };
-        if draft.revision != expected_revision {
+        let current = load_compose_draft(&tx, "draft_id", &draft_id.to_string())?;
+        if stored_snapshot.is_none()
+            && current
+                .as_ref()
+                .is_none_or(|current| current.revision != expected_revision)
+        {
+            let Some(current) = current else {
+                return Err(unavailable_draft_error(&tx, draft_id)?);
+            };
             return Err(Error::StaleDraft {
-                current_revision: draft.revision,
+                current_revision: current.revision,
             });
         }
-        let route = draft.route.ok_or(Error::InvalidRequest("route"))?;
-        // For one-to-one text replies, the latest record defines the current thread transport;
-        // an old legacy picture MMS must not permanently convert a later SMS thread to MMS.
-        let latest_transport: Option<Transport> = tx
-            .query_row(
-                "SELECT payload FROM messages WHERE conversation_id=? ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1",
-                params![draft.conversation_id.to_string()],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .map(|payload| decode::<MessagePayload>(payload.as_bytes()).map(|message| message.transport))
-            .transpose()?;
-        let transport = if draft.attachment_ids.is_empty()
-            && draft.recipients.len() == 1
-            && latest_transport != Some(Transport::Mms)
-        {
+        let is_local_queue = stored_snapshot.is_none();
+        let draft = stored_snapshot.or(current.clone()).ok_or(Error::NotFound)?;
+        if is_local_queue {
+            let remote_or_attempted: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM draft_sync d WHERE d.draft_id=? AND (d.accepted_revision_id IS NOT NULL OR EXISTS(SELECT 1 FROM draft_push_attempts a WHERE a.draft_id=d.draft_id)))",
+                [draft_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if remote_or_attempted {
+                return Err(Error::DraftNotSynced);
+            }
+        }
+        let clear_current = current
+            .as_ref()
+            .is_some_and(|current| current.revision == expected_revision && *current == draft);
+        let route = draft.route.as_ref().ok_or(Error::InvalidRequest("route"))?;
+        let transport = classify_outgoing_transport(
+            &tx,
+            draft.conversation_id,
+            &draft.recipients,
+            &draft.attachment_ids,
+        )?;
+        if transport == Transport::Sms {
             validate_outgoing(
                 &OutgoingSms {
                     conversation_id: draft.conversation_id,
                     recipients: draft.recipients.clone(),
                     body: draft.text.clone(),
                 },
-                &route,
+                route,
             )?;
-            Transport::Sms
         } else {
             validate_outgoing_mms(
                 &draft.recipients,
                 &draft.text,
                 &draft.attachment_ids,
                 None,
-                &route,
+                route,
             )?;
-            Transport::Mms
         };
+        if let Some(parts) = parts {
+            validate_draft_send_parts(&draft, parts)?;
+        }
         if expected_transport.is_some_and(|expected| expected != transport) {
             return Err(Error::InvalidRequest("compose transport changed"));
         }
-        let sms = OutgoingSms {
-            conversation_id: draft.conversation_id,
-            recipients: draft.recipients,
-            body: draft.text,
+        let remote_claim_accepted = preset_command_id.is_some();
+        let queued = if let Some(parts) = parts {
+            queue_split_draft_messages(&tx, &ctx, &draft, route, preset_command_id, parts)?
+        } else {
+            queue_message(
+                &tx,
+                &ctx,
+                OutgoingSms {
+                    conversation_id: draft.conversation_id,
+                    recipients: draft.recipients.clone(),
+                    body: draft.text.clone(),
+                },
+                route,
+                compose_references(&tx, &draft.attachment_ids)?,
+                transport,
+                None,
+                preset_command_id,
+            )?
         };
-        let queued = queue_message(
-            &tx,
-            &ctx,
-            sms,
-            &route,
-            &draft.attachment_ids,
-            transport,
-            None,
-        )?;
         let next = draft.revision.checked_add(1).ok_or(Error::Database)?;
-        tx.execute(
-            "UPDATE compose_drafts SET text='',attachment_ids='[]',revision=?,draft_only=0 WHERE draft_id=?",
-            params![to_i64(next)?, draft_id.to_string()],
-        )?;
+        if clear_current {
+            draft_sync::retire_sent_draft(&tx, draft_id, next, !remote_claim_accepted)?;
+            tx.execute(
+                "UPDATE compose_drafts SET text='',attachment_ids='[]',revision=?,draft_only=0 WHERE draft_id=?",
+                params![to_i64(next)?, draft_id.to_string()],
+            )?;
+        }
         tx.commit()?;
         Ok(queued)
+    }
+
+    pub(crate) fn send_compose_draft_snapshot(
+        &self,
+        draft_id: DraftId,
+        expected_revision: u64,
+        command_id: CommandId,
+        snapshot: ComposeDraft,
+        parts: Option<&DraftSendParts>,
+    ) -> Result<QueuedSend, Error> {
+        self.send_compose_draft_impl(
+            draft_id,
+            expected_revision,
+            None,
+            Some(command_id),
+            Some(snapshot),
+            parts,
+        )
+    }
+}
+
+pub(crate) fn validate_draft_send_parts(
+    draft: &ComposeDraft,
+    parts: &DraftSendParts,
+) -> Result<(), Error> {
+    if parts.image_groups.is_empty() || (parts.caption && draft.text.trim().is_empty()) {
+        return Err(Error::InvalidRequest("draft send parts"));
+    }
+    let attachment_ids: Vec<_> = parts.image_groups.iter().flatten().copied().collect();
+    if attachment_ids != draft.attachment_ids || parts.image_groups.iter().any(Vec::is_empty) {
+        return Err(Error::InvalidRequest("draft send parts"));
+    }
+    Ok(())
+}
+
+fn queue_split_draft_messages(
+    tx: &rusqlite::Transaction<'_>,
+    ctx: &Ctx,
+    draft: &ComposeDraft,
+    route: &GatewayRoute,
+    preset_command_id: Option<CommandId>,
+    parts: &DraftSendParts,
+) -> Result<QueuedSend, Error> {
+    let mut command_id = preset_command_id;
+    let mut queue_part = |body: String, attachment_ids: &[AttachmentId]| {
+        let queued = queue_message(
+            tx,
+            ctx,
+            OutgoingSms {
+                conversation_id: draft.conversation_id,
+                recipients: draft.recipients.clone(),
+                body,
+            },
+            route,
+            compose_references(tx, attachment_ids)?,
+            Transport::Mms,
+            None,
+            command_id.take(),
+        )?;
+        Ok::<_, Error>(queued)
+    };
+    let first = if parts.caption {
+        queue_part(draft.text.clone(), &[])?
+    } else {
+        queue_part(String::new(), &parts.image_groups[0])?
+    };
+    let groups = if parts.caption {
+        &parts.image_groups[..]
+    } else {
+        &parts.image_groups[1..]
+    };
+    for group in groups {
+        queue_part(String::new(), group)?;
+    }
+    Ok(first)
+}
+
+/// For one-to-one text replies, the latest record defines the current thread transport; an old
+/// legacy picture MMS must not permanently convert a later SMS thread to MMS.
+fn classify_outgoing_transport(
+    tx: &Connection,
+    conversation_id: ConversationId,
+    recipients: &[String],
+    attachments: &[AttachmentId],
+) -> Result<Transport, Error> {
+    let latest_transport: Option<Transport> = tx
+        .query_row(
+            "SELECT payload FROM messages WHERE conversation_id=? ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1",
+            params![conversation_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|payload| decode::<MessagePayload>(payload.as_bytes()).map(|message| message.transport))
+        .transpose()?;
+    if attachments.is_empty() && recipients.len() == 1 && latest_transport != Some(Transport::Mms) {
+        Ok(Transport::Sms)
+    } else {
+        Ok(Transport::Mms)
     }
 }
 
@@ -3442,7 +3726,6 @@ fn require_subscription(route: &GatewayRoute) -> Result<(), Error> {
     Ok(())
 }
 
-/// Writes the outgoing message, command binding and command outbox row for a validated SMS.
 /// Writes the outgoing message, command binding and command outbox row for a validated SMS
 /// (no attachments) or MMS (attachments prepared on this device).
 fn queue_sms(
@@ -3457,30 +3740,33 @@ fn queue_sms(
         ctx,
         sms,
         route,
-        attachments,
+        local_references(tx, attachments)?,
         if attachments.is_empty() {
             Transport::Sms
         } else {
             Transport::Mms
         },
         None,
+        None,
     )
 }
+#[allow(clippy::too_many_arguments)]
 fn queue_message(
     tx: &Connection,
     ctx: &Ctx,
     sms: OutgoingSms,
     route: &GatewayRoute,
-    attachments: &[AttachmentId],
+    attachments: Vec<AttachmentReference>,
     transport: Transport,
     subject: Option<String>,
+    preset_command_id: Option<CommandId>,
 ) -> Result<QueuedSend, Error> {
     let payload = MessagePayload {
         record: MessageRecord {
             message_id: MessageId::new(),
             conversation_id: sms.conversation_id,
             source_sequence: next_source_sequence(tx, sms.conversation_id, ctx.device_id)?,
-            attachments: local_references(tx, attachments)?,
+            attachments,
         },
         source_device_id: ctx.device_id,
         provider_message_id: None,
@@ -3496,13 +3782,13 @@ fn queue_message(
         mms_context: None,
     };
     let message_id = payload.record.message_id;
-    let command_id = CommandId::new();
     let gateway_device_id = match route {
         GatewayRoute::Carrier {
             gateway_device_id, ..
         }
         | GatewayRoute::RcsLink { gateway_device_id } => *gateway_device_id,
     };
+    let command_id = preset_command_id.unwrap_or_else(CommandId::new);
     if insert_message(tx, &payload)? != Inserted::New
         || !record_command(tx, command_id, message_id, gateway_device_id)?
     {
@@ -4203,6 +4489,49 @@ impl Client {
         let revision = rcs_mapping::next_rcs_mapping_revision(&tx, conversation_id)?;
         tx.commit()?;
         Ok(revision)
+    }
+
+    /// Highest `messages.local_order` (insertion order, AUTOINCREMENT), or 0 when empty.
+    pub fn latest_message_local_order(&self) -> Result<i64, Error> {
+        let store = self.lock()?;
+        store
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(local_order), 0) FROM messages",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Error::from)
+    }
+
+    /// Bounded rows after `after`, returning incoming messages and the last examined order.
+    pub fn incoming_messages_after(&self, after: i64, limit: usize) -> Result<IncomingPage, Error> {
+        let store = self.lock()?;
+        let limit = limit.clamp(1, MAX_HISTORY_PAGE);
+        // Scan a bounded interleave so outgoing-only tails advance webhook cursors.
+        let scan_limit = i64::try_from(limit.saturating_mul(5)).map_err(|_| Error::Database)?;
+        let mut query = store.conn.prepare(
+            "SELECT local_order,payload FROM messages WHERE local_order>?1 ORDER BY local_order LIMIT ?2",
+        )?;
+        let mut scanned_through = after;
+        let mut messages = Vec::new();
+        for row in query.query_map(params![after, scan_limit], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (local_order, payload) = row?;
+            scanned_through = local_order;
+            let payload: MessagePayload = decode(payload.as_bytes())?;
+            if payload.direction == Direction::Incoming {
+                messages.push((local_order, payload));
+                if messages.len() == limit {
+                    break;
+                }
+            }
+        }
+        Ok(IncomingPage {
+            messages,
+            scanned_through,
+        })
     }
 
     /// Atomically selects and freezes the only executable transport for an upgraded gateway.
@@ -5232,26 +5561,59 @@ impl Client {
         attachment_id: AttachmentId,
     ) -> Result<bool, Error> {
         let mut guard = self.lock()?;
+        let cipher_path = media::cipher_path(&guard.media_dir, attachment_id);
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id = attachment_id.to_string();
         let referenced: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM message_attachments WHERE attachment_id=? UNION SELECT 1 FROM message_media_meta WHERE thumbnail_attachment_id=? UNION SELECT 1 FROM mms_acquisition_parts WHERE attachment_id=? OR thumbnail_attachment_id=? UNION SELECT 1 FROM compose_drafts WHERE instr(attachment_ids, ?) > 0)",
-            params![id, id, id, id, id], |row| row.get(0),
+            "SELECT EXISTS(SELECT 1 FROM message_attachments WHERE attachment_id=? UNION SELECT 1 FROM message_media_meta WHERE thumbnail_attachment_id=? UNION SELECT 1 FROM mms_acquisition_parts WHERE attachment_id=? OR thumbnail_attachment_id=? UNION SELECT 1 FROM compose_drafts WHERE instr(attachment_ids, ?) > 0 UNION SELECT 1 FROM draft_media_references WHERE attachment_id=?)",
+            params![id, id, id, id, id, id], |row| row.get(0),
         )?;
         if referenced || contact_media::blocks_discard(&tx, attachment_id)? {
             return Ok(false);
         }
-        let deleted = tx.execute(
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attachments WHERE attachment_id=?)",
+            [attachment_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            tx.commit()?;
+            return Ok(false);
+        }
+        // Commit an explicit cleanup intent before removing ciphertext. If deletion fails after
+        // unlinking, this intent survives reopen and excludes the object from reuse and download.
+        tx.execute(
+            "INSERT INTO attachment_cleanup_intents(attachment_id) VALUES(?) ON CONFLICT(attachment_id) DO NOTHING",
+            params![attachment_id.to_string()],
+        )?;
+        tx.execute(
+            "UPDATE attachments SET state=? WHERE attachment_id=?",
+            params![
+                AttachmentState::PendingDownload.code(),
+                attachment_id.to_string()
+            ],
+        )?;
+        tx.commit()?;
+        match std::fs::remove_file(cipher_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(Error::Storage),
+        }
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
             "DELETE FROM attachments WHERE attachment_id=?",
             params![attachment_id.to_string()],
-        )? != 0;
+        )?;
+        tx.execute(
+            "DELETE FROM attachment_cleanup_intents WHERE attachment_id=?",
+            params![attachment_id.to_string()],
+        )?;
         tx.commit()?;
-        if deleted {
-            let _ = std::fs::remove_file(media::cipher_path(&guard.media_dir, attachment_id));
-        }
-        Ok(deleted)
+        Ok(true)
     }
 
     /// Locally prepared objects referenced by a message or a contact photo and not yet
@@ -5323,7 +5685,7 @@ impl Client {
         }
         let store = self.lock()?;
         let mut query = store.conn.prepare(
-            "SELECT attachment_id FROM attachments a WHERE state IN ('pending_upload','uploaded','available') AND NOT (state='uploaded' AND EXISTS(SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id)) AND (?1 IS NULL OR attachment_id>?1) ORDER BY attachment_id LIMIT ?2",
+            "SELECT attachment_id FROM attachments a WHERE state IN ('pending_upload','uploaded','available') AND NOT EXISTS(SELECT 1 FROM draft_sync_resurrection_attachments p WHERE p.new_attachment_id=a.attachment_id AND p.available=0) AND NOT (state='uploaded' AND EXISTS(SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id)) AND (?1 IS NULL OR attachment_id>?1) ORDER BY attachment_id LIMIT ?2",
         )?;
         let rows = query.query_map(
             params![after.map(|id| id.to_string()), limit as i64],
@@ -5368,7 +5730,7 @@ impl Client {
         let rows: Vec<(String, bool)> = store
             .conn
             .prepare(&format!(
-                "SELECT attachment_id,attachment_id IN (SELECT attachment_id FROM attachment_demand) FROM attachments a WHERE state='pending_download' AND remote_object_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM attachment_remote_state rs WHERE rs.attachment_id=a.attachment_id AND rs.removed_by_storage_policy=1) AND attachment_id NOT IN ({}) AND (attachment_id IN (SELECT attachment_id FROM attachment_demand) OR (NOT EXISTS(SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id) AND (attachment_id IN (SELECT thumbnail_attachment_id FROM message_media_meta WHERE thumbnail_attachment_id IS NOT NULL) OR (plaintext_bytes<={} AND attachment_id NOT IN (SELECT attachment_id FROM message_media_meta))))) ORDER BY rowid",
+                "SELECT attachment_id,attachment_id IN (SELECT attachment_id FROM attachment_demand) FROM attachments a WHERE state='pending_download' AND remote_object_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM attachment_cleanup_intents ci WHERE ci.attachment_id=a.attachment_id) AND NOT EXISTS(SELECT 1 FROM attachment_remote_state rs WHERE rs.attachment_id=a.attachment_id AND rs.removed_by_storage_policy=1) AND attachment_id NOT IN ({}) AND (attachment_id IN (SELECT attachment_id FROM attachment_demand) OR (NOT EXISTS(SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id) AND (attachment_id IN (SELECT thumbnail_attachment_id FROM message_media_meta WHERE thumbnail_attachment_id IS NOT NULL) OR (plaintext_bytes<={} AND attachment_id NOT IN (SELECT attachment_id FROM message_media_meta))))) ORDER BY rowid",
                 contact_media::REJECTED_DOWNLOADS_SQL, EAGER_MEDIA_PLAINTEXT_BYTES
             ))?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -5414,6 +5776,14 @@ impl Client {
         let mut guard = self.lock()?;
         if attachment_row(&guard.conn, attachment_id)?.is_none() {
             return Err(Error::NotFound);
+        }
+        let cleanup_pending: bool = guard.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attachment_cleanup_intents WHERE attachment_id=?)",
+            params![attachment_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if cleanup_pending {
+            return Err(Error::InvalidMedia);
         }
         attachment_retention::ensure_remote_available(&guard.conn, attachment_id)?;
         if media_cache::request_gateway_mms_rehydration(&mut guard, attachment_id)? {
@@ -5495,6 +5865,14 @@ impl Client {
         let (root, vault_id, row, contact_photo) = {
             let s = self.lock()?;
             let row = attachment_row(&s.conn, attachment_id)?.ok_or(Error::NotFound)?;
+            let cleanup_pending: bool = s.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM attachment_cleanup_intents WHERE attachment_id=?)",
+                params![attachment_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if cleanup_pending {
+                return Err(Error::InvalidMedia);
+            }
             attachment_retention::ensure_remote_available(&s.conn, attachment_id)?;
             let contact_photo = contact_media::is_received_photo(&s.conn, attachment_id)?;
             (s.media_dir.clone(), s.config.vault_id, row, contact_photo)
@@ -5502,37 +5880,45 @@ impl Client {
         if row.state != AttachmentState::PendingDownload {
             return Ok(());
         }
-        media::install_into_store(
-            &root,
-            attachment_id,
-            downloaded,
-            &media::Expected {
-                ciphertext_bytes: row.ciphertext_bytes,
-                ciphertext_sha256: &row.ciphertext_sha256,
-                plaintext_bytes: row.plaintext_bytes,
-            },
-            &row.file_key()?,
-            &media::media_aad(vault_id, attachment_id),
-        )?;
+        let expected = media::Expected {
+            ciphertext_bytes: row.ciphertext_bytes,
+            ciphertext_sha256: &row.ciphertext_sha256,
+            plaintext_bytes: row.plaintext_bytes,
+        };
+        let key = row.file_key()?;
+        let aad = media::media_aad(vault_id, attachment_id);
+        let staged = media::stage_download(&root, downloaded, &expected, &key, &aad)?;
         // Contact photos: the descriptor's type/size claims prove nothing about the bytes.
-        // Verify the decrypted content is a bounded 256x256 JPEG before it becomes available
-        // (state stays `pending_download` until then, so no native/web path can open it).
-        if contact_photo {
-            let valid = media::decrypt_to_bytes(
-                &root,
-                attachment_id,
-                &row.file_key()?,
-                &media::media_aad(vault_id, attachment_id),
-                row.plaintext_bytes,
-            )
-            .and_then(|bytes| contact_photos::validate_normalized(&bytes));
-            if let Err(error) = valid {
-                let _ = std::fs::remove_file(media::cipher_path(&root, attachment_id));
-                contact_media::reject_received(&self.lock()?.conn, attachment_id)?;
-                return Err(error);
-            }
+        // Verify the staged content before acquiring the publication lock.
+        if contact_photo
+            && let Err(error) =
+                media::decrypt_staged_to_bytes(&root, &staged, &key, &aad, row.plaintext_bytes)
+                    .and_then(|bytes| contact_photos::validate_normalized(&bytes))
+        {
+            contact_media::reject_received(&self.lock()?.conn, attachment_id)?;
+            return Err(error);
         }
-        self.lock()?.conn.execute(
+        #[cfg(test)]
+        media::pause_before_install_publication(attachment_id);
+        let mut store = self.lock()?;
+        let current = attachment_row(&store.conn, attachment_id)?;
+        let cleanup_pending: bool = store.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attachment_cleanup_intents WHERE attachment_id=?)",
+            params![attachment_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if cleanup_pending || current.is_none() {
+            return Err(Error::InvalidMedia);
+        }
+        if matches!(current, Some(ref current) if current.state == AttachmentState::Available) {
+            return Ok(());
+        }
+        if !matches!(current, Some(ref current) if current.state == AttachmentState::PendingDownload)
+        {
+            return Err(Error::InvalidMedia);
+        }
+        media::publish_staged_download(&root, attachment_id, &staged, &expected)?;
+        store.conn.execute(
             "UPDATE attachments SET state=? WHERE attachment_id=? AND state=?",
             params![
                 AttachmentState::Available.code(),
@@ -5540,7 +5926,6 @@ impl Client {
                 AttachmentState::PendingDownload.code()
             ],
         )?;
-        let mut store = self.lock()?;
         media_cache::record_installed_attachment(&mut store, attachment_id)
     }
 
@@ -7003,14 +7388,89 @@ CREATE TABLE IF NOT EXISTS provider_folder_writes(conversation_id TEXT PRIMARY K
 CREATE TABLE IF NOT EXISTS sender_blocklist_unmapped(number TEXT PRIMARY KEY);
 CREATE INDEX IF NOT EXISTS mms_thread_conversations_thread ON mms_thread_conversations(source_device_id, provider_thread_id);
 ";
-fn apply_migration_50(conn: &Connection) -> Result<(), Error> {
+/// Feature migration 46: encrypted compose-draft synchronization bookkeeping.
+/// Production's released schema 46 instead added notification preferences, so schema 49 repairs
+/// both layouts without treating the version number as a lineage marker.
+const DRAFT_SYNC_MIGRATION: &str = "
+CREATE TABLE IF NOT EXISTS draft_sync(
+  draft_id TEXT PRIMARY KEY, branch_id TEXT, accepted_revision_id TEXT,
+  accepted_local_revision INTEGER,
+  pending_revision_id TEXT, pending_sealed_record BLOB, authored_dirty INTEGER NOT NULL DEFAULT 0,
+  pending_local_revision INTEGER,
+   expires_at_ms INTEGER, state TEXT NOT NULL DEFAULT 'local_only', notice TEXT,
+    discard_pending INTEGER NOT NULL DEFAULT 0, resolves_json TEXT,
+   retired_revision INTEGER
+);
+CREATE TABLE IF NOT EXISTS draft_sync_conflicts(
+  draft_id TEXT NOT NULL, branch_id TEXT NOT NULL, record BLOB NOT NULL,
+  remote_draft_id TEXT NOT NULL,
+  PRIMARY KEY(draft_id, branch_id)
+);
+CREATE INDEX IF NOT EXISTS draft_sync_conflicts_remote_branch ON draft_sync_conflicts(remote_draft_id,branch_id);
+CREATE TABLE IF NOT EXISTS draft_sync_terminals(draft_id TEXT PRIMARY KEY, reason TEXT NOT NULL, command_id TEXT);
+CREATE TABLE IF NOT EXISTS draft_send_intents(draft_id TEXT PRIMARY KEY, revision_id TEXT NOT NULL, command_id TEXT NOT NULL, expected_revision INTEGER NOT NULL, sealed_snapshot BLOB NOT NULL, queued INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS draft_sync_revisions(draft_id TEXT NOT NULL, revision_id TEXT NOT NULL, local_revision INTEGER NOT NULL, PRIMARY KEY(draft_id,revision_id));
+CREATE TABLE IF NOT EXISTS draft_media_references(kind TEXT NOT NULL, owner_id TEXT NOT NULL, attachment_id TEXT NOT NULL, PRIMARY KEY(kind,owner_id,attachment_id));
+CREATE INDEX IF NOT EXISTS draft_media_references_attachment ON draft_media_references(attachment_id);
+CREATE TABLE IF NOT EXISTS draft_sync_resurrections(old_draft_id TEXT PRIMARY KEY, new_draft_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS draft_sync_resurrection_attachments(old_draft_id TEXT NOT NULL, old_attachment_id TEXT NOT NULL, new_attachment_id TEXT NOT NULL UNIQUE, available INTEGER NOT NULL, PRIMARY KEY(old_draft_id,old_attachment_id));
+CREATE TABLE IF NOT EXISTS draft_attachment_failures(
+  attachment_id TEXT PRIMARY KEY, direction TEXT NOT NULL CHECK(direction IN ('upload','download'))
+);
+CREATE TABLE IF NOT EXISTS draft_sync_meta(id INTEGER PRIMARY KEY CHECK(id=1), cursor TEXT NOT NULL DEFAULT '0', supported INTEGER NOT NULL DEFAULT 1, bootstrap_complete INTEGER NOT NULL DEFAULT 0);
+INSERT OR IGNORE INTO draft_sync_meta(id,cursor,supported) VALUES(1,'0',1);
+";
+/// Version 46 -> 47: last accepted draft content for three-way draft merges.
+/// This is local SQLCipher state, with the same at-rest protection as compose drafts.
+const DRAFT_MERGE_MIGRATION: &str = "
+CREATE TABLE IF NOT EXISTS draft_sync_merge_bases(
+  draft_id TEXT PRIMARY KEY, text TEXT NOT NULL, recipients TEXT NOT NULL,
+  attachment_ids TEXT NOT NULL, route TEXT
+);
+CREATE TABLE IF NOT EXISTS draft_sync_merge_fallbacks(
+  draft_id TEXT PRIMARY KEY, branch_id TEXT NOT NULL, record BLOB NOT NULL
+);
+";
+/// Version 47 -> 48: durable evidence that a draft revision PUT may have reached the server.
+const DRAFT_PUSH_MIGRATION: &str = "
+CREATE TABLE IF NOT EXISTS draft_push_attempts(
+  draft_id TEXT NOT NULL, revision_id TEXT NOT NULL,
+  PRIMARY KEY(draft_id, revision_id)
+);
+CREATE TABLE IF NOT EXISTS draft_sync_quarantines(
+  draft_id TEXT NOT NULL, revision_id TEXT NOT NULL, reason TEXT NOT NULL,
+  PRIMARY KEY(draft_id, revision_id)
+);
+";
+fn apply_draft_push_migration(
+    conn: &Connection,
+    legacy_pending_is_ambiguous: bool,
+) -> Result<(), Error> {
+    conn.execute_batch(DRAFT_PUSH_MIGRATION)?;
+    if legacy_pending_is_ambiguous {
+        conn.execute(
+            "INSERT OR IGNORE INTO draft_push_attempts(draft_id,revision_id) SELECT draft_id,pending_revision_id FROM draft_sync WHERE pending_revision_id IS NOT NULL AND pending_sealed_record IS NOT NULL",
+            [],
+        )?;
+    }
+    Ok(())
+}
+fn apply_draft_merge_migration(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(DRAFT_MERGE_MIGRATION)?;
+    add_column_if_missing(
+        conn,
+        "draft_sync",
+        "branch_closed INTEGER NOT NULL DEFAULT 0",
+    )
+}
+fn apply_notification_preferences_migration(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(
         conn,
         "notification_preferences",
         "show_source INTEGER NOT NULL DEFAULT 0",
     )
 }
-const MIGRATION_51: &str = "
+const VAULT_IDENTITY_MIGRATION: &str = "
 CREATE TABLE IF NOT EXISTS vault_identity_state(
   id INTEGER PRIMARY KEY CHECK(id=1),
   state TEXT NOT NULL CHECK(state IN ('pending','accepted','conflict')),
@@ -7021,6 +7481,10 @@ CREATE TABLE IF NOT EXISTS vault_identity_state(
   conflict_evidence BLOB,
   updated_at_ms INTEGER NOT NULL
 );";
+/// Version 49 -> 50: MCP attachment cleanup intents (idempotent; safe on every repaired layout).
+const MCP_CLEANUP_MIGRATION: &str = "
+CREATE TABLE IF NOT EXISTS attachment_cleanup_intents(attachment_id TEXT PRIMARY KEY);
+";
 fn apply_migration_45(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(
         conn,
@@ -7028,8 +7492,8 @@ fn apply_migration_45(conn: &Connection) -> Result<(), Error> {
         "key_epoch INTEGER NOT NULL DEFAULT 0",
     )
 }
-const MIGRATION_46: &str = "
-CREATE TABLE rcs_conversation_mappings(
+const RCS_MIGRATION_46: &str = "
+CREATE TABLE IF NOT EXISTS rcs_conversation_mappings(
   peppy_conversation_id TEXT PRIMARY KEY,
   google_conversation_id TEXT NOT NULL,
   class TEXT NOT NULL CHECK(class IN ('one_to_one','self_chat')),
@@ -7040,8 +7504,8 @@ CREATE TABLE rcs_conversation_mappings(
   invalidated_at_ms INTEGER,
   invalidation_code TEXT
 );
-CREATE UNIQUE INDEX rcs_mappings_google_active ON rcs_conversation_mappings(google_conversation_id) WHERE invalidated_at_ms IS NULL;
-CREATE TABLE rcs_mapping_proofs(
+CREATE UNIQUE INDEX IF NOT EXISTS rcs_mappings_google_active ON rcs_conversation_mappings(google_conversation_id) WHERE invalidated_at_ms IS NULL;
+CREATE TABLE IF NOT EXISTS rcs_mapping_proofs(
   peppy_conversation_id TEXT NOT NULL REFERENCES rcs_conversation_mappings(peppy_conversation_id),
   mapping_revision INTEGER NOT NULL,
   canonical_participant TEXT NOT NULL,
@@ -7049,7 +7513,7 @@ CREATE TABLE rcs_mapping_proofs(
   own_identity TEXT NOT NULL,
   PRIMARY KEY(peppy_conversation_id,mapping_revision)
 );
-CREATE TABLE rcs_send_ledger(
+CREATE TABLE IF NOT EXISTS rcs_send_ledger(
   command_id TEXT PRIMARY KEY,
   tmp_id TEXT NOT NULL UNIQUE,
   mapping_revision INTEGER NOT NULL,
@@ -7062,33 +7526,26 @@ CREATE TABLE rcs_send_ledger(
 );
 ";
 /// Version 46 -> 47: freeze the executed transport independently from legacy wire routing.
-const MIGRATION_47: &str = "
-ALTER TABLE attempts ADD COLUMN finalized_transport TEXT CHECK(finalized_transport IN ('carrier','rcs'));
-UPDATE attempts SET finalized_transport=CASE
-  WHEN EXISTS(SELECT 1 FROM rcs_send_ledger r WHERE r.command_id=attempts.command_id) THEN 'rcs'
-  ELSE 'carrier'
-END;
-";
 /// Version 47 -> 48: content-free RCS capability projections and publication cadence.
-const MIGRATION_48: &str = "
-CREATE TABLE rcs_link_status_projection(
+const RCS_MIGRATION_48: &str = "
+CREATE TABLE IF NOT EXISTS rcs_link_status_projection(
   gateway_device_id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('linked','unlinked','needs_relink','signed_out','unavailable')),
   availability INTEGER NOT NULL, health INTEGER NOT NULL, phone_responsive INTEGER NOT NULL,
   observed_at_ms INTEGER NOT NULL, capability_revision INTEGER NOT NULL, feature_bits INTEGER NOT NULL, producer_sequence INTEGER NOT NULL
 );
-CREATE TABLE rcs_link_eligibility_projection(
+CREATE TABLE IF NOT EXISTS rcs_link_eligibility_projection(
   gateway_device_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
   eligibility TEXT NOT NULL CHECK(eligibility IN ('eligible','not_eligible','unknown')), feature_bits INTEGER NOT NULL,
   mapping_revision INTEGER NOT NULL, observed_at_ms INTEGER NOT NULL, producer_sequence INTEGER NOT NULL,
   PRIMARY KEY(gateway_device_id,conversation_id)
 );
-CREATE TABLE rcs_capability_published(
+CREATE TABLE IF NOT EXISTS rcs_capability_published(
   identity TEXT PRIMARY KEY, revision INTEGER NOT NULL, body TEXT NOT NULL, published_at_ms INTEGER NOT NULL
 );
 ";
 /// Version 48 -> 49: local-only RCS receive ownership and immutable identities.
-const MIGRATION_49: &str = "
-CREATE TABLE rcs_lane_ownership(
+const RCS_MIGRATION_49: &str = "
+CREATE TABLE IF NOT EXISTS rcs_lane_ownership(
   conversation_id TEXT PRIMARY KEY,
   owner TEXT NOT NULL CHECK(owner IN ('link','provider')),
   ownership_generation INTEGER NOT NULL CHECK(ownership_generation > 0),
@@ -7098,8 +7555,8 @@ CREATE TABLE rcs_lane_ownership(
   observed_detector_high_water INTEGER NOT NULL,
   alert_code TEXT CHECK(alert_code IN ('ambiguous_provider_window','detector_overflow','gateway_unavailable'))
 );
-CREATE INDEX rcs_lane_ownership_owner_generation ON rcs_lane_ownership(owner,ownership_generation);
-CREATE TABLE rcs_message_identities(
+CREATE INDEX IF NOT EXISTS rcs_lane_ownership_owner_generation ON rcs_lane_ownership(owner,ownership_generation);
+CREATE TABLE IF NOT EXISTS rcs_message_identities(
   google_message_id TEXT NOT NULL,
   google_conversation_id TEXT NOT NULL,
   conversation_id TEXT NOT NULL,
@@ -7107,7 +7564,7 @@ CREATE TABLE rcs_message_identities(
   message_id TEXT,
   PRIMARY KEY(google_message_id,google_conversation_id)
 );
-CREATE TABLE rcs_provider_detectors(
+CREATE TABLE IF NOT EXISTS rcs_provider_detectors(
   conversation_id TEXT NOT NULL,
   provider_row_id INTEGER NOT NULL,
   provider_thread_id INTEGER NOT NULL,
@@ -7117,13 +7574,13 @@ CREATE TABLE rcs_provider_detectors(
   resolved INTEGER NOT NULL DEFAULT 0 CHECK(resolved IN (0,1)),
   PRIMARY KEY(conversation_id,provider_row_id)
 );
-CREATE INDEX rcs_provider_detectors_unresolved ON rcs_provider_detectors(conversation_id,resolved,provider_row_id);
-CREATE TABLE rcs_message_status(
+CREATE INDEX IF NOT EXISTS rcs_provider_detectors_unresolved ON rcs_provider_detectors(conversation_id,resolved,provider_row_id);
+CREATE TABLE IF NOT EXISTS rcs_message_status(
   message_id TEXT PRIMARY KEY,
   status_rank INTEGER NOT NULL CHECK(status_rank BETWEEN 0 AND 5),
   rcs_reported INTEGER NOT NULL CHECK(rcs_reported IN (0,1))
 );
-CREATE TABLE rcs_conversation_metadata(
+CREATE TABLE IF NOT EXISTS rcs_conversation_metadata(
   conversation_id TEXT PRIMARY KEY,
   transport TEXT NOT NULL CHECK(transport='rcs'),
   rcs_encryption INTEGER CHECK(rcs_encryption IN (0,1)),
@@ -7134,6 +7591,21 @@ CREATE TABLE rcs_conversation_metadata(
   source_sequence INTEGER NOT NULL
 );
 ";
+fn apply_rcs_union_migrations(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(RCS_MIGRATION_46)?;
+    add_column_if_missing(
+        conn,
+        "attempts",
+        "finalized_transport TEXT CHECK(finalized_transport IN ('carrier','rcs'))",
+    )?;
+    conn.execute(
+        "UPDATE attempts SET finalized_transport=CASE WHEN EXISTS(SELECT 1 FROM rcs_send_ledger r WHERE r.command_id=attempts.command_id) THEN 'rcs' ELSE 'carrier' END WHERE finalized_transport IS NULL",
+        [],
+    )?;
+    conn.execute_batch(RCS_MIGRATION_48)?;
+    conn.execute_batch(RCS_MIGRATION_49)?;
+    Ok(())
+}
 
 fn apply_migration_42(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(conn, "outbox", "origin_tag TEXT")
@@ -7310,12 +7782,13 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_43)?;
             tx.execute_batch(MIGRATION_44)?;
             apply_migration_45(&tx)?;
-            tx.execute_batch(MIGRATION_46)?;
-            tx.execute_batch(MIGRATION_47)?;
-            tx.execute_batch(MIGRATION_48)?;
-            tx.execute_batch(MIGRATION_49)?;
-            apply_migration_50(&tx)?;
-            tx.execute_batch(MIGRATION_51)?;
+            apply_notification_preferences_migration(&tx)?;
+            tx.execute_batch(DRAFT_SYNC_MIGRATION)?;
+            apply_draft_merge_migration(&tx)?;
+            apply_draft_push_migration(&tx, false)?;
+            tx.execute_batch(MCP_CLEANUP_MIGRATION)?;
+            apply_rcs_union_migrations(&tx)?;
+            tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -7324,7 +7797,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=50)) => {
+        Some(version @ (4..=51)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -7445,24 +7918,16 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             if version <= 44 {
                 apply_migration_45(&tx)?;
             }
-            if version <= 46 && !table_exists(&tx, "rcs_conversation_mappings")? {
-                tx.execute_batch(MIGRATION_46)?;
-            }
-            if version <= 46 {
-                tx.execute_batch(MIGRATION_47)?;
-            }
-            if version <= 47 {
-                tx.execute_batch(MIGRATION_48)?;
-            }
-            if version <= 48 {
-                tx.execute_batch(MIGRATION_49)?;
-            }
-            if version <= 49 {
-                apply_migration_50(&tx)?;
-            }
-            if version <= 50 {
-                tx.execute_batch(MIGRATION_51)?;
-            }
+            // Versions 46–51 identify incompatible production and feature layouts. Repair the
+            // union by actual table/column presence rather than by the ambiguous version number.
+            apply_notification_preferences_migration(&tx)?;
+            let had_push_attempts = table_exists(&tx, "draft_push_attempts")?;
+            tx.execute_batch(DRAFT_SYNC_MIGRATION)?;
+            apply_draft_merge_migration(&tx)?;
+            apply_draft_push_migration(&tx, !had_push_attempts)?;
+            tx.execute_batch(MCP_CLEANUP_MIGRATION)?;
+            apply_rcs_union_migrations(&tx)?;
+            tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
@@ -7472,6 +7937,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     }
     mms_backfill::initialize(conn)?;
     attachment_retention::initialize(conn)?;
+    mcp_commands::initialize(conn)?;
     media_cache::initialize(conn)?;
     deferred_media::initialize(conn)?;
     initialize_battery_lookup_indexes(conn)?;
@@ -11174,6 +11640,35 @@ fn local_references(
         })
         .collect())
 }
+
+/// Compose drafts may reuse a remotely synchronized attachment only after its ciphertext has
+/// been verified and installed locally. Direct queueing remains local-preparation only.
+fn compose_references(
+    conn: &Connection,
+    ids: &[AttachmentId],
+) -> Result<Vec<AttachmentReference>, Error> {
+    let mut seen = HashSet::with_capacity(ids.len());
+    for id in ids {
+        let sendable = attachment_row(conn, *id)?.is_some_and(|row| {
+            matches!(
+                row.state,
+                AttachmentState::PendingUpload | AttachmentState::Uploaded
+            ) || (row.state == AttachmentState::Available && row.remote_object_id.is_some())
+        });
+        if !sendable || !seen.insert(*id) {
+            return Err(Error::InvalidRequest(
+                "attachment not prepared on this device",
+            ));
+        }
+    }
+    Ok(ids
+        .iter()
+        .map(|attachment_id| AttachmentReference {
+            attachment_id: *attachment_id,
+            pending: false,
+        })
+        .collect())
+}
 /// Private descriptors for a message, or `None` while any object still lacks a remote ID.
 fn descriptor_for_attachment(
     conn: &Connection,
@@ -11445,6 +11940,15 @@ fn moved_draft(conn: &Connection, draft_id: DraftId) -> Result<Option<Error>, Er
         .transpose()
 }
 
+fn unavailable_draft_error(conn: &Connection, draft_id: DraftId) -> Result<Error, Error> {
+    if let Some(revision) = draft_sync::retired_draft_revision(conn, draft_id)? {
+        return Ok(Error::StaleDraft {
+            current_revision: revision,
+        });
+    }
+    Ok(moved_draft(conn, draft_id)?.unwrap_or(Error::NotFound))
+}
+
 fn redirect_target(
     conn: &Connection,
     start: String,
@@ -11509,25 +12013,33 @@ fn move_compose_draft(
     source: ComposeDraft,
     update: ComposeDraftUpdate,
     destination_conversation: ConversationId,
-) -> Result<ComposeDraft, Error> {
+) -> Result<(ComposeDraft, ComposeDraft), Error> {
     let destination = load_compose_draft(
         conn,
         "conversation_id",
         &destination_conversation.to_string(),
     )?;
-    let (destination_id, text, attachment_ids, route, revision) = if let Some(destination) =
-        destination
+    let (destination_id, text, attachment_ids, route, revision, previous) = if let Some(
+        destination,
+    ) = destination
     {
         let text = merge_draft_text(&destination.text, &update.text)?;
         let attachment_ids =
             merge_attachment_ids(&destination.attachment_ids, &update.attachment_ids)?;
-        let route = update.route.clone().or(destination.route);
+        let route = update.route.clone().or(destination.route.clone());
         let revision = destination.revision.checked_add(1).ok_or(Error::Database)?;
         conn.execute(
             "UPDATE compose_drafts SET text=?,recipients=?,attachment_ids=?,route=?,revision=?,draft_only=1 WHERE draft_id=?",
             params![text, json(&update.recipients)?, json(&attachment_ids)?, route.as_ref().map(json).transpose()?, to_i64(revision)?, destination.draft_id.to_string()],
         )?;
-        (destination.draft_id, text, attachment_ids, route, revision)
+        (
+            destination.draft_id,
+            text,
+            attachment_ids,
+            route,
+            revision,
+            destination,
+        )
     } else {
         let destination_id = DraftId::new();
         let revision = source.revision.checked_add(1).ok_or(Error::Database)?;
@@ -11535,12 +12047,22 @@ fn move_compose_draft(
             "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,draft_only) VALUES(?,?,?,?,?,?,?,1)",
             params![destination_id.to_string(), destination_conversation.to_string(), update.text, json(&update.recipients)?, json(&update.attachment_ids)?, update.route.as_ref().map(json).transpose()?, to_i64(revision)?],
         )?;
+        let previous = ComposeDraft {
+            draft_id: destination_id,
+            conversation_id: destination_conversation,
+            text: String::new(),
+            recipients: Vec::new(),
+            attachment_ids: Vec::new(),
+            route: None,
+            revision: 0,
+        };
         (
             destination_id,
             update.text,
             update.attachment_ids,
             update.route,
             revision,
+            previous,
         )
     };
     let source_has_messages: bool = conn.query_row(
@@ -11564,15 +12086,18 @@ fn move_compose_draft(
         "DELETE FROM compose_draft_redirects WHERE rowid IN (SELECT rowid FROM compose_draft_redirects ORDER BY rowid DESC LIMIT -1 OFFSET 256)",
         [],
     )?;
-    Ok(ComposeDraft {
-        draft_id: destination_id,
-        conversation_id: destination_conversation,
-        text,
-        recipients: update.recipients,
-        attachment_ids,
-        route,
-        revision,
-    })
+    Ok((
+        ComposeDraft {
+            draft_id: destination_id,
+            conversation_id: destination_conversation,
+            text,
+            recipients: update.recipients,
+            attachment_ids,
+            route,
+            revision,
+        },
+        previous,
+    ))
 }
 
 fn merge_draft_text(destination: &str, source: &str) -> Result<String, Error> {
@@ -11668,6 +12193,98 @@ mod tests {
               ALTER TABLE attempts DROP COLUMN finalized_transport;",
         )
         .unwrap();
+    }
+
+    fn schema_shape(conn: &Connection) -> Vec<(String, Vec<String>)> {
+        let mut tables = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+            .unwrap();
+        tables
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|table| {
+                let table = table.unwrap();
+                let mut columns = conn
+                    .prepare(&format!("PRAGMA table_info({table})"))
+                    .unwrap();
+                let columns = columns
+                    .query_map([], |row| row.get::<_, String>(1))
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .collect();
+                (table, columns)
+            })
+            .collect()
+    }
+
+    fn downgrade_union_fixture(conn: &Connection, version: i64, drop_rcs: bool, drop_drafts: bool) {
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        if drop_rcs {
+            drop_post_v45_objects(conn);
+        }
+        if drop_drafts {
+            for table in [
+                "draft_sync_conflicts",
+                "draft_sync_terminals",
+                "draft_send_intents",
+                "draft_sync_revisions",
+                "draft_media_references",
+                "draft_sync_resurrections",
+                "draft_sync_resurrection_attachments",
+                "draft_attachment_failures",
+                "draft_sync_meta",
+                "draft_sync_merge_bases",
+                "draft_sync_merge_fallbacks",
+                "draft_push_attempts",
+                "draft_sync_quarantines",
+                "draft_sync",
+                "attachment_cleanup_intents",
+            ] {
+                conn.execute_batch(&format!("DROP TABLE IF EXISTS {table};"))
+                    .unwrap();
+            }
+        }
+        conn.execute_batch("DROP TABLE IF EXISTS vault_identity_state;")
+            .unwrap();
+        conn.execute("UPDATE schema_meta SET version=?", [version])
+            .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+    }
+
+    #[test]
+    fn production_feature_and_base_layouts_converge_to_schema_52() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let mut shapes = Vec::new();
+        for (name, version, drop_rcs, drop_drafts) in [
+            ("fresh", 52, false, false),
+            ("production-50", 50, true, false),
+            ("branch-51", 51, false, true),
+            ("base-46", 46, true, true),
+        ] {
+            let config = ClientConfig {
+                database_path: directory.path().join(format!("{name}.db")),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            };
+            let key = || DatabaseKey::new(&[52; 32]).unwrap();
+            let client = Client::open(config.clone(), key()).unwrap();
+            if name != "fresh" {
+                let store = client.lock().unwrap();
+                downgrade_union_fixture(&store.conn, version, drop_rcs, drop_drafts);
+            }
+            drop(client);
+            let reopened = Client::open(config, key()).unwrap();
+            let store = reopened.lock().unwrap();
+            let upgraded_version: i64 = store
+                .conn
+                .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(upgraded_version, 52, "{name}");
+            shapes.push((name, schema_shape(&store.conn)));
+        }
+        for (name, shape) in &shapes[1..] {
+            assert_eq!(shape, &shapes[0].1, "{name} did not converge");
+        }
     }
 
     type RcsMappingRow = (
@@ -11855,6 +12472,183 @@ mod tests {
             Client::open(config, DatabaseKey::new(&[17; 32]).unwrap()),
             Err(Error::UnsupportedSchema)
         ));
+    }
+
+    fn webhook_test_client() -> (tempfile::TempDir, Client) {
+        let directory = tempfile::tempdir().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("webhooks.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[1; 32]).unwrap(),
+        )
+        .unwrap();
+        (directory, client)
+    }
+
+    fn webhook_test_message(sequence: u64, direction: Direction) -> MessagePayload {
+        MessagePayload {
+            record: MessageRecord {
+                message_id: MessageId::new(),
+                conversation_id: ConversationId::new(),
+                source_sequence: SourceSequence(sequence),
+                attachments: Vec::new(),
+            },
+            source_device_id: DeviceId::new(),
+            provider_message_id: None,
+            sender_address: None,
+            recipients: Vec::new(),
+            subject: None,
+            body: format!("message {sequence}"),
+            transport: Transport::Sms,
+            direction,
+            imported: false,
+            sent_at_ms: None,
+            ordered_at_ms: None,
+            mms_context: None,
+        }
+    }
+
+    fn insert_webhook_test_message(client: &Client, sequence: u64, direction: Direction) {
+        let store = client.lock().unwrap();
+        assert_eq!(
+            insert_message(&store.conn, &webhook_test_message(sequence, direction)).unwrap(),
+            Inserted::New
+        );
+    }
+
+    #[test]
+    fn latest_message_local_order_is_zero_for_an_empty_database() {
+        let (_directory, client) = webhook_test_client();
+
+        assert_eq!(client.latest_message_local_order().unwrap(), 0);
+        let page = client.incoming_messages_after(0, 20).unwrap();
+        assert!(page.messages.is_empty());
+        assert_eq!(page.scanned_through, 0);
+    }
+
+    #[test]
+    fn incoming_messages_are_ordered_exclude_outgoing_and_use_an_exclusive_cursor() {
+        let (_directory, client) = webhook_test_client();
+        insert_webhook_test_message(&client, 1, Direction::Incoming);
+        insert_webhook_test_message(&client, 2, Direction::Outgoing);
+        insert_webhook_test_message(&client, 3, Direction::Incoming);
+
+        assert_eq!(client.latest_message_local_order().unwrap(), 3);
+        let messages = client.incoming_messages_after(1, 20).unwrap();
+        assert_eq!(
+            messages
+                .messages
+                .iter()
+                .map(|(local_order, payload)| (*local_order, payload.body.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(3, "message 3")]
+        );
+        assert_eq!(
+            client
+                .incoming_messages_after(0, 20)
+                .unwrap()
+                .messages
+                .iter()
+                .map(|(local_order, _)| *local_order)
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+    }
+
+    #[test]
+    fn incoming_messages_limit_is_bounded() {
+        let (_directory, client) = webhook_test_client();
+        for sequence in 1..=3 {
+            insert_webhook_test_message(&client, sequence, Direction::Incoming);
+        }
+
+        assert_eq!(
+            client.incoming_messages_after(0, 0).unwrap().messages.len(),
+            1
+        );
+        assert_eq!(
+            client.incoming_messages_after(0, 2).unwrap().messages.len(),
+            2
+        );
+    }
+
+    #[test]
+    fn incoming_messages_after_a_full_page_returns_each_message_once() {
+        let (_directory, client) = webhook_test_client();
+        for sequence in 1..=201 {
+            insert_webhook_test_message(&client, sequence, Direction::Incoming);
+        }
+
+        let first = client.incoming_messages_after(0, 200).unwrap();
+        let second = client
+            .incoming_messages_after(first.scanned_through, 200)
+            .unwrap();
+
+        assert_eq!(first.messages.len(), 200);
+        assert_eq!(first.scanned_through, 200);
+        assert_eq!(second.messages.len(), 1);
+        assert_eq!(second.scanned_through, 201);
+        assert_eq!(
+            first
+                .messages
+                .iter()
+                .chain(&second.messages)
+                .map(|(local_order, _)| *local_order)
+                .collect::<Vec<_>>(),
+            (1..=201).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn incoming_messages_stop_at_the_last_returned_message() {
+        let (_directory, client) = webhook_test_client();
+        for (sequence, direction) in [
+            (1, Direction::Incoming),
+            (2, Direction::Outgoing),
+            (3, Direction::Incoming),
+            (4, Direction::Outgoing),
+            (5, Direction::Incoming),
+        ] {
+            insert_webhook_test_message(&client, sequence, direction);
+        }
+
+        let first = client.incoming_messages_after(0, 2).unwrap();
+        let second = client
+            .incoming_messages_after(first.scanned_through, 2)
+            .unwrap();
+
+        assert_eq!(first.scanned_through, 3);
+        assert_eq!(
+            first
+                .messages
+                .iter()
+                .map(|(local_order, _)| *local_order)
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert_eq!(second.scanned_through, 5);
+        assert_eq!(
+            second
+                .messages
+                .iter()
+                .map(|(local_order, _)| *local_order)
+                .collect::<Vec<_>>(),
+            vec![5]
+        );
+    }
+
+    #[test]
+    fn incoming_messages_scan_through_an_outgoing_only_tail() {
+        let (_directory, client) = webhook_test_client();
+        insert_webhook_test_message(&client, 1, Direction::Incoming);
+        insert_webhook_test_message(&client, 2, Direction::Outgoing);
+
+        let page = client.incoming_messages_after(1, 20).unwrap();
+        assert!(page.messages.is_empty());
+        assert_eq!(page.scanned_through, 2);
     }
 
     #[test]
@@ -12106,6 +12900,50 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn migration_47_adds_draft_branch_closed_for_fresh_and_upgraded_databases() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("schema-47.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let fresh = Client::open(config.clone(), DatabaseKey::new(&[47; 32]).unwrap()).unwrap();
+        {
+            let store = fresh.lock().unwrap();
+            let exists: bool = store
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('draft_sync') WHERE name='branch_closed')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists);
+            store
+                .conn
+                .execute_batch("ALTER TABLE draft_sync DROP COLUMN branch_closed")
+                .unwrap();
+            store
+                .conn
+                .execute("UPDATE schema_meta SET version=46", [])
+                .unwrap();
+        }
+        drop(fresh);
+
+        let upgraded = Client::open(config, DatabaseKey::new(&[47; 32]).unwrap()).unwrap();
+        let store = upgraded.lock().unwrap();
+        let exists: bool = store
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('draft_sync') WHERE name='branch_closed')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exists);
     }
 
     #[test]
@@ -16291,7 +17129,77 @@ mod tests {
     }
 
     #[test]
-    fn reopened_cache_only_client_cannot_seal_a_phone_handoff() {
+    fn verified_owner_seals_only_matching_computer_contexts() {
+        use peppy_crypto::create_vault_check_header;
+        use peppy_crypto::enrollment::{EnrollmentPurpose, EnrollmentRole, open_handoff};
+        use peppy_crypto::profile_fingerprint_bytes;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let owner_device_id = DeviceId::new();
+        let client = handoff_test_client(&directory, "computer-seal.db", vault_id, owner_device_id);
+        let profile = KeyProfile::new(vault_id.0, 4).unwrap();
+        let root = derive_root_key(HANDOFF_PASSPHRASE, &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        client
+            .unlock(&profile, &header, HANDOFF_PASSPHRASE)
+            .unwrap();
+        let sender = TransferKeypair::generate().unwrap();
+        let recipient = TransferKeypair::generate().unwrap();
+        let context = EnrollmentContext {
+            purpose: EnrollmentPurpose::Computer,
+            canonical_origin: "https://peppy.test".into(),
+            vault_id: vault_id.0,
+            fingerprint: profile_fingerprint_bytes(&profile).unwrap(),
+            key_epoch: 4,
+            enrollment_id: Uuid::new_v4(),
+            server_nonce: [2; 32],
+            owner_transfer_public_key: sender.public_key(),
+            recipient_transfer_public_key: recipient.public_key(),
+            recipient_signing_public_key: [3; 32],
+            device_id: DeviceId::new().0,
+            credential_digest: [4; 32],
+            role: EnrollmentRole::Device,
+        };
+
+        let sealed = client.seal_computer_handoff(&sender, &context).unwrap();
+        let handoff = open_handoff(&recipient, &sender.public_key(), &context, &sealed).unwrap();
+        assert!(handoff.sign_admission_context(&context).is_ok());
+
+        let mut wrong_purpose = context.clone();
+        wrong_purpose.purpose = EnrollmentPurpose::Phone;
+        assert!(matches!(
+            client.seal_computer_handoff(&sender, &wrong_purpose),
+            Err(Error::InvalidProfile)
+        ));
+        let mut wrong_role = context.clone();
+        wrong_role.role = EnrollmentRole::Gateway;
+        assert!(matches!(
+            client.seal_computer_handoff(&sender, &wrong_role),
+            Err(Error::InvalidProfile)
+        ));
+        let mut wrong_vault = context.clone();
+        wrong_vault.vault_id = Uuid::new_v4();
+        assert!(matches!(
+            client.seal_computer_handoff(&sender, &wrong_vault),
+            Err(Error::InvalidProfile)
+        ));
+        let mut wrong_profile = context.clone();
+        wrong_profile.fingerprint[0] ^= 1;
+        assert!(matches!(
+            client.seal_computer_handoff(&sender, &wrong_profile),
+            Err(Error::InvalidProfile)
+        ));
+        let mut missing_recipient = context.clone();
+        missing_recipient.device_id = Uuid::nil();
+        assert!(matches!(
+            client.seal_computer_handoff(&sender, &missing_recipient),
+            Err(Error::InvalidProfile)
+        ));
+    }
+
+    #[test]
+    fn reopened_cache_only_client_cannot_seal_phone_or_computer_handoffs() {
         use peppy_crypto::create_vault_check_header;
         use peppy_crypto::enrollment::{EnrollmentPurpose, EnrollmentRole};
         use peppy_crypto::profile_fingerprint_bytes;
@@ -16331,6 +17239,15 @@ mod tests {
 
         assert!(matches!(
             cache_only.seal_phone_handoff(&sender, &context),
+            Err(Error::KeysUnavailable)
+        ));
+        let computer_context = EnrollmentContext {
+            purpose: EnrollmentPurpose::Computer,
+            role: EnrollmentRole::Device,
+            ..context
+        };
+        assert!(matches!(
+            cache_only.seal_computer_handoff(&sender, &computer_context),
             Err(Error::KeysUnavailable)
         ));
     }

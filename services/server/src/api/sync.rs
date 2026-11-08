@@ -1123,10 +1123,9 @@ pub(super) fn spawn_maintenance(
                         Err(error) => tracing::warn!(error_kind = %error, "record compaction failed"),
                     }
                 }
-                _ = cleanup.tick(), if storage.is_some() => {
+                _ = cleanup.tick() => {
                     if weak.strong_count() == 0 || db.is_closed() { return; }
-                    let Some(store) = &storage else { continue };
-                    if let Err(error) = super::attachments::storage_maintenance(&db, store, options.storage_cleanup_batch).await {
+                    if let Err(error) = super::attachments::storage_maintenance(&db, storage.as_ref(), options.storage_cleanup_batch).await {
                         tracing::warn!(error_kind = %error, "storage cleanup failed");
                     }
                 }

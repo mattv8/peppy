@@ -7,6 +7,23 @@ set -euo pipefail
 # Enforce public library namespace only (no private-library)
 [[ "$IMAGE" =~ ^hub\.docker\.visnovsky\.us/library/[a-z0-9][a-z0-9._/-]*$ ]] || { echo "Invalid public image name: must be hub.docker.visnovsky.us/library/*" >&2; exit 1; }
 
+# Seconds to wait before each signing retry; the default allows 5 attempts of at most
+# 2 minutes each, which fits the 30-minute publish job alongside the image build.
+# PUBLISH_SIGN_RETRY_DELAYS exists so tests can shorten the schedule.
+sign_retry_input=${PUBLISH_SIGN_RETRY_DELAYS-10 20 40 80}
+reject_sign_retry_delays() {
+    echo "PUBLISH_SIGN_RETRY_DELAYS must be a non-empty single-line list of integers from 0 to 300" >&2
+    exit 1
+}
+[[ "$sign_retry_input" != *$'\n'* ]] || reject_sign_retry_delays
+read -r -a sign_retry_delays <<<"$sign_retry_input"
+((${#sign_retry_delays[@]} > 0)) || reject_sign_retry_delays
+for delay in "${sign_retry_delays[@]}"; do
+    if [[ ! "$delay" =~ ^[0-9]+$ ]] || ((10#$delay > 300)); then
+        reject_sign_retry_delays
+    fi
+done
+
 inspect_error=$(mktemp)
 tag_error=$(mktemp)
 trap 'rm -f "$inspect_error" "$tag_error"' EXIT
@@ -23,6 +40,26 @@ decode_digest() {
 report_invalid_digest() {
     echo "Registry returned an invalid digest for $immutable" >&2
     exit 1
+}
+
+# Retries only the signature of an image this run just pushed; an existing tag is
+# verified, never signed. Prints attempt numbers and messages only, never key material.
+sign_new_image() {
+    local attempt=1 max_attempts=$((${#sign_retry_delays[@]} + 1)) delay
+    while true; do
+        echo "cosign sign attempt $attempt of $max_attempts for $immutable" >&2
+        if cosign sign --timeout 2m --yes --key env://COSIGN_PRIVATE_KEY "$IMAGE@$digest"; then
+            return 0
+        fi
+        if ((attempt >= max_attempts)); then
+            echo "cosign sign failed after $attempt attempts; refusing to promote unsigned image: $immutable" >&2
+            return 1
+        fi
+        delay=${sign_retry_delays[attempt-1]}
+        echo "retrying cosign sign in ${delay}s" >&2
+        sleep "$delay"
+        attempt=$((attempt + 1))
+    done
 }
 
 report_inspect_error() {
@@ -48,7 +85,7 @@ else
         --tag "$immutable" "$CONTEXT"
     inspected=$(docker buildx imagetools inspect --format "$digest_format" "$immutable")
     digest=$(decode_digest "$inspected") || report_invalid_digest
-    cosign sign --yes --key env://COSIGN_PRIVATE_KEY "$IMAGE@$digest"
+    sign_new_image
 fi
 
 if [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then

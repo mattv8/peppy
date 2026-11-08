@@ -1,0 +1,39 @@
+[package]
+name = "peppy-mcp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+license.workspace = true
+
+[dependencies]
+axum.workspace = true
+base64.workspace = true
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+hmac.workspace = true
+libsodium-rs.workspace = true
+libc = "0.2.189"
+peppy-client-core.workspace = true
+peppy-desktop-api.workspace = true
+peppy-domain.workspace = true
+peppy-gateway-simulator = { path = "../gateway-simulator", version = "0.1.0" }
+peppy-hosted-api.workspace = true
+peppy-hosted-client = { path = "../../crates/hosted-client", version = "0.1.0" }
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "signal", "sync", "time"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+uuid.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+peppy-server = { path = "../server", version = "0.1.0" }
+peppy-crypto.workspace = true
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+sqlx = { workspace = true, features = ["uuid"] }
+tempfile.workspace = true

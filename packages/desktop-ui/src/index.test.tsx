@@ -1,15 +1,18 @@
 import "@testing-library/jest-dom/vitest";
 import type { ComponentProps } from "react";
+import { useState } from "react";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AppTitlebar,
   Composer,
+  mapSelectionThroughEdit,
   installOverlayScrollbars,
   isRecipientPosition,
   NavButtons,
   Panel,
   RecipientPanel,
+  RecipientChipInput,
   RecipientPicker,
   ResizeHandle,
   StatusPopover,
@@ -19,10 +22,127 @@ import {
 } from "./index";
 
 const people = [{ id: "conv-a", name: "Aurora", preview: "Hi", unread: 0 }];
+
+function TestComposer({ draft, onDraftChange }: { draft: string; onDraftChange(value: string): void }) {
+  return <Composer attachments={[]} draft={draft} sendSupported onDraftChange={onDraftChange} onSend={() => {}} />;
+}
+
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe("Composer external draft updates", () => {
+  it.each([
+    ["insertion", "abc", "aXbc", 2, 3],
+    ["deletion", "abc", "ac", 2, 1],
+    ["replaced region", "hello world", "hello there", 8, 6],
+    ["start boundary", "abc", "zabc", 0, 0],
+    ["end boundary", "abc", "abcz", 3, 4],
+    ["emoji replacement", "😀", "😁", 1, 0],
+    ["empty source", "", "text", 0, 4],
+    ["unrelated replacement", "abc", "xyz", 2, 0],
+  ])("maps %s without landing inside a surrogate pair", (_name, oldText, newText, position, expected) => {
+    expect(mapSelectionThroughEdit(oldText, newText, position)).toBe(expected);
+  });
+
+  it("maps the caret through an external draft update", () => {
+    const { rerender } = render(<TestComposer draft="hello brave world" onDraftChange={() => {}} />);
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    textarea.focus();
+    textarea.setSelectionRange(11, 11);
+
+    rerender(<TestComposer draft="hello kind brave world" onDraftChange={() => {}} />);
+
+    expect(textarea.selectionStart).toBe(16);
+    expect(textarea.selectionEnd).toBe(16);
+  });
+
+  it("applies the latest external update after composition ends without a local edit", () => {
+    const { rerender } = render(<TestComposer draft="hello" onDraftChange={() => {}} />);
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.compositionStart(textarea);
+
+    rerender(<TestComposer draft="remote" onDraftChange={() => {}} />);
+    expect(textarea).toHaveValue("hello");
+
+    fireEvent.compositionEnd(textarea);
+    expect(textarea).toHaveValue("remote");
+  });
+
+  it("defers external updates during composition and drops them after a local edit", () => {
+    function ControlledComposer() {
+      const [draft, setDraft] = useState("hello");
+      const [externalDraft, setExternalDraft] = useState<string | null>(null);
+      return <>
+        <button type="button" onClick={() => setExternalDraft("remote")}>Apply remote</button>
+        <TestComposer draft={externalDraft ?? draft} onDraftChange={(value) => {
+          setExternalDraft(null);
+          setDraft(value);
+        }} />
+      </>;
+    }
+
+    render(<ControlledComposer />);
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.compositionStart(textarea);
+    fireEvent.click(screen.getByRole("button", { name: "Apply remote" }));
+    expect(textarea).toHaveValue("hello");
+
+    fireEvent.change(textarea, { target: { value: "hello!" } });
+    fireEvent.compositionEnd(textarea);
+
+    expect(textarea).toHaveValue("hello!");
+  });
+
+  it("keeps a local IME edit when a first-save alias rekeys the draft", () => {
+    function ControlledComposer() {
+      const [draft, setDraft] = useState("hello");
+      const [draftKey, setDraftKey] = useState("new:1");
+      return <>
+        <button type="button" onClick={() => setDraftKey("conversation-1")}>Save draft</button>
+        <Composer attachments={[]} draft={draft} draftIdentity="new-draft" draftKey={draftKey} sendSupported onDraftChange={setDraft} onSend={() => {}} />
+      </>;
+    }
+
+    render(<ControlledComposer />);
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.compositionStart(textarea);
+    fireEvent.change(textarea, { target: { value: "hello!" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+    fireEvent.compositionEnd(textarea);
+
+    expect(textarea).toHaveValue("hello!");
+  });
+
+  it("clears transient composer state when navigation follows a new draft", () => {
+    function ControlledComposer() {
+      const [draft, setDraft] = useState("hello");
+      const [draftKey, setDraftKey] = useState("new:1");
+      const [draftIdentity, setDraftIdentity] = useState("new:1");
+      return <>
+        <button type="button" onClick={() => {
+          setDraft("remote");
+          setDraftKey("conversation-2");
+          setDraftIdentity("conversation-2");
+        }}>Open conversation</button>
+        <Composer attachments={[]} draft={draft} draftIdentity={draftIdentity} draftKey={draftKey} sendSupported onDraftChange={setDraft} onPasteImages={() => {}} onSend={() => {}} />
+      </>;
+    }
+
+    render(<ControlledComposer />);
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.paste(textarea, { clipboardData: { files: [new File(["x"], "invalid.bmp", { type: "image/bmp" })], getData: () => "" } });
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    fireEvent.compositionStart(textarea);
+    fireEvent.change(textarea, { target: { value: "hello!" } });
+    fireEvent.click(screen.getByRole("button", { name: "Open conversation" }));
+    fireEvent.compositionEnd(textarea);
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(textarea).toHaveValue("remote");
+  });
 });
 
 describe("isPopoutMode", () => {
@@ -509,6 +629,81 @@ describe("ConversationList interactions", () => {
 });
 
 describe("desktop UI controls", () => {
+  it("renders standalone recipient chips and commits typed phone numbers", () => {
+    const committed = vi.fn();
+    render(<RecipientChipInput recipients={[{ id: "aurora", label: "Aurora" }]} onCommit={committed} />);
+
+    expect(screen.getByText("Aurora")).toBeInTheDocument();
+    const input = screen.getByLabelText("Recipients");
+    fireEvent.change(input, { target: { value: "2025550100" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(committed).toHaveBeenCalledWith(["aurora", "+12025550100"]);
+    expect(screen.queryByText("Group · MMS")).not.toBeInTheDocument();
+  });
+
+  it("removes standalone recipient chips by Backspace and remove button", () => {
+    const committed = vi.fn();
+    render(<RecipientChipInput recipients={[{ id: "aurora", label: "Aurora" }, { id: "sol", label: "Sol" }]} onCommit={committed} />);
+
+    fireEvent.keyDown(screen.getByLabelText("Recipients"), { key: "Backspace" });
+    expect(committed).toHaveBeenLastCalledWith(["aurora"]);
+    fireEvent.click(screen.getByRole("button", { name: "Remove Aurora" }));
+    expect(committed).toHaveBeenLastCalledWith(["sol"]);
+  });
+
+  it("chooses standalone contact suggestions and generates distinct ids", async () => {
+    const committed = vi.fn();
+    const chosen = vi.fn();
+    render(<>
+      <RecipientChipInput recipients={[]} onCommit={committed} onSuggestionChosen={chosen} searchContacts={async () => [{ id: "+12025550100", label: "Aurora" }]} />
+      <RecipientChipInput recipients={[]} onCommit={() => {}} />
+    </>);
+
+    const inputs = screen.getAllByLabelText("Recipients");
+    expect(inputs[0].getAttribute("aria-describedby")).not.toBe(inputs[1].getAttribute("aria-describedby"));
+    fireEvent.change(inputs[0], { target: { value: "Aur" } });
+    const option = await screen.findByRole("option", { name: "Aurora" });
+    fireEvent.mouseDown(option);
+
+    expect(chosen).toHaveBeenCalledWith({ id: "+12025550100", label: "Aurora" });
+    expect(committed).toHaveBeenCalledWith(["+12025550100"]);
+  });
+
+  it("marks a standalone chip input invalid and appends its external description", () => {
+    render(<>
+      <p id="field-error">Add at least one contact.</p>
+      <RecipientChipInput recipients={[]} onCommit={() => {}} hint="Pick contacts." inputLabel="Contacts" invalid describedBy="field-error" />
+    </>);
+
+    const input = screen.getByLabelText("Contacts");
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(input.getAttribute("aria-describedby")).toMatch(/ field-error$/);
+  });
+
+  it("keeps the input valid when no error is present", () => {
+    render(<RecipientChipInput recipients={[]} onCommit={() => {}} inputLabel="Contacts" />);
+
+    expect(screen.getByLabelText("Contacts")).not.toHaveAttribute("aria-invalid");
+  });
+
+  it("shows the hint as visible text only when asked", () => {
+    const { unmount } = render(<RecipientChipInput recipients={[]} onCommit={() => {}} hint="Visible hint" hintVisible inputLabel="Contacts" />);
+    expect(screen.getByText("Visible hint")).not.toHaveClass("sr-only");
+    expect(screen.getByLabelText("Contacts")).toHaveAccessibleDescription("Visible hint");
+    unmount();
+
+    render(<RecipientChipInput recipients={[]} onCommit={() => {}} hint="Hidden hint" inputLabel="Contacts" />);
+    expect(screen.getByText("Hidden hint")).toHaveClass("sr-only");
+  });
+
+  it("applies the standalone variant class only when requested", () => {
+    const { container, unmount } = render(<RecipientChipInput recipients={[]} onCommit={() => {}} variant="standalone" />);
+    expect(container.querySelector("[data-recipient-chip-input]")).toHaveClass("recipient-chip-input", "recipient-chip-input--standalone");
+    unmount();
+
+  });
+
   it("uses a deterministic fallback avatar for conversations without an identity", () => {
     render(<ConversationList conversations={people} selectedId="conv-a" onSelect={() => {}} />);
     const avatar = screen.getByRole("button", { name: /Aurora/ }).querySelector(".contact-avatar");

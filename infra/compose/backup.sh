@@ -20,16 +20,29 @@ python3 - "$config" > "$layout_file" <<'PY'
 import json, sys
 c = json.load(open(sys.argv[1]))
 want = {"postgres": {"/var/lib/postgresql"}, "seaweedfs": {"/data", "/root/.seaweedfs"}}
+rows = []
 for service, targets in want.items():
     mounts = {v.get("target"): v for v in c["services"][service].get("volumes", []) if v.get("type") == "volume"}
     if set(mounts) & targets != targets: raise SystemExit(f"missing expected named-volume mount for {service}")
     for target in sorted(targets):
         source = mounts[target]["source"]
-        print(f"{service}\t{target}\t{c['volumes'][source]['name']}")
+        rows.append((service, target, c["volumes"][source]["name"]))
+if "mcp" in c["services"]:
+    mounts = {v.get("target"): v for v in c["services"]["mcp"].get("volumes", []) if v.get("type") == "volume"}
+    targets = {"/var/lib/peppy-mcp", "/run/peppy-mcp"}
+    if set(mounts) & targets != targets:
+        raise SystemExit("missing expected named-volume mount for mcp")
+    for target in sorted(targets):
+        source = mounts[target]["source"]
+        rows.append(("mcp", target, c["volumes"][source]["name"]))
+physical_names = [name for _, _, name in rows]
+if len(set(physical_names)) != len(physical_names):
+    raise SystemExit("Compose storage mounts must resolve to distinct volume names")
+for row in rows: print("\t".join(row))
 PY
 layout=()
 while IFS= read -r entry; do layout[${#layout[@]}]="$entry"; done < "$layout_file"
-test "${#layout[@]}" = 3 || { echo "unexpected Compose storage layout" >&2; exit 65; }
+case "${#layout[@]}" in 3) mcp_enabled=0 ;; 5) mcp_enabled=1 ;; *) echo "unexpected Compose storage layout" >&2; exit 65 ;; esac
 project=$(python3 - "$config" <<'PY'
 import json, sys
 print(json.load(open(sys.argv[1]))["name"])
@@ -45,6 +58,12 @@ import json, sys
 print(json.load(open(sys.argv[1]))["services"]["seaweedfs"].get("image", ""))
 PY
 )
+mcp_image=$(python3 - "$config" "$mcp_enabled" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+print(c["services"]["mcp"].get("image", "") if sys.argv[2] == "1" else "")
+PY
+)
 
 # Refuse before stopping anything when the source project/volumes are absent.
 for entry in "${layout[@]}"; do
@@ -56,10 +75,11 @@ grep -qx postgres <<< "$running" || { echo "source PostgreSQL must be running" >
 
 # Inspect all containers so clean stopped states are visible and unstable states fail closed.
 "${compose[@]}" ps --all --format json > "$state_file"
-python3 - "$state_file" <<'PYSTATE'
+python3 - "$state_file" "$mcp_enabled" <<'PYSTATE'
 import json, sys
 with open(sys.argv[1]) as source:
     text = source.read()
+mcp_enabled = sys.argv[2] == "1"
 try:
     parsed = json.loads(text)
     services = parsed if isinstance(parsed, list) else [parsed]
@@ -73,6 +93,9 @@ allowed = {
     "api": {"running", "created", "exited"},
     "seaweedfs": {"running", "created", "exited"},
 }
+if mcp_enabled:
+    allowed["mcp"] = {"running", "created", "exited"}
+    allowed["mcp-state-init"] = {"exited"}
 for service, valid_states in allowed.items():
     state = state_map.get(service, "")
     if state and state not in valid_states:
@@ -112,13 +135,21 @@ PYIMG
   )
   verify_image api "$api_image" >/dev/null || exit 67
 fi
+if test "$mcp_enabled" = 1; then
+  verify_image mcp "$mcp_image" >/dev/null || exit 67
+  init_container=$("${compose[@]}" ps --all -q mcp-state-init)
+  test -n "$init_container" || { echo "MCP state initializer is missing" >&2; exit 67; }
+  init_exit=$(docker inspect --format '{{.State.ExitCode}}' "$init_container") || { echo "could not inspect MCP state initializer" >&2; exit 67; }
+  test "$init_exit" = 0 || { echo "MCP state initializer did not exit cleanly (exit code $init_exit)" >&2; exit 67; }
+fi
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 backup_dir="$destination/peppy-${project}-${stamp}"
 mkdir "$backup_dir"
-api_was_running=0; seaweed_was_running=0
+api_was_running=0; seaweed_was_running=0; mcp_was_running=0
 grep -qx api <<< "$running" && api_was_running=1
 grep -qx seaweedfs <<< "$running" && seaweed_was_running=1
+if test "$mcp_enabled" = 1 && grep -qx mcp <<< "$running"; then mcp_was_running=1; fi
 cleanup() {
   status=$?
   rm -f "$config" "$layout_file" "$state_file"
@@ -127,6 +158,9 @@ cleanup() {
   fi
   if test "$api_was_running" = 1 && ! "${compose[@]}" start api >/dev/null 2>&1; then
     echo "warning: failed to restart api after backup" >&2
+  fi
+  if test "$mcp_was_running" = 1 && ! "${compose[@]}" start mcp >/dev/null 2>&1; then
+    echo "warning: failed to restart mcp after backup" >&2
   fi
   exit "$status"
 }
@@ -138,28 +172,50 @@ if test "$api_was_running" = 1; then
 fi
 "${compose[@]}" exec -T postgres sh -ec 'exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom' > "$backup_dir/postgres.dump"
 if test "$seaweed_was_running" = 1; then "${compose[@]}" stop seaweedfs; fi
+if test "$mcp_was_running" = 1; then "${compose[@]}" stop mcp; fi
 
+artifacts=(postgres.dump seaweed-data.tar.gz seaweed-home.tar.gz)
+manifest_layout=()
 for entry in "${layout[@]}"; do
   IFS=$'\t' read -r service target volume <<< "$entry"
+  test "$service" = mcp || manifest_layout[${#manifest_layout[@]}]="$entry"
   test "$service" = seaweedfs || continue
   archive=$([[ "$target" = /data ]] && echo seaweed-data.tar.gz || echo seaweed-home.tar.gz)
   docker run --rm -v "$volume:/source:ro" "$postgres_id" \
     tar --sparse -C /source -czf - . > "$backup_dir/$archive"
 done
+if test "$mcp_enabled" = 1; then
+  for entry in "${layout[@]}"; do
+    IFS=$'\t' read -r service target volume <<< "$entry"
+    test "$service" = mcp && test "$target" = /var/lib/peppy-mcp || continue
+    docker run --rm -v "$volume:/source:ro" "$postgres_id" \
+      tar --sparse -C /source -czf - . > "$backup_dir/mcp-state.tar.gz"
+    artifacts[${#artifacts[@]}]=mcp-state.tar.gz
+    manifest_layout[${#manifest_layout[@]}]="$entry"
+  done
+fi
 postgres_container=$("${compose[@]}" ps --all -q postgres)
 seaweed_container=$("${compose[@]}" ps --all -q seaweedfs)
-python3 - "$backup_dir/manifest.json" "$project" "$stamp" "$postgres_image" "$seaweed_image" "$postgres_container" "$seaweed_container" "${layout[@]}" <<'PY'
+if test "$mcp_enabled" = 1; then mcp_container=$("${compose[@]}" ps --all -q mcp); else mcp_container=; fi
+python3 - "$backup_dir/manifest.json" "$project" "$stamp" "$postgres_image" "$seaweed_image" "$mcp_image" "$postgres_container" "$seaweed_container" "$mcp_container" --layout-- "${manifest_layout[@]}" --artifacts-- "${artifacts[@]}" <<'PY'
 import json, subprocess, sys
-out, project, stamp, pg, seaweed, pgc, swc, *layout = sys.argv[1:]
+out, project, stamp, pg, seaweed, mcp, pgc, swc, mcpc, *rest = sys.argv[1:]
+layout_marker = rest.index("--layout--")
+artifacts_marker = rest.index("--artifacts--")
+layout = rest[layout_marker + 1:artifacts_marker]
+artifacts = rest[artifacts_marker + 1:]
 def image_id(container):
     return subprocess.check_output(["docker", "inspect", "--format", "{{.Image}}", container], text=True).strip()
 mounts = [dict(zip(("service", "target", "volume"), item.split("\t"))) for item in layout]
+configured = {"postgres": pg, "seaweedfs": seaweed}
+running_ids = {"postgres": image_id(pgc), "seaweedfs": image_id(swc)}
+if mcp:
+    configured["mcp"] = mcp
+    running_ids["mcp"] = image_id(mcpc)
 json.dump({"format_version": 2, "created_at_utc": stamp, "source_project": project,
-           "images": {"configured": {"postgres": pg, "seaweedfs": seaweed},
-                      "running_ids": {"postgres": image_id(pgc), "seaweedfs": image_id(swc)}},
-           "mounts": mounts,
-           "artifacts": ["postgres.dump", "seaweed-data.tar.gz", "seaweed-home.tar.gz"]}, open(out, "w"), sort_keys=True)
+            "images": {"configured": configured, "running_ids": running_ids},
+            "mounts": mounts, "artifacts": artifacts}, open(out, "w"), sort_keys=True)
 PY
-( cd "$backup_dir" && shasum -a 256 manifest.json postgres.dump seaweed-data.tar.gz seaweed-home.tar.gz > manifest.sha256 )
+( cd "$backup_dir" && shasum -a 256 manifest.json "${artifacts[@]}" > manifest.sha256 )
 chmod 600 "$backup_dir"/*
 echo "Backup written to $backup_dir" >&2

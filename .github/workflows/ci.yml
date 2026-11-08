@@ -214,6 +214,7 @@ jobs:
       - run: cargo run --locked -p peppy-desktop-api --bin generate-search-contracts -- --check
       - run: cargo run --locked -p peppy-desktop-api --bin generate-attachment-retention-contracts -- --check
       - run: cargo run --locked -p peppy-hosted-api --bin export-web-schema -- --check
+      - run: cargo run --locked -p peppy-hosted-api --bin generate-mcp-contracts -- --check
       - run: cargo install cargo-deny --version 0.20.2 --locked
       - run: cargo deny check licenses bans sources
       - run: cargo deny check advisories
@@ -727,6 +728,18 @@ jobs:
       environment: staging
       sha: ${{ github.sha }}
     secrets: inherit
+  publish-staging-mcp:
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success'"
+    needs: gate
+    uses: ./.github/workflows/publish-community-image.yml
+    with:
+      image: hub.docker.visnovsky.us/library/peppy-mcp
+      context: .
+      dockerfile: infra/docker/mcp.Dockerfile
+      tag: staging
+      environment: staging
+      sha: ${{ github.sha }}
+    secrets: inherit
   publish-production-server:
     if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success'"
     needs: gate
@@ -747,6 +760,18 @@ jobs:
       image: hub.docker.visnovsky.us/library/peppy-push-relay
       context: .
       dockerfile: infra/docker/push-relay.Dockerfile
+      tag: edge
+      environment: production
+      sha: ${{ github.sha }}
+    secrets: inherit
+  publish-production-mcp:
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success'"
+    needs: gate
+    uses: ./.github/workflows/publish-community-image.yml
+    with:
+      image: hub.docker.visnovsky.us/library/peppy-mcp
+      context: .
+      dockerfile: infra/docker/mcp.Dockerfile
       tag: edge
       environment: production
       sha: ${{ github.sha }}
@@ -775,8 +800,8 @@ jobs:
           RELAY_DIGEST: ${{ needs.publish-production-relay.outputs.digest }}
         run: bash .github/scripts/notify-hosted-production.sh
   stable-release:
-    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success' && needs.version.outputs.head_released != 'true' && needs.version.result == 'success' && needs.publish-production-server.result == 'success' && needs.publish-production-relay.result == 'success'"
-    needs: [gate, version, publish-production-server, publish-production-relay]
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success' && needs.version.outputs.head_released != 'true' && needs.version.result == 'success' && needs.publish-production-server.result == 'success' && needs.publish-production-relay.result == 'success' && needs.publish-production-mcp.result == 'success'"
+    needs: [gate, version, publish-production-server, publish-production-relay, publish-production-mcp]
     permissions:
       contents: write
       actions: read

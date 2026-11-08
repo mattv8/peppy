@@ -61,12 +61,13 @@ class TrustedCore {
 }
 
 class AttachmentCore extends TrustedCore {
-  public state: "ready" | "pending" = "ready";
+  public state: "ready" | "uploading" | "pending" = "ready";
   public readonly attachmentCommands: string[] = [];
   public attachmentInfoGate?: Promise<void>;
   public exportFailure?: CoreRejectedError;
   public touchFailure?: CoreRejectedError;
   public snapshot?: CoreResult;
+  public snapshotDraftMediaState = false;
   public history?: CoreResult;
   public content = encoder.encode("cat");
   public previewFailure?: CoreRejectedError;
@@ -77,7 +78,7 @@ class AttachmentCore extends TrustedCore {
     this.attachmentCommands.push(command);
     if (command === "attachment_info") {
       await this.attachmentInfoGate;
-      return this.state === "ready" ? { state: "ready", plaintextBytes: this.content.byteLength } : { state: "pending" };
+      return { state: this.state, plaintextBytes: this.content.byteLength };
     }
     if (command === "preview_attachment" && this.previewFailure) throw this.previewFailure;
     if (command === "retain_attachment_ciphertext") {
@@ -110,7 +111,11 @@ class AttachmentCore extends TrustedCore {
       return { file: `worker-output/${outputId}`, byteSize: 3, name: "public.png" };
     }
     if (command === "_worker_attachment_remote") return { remoteObjectId: "remote-object" };
-    if (command === "_worker_local_attachment_ids") return { attachmentIds: this.state === "ready" ? this.attachmentIds : [] };
+    if (command === "_worker_local_attachment_ids") return { attachmentIds: this.state === "pending" ? [] : this.attachmentIds };
+    if (command === "_worker_draft_attachment_ids") return { attachmentIds: this.attachmentIds };
+    if (command === "snapshot" && this.snapshotDraftMediaState) {
+      return { drafts: [{ attachment: this.fs.readdir("/peppy/client.db.media/cipher").includes(`${id}.ppss`) ? "ready" : "unavailable" }] };
+    }
     if (command === "snapshot" && this.snapshot) return this.snapshot;
     if (command === "load_history" && this.history) return this.history;
     return super.invoke(request);
@@ -122,7 +127,7 @@ function deferred(): { promise: Promise<void>; release(): void } {
   return { promise: new Promise<void>(resolve => { release = resolve; }), release };
 }
 
-async function unlockedAttachmentSession(state: "ready" | "pending", files: CheckpointInput["files"], attachmentIds = [id]): Promise<{ core: AttachmentCore; fs: MemoryFs; session: BrowserSession; store: IndexedDbCheckpointStore }> {
+async function unlockedAttachmentSession(state: "ready" | "uploading" | "pending", files: CheckpointInput["files"], attachmentIds = [id]): Promise<{ core: AttachmentCore; fs: MemoryFs; session: BrowserSession; store: IndexedDbCheckpointStore }> {
   const store = new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`);
   await store.commit(checkpoint(0, "envelope-1", files));
   const fs = new MemoryFs();
@@ -185,6 +190,18 @@ describe("BrowserSession", () => {
     const locked = await BrowserSession.boot(sessionOptions(new TrustedCore(), new MemoryFs(), store));
     expect(locked.phase).toBe("locked");
     expect(locked.generation).toBe(1);
+  });
+
+  it("hydrates committed draft ciphertext before a restored snapshot inspects draft media", async () => {
+    const { core, fs, session } = await unlockedAttachmentSession("ready", [
+      { path: "client.db", bytes: encoder.encode("encrypted database") },
+      { path: cipherPath, bytes: encoder.encode("draft ciphertext") },
+    ]);
+    core.state = "pending";
+    core.snapshotDraftMediaState = true;
+
+    await expect(session.query("snapshot", {})).resolves.toEqual({ drafts: [{ attachment: "ready" }] });
+    expect(fs.readdir("/peppy/client.db.media/cipher")).toContain(`${id}.ppss`);
   });
 
   it("restores a committed checkpoint with a remembered phrase without saving it again", async () => {
@@ -592,6 +609,16 @@ describe("BrowserSession", () => {
     expect(() => session.tokenForTransport()).toThrow(BrowserSessionError);
   });
 
+  it("restores and previews a locally staged attachment while its upload is pending", async () => {
+    const { core, session } = await unlockedAttachmentSession("uploading", [
+      { path: "client.db", bytes: encoder.encode("encrypted database") },
+      { path: cipherPath, bytes: encoder.encode("cold cipher") },
+    ]);
+
+    await expect(session.previewAttachment(id)).resolves.toBe("data:image/png;base64,cHJldmlldw==");
+    expect(core.attachmentCommands).toContain("preview_attachment");
+  });
+
   it("keeps ready-media availability, hydration, and export atomic when queued eviction races two callers", async () => {
     const { promise, release } = deferred();
     const { core, session, store } = await unlockedAttachmentSession("ready", [
@@ -686,6 +713,21 @@ describe("BrowserSession", () => {
     expect(core.attachmentCommands.filter(command => command === "preview_attachment")).toHaveLength(24);
     expect(core.attachmentCommands).not.toContain("touch_attachment_ciphertext");
     expect(commit).not.toHaveBeenCalled();
+  });
+
+  it("hydrates each committed draft cipher only once per session generation", async () => {
+    const files = [
+      { path: "client.db", bytes: encoder.encode("encrypted database") },
+      { path: cipherPath, bytes: encoder.encode("cold cipher") },
+    ];
+    const { session, store } = await unlockedAttachmentSession("ready", files);
+    const readCipher = vi.spyOn(store, "readCipher");
+
+    await session.hydrateDraftMedia();
+    await session.hydrateDraftMedia();
+
+    expect(readCipher).toHaveBeenCalledTimes(1);
+    expect(readCipher).toHaveBeenCalledWith(cipherPath, session.generation);
   });
 
   it("treats an evicted queued preview as transient pending without poisoning or caching it", async () => {

@@ -77,9 +77,16 @@ import type {
   StartupStatus,
   StoreProduct,
   TypingSignal,
+  WebhookCreated,
+  WebhookInput,
+  WebhookList,
+  WebhookSecret,
+  WebhookTestResult,
+  WebhookView,
   DesktopBridge as SharedDesktopBridge,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { normalizePhoneNumber } from "@peppy/desktop-ui";
+import { errorText } from "./bridgeErrors";
 
 export {
   type ConnectionState,
@@ -196,6 +203,17 @@ const fixtureDrafts = new Map<string, Draft>();
 const fixtureToneOverrides = new Map<string, number>();
 let fixtureCreated = 0;
 let fixturePhoneApproved = false;
+let fixtureMcpEnabled = false;
+let fixtureMcpGeneration = 0;
+const fixtureMcpGrants = [{ id: "11111111-1111-4111-8111-111111111111", clientName: "Fixture assistant", scopes: ["conversations:read" as const], createdAt: "Fixture", lastUsedAt: null }];
+const fixtureWebhooks: WebhookView[] = [
+  { id: "22222222-2222-4222-8222-222222222222", name: "Home Assistant", nameIsDerived: false, url: "https://home.example.com/peppy", events: ["message.received"], filterMode: "all", filter: [], paused: false, createdAt: "2026-11-01T12:00:00Z", lastDeliveryState: "delivered", lastDeliveryAt: "2026-11-07T12:00:00Z", lastStatusCode: 200, lastError: null, pendingDeliveries: 0 },
+  { id: "33333333-3333-4333-8333-333333333333", name: "Zapier: Alice & Bob", nameIsDerived: false, url: "https://hooks.zapier.com/example", events: ["message.received"], filterMode: "only", filter: [{ address: "+12025550123", label: "Alice", contactId: null, bookId: null }, { address: "+12025550124", label: "Bob", contactId: null, bookId: null }], paused: false, createdAt: "2026-11-02T12:00:00Z", lastDeliveryState: "failed", lastDeliveryAt: "2026-11-07T12:00:00Z", lastStatusCode: 503, lastError: "http_503", pendingDeliveries: 1 },
+  { id: "44444444-4444-4444-8444-444444444444", name: "n8n triage", nameIsDerived: false, url: "https://n8n.example.com/webhook/triage", events: ["message.received"], filterMode: "except", filter: [{ address: "+12025550125", label: "Mina", contactId: null, bookId: null }], paused: true, createdAt: "2026-11-03T12:00:00Z", lastDeliveryState: "never", lastDeliveryAt: null, lastStatusCode: null, lastError: null, pendingDeliveries: 0 },
+];
+let fixtureWebhookSequence = 4;
+const fixtureWebhookSecrets = new Map(fixtureWebhooks.map((webhook) => [webhook.id, `whsec_fixture_${webhook.id.replaceAll("-", "")}`]));
+const fixtureWebhook = (input: WebhookInput, id: string): WebhookView => ({ id, name: input.name?.trim() || new URL(input.url).hostname.replace(/^www\./, ""), nameIsDerived: !input.name?.trim(), url: input.url, events: [...input.events], filterMode: input.filterMode, filter: input.filter.map(entry => ({ ...entry })), paused: input.paused, createdAt: "2026-11-07T12:00:00Z", lastDeliveryState: "never", lastDeliveryAt: null, lastStatusCode: null, lastError: null, pendingDeliveries: 0 });
 const fixtureError = (code: string, message: string): BridgeError => ({ code, message });
 const fixtureSearchContacts = [
   { id: "contact-aurora", bookId: "book-pixel8", title: "Aurora Chen", subtitle: "+12025550123" },
@@ -399,6 +417,9 @@ export const fixtureBridge: DesktopBridge = {
   request_notification_permission: async () => ({ status: "granted", testSent: true, canOpenSettings: false }),
   open_notification_settings: async () => undefined,
   pick_attachments: async () => [{ id: `attachment-fixture-${Date.now()}`, name: "fixture-image.png", mediaType: "image/png", byteSize: 2400, state: "ready", previewUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" }],
+  prepare_pasted_attachments: async files => ({ views: files.map((file, index) => ({ id: `attachment-fixture-pasted-${Date.now()}-${index}`, name: file.name, mediaType: file.mediaType, byteSize: file.bytes.byteLength, state: "ready" as const, draftState: "local" as const, previewUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" })), failures: [] }),
+  resolve_draft_conflict: async () => { throw fixtureError("not-available", "Draft conflict resolution is not available yet."); },
+  acknowledge_draft_notice: async () => { throw fixtureError("not-available", "Draft notices are not available yet."); },
   retry_attachment: async () => undefined,
   save_attachment: async () => false,
   request_attachment_download: async () => undefined,
@@ -459,7 +480,22 @@ export const fixtureBridge: DesktopBridge = {
     if (device.revoked) throw fixtureError("device_already_revoked", "This device was already removed.");
     if (device.id === "device-desktop") throw fixtureError("current_device", "This device cannot remove itself here.");
     device.revoked = true;
+    if (device.id.startsWith("fixture-mcp-device-")) { fixtureMcpEnabled = false; fixtureMcpGrants.splice(0); }
   },
+  mcp_status: async () => ({ vaultId: "11111111-1111-4111-8111-111111111111", available: true, serverOrigin: "https://push.example.com", hosted: true, device: fixtureMcpEnabled ? { deviceId: `fixture-mcp-device-${fixtureMcpGeneration}`, name: "Peppy MCP", state: "online" as const, lastSyncedAt: "Fixture", cleanupPending: false } : null }),
+  mcp_enable: async () => { fixtureMcpEnabled = true; fixtureMcpGeneration += 1; fixtureDevices.push({ id: `fixture-mcp-device-${fixtureMcpGeneration}`, name: "Peppy MCP", kind: "desktop", role: "device", revoked: false }); return fixtureBridge.mcp_status(); },
+  mcp_grants: async () => fixtureMcpGrants.map(grant => ({ ...grant })),
+  mcp_revoke_grant: async id => { const index = fixtureMcpGrants.findIndex(grant => grant.id === id); if (index >= 0) fixtureMcpGrants.splice(index, 1); },
+  webhooks_list: async (): Promise<WebhookList> => ({ available: true, webhooks: fixtureWebhooks.map(webhook => ({ ...webhook, filter: webhook.filter.map(entry => ({ ...entry })) })) }),
+  webhook_create: async (input): Promise<WebhookCreated> => { const id = `00000000-0000-4000-8000-${String(++fixtureWebhookSequence).padStart(12, "0")}`; const webhook = fixtureWebhook(input, id); const secret = `whsec_fixture_${id.replaceAll("-", "")}`; fixtureWebhooks.push(webhook); fixtureWebhookSecrets.set(id, secret); return { webhook: { ...webhook }, secret }; },
+  webhook_update: async (id, input) => { const index = fixtureWebhooks.findIndex(webhook => webhook.id === id); if (index < 0) throw fixtureError("webhook_not_found", "Webhook not found."); const current = fixtureWebhooks[index]; const webhook = { ...fixtureWebhook(input, id), createdAt: current.createdAt, lastDeliveryState: current.lastDeliveryState, lastDeliveryAt: current.lastDeliveryAt, lastStatusCode: current.lastStatusCode, lastError: current.lastError, pendingDeliveries: current.pendingDeliveries }; fixtureWebhooks[index] = webhook; return { ...webhook }; },
+  webhook_delete: async id => { const index = fixtureWebhooks.findIndex(webhook => webhook.id === id); if (index < 0) throw fixtureError("webhook_not_found", "Webhook not found."); fixtureWebhooks.splice(index, 1); fixtureWebhookSecrets.delete(id); },
+  webhook_reveal_secret: async id => { const secret = fixtureWebhookSecrets.get(id); if (!secret) throw fixtureError("webhook_not_found", "Webhook not found."); return { id, secret }; },
+  webhook_rotate_secret: async id => { if (!fixtureWebhooks.some((webhook) => webhook.id === id)) throw fixtureError("webhook_not_found", "Webhook not found."); const secret = `whsec_fixture_${id.replaceAll("-", "")}_${++fixtureWebhookSequence}`; fixtureWebhookSecrets.set(id, secret); return { id, secret }; },
+  webhook_test: async (): Promise<WebhookTestResult> => ({ ok: true, statusCode: 200, durationMs: 142, error: null }),
+  mcp_authorization: async () => { throw fixtureError("unsupported", "MCP authorization is unavailable."); },
+  mcp_approve_authorization: async () => { throw fixtureError("unsupported", "MCP authorization is unavailable."); },
+  mcp_deny_authorization: async () => { throw fixtureError("unsupported", "MCP authorization is unavailable."); },
   list_contact_books: async () => [{ id: "book-pixel8", deviceName: "Pixel 8", state: "active", capabilities: { canWrite: true, canDelete: true, canRestore: true, supportsNotes: true, supportsPhoto: true, supportsBirthday: true, canSync: true }, ownerDeviceId: "device-pixel8", contactCount: 3, defaultAccountLabel: "Google · aurora@example.com", lastSyncAt: "Just now", pendingEditCount: 1 }, { id: "book-iphone-retired", deviceName: "iPhone", state: "retired", capabilities: { canWrite: false, canDelete: false, supportsNotes: false, supportsPhoto: true, canSync: false }, sourceRevoked: true, ownerDeviceId: "device-old-iphone", contactCount: 0, lastSyncAt: "3 days ago", pendingEditCount: 0 }],
   forget_contact_book: async () => undefined,
   list_contacts: async (bookId, query = "", offset = 0, sort = { key: "family" as const, direction: "asc" as const }) => {
@@ -554,6 +590,10 @@ export const fixtureBridge: DesktopBridge = {
 };
 
 const invoke = async <T>(command: string, args?: Record<string, unknown>) => (await import("@tauri-apps/api/core")).invoke<T>(command, args);
+const invokeRaw = async <T>(command: string, bytes: ArrayBuffer, headers: Record<string, string>) => {
+  const { invoke: nativeInvoke } = await import("@tauri-apps/api/core");
+  return nativeInvoke<T>(command, bytes, { headers });
+};
 /** Native claimant response, normalized before it reaches shared UI. */
 type NativeComputerClaimantView = {
   stage: "waiting_owner" | "compare_codes" | "finishing" | "connected" | "denied" | "expired" | "error" | string;
@@ -594,6 +634,23 @@ export const renewHostedSession = () => "__TAURI_INTERNALS__" in window
   ? invoke<void>("hosted_session_renew")
   : Promise.resolve();
 export const tauriBridge: DesktopBridge = {
+  prepare_pasted_attachments: async files => {
+    const views: AttachmentView[] = [];
+    const failures: string[] = [];
+    for (const file of files) {
+      try {
+        views.push(await invokeRaw<AttachmentView>("prepare_pasted_attachment", file.bytes, {
+          "peppy-attachment-name": encodeURIComponent(file.name || "pasted-image"),
+          "peppy-attachment-type": file.mediaType,
+        }));
+      } catch (error) {
+        failures.push(`${file.name || "Pasted image"}: ${errorText(error)}`);
+      }
+    }
+    return { views, failures };
+  },
+  resolve_draft_conflict: (input) => invoke("resolve_draft_conflict", { draftId: input.draftId, keepBranchId: input.keepBranchId }),
+  acknowledge_draft_notice: (draftId) => invoke("acknowledge_draft_notice", { draftId }),
   get_notification_sound: () => invoke("get_notification_sound"),
   get_notification_persistence: () => invoke("get_notification_persistence"),
   startup_status: () => invoke("startup_status"),
@@ -618,6 +675,20 @@ export const tauriBridge: DesktopBridge = {
   attachment_retention_state: attachmentId => invoke("attachment_retention_state", { attachmentId }),
   load_state: (conversationId, historyFromMessageId, options) => invoke("load_state", { conversationId, historyFromMessageId, metadataOnly: options?.metadataOnly }), search_local: input => invoke("search_local", { input }), advance_search_index: input => invoke("advance_search_index", { input }), get_history_search: () => invoke("get_history_search"), start_history_search: ({ operationId }) => invoke("start_history_search", { input: { operationId } }), cancel_history_search: ({ attemptId }) => invoke("cancel_history_search", { input: { attemptId } }), load_message_window: input => invoke("load_message_window", { input }), open_external_url: url => invoke("open_external_url", { url }), load_history: (conversationId, beforeMessageId) => invoke("load_history", { conversationId, beforeMessageId }), configure_server: origin => invoke("configure_server", { origin }), unlock_sync: () => invoke("unlock_sync"), get_app_lock_status: () => invoke("get_app_lock_status"), retry_app_lock_check: () => invoke("retry_app_lock_check"), set_app_lock: enabled => invoke("set_app_lock", { enabled }), unlock_app: () => invoke("unlock_app"), save_draft: input => invoke("save_draft", { input }), discard_draft: input => invoke("discard_draft", { input }), send_draft: input => invoke("send_draft", { input }), mark_seen: visibleMessageIds => invoke("mark_seen", { visibleMessageIds }), mark_all_read: () => invoke("mark_all_read"), dismiss_notification: target => invoke("dismiss_notification", { target }), dismiss_all_notifications: () => invoke("dismiss_all_notifications"), set_app_muted: (sourceDeviceId, packageName, appName, muted) => invoke("set_app_muted", { sourceDeviceId, packageName, appName, muted }), mark_notifications_seen: targets => invoke("mark_notifications_seen", { targets }), set_notification_preferences: preferences => invoke("set_notification_preferences", { preferences }), set_notification_context: (view, conversationId) => invoke("set_notification_context", { view, conversationId }), request_notification_permission: () => invoke("request_notification_permission"), open_notification_settings: () => invoke("open_notification_settings"), pick_attachments: () => invoke("pick_attachments"), retry_attachment: id => invoke("retry_attachment", { id }), save_attachment: id => invoke("save_attachment", { id }), request_attachment_download: id => invoke("request_attachment_download", { id }), media_page: (conversationId, cursor, limit) => invoke("media_page", { conversationId, cursor, limit }), open_media: id => invoke("open_media", { id }), close_media: (id, url) => invoke("close_media", { id, url }), load_media: id => invoke("load_media", { id }), publish_attachment: id => invoke("publish_attachment", { id }), open_composer: conversationId => invoke("open_composer", { conversationId }), set_start_at_login: enabled => invoke("set_start_at_login", { enabled }), popout_conversation: conversationId => invoke("popout_conversation", { conversationId }), hide_head: conversationId => invoke("hide_head", { conversationId }), close_composer: () => invoke("close_composer"), close_head_panel: () => invoke("close_head_panel"), set_maximize_button_region: region => invoke("set_maximize_button_region", { region }), subscribe: listener => subscribeEvent("peppy://state", () => listener()), subscribe_maximize_button_hover: listener => subscribeWindowEvent("peppy://maximize-button-hover", payload => { if (typeof payload === "boolean") listener(payload); }), subscribe_drafts: listener => subscribeWindowEvent("peppy://draft", payload => { if (isDraft(payload)) listener(payload); }), subscribe_typing: listener => subscribeWindowEvent("peppy://typing", payload => { if (isTypingSignal(payload)) listener(payload); }), subscribe_lifecycle: listener => subscribeWindowEvent("peppy://lifecycle-request", (payload: unknown) => { if (isLifecycleRequest(payload)) listener(payload); }), subscribe_lifecycle_finished: listener => subscribeWindowEvent("peppy://lifecycle-finished", (payload: unknown) => { if (isLifecycleFinished(payload)) listener(payload); }), acknowledge_lifecycle: (id, ok) => invoke("acknowledge_lifecycle", { id, ok }),
    list_devices: () => invoke("list_devices"), revoke_device: deviceId => invoke("revoke_device", { deviceId }), list_contact_books: () => invoke("list_contact_books"), forget_contact_book: bookId => invoke("forget_contact_book", { bookId }), list_contacts: (bookId, query, offset, sort) => invoke("list_contacts", { bookId, query, offset, sort }), submit_contact_edit: input => invoke("submit_contact_edit", { input }), list_contact_edits: bookId => invoke("list_contact_edits", { bookId }), search_contact_recipients: (query, sourceDeviceId) => invoke("search_contact_recipients", { query, sourceDeviceId }), request_contact_repair: () => invoke("request_contact_repair"), request_contact_sync: bookId => invoke("request_contact_sync", { bookId }), get_contact_sync_request: bookId => invoke("get_contact_sync_request", { bookId }), pick_contact_photo: () => invoke("pick_contact_photo"), list_restorable_contacts: bookId => invoke("list_restorable_contacts", { bookId }), restore_contact: (bookId, contactId) => invoke("restore_contact", { bookId, contactId }), hosted_account: () => invoke("hosted_account"), hosted_origin_url: () => invoke("hosted_origin_url"), hosted_sign_in: provider => invoke("hosted_sign_in", { provider }), hosted_sign_out: () => invoke("hosted_sign_out"), hosted_open_billing: () => invoke("hosted_open_billing"), hosted_provision: () => invoke("hosted_provision"), billing_summary: () => invoke("billing_summary"), enrollment_discover: discoverEnrollment, enrollment_start_over: () => invoke("enrollment_start_over"), enrollment_create_owner: input => invoke("enrollment_create_owner", { input }), enrollment_sign_in: input => invoke("enrollment_sign_in", { input }), enrollment_connect_shared_secret: input => invoke("enrollment_connect_shared_secret", { input }), enrollment_begin_vault_request: input => invoke("enrollment_begin_vault_request", { input }), enrollment_vault_request_status: () => invoke("enrollment_vault_request_status"), enrollment_create_vault: input => invoke("enrollment_create_vault", { input }), enrollment_add_phone: method => invoke("enrollment_add_phone", { method }), enrollment_rotate_phone: method => invoke("enrollment_rotate_phone", { method }), enrollment_cancel_phone: () => invoke("enrollment_cancel_phone"), reveal_vault_secret: () => invoke("reveal_vault_secret"), enrollment_status: () => invoke("enrollment_status"), enrollment_approve: () => invoke("enrollment_approve"), enrollment_cancel: () => invoke("enrollment_cancel"), enrollment_sign_out: () => invoke("enrollment_sign_out"),
+  mcp_status: () => invoke("mcp_status"),
+  mcp_enable: () => invoke("mcp_enable"),
+  mcp_grants: () => invoke("mcp_grants"),
+  mcp_revoke_grant: id => invoke("mcp_revoke_grant", { id }),
+  webhooks_list: () => invoke("webhooks_list"),
+  webhook_create: input => invoke("webhook_create", { input }),
+  webhook_update: (id, input) => invoke("webhook_update", { id, input }),
+  webhook_delete: id => invoke("webhook_delete", { id }),
+  webhook_reveal_secret: id => invoke("webhook_reveal_secret", { id }),
+  webhook_rotate_secret: id => invoke("webhook_rotate_secret", { id }),
+  webhook_test: id => invoke("webhook_test", { id }),
+  mcp_authorization: id => invoke("mcp_authorization", { id }),
+  mcp_approve_authorization: (id, scopes) => invoke("mcp_approve_authorization", { id, scopes }),
+  mcp_deny_authorization: id => invoke("mcp_deny_authorization", { id }),
   enrollment_connect_computer: beginComputerClaimant,
   enrollment_computer_status: computerClaimantStatus,
   enrollment_confirm_computer: confirmComputerClaimant,

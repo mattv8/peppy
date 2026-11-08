@@ -28,6 +28,15 @@ struct OwnerRequest {
 fn empty_secret() -> SecretString {
     SecretString(Zeroizing::new(String::new()))
 }
+
+fn browser_enrollment_origin(origin: &str) -> Result<String, Failure> {
+    crate::origin::canonical_enrollment_origin(origin).map_err(|error| match error {
+        crate::origin::EnrollmentOriginError::Invalid => invalid(),
+        crate::origin::EnrollmentOriginError::HttpsRequired => {
+            Failure::new("https-required", "Use HTTPS to set up Peppy in a browser.")
+        }
+    })
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ManualChallenge {
@@ -123,6 +132,16 @@ struct FinishComputer {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct McpOwnerCreate {
+    pairing_json: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct McpOwnerCreated {
+    created_json: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct HostedOwnerPrepare {
     account_id: String,
     passphrase: SecretString,
@@ -164,7 +183,7 @@ impl BrowserCore {
             }
             "_worker_enrollment_new" => {
                 let input: NewClient = serde_json::from_str(raw.get()).map_err(|_| invalid())?;
-                let origin = canonical_origin(&input.origin)?;
+                let origin = browser_enrollment_origin(&input.origin)?;
                 if self.identity_session.is_some()
                     || self.client.is_some()
                     || self.prepared_enrollment_identity.is_some()
@@ -192,6 +211,7 @@ impl BrowserCore {
                 let session = self.identity_session.as_ref().ok_or_else(unavailable)?;
                 let (origin, profile, header) =
                     session.owner_enrollment_material(self.client()?)?;
+                let origin = browser_enrollment_origin(&origin)?;
                 self.enrollment = Some(
                     peppy_hosted_client::newenrollment::EnrollmentClient::for_existing_owner(
                         origin,
@@ -642,6 +662,65 @@ impl BrowserCore {
                 }
                 Ok(json!({}))
             }
+            "_worker_mcp_owner_create" => {
+                let input: McpOwnerCreate =
+                    serde_json::from_str(raw.get()).map_err(|_| invalid())?;
+                if self.context.device_role.as_deref() != Some("owner") {
+                    return Err(Failure::new(
+                        "owner_required",
+                        "Only an owner can enable MCP.",
+                    ));
+                }
+                let device_id = self.device_id.ok_or_else(unavailable)?;
+                let enrollment = self.mcp_enrollment.as_mut().ok_or_else(unavailable)?;
+                enrollment
+                    .configure_computer_owner_device(device_id.0)
+                    .map_err(|_| invalid())?;
+                let request = enrollment
+                    .scan_computer_qr(input.pairing_json)
+                    .map_err(|_| invalid())?;
+                Ok(json!({"request": request}))
+            }
+            "_worker_mcp_owner_created" => {
+                let input: McpOwnerCreated =
+                    serde_json::from_str(raw.get()).map_err(|_| invalid())?;
+                self.mcp_enrollment
+                    .as_mut()
+                    .ok_or_else(unavailable)?
+                    .accept_computer_created(input.created_json)
+                    .map_err(|_| invalid())?;
+                Ok(json!({}))
+            }
+            "_worker_mcp_owner_approve" => {
+                empty_new_enrollment(raw)?;
+                let client = self.client()?.clone();
+                let request = self
+                    .mcp_enrollment
+                    .as_mut()
+                    .ok_or_else(unavailable)?
+                    .approve_computer_enrollment_with_client(true, &client)
+                    .map_err(|_| unavailable())?;
+                Ok(json!({"request": request}))
+            }
+            "_worker_mcp_owner_begin" => {
+                let input: ExistingOwnerClient =
+                    serde_json::from_str(raw.get()).map_err(|_| invalid())?;
+                let session = self.identity_session.as_ref().ok_or_else(unavailable)?;
+                let (origin, profile, header) =
+                    session.owner_enrollment_material(self.client()?)?;
+                let origin = browser_enrollment_origin(&origin)?;
+                self.mcp_enrollment = Some(
+                    peppy_hosted_client::newenrollment::EnrollmentClient::for_existing_owner(
+                        origin,
+                        ClientKind::Browser,
+                        input.device_name,
+                        profile,
+                        header,
+                    )
+                    .map_err(|_| invalid())?,
+                );
+                Ok(json!({}))
+            }
             _ => Err(unknown_command()),
         }
     }
@@ -662,9 +741,9 @@ mod tests {
         ApproveComputerEnrollmentRequest, ComputerEnrollmentCreated, ComputerEnrollmentStatus,
     };
     use peppy_hosted_api::enrollment::{
-        AdmissionComplete, ClaimInvitationRequest, EnrollmentRole, EnrollmentState,
-        EnrollmentTranscript, InvitationClaim, InvitationPublicClaim, InvitationStatus,
-        PhonePairingQr, VaultMaterial,
+        AdmissionComplete, ClaimInstanceRequest, ClaimInstanceResponse, ClaimInvitationRequest,
+        EnrollmentRole, EnrollmentState, EnrollmentTranscript, InstanceSession, InvitationClaim,
+        InvitationPublicClaim, InvitationStatus, PhonePairingQr, VaultMaterial,
     };
 
     const ORIGIN: &str = "https://peppy.test/";
@@ -806,6 +885,20 @@ mod tests {
             serde_json::to_string(&complete).unwrap(),
             browser_root,
         )
+    }
+
+    #[test]
+    fn browser_enrollment_rejects_loopback_http_with_an_https_requirement() {
+        let mut core = BrowserCore::new(std::path::PathBuf::new());
+
+        let response = dispatch(
+            &mut core,
+            "_worker_enrollment_new",
+            r#"{"origin":"http://127.0.0.1:7000","deviceName":"Browser"}"#,
+        );
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "https-required");
     }
 
     #[test]
@@ -1095,6 +1188,30 @@ mod tests {
         );
         assert!(owner_view["sas"].as_str().is_some());
         assert!(owner_view["claimDigest"].as_str().is_some());
+        let mcp_pairing = peppy_hosted_client::newenrollment::EnrollmentClient::new(
+            ORIGIN.into(),
+            ClientKind::Desktop,
+            "Peppy MCP".into(),
+        )
+        .unwrap()
+        .begin_computer_claimant()
+        .unwrap();
+        value(&dispatch(
+            &mut core,
+            "_worker_mcp_owner_begin",
+            r#"{"deviceName":"Owner browser"}"#,
+        ));
+        value(&dispatch(
+            &mut core,
+            "_worker_mcp_owner_create",
+            &json!({"pairingJson": mcp_pairing}).to_string(),
+        ));
+        let preserved_view = value(&dispatch(
+            &mut core,
+            "_worker_enrollment_phone_status",
+            &json!({"statusJson": serde_json::to_string(&claimed).unwrap()}).to_string(),
+        ));
+        assert_eq!(preserved_view["claimDigest"], owner_view["claimDigest"]);
         let approval = value(&dispatch(
             &mut core,
             "_worker_enrollment_approve_phone_invitation",
@@ -1115,6 +1232,173 @@ mod tests {
                 .unwrap()
                 .contains("admission_signature")
         );
+    }
+
+    #[test]
+    fn browser_owner_enrollment_rejects_a_loopback_http_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(root.path().to_owned());
+        let origin = "http://127.0.0.1:7000";
+        let vault = VaultId::new();
+        let profile = KeyProfile::new(vault.0, 1).unwrap();
+        let header = create_vault_check_header(
+            &derive_root_key("correct horse battery staple", &profile).unwrap(),
+            profile.clone(),
+        )
+        .unwrap();
+        let metadata = crate::local_identity::IdentityMetadata {
+            version: 1,
+            origin: origin.into(),
+            vault_id: vault.0,
+            device_id: Uuid::new_v4(),
+            role: crate::local_identity::DeviceRole::Owner,
+            profile,
+            header,
+        };
+        value(&dispatch(
+            &mut core,
+            "_worker_initialize",
+            &json!({"origin": origin}).to_string(),
+        ));
+        value(&dispatch(
+            &mut core,
+            "_worker_enroll_identity",
+            &json!({
+                "metadata": metadata,
+                "deviceToken": "a".repeat(96),
+                "passphrase": "correct horse battery staple",
+            })
+            .to_string(),
+        ));
+
+        let response = dispatch(
+            &mut core,
+            "_worker_enrollment_new_owner_from_identity",
+            r#"{"deviceName":"Owner browser"}"#,
+        );
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "https-required");
+    }
+
+    #[test]
+    fn mcp_owner_facade_is_scoped_separately_from_browser_enrollment() {
+        let root = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(root.path().to_owned());
+        value(&dispatch(
+            &mut core,
+            "_worker_initialize",
+            &json!({"origin": ORIGIN}).to_string(),
+        ));
+        value(&dispatch(
+            &mut core,
+            "_worker_enrollment_new",
+            &json!({"origin": ORIGIN, "deviceName": "Owner browser"}).to_string(),
+        ));
+        let passphrase = "alpha bravo charlie delta echo foxtrot";
+        let request = value(&dispatch(
+            &mut core,
+            "_worker_enrollment_create_owner",
+            &json!({
+                "setupToken": "setup",
+                "username": "admin",
+                "adminPassword": "password long enough",
+                "passphrase": passphrase,
+            })
+            .to_string(),
+        ));
+        let claim: ClaimInstanceRequest =
+            serde_json::from_str(request["request"].as_str().unwrap()).unwrap();
+        let profile: KeyProfile = serde_json::from_value(claim.material.profile).unwrap();
+        let response = ClaimInstanceResponse {
+            vault_id: profile.vault_id,
+            device_id: claim.device.device_id,
+            replayed: false,
+            session: InstanceSession {
+                session_token: None,
+                csrf_token: Some("csrf".into()),
+                expires_in_seconds: 60,
+            },
+        };
+        value(&dispatch(
+            &mut core,
+            "_worker_enrollment_finish_owner",
+            &json!({
+                "responseJson": serde_json::to_string(&response).unwrap(),
+                "passphrase": passphrase,
+            })
+            .to_string(),
+        ));
+        assert!(core.enrollment.is_none());
+        assert_eq!(core.context.device_role.as_deref(), Some("owner"));
+        assert!(core.device_id.is_some());
+
+        let mut claimant = peppy_hosted_client::newenrollment::EnrollmentClient::new(
+            ORIGIN.into(),
+            ClientKind::Desktop,
+            "Peppy MCP".into(),
+        )
+        .unwrap();
+        let pairing_json = claimant.begin_computer_claimant().unwrap();
+        value(&dispatch(
+            &mut core,
+            "_worker_enrollment_new_owner_from_identity",
+            r#"{"deviceName":"Owner browser"}"#,
+        ));
+        value(&dispatch(
+            &mut core,
+            "_worker_enrollment_create_phone_invitation",
+            r#"{"method":"transfer"}"#,
+        ));
+        value(&dispatch(
+            &mut core,
+            "_worker_enrollment_consume_created_phone_invitation",
+            r#"{"createdJson":"{\"invitation_id\":\"00000000-0000-4000-8000-000000000001\",\"expires_in_seconds\":300}"}"#,
+        ));
+        value(&dispatch(
+            &mut core,
+            "_worker_mcp_owner_begin",
+            r#"{"deviceName":"Owner browser"}"#,
+        ));
+        let created = dispatch(
+            &mut core,
+            "_worker_mcp_owner_create",
+            &json!({"pairingJson": pairing_json}).to_string(),
+        );
+
+        assert_eq!(created["ok"], true, "{created}");
+        let phone_qr = dispatch(&mut core, "_worker_enrollment_get_phone_qr", "{}");
+        assert_eq!(phone_qr["ok"], true, "{phone_qr}");
+
+        let pairing_json = peppy_hosted_client::newenrollment::EnrollmentClient::new(
+            ORIGIN.into(),
+            ClientKind::Desktop,
+            "Peppy MCP retry".into(),
+        )
+        .unwrap()
+        .begin_computer_claimant()
+        .unwrap();
+        value(&dispatch(
+            &mut core,
+            "_worker_mcp_owner_begin",
+            r#"{"deviceName":"Owner browser"}"#,
+        ));
+        value(&dispatch(
+            &mut core,
+            "_worker_mcp_owner_create",
+            &json!({"pairingJson": pairing_json}).to_string(),
+        ));
+        let phone_qr = dispatch(&mut core, "_worker_enrollment_get_phone_qr", "{}");
+        assert_eq!(phone_qr["ok"], true, "{phone_qr}");
+
+        value(&dispatch(&mut core, "close", "{}"));
+        assert!(core.mcp_enrollment.is_none());
+        let after_close = dispatch(
+            &mut core,
+            "_worker_mcp_owner_create",
+            &json!({"pairingJson": pairing_json}).to_string(),
+        );
+        assert_eq!(after_close["ok"], false);
     }
 
     #[test]

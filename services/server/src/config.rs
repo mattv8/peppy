@@ -24,6 +24,9 @@ pub struct Config {
     pub replay_retention: Duration,
     /// Fixed operator relay origin. The server never receives provider/manage credentials.
     pub relay_url: Option<Url>,
+    /// Fixed private MCP worker endpoint and its separate control-token file.
+    pub mcp_worker_url: Option<Url>,
+    pub mcp_worker_token_file: Option<PathBuf>,
     pub web_client: Option<WebClientConfig>,
     pub web_live_trusted_origin: Option<Origin>,
 }
@@ -77,6 +80,8 @@ pub enum ConfigError {
     InsecureProductionUrl { name: &'static str },
     #[error("S3_INTERNAL_ENDPOINT, S3_ACCESS_KEY, and S3_SECRET_KEY must be configured together")]
     IncompleteS3,
+    #[error("PEPPY_MCP_WORKER_URL and PEPPY_MCP_WORKER_TOKEN_FILE must be configured together")]
+    IncompleteMcpWorker,
     #[error("S3_INTERNAL_ENDPOINT must be an origin without a path, query, or fragment")]
     S3EndpointMustBeOrigin,
     #[error("{name} contains characters unsafe for the SeaweedFS JSON configuration")]
@@ -150,6 +155,30 @@ impl Config {
         }
         let replay_retention = Duration::from_secs(u64::from(replay_retention_days) * 86_400);
         let relay_url = relay_url(&get, production)?;
+        let (mcp_worker_url, mcp_worker_token_file) = match (
+            get("PEPPY_MCP_WORKER_URL").filter(|value| !value.is_empty()),
+            get("PEPPY_MCP_WORKER_TOKEN_FILE").filter(|value| !value.is_empty()),
+        ) {
+            (None, None) => (None, None),
+            (Some(url), Some(token_file)) => {
+                let url = url.parse::<Url>().map_err(|source| ConfigError::Invalid {
+                    name: "PEPPY_MCP_WORKER_URL",
+                    message: source.to_string(),
+                })?;
+                if !matches!(url.scheme(), "http" | "https")
+                    || url.path() != "/"
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                {
+                    return Err(ConfigError::Invalid {
+                        name: "PEPPY_MCP_WORKER_URL",
+                        message: "must be an HTTP(S) origin".into(),
+                    });
+                }
+                (Some(url), Some(PathBuf::from(token_file)))
+            }
+            _ => return Err(ConfigError::IncompleteMcpWorker),
+        };
         let web_client = web_client_config(&get, public_api_url.as_ref())?;
         let web_live_trusted_origin = get("PEPPY_WEB_LIVE_TRUSTED_ORIGIN")
             .filter(|value| !value.is_empty())
@@ -255,6 +284,8 @@ impl Config {
             trusted_proxy_cidrs,
             replay_retention,
             relay_url,
+            mcp_worker_url,
+            mcp_worker_token_file,
             web_client,
             web_live_trusted_origin,
         })

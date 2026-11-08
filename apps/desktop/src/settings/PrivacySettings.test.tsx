@@ -23,6 +23,15 @@ describe("PrivacySettings", () => {
     expect(openUrl).not.toHaveBeenCalled();
   });
 
+  it("keeps the scope note as the link's accessible description and marks the footer section", () => {
+    const { container } = render(<PrivacySettings browserHost={false} />);
+
+    const button = screen.getByRole("button", { name: "Privacy Policy" });
+    expect(button).toHaveAccessibleDescription(peppyCopy.privacy_policy_scope);
+    expect(container.querySelector("footer#settings-privacy")).toHaveAttribute("data-settings-section", "privacy-links");
+    expect(screen.queryByText(peppyCopy.privacy_policy_scope, { selector: ":not(.visually-hidden)" })).not.toBeInTheDocument();
+  });
+
   it("opens only the canonical policy URL from the native host", async () => {
     render(<PrivacySettings browserHost={false} />);
 

@@ -770,6 +770,8 @@ fn test_config(database_url: &str) -> crate::config::Config {
                 .unwrap()
                 .origin(),
         ),
+        mcp_worker_url: None,
+        mcp_worker_token_file: None,
     }
 }
 

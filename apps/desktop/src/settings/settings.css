@@ -1,3 +1,41 @@
+/* Privacy footer: a centered link row at the very end of settings content. */
+#settings-privacy {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0 4px;
+  font-size: 12px;
+}
+
+#settings-privacy > a,
+#settings-privacy > button {
+  border: 0;
+  background: transparent;
+  color: var(--peppy-accent);
+  font: inherit;
+  padding: 0;
+}
+
+#settings-privacy > a:hover,
+#settings-privacy > button:hover {
+  color: var(--peppy-accent-hover);
+  text-decoration: underline;
+}
+
+#settings-privacy > a:focus-visible,
+#settings-privacy > button:focus-visible {
+  outline: 2px solid var(--peppy-focus);
+  outline-offset: 2px;
+}
+
+#settings-privacy .settings-error {
+  flex-basis: 100%;
+  margin: 0;
+  text-align: center;
+}
+
 #settings-layout {
   display: grid;
   min-height: 0;

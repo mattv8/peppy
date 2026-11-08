@@ -60,8 +60,10 @@ publish_job_names = %w[
   publish-prerelease-android
   publish-staging-server
   publish-staging-relay
+  publish-staging-mcp
   publish-production-server
   publish-production-relay
+  publish-production-mcp
   stable-release
 ]
 
@@ -136,7 +138,8 @@ successful_results = {
   'development-artifacts' => 'success',
   'publish-prerelease' => 'success',
   'publish-production-server' => 'success',
-  'publish-production-relay' => 'success'
+  'publish-production-relay' => 'success',
+  'publish-production-mcp' => 'success'
 }.freeze
 staging_context = {
   event: 'push', ref: 'refs/heads/staging', cancelled: false,
@@ -149,9 +152,9 @@ production_context = {
   outputs: { 'version.android_changed' => true, 'version.android_budget_refresh' => false }
 }.freeze
 
-staging_publishers = %w[publish-prerelease publish-staging-server publish-staging-relay]
+staging_publishers = %w[publish-prerelease publish-staging-server publish-staging-relay publish-staging-mcp]
 staging_publishers << 'publish-prerelease-android'
-production_publishers = %w[publish-production-server publish-production-relay stable-release]
+production_publishers = %w[publish-production-server publish-production-relay publish-production-mcp stable-release]
 staging_publishers.each do |job_name|
   condition = publish_conditions.fetch(job_name)
   assert.call(condition_allows.call(condition, **staging_context.merge(implicit_success: true)), "#{job_name} must run for an ordinary successful staging push")
@@ -198,7 +201,7 @@ end
     assert.call(!condition_allows.call(publish_conditions.fetch(job_name), **context.merge(results: results)), "#{job_name} must require a successful version job, not #{version_result}")
   end
 end
-%w[publish-production-server publish-production-relay].each do |publisher|
+%w[publish-production-server publish-production-relay publish-production-mcp].each do |publisher|
   %w[failure skipped cancelled].each do |publisher_result|
     results = successful_results.merge(publisher => publisher_result)
     assert.call(!condition_allows.call(publish_conditions.fetch('stable-release'), **production_context.merge(results: results)), "stable release must require #{publisher} success, not #{publisher_result}")
@@ -206,7 +209,8 @@ end
 end
 
 stable = ci_jobs.fetch('stable-release')
-assert.call(stable.fetch('needs').sort == %w[gate publish-production-relay publish-production-server version], 'stable release must wait for the gate and both edge publishers')
+assert.call(stable.fetch('needs').sort == %w[gate publish-production-mcp publish-production-relay publish-production-server version], 'stable release must wait for the gate and all three edge publishers')
+assert.call(ci_jobs.fetch('notify-hosted-production').fetch('needs').sort == %w[gate publish-production-relay publish-production-server], 'hosted dispatch must keep its server and relay payload contract')
 assert.call(stable.fetch('permissions') == { 'contents' => 'write', 'actions' => 'read', 'attestations' => 'write', 'id-token' => 'write' }, 'stable release must grant its nested publisher provenance permissions')
 assert.call(stable.fetch('concurrency').fetch('group') == 'stable-release', 'automatic stable release must serialize with manual release')
 assert.call(stable.fetch('with') == { 'bump' => 'auto', 'version' => '', 'dry_run' => false }, 'automatic release must use the safe automatic inputs')
@@ -280,6 +284,10 @@ assert.call(!release.fetch('jobs').key?('container'), 'release must not rebuild 
 assert.call(image_needs.sort == %w[artifacts prepare signing], 'stable server image promotion must wait for trusted artifacts')
 relay_needs = release.fetch('jobs').fetch('publish-relay-image').fetch('needs')
 assert.call(relay_needs.sort == %w[artifacts prepare signing], 'stable relay image promotion must wait for trusted artifacts')
+mcp_needs = release.fetch('jobs').fetch('publish-mcp-image').fetch('needs')
+assert.call(mcp_needs.sort == %w[artifacts prepare signing], 'stable MCP image promotion must wait for trusted artifacts')
+mcp_image = release.fetch('jobs').fetch('publish-mcp-image').fetch('with')
+assert.call(mcp_image.fetch('image') == 'hub.docker.visnovsky.us/library/peppy-mcp' && mcp_image.fetch('dockerfile') == 'infra/docker/mcp.Dockerfile' && mcp_image.fetch('context') == '.', 'stable MCP image must publish peppy-mcp from its Dockerfile at the repository root')
 
 signing = release.fetch('jobs').fetch('signing')
 assert.call(signing.fetch('environment') == 'updates-stable', 'signing readiness must resolve protected stable environment inputs')
@@ -298,9 +306,9 @@ assert.call(release_artifacts.fetch('if').include?('!cancelled()'), 'trusted art
 assert.call(release_artifacts.fetch('with').fetch('build_desktop') == true, 'stable release artifacts must always include desktop')
 
 publish_needs = release.fetch('jobs').fetch('publish').fetch('needs')
-assert.call(publish_needs.sort == %w[artifacts prepare publish-relay-image publish-server-image signing], 'stable publish must wait for trusted artifacts and both image publishers')
+assert.call(publish_needs.sort == %w[artifacts prepare publish-mcp-image publish-relay-image publish-server-image signing], 'stable publish must wait for trusted artifacts and all image publishers')
 assert.call(release.fetch('jobs').fetch('publish').fetch('if').include?('!cancelled()'), 'release publishing must not begin after cancellation')
-%w[publish-server-image publish-relay-image].each do |job_name|
+%w[publish-server-image publish-relay-image publish-mcp-image].each do |job_name|
   assert.call(release.fetch('jobs').fetch(job_name).fetch('if').include?('!cancelled()'), "#{job_name} must not begin after cancellation")
 end
 

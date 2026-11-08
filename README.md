@@ -18,6 +18,7 @@
 - [Quick Start](#quick-start)
 - [Clients](#clients)
 - [Post-install and first run](#post-install-and-first-run)
+- [Server-resident MCP](#server-resident-mcp)
 - [Concepts](#concepts)
 - [Operations](#operations)
 - [Contributing](#contributing)
@@ -192,6 +193,106 @@ The browser client uses the server's canonical API origin for enrollment and get
 
 For a source-based local development stack, use `just dev-setup` and `just dev-up`. Run `just smoke-infra` to start the root stack, check `/healthz` and `/readyz`, and run the storage check.
 
+### Server-resident MCP
+
+Peppy MCP is an opt-in, always-on client that runs beside the API on the same server. It is not a desktop bridge or a separate public hostname. For a release deployment, use matching, signed immutable API and worker image digests:
+
+```sh
+docker compose -f docker-compose.yml -f infra/compose/compose.community.yml -f infra/compose/compose.mcp.yml -f infra/compose/compose.community-mcp.yml up -d
+```
+
+Set `PEPPY_SERVER_IMAGE` and `PEPPY_MCP_IMAGE` to matching approved release digests. Do not mix a pinned API image with an arbitrary checkout-built worker. Obtain the companion worker's immutable digest from the release image publication and verify its signature before enabling this overlay. Use the operator-published Cosign public key, the same key the release publisher verifies with before promotion:
+
+```sh
+cosign verify --key <operator-published-cosign.pub> hub.docker.visnovsky.us/library/peppy-mcp@sha256:<digest>
+```
+
+Do not enable the overlay if verification fails or no digest-bound signature is found.
+
+For source development only, omit the two Community overlays:
+
+```sh
+docker compose -f docker-compose.yml -f infra/compose/compose.mcp.yml up -d
+```
+
+The overlay publishes no worker port. The existing server origin exposes `/mcp`; the API reaches the worker only on the internal `mcp-api` Compose network. The worker runs as UID 10001 with a read-only root filesystem. Its durable `mcp-state` volume holds encrypted client state, while the worker-owned `mcp-control` volume supplies a control token read-only to the API. The worker creates its control token and storage key only in an empty initialized volume. Keep both volumes private. Store the worker state on a local filesystem: its single-node lock does not support network filesystems or HA sharing.
+
+When backing up MCP, use the same MCP Compose overlays that run the worker. The backup stops the worker and adds the private, `0600` `mcp-state.tar.gz` archive to the backup set; it contains the storage key and must receive the same protection as vault recovery material. It never archives or records `mcp-control`: the worker regenerates that control token in a fresh control volume. Restore with the identical MCP overlays, to a fresh Compose project with no target volumes. Restore recreates only `mcp-state`, leaves the control volume to normal initialization, and does not start MCP; review the recovered deployment, then start it deliberately.
+
+Peppy Hosted keeps MCP optional. Operate one separately managed worker per hosted environment, with one stable private DNS alias and external state/control volumes shared only with the active API colors. Start and verify that singleton before applying its API overlay to either color. Upgrade or cut over the worker only while it is stopped; never run two workers against the same state volume. Existing Hosted releases that do not use the MCP overlays remain unchanged.
+
+In the desktop or web **Settings → Devices** view, an unlocked vault owner can enable Peppy MCP after accepting that the self-hosted server operator can hold the selected vault's purpose keys in the same-server worker. The current server is selected automatically. Enabling creates an ordinary enrolled device for that vault; it does not add a paid entitlement or require an enrollment CLI. The UI lists each authorized AI client and its read, text-send, and image-send permissions. Reapprove when the displayed status or epoch requires it. Mobile clients show the generic device roster; Android carrier behavior is unchanged and still requires its permission-ready Android gateway. iOS has no carrier executor, so MCP has no carrier effect there.
+
+Peppy MCP reads and sends only within an authorized client grant. Refreshing a token reissues the grant's full approved scope; create a new grant when a client needs fewer permissions. To connect an AI client, add `https://your-server/mcp` as a remote Streamable HTTP MCP server using OAuth. When it opens Peppy, unlock the vault on an owner device and approve only the requested permissions it needs. To verify the connection safely, ask: `List the available Peppy tools and their permissions. Do not read messages or send anything.` The AI client must be able to reach the server address. A cloud-hosted client cannot use an address that works only on a private network. Browser-based external MCP clients from another origin are unsupported: `/mcp` does not provide cross-origin browser access. Dynamic client registrations that remain idle without an authorization or live token expire after 24 hours and must register again. SMS and MMS still require an enabled, permission-ready Android gateway. A reaction-text request sends the literal text as a message; it is not a native carrier reaction. Queued sends are not delivery evidence, and an uncertain carrier outcome is not retried automatically.
+
+Removing the MCP device or revoking a client grant fences new MCP access. Cleanup of the server-side worker state is reported separately, and revocation cannot erase copies that an external AI client already received. If a backup or restore loses any bound component (the SQLCipher database, media and their keys, protected client cache, or device credential), remove and re-enable MCP from an unlocked owner device rather than trying to recreate the binding from a partial backup.
+
+#### Webhooks
+
+An unlocked vault owner can add up to 10 outbound webhooks per vault in desktop or web **Settings → Advanced**. A webhook fires for each inbound SMS or MMS and filters by sender: `all` sends every inbound message, `only` sends messages from the listed contacts or numbers, and `except` sends every message except those. Up to 50 filter entries are allowed per webhook. Delivery runs on the server-resident MCP worker, so no desktop, browser, or phone needs to be online. Webhooks need no extra configuration: they are available whenever Peppy MCP is enabled, and every control is in the settings UI. The MCP overlay runs the worker on two networks: `mcp-api`, an internal network shared only with the API, and `mcp-egress`, a non-internal network for webhook delivery. The worker is not on the storage or database network, and it still publishes no port.
+
+Each request carries Standard Webhooks headers:
+
+- `webhook-id`: stable for a given webhook and message. Use it to deduplicate.
+- `webhook-timestamp`: Unix seconds when the request was sent.
+- `webhook-signature`: `v1,<base64>`, an HMAC-SHA256 of `<webhook-id>.<webhook-timestamp>.<raw body>`, keyed with the base64-decoded part of the `whsec_…` signing secret.
+
+Any Standard Webhooks or Svix library can verify these headers. Verify against the raw body bytes before parsing the JSON. The signing secret appears in the webhook editor, where it can be copied or rotated.
+
+A `message.received` payload looks like this (values abbreviated):
+
+```json
+{
+  "type": "message.received",
+  "timestamp": "2026-11-07T14:02:11Z",
+  "source": "https://peppy.example.com",
+  "data": {
+    "webhook_id": "…",
+    "message_id": "…",
+    "conversation_id": "…",
+    "from": { "address": "+15551234567", "contact_name": "Jordan Lee" },
+    "to": ["+15557654321"],
+    "transport": "sms",
+    "subject": null,
+    "body": "Running ten minutes late.",
+    "sent_at": "2026-11-07T14:02:09Z",
+    "attachments": [{ "id": "…", "content_type": "image/jpeg", "size": 48211 }]
+  }
+}
+```
+
+`source` is the Peppy app origin, derived from the server's existing configuration. `contact_name` and `subject` may be `null`. Attachments include only an id, content type, and size, never bytes or URLs. The editor's **Send test** button sends a `webhook.test` event with `data.message` set to `"This is a test event from Peppy."`. A test is not queued and does not change the webhook's delivery status.
+
+Delivery semantics:
+
+- Delivery is at least once. Deduplicate on `webhook-id`.
+- A 2xx response within 10 seconds succeeds. Redirects are not followed; a 3xx response fails.
+- A failed delivery is retried after 5 seconds, 1 minute, 10 minutes, 1 hour, and 6 hours. After the sixth attempt fails, the delivery is dropped and the webhook shows as failed.
+- 5xx responses, timeouts, DNS failures, and connection failures are retried. Other 4xx responses are permanent and are not retried; 408, 425, and 429 are retried.
+- Pausing a webhook holds its queued deliveries; they are sent after it is resumed. Changing a webhook's URL or filter discards its queued deliveries. Renaming it keeps them.
+- Webhooks never backfill. Messages received more than five minutes before the webhook was created are not sent. Imported history and messages older than 24 hours are skipped.
+
+Endpoint policy:
+
+- Endpoints must use `https://` and resolve to public addresses.
+- Private and LAN, loopback, link-local (including the `169.254.169.254` metadata address), CGNAT, unique-local, and multicast destinations are always blocked. To reach a service on your LAN, expose it through a public HTTPS endpoint or tunnel.
+
+Privacy: webhook payloads contain plaintext message content, sent to the endpoint you configure. That traffic is outside Peppy's encryption. Queued deliveries are encrypted at rest in `mcp-state`.
+
+Lifecycle: webhook settings and queued deliveries live in the worker's encrypted state, so they are included in `mcp-state` backups. Removing the MCP device deletes them, and so does re-enabling MCP. Recovering MCP from a stale backup, described below, therefore also clears them.
+
+#### Recovering MCP after a stale backup
+
+Treat a restored MCP receipt, device credential, and worker state as stale. Do not start the restored worker or use a restored receipt to resume a send.
+
+1. Restore into the distinct project and keep the MCP overlay stopped. Start the restored API without the MCP overlay so it cannot contact the restored worker.
+2. From a trusted, unlocked desktop or web owner session, remove the restored MCP device or revoke it before any worker starts. This fences the old device at the server.
+3. Inspect the distinct project's `mcp-state` and `mcp-control` volumes, then remove only those inspected MCP volumes. Do not remove the database, attachment, or another project's volumes.
+4. Start the MCP overlay with fresh MCP volumes, then enable MCP again from the desktop or web owner view. This creates a fresh device enrollment and worker binding; do not reuse the prior completion receipt.
+5. Reconcile commands and carrier outcomes created after the backup. Keep uncertain attempts as `OutcomeUnknown`; do not automatically resend them.
+
+The automated recovery drill does not verify this MCP re-enrollment procedure. It only covers the documented disposable restore scope.
+
 ## Post-install and first run
 
 ### First-run setup and device connections
@@ -282,6 +383,17 @@ Contacts support structured names, nicknames, labeled phone numbers and emails, 
 Update participating clients before you enable Android notification mirroring. Older builds quarantine unfamiliar notification records and do not retry them automatically after an upgrade. Android requires notification access and the mirroring switch; apps are allowed by default, with per-phone filters available on the companion or desktop. Peppy's own notifications, duplicate default-SMS notifications, group summaries, ongoing or progress notifications, and empty notifications are excluded. Locked sync does not collect a plaintext notification backlog.
 
 The desktop shows a notification feed, app mutes, and dismissals. Phone dismissals sync through the vault. Desktop dismissal requests wait for the phone's next sync and Android background scheduling can delay them by 15 minutes or more; this is not an immediate remote-control channel. Group summaries can remain on the phone after their children are dismissed. The feed keeps up to 1,000 active notifications; bulk dismissal handles up to 100 at a time. Native banner behavior depends on OS permissions and settings.
+
+### Drafts and attachment limits
+
+- A draft expires 30 days after the server accepts an authored edit. Expiry closes the draft, clears the sealed bytes of its revisions, and deletes only private draft attachments that no message record, sent-message history, hold, or public copy still uses. Sent MMS media stays protected.
+- A draft whose upload was never attempted stays editable and sendable offline. If an upload was attempted and the server's acceptance is unknown, Peppy blocks local sending of that draft until the client reconnects and reconciles with the server.
+- Each draft allows up to three live branches. The vault attachment quota is set by `VAULT_ATTACHMENT_QUOTA_BYTES`; Compose defaults it to `536870912` bytes. Finalized attachments, unexpired upload reservations, and unpurged removals or public copies count against it.
+- On Android, MMS content version 4 can resize images and split a large message into groups. Split parts are sent in planned order on a best-effort basis, and carriers can deliver them out of order. Content version 3 and older get no split plan; an oversize message is refused.
+- Android keeps fitted MMS images as plaintext in app-private storage that Android does not back up, and removes them when the command settles or the fit fails.
+- Downgrading across migration 0026 is refused while draft data remains. Older client binaries refuse a database with a newer local schema; the current checkout uses schema 49.
+
+Carrier delivery order, production role permissions, and hosted deployment state are not established by this repository's tests.
 
 ### Compaction and recovery
 

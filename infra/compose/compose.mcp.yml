@@ -1,0 +1,78 @@
+# Same-server MCP worker overlay. Pass root docker-compose.yml first so paths
+# remain relative to the repository root.
+x-mcp-image: &mcp-image
+  build:
+    context: .
+    dockerfile: infra/docker/mcp.Dockerfile
+  image: peppy-mcp:local
+
+services:
+  mcp-state-init:
+    <<: *mcp-image
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command: >-
+      mkdir -p /var/lib/peppy-mcp /run/peppy-mcp &&
+      chown 10001:10001 /var/lib/peppy-mcp /run/peppy-mcp &&
+      chmod 0700 /var/lib/peppy-mcp /run/peppy-mcp
+    volumes:
+      - mcp-state:/var/lib/peppy-mcp
+      - mcp-control:/run/peppy-mcp
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    security_opt: [no-new-privileges:true]
+    network_mode: none
+    restart: "no"
+
+  mcp:
+    <<: *mcp-image
+    environment:
+      PEPPY_MCP_BIND_ADDR: 0.0.0.0:8091
+      PEPPY_MCP_STATE_DIR: /var/lib/peppy-mcp
+      PEPPY_MCP_API_URL: http://api:8080
+      PUBLIC_API_URL: ${PUBLIC_API_URL:?set in .env}
+      PEPPY_MCP_WORKER_TOKEN_FILE: /run/peppy-mcp/control-token
+      PEPPY_MCP_KEY_FILE: /var/lib/peppy-mcp/storage-key
+    depends_on:
+      mcp-state-init:
+        condition: service_completed_successfully
+    volumes:
+      - mcp-state:/var/lib/peppy-mcp
+      - mcp-control:/run/peppy-mcp
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent --show-error http://127.0.0.1:8091/healthz >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    # mcp-api reaches only the API control channel (no storage or database
+    # network); mcp-egress carries outbound webhook delivery. No published ports.
+    networks: [mcp-api, mcp-egress]
+    restart: unless-stopped
+
+  api:
+    environment:
+      PEPPY_MCP_WORKER_URL: http://mcp:8091
+      PEPPY_MCP_WORKER_TOKEN_FILE: /run/peppy-mcp/control-token
+    depends_on:
+      mcp:
+        condition: service_healthy
+    networks: [private, edge, mcp-api]
+    volumes:
+      - mcp-control:/run/peppy-mcp:ro
+
+networks:
+  mcp-api:
+    internal: true
+  mcp-egress:
+
+volumes:
+  mcp-state:
+  mcp-control:

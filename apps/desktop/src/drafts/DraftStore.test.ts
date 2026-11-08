@@ -15,6 +15,22 @@ const draft = (overrides: Partial<Draft> = {}): Draft => ({
 const events = { changed: () => {}, rekeyed: () => {} };
 
 describe("DraftStore authoritative coordination", () => {
+  it("silently adopts a clean same-draft text mirror", () => {
+    const notices: [string, string][] = [];
+    const store = new DraftStore(async input => draft({ ...input, revision: "2" }), {
+      ...events,
+      notice: (key, event) => notices.push([key, event]),
+    });
+    store.adopt("conversation-one", draft({ text: "first", revision: "1" }));
+
+    store.applyAuthoritative(draft({ text: "mirrored", revision: "2" }));
+
+    expect(store.get("conversation-one")?.content.text).toBe("mirrored");
+    expect(store.hasUndo("conversation-one")).toBe(false);
+    expect(store.retainedText("conversation-one")).toBeUndefined();
+    expect(notices).toEqual([]);
+  });
+
   it("does not restore retained text onto different recipients", async () => {
     const remote = draft({ text: "remote", recipientIds: ["+15550002"], revision: "2" });
     const store = new DraftStore(async input => {
@@ -460,28 +476,6 @@ describe("DraftStore authoritative coordination", () => {
     await saving;
   });
 
-  it("preserves a clean text-only remote replacement as one generation-fenced undo", async () => {
-    const notices: string[] = [];
-    let host = draft({ text: "A", revision: "1" });
-    const persist = vi.fn(async input => {
-      host = draft({ ...input, revision: "3" });
-      return host;
-    });
-    const store = new DraftStore(persist, { ...events, notice: (_, event) => notices.push(event) }, async () => host);
-    store.adopt("conversation-one", host);
-    const remote = draft({ text: "B", revision: "2" });
-    host = remote;
-
-    store.applyAuthoritative(remote);
-    store.applyAuthoritative(remote);
-
-    expect(store.get("conversation-one")?.content.text).toBe("B");
-    expect(store.hasUndo("conversation-one")).toBe(true);
-    expect(notices).toEqual(["remote-update"]);
-    await expect(store.undo("conversation-one")).resolves.toEqual({ ok: true });
-    expect(persist).toHaveBeenCalledWith(expect.objectContaining({ text: "A", expectedRevision: "2" }));
-  });
-
   it("does not restore an old undo after later local edits and host updates", async () => {
     let host = draft({ text: "A", revision: "1" });
     const writes: DraftInput[] = [];
@@ -502,33 +496,6 @@ describe("DraftStore authoritative coordination", () => {
     await expect(store.undo("conversation-one")).resolves.toEqual({ ok: false, error: "No retained draft text is available." });
     expect(store.get("conversation-one")?.content.text).toBe("E");
     expect(writes.map(write => write.text)).not.toContain("A");
-  });
-
-  it("rejects undo when the loaded host no longer matches the reviewed revision", async () => {
-    const persist = vi.fn(async (input: DraftInput) => draft({ ...input, revision: "4" }));
-    const store = new DraftStore(persist, events, async () => draft({ text: "D", revision: "3" }));
-    store.adopt("conversation-one", draft({ text: "A", revision: "1" }));
-    store.applyAuthoritative(draft({ text: "B", revision: "2" }));
-
-    await expect(store.undo("conversation-one")).resolves.toEqual({ ok: false, error: "Draft structure changed; local text is kept for review." });
-    expect(store.get("conversation-one")?.content.text).toBe("B");
-    expect(persist).not.toHaveBeenCalled();
-  });
-
-  it("fences an undo load when typing changes the draft while it awaits the host", async () => {
-    let resolveLoad!: (value: Draft) => void;
-    const persist = vi.fn(async (input: DraftInput) => draft({ ...input, revision: "3" }));
-    const store = new DraftStore(persist, events, async () => new Promise(resolve => { resolveLoad = resolve; }));
-    store.adopt("conversation-one", draft({ text: "A", revision: "1" }));
-    store.applyAuthoritative(draft({ text: "B", revision: "2" }));
-
-    const pendingUndo = store.undo("conversation-one");
-    await vi.waitFor(() => expect(resolveLoad).toBeTypeOf("function"));
-    await store.edit("conversation-one", { text: "typing" });
-    resolveLoad(draft({ text: "B", revision: "2" }));
-
-    await expect(pendingUndo).resolves.toEqual({ ok: false, error: "Draft structure changed; local text is kept for review." });
-    expect(store.get("conversation-one")?.content.text).toBe("typing");
   });
 
   it("acknowledges an in-flight held save before the next CAS edit", async () => {
@@ -785,21 +752,6 @@ describe("DraftStore authoritative coordination", () => {
     await expect(store.flush("conversation-one")).resolves.toEqual({ ok: true });
   });
 
-  it("does not apply a delayed undo load after reset", async () => {
-    let resolveUndoLoad: ((value: Draft | undefined) => void) | undefined;
-    const remote = draft({ text: "remote", revision: "2" });
-    const store = new DraftStore(async input => draft(input), events, async () => new Promise(resolve => { resolveUndoLoad = resolve; }));
-    store.adopt("conversation-one", draft({ text: "original" }));
-    store.applyAuthoritative(remote);
-    const undo = store.undo("conversation-one");
-    await vi.waitFor(() => expect(resolveUndoLoad).toBeTypeOf("function"));
-    store.reset();
-    resolveUndoLoad!(remote);
-
-    expect(await undo).toEqual({ ok: true });
-    expect(store.get("conversation-one")).toBeUndefined();
-  });
-
   it("reset clears plaintext and fences delayed save, load, and undo callbacks", async () => {
     let resolveSave: ((value: Draft) => void) | undefined;
     let resolveLoad: ((value: Draft | undefined) => void) | undefined;
@@ -967,6 +919,103 @@ describe("DraftStore authoritative coordination", () => {
     expect(outcome).toEqual({ ok: false, error: "A stored draft conflicts with local edits. Review both versions before saving." });
     expect(outcome).not.toHaveProperty("reviewRequired");
   });
+
+  it("coalesces rapid edits behind one in-flight save and settles every caller", async () => {
+    let releaseFirst!: (saved: Draft) => void;
+    const writes: DraftInput[] = [];
+    const store = new DraftStore(async input => {
+      writes.push(input);
+      if (writes.length === 1) return new Promise(resolve => { releaseFirst = resolve; });
+      return draft({ ...input, revision: String(writes.length + 1) });
+    }, events);
+    store.adopt("conversation-one", draft({ text: "" }));
+
+    const first = store.edit("conversation-one", { text: "first" });
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    const rapidEdits = [
+      store.edit("conversation-one", { text: "second" }),
+      store.edit("conversation-one", { text: "third" }),
+      store.edit("conversation-one", { text: "latest" }),
+    ];
+    releaseFirst(draft({ ...writes[0], revision: "2" }));
+
+    await expect(Promise.all([first, ...rapidEdits])).resolves.toEqual([{ ok: true }, { ok: true }, { ok: true }, { ok: true }]);
+    expect(writes).toHaveLength(2);
+    expect(writes[1]).toMatchObject({ text: "latest", expectedRevision: "2" });
+  });
+
+  it("coalesces two edits made in the same tick", async () => {
+    let releaseFirst!: (saved: Draft) => void;
+    const writes: DraftInput[] = [];
+    const store = new DraftStore(async input => {
+      writes.push(input);
+      if (writes.length === 1) return new Promise(resolve => { releaseFirst = resolve; });
+      return draft({ ...input, revision: "3" });
+    }, events);
+    store.adopt("conversation-one", draft({ text: "" }));
+
+    const first = store.edit("conversation-one", { text: "first" });
+    const second = store.edit("conversation-one", { text: "second" });
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]).toMatchObject({ text: "second" });
+    releaseFirst(draft({ ...writes[0], revision: "2" }));
+
+    await expect(Promise.all([first, second])).resolves.toEqual([{ ok: true }, { ok: true }]);
+    expect(writes).toHaveLength(1);
+  });
+
+  it("fails all coalesced callers without retrying after their pending save fails", async () => {
+    let releaseFirst!: (saved: Draft) => void;
+    const writes: DraftInput[] = [];
+    const store = new DraftStore(async input => {
+      writes.push(input);
+      if (writes.length === 1) return new Promise(resolve => { releaseFirst = resolve; });
+      if (writes.length === 2) throw { code: "io", message: "disk full" };
+      return draft({ ...input, revision: String(writes.length + 1) });
+    }, events);
+    store.adopt("conversation-one", draft({ text: "" }));
+
+    const first = store.edit("conversation-one", { text: "first" });
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    const rapidEdits = [
+      store.edit("conversation-one", { text: "second" }),
+      store.edit("conversation-one", { text: "latest" }),
+    ];
+    releaseFirst(draft({ ...writes[0], revision: "2" }));
+
+    await expect(first).resolves.toEqual({ ok: true });
+    await expect(Promise.all(rapidEdits)).resolves.toEqual([
+      { ok: false, error: "disk full" },
+      { ok: false, error: "disk full" },
+    ]);
+    expect(writes).toHaveLength(2);
+  });
+
+  it("flush waits for the latest coalesced content", async () => {
+    const releases: Array<(saved: Draft) => void> = [];
+    const writes: DraftInput[] = [];
+    const store = new DraftStore(async input => {
+      writes.push(input);
+      return new Promise(resolve => { releases.push(resolve); });
+    }, events);
+    store.adopt("conversation-one", draft({ text: "" }));
+
+    void store.edit("conversation-one", { text: "first" });
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    void store.edit("conversation-one", { text: "latest" });
+    const flushing = store.flush("conversation-one");
+    releases[0](draft({ ...writes[0], revision: "2" }));
+    await vi.waitFor(() => expect(writes).toHaveLength(2));
+    let flushed = false;
+    void flushing.then(() => { flushed = true; });
+    await Promise.resolve();
+    expect(flushed).toBe(false);
+    releases[1](draft({ ...writes[1], revision: "3" }));
+
+    await expect(flushing).resolves.toEqual({ ok: true });
+    expect(writes[1]).toMatchObject({ text: "latest", expectedRevision: "2" });
+  });
+
 });
 
 describe("DraftStore stale-send review reconciliation", () => {

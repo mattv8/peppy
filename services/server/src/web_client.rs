@@ -206,6 +206,13 @@ fn is_api_path(path: &str) -> bool {
         || path.starts_with("/v1/")
         || path == "/file"
         || path.starts_with("/file/")
+        || path == "/mcp"
+        || path == "/.well-known/oauth-protected-resource"
+        || path == "/.well-known/oauth-authorization-server"
+        || path == "/oauth/register"
+        || path == "/oauth/authorize"
+        || path == "/oauth/token"
+        || path == "/oauth/revoke"
 }
 
 /// Exact app-host paths forwarded to the API router. Each is matched by path

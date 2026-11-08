@@ -45,6 +45,52 @@ describe("native computer claimant normalization", () => {
   });
 });
 
+describe("pasted attachment bridge", () => {
+  beforeEach(() => invokeMock.mockReset());
+
+  it("sends each pasted image as raw bytes with encoded attachment headers", async () => {
+    invokeMock.mockResolvedValue({ id: "attachment-1", name: "café.png", mediaType: "image/png", byteSize: 3, state: "ready" });
+    const bytes = new Uint8Array([1, 2, 3]).buffer;
+
+    await expect(tauriBridge.prepare_pasted_attachments([{ bytes, name: "café.png", mediaType: "image/png" }])).resolves.toMatchObject({ views: [{ id: "attachment-1" }], failures: [] });
+
+    expect(invokeMock).toHaveBeenCalledWith("prepare_pasted_attachment", bytes, {
+      headers: { "peppy-attachment-name": "caf%C3%A9.png", "peppy-attachment-type": "image/png" },
+    });
+  });
+
+  it("prepares pasted images sequentially, retains successful views, and falls back for empty names", async () => {
+    const first = new Uint8Array([1]).buffer;
+    const second = new Uint8Array([2]).buffer;
+    invokeMock
+      .mockResolvedValueOnce({ id: "attachment-1", name: "first.png", mediaType: "image/png", byteSize: 1, state: "ready" })
+      .mockRejectedValueOnce(new Error("disk full"));
+
+    await expect(tauriBridge.prepare_pasted_attachments([
+      { bytes: first, name: "first.png", mediaType: "image/png" },
+      { bytes: second, name: "", mediaType: "image/png" },
+    ])).resolves.toEqual({
+      views: [{ id: "attachment-1", name: "first.png", mediaType: "image/png", byteSize: 1, state: "ready" }],
+      failures: ["Pasted image: disk full"],
+    });
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "prepare_pasted_attachment", first, {
+      headers: { "peppy-attachment-name": "first.png", "peppy-attachment-type": "image/png" },
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "prepare_pasted_attachment", second, {
+      headers: { "peppy-attachment-name": "pasted-image", "peppy-attachment-type": "image/png" },
+    });
+  });
+
+  it("reports a native plain-object rejection reason", async () => {
+    invokeMock.mockRejectedValueOnce({ message: "Image is too large" });
+
+    await expect(tauriBridge.prepare_pasted_attachments([
+      { bytes: new Uint8Array([1]).buffer, name: "large.png", mediaType: "image/png" },
+    ])).resolves.toEqual({ views: [], failures: ["large.png: Image is too large"] });
+  });
+});
+
 describe("bridge subscriptions", () => {
   beforeEach(() => {
     invokeMock.mockClear();
@@ -119,6 +165,15 @@ describe("bridge subscriptions", () => {
     handler?.({ payload: true });
     expect(listener).toHaveBeenCalledOnce();
     expect(listener).toHaveBeenCalledWith(true);
+    invokeMock.mockClear();
+  });
+
+  it("forwards draft conflict and notice actions with native camelCase arguments", async () => {
+    invokeMock.mockResolvedValue({ id: "draft-1" });
+    await tauriBridge.resolve_draft_conflict({ draftId: "draft-1", keepBranchId: null });
+    await tauriBridge.acknowledge_draft_notice("draft-1");
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "resolve_draft_conflict", { draftId: "draft-1", keepBranchId: null });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "acknowledge_draft_notice", { draftId: "draft-1" });
     invokeMock.mockClear();
   });
 
@@ -254,6 +309,13 @@ describe("bridge subscriptions", () => {
     await tauriBridge.store_restore();
     await tauriBridge.open_store_subscriptions();
     await tauriBridge.billing_summary();
+    await tauriBridge.webhooks_list();
+    await tauriBridge.webhook_create({ name: null, url: "https://hooks.example.test", events: ["message.received"], filterMode: "all", filter: [], paused: false });
+    await tauriBridge.webhook_update("00000000-0000-4000-8000-000000000001", { name: "Updated", url: "https://hooks.example.test", events: ["message.received"], filterMode: "all", filter: [], paused: false });
+    await tauriBridge.webhook_delete("00000000-0000-4000-8000-000000000001");
+    await tauriBridge.webhook_reveal_secret("00000000-0000-4000-8000-000000000001");
+    await tauriBridge.webhook_rotate_secret("00000000-0000-4000-8000-000000000001");
+    await tauriBridge.webhook_test("00000000-0000-4000-8000-000000000001");
 
     expect(invokeMock).toHaveBeenNthCalledWith(1, "list_devices", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(2, "revoke_device", { deviceId: "device-id" });
@@ -284,6 +346,13 @@ describe("bridge subscriptions", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(27, "store_restore", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(28, "open_store_subscriptions", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(29, "billing_summary", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(30, "webhooks_list", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(31, "webhook_create", { input: { name: null, url: "https://hooks.example.test", events: ["message.received"], filterMode: "all", filter: [], paused: false } });
+    expect(invokeMock).toHaveBeenNthCalledWith(32, "webhook_update", { id: "00000000-0000-4000-8000-000000000001", input: { name: "Updated", url: "https://hooks.example.test", events: ["message.received"], filterMode: "all", filter: [], paused: false } });
+    expect(invokeMock).toHaveBeenNthCalledWith(33, "webhook_delete", { id: "00000000-0000-4000-8000-000000000001" });
+    expect(invokeMock).toHaveBeenNthCalledWith(34, "webhook_reveal_secret", { id: "00000000-0000-4000-8000-000000000001" });
+    expect(invokeMock).toHaveBeenNthCalledWith(35, "webhook_rotate_secret", { id: "00000000-0000-4000-8000-000000000001" });
+    expect(invokeMock).toHaveBeenNthCalledWith(36, "webhook_test", { id: "00000000-0000-4000-8000-000000000001" });
   });
 
   it("opens a media viewer with its conversation, attachment, and message", async () => {
@@ -303,6 +372,24 @@ describe("fixture draft saves", () => {
   beforeEach(async () => {
     vi.resetModules();
     ({ fixtureBridge } = await import("./bridge"));
+  });
+
+  it("keeps fixture webhook secrets consistent across create, reveal, and rotation", async () => {
+    const created = await fixtureBridge.webhook_create({
+      name: "Fixture webhook",
+      url: "https://hooks.example.test/fixture",
+      events: ["message.received"],
+      filterMode: "all",
+      filter: [],
+      paused: false,
+    });
+
+    expect(await fixtureBridge.webhook_reveal_secret(created.webhook.id)).toEqual({ id: created.webhook.id, secret: created.secret });
+    const firstRotation = await fixtureBridge.webhook_rotate_secret(created.webhook.id);
+    expect(await fixtureBridge.webhook_reveal_secret(created.webhook.id)).toEqual(firstRotation);
+    const secondRotation = await fixtureBridge.webhook_rotate_secret(created.webhook.id);
+    expect(secondRotation.secret).not.toBe(firstRotation.secret);
+    expect(await fixtureBridge.webhook_reveal_secret(created.webhook.id)).toEqual(secondRotation);
   });
 
   it("marks every fixture conversation unread count once", async () => {

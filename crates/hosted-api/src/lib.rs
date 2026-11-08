@@ -4,6 +4,8 @@
 //! billing, and provisioning APIs. All types are designed for clean JSON
 //! roundtripping with explicit error handling for unknown enum variants.
 
+pub mod mcp;
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
@@ -994,6 +996,7 @@ pub mod billing_play;
 pub mod billing_web;
 pub mod computer_enrollment;
 pub mod devices;
+pub mod drafts;
 pub mod enrollment;
 pub mod presence;
 pub mod tester_admin;

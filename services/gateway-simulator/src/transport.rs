@@ -2,6 +2,78 @@ use std::{env, ffi::OsString, fs, time::Duration};
 
 use crate::SimulatorError;
 
+/// A validated destination paired with a client that does not follow redirects.
+pub struct HttpTransport {
+    origin: String,
+    client: reqwest::Client,
+}
+
+impl HttpTransport {
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
+}
+
+pub(crate) fn transport_for_validated_origin(
+    origin: String,
+) -> Result<HttpTransport, SimulatorError> {
+    Ok(HttpTransport {
+        client: http_client(&origin)?,
+        origin,
+    })
+}
+
+/// Builds the worker's fixed private API transport. Unlike public simulator origins, a private
+/// service endpoint may use HTTP for a Compose network, but it still cannot contain credentials
+/// or URL components that would change the request destination.
+pub fn private_http_transport(origin: &str) -> Result<HttpTransport, SimulatorError> {
+    let origin = private_origin(origin)?;
+    Ok(HttpTransport {
+        client: private_http_client(&origin)?,
+        origin,
+    })
+}
+
+/// Combines a fixed private API endpoint with an already configured bounded no-redirect client.
+/// This is for hosts that must provide DNS resolution explicitly, such as container tests.
+#[cfg(test)]
+fn private_http_transport_with_client(
+    origin: &str,
+    client: reqwest::Client,
+) -> Result<HttpTransport, SimulatorError> {
+    Ok(HttpTransport {
+        origin: private_origin(origin)?,
+        client,
+    })
+}
+
+fn private_origin(origin: &str) -> Result<String, SimulatorError> {
+    let parsed = url::Url::parse(origin).map_err(|_| SimulatorError::Response)?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(SimulatorError::Response);
+    }
+    Ok(parsed.origin().ascii_serialization())
+}
+
+fn private_http_client(origin: &str) -> Result<reqwest::Client, SimulatorError> {
+    let development_certificate = loopback_https(origin).then(|| env::var_os("PEPPY_DEV_TLS_CERT"));
+    http_client_builder(origin, development_certificate.flatten())?
+        .no_proxy()
+        .build()
+        .map_err(|_| SimulatorError::Http)
+}
+
 /// Builds the simulator's HTTPS client for `origin`.
 ///
 /// The development CA is deliberately scoped to loopback HTTPS destinations so it cannot broaden
@@ -218,6 +290,62 @@ mod tests {
             .resolve("localhost", SocketAddr::from(([127, 0, 0, 1], port)))
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn private_transport_allows_compose_http_with_a_resolved_backend() {
+        assert_eq!(
+            private_http_transport("http://api:8080").unwrap().origin(),
+            "http://api:8080"
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let received = std::io::Read::read(&mut stream, &mut request).unwrap();
+            assert!(
+                std::str::from_utf8(&request[..received])
+                    .unwrap()
+                    .starts_with("GET /health HTTP/1.1")
+            );
+            std::io::Write::write_all(
+                &mut stream,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+            )
+            .unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .resolve("api", address)
+            .build()
+            .unwrap();
+        let transport =
+            private_http_transport_with_client(&format!("http://api:{}", address.port()), client)
+                .unwrap();
+
+        let response = transport
+            .client()
+            .get(format!("{}/health", transport.origin()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn private_transport_rejects_url_components_outside_the_fixed_origin() {
+        for origin in [
+            "ftp://api:8080",
+            "http://user@api:8080",
+            "http://api:8080/path",
+            "http://api:8080?query=1",
+            "http://api:8080#fragment",
+        ] {
+            assert!(private_http_transport(origin).is_err(), "accepted {origin}");
+        }
     }
 
     #[tokio::test]

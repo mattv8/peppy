@@ -131,6 +131,8 @@ impl Fixture {
             trusted_proxy_cidrs: vec![],
             replay_retention: Duration::from_secs(7 * 86_400),
             relay_url: None,
+            mcp_worker_url: None,
+            mcp_worker_token_file: None,
             web_client: None,
             web_live_trusted_origin: None,
         }
@@ -835,6 +837,160 @@ async fn live_ticket_resolver_and_consume_are_runtime_scoped() {
 }
 
 #[tokio::test]
+async fn mcp_cleanup_queue_is_maintenance_only_and_oauth_sweep_is_executable() {
+    let fixture = Fixture::new().await;
+    for statement in [
+        "SELECT 1 FROM mcp_cleanup_jobs",
+        "INSERT INTO mcp_cleanup_jobs(vault_id,worker_device_id) VALUES(gen_random_uuid(),gen_random_uuid())",
+        "UPDATE mcp_cleanup_jobs SET attempts=attempts",
+        "DELETE FROM mcp_cleanup_jobs",
+    ] {
+        assert!(
+            sqlx::query(statement)
+                .execute(&fixture.runtime)
+                .await
+                .is_err()
+        );
+    }
+    let maintenance_privileges: (bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT has_table_privilege(current_user, 'mcp_cleanup_jobs', 'SELECT'), has_table_privilege(current_user, 'mcp_cleanup_jobs', 'UPDATE'), has_table_privilege(current_user, 'mcp_cleanup_jobs', 'DELETE'), has_table_privilege(current_user, 'mcp_cleanup_jobs', 'INSERT'), has_table_privilege(current_user, 'mcp_cleanup_jobs', 'TRUNCATE'), has_table_privilege(current_user, 'mcp_cleanup_jobs', 'REFERENCES'), has_table_privilege(current_user, 'mcp_cleanup_jobs', 'TRIGGER')",
+    )
+    .fetch_one(&fixture.maintenance)
+    .await
+    .unwrap();
+    assert_eq!(
+        maintenance_privileges,
+        (true, true, true, false, false, false, false)
+    );
+    sqlx::query("SELECT mcp_sweep_oauth()")
+        .execute(&fixture.maintenance)
+        .await
+        .unwrap();
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn runtime_cleanup_triggers_ignore_a_temporary_queue_shadow() {
+    let fixture = Fixture::new().await;
+    let device_vault = Uuid::new_v4();
+    let operation_vault = Uuid::new_v4();
+    let vault_vault = Uuid::new_v4();
+    let device_id = Uuid::new_v4();
+    let operation_owner = Uuid::new_v4();
+    let operation_worker = Uuid::new_v4();
+    let vault_device = Uuid::new_v4();
+
+    for (vault, device) in [
+        (device_vault, device_id),
+        (operation_vault, operation_owner),
+        (vault_vault, vault_device),
+    ] {
+        sqlx::query("INSERT INTO vaults(vault_id,public_key_profile,encrypted_vault_check_header,key_epoch,profile_fingerprint) VALUES($1,'{}',$2,1,$3)")
+            .bind(vault)
+            .bind([1_u8].as_slice())
+            .bind("f".repeat(64))
+            .execute(&fixture.migration)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch,name,kind) VALUES($1,$2,'owner','{}',$3,1,'owner','desktop')")
+            .bind(vault)
+            .bind(device)
+            .bind("f".repeat(64))
+            .execute(&fixture.migration)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO mcp_devices(vault_id,device_id) VALUES($1,$2),($3,$4)")
+        .bind(device_vault)
+        .bind(device_id)
+        .bind(vault_vault)
+        .bind(vault_device)
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO mcp_operations(id,vault_id,owner_device_id,worker_device_id,state) VALUES($1,$2,$3,$4,'activated')")
+        .bind(Uuid::new_v4())
+        .bind(operation_vault)
+        .bind(operation_owner)
+        .bind(operation_worker)
+        .execute(&fixture.migration)
+        .await
+        .unwrap();
+
+    let mut runtime = fixture.runtime.begin().await.unwrap();
+    sqlx::raw_sql(
+        "CREATE TEMP TABLE mcp_cleanup_jobs(vault_id uuid, worker_device_id uuid, created_at timestamptz, attempts integer, last_attempt_at timestamptz); \
+         CREATE FUNCTION pg_temp.shadow_cleanup_job() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'temporary shadow trigger executed'; END $$; \
+         CREATE TRIGGER shadow_cleanup_job BEFORE INSERT ON mcp_cleanup_jobs FOR EACH ROW EXECUTE FUNCTION pg_temp.shadow_cleanup_job();",
+    )
+    .execute(&mut *runtime)
+    .await
+    .unwrap();
+    for (vault, statement, id) in [
+        (
+            device_vault,
+            "DELETE FROM devices WHERE vault_id=$1 AND device_id=$2",
+            device_id,
+        ),
+        (
+            operation_vault,
+            "DELETE FROM mcp_operations WHERE vault_id=$1",
+            operation_owner,
+        ),
+        (
+            vault_vault,
+            "DELETE FROM vaults WHERE vault_id=$1",
+            vault_device,
+        ),
+    ] {
+        sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+            .bind(vault.to_string())
+            .execute(&mut *runtime)
+            .await
+            .unwrap();
+        if statement.contains("device_id") {
+            sqlx::query(statement)
+                .bind(vault)
+                .bind(id)
+                .execute(&mut *runtime)
+                .await
+                .unwrap();
+        } else {
+            if vault == vault_vault {
+                sqlx::query("DELETE FROM devices WHERE vault_id=$1 AND device_id=$2")
+                    .bind(vault)
+                    .bind(id)
+                    .execute(&mut *runtime)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query(statement)
+                .bind(vault)
+                .execute(&mut *runtime)
+                .await
+                .unwrap();
+        }
+    }
+    let shadow_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM mcp_cleanup_jobs")
+        .fetch_one(&mut *runtime)
+        .await
+        .unwrap();
+    assert_eq!(shadow_rows, 0);
+    runtime.commit().await.unwrap();
+
+    let real_jobs: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM mcp_cleanup_jobs WHERE vault_id IN ($1,$2,$3)")
+            .bind(device_vault)
+            .bind(operation_vault)
+            .bind(vault_vault)
+            .fetch_one(&fixture.maintenance)
+            .await
+            .unwrap();
+    assert_eq!(real_jobs, 3);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn startup_validation_rejects_grant_policy_and_execute_drift() {
     let fixture = Fixture::new().await;
 
@@ -1344,7 +1500,7 @@ async fn live_ticket_admission_events_are_runtime_scoped_and_independent_of_tick
 async fn live_ticket_admission_event_migration_round_trips() {
     let fixture = Fixture::new().await;
     sqlx::raw_sql(include_str!(
-        "../migrations/down/0029_live_ticket_admission_events.down.sql"
+        "../migrations/down/0033_live_ticket_admission_events.down.sql"
     ))
     .execute(&fixture.migration)
     .await
@@ -1356,7 +1512,7 @@ async fn live_ticket_admission_event_migration_round_trips() {
             .unwrap();
     assert!(absent.is_none());
     sqlx::raw_sql(include_str!(
-        "../migrations/0029_live_ticket_admission_events.sql"
+        "../migrations/0033_live_ticket_admission_events.sql"
     ))
     .execute(&fixture.migration)
     .await

@@ -376,4 +376,17 @@ describe("DevicesSettings", () => {
     rerender(<DevicesSettings serverOffline />);
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
+
+  it("removes the MCP roster device through the existing revoke dialog", async () => {
+    vi.mocked(bridge.list_devices).mockResolvedValue({ currentDeviceId: "self", devices: [
+      { id: "self", name: "This Mac", kind: "desktop", role: "owner", revoked: false },
+      { id: "mcp-id", name: "Server client", kind: "desktop", role: "device", revoked: false },
+    ] });
+    vi.mocked(bridge.mcp_status).mockResolvedValue({ vaultId: "11111111-1111-4111-8111-111111111111", available: true, serverOrigin: "https://vault.example", hosted: true, device: { deviceId: "mcp-id", name: "Peppy MCP", state: "online", lastSyncedAt: null, cleanupPending: false } });
+    render(<DevicesSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove Peppy MCP" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("fences its grants and device access");
+    fireEvent.click(screen.getByRole("button", { name: "Remove device" }));
+    await waitFor(() => expect(bridge.revoke_device).toHaveBeenCalledWith("mcp-id"));
+  });
 });

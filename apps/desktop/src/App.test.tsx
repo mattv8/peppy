@@ -11,7 +11,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { conversationAvatar, formatDateTime, isoDateTime, paletteIndex } from "@peppy/desktop-ui";
-import { App, DraftStore, searchRecipientSuggestions } from "./App";
+import { App, DraftStore, nextComposerDraftIdentity, searchRecipientSuggestions } from "./App";
 import {
   bridge,
   fixtureBridge,
@@ -41,6 +41,21 @@ const findEmptyConversationAction = () => waitFor(() => {
   const action = document.getElementById("new-conversation-cta");
   expect(action).toBeVisible();
   return action!;
+});
+
+describe("composer draft identity", () => {
+  it("preserves identity only for a confirmed DraftStore rekey", async () => {
+    const store = new DraftStore(
+      async ({ expectedRevision: _, ...input }) => ({ ...input, id: "draft-created", conversationId: "conversation-created", revision: "1" }),
+      { changed: () => {}, rekeyed: () => {} },
+    );
+    const { key, saved } = store.createNew("+15550001");
+    await saved;
+    const rekeyed = store.resolve(key);
+
+    expect(nextComposerDraftIdentity(key, key, rekeyed, candidate => store.resolve(candidate))).toBe(key);
+    expect(nextComposerDraftIdentity(rekeyed, key, "conversation-unrelated", candidate => store.resolve(candidate))).toBe("conversation-unrelated");
+  });
 });
 
 describe("group sender attribution", () => {
@@ -1233,6 +1248,92 @@ afterEach(() => {
   localStorage.removeItem("peppy.layout.v1");
   window.history.replaceState({}, "", "/");
   vi.unstubAllGlobals();
+});
+
+describe("MCP authorization routing", () => {
+  it("does not load a URL authorization request for a locked or nonowner session", async () => {
+    window.history.replaceState({}, "", "/?mcp_authorize=request-1");
+    const snapshot = await fixtureBridge.load_state();
+    const authorization = vi.spyOn(bridge, "mcp_authorization");
+    vi.spyOn(bridge, "load_state")
+      .mockResolvedValueOnce({ ...snapshot, encryption: { ...snapshot.encryption, state: "locked" } })
+      .mockResolvedValueOnce({ ...snapshot, deviceRole: "device" });
+
+    const { unmount } = render(<App />);
+    await waitFor(() => expect(bridge.load_state).toHaveBeenCalled());
+    expect(authorization).not.toHaveBeenCalled();
+
+    unmount();
+    render(<App />);
+    await waitFor(() => expect(bridge.load_state).toHaveBeenCalledTimes(2));
+    expect(authorization).not.toHaveBeenCalled();
+  });
+
+  it("shows a locked owner the waiting notice, and Dismiss clears the URL without denying", async () => {
+    window.history.replaceState({}, "", "/?mcp_authorize=request-1");
+    const snapshot = await fixtureBridge.load_state();
+    vi.spyOn(bridge, "load_state").mockResolvedValue({ ...snapshot, deviceRole: "owner", encryption: { ...snapshot.encryption, state: "locked" } });
+    const authorization = vi.spyOn(bridge, "mcp_authorization");
+    const deny = vi.spyOn(bridge, "mcp_deny_authorization");
+
+    render(<App />);
+    const notice = await waitFor(() => {
+      const element = document.getElementById("mcp-authorization-waiting");
+      expect(element).not.toBeNull();
+      return element as HTMLElement;
+    });
+    expect(notice).toHaveAttribute("data-mcp-authorization-waiting", "locked");
+    expect(within(notice).getByText("An AI client is waiting for owner approval. Unlock Peppy to continue.")).toBeInTheDocument();
+
+    fireEvent.click(within(notice).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(document.getElementById("mcp-authorization-waiting")).toBeNull());
+    expect(new URLSearchParams(window.location.search).has("mcp_authorize")).toBe(false);
+    expect(deny).not.toHaveBeenCalled();
+    expect(authorization).not.toHaveBeenCalled();
+  });
+
+  it("shows a non-owner the approval-device notice while the vault is unlocked", async () => {
+    window.history.replaceState({}, "", "/?mcp_authorize=request-1");
+    const snapshot = await fixtureBridge.load_state();
+    vi.spyOn(bridge, "load_state").mockResolvedValue({ ...snapshot, deviceRole: "device", sessionScopeId: "session-a", encryption: { ...snapshot.encryption, state: "unlocked" } });
+    const authorization = vi.spyOn(bridge, "mcp_authorization");
+
+    render(<App />);
+    const notice = await waitFor(() => {
+      const element = document.getElementById("mcp-authorization-waiting");
+      expect(element).not.toBeNull();
+      return element as HTMLElement;
+    });
+    expect(notice).toHaveAttribute("data-mcp-authorization-waiting", "non-owner");
+    expect(within(notice).getByText("An AI client is waiting for owner approval. Approve it from the vault owner device.")).toBeInTheDocument();
+    expect(authorization).not.toHaveBeenCalled();
+  });
+
+  it("shows no waiting notice to an unlocked owner, who gets the consent dialog instead", async () => {
+    window.history.replaceState({}, "", "/?mcp_authorize=request-1");
+    const snapshot = await fixtureBridge.load_state();
+    vi.spyOn(bridge, "load_state").mockResolvedValue({ ...snapshot, sessionScopeId: "session-a", deviceRole: "owner", encryption: { ...snapshot.encryption, state: "unlocked" } });
+    vi.spyOn(bridge, "mcp_authorization").mockResolvedValue({ id: "request-1", clientName: "Claude", requestedScopes: ["conversations:read"], serverOrigin: "https://push.example.com", resource: "https://push.example.com/mcp", clientId: "client-1", redirectOrigin: "https://client.example", redirectIsLoopback: false });
+    vi.spyOn(bridge, "mcp_status").mockResolvedValue({ vaultId: "11111111-1111-4111-8111-111111111111", available: true, serverOrigin: "https://push.example.com", hosted: true, device: null });
+
+    render(<App />);
+    await screen.findByRole("dialog", { name: "Authorize MCP client" });
+    expect(document.getElementById("mcp-authorization-waiting")).toBeNull();
+  });
+
+  it("returns focus to the desktop shell when URL consent closes from a conversation", async () => {
+    window.history.replaceState({}, "", "/?mcp_authorize=request-1");
+    const snapshot = await fixtureBridge.load_state();
+    vi.spyOn(bridge, "load_state").mockResolvedValue({ ...snapshot, sessionScopeId: "session-a", deviceRole: "owner", encryption: { ...snapshot.encryption, state: "unlocked" } });
+    vi.spyOn(bridge, "mcp_authorization").mockResolvedValue({ id: "request-1", clientName: "Claude", requestedScopes: ["conversations:read"], serverOrigin: "https://push.example.com", resource: "https://push.example.com/mcp", clientId: "client-1", redirectOrigin: "https://client.example", redirectIsLoopback: false });
+    vi.spyOn(bridge, "mcp_status").mockResolvedValue({ vaultId: "11111111-1111-4111-8111-111111111111", available: true, serverOrigin: "https://push.example.com", hosted: true, device: null });
+
+    render(<App />);
+    const dialog = await screen.findByRole("dialog", { name: "Authorize MCP client" });
+    fireEvent(dialog, new Event("cancel", { cancelable: true }));
+
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toHaveFocus());
+  });
 });
 
 describe("lazy conversation history", () => {
@@ -3673,7 +3774,8 @@ describe("draft durability", () => {
     await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("other window"));
   });
 
-  it("adopts a same-recipient remote text change with an Undo that restores the previous text", async () => {
+  it("silently adopts a clean same-recipient remote text mirror", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
     host.drafts.set("aurora", { id: "draft-aurora", conversationId: "aurora", text: "stored", recipientIds: [], attachmentIds: [], revision: "1" });
     render(<App />);
     await waitFor(() => expect(message()).toHaveValue("stored"));
@@ -3682,14 +3784,35 @@ describe("draft durability", () => {
     await act(async () => hint?.());
 
     expect(message()).toHaveValue("from window two");
-    const updated = (await screen.findByText("Updated from another window.")).closest("[data-draft-notice]") as HTMLElement;
-    expect(updated).toHaveAttribute("data-draft-notice", "remote-update");
-    fireEvent.click(within(updated).getByRole("button", { name: "Undo" }));
+    expect(screen.queryByText("Updated from another window.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Undo|Copy/ })).not.toBeInTheDocument();
+  });
+
+  it("silences pure remote mirror updates regardless of window focus", async () => {
+    const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    host.drafts.set("aurora", { id: "draft-aurora", conversationId: "aurora", text: "stored", recipientIds: [], attachmentIds: [], revision: "1" });
+    render(<App />);
     await waitFor(() => expect(message()).toHaveValue("stored"));
-    await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("stored"));
+    expect(screen.queryByText("Updated from another window.")).not.toBeInTheDocument();
+    type("local edit");
+    await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("local edit"));
+    host.drafts.set("aurora", { ...host.drafts.get("aurora")!, text: "from an unfocused mirror", revision: "3" });
+
+    await act(async () => hint?.());
+
+    expect(message()).toHaveValue("from an unfocused mirror");
+    expect(screen.queryByRole("button", { name: /Undo|Copy/ })).not.toBeInTheDocument();
+
+    hasFocus.mockReturnValue(true);
+    host.drafts.set("aurora", { ...host.drafts.get("aurora")!, text: "from a focused update", revision: "4" });
+    await act(async () => hint?.());
+
+    expect(message()).toHaveValue("from a focused update");
+    expect(screen.queryByText("Updated from another window.")).not.toBeInTheDocument();
   });
 
   it("offers copy, not Undo, when a remote update changed the recipients of the local text", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
     host.drafts.set("aurora", { id: "draft-aurora", conversationId: "aurora", text: "stored", recipientIds: [], attachmentIds: [], revision: "1" });
     render(<App />);
     await waitFor(() => expect(message()).toHaveValue("stored"));
@@ -3705,6 +3828,83 @@ describe("draft durability", () => {
     fireEvent.click(within(updated).getByRole("button", { name: "Copy text of retained draft" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("mine"));
     expect(message()).toHaveValue("other window");
+  });
+
+  it("follows the authoritative conversation and clears a clean remotely sent draft", async () => {
+    host.conversations = [];
+    host.drafts.set("terminal-source", {
+      id: "draft-terminal-source",
+      conversationId: "terminal-source",
+      text: "sent from another device",
+      recipientIds: ["+15550001"],
+      attachmentIds: ["remote-image-1", "remote-image-2"],
+      revision: "3",
+      attachments: [
+        { id: "remote-image-1", name: "one.png", mediaType: "image/png", byteSize: 10, state: "ready" },
+        { id: "remote-image-2", name: "two.png", mediaType: "image/png", byteSize: 12, state: "ready" },
+      ],
+      sync: { state: "synced", expiresAt: "2028-11-07T00:00:00Z", conflicts: [], notice: null, sendRequiresConnection: false },
+    });
+    render(<App />);
+    await waitFor(() => expect(message()).toHaveValue("sent from another device"));
+    expect(document.querySelector("#draft-sync-status")).toBeNull();
+    expect(document.querySelector('[data-attachment-id="remote-image-1"]')).toBeInTheDocument();
+
+    host.drafts.delete("terminal-source");
+    host.conversations = [{
+      id: "canonical-conversation",
+      name: "Canonical recipient",
+      preview: "sent from another device",
+      unread: 0,
+      messages: [{ id: "sent-message", revision: "1", sender: "self", body: "sent from another device", timestamp: "now", attachments: [] }],
+    }];
+    await act(async () => hint?.());
+
+    await waitFor(() => expect(document.querySelector("[data-header-title]")).toHaveTextContent("Canonical recipient"));
+    expect(message()).toHaveValue("");
+    expect(document.querySelector('[data-attachment-id="remote-image-1"]')).not.toBeInTheDocument();
+    expect(document.querySelector('[data-attachment-id="remote-image-2"]')).not.toBeInTheDocument();
+    expect(document.querySelector("#draft-sync-status")).toBeNull();
+  });
+
+  it("keeps edits made while a remote terminal refresh is pending", async () => {
+    host.conversations = [];
+    host.drafts.set("terminal-source", {
+      id: "draft-terminal-source",
+      conversationId: "terminal-source",
+      text: "old caption",
+      recipientIds: ["+15550001"],
+      attachmentIds: [],
+      revision: "3",
+    });
+    render(<App />);
+    await waitFor(() => expect(message()).toHaveValue("old caption"));
+
+    const pendingSave = deferred<Draft>();
+    vi.mocked(bridge.save_draft).mockReturnValueOnce(pendingSave.promise);
+    type("new local caption");
+    await waitFor(() => expect(bridge.save_draft).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Add attachment" }));
+    await waitFor(() => expect(document.querySelector('[data-attachment-id="file-1"]')).toBeInTheDocument());
+
+    host.drafts.delete("terminal-source");
+    host.conversations = [{
+      id: "canonical-conversation",
+      name: "Canonical recipient",
+      preview: "old caption",
+      unread: 0,
+      messages: [{ id: "sent-message", revision: "1", sender: "self", body: "old caption", timestamp: "now", attachments: [] }],
+    }];
+    await act(async () => hint?.());
+
+    expect(message()).toHaveValue("new local caption");
+    expect(document.querySelector('[data-attachment-id="file-1"]')).toBeInTheDocument();
+    expect(document.querySelector("[data-header-title]")).not.toHaveTextContent("Canonical recipient");
+
+    await act(async () => pendingSave.reject({ code: "not-found", message: "Draft no longer exists." }));
+    await screen.findByRole("alert");
+    expect(message()).toHaveValue("new local caption");
+    expect(document.querySelector('[data-attachment-id="file-1"]')).toBeInTheDocument();
   });
 
   it("keeps local text until explicit recovery recreates a draft deleted elsewhere", async () => {
@@ -4138,7 +4338,8 @@ describe("draft durability", () => {
     expect(message()).toHaveValue("aurora unsaved");
   });
 
-  it("P8 discards an expired Aurora notice so a later Aurora update exposes its Undo despite River activity", async () => {
+  it("keeps same-device mirror updates quiet despite background River activity", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: /River/ }));
@@ -4152,28 +4353,22 @@ describe("draft durability", () => {
     const aurora = host.drafts.get("aurora")!;
     const firstRemote = { ...aurora, text: "Aurora remote", revision: String(Number(aurora.revision) + 1) };
     host.drafts.set("aurora", firstRemote);
-    vi.useFakeTimers();
-    try {
-      await act(async () => draftHint?.(firstRemote));
-      expect(screen.getByRole("button", { name: "Undo" })).toBeInTheDocument();
-      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
-      expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+    await act(async () => draftHint?.(firstRemote));
+    expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
 
-      const river = host.drafts.get("river")!;
-      const riverRemote = { ...river, text: "River remote", revision: String(Number(river.revision) + 1) };
-      host.drafts.set("river", riverRemote);
-      await act(async () => draftHint?.(riverRemote));
-      const secondRemote = { ...firstRemote, text: "Aurora remote again", revision: String(Number(firstRemote.revision) + 1) };
-      host.drafts.set("aurora", secondRemote);
-      await act(async () => draftHint?.(secondRemote));
+    const river = host.drafts.get("river")!;
+    const riverRemote = { ...river, text: "River remote", revision: String(Number(river.revision) + 1) };
+    host.drafts.set("river", riverRemote);
+    await act(async () => draftHint?.(riverRemote));
+    const secondRemote = { ...firstRemote, text: "Aurora remote again", revision: String(Number(firstRemote.revision) + 1) };
+    host.drafts.set("aurora", secondRemote);
+    await act(async () => draftHint?.(secondRemote));
 
-      expect(screen.getByRole("button", { name: "Undo" })).toBeEnabled();
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
   }, 10_000);
 
   it("P12 restores composer focus after fallback retained-text copy", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
     render(<App />);
     await screen.findByText("Hello from Aurora");
     type("local retained text");
@@ -4662,6 +4857,25 @@ describe("gateway routes", () => {
     ...overrides,
   });
 
+  it("queues Enter through an in-flight save without a save-blocker hint", async () => {
+    const saving = deferred<Draft>();
+    host.drafts.set("aurora", storedDraft({ text: "before save" }));
+    vi.mocked(bridge.save_draft).mockReturnValueOnce(saving.promise);
+    render(<App />);
+    await screen.findByDisplayValue("before save");
+
+    fireEvent.change(message(), { target: { value: "send after save" } });
+    await waitFor(() => expect(bridge.save_draft).toHaveBeenCalledOnce());
+
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    expect(document.getElementById("unavailable-hint")).toBeEmptyDOMElement();
+    fireEvent.keyDown(message(), { key: "Enter" });
+    expect(bridge.send_draft).not.toHaveBeenCalled();
+
+    saving.resolve(storedDraft({ text: "send after save", revision: "2" }));
+    await waitFor(() => expect(bridge.send_draft).toHaveBeenCalledOnce());
+  });
+
   it("requires a version-2-or-newer MMS route for text-only groups and keeps the draft", async () => {
     host.gateways = [{ ...MMS_SIM, mmsContentVersion: undefined }];
     host.drafts.set("aurora", storedDraft({ recipientIds: ["+15550001", "+15550002"] }));
@@ -4819,6 +5033,63 @@ describe("gateway routes", () => {
     render(<App />);
     await screen.findByText(/estimate exceeds/);
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+  });
+
+  it("shows the 80% MMS warning and opens its help from the real tray header", async () => {
+    const attachment = { id: "file-1", name: "file.png", mediaType: "image/png", byteSize: 245_760, state: "ready" as const };
+    host.gateways = [{ ...MMS_SIM, mmsMaxBytes: 300 * 1024, mmsLimitSource: "carrier" }];
+    host.drafts.set("aurora", storedDraft({ attachmentIds: [attachment.id], attachments: [attachment] }));
+    render(<App />);
+
+    const header = await screen.findByText(/KB of .*KB/);
+    expect(header.parentElement).toHaveAttribute("data-mms-size-tone", "warning");
+    fireEvent.click(screen.getByRole("button", { name: "About message size" }));
+    expect(screen.getByRole("dialog", { name: "Message size" })).toHaveTextContent(/KB/);
+  });
+
+  it("keeps an oversized resizable image send enabled only on a version-4 route", async () => {
+    const attachment = { id: "file-1", name: "file.png", mediaType: "image/png", byteSize: 2, state: "ready" as const };
+    host.drafts.set("aurora", storedDraft({ attachmentIds: [attachment.id], attachments: [attachment] }));
+    host.gateways = [{ ...MMS_SIM, mmsContentVersion: 3, mmsMaxBytes: 1 }];
+    const rendered = render(<App />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeDisabled());
+
+    rendered.unmount();
+    host.gateways = [{ ...MMS_SIM, mmsContentVersion: 4, mmsMaxBytes: 1 }];
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeEnabled());
+    expect(document.querySelector("[data-mms-size-tone]")).toHaveAttribute("data-mms-size-tone", "default");
+  });
+
+  it("keeps an oversized unresizable image as an error on a version-4 route", async () => {
+    const attachment = { id: "file-1", name: "animated.gif", mediaType: "image/gif", byteSize: 3_000_000, state: "ready" as const };
+    host.gateways = [{ ...MMS_SIM, mmsContentVersion: 4, mmsMaxBytes: 1 }];
+    host.drafts.set("aurora", storedDraft({ attachmentIds: [attachment.id], attachments: [attachment] }));
+    render(<App />);
+
+    await screen.findByText("animated.gif");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeDisabled());
+    expect(document.querySelector("[data-mms-size-tone]")).toHaveAttribute("data-mms-size-tone", "error");
+    fireEvent.click(screen.getByRole("button", { name: "About message size" }));
+    expect(screen.getByRole("dialog", { name: "Message size" })).not.toHaveTextContent("Images are resized to fit");
+  });
+
+  it("shows the number of split MMS messages in the attachment header", async () => {
+    const attachments = Array.from({ length: 4 }, (_, index) => ({
+      id: `large-image-${index}`,
+      name: `large-image-${index}.jpg`,
+      mediaType: "image/jpeg",
+      byteSize: 3_000_000,
+      state: "ready" as const,
+    }));
+    host.gateways = [{ ...MMS_SIM, mmsContentVersion: 4, mmsMaxBytes: 300 * 1024 }];
+    host.drafts.set("aurora", storedDraft({ attachmentIds: attachments.map(({ id }) => id), attachments }));
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("Sends as 3 messages")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
   });
 
   it("distinguishes two SIMs on one gateway device and blocks MMS on the SMS-only SIM", async () => {
@@ -5275,14 +5546,15 @@ describe("host state display", () => {
 
     const navigation = screen.getByRole("navigation", { name: "Settings categories" });
     expect(within(navigation).getByRole("link", { name: "Server" })).toHaveAttribute("aria-current", "location");
-    expect(within(navigation).queryByRole("link", { name: "Advanced" })).not.toBeInTheDocument();
+    expect(within(navigation).getByRole("link", { name: "Advanced" })).toBeInTheDocument();
     const account = within(navigation).getByRole("link", { name: "Account" });
     fireEvent.click(account);
 
     expect(account).toHaveAttribute("aria-current", "location");
     expect(document.getElementById("settings-account-billing")).toHaveAttribute("data-settings-section", "account-billing");
-    expect(within(navigation).getAllByRole("link").at(-1)).toHaveTextContent("Privacy");
-    expect(document.getElementById("settings-privacy")).toHaveAttribute("data-settings-section", "privacy");
+    expect(within(navigation).getAllByRole("link").at(-1)).toHaveTextContent("Advanced");
+    expect(within(navigation).queryByRole("link", { name: "Privacy" })).not.toBeInTheDocument();
+    expect(document.getElementById("settings-privacy")).toHaveAttribute("data-settings-section", "privacy-links");
   });
 
   it.each([false, true])("scrolls only the settings content when selecting Account (reduced motion: %s)", async (reducedMotion) => {

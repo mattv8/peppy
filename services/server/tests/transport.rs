@@ -245,6 +245,8 @@ impl TestServer {
                     relay_url,
                     web_client: None,
                     web_live_trusted_origin: None,
+                    mcp_worker_url: None,
+                    mcp_worker_token_file: None,
                 };
                 peppy_server::ServerBuilder::new(config, server_pool)
                     .build()
@@ -311,10 +313,19 @@ impl TestServer {
         self.task.abort();
         let _ = self.task.await;
         self.pool.close().await;
-        sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
-            .execute(&self.admin)
-            .await
-            .unwrap();
+        let drop_schema = format!("DROP SCHEMA {} CASCADE", self.schema);
+        let first_attempt = sqlx::query(&drop_schema).execute(&self.admin).await;
+        if matches!(
+            &first_attempt,
+            Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("40P01")
+        ) {
+            sqlx::query(&drop_schema)
+                .execute(&self.admin)
+                .await
+                .unwrap();
+        } else {
+            first_attempt.unwrap();
+        }
         self.admin.close().await;
     }
 }
@@ -1778,7 +1789,14 @@ async fn websocket_presence_hint_is_vault_scoped_and_tracks_pong_and_close() {
 
     let mut observer = server.connect_ws(&server.owner_token).await;
     send_hello(&mut observer, "0").await;
-    assert_eq!(next_json(&mut observer, 3).await["type"], "ready");
+    let ready = next_json(&mut observer, 3).await;
+    assert_eq!(ready["type"], "ready");
+    assert!(
+        ready["frame_types"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("drafts_changed"))
+    );
     assert_eq!(
         next_json(&mut observer, 3).await["type"],
         "presence_changed"
@@ -1826,6 +1844,89 @@ async fn websocket_presence_hint_is_vault_scoped_and_tracks_pong_and_close() {
         .find(|entry| entry["device_id"] == device.id.to_string())
         .unwrap();
     assert_eq!(seen["presence"]["state"], "seen");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn websocket_draft_hints_are_ready_gated_vault_scoped_and_coalesced() {
+    let server = TestServer::start().await;
+    let foreign_vault = Uuid::new_v4();
+    let (foreign_profile, foreign_fingerprint) = profile(foreign_vault, 1);
+    let foreign = create_owner(
+        &server.pool,
+        foreign_profile,
+        vec![1],
+        foreign_fingerprint,
+        1,
+    )
+    .await
+    .unwrap();
+
+    let mut observer = server.connect_ws(&server.owner_token).await;
+    send_hello(&mut observer, "0").await;
+    assert_eq!(next_json(&mut observer, 3).await["type"], "ready");
+    assert_eq!(
+        next_json(&mut observer, 3).await["type"],
+        "presence_changed"
+    );
+
+    let mut foreign_observer = server.connect_ws(&foreign.device_token).await;
+    send_hello(&mut foreign_observer, "0").await;
+    assert_eq!(next_json(&mut foreign_observer, 3).await["type"], "ready");
+    assert_eq!(
+        next_json(&mut foreign_observer, 3).await["type"],
+        "presence_changed"
+    );
+
+    let mut unready = server.connect_ws(&server.owner_token).await;
+    let (writes_complete, mut observe_complete) = tokio::sync::watch::channel(false);
+    let burst_started = tokio::time::Instant::now();
+    let send_burst = async {
+        for _ in 0..4 {
+            server.put_draft(Uuid::new_v4(), Uuid::new_v4()).await;
+        }
+        writes_complete.send_replace(true);
+    };
+    let observe_burst = async {
+        let mut hints = Vec::new();
+        let mut writes_done = false;
+        let mut settle = Box::pin(tokio::time::sleep(Duration::from_secs(3_600)));
+        loop {
+            tokio::select! {
+                frame = next_json_frame(&mut observer) => match frame["type"].as_str() {
+                    Some("drafts_changed") => {
+                        assert_eq!(frame, json!({"type":"drafts_changed"}));
+                        hints.push(tokio::time::Instant::now());
+                    }
+                    Some("presence_changed") => {}
+                    other => panic!("expected a draft hint or presence hint, got {other:?}: {frame}"),
+                },
+                changed = observe_complete.changed(), if !writes_done => {
+                    assert!(changed.is_ok(), "draft writes ended without completion");
+                    writes_done = true;
+                    settle
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + Duration::from_millis(600));
+                }
+                _ = &mut settle, if writes_done => break,
+            }
+        }
+        hints
+    };
+    let ((), hint_times) = tokio::join!(send_burst, observe_burst);
+    assert!(
+        hint_times.len() >= 2,
+        "a burst must produce leading and trailing hints"
+    );
+    for (index, received_at) in hint_times.into_iter().enumerate() {
+        let minimum_elapsed = Duration::from_millis(500 * index as u64);
+        assert!(
+            received_at.duration_since(burst_started) >= minimum_elapsed,
+            "draft hint {index} arrived before its 500 ms rate-limit window"
+        );
+    }
+    assert_no_text_frame(&mut foreign_observer, Duration::from_millis(600)).await;
+    assert_no_text_frame(&mut unready, Duration::from_millis(600)).await;
     server.shutdown().await;
 }
 
@@ -1898,6 +1999,51 @@ async fn websocket_handshake_replays_and_revocation_closes_active_socket() {
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+#[tokio::test]
+async fn draft_merge_push_rebases_on_target_and_closes_only_other_live_branches() {
+    let server = TestServer::start().await;
+    let draft = Uuid::new_v4();
+    let revision_a = Uuid::new_v4();
+    let revision_b = Uuid::new_v4();
+    let merged_revision = Uuid::new_v4();
+    let path = |revision| format!("/v1/drafts/{draft}/revisions/{revision}");
+    let put = |revision, base: Option<Uuid>, resolves: Vec<Uuid>| {
+        Client::new()
+            .put(format!("{}{}", server.base_url, path(revision)))
+            .bearer_auth(&server.owner_token)
+            .json(&json!({
+                "base_revision_id": base,
+                "sealed_record": URL_SAFE_NO_PAD.encode(b"draft"),
+                "attachment_ids": [],
+                "authored": true,
+                "resolves_branch_ids": resolves,
+            }))
+    };
+    let (status, first) = server.call(put(revision_a, None, vec![])).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let branch_a: Uuid = serde_json::from_value(first["branch_id"].clone()).unwrap();
+    let (status, second) = server.call(put(revision_b, None, vec![])).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let branch_b: Uuid = serde_json::from_value(second["branch_id"].clone()).unwrap();
+    assert_ne!(branch_a, branch_b);
+
+    let (status, merged) = server
+        .call(put(merged_revision, Some(revision_b), vec![branch_a]))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{merged}");
+    assert_eq!(merged["branch_id"], second["branch_id"]);
+    let live: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT branch_id FROM draft_branches WHERE vault_id=$1 AND draft_id=$2 AND state='live'",
+    )
+    .bind(server.vault)
+    .bind(draft)
+    .fetch_all(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(live, vec![branch_b]);
+    server.shutdown().await;
+}
+
 impl TestServer {
     async fn connect_ws(&self, token: &str) -> Ws {
         let request = tungstenite::http::Request::builder()
@@ -1949,6 +2095,26 @@ impl TestServer {
                 .json(body),
         )
         .await
+    }
+
+    async fn put_draft(&self, draft: Uuid, revision: Uuid) {
+        let (status, body) = self
+            .call(
+                Client::new()
+                    .put(format!(
+                        "{}/v1/drafts/{draft}/revisions/{revision}",
+                        self.base_url
+                    ))
+                    .bearer_auth(&self.owner_token)
+                    .json(&json!({
+                        "base_revision_id": null,
+                        "sealed_record": URL_SAFE_NO_PAD.encode(b"draft"),
+                        "attachment_ids": [],
+                        "authored": true,
+                    })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
     }
 
     /// A valid owner-produced event at the vault's initial epoch.

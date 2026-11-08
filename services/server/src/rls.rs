@@ -42,6 +42,16 @@ pub const TENANT_TABLES: &[&str] = &[
     "live_tickets",
     "live_ticket_device_authority",
     "live_ticket_admission_events",
+    "mcp_devices",
+    "mcp_grants",
+    "mcp_operations",
+    "mcp_oauth_codes",
+    "mcp_oauth_tokens",
+    "draft_incarnations",
+    "draft_branches",
+    "draft_revisions",
+    "draft_terminals",
+    "draft_attachment_holds",
 ];
 
 const MEMBERSHIP_VERSION_TABLE: &str = "membership_versions";
@@ -52,6 +62,8 @@ const CONTROL_PLANE_TABLES: &[&str] = &[
     "instance_sessions",
     "vault_invites",
     "vault_requests",
+    "mcp_oauth_clients",
+    "mcp_oauth_authorizations",
 ];
 const ADMISSION_TABLES: &[&str] = &["instance_admission_windows", "instance_admission_sources"];
 const LIVE_TICKET_TABLES: &[&str] = &[
@@ -61,6 +73,7 @@ const LIVE_TICKET_TABLES: &[&str] = &[
     "live_ticket_admission_events",
 ];
 const LIVE_TICKET_RESOLVER: &str = "community_resolve_live_ticket_vault(bytea)";
+const MCP_MAINTENANCE_TABLES: &[&str] = &["mcp_cleanup_jobs"];
 const TENANT_SCOPE_POLICY_EXPRESSION: &str =
     "((vault_id)::text = NULLIF(current_setting('peppy.vault_id'::text, true), ''::text))";
 const COMMUNITY_RESOLVERS: &[&str] = &[
@@ -72,6 +85,11 @@ const COMMUNITY_RESOLVERS: &[&str] = &[
     "community_resolve_device_admission(uuid)",
     "community_resolve_live_ticket_vault(bytea)",
     "community_admin_vault_summaries()",
+    "mcp_resolve_access_token(bytea)",
+    "mcp_resolve_code(bytea)",
+    "mcp_resolve_refresh_token(bytea)",
+    "mcp_resolve_token(bytea)",
+    "mcp_sweep_oauth()",
 ];
 
 #[derive(Debug, Error)]
@@ -237,6 +255,7 @@ pub async fn grant_maintenance_privileges(pool: &PgPool, role: &str) -> Result<(
     let control_plane_tables = qualified_tables(&schema, CONTROL_PLANE_TABLES);
     let membership_version_table = qualified_tables(&schema, &[MEMBERSHIP_VERSION_TABLE]);
     let vault_identity_table = qualified_tables(&schema, &[VAULT_IDENTITY_TABLE]);
+    let mcp_maintenance_tables = qualified_tables(&schema, MCP_MAINTENANCE_TABLES);
     sqlx::raw_sql(&format!(
         "GRANT USAGE ON SCHEMA {schema_identifier} TO {role}"
     ))
@@ -269,6 +288,16 @@ pub async fn grant_maintenance_privileges(pool: &PgPool, role: &str) -> Result<(
     .await?;
     sqlx::raw_sql(&format!(
         "GRANT SELECT, UPDATE, DELETE ON TABLE {admission_tables} TO {role}"
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::raw_sql(&format!(
+        "GRANT SELECT, UPDATE, DELETE ON TABLE {mcp_maintenance_tables} TO {role}"
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::raw_sql(&format!(
+        "GRANT EXECUTE ON FUNCTION {schema_identifier}.mcp_sweep_oauth() TO {role}"
     ))
     .execute(pool)
     .await?;
@@ -599,6 +628,28 @@ pub async fn validate_maintenance_role(pool: &PgPool) -> Result<(), RlsError> {
     if !control_plane_sweep {
         return Err(RlsError::UnsafeMaintenanceRole(
             "requires global sweep privileges",
+        ));
+    }
+    let mcp_cleanup_dml: bool = sqlx::query_scalar(
+        "SELECT count(*) = $2 AND COALESCE(bool_and(has_table_privilege(current_user, oid, 'SELECT') AND has_table_privilege(current_user, oid, 'UPDATE') AND has_table_privilege(current_user, oid, 'DELETE')), false) FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = ANY($1)",
+    )
+    .bind(MCP_MAINTENANCE_TABLES.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>())
+    .bind(MCP_MAINTENANCE_TABLES.len() as i64)
+    .fetch_one(pool)
+    .await?;
+    if !mcp_cleanup_dml {
+        return Err(RlsError::UnsafeMaintenanceRole(
+            "requires MCP cleanup maintenance privileges",
+        ));
+    }
+    let oauth_sweep_execute: bool = sqlx::query_scalar(
+        "SELECT has_function_privilege(current_user, 'mcp_sweep_oauth()', 'EXECUTE') AND NOT has_function_privilege('public', 'mcp_sweep_oauth()', 'EXECUTE')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !oauth_sweep_execute {
+        return Err(RlsError::UnsafeMaintenanceRole(
+            "requires MCP OAuth sweep execute privilege",
         ));
     }
     validate_admission_maintenance_privileges(pool).await
