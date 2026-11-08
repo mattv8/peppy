@@ -107,7 +107,11 @@ class GatewayWorkTest {
 
     @Test fun urgentWorkUsesExpeditedFallbackOnlyOnSupportedAndroidVersions() {
         assertFalse(GatewayWork.createRequest(urgent = true, apiLevel = 30).workSpec.expedited)
-        assertTrue(GatewayWork.createRequest(urgent = true, apiLevel = 31).workSpec.expedited)
+        val urgent = GatewayWork.createRequest(urgent = true, apiLevel = 31).workSpec
+        val normal = GatewayWork.createRequest(urgent = false, apiLevel = 31).workSpec
+        assertTrue(urgent.expedited)
+        assertEquals(0L, urgent.initialDelay)
+        assertEquals(0L, normal.initialDelay)
     }
 
     @After fun finishCoalescedPass() {

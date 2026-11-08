@@ -136,7 +136,7 @@ object GatewayWork {
     internal const val DIAGNOSTIC_REQUEST_TRACE = "peppy-gateway-diagnostic-request-trace"
     internal const val DIAGNOSTIC_SESSION = "peppy-gateway-diagnostic-session"
 
-    /** Called only under [GatewaySyncWorker]'s process-wide pass mutex. */
+    /** Called only under [GatewaySyncWorker]'s process-wide pass mutex; a missing hint conservatively requests capture. */
     internal fun beginPass(context: Context): Boolean {
         coalescer.begin()
         val prefs = context.getSharedPreferences(COALESCE, 0)
@@ -145,7 +145,7 @@ object GatewayWork {
         return captureHint
     }
 
-    /** Periodic work is an external sync hint, not a capture follow-up. */
+    /** Records a capture follow-up requested by an ordinary or urgent gateway wake. */
     internal fun captureHintPending(context: Context) {
         context.getSharedPreferences(COALESCE, 0).edit().putBoolean(CAPTURE_HINT_PENDING, true).commit()
     }
@@ -777,20 +777,11 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
     }
 
     private fun runPass(): Result {
-        if (isPeriodicRun()) GatewayWork.captureHintPending(applicationContext)
         GatewayStateStore(applicationContext).migrateRejectionPolicy(System.currentTimeMillis())
         val captureHint = GatewayWork.beginPass(applicationContext)
         val result = pass(captureHint)
         if (result == Result.success()) GatewayWork.finishPass()
         return result
-    }
-
-    // Tags are not used: KEEP leaves pre-upgrade periodic requests untagged. Unknown state counts as periodic.
-    private fun isPeriodicRun(): Boolean = try {
-        WorkManager.getInstance(applicationContext).getWorkInfosForUniqueWork(GatewayWork.PERIODIC_NAME).get()
-            .any { it.id == id }
-    } catch (_: Exception) {
-        true
     }
 
     private fun pass(captureHint: Boolean): Result {
