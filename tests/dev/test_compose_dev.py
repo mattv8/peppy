@@ -365,6 +365,16 @@ class ComposeDevelopmentTests(unittest.TestCase):
         self.assertEqual(config["services"]["mcp-state-init"]["network_mode"], "none")
         self.assertNotIn("networks", config["services"]["mcp-state-init"])
 
+    def test_shell_entrypoints_receive_their_script_as_one_argument(self):
+        # Compose splits a string command into argv words, so `sh -c` would run only the first word.
+        result = self.render("docker-compose.yml", "infra/compose/compose.mcp.yml")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name, service in json.loads(result.stdout)["services"].items():
+            entrypoint = service.get("entrypoint") or []
+            if entrypoint and entrypoint[-1].startswith("-") and entrypoint[-1].endswith("c"):
+                with self.subTest(service=name):
+                    self.assertEqual(len(service.get("command") or []), 1)
+
     def test_dev_recipes_clean_legacy_services_and_use_one_off_helpers(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
