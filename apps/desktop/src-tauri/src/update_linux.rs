@@ -125,8 +125,8 @@ pub trait PackageKitBackend {
 /// Production PackageKit system-bus client. It is Linux-only because PackageKit
 /// and its Polkit authorization boundary are Linux platform services.
 ///
-/// The native integration owner must add the Linux-target dependency
-/// `zbus = { version = "5", default-features = false, features = ["tokio"] }`.
+/// Production uses zbus's `tokio` feature only; the peer fixture enables `p2p`
+/// through the Linux-target development dependency.
 #[cfg(target_os = "linux")]
 pub struct ZbusPackageKit {
     connection: zbus::Connection,
@@ -151,12 +151,16 @@ impl ZbusPackageKit {
         let connection = zbus::Connection::system()
             .await
             .map_err(|error| error.to_string())?;
-        Ok(Self {
+        Ok(Self::with_connection(connection))
+    }
+
+    fn with_connection(connection: zbus::Connection) -> Self {
+        Self {
             connection,
             deadline: Duration::from_secs(10 * 60),
             cancellation_grace: Duration::from_secs(30),
             pending_transaction: Mutex::new(None),
-        })
+        }
     }
 
     pub fn with_deadline(mut self, deadline: Duration, cancellation_grace: Duration) -> Self {
@@ -231,15 +235,31 @@ impl ZbusPackageKit {
         {
             return TransactionEvent::FinishedFailed(error.to_string());
         }
-        if let Err(error) = tokio::time::timeout(
+        // A method reply can be lost after PackageKit has accepted this request.
+        // Keep the exact transaction before dispatch so that ambiguity cannot
+        // release the coordinator's installer exclusion.
+        *self
+            .pending_transaction
+            .lock()
+            .expect("pending transaction mutex poisoned") = Some(transaction_path.clone());
+        match tokio::time::timeout(
             self.deadline,
             transaction.call::<_, _, ()>("InstallFiles", &(Self::ONLY_TRUSTED, vec![path])),
         )
         .await
-        .map_err(|_| "PackageKit InstallFiles timed out".to_string())
-        .and_then(|result| result.map_err(|error| error.to_string()))
         {
-            return TransactionEvent::FinishedFailed(error.to_string());
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                return TransactionEvent::CompletionUnknown(format!(
+                    "PackageKit InstallFiles reply was not conclusive: {error}"
+                ));
+            }
+            Err(_) => {
+                return TransactionEvent::CompletionUnknown(
+                    "PackageKit InstallFiles reply timed out; transaction completion is unknown"
+                        .into(),
+                );
+            }
         }
 
         let completion = tokio::time::timeout(self.deadline, async {
@@ -288,6 +308,11 @@ impl ZbusPackageKit {
                 .pending_transaction
                 .lock()
                 .expect("pending transaction mutex poisoned") = Some(transaction_path);
+        } else {
+            *self
+                .pending_transaction
+                .lock()
+                .expect("pending transaction mutex poisoned") = None;
         }
         event
     }
@@ -488,20 +513,38 @@ impl ZbusPackageKit {
             Err(error) => return TransactionEvent::FinishedFailed(error.to_string()),
         };
         let hint = format!("interactive={interactive}");
-        let start = async {
-            transaction
-                .call::<_, _, ()>("SetHints", &vec![hint])
-                .await?;
-            transaction
-                .call::<_, _, ()>("UpdatePackages", &(Self::ONLY_TRUSTED, vec![package_id]))
-                .await
-        };
-        if let Err(error) = tokio::time::timeout(self.deadline, start)
-            .await
-            .map_err(|_| "PackageKit UpdatePackages setup timed out".to_string())
-            .and_then(|result| result.map_err(|error| error.to_string()))
+        if let Err(error) = tokio::time::timeout(
+            self.deadline,
+            transaction.call::<_, _, ()>("SetHints", &vec![hint]),
+        )
+        .await
+        .map_err(|_| "PackageKit SetHints timed out".to_string())
+        .and_then(|result| result.map_err(|error| error.to_string()))
         {
             return TransactionEvent::FinishedFailed(error);
+        }
+        *self
+            .pending_transaction
+            .lock()
+            .expect("pending transaction mutex poisoned") = Some(transaction_path.clone());
+        match tokio::time::timeout(
+            self.deadline,
+            transaction.call::<_, _, ()>("UpdatePackages", &(Self::ONLY_TRUSTED, vec![package_id])),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                return TransactionEvent::CompletionUnknown(format!(
+                    "PackageKit UpdatePackages reply was not conclusive: {error}"
+                ));
+            }
+            Err(_) => {
+                return TransactionEvent::CompletionUnknown(
+                    "PackageKit UpdatePackages reply timed out; transaction completion is unknown"
+                        .into(),
+                );
+            }
         }
         let event = match tokio::time::timeout(self.deadline, async {
             let mut error = None;
@@ -527,6 +570,11 @@ impl ZbusPackageKit {
                 .pending_transaction
                 .lock()
                 .expect("pending transaction mutex poisoned") = Some(transaction_path);
+        } else {
+            *self
+                .pending_transaction
+                .lock()
+                .expect("pending transaction mutex poisoned") = None;
         }
         event
     }
@@ -1104,5 +1152,294 @@ mod tests {
             .deserialize()
             .expect("UpdatePackages arguments deserialize as D-Bus");
         assert_eq!(decoded, body);
+    }
+
+    #[cfg(target_os = "linux")]
+    mod packagekit_peer_fixture {
+        use super::*;
+        use std::sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        };
+        use tokio::sync::Notify;
+        use zbus::{
+            connection::Builder, interface, object_server::SignalEmitter,
+            zvariant::OwnedObjectPath, Guid,
+        };
+
+        const TRANSACTION_PATH: &str = "/org/freedesktop/PackageKit/transactions/peppy";
+
+        #[derive(Clone, Copy)]
+        enum ReplyBehavior {
+            Withhold,
+            TerminalSuccess,
+        }
+
+        struct FixtureState {
+            fail_hints: AtomicBool,
+            set_hints_calls: AtomicUsize,
+            mutations: AtomicUsize,
+            mutation_seen: Notify,
+            reconciliation_seen: Notify,
+            reply_behavior: ReplyBehavior,
+        }
+
+        impl FixtureState {
+            fn new(fail_hints: bool, reply_behavior: ReplyBehavior) -> Arc<Self> {
+                Arc::new(Self {
+                    fail_hints: AtomicBool::new(fail_hints),
+                    set_hints_calls: AtomicUsize::new(0),
+                    mutations: AtomicUsize::new(0),
+                    mutation_seen: Notify::new(),
+                    reconciliation_seen: Notify::new(),
+                    reply_behavior,
+                })
+            }
+        }
+
+        struct FakePackageKitRoot {
+            state: Arc<FixtureState>,
+        }
+
+        #[interface(name = "org.freedesktop.PackageKit")]
+        impl FakePackageKitRoot {
+            async fn create_transaction(&self) -> OwnedObjectPath {
+                OwnedObjectPath::try_from(TRANSACTION_PATH).expect("fixture transaction path")
+            }
+
+            async fn get_transaction_list(&self) -> Vec<OwnedObjectPath> {
+                self.state.reconciliation_seen.notify_waiters();
+                vec![OwnedObjectPath::try_from(TRANSACTION_PATH).expect("fixture transaction path")]
+            }
+        }
+
+        struct FakePackageKitTransaction {
+            state: Arc<FixtureState>,
+        }
+
+        #[interface(name = "org.freedesktop.PackageKit.Transaction")]
+        impl FakePackageKitTransaction {
+            async fn set_hints(&self, _hints: Vec<String>) -> zbus::fdo::Result<()> {
+                self.state.set_hints_calls.fetch_add(1, Ordering::SeqCst);
+                if self.state.fail_hints.load(Ordering::SeqCst) {
+                    Err(zbus::fdo::Error::Failed(
+                        "SetHints rejected before dispatch".into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+
+            async fn install_files(
+                &self,
+                _flags: u64,
+                _files: Vec<String>,
+                #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+            ) -> zbus::fdo::Result<()> {
+                self.mutate(emitter).await
+            }
+
+            async fn update_packages(
+                &self,
+                _flags: u64,
+                _files: Vec<String>,
+                #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+            ) -> zbus::fdo::Result<()> {
+                self.mutate(emitter).await
+            }
+
+            async fn cancel(&self) -> zbus::fdo::Result<()> {
+                Ok(())
+            }
+
+            #[zbus(signal)]
+            async fn finished(
+                emitter: &SignalEmitter<'_>,
+                exit: u32,
+                runtime: u32,
+            ) -> zbus::Result<()>;
+        }
+
+        impl FakePackageKitTransaction {
+            async fn mutate(&self, emitter: SignalEmitter<'_>) -> zbus::fdo::Result<()> {
+                self.state.mutations.fetch_add(1, Ordering::SeqCst);
+                self.state.mutation_seen.notify_waiters();
+                match self.state.reply_behavior {
+                    ReplyBehavior::Withhold => std::future::pending().await,
+                    ReplyBehavior::TerminalSuccess => {
+                        Self::finished(&emitter, PACKAGEKIT_EXIT_SUCCESS, 0)
+                            .await
+                            .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))
+                    }
+                }
+            }
+        }
+
+        async fn fixture(
+            fail_hints: bool,
+            reply_behavior: ReplyBehavior,
+        ) -> (Arc<FixtureState>, ZbusPackageKit, zbus::Connection) {
+            let state = FixtureState::new(fail_hints, reply_behavior);
+            let (server_socket, client_socket) =
+                tokio::net::UnixStream::pair().expect("fixture peer sockets");
+            let guid = Guid::generate();
+            let server = Builder::unix_stream(server_socket)
+                .server(guid.clone())
+                .expect("fixture server GUID")
+                .p2p()
+                .serve_at(
+                    ZbusPackageKit::ROOT_PATH,
+                    FakePackageKitRoot {
+                        state: state.clone(),
+                    },
+                )
+                .expect("fixture root interface")
+                .serve_at(
+                    TRANSACTION_PATH,
+                    FakePackageKitTransaction {
+                        state: state.clone(),
+                    },
+                )
+                .expect("fixture transaction interface");
+            let client = Builder::unix_stream(client_socket).p2p();
+            let (server, client) = futures_util::try_join!(server.build(), client.build())
+                .expect("fixture peer connections");
+            let backend = ZbusPackageKit::with_connection(client)
+                .with_deadline(Duration::from_millis(250), Duration::from_millis(5));
+            (state, backend, server)
+        }
+
+        async fn assert_reply_loss_retains_and_reconciles<F>(
+            invoke: impl FnOnce(Arc<ZbusPackageKit>) -> F,
+            backend: Arc<ZbusPackageKit>,
+            state: Arc<FixtureState>,
+            server: zbus::Connection,
+        ) where
+            F: std::future::Future<Output = TransactionEvent> + Send + 'static,
+        {
+            let mutation_seen = state.mutation_seen.notified();
+            let invocation = tokio::spawn(invoke(backend.clone()));
+            mutation_seen.await;
+            assert_eq!(state.mutations.load(Ordering::SeqCst), 1);
+            assert!(
+                !invocation.is_finished(),
+                "the fake still withholds the mutation reply at the observation barrier"
+            );
+            assert_eq!(
+                backend
+                    .pending_transaction
+                    .lock()
+                    .expect("pending transaction mutex")
+                    .as_deref(),
+                Some(TRANSACTION_PATH),
+                "the exact transaction is retained while the mutation reply is withheld"
+            );
+            let event = invocation.await.expect("invocation task");
+            assert!(matches!(event, TransactionEvent::CompletionUnknown(_)));
+
+            let reconciliation_seen = state.reconciliation_seen.notified();
+            let reconcile_backend = backend.clone();
+            let reconciliation =
+                tokio::spawn(async move { reconcile_backend.wait_for_pending().await });
+            reconciliation_seen.await;
+            let transaction = server
+                .object_server()
+                .interface::<_, FakePackageKitTransaction>(TRANSACTION_PATH)
+                .await
+                .expect("fixture transaction interface");
+            for _ in 0..10 {
+                FakePackageKitTransaction::finished(
+                    transaction.signal_emitter(),
+                    PACKAGEKIT_EXIT_SUCCESS,
+                    0,
+                )
+                .await
+                .expect("fixture completion signal");
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            assert_eq!(
+                reconciliation.await.expect("reconciliation task"),
+                Some(TransactionEvent::FinishedSuccess)
+            );
+            assert_eq!(state.mutations.load(Ordering::SeqCst), 1);
+            assert!(!backend.has_pending_transaction().await);
+        }
+
+        #[tokio::test]
+        async fn install_files_reply_loss_retains_the_dispatched_transaction_until_its_terminal_signal(
+        ) {
+            let (state, backend, server) = fixture(false, ReplyBehavior::Withhold).await;
+            let cache = tempfile::tempdir().expect("fixture cache");
+            let package = cache.path().join("peppy.deb");
+            std::fs::write(&package, b"fixture package").expect("fixture package file");
+            let backend = Arc::new(backend);
+            assert_reply_loss_retains_and_reconciles(
+                move |backend| async move { backend.install_files_transaction(&package, false).await },
+                backend,
+                state,
+                server,
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn update_packages_reply_loss_retains_the_dispatched_transaction_until_its_terminal_signal(
+        ) {
+            let (state, backend, server) = fixture(false, ReplyBehavior::Withhold).await;
+            let backend = Arc::new(backend);
+            assert_reply_loss_retains_and_reconciles(
+                |backend| async move {
+                    backend
+                        .update_trusted_package("peppy;1.2.3;amd64;peppy-stable".into(), false)
+                        .await
+                },
+                backend,
+                state,
+                server,
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn set_hints_failure_is_terminal_before_each_mutating_dispatch() {
+            let (state, backend, _server) = fixture(true, ReplyBehavior::TerminalSuccess).await;
+            let cache = tempfile::tempdir().expect("fixture cache");
+            let package = cache.path().join("peppy.deb");
+            std::fs::write(&package, b"fixture package").expect("fixture package file");
+            assert!(matches!(
+                backend.install_files_transaction(&package, false).await,
+                TransactionEvent::FinishedFailed(_)
+            ));
+            assert_eq!(state.set_hints_calls.load(Ordering::SeqCst), 1);
+            assert!(matches!(
+                backend
+                    .update_trusted_package("peppy;1.2.3;amd64;peppy-stable".into(), false)
+                    .await,
+                TransactionEvent::FinishedFailed(_)
+            ));
+            assert_eq!(state.set_hints_calls.load(Ordering::SeqCst), 2);
+            assert_eq!(state.mutations.load(Ordering::SeqCst), 0);
+            assert!(!backend.has_pending_transaction().await);
+        }
+
+        #[tokio::test]
+        async fn terminal_mutation_replies_clear_the_pending_transaction_for_both_routes() {
+            let (state, backend, _server) = fixture(false, ReplyBehavior::TerminalSuccess).await;
+            let cache = tempfile::tempdir().expect("fixture cache");
+            let package = cache.path().join("peppy.deb");
+            std::fs::write(&package, b"fixture package").expect("fixture package file");
+            assert_eq!(
+                backend.install_files_transaction(&package, false).await,
+                TransactionEvent::FinishedSuccess
+            );
+            assert_eq!(
+                backend
+                    .update_trusted_package("peppy;1.2.3;amd64;peppy-stable".into(), false)
+                    .await,
+                TransactionEvent::FinishedSuccess
+            );
+            assert_eq!(state.mutations.load(Ordering::SeqCst), 2);
+            assert!(!backend.has_pending_transaction().await);
+        }
     }
 }

@@ -34,7 +34,9 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
+import java.lang.reflect.Proxy
 import kotlinx.coroutines.CancellationException
+import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -47,10 +49,13 @@ import org.robolectric.annotation.Config
 import uniffi.peppy_mobile_bindings.NativeMmsAcquisition
 import uniffi.peppy_mobile_bindings.NativeMmsAcquisitionInput
 import uniffi.peppy_mobile_bindings.NativeMmsAcquisitionState
+import uniffi.peppy_mobile_bindings.NativeMmsBackfillPhase
+import uniffi.peppy_mobile_bindings.NativeMmsBackfillScanPlan
 import uniffi.peppy_mobile_bindings.NativeMmsBeginOutcome
 import uniffi.peppy_mobile_bindings.NativeMmsPreviewState
 import uniffi.peppy_mobile_bindings.NativeMmsProviderIdentityQuarantine
 import uniffi.peppy_mobile_bindings.NativeMmsSource
+import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.MobileBindingsException
 
 
@@ -368,6 +373,67 @@ class MmsCaptureOrchestrationTest {
         assertEquals(1, second.captured)
     }
 
+    @Test fun admittedHistoryProviderPageFailureSettlesThroughProductionScanWithoutContinuation() {
+        val calls = mutableListOf<String>()
+        var finishInput: JSONObject? = null
+        val client = Proxy.newProxyInstance(
+            javaClass.classLoader,
+            arrayOf(NativeClientInterface::class.java),
+        ) { _, method, arguments ->
+            val args = arguments?.toList().orEmpty()
+            calls += method.name
+            when (method.name) {
+                "migrateMmsBackfillState" -> null
+                "planMmsBackfillScans" -> listOf(
+                    NativeMmsBackfillScanPlan(
+                        NativeMmsBackfillPhase.HISTORY,
+                        "generation",
+                        "mms",
+                        "3",
+                        null,
+                        false,
+                        null,
+                        "9",
+                        false,
+                        false,
+                        null,
+                        50u,
+                    ),
+                )
+                "beginMessageHistoryCapture" -> """{"token":"claim","budget":50}"""
+                "finishMessageHistoryCapture" -> {
+                    finishInput = JSONObject(args.single() as String)
+                    "{}"
+                }
+                "drainMessageHistoryCaptureResults" -> """{"published":0,"pending":0}"""
+                else -> error("unexpected ${method.name}")
+            }
+        } as NativeClientInterface
+
+        val result = MmsCapture.run(
+            plan(),
+            nativeCore(client),
+            FakeProvider(emptyList(), pageError = MmsProviderException("provider unavailable")),
+            temp(),
+        )
+
+        assertEquals(
+            listOf(
+                "migrateMmsBackfillState",
+                "planMmsBackfillScans",
+                "beginMessageHistoryCapture",
+                "finishMessageHistoryCapture",
+                "drainMessageHistoryCaptureResults",
+            ),
+            calls,
+        )
+        assertEquals("claim", finishInput!!.getString("token"))
+        assertEquals(0, finishInput!!.getInt("observations"))
+        assertFalse(finishInput!!.getBoolean("exhausted"))
+        assertEquals("provider_error", finishInput!!.getString("reason"))
+        assertFalse(result.more)
+    }
+
     @Test fun unknownProviderDatesReachCoreAsUnknownSentinel() {
         val core = FakeCore()
         MmsCapture.run(plan(), core, FakeProvider(listOf(record(1).copy(dateMs = null))), temp())
@@ -390,6 +456,26 @@ class MmsCaptureOrchestrationTest {
         MmsCapture.run(plan(), core, provider, temp())
 
         assertTrue(core.advanced.contains(MmsBackfillPhase.HISTORY to "3"))
+    }
+
+    @Test fun descendingHistoryUsesStrictCursorAcrossPagesAndExhaustsWithoutRepeatingBoundary() {
+        val core = FakeCore(
+            initialLiveCursor = "55",
+            historyUpperBound = "55",
+            historyDescending = true,
+            initialState = NativeMmsAcquisitionState.COMPLETE,
+        )
+        val provider = FakeProvider((1L..55L).map(::record))
+
+        val first = MmsCapture.run(plan(), core, provider, temp())
+        val second = MmsCapture.run(plan(), core, provider, temp())
+
+        assertEquals(listOf(null, 6L), provider.descendingPageCursors)
+        assertEquals(1, provider.descendingPageIds.flatten().count { it == 6L })
+        assertEquals(listOf(MmsBackfillPhase.HISTORY to "6", MmsBackfillPhase.HISTORY to "1"), core.advanced)
+        assertTrue(first.more)
+        assertFalse(second.more)
+        assertEquals(listOf("55"), core.finished)
     }
 
     @Test fun descendingHistoryRecordsMissingSubscriptionsAsUnavailableAndContinues() {
@@ -546,6 +632,42 @@ class MmsCaptureOrchestrationTest {
         assertEquals(32, core.manualRecheckLimit)
         assertEquals(listOf("1"), core.inputs.map { it.source.providerMessageId })
         assertTrue(result.more)
+    }
+
+    @Test fun recheckProviderReadCancellationPropagatesWithoutRecordingFailure() {
+        val core = FakeCore(recheckRequests = listOf(MmsBackfillRecheckRequest("1", true)))
+        val provider = FakeProvider(listOf(record(1)), readError = CancellationException("stopped"))
+
+        assertThrows(CancellationException::class.java) { MmsCapture.run(plan(), core, provider, temp()) }
+
+        assertTrue(core.recheckOutcomes.isEmpty())
+        assertTrue(core.inputs.isEmpty())
+    }
+
+    @Test fun recheckProcessCancellationPropagatesWithoutRecordingFailure() {
+        val core = FakeCore(
+            recheckRequests = listOf(MmsBackfillRecheckRequest("1", true)),
+            initialReason = "preview_deferred",
+        )
+        val provider = FakeProvider(
+            listOf(record(1).copy(parts = listOf(pngPart(10)))),
+            copyError = CancellationException("stopped"),
+        )
+
+        assertThrows(CancellationException::class.java) { MmsCapture.run(plan(), core, provider, temp()) }
+
+        assertTrue(core.recheckOutcomes.isEmpty())
+        assertTrue(core.reasons.isEmpty())
+    }
+
+    @Test fun recheckProviderReadFailureRecordsTransientOutcome() {
+        val core = FakeCore(recheckRequests = listOf(MmsBackfillRecheckRequest("1", true)))
+        val provider = FakeProvider(listOf(record(1)), readError = MmsProviderException("unavailable"))
+
+        val result = MmsCapture.run(plan(), core, provider, temp())
+
+        assertEquals(listOf(MmsBackfillRecheckOutcome.TRANSIENT_FAILURE), core.recheckOutcomes)
+        assertFalse(result.more)
     }
 
     @Test fun mappedDeferredPreviewWaitsForCapacityThenCompletesWithoutPreparingOriginalAgain() {
@@ -938,6 +1060,13 @@ class MmsCaptureOrchestrationTest {
     private fun pngPart(id: Long) = MmsProviderPart(id, 0, "image/png", "photo.png", null, null, Uri.parse("content://mms/part/$id"))
 
     private fun plan() = MmsCapturePlan("generation", null, false, null, null, false)
+
+    private fun nativeCore(client: NativeClientInterface): MmsCaptureCore {
+        val constructor = Class.forName("dev.peppy.mobile.NativeCore")
+            .getDeclaredConstructor(NativeClientInterface::class.java)
+            .apply { isAccessible = true }
+        return constructor.newInstance(client) as MmsCaptureCore
+    }
     private fun temp() = kotlin.io.path.createTempDirectory("mms-capture-test").toFile()
     private fun hintContext(): android.content.Context = ApplicationProvider.getApplicationContext<android.content.Context>().also {
         it.getSharedPreferences(MmsCaptureHints.PREFERENCES, android.content.Context.MODE_PRIVATE).edit().clear().commit()
@@ -961,10 +1090,14 @@ class MmsCaptureOrchestrationTest {
         private val previewResult: MmsMediaPreviewResult? = null,
         private val failHighWater: Boolean = false,
         private val descendingPageError: Exception? = null,
+        private val pageError: Exception? = null,
+        private val readError: Exception? = null,
     ) : MmsCaptureProvider {
         var copyCount = 0
         val copiedPartIds = mutableListOf<Long>()
         var descendingPageCount = 0
+        val descendingPageCursors = mutableListOf<Long?>()
+        val descendingPageIds = mutableListOf<List<Long>>()
         var previewError: Exception? = null
         var onDescendingPage: (() -> Unit)? = null
         var onRead: (() -> Unit)? = null
@@ -977,15 +1110,20 @@ class MmsCaptureOrchestrationTest {
             if (failHighWater) throw MmsProviderException("MMS provider returned no high-water cursor")
             return records.maxOfOrNull { it.id } ?: 0
         }
-        override fun page(afterId: Long, limit: Int) = MmsProviderPage(records.filter { it.id > afterId }.take(limit), afterId)
+        override fun page(afterId: Long, limit: Int) = pageError?.let { throw it }
+            ?: MmsProviderPage(records.filter { it.id > afterId }.take(limit), afterId)
         override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int): MmsProviderPage {
             descendingPageCount++
+            descendingPageCursors += cursor
             descendingPageError?.let { throw it }
+            val page = records.filter { record ->
+                record.id <= upperBound && record.id > (floor ?: 0L) && (cursor == null || record.id < cursor)
+            }.sortedByDescending { it.id }.take(limit)
+            descendingPageIds += page.map { it.id }
             val ceiling = cursor ?: upperBound
-            val page = records.filter { it.id <= ceiling && it.id > (floor ?: 0L) }.sortedByDescending { it.id }.take(limit)
             return MmsProviderPage(page, page.lastOrNull()?.id ?: ceiling).also { onDescendingPage?.invoke() }
         }
-        override fun read(id: Long) = records.firstOrNull { it.id == id }.also { onRead?.invoke() }
+        override fun read(id: Long) = readError?.let { throw it } ?: records.firstOrNull { it.id == id }.also { onRead?.invoke() }
         override fun readPartText(part: MmsProviderPart, byteLimit: Int): String? {
             textReadError?.let { throw it }
             return part.text.also { onReadPartText?.invoke() }

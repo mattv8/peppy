@@ -22,6 +22,9 @@ pub fn message_view(
             RcsMessageStatus::Read => "read",
             RcsMessageStatus::Failed => "failed-confirmed",
         });
+        if status.status == RcsMessageStatus::Read {
+            view.status_at = None;
+        }
     }
     Ok(view)
 }

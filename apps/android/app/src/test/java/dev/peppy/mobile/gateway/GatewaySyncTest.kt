@@ -34,6 +34,10 @@ import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.NativeIncomingSms
 import uniffi.peppy_mobile_bindings.NativePermitState
 import uniffi.peppy_mobile_bindings.NativeSnapshotProjectionState
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 
 
 /** A loopback stand-in for the server routes the worker uses; no carrier or real server involved. */
@@ -57,6 +61,7 @@ class GatewaySyncTest : GatewayTestBase() {
     private var snapshotCompactionSupported = false
     private var snapshotCompactionActive = false
     private var snapshotOriginTagsSupported: Boolean? = null
+    private var uploadResponder: (() -> LoopbackHttpServer.Response)? = null
 
     private val server = LoopbackHttpServer { request ->
         synchronized(requests) {
@@ -72,7 +77,7 @@ class GatewaySyncTest : GatewayTestBase() {
             request.method == "GET" && path == "/v1/events" ->
                 if (eventsStatus == 200) LoopbackHttpServer.Response(200, JSONObject().put("events", events).toString())
                 else LoopbackHttpServer.Response(eventsStatus, """{"code":"resync_required"}""")
-            request.method == "POST" && path == "/v1/events" -> uploadResponse
+            request.method == "POST" && path == "/v1/events" -> uploadResponder?.invoke() ?: uploadResponse
             request.method == "GET" && path == "/v1/snapshot" -> LoopbackHttpServer.Response(
                 200,
                 (snapshotCut ?: (snapshot.length().toString() to snapshot.length().toString())).let { (highWater, count) ->
@@ -115,6 +120,7 @@ class GatewaySyncTest : GatewayTestBase() {
         contactPhotos: () -> Boolean = { false },
         nowMs: () -> Long = { System.currentTimeMillis() },
         sessionCurrent: () -> Boolean = { true },
+        effectPermitted: () -> Boolean = { true },
     ) = GatewaySync(
         client, GatewayHttp(server.origin, TEST_TOKEN), state, deviceId,
         dispatch = dispatch,
@@ -123,10 +129,129 @@ class GatewaySyncTest : GatewayTestBase() {
         contacts = contacts,
         contactPhotos = contactPhotos,
         sessionCurrent = sessionCurrent,
+        effectPermitted = effectPermitted,
         nowMs = nowMs,
     )
 
     private fun uploads() = requests.count { it.first == "POST /v1/events" }
+
+    private fun envelopeIds(envelopes: List<String>) =
+        envelopes.mapTo(linkedSetOf()) { JSONObject(it).getString("envelope_id") }
+
+    private fun assertLocalEvent(envelope: String) {
+        val json = JSONObject(envelope)
+        assertEquals(deviceId, json.getString("producer_device_id"))
+        assertEquals("event", json.getString("purpose"))
+    }
+
+    @Test
+    fun cancellationAfterBlockedOutboxBatchPreventsUploadAndDispatch() {
+        val client = live()
+        client.captureIncoming(NativeIncomingSms(null, "+15550009001", "first", "cancel-batch-1", false))
+        client.captureIncoming(NativeIncomingSms(null, "+15550009002", "second", "cancel-batch-2", false))
+        val smsEnvelopes = client.pendingOutboxJsonBatch(10uL)
+        assertEquals(2, smsEnvelopes.size)
+        smsEnvelopes.forEach(::assertLocalEvent)
+        val smsEnvelopeIds = envelopeIds(smsEnvelopes)
+        val (command, wire) = desktopCommandEnvelope(SimRoutes.routeId(3), "must remain pending")
+        events = JSONArray().put(record(1, wire))
+        val batchStarted = CountDownLatch(1)
+        val releaseBatch = CountDownLatch(1)
+        val permitted = AtomicBoolean(true)
+        val carrier = FakeCarrier()
+        var blockedBatch = emptyList<String>()
+        val blockingClient = object : NativeClientInterface by client {
+            override fun pendingOutboxJsonBatch(maxEnvelopes: ULong): List<String> {
+                blockedBatch = client.pendingOutboxJsonBatch(maxEnvelopes)
+                batchStarted.countDown()
+                assertTrue("test must release batch acquisition", releaseBatch.await(5, TimeUnit.SECONDS))
+                return blockedBatch
+            }
+        }
+        var cancellation: Throwable? = null
+        val complete = CountDownLatch(1)
+        Thread {
+            try {
+                sync(blockingClient, carrier, effectPermitted = permitted::get).run()
+            } catch (error: Throwable) {
+                cancellation = error
+            } finally {
+                complete.countDown()
+            }
+        }.start()
+
+        assertTrue("upload batch acquisition started", batchStarted.await(5, TimeUnit.SECONDS))
+        val blockedIds = envelopeIds(blockedBatch)
+        assertEquals("command apply adds one local receipt event", smsEnvelopes.size + 1, blockedBatch.size)
+        assertTrue("both SMS envelopes reached the blocked upload", blockedIds.containsAll(smsEnvelopeIds))
+        blockedBatch.single { JSONObject(it).getString("envelope_id") !in smsEnvelopeIds }.let(::assertLocalEvent)
+        permitted.set(false)
+        releaseBatch.countDown()
+
+        assertTrue("cancelled pass completed", complete.await(5, TimeUnit.SECONDS))
+        assertTrue(cancellation is CancellationException)
+        assertEquals("no POST after cancellation", 0, uploads())
+        assertEquals("no envelope was acknowledged", blockedIds, envelopeIds(client.pendingOutboxJsonBatch(10uL)))
+        assertTrue("command stayed eligible for dispatch", client.pendingCommands().any { it.commandId == command })
+        assertTrue("dispatch phase did not reach the carrier", carrier.calls.isEmpty())
+    }
+
+    @Test
+    fun cancellationAfterBlockedFirstUploadAcknowledgesIssuedResponseButStopsLaterEffects() {
+        val client = live()
+        client.captureIncoming(NativeIncomingSms(null, "+15550009003", "first", "cancel-post-1", false))
+        client.captureIncoming(NativeIncomingSms(null, "+15550009004", "second", "cancel-post-2", false))
+        val smsEnvelopes = client.pendingOutboxJsonBatch(10uL)
+        assertEquals(2, smsEnvelopes.size)
+        smsEnvelopes.forEach(::assertLocalEvent)
+        val smsEnvelopeIds = envelopeIds(smsEnvelopes)
+        val (command, wire) = desktopCommandEnvelope(SimRoutes.routeId(3), "must not dispatch")
+        events = JSONArray().put(record(1, wire))
+        val firstPostStarted = CountDownLatch(1)
+        val releaseFirstPost = CountDownLatch(1)
+        val permitted = AtomicBoolean(true)
+        val carrier = FakeCarrier()
+        var issuedEnvelope = ""
+        uploadResponder = {
+            issuedEnvelope = synchronized(requests) { requests.last { it.first == "POST /v1/events" }.second }
+            firstPostStarted.countDown()
+            assertTrue("test must release first POST", releaseFirstPost.await(5, TimeUnit.SECONDS))
+            uploadResponse
+        }
+        var cancellation: Throwable? = null
+        val complete = CountDownLatch(1)
+        Thread {
+            try {
+                sync(client, carrier, effectPermitted = permitted::get).run()
+            } catch (error: Throwable) {
+                cancellation = error
+            } finally {
+                complete.countDown()
+            }
+        }.start()
+
+        assertTrue("first POST started", firstPostStarted.await(5, TimeUnit.SECONDS))
+        val boundaryBatch = client.pendingOutboxJsonBatch(10uL)
+        val boundaryIds = envelopeIds(boundaryBatch)
+        val issuedId = JSONObject(issuedEnvelope).getString("envelope_id")
+        assertEquals("command apply adds one local receipt event", smsEnvelopes.size + 1, boundaryBatch.size)
+        assertTrue("both SMS envelopes reached upload", boundaryIds.containsAll(smsEnvelopeIds))
+        boundaryBatch.single { JSONObject(it).getString("envelope_id") !in smsEnvelopeIds }.let(::assertLocalEvent)
+        assertTrue("issued envelope came from the captured boundary", issuedId in boundaryIds)
+        permitted.set(false)
+        releaseFirstPost.countDown()
+
+        assertTrue("cancelled pass completed", complete.await(5, TimeUnit.SECONDS))
+        assertTrue(cancellation is CancellationException)
+        assertEquals("no later POST", 1, uploads())
+        assertEquals(
+            "only the issued response was acknowledged",
+            boundaryIds - issuedId,
+            envelopeIds(client.pendingOutboxJsonBatch(10uL)),
+        )
+        assertTrue("command stayed eligible for dispatch", client.pendingCommands().any { it.commandId == command })
+        assertTrue("dispatch phase did not reach the carrier", carrier.calls.isEmpty())
+    }
 
     @Test
     fun freshEnrollmentBootstrapsFromSnapshotSoHistoricalCommandsNeverReachTheCarrier() {

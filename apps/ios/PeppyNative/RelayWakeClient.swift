@@ -264,7 +264,11 @@ public actor RelayWakeClient {
 
     /// Lets the runtime retain its captured old-identity context until every durable cleanup
     /// operation has reached a terminal result. This accessor performs no network or mutation.
-    public func hasPendingCleanup() throws -> Bool { !(try cleanups()).isEmpty }
+    public func hasPendingCleanup() throws -> Bool {
+        if !(try cleanups()).isEmpty { return true }
+        if try route() != nil { return true }
+        return try pending() != nil
+    }
 
     public func isBound(to expected: RelayWakeIdentity, relayOrigin: String) -> Bool {
         identity == expected && origin.serialized == relayOrigin
@@ -274,11 +278,18 @@ public actor RelayWakeClient {
     /// NativeSession has disconnected because the publisher owns captured identity credentials.
     public func revoke() async {
         if let active = try? route() {
-            try? enqueue(active)
-            try? secure.delete(account("route"))
+            // Losing the active proof before durable cleanup would make a restart unable to
+            // revoke the route. Keep it intact when the queue write fails.
+            if (try? enqueue(active)) != nil {
+                try? secure.delete(account("route"))
+            }
         }
-        if let pending = try? pending() { try? retire(pending) }
-        try? secure.delete(account("pending"))
+        if let pending = try? pending() {
+            // A pending registration has cleanup authority only after it was durably queued.
+            if (try? retire(pending)) != nil {
+                try? secure.delete(account("pending"))
+            }
+        }
         await retryCleanup()
     }
 

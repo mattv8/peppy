@@ -189,6 +189,8 @@ pub use vault_identity::{
 use zeroize::Zeroizing;
 
 const SCHEMA_VERSION: i64 = 52;
+const PENDING_COMMAND_ELIGIBILITY: &str =
+    "a.command_id IS NULL AND l.historical=0 AND l.subscription_id<>'' AND l.key_epoch=?";
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -4237,9 +4239,9 @@ impl Client {
         if restore_guarded(&s.conn)? {
             return Ok(Vec::new());
         }
-        let mut query = s.conn.prepare(
-            "SELECT l.command_id,l.subscription_id,l.payload FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE a.command_id IS NULL AND l.historical=0 AND l.subscription_id<>'' AND l.key_epoch=? ORDER BY l.local_order",
-        )?;
+        let mut query = s.conn.prepare(&format!(
+            "SELECT l.command_id,l.subscription_id,l.payload FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE {PENDING_COMMAND_ELIGIBILITY} ORDER BY l.local_order"
+        ))?;
         let rows = query
             .query_map(params![active], |r| {
                 Ok((
@@ -4258,6 +4260,38 @@ impl Client {
                 })
             })
             .collect()
+    }
+
+    /// Returns the attachment count for one currently pending carrier command.
+    ///
+    /// `None` means the command is not pending for this active, unguarded gateway epoch.
+    pub fn pending_command_attachment_count(
+        &self,
+        command_id: CommandId,
+    ) -> Result<Option<u64>, Error> {
+        let s = self.lock()?;
+        let Some(active) = s.active_epoch else {
+            return Ok(None);
+        };
+        if restore_guarded(&s.conn)? {
+            return Ok(None);
+        }
+        let payload = s
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT l.payload FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE l.command_id=? AND {PENDING_COMMAND_ELIGIBILITY}"
+                ),
+                params![command_id.to_string(), active],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        payload
+            .map(|payload| {
+                let (message, _) = localize(&s.conn, decode(payload.as_bytes())?)?;
+                u64::try_from(message.record.attachments.len()).map_err(|_| Error::Database)
+            })
+            .transpose()
     }
 
     /// Candidate RCS-link commands for the trusted native coordinator.
@@ -7322,6 +7356,35 @@ CREATE TRIGGER IF NOT EXISTS addresses_search_delete AFTER DELETE ON addresses B
 END;
 ";
 
+const SEARCH_BACKFILL_COUNTER_ADOPTION: &str = "search_backfill_counter_contract_v1";
+const SEARCH_BACKFILL_COUNTER_TRIGGER: &str = "
+DROP TRIGGER IF EXISTS messages_search_delete;
+CREATE TRIGGER messages_search_delete AFTER DELETE ON messages BEGIN
+  DELETE FROM local_search_fts WHERE rowid=old.local_order;
+  UPDATE metadata SET v=CAST(v AS INTEGER)+1 WHERE k='search_generation';
+  UPDATE metadata
+  SET v=MAX(CAST(v AS INTEGER)-1,0)
+  WHERE k='search_remaining'
+    AND old.local_order>CAST((SELECT v FROM metadata WHERE k='search_backfill_watermark') AS INTEGER)
+    AND old.local_order<=CAST((SELECT v FROM metadata WHERE k='search_backfill_highwater') AS INTEGER);
+END;
+";
+
+fn adopt_search_backfill_counter(conn: &mut Connection) -> Result<(), Error> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if get_meta(&tx, SEARCH_BACKFILL_COUNTER_ADOPTION)?.is_none() {
+        tx.execute_batch(SEARCH_BACKFILL_COUNTER_TRIGGER)?;
+        let remaining: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM messages WHERE local_order>CAST((SELECT v FROM metadata WHERE k='search_backfill_watermark') AS INTEGER) AND local_order<=CAST((SELECT v FROM metadata WHERE k='search_backfill_highwater') AS INTEGER)",
+            [],
+            |row| row.get(0),
+        )?;
+        set_meta(&tx, "search_remaining", &remaining.to_string())?;
+        set_meta(&tx, SEARCH_BACKFILL_COUNTER_ADOPTION, "1")?;
+    }
+    Ok(tx.commit()?)
+}
+
 /// Version 35 -> 36: persisted static upload priority and a durable bounded initial history seed.
 /// Existing unknown backlog is background (4) and existing commands are priority 0. Rows keep
 /// their IDs, plain bytes, and wire bytes; only the priority metadata and its partial indexes
@@ -7943,6 +8006,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     initialize_battery_lookup_indexes(conn)?;
     mms_identity::install_query_indexes(conn)?;
     install_snapshot_apply_index(conn)?;
+    adopt_search_backfill_counter(conn)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for (key, value) in [
         ("vault_id", store.config.vault_id.to_string()),
@@ -12177,6 +12241,139 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn pending_attachment_lookup_matches_pending_eligibility_and_uses_command_index() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("pending-lookup.db"),
+                vault_id,
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[93; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let payload = |attachments: usize| {
+            serde_json::to_string(&MessagePayload {
+                record: MessageRecord {
+                    message_id: MessageId::new(),
+                    conversation_id: ConversationId::new(),
+                    source_sequence: SourceSequence(1),
+                    attachments: (0..attachments)
+                        .map(|_| AttachmentReference {
+                            attachment_id: AttachmentId::new(),
+                            pending: false,
+                        })
+                        .collect(),
+                },
+                source_device_id: DeviceId::new(),
+                provider_message_id: None,
+                sender_address: Some("+15555550100".into()),
+                recipients: vec![],
+                subject: None,
+                body: String::new(),
+                transport: Transport::Mms,
+                direction: Direction::Incoming,
+                imported: false,
+                sent_at_ms: None,
+                ordered_at_ms: None,
+                mms_context: None,
+            })
+            .unwrap()
+        };
+        let selected = CommandId::new();
+        let historical = CommandId::new();
+        let attempted = CommandId::new();
+        let empty_sim = CommandId::new();
+        let stale_epoch = CommandId::new();
+        let malformed = CommandId::new();
+        {
+            let store = client.lock().unwrap();
+            let active_epoch = store.active_epoch.unwrap();
+            let insert = |id: CommandId,
+                          epoch: u32,
+                          subscription: &str,
+                          payload: String,
+                          historical: bool| {
+                store.conn.execute(
+                    "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload,historical) VALUES(?,?,?,?,?)",
+                    params![id.to_string(), epoch, subscription, payload, historical],
+                ).unwrap();
+            };
+            insert(selected, active_epoch, "sim", payload(2), false);
+            insert(historical, active_epoch, "sim", payload(1), true);
+            insert(attempted, active_epoch, "sim", payload(1), false);
+            insert(empty_sim, active_epoch, "", payload(1), false);
+            insert(stale_epoch, active_epoch + 1, "sim", payload(1), false);
+            insert(malformed, active_epoch, "sim", "not-json".into(), false);
+            for _ in 0..1_000 {
+                insert(
+                    CommandId::new(),
+                    active_epoch,
+                    "sim",
+                    "not-json".into(),
+                    false,
+                );
+            }
+            store.conn.execute(
+                "INSERT INTO attempts(command_id,state,attempted_at_ms) VALUES(?,'attempt_recorded',0)",
+                [attempted.to_string()],
+            ).unwrap();
+            let plan = store.conn.prepare(
+                "EXPLAIN QUERY PLAN SELECT l.payload FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE l.command_id=? AND a.command_id IS NULL AND l.historical=0 AND l.subscription_id<>'' AND l.key_epoch=?",
+            ).unwrap().query_map(params![selected.to_string(), active_epoch], |row| row.get::<_, String>(3)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+            assert!(
+                plan.iter().any(|detail| detail.contains("command_id=?")),
+                "{plan:?}"
+            );
+        }
+        assert_eq!(
+            client.pending_command_attachment_count(selected).unwrap(),
+            Some(2)
+        );
+        for id in [
+            historical,
+            attempted,
+            empty_sim,
+            stale_epoch,
+            CommandId::new(),
+        ] {
+            assert_eq!(client.pending_command_attachment_count(id).unwrap(), None);
+        }
+        assert!(matches!(
+            client.pending_command_attachment_count(malformed),
+            Err(Error::Database)
+        ));
+        client
+            .lock()
+            .unwrap()
+            .conn
+            .execute("INSERT INTO metadata(k,v) VALUES('restore_guard','1')", [])
+            .unwrap();
+        assert_eq!(
+            client.pending_command_attachment_count(selected).unwrap(),
+            None
+        );
+        client
+            .lock()
+            .unwrap()
+            .conn
+            .execute("DELETE FROM metadata WHERE k='restore_guard'", [])
+            .unwrap();
+        client.lock().unwrap().active_epoch = None;
+        assert_eq!(
+            client.pending_command_attachment_count(selected).unwrap(),
+            None
+        );
+    }
+
     fn drop_post_v45_objects(conn: &Connection) {
         conn.execute_batch(
             "DROP TABLE rcs_mapping_proofs;
@@ -12252,11 +12449,11 @@ mod tests {
     }
 
     #[test]
-    fn production_feature_and_base_layouts_converge_to_schema_52() {
+    fn production_feature_and_base_layouts_converge_to_current_schema() {
         let directory = tempfile::TempDir::new().unwrap();
         let mut shapes = Vec::new();
         for (name, version, drop_rcs, drop_drafts) in [
-            ("fresh", 52, false, false),
+            ("fresh", SCHEMA_VERSION, false, false),
             ("production-50", 50, true, false),
             ("branch-51", 51, false, true),
             ("base-46", 46, true, true),
@@ -12279,7 +12476,7 @@ mod tests {
                 .conn
                 .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
                 .unwrap();
-            assert_eq!(upgraded_version, 52, "{name}");
+            assert_eq!(upgraded_version, SCHEMA_VERSION, "{name}");
             shapes.push((name, schema_shape(&store.conn)));
         }
         for (name, shape) in &shapes[1..] {

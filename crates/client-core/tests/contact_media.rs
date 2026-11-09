@@ -901,7 +901,14 @@ fn retention_contact_use_gates_real_publication_until_ack_and_live_holder_termin
         "a current contact holder must never auto-queue release"
     );
     call(capture(&p.owner, &p.owner_cfg, None));
-    p.owner = unlocked(&p.owner_cfg, &p.vault);
+    let owner_cfg = p.owner_cfg.clone();
+    let vault = Vault {
+        id: p.vault.id,
+        profile: p.vault.profile.clone(),
+        header: p.vault.header.clone(),
+    };
+    drop(p.owner);
+    p.owner = unlocked(&owner_cfg, &vault);
     p.owner
         .configure_attachment_retention_protocol(true)
         .unwrap();
@@ -946,7 +953,14 @@ fn contact_photo_tombstone_suppresses_real_queued_photo_publication_across_reope
         after < before,
         "photo-bearing queued event must be suppressed"
     );
-    p.owner = unlocked(&p.owner_cfg, &p.vault);
+    let owner_cfg = p.owner_cfg.clone();
+    let vault = Vault {
+        id: p.vault.id,
+        profile: p.vault.profile.clone(),
+        header: p.vault.header.clone(),
+    };
+    drop(p.owner);
+    p.owner = unlocked(&owner_cfg, &vault);
     assert_eq!(p.owner.pending_outbox_count().unwrap(), after);
     assert!(state(&p.owner)["uploads"].as_array().unwrap().is_empty());
     assert!(

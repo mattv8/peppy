@@ -103,6 +103,17 @@ internal object NotificationReconciliation {
 
 data class ObservedNotificationApp(val packageName: String, val label: String)
 
+/** The listener's production removal boundary; OS facts select the core's lifetime-safe operation. */
+internal object NotificationRemovalExecutor {
+    fun remove(client: NativeClientInterface, key: String, instance: String, activeInstances: Map<String, String>) {
+        if (key in activeInstances) {
+            client.removeNotificationIfCurrentInstance(key, instance)
+        } else {
+            client.removeNotification(key, instance)
+        }
+    }
+}
+
 object NotificationMirrorAccess {
     fun granted(context: Context): Boolean = NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName)
     fun settingsIntent() = android.content.Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
@@ -206,11 +217,18 @@ class NotificationMirrorService : NotificationListenerService() {
         // A delayed removal callback must not retire a repost that is currently active.
         val active = try { activeNotifications ?: return } catch (_: SecurityException) { return }
         if (NotificationExtraction.removedInstanceStillActive(sbn, active)) return
-        pending.remove(key)
-        callbacks.remove(key)?.let(handler::removeCallbacks)
-        // No plaintext removal backlog is retained when the vault is locked.
+        val pendingCapture = pending[key]?.takeIf { it.instance == instance }
+        if (pendingCapture != null) pending.remove(key, pendingCapture)
+        callbacks[key]?.takeIf { pendingCapture != null }?.let {
+            callbacks.remove(key, it)
+            handler.removeCallbacks(it)
+        }
+        // A repost with the same key must retire only the old core lifetime. Once the OS no
+        // longer reports the key, retain the historic unconditional reconciliation behavior.
         val session = NativeGateway.session(applicationContext) ?: return
-        try { session.client.removeNotification(key, instance) } catch (_: MobileBindingsException) { return }
+        try {
+            NotificationRemovalExecutor.remove(session.client, key, instance, active.associate { it.key to "${it.key}:${it.postTime}" })
+        } catch (_: MobileBindingsException) { return }
         GatewayWork.enqueueUrgent(applicationContext)
     }
 

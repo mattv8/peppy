@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebhookEditorModal, type WebhookEditorModalProps } from "./WebhookEditorModal";
 import { bridge } from "../bridge/bridge";
@@ -548,7 +548,7 @@ describe("WebhookEditorModal", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Send test" }));
       typeInto("Name (optional)", "Changed");
-      resolveTest({ ok: true, statusCode: 200, durationMs: 142, error: null });
+      await act(async () => resolveTest({ ok: true, statusCode: 200, durationMs: 142, error: null }));
 
       await waitFor(() => expect(screen.queryByText("200 OK · 142 ms")).not.toBeInTheDocument());
     });

@@ -224,6 +224,24 @@ impl Controller {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn set_discovered_controller_for_test(
+    state: &AppState,
+    origin: String,
+    mode: DeploymentMode,
+) {
+    let mut controller = state.enrollment.lock().unwrap();
+    controller.origin = Some(origin);
+    controller.info = Some(InstanceInfo {
+        mode,
+        claimed: true,
+        setup_required: false,
+        password_auth: false,
+        qr_pairing: false,
+        shared_secret_pairing: false,
+    });
+}
+
 /// Only an explicitly discovered, unclaimed community server without a setup requirement is open.
 /// Missing, claimed, and non-community state all fail closed to a native setup-token prompt,
 /// except resuming this device's own attempt on a claimed server: the server replays a matching
@@ -984,35 +1002,58 @@ async fn post(
     if let Some(session) = session {
         call = call.header("Peppy-Instance-Session", session);
     }
-    if let Some(account_session) = account_session {
-        call = call.header("Peppy-Account-Session", account_session);
-    }
+    let call = attach_account_header(call, origin, account_session)?;
     body(call.send().await.map_err(|_| NetError::Offline)?).await
 }
 
 pub(crate) async fn hosted_account_header(
     state: &AppState,
     hosted: &crate::hosted::HostedState,
+    destination: &str,
 ) -> BridgeResult<Option<Zeroizing<String>>> {
-    let hosted_mode = state
-        .enrollment
-        .lock()
-        .map_err(|_| BridgeError::host_state())?
-        .info
-        .as_ref()
-        .is_some_and(|info| info.mode == DeploymentMode::Hosted);
+    let (hosted_mode, origin) = {
+        let controller = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
+        let hosted_mode = controller
+            .info
+            .as_ref()
+            .is_some_and(|info| info.mode == DeploymentMode::Hosted);
+        let origin = hosted_mode
+            .then(|| controller.origin().map(str::to_owned))
+            .transpose()?;
+        (hosted_mode, origin)
+    };
     if !hosted_mode {
         return Ok(None);
     }
-    let origin = state
-        .enrollment
-        .lock()
-        .map_err(|_| BridgeError::host_state())?
-        .origin()?
-        .to_owned();
+    if Some(destination) != origin.as_deref() {
+        return Err(BridgeError::new(
+            "origin-binding",
+            "The enrollment destination changed before account authorization.",
+        ));
+    }
     Ok(Some(
-        crate::hosted::enrollment_account_session(state, hosted, &origin).await?,
+        crate::hosted::enrollment_account_session(state, hosted, destination).await?,
     ))
+}
+
+pub(crate) fn attach_account_header(
+    request: reqwest::RequestBuilder,
+    origin: &str,
+    account_session: Option<&str>,
+) -> BridgeResult<reqwest::RequestBuilder> {
+    let Some(account_session) = account_session else {
+        return Ok(request);
+    };
+    if origin != crate::hosted::hosted_origin()? {
+        return Err(BridgeError::new(
+            "origin-binding",
+            "An account session is only sent to Peppy Hosted.",
+        ));
+    }
+    Ok(request.header("Peppy-Account-Session", account_session))
 }
 
 fn device_request(
@@ -1037,10 +1078,7 @@ fn device_request(
             peppy_hosted_api::attachments::ATTACHMENT_RETENTION_PROTOCOL_VERSION,
         );
     }
-    if let Some(account_session) = account_session {
-        request = request.header("Peppy-Account-Session", account_session);
-    }
-    Ok(request)
+    attach_account_header(request, origin, account_session)
 }
 
 pub(super) fn native_identity_credential(
@@ -1762,7 +1800,7 @@ pub async fn enrollment_connect_shared_secret(
         (origin, request)
     };
     let client = http(&origin)?;
-    let account_session = hosted_account_header(&state, &hosted).await?;
+    let account_session = hosted_account_header(&state, &hosted, &origin).await?;
     let challenge_json = match post(
         &client,
         &origin,
@@ -2386,6 +2424,35 @@ fn discard_owner_draft(
     Ok(())
 }
 
+async fn send_phone_invitation_request(
+    state: &AppState,
+    hosted: &crate::hosted::HostedState,
+    session: std::sync::Arc<crate::session::Session>,
+    request: String,
+) -> BridgeResult<InvitationCreated> {
+    let origin = session.api.origin().to_owned();
+    let account = hosted_account_header(state, hosted, &origin).await?;
+    let response = body(
+        device_request(
+            &session,
+            &origin,
+            http(&origin)?
+                .post(format!(
+                    "{origin}{}",
+                    enrollment::routes::ENROLLMENT_INVITATIONS
+                ))
+                .header("content-type", "application/json")
+                .body(request),
+            account.as_ref().map(|value| value.as_str()),
+        )?
+        .send()
+        .await
+        .map_err(|_| NetError::Offline)?,
+    )
+    .await?;
+    serde_json::from_str(&response).map_err(|_| enrollment_error())
+}
+
 async fn enrollment_add_phone_core(
     state: &AppState,
     method: EnrollmentMethod,
@@ -2415,31 +2482,10 @@ async fn enrollment_add_phone_core(
             Err(_) => return Err(enrollment_error()),
         }
     };
-    let created = async {
-        let session = state.require_session().await?;
-        let origin = session.api.origin().to_owned();
-        let account = hosted_account_header(state, hosted).await?;
-        let response = body(
-            device_request(
-                &session,
-                &origin,
-                http(&origin)?
-                    .post(format!(
-                        "{origin}{}",
-                        enrollment::routes::ENROLLMENT_INVITATIONS
-                    ))
-                    .header("content-type", "application/json")
-                    .body(request),
-                account.as_ref().map(|value| value.as_str()),
-            )?
-            .send()
-            .await
-            .map_err(|_| NetError::Offline)?,
-        )
-        .await?;
-        serde_json::from_str::<InvitationCreated>(&response).map_err(|_| enrollment_error())
-    }
-    .await;
+    let created = match state.require_session().await {
+        Ok(session) => send_phone_invitation_request(state, hosted, session, request).await,
+        Err(error) => Err(error),
+    };
     let created = match created {
         Ok(created) => created,
         Err(error) => {
@@ -2549,19 +2595,14 @@ async fn ensure_owner_client(state: &AppState) -> BridgeResult<()> {
     Ok(())
 }
 
-async fn refresh_invitation(
+async fn refresh_invitation_with_session(
     state: &AppState,
     hosted: &crate::hosted::HostedState,
+    session: std::sync::Arc<crate::session::Session>,
+    id: uuid::Uuid,
 ) -> BridgeResult<()> {
-    let id = state
-        .enrollment
-        .lock()
-        .map_err(|_| BridgeError::host_state())?
-        .invitation_id
-        .ok_or_else(enrollment_error)?;
-    let session = state.require_session().await?;
     let origin = session.api.origin().to_owned();
-    let account = hosted_account_header(state, hosted).await?;
+    let account = hosted_account_header(state, hosted, &origin).await?;
     let status: InvitationStatus = serde_json::from_str(
         &body(
             device_request(
@@ -2581,6 +2622,20 @@ async fn refresh_invitation(
     )
     .map_err(|_| enrollment_error())?;
     apply_refreshed_invitation_status(&state.enrollment, id, status)
+}
+
+async fn refresh_invitation(
+    state: &AppState,
+    hosted: &crate::hosted::HostedState,
+) -> BridgeResult<()> {
+    let id = state
+        .enrollment
+        .lock()
+        .map_err(|_| BridgeError::host_state())?
+        .invitation_id
+        .ok_or_else(enrollment_error)?;
+    let session = state.require_session().await?;
+    refresh_invitation_with_session(state, hosted, session, id).await
 }
 
 /// Orders the post-approval stages. Zero means the invitation has not been approved yet.
@@ -2653,21 +2708,14 @@ fn apply_refreshed_invitation_status(
     Ok(())
 }
 
-async fn cancel_phone_invitation(
+async fn cancel_phone_invitation_with_session(
     state: &AppState,
     hosted: &crate::hosted::HostedState,
+    session: std::sync::Arc<crate::session::Session>,
+    id: uuid::Uuid,
 ) -> BridgeResult<()> {
-    let id = state
-        .enrollment
-        .lock()
-        .map_err(|_| BridgeError::host_state())?
-        .invitation_id;
-    let Some(id) = id else {
-        return Ok(());
-    };
-    let session = state.require_session().await?;
     let origin = session.api.origin().to_owned();
-    let account = hosted_account_header(state, hosted).await?;
+    let account = hosted_account_header(state, hosted, &origin).await?;
     body(
         device_request(
             &session,
@@ -2684,6 +2732,22 @@ async fn cancel_phone_invitation(
     )
     .await?;
     clear_confirmed_phone_cancellation(&state.enrollment, id)
+}
+
+async fn cancel_phone_invitation(
+    state: &AppState,
+    hosted: &crate::hosted::HostedState,
+) -> BridgeResult<()> {
+    let id = state
+        .enrollment
+        .lock()
+        .map_err(|_| BridgeError::host_state())?
+        .invitation_id;
+    let Some(id) = id else {
+        return Ok(());
+    };
+    let session = state.require_session().await?;
+    cancel_phone_invitation_with_session(state, hosted, session, id).await
 }
 
 fn phone_invitation_is_cancelable(
@@ -3204,7 +3268,7 @@ pub async fn enrollment_approve(
         Err(_) => return Err(enrollment_error()),
     };
     let origin = session.api.origin().to_owned();
-    let account = hosted_account_header(&state, &hosted).await?;
+    let account = hosted_account_header(&state, &hosted, &origin).await?;
     if state.require_session_admitted(&operation).await?.binding != binding
         || !phone_approval_submit_is_fresh(&state.enrollment, &preparation)?
     {
@@ -3337,7 +3401,7 @@ pub async fn enrollment_cancel(
         }
         let session = state.require_session().await?;
         let origin = session.api.origin().to_owned();
-        let account = hosted_account_header(&state, &hosted).await?;
+        let account = hosted_account_header(&state, &hosted, &origin).await?;
         body(
             device_request(
                 &session,
@@ -7341,16 +7405,62 @@ mod owner_retry_tests {
     }
 
     #[tokio::test]
-    async fn device_request_binds_origin_and_sends_retention_header_only_when_supported() {
-        let origin = "http://127.0.0.1:9";
-        let fixture = crate::tests::fixture_at(origin);
+    async fn hosted_account_headers_require_the_captured_canonical_destination() {
+        let origin = crate::hosted::hosted_origin().unwrap();
+        let store = Arc::new(MemoryStore::default());
+        store
+            .set(
+                &format!("hosted-session:{origin}"),
+                br#"{"account_id":"account","bearer":"account-session","expires_at_unix":18446744073709551615}"#,
+            )
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::new(root.path().to_path_buf(), store, crate::tests::noop());
+        {
+            let mut controller = state.enrollment.lock().unwrap();
+            controller.origin = Some(origin.clone());
+            controller.info = Some(InstanceInfo {
+                mode: DeploymentMode::Hosted,
+                claimed: true,
+                setup_required: false,
+                password_auth: false,
+                qr_pairing: false,
+                shared_secret_pairing: false,
+            });
+        }
+
+        let account =
+            hosted_account_header(&state, &crate::hosted::HostedState::default(), &origin)
+                .await
+                .unwrap();
+        assert_eq!(
+            account.as_ref().map(|value| value.as_str()),
+            Some("account-session")
+        );
+        assert_eq!(
+            hosted_account_header(
+                &state,
+                &crate::hosted::HostedState::default(),
+                "https://community.example",
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "origin-binding"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_request_binds_origin_and_never_attaches_an_account_header_elsewhere() {
+        let origin = crate::hosted::hosted_origin().unwrap();
+        let fixture = crate::tests::fixture_at(&origin);
         let session = crate::tests::open(&fixture, &fixture.binding, &[]);
         let header = peppy_hosted_api::attachments::ATTACHMENT_RETENTION_PROTOCOL_HEADER;
         let build = |session: &crate::session::Session| {
             device_request(
                 session,
-                origin,
-                http(origin)
+                &origin,
+                http(&origin)
                     .unwrap()
                     .post(format!("{origin}/v1/attachments/probe")),
                 Some("account-session"),
@@ -7392,16 +7502,163 @@ mod owner_retry_tests {
             );
         }
 
+        let community_origin = "https://community.example";
+        let community_fixture = crate::tests::fixture_at(community_origin);
+        let community_session =
+            crate::tests::open(&community_fixture, &community_fixture.binding, &[]);
         let rejected = device_request(
-            &session,
-            "http://127.0.0.1:10",
-            http(origin)
+            &community_session,
+            community_origin,
+            http(community_origin)
                 .unwrap()
-                .post("http://127.0.0.1:10/v1/attachments/probe"),
-            None,
+                .post(format!("{community_origin}/v1/attachments/probe")),
+            Some("account-session"),
         )
         .err()
         .unwrap();
         assert_eq!(rejected.code, "origin-binding");
+    }
+
+    #[tokio::test]
+    async fn captured_community_phone_operations_reject_a_hosted_switchback_before_http() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let community_origin = format!("http://{}", listener.local_addr().unwrap());
+        let request = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0; 4096];
+            let read = socket.read(&mut buffer).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+            String::from_utf8(buffer[..read].to_vec()).unwrap()
+        });
+        let community_fixture = crate::tests::fixture_at(&community_origin);
+        let community_session = Arc::new(crate::tests::open(
+            &community_fixture,
+            &community_fixture.binding,
+            &[],
+        ));
+        let hosted_origin = crate::hosted::hosted_origin().unwrap();
+        let hosted_fixture = crate::tests::fixture_at(&hosted_origin);
+        let hosted_session = Arc::new(crate::tests::open(
+            &hosted_fixture,
+            &hosted_fixture.binding,
+            &[],
+        ));
+        let store = Arc::new(MemoryStore::default());
+        store
+            .set(
+                &format!("hosted-session:{hosted_origin}"),
+                br#"{"account_id":"account","bearer":"account-session","expires_at_unix":18446744073709551615}"#,
+            )
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::new(root.path().to_path_buf(), store, crate::tests::noop());
+        let invitation_id = uuid::Uuid::new_v4();
+        let mut client = EnrollmentClient::for_existing_owner(
+            hosted_origin.clone(),
+            ClientKind::Desktop,
+            DEVICE_NAME.into(),
+            hosted_fixture.profile.clone(),
+            hosted_fixture.header.clone(),
+        )
+        .unwrap();
+        let create_request = client
+            .create_phone_invitation(EnrollmentMethod::Transfer)
+            .unwrap();
+        client
+            .consume_created_invitation(
+                serde_json::to_string(&InvitationCreated {
+                    invitation_id,
+                    expires_in_seconds: 60,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        {
+            let mut controller = state.enrollment.lock().unwrap();
+            controller.origin = Some(hosted_origin.clone());
+            controller.info = Some(InstanceInfo {
+                mode: DeploymentMode::Hosted,
+                claimed: true,
+                setup_required: false,
+                password_auth: false,
+                qr_pairing: false,
+                shared_secret_pairing: false,
+            });
+            controller.client = Some(client);
+            controller.invitation_id = Some(invitation_id);
+            controller.invitation = Some(invitation_status(EnrollmentState::Waiting, 60));
+            controller.invitation_method = Some(EnrollmentMethod::Transfer);
+        }
+        let hosted = crate::hosted::HostedState::default();
+
+        for operation in ["create", "status", "cancel"] {
+            state
+                .update_config(|config| {
+                    config.origin = Some(community_fixture.binding.origin.clone());
+                    config.remember(&community_fixture.binding);
+                    config.active = Some(community_fixture.binding.clone());
+                })
+                .unwrap();
+            *state.session.lock().await = Some(community_session.clone());
+            let captured = state.require_session().await.unwrap();
+
+            state
+                .update_config(|config| {
+                    config.origin = Some(hosted_fixture.binding.origin.clone());
+                    config.remember(&hosted_fixture.binding);
+                    config.active = Some(hosted_fixture.binding.clone());
+                })
+                .unwrap();
+            *state.session.lock().await = Some(hosted_session.clone());
+
+            let error = match operation {
+                "create" => {
+                    send_phone_invitation_request(&state, &hosted, captured, create_request.clone())
+                        .await
+                        .map(|_| ())
+                }
+                "status" => {
+                    refresh_invitation_with_session(&state, &hosted, captured, invitation_id).await
+                }
+                "cancel" => {
+                    cancel_phone_invitation_with_session(&state, &hosted, captured, invitation_id)
+                        .await
+                }
+                _ => unreachable!(),
+            }
+            .unwrap_err();
+            assert_eq!(error.code, "origin-binding", "{operation}");
+            assert_eq!(
+                error.message, "The enrollment destination changed before account authorization.",
+                "{operation} must authorize the captured destination"
+            );
+        }
+
+        let captured = community_session;
+        {
+            let mut controller = state.enrollment.lock().unwrap();
+            controller.origin = Some(community_origin.clone());
+            controller.info.as_mut().unwrap().mode = DeploymentMode::Community;
+        }
+        state
+            .update_config(|config| {
+                config.origin = Some(community_fixture.binding.origin.clone());
+                config.active = Some(community_fixture.binding.clone());
+            })
+            .unwrap();
+        *state.session.lock().await = Some(captured.clone());
+        cancel_phone_invitation_with_session(&state, &hosted, captured, invitation_id)
+            .await
+            .unwrap();
+        assert!(!request
+            .await
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("peppy-account-session:"));
     }
 }

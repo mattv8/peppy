@@ -9,6 +9,7 @@ pub const MAX_SEARCH_QUERY_CHARS: usize = 128;
 pub const HISTORY_WINDOW_LIMIT: usize = 50;
 pub const HISTORY_REFRESH_LIMIT: usize = 150;
 const INDEX_BATCH_LIMIT: usize = 100;
+const SEARCH_BACKFILL_PAGE_SQL: &str = "SELECT local_order,id,conversation_id,payload,sort_at_ms FROM messages WHERE local_order>? AND local_order<=? ORDER BY local_order LIMIT ?";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchKind {
@@ -119,9 +120,15 @@ impl Client {
         let highwater = metadata_i64(&tx, "search_backfill_highwater")?;
         let watermark = metadata_i64(&tx, "search_backfill_watermark")?;
         let rows = tx
-            .prepare("SELECT local_order,id,conversation_id,payload,sort_at_ms FROM messages WHERE local_order>? AND local_order<=? ORDER BY local_order LIMIT ?")?
+            .prepare(SEARCH_BACKFILL_PAGE_SQL)?
             .query_map(params![watermark, highwater, budget as i64], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, i64>(4)?))
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         let mut inserted = 0_i64;
@@ -140,15 +147,22 @@ impl Client {
             tx.execute("INSERT INTO local_search_fts(rowid,kind,target_id,conversation_id,title,body,timestamp) VALUES(?,?,?,?,?,?,?)", params![order, "message", id, conversation_id, payload.get("subject").and_then(Value::as_str).unwrap_or(""), payload.get("body").and_then(Value::as_str).unwrap_or(""), timestamp])?;
             inserted += 1;
         }
-        let next_watermark = rows.last().map(|row| row.0).unwrap_or(highwater);
+        let mut next_watermark = rows.last().map(|row| row.0).unwrap_or(highwater);
+        // `search_remaining` is initialized with the backfill high-water mark and subsequently
+        // maintained from the bounded page. Counting the tail on every page turns a 100k-row
+        // backfill into quadratic work. A deleted tail produces an empty page, which advances the
+        // watermark to high-water and settles the count at zero.
+        let remaining = if next_watermark == highwater {
+            0
+        } else {
+            metadata_i64(&tx, "search_remaining")?.saturating_sub(rows.len() as i64)
+        };
+        if remaining == 0 {
+            next_watermark = highwater;
+        }
         if next_watermark != watermark {
             set_metadata_i64(&tx, "search_backfill_watermark", next_watermark)?;
         }
-        let remaining: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM messages WHERE local_order>? AND local_order<=?",
-            params![next_watermark, highwater],
-            |row| row.get(0),
-        )?;
         if metadata_i64(&tx, "search_remaining")? != remaining {
             set_metadata_i64(&tx, "search_remaining", remaining)?;
         }
@@ -986,6 +1000,111 @@ mod tests {
     use super::*;
     use crate::{ClientConfig, DatabaseKey, DeviceId, VaultId};
     use peppy_crypto::{KeyProfile, VaultCheckHeader, create_vault_check_header, derive_root_key};
+    use rusqlite::ffi;
+    use std::{
+        ffi::c_void,
+        os::raw::c_int,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    struct ProgressCounter {
+        database: *mut ffi::sqlite3,
+        steps: Arc<AtomicUsize>,
+    }
+
+    impl ProgressCounter {
+        fn install(conn: &rusqlite::Connection) -> Self {
+            let steps = Arc::new(AtomicUsize::new(0));
+            let database = unsafe { conn.handle() };
+            unsafe {
+                ffi::sqlite3_progress_handler(
+                    database,
+                    1,
+                    Some(count_progress_steps),
+                    Arc::as_ptr(&steps) as *mut c_void,
+                );
+            }
+            Self { database, steps }
+        }
+
+        fn steps(&self) -> usize {
+            self.steps.load(Ordering::Relaxed)
+        }
+    }
+
+    impl Drop for ProgressCounter {
+        fn drop(&mut self) {
+            unsafe {
+                ffi::sqlite3_progress_handler(self.database, 0, None, std::ptr::null_mut());
+            }
+        }
+    }
+
+    unsafe extern "C" fn count_progress_steps(context: *mut c_void) -> c_int {
+        unsafe { (&*(context as *const AtomicUsize)).fetch_add(1, Ordering::Relaxed) };
+        0
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct SearchAdoptionSnapshot {
+        source_rows: Vec<(i64, String, String, String, i64)>,
+        fts_rowids: Vec<i64>,
+        needle_rowids: Vec<i64>,
+        token_two_rowids: Vec<i64>,
+        generation: i64,
+        watermark: i64,
+        highwater: i64,
+        remaining: i64,
+    }
+
+    fn search_adoption_snapshot(conn: &rusqlite::Connection) -> SearchAdoptionSnapshot {
+        let source_rows = conn
+            .prepare("SELECT local_order,id,conversation_id,payload,sort_at_ms FROM messages ORDER BY local_order")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let fts_rowids = conn
+            .prepare("SELECT rowid FROM local_search_fts ORDER BY rowid")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let matching_rowids = |query| {
+            conn.prepare(
+                "SELECT rowid FROM local_search_fts WHERE local_search_fts MATCH ? ORDER BY rowid",
+            )
+            .unwrap()
+            .query_map([query], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+        };
+
+        SearchAdoptionSnapshot {
+            source_rows,
+            fts_rowids,
+            needle_rowids: matching_rowids("needle"),
+            token_two_rowids: matching_rowids("token2"),
+            generation: metadata_i64(conn, "search_generation").unwrap(),
+            watermark: metadata_i64(conn, "search_backfill_watermark").unwrap(),
+            highwater: metadata_i64(conn, "search_backfill_highwater").unwrap(),
+            remaining: metadata_i64(conn, "search_remaining").unwrap(),
+        }
+    }
 
     fn unlocked_client(
         path: std::path::PathBuf,
@@ -1051,7 +1170,7 @@ mod tests {
                    DROP TABLE rcs_lane_ownership;
                    DROP TABLE rcs_conversation_metadata;
                    ALTER TABLE attempts DROP COLUMN finalized_transport;
-                   DELETE FROM metadata WHERE k IN ('search_remaining','search_generation','search_backfill_highwater','search_backfill_watermark');
+                   DELETE FROM metadata WHERE k IN ('search_remaining','search_generation','search_backfill_highwater','search_backfill_watermark','search_backfill_counter_contract_v1');
                  UPDATE schema_meta SET version=34;",
             ).unwrap();
             let mut insert = store.conn.prepare(
@@ -1126,7 +1245,7 @@ mod tests {
         let old_cursor = first_page.next_cursor.unwrap();
         drop(client);
 
-        let client = unlocked_client(path, vault_id, device_id, &profile, &header);
+        let client = unlocked_client(path.clone(), vault_id, device_id, &profile, &header);
         let first = client.advance_search_index(Some(100)).unwrap();
         assert_eq!((first.processed, first.remaining), (100, 105));
         assert!(matches!(
@@ -1138,15 +1257,276 @@ mod tests {
             }),
             Err(Error::InvalidRequest("search cursor"))
         ));
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute("DELETE FROM messages WHERE id='message-150'", [])
+                .unwrap();
+            assert_eq!(metadata_i64(&store.conn, "search_remaining").unwrap(), 104);
+        }
+        drop(client);
+        let client = unlocked_client(path, vault_id, device_id, &profile, &header);
         let second = client.advance_search_index(Some(100)).unwrap();
-        assert_eq!((second.processed, second.remaining), (100, 5));
+        assert_eq!((second.processed, second.remaining), (100, 4));
         let third = client.advance_search_index(Some(100)).unwrap();
         assert_eq!(
             (third.processed, third.remaining, third.index_state),
-            (5, 0, SearchIndexState::Ready)
+            (4, 0, SearchIndexState::Ready)
         );
         let ready_again = client.advance_search_index(Some(100)).unwrap();
         assert_eq!((ready_again.processed, ready_again.remaining), (0, 0));
+    }
+
+    #[test]
+    fn old_schema_52_counter_is_repaired_once_without_resetting_backfill_state() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("old-52-backfill.db");
+        let vault_id = VaultId::new();
+        let device_id = DeviceId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("search-test-passphrase", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let client = unlocked_client(path.clone(), vault_id, device_id, &profile, &header);
+        {
+            let store = client.lock().unwrap();
+            for number in 1..=5 {
+                store.conn.execute(
+                    "INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,payload,seen,sort_at_ms) VALUES(?,?,?,?,?,0,?)",
+                    params![format!("old-{number}"), "conversation", "source", number, format!(r#"{{"body":"needle token{number}"}}"#), number],
+                ).unwrap();
+            }
+            store
+                .conn
+                .execute_batch(
+                    "DELETE FROM metadata WHERE k='search_backfill_counter_contract_v1';
+                 DROP TRIGGER messages_search_delete;
+                 CREATE TRIGGER messages_search_delete AFTER DELETE ON messages BEGIN
+                   DELETE FROM local_search_fts WHERE rowid=old.local_order;
+                   UPDATE metadata SET v=CAST(v AS INTEGER)+1 WHERE k='search_generation';
+                 END;
+                 UPDATE metadata SET v='5' WHERE k='search_backfill_highwater';
+                 UPDATE metadata SET v='1' WHERE k='search_backfill_watermark';
+                 UPDATE metadata SET v='4' WHERE k='search_remaining';",
+                )
+                .unwrap();
+            store
+                .conn
+                .execute("DELETE FROM messages WHERE id='old-3'", [])
+                .unwrap();
+            assert_eq!(metadata_i64(&store.conn, "search_remaining").unwrap(), 4);
+        }
+        let (before_adoption, old_schema_version) = {
+            let store = client.lock().unwrap();
+            (
+                search_adoption_snapshot(&store.conn),
+                store
+                    .conn
+                    .query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+            )
+        };
+        assert_eq!(before_adoption.needle_rowids, vec![1, 2, 4, 5]);
+        assert_eq!(before_adoption.token_two_rowids, vec![2]);
+        drop(client);
+
+        let client = unlocked_client(path.clone(), vault_id, device_id, &profile, &header);
+        let (after_adoption, adopted_trigger, adopted_schema_version) = {
+            let store = client.lock().unwrap();
+            let version: i64 = store
+                .conn
+                .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 52);
+            let after_adoption = search_adoption_snapshot(&store.conn);
+            assert_eq!(after_adoption.source_rows, before_adoption.source_rows);
+            assert_eq!(after_adoption.fts_rowids, before_adoption.fts_rowids);
+            assert_eq!(after_adoption.needle_rowids, before_adoption.needle_rowids);
+            assert_eq!(
+                after_adoption.token_two_rowids,
+                before_adoption.token_two_rowids
+            );
+            assert_eq!(after_adoption.generation, before_adoption.generation);
+            assert_eq!(after_adoption.watermark, before_adoption.watermark);
+            assert_eq!(after_adoption.highwater, before_adoption.highwater);
+            assert_eq!(after_adoption.remaining, 3);
+            assert_eq!(
+                store
+                    .conn
+                    .query_row(
+                        "SELECT v FROM metadata WHERE k='search_backfill_counter_contract_v1'",
+                        [],
+                        |row| row.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                "1"
+            );
+            (
+                after_adoption,
+                store.conn.query_row("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='messages_search_delete'", [], |row| row.get::<_, String>(0)).unwrap(),
+                store.conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0)).unwrap(),
+            )
+        };
+        drop(client);
+        let client = unlocked_client(path.clone(), vault_id, device_id, &profile, &header);
+        let repeated_adoption_schema_version = {
+            let store = client.lock().unwrap();
+            assert_eq!(search_adoption_snapshot(&store.conn), after_adoption);
+            assert_eq!(
+                store.conn.query_row("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='messages_search_delete'", [], |row| row.get::<_, String>(0)).unwrap(),
+                adopted_trigger
+            );
+            store
+                .conn
+                .query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
+                .unwrap()
+        };
+        assert_eq!(
+            adopted_schema_version - old_schema_version,
+            repeated_adoption_schema_version - adopted_schema_version + 2,
+            "repeated adoption replaced the delete trigger"
+        );
+        assert_eq!(client.advance_search_index(Some(1)).unwrap().remaining, 2);
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute("DELETE FROM messages WHERE id='old-1'", [])
+                .unwrap();
+            assert_eq!(metadata_i64(&store.conn, "search_remaining").unwrap(), 2);
+            store.conn.execute(
+                "INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,payload,seen,sort_at_ms) VALUES('after-highwater','conversation','source',6,?,0,6)",
+                [r#"{"body":"needle"}"#],
+            ).unwrap();
+            store
+                .conn
+                .execute("DELETE FROM messages WHERE id='after-highwater'", [])
+                .unwrap();
+            assert_eq!(metadata_i64(&store.conn, "search_remaining").unwrap(), 2);
+            store
+                .conn
+                .execute("DELETE FROM messages WHERE id='old-5'", [])
+                .unwrap();
+            assert_eq!(metadata_i64(&store.conn, "search_remaining").unwrap(), 1);
+        }
+        drop(client);
+        let client = unlocked_client(path.clone(), vault_id, device_id, &profile, &header);
+        let complete = client.advance_search_index(Some(100)).unwrap();
+        assert_eq!(
+            (complete.processed, complete.remaining, complete.index_state),
+            (1, 0, SearchIndexState::Ready)
+        );
+        assert_eq!(
+            metadata_i64(&client.lock().unwrap().conn, "search_backfill_watermark").unwrap(),
+            5
+        );
+        drop(client);
+
+        let client = unlocked_client(path, vault_id, device_id, &profile, &header);
+        let store = client.lock().unwrap();
+        assert_eq!(
+            store.conn.query_row("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='messages_search_delete'", [], |row| row.get::<_, String>(0)).unwrap(),
+            adopted_trigger
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT v FROM metadata WHERE k='search_backfill_counter_contract_v1'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "1"
+        );
+        assert_eq!(
+            search_adoption_snapshot(&store.conn),
+            SearchAdoptionSnapshot {
+                source_rows: vec![
+                    (
+                        2,
+                        "old-2".into(),
+                        "conversation".into(),
+                        r#"{"body":"needle token2"}"#.into(),
+                        2
+                    ),
+                    (
+                        4,
+                        "old-4".into(),
+                        "conversation".into(),
+                        r#"{"body":"needle token4"}"#.into(),
+                        4
+                    ),
+                ],
+                fts_rowids: vec![2, 4],
+                needle_rowids: vec![2, 4],
+                token_two_rowids: vec![2],
+                generation: after_adoption.generation + 4,
+                watermark: 5,
+                highwater: 5,
+                remaining: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn budget_one_backfill_does_bounded_work_with_a_large_remaining_tail() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("search-test-passphrase", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let client = unlocked_client(
+            directory.path().join("large-backfill.db"),
+            vault_id,
+            DeviceId::new(),
+            &profile,
+            &header,
+        );
+        {
+            let mut store = client.lock().unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "DROP TRIGGER messages_search_insert;
+                 DROP TRIGGER messages_search_update;
+                 DROP TRIGGER messages_search_delete;",
+                )
+                .unwrap();
+            let transaction = store.conn.transaction().unwrap();
+            let mut insert = transaction.prepare(
+                "INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,payload,seen,sort_at_ms) VALUES(?,?,?,?,?,0,?)",
+            ).unwrap();
+            for number in 0..100_000_i64 {
+                insert
+                    .execute(params![
+                        format!("large-{number}"),
+                        "conversation",
+                        "source",
+                        number,
+                        r#"{"body":"needle"}"#,
+                        number,
+                    ])
+                    .unwrap();
+            }
+            drop(insert);
+            transaction.commit().unwrap();
+            store.conn.execute(
+                "UPDATE metadata SET v='100000' WHERE k IN ('search_backfill_highwater','search_remaining')",
+                [],
+            ).unwrap();
+            let progress = ProgressCounter::install(&store.conn);
+            drop(store);
+            let page = client.advance_search_index(Some(1)).unwrap();
+            assert_eq!((page.processed, page.remaining), (1, 99_999));
+            let steps = progress.steps();
+            assert!(
+                steps > 0,
+                "progress handler did not observe production SQL work"
+            );
+            eprintln!("budget-one backfill used {steps} VM steps");
+            assert!(steps <= 1_000, "budget-one backfill used {steps} VM steps");
+        }
     }
 
     #[test]

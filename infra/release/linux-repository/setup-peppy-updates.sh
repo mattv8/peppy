@@ -7,9 +7,17 @@ usage() { echo "usage: $0 --distro <debian|fedora> --repo-url https://... --key-
 fail() { echo "$*" >&2; exit 1; }
 valid_url() { [[ "$1" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~:/@!\&\(\)*+,;=%-]*)?$ ]]; }
 url_authority() { printf '%s\n' "${1#https://}" | sed 's#/.*##'; }
+url_hostname() { url_authority "$1" | sed 's/:[0-9][0-9]*$//'; }
 write_file() {
   local path=$1 content=$2
-  if "$dry_run"; then printf '+ write %s\n%s\n' "$path" "$content"; else [ ! -e "$path" ] || fail "refusing to replace existing $path"; printf '%s\n' "$content" > "$path"; fi
+  if "$dry_run"; then
+    printf '+ write %s\n%s\n' "$path" "$content"
+  else
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      fail "refusing to replace existing $path"
+    fi
+    printf '%s\n' "$content" > "$path"
+  fi
 }
 
 distro=''; repo_url=''; key_url=''; fingerprint=''; channel=''; dry_run=false
@@ -34,15 +42,22 @@ if ! "$dry_run"; then
 fi
 
 if [ "$distro" = debian ]; then
+  if ! "$dry_run"; then
+    for destination in /etc/apt/keyrings/peppy.asc /etc/apt/sources.list.d/peppy.list /etc/apt/preferences.d/peppy /etc/systemd/system/peppy-update.service /etc/systemd/system/peppy-update.timer; do
+      if [ -e "$destination" ] || [ -L "$destination" ]; then
+        fail "refusing to replace existing $destination"
+      fi
+    done
+  fi
   if "$dry_run"; then printf '+ install -d -m 0755 /etc/apt/keyrings\n'; else install -d -m 0755 /etc/apt/keyrings; fi
   if "$dry_run"; then printf '+ verify key fingerprint %s\n+ install key /etc/apt/keyrings/peppy.asc\n' "$fingerprint"; else install -m 0644 "$key_tmp" /etc/apt/keyrings/peppy.asc; fi
   write_file /etc/apt/sources.list.d/peppy.list "deb [arch=amd64 signed-by=/etc/apt/keyrings/peppy.asc] ${repo_url%/}/apt $channel main"
   write_file /etc/apt/preferences.d/peppy "Package: *
-Pin: origin $(url_authority "$repo_url")
+Pin: origin $(url_hostname "$repo_url")
 Pin-Priority: -1
 
 Package: peppy
-Pin: origin $(url_authority "$repo_url")
+Pin: origin $(url_hostname "$repo_url")
 Pin-Priority: 990"
   service='[Unit]
 Description=Update Peppy only from its configured signed repository
@@ -53,6 +68,13 @@ Type=oneshot
 ExecStartPre=/usr/bin/apt-get update
 ExecStart=/usr/bin/apt-get install --only-upgrade --yes peppy'
 else
+  if ! "$dry_run"; then
+    for destination in /etc/pki/rpm-gpg/RPM-GPG-KEY-peppy /etc/yum.repos.d/peppy.repo /etc/systemd/system/peppy-update.service /etc/systemd/system/peppy-update.timer; do
+      if [ -e "$destination" ] || [ -L "$destination" ]; then
+        fail "refusing to replace existing $destination"
+      fi
+    done
+  fi
   if "$dry_run"; then printf '+ install -d -m 0755 /etc/pki/rpm-gpg\n'; else install -d -m 0755 /etc/pki/rpm-gpg; fi
   if "$dry_run"; then printf '+ verify key fingerprint %s\n+ install key /etc/pki/rpm-gpg/RPM-GPG-KEY-peppy\n' "$fingerprint"; else install -m 0644 "$key_tmp" /etc/pki/rpm-gpg/RPM-GPG-KEY-peppy; fi
   write_file /etc/yum.repos.d/peppy.repo "[peppy]

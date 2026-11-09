@@ -47,6 +47,8 @@ services:
       PEPPY_SETUP_TOKEN: ${PEPPY_SETUP_TOKEN:-}
       PEPPY_DEMO_ADMIN_PASSWORD: ${PEPPY_DEMO_ADMIN_PASSWORD:-}
     depends_on:
+      database-password-preflight:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       seaweedfs:

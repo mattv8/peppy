@@ -13,11 +13,13 @@ import Testing
         _ transport: OwnerTransportFake = OwnerTransportFake(),
         _ secure: OwnerFaultyStore = OwnerFaultyStore(),
         isHosted: Bool = false,
-        session: String? = nil
+        session: String? = nil,
+        recreateProducer: (@Sendable () throws -> any OwnerPhoneProducer)? = nil
     ) -> OwnerPhoneApprovalHost {
         OwnerPhoneApprovalHost(
             producer: producer, transport: transport, secrets: VaultSecretStore(secure: secure),
-            identity: identity, credential: "device", isHosted: isHosted, accountSession: session
+            identity: identity, credential: "device", isHosted: isHosted, accountSession: session,
+            recreateProducer: recreateProducer
         )
     }
 
@@ -253,6 +255,40 @@ import Testing
         #expect(transport.requests == ["GET \(invitePath)", "DELETE \(invitePath)"])
     }
 
+    @Test func terminalWithdrawalRecreatesTheOwnerProducerBeforeTheNextInvitation() async {
+        let original = OwnerProducerFake(stage: .expired)
+        let recreated = OwnerProducerFake(stage: .waiting)
+        let calls = RecreationCounter()
+        let transport = OwnerTransportFake([http(200), http(410), http(200)])
+        let approver = host(original, transport, recreateProducer: {
+            calls.record()
+            return recreated
+        })
+
+        #expect(await approver.cancel() == .cancelled)
+        #expect(calls.value == 1)
+        #expect(await approver.start(method: .transfer) == .view(
+            .init(invitationId: "invite", stage: .waiting, expiresInSeconds: 0, sas: nil, claimDigest: nil),
+            qr: "qr"
+        ))
+    }
+
+    @Test func approvedInvitationNeverRecreatesTheOwnerProducer() async {
+        let secure = OwnerFaultyStore(); secure.seed(account, "vault secret")
+        let producer = OwnerProducerFake()
+        producer.statusByBody["approved"] = .init(invitationId: "invite", stage: .approved, expiresInSeconds: 30, sas: nil, claimDigest: "digest")
+        let calls = RecreationCounter()
+        let transport = OwnerTransportFake([http(200), .init(status: 200, body: "approved")])
+        let approver = host(producer, transport, secure, recreateProducer: {
+            calls.record()
+            return OwnerProducerFake()
+        })
+
+        _ = await approver.approve(prompt: { nil })
+        #expect(await approver.cancel() == .failed("enrollment-state"))
+        #expect(calls.value == 0)
+    }
+
     @Test func approvedAndConnectedStopPollingAndRotation() async {
         for stage in [OwnerPhoneStage.approved, .connected] {
             let transport = OwnerTransportFake()
@@ -369,6 +405,13 @@ private final class OwnerTransportFake: OwnerPhoneTransport, @unchecked Sendable
         sessions.append(accountSession)
         return queue.isEmpty ? .init(status: 200, body: "{}") : queue.removeFirst()
     }
+}
+
+private final class RecreationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func record() { lock.withLock { count += 1 } }
 }
 
 private final class PromptScript: @unchecked Sendable {

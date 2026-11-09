@@ -101,6 +101,65 @@ describe("MediaLightbox", () => {
     expect(document.querySelector("#lightbox-retry-btn")).not.toBeInTheDocument();
   });
 
+  it("ignores an old save after returning to the same attachment", async () => {
+    const pending = { code: "media-pending" };
+    let rejectA!: (reason: unknown) => void;
+    const saveMedia = vi.fn().mockImplementationOnce(() => new Promise<void>((_, reject) => { rejectA = reject; })).mockResolvedValueOnce(undefined);
+    const requestOriginal = vi.fn().mockResolvedValue({ state: "ready" as const, url: "blob:image" });
+    const view = render(<MediaLightbox items={items} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={requestOriginal} saveMedia={saveMedia} retryKey={0} />);
+
+    await screen.findByRole("button", { name: "Save image" });
+    fireEvent.click(screen.getByRole("button", { name: "Save image" }));
+    fireEvent.keyDown(document, { key: "ArrowRight" });
+    expect(screen.getByText("Image 2 of 2")).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "ArrowLeft" });
+    expect(screen.getByText("Image 1 of 2")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save image" })).toBeInTheDocument();
+    await act(async () => rejectA(pending));
+    view.rerender(<MediaLightbox items={items} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={requestOriginal} saveMedia={saveMedia} retryKey={1} />);
+
+    await act(async () => {});
+    expect(saveMedia).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Save image" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save image" }));
+    await act(async () => {});
+    expect(saveMedia).toHaveBeenNthCalledWith(2, "one");
+  });
+
+  it("does not retry a pending save for a later attachment", async () => {
+    const pending = { code: "media-pending" };
+    let rejectA!: (reason: unknown) => void;
+    const saveMedia = vi.fn().mockImplementationOnce(() => new Promise<void>((_, reject) => { rejectA = reject; }));
+    const requestOriginal = vi.fn().mockResolvedValue({ state: "ready" as const, url: "blob:image" });
+    const view = render(<MediaLightbox items={items} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={requestOriginal} saveMedia={saveMedia} retryKey={0} />);
+
+    await screen.findByRole("button", { name: "Save image" });
+    fireEvent.click(screen.getByRole("button", { name: "Save image" }));
+    fireEvent.keyDown(document, { key: "ArrowRight" });
+    await act(async () => rejectA(pending));
+    view.rerender(<MediaLightbox items={items} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={requestOriginal} saveMedia={saveMedia} retryKey={1} />);
+
+    await act(async () => {});
+    expect(saveMedia).toHaveBeenCalledTimes(1);
+    expect(saveMedia).toHaveBeenLastCalledWith("one");
+    expect(screen.getByRole("button", { name: "Save image" })).toBeInTheDocument();
+  });
+
+  it("retries a pending save for the same attachment", async () => {
+    const saveMedia = vi.fn().mockRejectedValueOnce({ code: "media-pending" }).mockResolvedValueOnce(undefined);
+    const requestOriginal = vi.fn().mockResolvedValue({ state: "ready" as const, url: "blob:image" });
+    const view = render(<MediaLightbox items={items} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={requestOriginal} saveMedia={saveMedia} retryKey={0} />);
+
+    await screen.findByRole("button", { name: "Save image" });
+    fireEvent.click(screen.getByRole("button", { name: "Save image" }));
+    await act(async () => {});
+    expect(screen.getByRole("button", { name: "Downloading image" })).toBeInTheDocument();
+    view.rerender(<MediaLightbox items={items} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={requestOriginal} saveMedia={saveMedia} retryKey={1} />);
+    await act(async () => {});
+    expect(saveMedia).toHaveBeenNthCalledWith(1, "one");
+    expect(saveMedia).toHaveBeenNthCalledWith(2, "one");
+  });
+
   it("shows only Save without media actions and adds Link and Copy with a provider", async () => {
     const requestOriginal = vi.fn().mockResolvedValue({ state: "ready" as const, url: "blob:one" });
     const properties = { items: [items[0]], initialAttachmentId: "one", onDismiss: vi.fn(), requestOriginal, checkOriginal: requestOriginal, saveMedia: vi.fn() };

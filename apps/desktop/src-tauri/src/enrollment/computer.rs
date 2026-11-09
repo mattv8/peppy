@@ -1009,7 +1009,7 @@ async fn fetch_status(
     if !request.path.starts_with(COMPUTER_STATUS_PATH) {
         return Err(enrollment_error());
     }
-    let account = hosted_account_header(state, hosted).await?;
+    let account = hosted_account_header(state, hosted, &origin).await?;
     post_computer_status(&origin, request, account.as_deref().map(String::as_str)).await
 }
 
@@ -1018,17 +1018,15 @@ async fn post_computer_status(
     request: StatusRequest,
     account_session: Option<&str>,
 ) -> BridgeResult<Option<String>> {
-    let mut request_builder = http(origin)?
+    let request_builder = http(origin)?
         .post(format!("{origin}{}", request.path))
         .header("content-type", "application/json")
         .body(serde_json::to_string(&request.body).map_err(|_| enrollment_error())?);
-    if let Some(account_session) = account_session {
-        request_builder = request_builder.header("Peppy-Account-Session", account_session);
-    }
-    let response = request_builder
-        .send()
-        .await
-        .map_err(|_| NetError::Offline)?;
+    let response =
+        crate::enrollment::attach_account_header(request_builder, origin, account_session)?
+            .send()
+            .await
+            .map_err(|_| NetError::Offline)?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
@@ -1041,16 +1039,16 @@ async fn post_computer_confirm(
     request: Zeroizing<String>,
     account_session: Option<&str>,
 ) -> BridgeResult<Result<String, (reqwest::StatusCode, Option<String>)>> {
-    let mut call = http(origin)?
+    let call = http(origin)?
         .post(format!(
             "{origin}{COMPUTER_STATUS_PATH}/{invitation_id}/confirm"
         ))
         .header("content-type", "application/json")
         .body(request.to_string());
-    if let Some(account_session) = account_session {
-        call = call.header("Peppy-Account-Session", account_session);
-    }
-    let response = call.send().await.map_err(|_| NetError::Offline)?;
+    let response = crate::enrollment::attach_account_header(call, origin, account_session)?
+        .send()
+        .await
+        .map_err(|_| NetError::Offline)?;
     if response.status().is_success() {
         return Ok(Ok(String::from_utf8(
             read_bounded(response, MAX_JSON_BYTES).await?,
@@ -1344,7 +1342,7 @@ async fn confirm_computer_claimant(
             claimant.view.invitation_id.clone(),
         )
     };
-    let account = hosted_account_header(state, hosted).await?;
+    let account = hosted_account_header(state, hosted, &origin).await?;
     let complete = post_computer_confirm(
         &origin,
         &invitation_id,
@@ -2880,7 +2878,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hosted_account_header_is_sent_for_status_and_confirm_retries_keep_the_body() {
+    async fn computer_requests_reject_account_headers_outside_hosted_and_keep_confirm_bodies() {
         let headers = Arc::new(Mutex::new(Vec::new()));
         let confirm_bodies = Arc::new(Mutex::new(Vec::new()));
         let app = Router::new()
@@ -2929,7 +2927,7 @@ mod tests {
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let status = post_computer_status(
+        let rejected = post_computer_status(
             &origin,
             StatusRequest {
                 path: "/v1/enrollment/computers/test/status".into(),
@@ -2937,21 +2935,34 @@ mod tests {
             },
             Some("hosted-session"),
         )
+        .await
+        .unwrap_err();
+        assert_eq!(rejected.code, "origin-binding");
+        let status = post_computer_status(
+            &origin,
+            StatusRequest {
+                path: "/v1/enrollment/computers/test/status".into(),
+                body: serde_json::json!({"claim_token":"private"}),
+            },
+            None,
+        )
         .await;
         assert_eq!(status.unwrap().as_deref(), Some("{}"));
         let request = Zeroizing::<String>::new("{\"claim_token\":\"private\"}".into());
-        let _ = post_computer_confirm(&origin, "test", request.clone(), Some("hosted-session"))
-            .await
-            .unwrap();
-        let _ = post_computer_confirm(&origin, "test", request, Some("hosted-session"))
+        let rejected =
+            post_computer_confirm(&origin, "test", request.clone(), Some("hosted-session"))
+                .await
+                .unwrap_err();
+        assert_eq!(rejected.code, "origin-binding");
+        let _ = post_computer_confirm(&origin, "test", request, None)
             .await
             .unwrap();
         server.abort();
 
-        assert_eq!(headers.lock().unwrap().as_slice(), ["hosted-session"; 3]);
+        assert_eq!(headers.lock().unwrap().as_slice(), [""; 2]);
         assert_eq!(
             confirm_bodies.lock().unwrap().as_slice(),
-            ["{\"claim_token\":\"private\"}"; 2]
+            ["{\"claim_token\":\"private\"}"]
         );
     }
 }

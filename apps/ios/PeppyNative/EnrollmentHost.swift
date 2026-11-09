@@ -174,7 +174,7 @@ public struct EnrollmentHost: Sendable {
     }
 
     public func cancelPhoneInvitation(id: String, credential: String) async throws {
-        _ = try await exchange(method: "DELETE", path: "/v1/enrollment/invitations/\(try enrollmentID(id))", body: nil, headers: ownerEnrollmentHeaders(credential))
+        try await exchangeVoid(method: "DELETE", path: "/v1/enrollment/invitations/\(try enrollmentID(id))", headers: ownerEnrollmentHeaders(credential))
     }
 
     public func createComputerEnrollment(_ request: String, credential: String) async throws -> String {
@@ -186,7 +186,7 @@ public struct EnrollmentHost: Sendable {
     }
 
     public func cancelComputerEnrollment(id: String, credential: String) async throws {
-        _ = try await exchange(method: "DELETE", path: "/v1/enrollment/computers/\(try enrollmentID(id))", body: nil, headers: ownerEnrollmentHeaders(credential))
+        try await exchangeVoid(method: "DELETE", path: "/v1/enrollment/computers/\(try enrollmentID(id))", headers: ownerEnrollmentHeaders(credential))
     }
 
     /// Runs a Rust-produced, claimant-authenticated descriptor. Its restricted
@@ -229,6 +229,22 @@ public struct EnrollmentHost: Sendable {
             throw ClientError.invalidResponse(path)
         }
         return json
+    }
+
+    /// Only cancellation endpoints are specified to return an empty successful response.
+    private func exchangeVoid(method: String, path: String, headers: [String: String]) async throws {
+        var requestHeaders = headers
+        requestHeaders["Accept"] = "application/json"
+        attachmentRetention?.apply(to: &requestHeaders, method: method)
+        let response = try await transport.send(HTTPRequest(
+            method: method, url: origin.url(path), headers: requestHeaders, body: nil,
+            maxResponseBytes: ServerClient.maxSmallBytes
+        ))
+        guard origin.contains(response.url) else { throw ClientError.originMismatch }
+        guard (200..<300).contains(response.status) else {
+            let code = (try? JSONSerialization.jsonObject(with: response.body) as? [String: Any])?["code"] as? String
+            throw ClientError.server(status: response.status, code: code)
+        }
     }
 
     private func enrollmentID(_ value: String) throws -> String {

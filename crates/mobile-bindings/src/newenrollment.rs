@@ -427,12 +427,13 @@ impl NativeEnrollmentIdentity {
         &self,
         native_client: Arc<NativeClient>,
     ) -> Result<(), MobileBindingsError> {
-        let identity = self
-            .inner
-            .lock()
-            .map_err(|_| MobileBindingsError::Crypto)?
-            .take()
-            .ok_or(MobileBindingsError::InvalidRequest)?;
+        let mut identity = self.inner.lock().map_err(|_| MobileBindingsError::Crypto)?;
+        if !identity.as_ref().is_some_and(
+            peppy_hosted_client::newenrollment::NativeEnrollmentIdentity::has_activation,
+        ) {
+            return Err(MobileBindingsError::InvalidRequest);
+        }
+        let identity = identity.take().ok_or(MobileBindingsError::InvalidRequest)?;
         native_client.activate_enrollment_identity(
             identity
                 .into_activation()
@@ -463,6 +464,57 @@ fn native_identity(
         },
         inner: Mutex::new(Some(identity)),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejected_handoff_activation_keeps_a_phrase_identity_for_secure_storage() {
+        let enrollment = new_native_enrollment_client(
+            "https://enroll.example".into(),
+            NativeEnrollmentClientKind::Android,
+            "phone".into(),
+        )
+        .unwrap();
+        let request: serde_json::Value = serde_json::from_str(
+            &enrollment
+                .create_owner_request(
+                    "setup".into(),
+                    "admin".into(),
+                    "password long enough".into(),
+                    "alpha bravo charlie delta echo foxtrot".into(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let identity = enrollment
+            .finish_owner_admission(
+                serde_json::json!({
+                    "vault_id": request["material"]["profile"]["vault_id"],
+                    "device_id": request["device"]["device_id"],
+                    "replayed": false,
+                    "session": { "expires_in_seconds": 60 },
+                })
+                .to_string(),
+                "alpha bravo charlie delta echo foxtrot".into(),
+            )
+            .unwrap();
+        let credential = identity.credential_for_native_secure_store().unwrap();
+        let native_client = Arc::new(NativeClient {
+            client: Mutex::new(None),
+        });
+
+        assert!(matches!(
+            identity.activate_into(native_client),
+            Err(MobileBindingsError::InvalidRequest)
+        ));
+        assert_eq!(
+            identity.credential_for_native_secure_store().unwrap(),
+            credential
+        );
+    }
 }
 
 #[uniffi::export]

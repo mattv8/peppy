@@ -93,6 +93,37 @@ public class AbsAdbConnectionManagerTest {
         assertTrue(failure.get() instanceof IOException);
     }
 
+    @Test
+    public void cancelPairingDoesNotWaitForManagerLockHeldByBlockedOpen() throws Exception {
+        try (BlockedOpenPeer peer = new BlockedOpenPeer()) {
+            peer.start();
+            TestManager manager = new TestManager();
+            assertTrue(manager.connect("127.0.0.1", peer.getPort()));
+            AtomicReference<Throwable> openFailure = new AtomicReference<>();
+            Thread opener = new Thread(() -> {
+                try {
+                    manager.openStream("shell:blocked");
+                } catch (Throwable throwable) {
+                    openFailure.set(throwable);
+                }
+            });
+            opener.start();
+            assertTrue(peer.openReceived.await(1, TimeUnit.SECONDS));
+
+            Thread cancellation = new Thread(manager::cancelPairing);
+            cancellation.start();
+            cancellation.join(1_000);
+            assertTrue("cancellation waited for blocked OPEN", !cancellation.isAlive());
+            assertEquals("peer closed before manager teardown", 1, peer.clientEof.getCount());
+
+            manager.close();
+            assertTrue("manager close did not close the peer socket", peer.clientEof.await(1, TimeUnit.SECONDS));
+            opener.join(1_000);
+            assertTrue("OPEN did not terminate after manager close", !opener.isAlive());
+            assertTrue(openFailure.get() instanceof IOException);
+        }
+    }
+
     private static final class TestManager extends AbsAdbConnectionManager {
         final CountDownLatch pending = new CountDownLatch(1);
         final CountDownLatch resume = new CountDownLatch(1);
@@ -184,5 +215,59 @@ public class AbsAdbConnectionManagerTest {
         @Override public void verify(PublicKey key, String provider) { }
         @Override public String toString() { return "test"; }
         @Override public PublicKey getPublicKey() { return publicKey; }
+    }
+
+    private static final class BlockedOpenPeer implements AutoCloseable {
+        final java.net.ServerSocket server = new java.net.ServerSocket(0);
+        final CountDownLatch openReceived = new CountDownLatch(1);
+        final CountDownLatch clientEof = new CountDownLatch(1);
+        final AtomicReference<Throwable> failure = new AtomicReference<>();
+        volatile java.net.Socket socket;
+        volatile boolean cleanup;
+        Thread thread;
+
+        BlockedOpenPeer() throws IOException {
+        }
+
+        int getPort() {
+            return server.getLocalPort();
+        }
+
+        void start() {
+            thread = new Thread(() -> {
+                try (java.net.Socket accepted = server.accept()) {
+                    socket = accepted;
+                    socket.setSoTimeout(5_000);
+                    AdbProtocol.Message.parse(socket.getInputStream(), AdbProtocol.A_VERSION_MIN, AdbProtocol.MAX_PAYLOAD);
+                    socket.getOutputStream().write(AdbProtocol.generateMessage(AdbProtocol.A_CNXN,
+                            AdbProtocol.A_VERSION_MIN, AdbProtocol.MAX_PAYLOAD, new byte[0]));
+                    socket.getOutputStream().flush();
+                    AdbProtocol.Message open = AdbProtocol.Message.parse(socket.getInputStream(), AdbProtocol.A_VERSION_MIN, AdbProtocol.MAX_PAYLOAD);
+                    if (open.command != AdbProtocol.A_OPEN) {
+                        throw new AssertionError("expected OPEN packet");
+                    }
+                    openReceived.countDown();
+                    if (socket.getInputStream().read() != -1) {
+                        throw new AssertionError("expected client EOF after manager close");
+                    }
+                    clientEof.countDown();
+                } catch (Throwable throwable) {
+                    if (!cleanup) failure.set(throwable);
+                }
+            });
+            thread.start();
+        }
+
+        @Override
+        public void close() throws Exception {
+            cleanup = true;
+            server.close();
+            if (socket != null) socket.close();
+            if (thread != null) {
+                thread.join(1_000);
+                assertTrue("peer did not terminate", !thread.isAlive());
+            }
+            if (failure.get() != null) throw new AssertionError("peer failed", failure.get());
+        }
     }
 }

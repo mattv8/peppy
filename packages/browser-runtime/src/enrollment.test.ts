@@ -1698,6 +1698,73 @@ describe("BrowserEnrollment", () => {
     expect(enrollment.view()).not.toHaveProperty("hasGateway");
   });
 
+  it("prepares a hosted owner without first creating a generic enrollment client", async () => {
+    let enrollmentClient: "none" | "generic" | "hosted" = "none";
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_enrollment_new") {
+        enrollmentClient = "generic";
+        return {};
+      }
+      if (command === "_worker_enrollment_prepare_hosted_owner") {
+        if (enrollmentClient !== "none") throw new Error("generic-client-conflict");
+        enrollmentClient = "hosted";
+        return { request: JSON.stringify({ operation_id: "operation" }) };
+      }
+      if (command === "_worker_enrollment_accept_hosted_grant") return { request: JSON.stringify({ operation_id: "operation" }) };
+      return {};
+    }) };
+    const session = new TestSession();
+    session.finishEnrollment.mockImplementationOnce(async () => { session.phase = "ready"; session.identity = { role: "owner" }; });
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({ mode: "hosted" });
+      if (path === "/hosted/v1/web/app-session") return json({ signed_in: true, csrf_token: "csrf" });
+      if (path === "/hosted/v1/web/app-account") return json({ account_id: "account", classification: "eligible" });
+      if (path === "/hosted/v1/web/provisioning") return json({ grant: "grant" });
+      if (path === "/hosted/v1/web/provisioning/complete") return json({ vault_id: vaultId, device_id: deviceId, role: "owner", material: {} });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ mode: "hosted", stage: "setup" });
+    await expect(enrollment.createOwner({ passphrase: "vault-secret" })).resolves.toMatchObject({ stage: "ready", owner: true });
+    expect(enrollmentClient).toBe("hosted");
+    expect(core.invoke).not.toHaveBeenCalledWith(expect.objectContaining({ command: "_worker_enrollment_new" }));
+  });
+
+  it("initializes a generic client before manually admitting into an existing hosted vault", async () => {
+    let enrollmentClient = false;
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_enrollment_new") {
+        enrollmentClient = true;
+        return {};
+      }
+      if (command === "_worker_enrollment_manual_challenge") {
+        if (!enrollmentClient) throw new Error("missing-generic-client");
+        return { request: JSON.stringify({ credential_digest: "digest" }) };
+      }
+      if (command === "_worker_enrollment_complete_manual_challenge") return { request: JSON.stringify({ proof: "proof" }) };
+      return {};
+    }) };
+    const session = new TestSession();
+    session.finishEnrollment.mockImplementationOnce(async () => { session.phase = "ready"; session.identity = { role: "device" }; });
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({ mode: "hosted" });
+      if (path === "/hosted/v1/web/app-session") return json({ signed_in: true, csrf_token: "csrf" });
+      if (path === "/hosted/v1/web/app-account") return json({ vault_id: vaultId });
+      if (path === "/v1/enrollment/challenges") return json({ enrollment_id: challengeId });
+      if (path.endsWith(`/challenges/${challengeId}/complete`)) return json({ vault_id: vaultId, device_id: deviceId, role: "device", material: {} });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ mode: "hosted", stage: "locked" });
+    await expect(enrollment.connectSharedSecret("vault-secret")).resolves.toMatchObject({ stage: "ready", owner: false });
+    expect(enrollmentClient).toBe(true);
+    expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_enrollment_new", args: { origin, deviceName: "Peppy Browser" } });
+  });
+
   it("restores community CSRF for an unenrolled browser on /manage before an invite mutation", async () => {
     const core = new LifecycleCore();
     const session = new TestSession();
@@ -1805,7 +1872,7 @@ describe("BrowserEnrollment", () => {
     await expect(enrollment.discover()).resolves.toMatchObject({ mode: "hosted", stage: "signin" });
 
     expect(requestedPaths).toEqual(["/hosted/v1/enrollment/config", "/hosted/v1/web/app-session"]);
-    expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_enrollment_new", args: { origin, deviceName: "Peppy Browser" } });
+    expect(core.invoke).not.toHaveBeenCalledWith(expect.objectContaining({ command: "_worker_enrollment_new" }));
   });
 
   it.each([

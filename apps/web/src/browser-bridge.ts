@@ -395,6 +395,9 @@ export class BrowserBridge implements DesktopBridge {
   private stop(reason: string): void {
     if (this.stopped) return;
     this.stopped = true;
+    activeSecretDialog?.();
+    this.ownerClaimDraft = undefined;
+    this.vaultClaimDraft = undefined;
     this.failPending(reason, "Peppy locked or stopped. Reconnect to continue.");
     this.revokeBlobUrls();
     this.banners.forEach(notification => notification.close());

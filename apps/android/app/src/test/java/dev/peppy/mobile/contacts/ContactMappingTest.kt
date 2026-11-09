@@ -131,6 +131,44 @@ class ContactMappingTest {
         assertEquals("${Phone.TYPE_MOBILE}", fields.single { it.kind == Kind.PHONE }.values[Phone.TYPE])
     }
 
+    @Test fun createRequestOptionalTopLevelTextFieldsTreatNullAsAbsentAndPreserveLiteralNull() {
+        data class OptionalField(val key: String, val kind: Kind, val column: String)
+        val optionalFields = listOf(
+            OptionalField("display_name", Kind.NAME, StructuredName.DISPLAY_NAME),
+            OptionalField("nickname", Kind.NICKNAME, android.provider.ContactsContract.CommonDataKinds.Nickname.NAME),
+            OptionalField("organization", Kind.ORGANIZATION, android.provider.ContactsContract.CommonDataKinds.Organization.COMPANY),
+            OptionalField("title", Kind.ORGANIZATION, android.provider.ContactsContract.CommonDataKinds.Organization.TITLE),
+            OptionalField("notes", Kind.NOTE, android.provider.ContactsContract.CommonDataKinds.Note.NOTE),
+        )
+        for (field in optionalFields) {
+            fun providerRows(value: Any?, included: Boolean) = ContactMapping.newFields(JSONObject().apply {
+                if (included) put(field.key, value)
+            }).filter { it.kind == field.kind }
+
+            assertTrue("${field.key} omitted", providerRows(null, false).isEmpty())
+            assertTrue("${field.key} JSON null", providerRows(JSONObject.NULL, true).isEmpty())
+            assertTrue("${field.key} empty", providerRows("", true).isEmpty())
+            assertEquals("text", providerRows("text", true).single().values[field.column])
+            assertEquals("null", providerRows("null", true).single().values[field.column])
+        }
+    }
+
+    @Test fun createRequestNamePartsTreatOmittedAndJsonNullAsAbsentAndFallBackToDisplayName() {
+        for ((key, column) in ContactMapping.NAME_PARTS) {
+            fun values(value: Any?, included: Boolean) = ContactMapping.newFields(
+                JSONObject().put("display_name", "Ada").put("name", JSONObject().apply {
+                    if (included) put(key, value)
+                }),
+            ).single { it.kind == Kind.NAME }.values
+
+            assertEquals("Ada", values(null, false)[StructuredName.DISPLAY_NAME])
+            assertEquals("Ada", values(JSONObject.NULL, true)[StructuredName.DISPLAY_NAME])
+            assertEquals("Ada", values("", true)[StructuredName.DISPLAY_NAME])
+            assertEquals("text", values("text", true)[column])
+            assertEquals("null", values("null", true)[column])
+        }
+    }
+
     @Test fun rawScopedViewHoldsOnlyTheCreatedRawAndNoLookupHint() {
         val scoped = ContactMapping.rawScoped(contact(), 11)
         assertEquals(setOf(11L), ContactMapping.rawIds(scoped))

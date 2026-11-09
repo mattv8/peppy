@@ -149,23 +149,21 @@ ensure_debug_loopback() {
     adb -s "$serial" reverse "tcp:$port" "tcp:$port"
 }
 container_run() {
-    local cmd=$1 dotenv
+    local cmd=$1 dotenv container_artifacts=${PEPPY_ANDROID_CONTAINER_ARTIFACTS:-/artifacts/android}
     local -a compose_run=(compose --profile android run --build --rm)
     command -v docker >/dev/null || die "docker is required for android-$cmd"
     docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required for android-$cmd"
     dotenv=$(development_dotenv)
     test -f "$dotenv" || die "missing .env; run bash infra/dev/dev.sh dev-setup first"
     mkdir -p "$ARTIFACTS"; chmod 0700 "$ARTIFACTS"
-    if [[ -n ${PEPPY_ANDROID_CONTAINER_ARTIFACTS:-} ]]; then
-        compose_run+=(-v "$ARTIFACTS:$PEPPY_ANDROID_CONTAINER_ARTIFACTS")
-    fi
+    compose_run+=(-v "$ARTIFACTS:$container_artifacts")
     local uid gid volume
     uid=$(id -u); gid=$(id -g)
     for volume in android-sdk android-gradle android-cargo android-target android-debug-keystore; do
         docker volume create "peppy-$volume-$uid-$gid" >/dev/null
     done
     prepare_debug_tls
-    PEPPY_ANDROID_BUILD_VARIANT=$ANDROID_BUILD_VARIANT DEV_UID=$uid DEV_GID=$gid PEPPY_SOURCE_TREE=$SOURCE_ROOT python3 "$ROOT/infra/dev/dev_tls.py" "${compose_run[@]}" android run "$cmd"
+    PEPPY_ANDROID_BUILD_VARIANT=$ANDROID_BUILD_VARIANT PEPPY_ANDROID_CONTAINER_ARTIFACTS=$container_artifacts DEV_UID=$uid DEV_GID=$gid PEPPY_SOURCE_TREE=$SOURCE_ROOT python3 "$ROOT/infra/dev/dev_tls.py" "${compose_run[@]}" android run "$cmd"
 }
 accept_licenses() {
     local status

@@ -62,7 +62,8 @@ public enum OwnerPhoneResult: Sendable, Equatable {
 }
 
 public actor OwnerPhoneApprovalHost {
-    private let producer: any OwnerPhoneProducer
+    private var producer: any OwnerPhoneProducer
+    private let recreateProducer: (@Sendable () throws -> any OwnerPhoneProducer)?
     private let transport: any OwnerPhoneTransport
     private let secrets: VaultSecretStore
     private let identity: EnrollmentIdentity
@@ -84,6 +85,7 @@ public actor OwnerPhoneApprovalHost {
         credential: String,
         isHosted: Bool = false,
         accountSession: String? = nil,
+        recreateProducer: (@Sendable () throws -> any OwnerPhoneProducer)? = nil,
         shouldRotate: @escaping @Sendable (OwnerPhoneStage, Int, OwnerPhoneMethod, OwnerPhoneMethod) -> Bool = { stage, seconds, active, requested in
             (stage == .waiting && (seconds <= 15 || active != requested)) || stage == .expired
         }
@@ -95,6 +97,7 @@ public actor OwnerPhoneApprovalHost {
         self.credential = credential
         self.isHosted = isHosted
         self.accountSession = accountSession
+        self.recreateProducer = recreateProducer
         self.shouldRotate = shouldRotate
     }
 
@@ -149,6 +152,7 @@ public actor OwnerPhoneApprovalHost {
             guard response.status == 404 || response.status == 410 || code(response.status) == nil else {
                 return .failed(code(response.status)!)
             }
+            try resetProducerAfterTerminalWithdrawal()
             return await start(method: requested)
         } catch let failure as Failure {
             if failure.code == "claim-mismatch" { return .cancelled }
@@ -203,8 +207,14 @@ public actor OwnerPhoneApprovalHost {
             }
             let response = try await send("DELETE", path(status.invitationId), nil)
             guard let response else { return .failed("offline") }
-            if response.status == 404 || response.status == 410 { return .cancelled }
-            guard let error = code(response.status) else { return .cancelled }
+            if response.status == 404 || response.status == 410 {
+                try resetProducerAfterTerminalWithdrawal()
+                return .cancelled
+            }
+            guard let error = code(response.status) else {
+                try resetProducerAfterTerminalWithdrawal()
+                return .cancelled
+            }
             return .failed(error)
         } catch let failure as Failure {
             return .failed(failure.code)
@@ -220,6 +230,14 @@ public actor OwnerPhoneApprovalHost {
     private func current() async throws -> OwnerPhoneStatus {
         let (status, _) = try await currentJSON()
         return status
+    }
+
+    /// Rebuild owner enrollment state after the server accepts a terminal withdrawal.
+    /// Approved invitations never enter either caller above.
+    private func resetProducerAfterTerminalWithdrawal() throws {
+        if let recreateProducer { producer = try recreateProducer() }
+        displayedClaim = nil
+        approvedInvitationId = nil
     }
 
     private func currentJSON() async throws -> (OwnerPhoneStatus, String) {

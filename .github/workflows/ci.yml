@@ -140,11 +140,25 @@ jobs:
       - run: infra/release/test-android-signing.sh
       - run: infra/release/test-android-distribution.sh
       - run: infra/release/linux-repository/test-linux-repository.sh
-      - run: infra/release/test-desktop-bundles.sh
       - name: Test real Linux package normalization
         run: |
           sudo apt-get update && sudo apt-get install --yes rpm gnupg cpio file
           infra/release/test-linux-package-metadata.sh
+
+  release-macos-tooling:
+    runs-on: macos-15
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version-file: .node-version
+      - run: infra/release/test-desktop-bundles.sh
 
   source-audit:
     timeout-minutes: 10
@@ -489,7 +503,9 @@ jobs:
           cache: false
       - run: ./prepare-libgm.sh
       - run: go test -race ./...
+      - run: go test -race go.mau.fi/mautrix-gmessages/pkg/libgm
       - run: go vet ./...
+      - run: go vet go.mau.fi/mautrix-gmessages/pkg/libgm
       - run: test -z "$(gofmt -l .)"
 
   android:
@@ -597,7 +613,7 @@ jobs:
 
   gate:
     if: always()
-    needs: [changes, source-audit, workflow-security, version, release-tooling, development-tools, rust, integration, frontend, desktop, desktop-updater, android, google-messages-go, swift-bindings, container-image, development-artifacts]
+    needs: [changes, source-audit, workflow-security, version, release-tooling, release-macos-tooling, development-tools, rust, integration, frontend, desktop, desktop-updater, android, google-messages-go, swift-bindings, container-image, development-artifacts]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -616,6 +632,8 @@ jobs:
           VERSION_REQUIRED: 'true'
           RELEASE_TOOLING_RESULT: ${{ needs.release-tooling.result }}
           RELEASE_TOOLING_REQUIRED: 'true'
+          RELEASE_MACOS_TOOLING_RESULT: ${{ needs.release-macos-tooling.result }}
+          RELEASE_MACOS_TOOLING_REQUIRED: 'true'
           DEVELOPMENT_TOOLS_RESULT: ${{ needs.development-tools.result }}
           DEVELOPMENT_TOOLS_REQUIRED: 'true'
           RUST_RESULT: ${{ needs.rust.result }}

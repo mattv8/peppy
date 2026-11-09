@@ -159,6 +159,18 @@ struct RuntimeToken {
     session: Arc<crate::session::Session>,
 }
 
+enum RefreshVisibility<T> {
+    Continue(T),
+    Clear,
+    Preserve { clear_recents: bool },
+}
+
+enum RefreshRevalidation {
+    Current,
+    Clear,
+    Stale,
+}
+
 #[derive(Clone)]
 struct HeadData {
     id: String,
@@ -517,14 +529,15 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
             return;
         }
     };
-    let session = match app_state.session_admitted(operation).await {
-        Ok(Some(session)) if session.binding == binding => session,
-        Ok(None) | Ok(Some(_)) => {
-            clear_visible(app).await;
-            return;
-        }
-        Err(_) => return,
-    };
+    let session =
+        match admitted_refresh_session(&binding, app_state.session_admitted(operation).await) {
+            RefreshVisibility::Continue(session) => session,
+            RefreshVisibility::Clear => {
+                clear_visible(app).await;
+                return;
+            }
+            RefreshVisibility::Preserve { .. } => return,
+        };
     let (token, stale, clear_recent_menu) =
         match begin_binding(app, binding.clone(), session.clone()) {
             Ok(value) => value,
@@ -564,19 +577,36 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
         .chain(recent_ids.iter().cloned())
         .collect::<HashSet<_>>();
     let photos = runtime(app).photos.clone();
-    let queried = crate::sync::blocking({
-        let session = session.clone();
-        move || resolve_heads(&session, &wanted_ids, &photos)
-    })
-    .await;
-    let data = match queried {
-        Ok(Some(data)) => data,
-        Ok(None) => {
+    let data = match resolved_refresh_visibility(
+        &session,
+        crate::sync::blocking({
+            let session = session.clone();
+            move || resolve_heads(&session, &wanted_ids, &photos)
+        }),
+        async {
+            if app_state
+                .app_locked
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                RefreshRevalidation::Clear
+            } else if revalidate_after_await(app, &token).await {
+                RefreshRevalidation::Current
+            } else {
+                RefreshRevalidation::Stale
+            }
+        },
+    )
+    .await
+    {
+        RefreshVisibility::Continue(data) => data,
+        RefreshVisibility::Clear => {
             clear_visible(app).await;
             return;
         }
-        Err(_) => {
-            clear_recent_entries(app, &token).await;
+        RefreshVisibility::Preserve { clear_recents } => {
+            if clear_recents {
+                clear_recent_entries(app, &token).await;
+            }
             return; // transient query failures leave the last good registry intact
         }
     };
@@ -588,10 +618,6 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
         clear_visible(app).await;
         return;
     }
-    if !revalidate_after_await(app, &token).await {
-        return;
-    }
-
     let data: HashMap<String, HeadData> = data
         .into_iter()
         .map(|head| (head.id.clone(), head))
@@ -1060,6 +1086,54 @@ fn session_displayable(session: &crate::session::Session) -> BridgeResult<bool> 
     Ok(!status.revoked && !session.cancel.is_cancelled())
 }
 
+fn session_revoked(session: &crate::session::Session) -> bool {
+    session.status.lock().is_ok_and(|status| status.revoked)
+}
+
+fn admitted_refresh_session(
+    binding: &Binding,
+    admitted: BridgeResult<Option<Arc<crate::session::Session>>>,
+) -> RefreshVisibility<Arc<crate::session::Session>> {
+    match admitted {
+        Ok(Some(session)) if session.binding == *binding && !session_revoked(&session) => {
+            RefreshVisibility::Continue(session)
+        }
+        Ok(None)
+        | Ok(Some(_))
+        | Err(BridgeError {
+            code: "revoked", ..
+        }) => RefreshVisibility::Clear,
+        Err(_) => RefreshVisibility::Preserve {
+            clear_recents: false,
+        },
+    }
+}
+
+async fn resolved_refresh_visibility<T, R, V>(
+    session: &Arc<crate::session::Session>,
+    resolution: R,
+    revalidated: V,
+) -> RefreshVisibility<T>
+where
+    R: std::future::Future<Output = BridgeResult<Option<T>>>,
+    V: std::future::Future<Output = RefreshRevalidation>,
+{
+    match resolution.await {
+        Ok(Some(data)) => match revalidated.await {
+            RefreshRevalidation::Current => RefreshVisibility::Continue(data),
+            RefreshRevalidation::Clear => RefreshVisibility::Clear,
+            RefreshRevalidation::Stale if session_revoked(session) => RefreshVisibility::Clear,
+            RefreshRevalidation::Stale => RefreshVisibility::Preserve {
+                clear_recents: false,
+            },
+        },
+        Ok(None) => RefreshVisibility::Clear,
+        Err(_) => RefreshVisibility::Preserve {
+            clear_recents: true,
+        },
+    }
+}
+
 fn unlocked_tone_overrides(
     session: &crate::session::Session,
 ) -> BridgeResult<BTreeMap<String, u8>> {
@@ -1168,12 +1242,7 @@ fn token_valid_sync(app: &AppHandle, token: &RuntimeToken) -> bool {
     if token.session.cancel.is_cancelled() {
         return false;
     }
-    if token
-        .session
-        .status
-        .lock()
-        .map_or(true, |status| status.revoked)
-    {
+    if session_revoked(&token.session) {
         return false;
     }
     if app
@@ -2165,35 +2234,52 @@ async fn clear_visible(app: &AppHandle) {
         if state.stopped {
             return;
         }
-        if let Ok(mut fence) = app.state::<AppState>().head_generation.lock() {
-            state.generation = fence.invalidate();
-        }
-        let labels = state
-            .heads
-            .iter()
-            .filter(|(_, head)| head.panel)
-            .map(|(id, _)| format!("{}{}", tray::COMPOSER_PREFIX, id))
-            .collect::<Vec<_>>();
-        state.heads.clear();
-        state.binding = None;
-        state.session = None;
-        state.recent_entries = None;
-        state.layout_cache.clear(); // Clear cache on clear visible (N2)
-        labels
+        let generation = app
+            .state::<AppState>()
+            .head_generation
+            .lock()
+            .map(|mut fence| fence.invalidate())
+            .unwrap_or(state.generation);
+        clear_visible_state(&mut state, generation)
     };
     clear_photos(app);
     let _ = on_main(app, move |app| {
         windows::clear_heads(app);
-        for label in labels {
-            crate::close_media_viewers_for_parent(app, &label);
-            if let Some(window) = app.get_webview_window(&label) {
+        hide_visible_panels(&labels, |label| {
+            crate::close_media_viewers_for_parent(app, label);
+            if let Some(window) = app.get_webview_window(label) {
                 let _ = window.hide();
             }
-        }
+        });
     })
     .await;
     update_tray_menu(app, None).await;
     update_recent_tray_menu(app, None).await;
+}
+
+fn clear_visible_state(state: &mut RuntimeState, generation: u64) -> Vec<String> {
+    state.generation = generation;
+    let labels = state
+        .heads
+        .iter()
+        .filter(|(_, head)| head.panel)
+        .map(|(id, _)| format!("{}{}", tray::COMPOSER_PREFIX, id))
+        .collect::<Vec<_>>();
+    state.heads.clear();
+    state.binding = None;
+    state.session = None;
+    state.recent_entries = None;
+    state.layout_cache.clear();
+    labels
+}
+
+fn hide_visible_panels<F>(labels: &[String], mut hide: F)
+where
+    F: FnMut(&str),
+{
+    for label in labels {
+        hide(label);
+    }
 }
 
 fn set_panel(app: &AppHandle, conversation_id: &str, panel: bool) {
@@ -2392,7 +2478,7 @@ fn tray_entries(mut entries: Vec<(String, String)>) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::heads::PanelLayout;
+    use crate::heads::{GenerationFence, PanelLayout};
     use crate::tests::{fixture_at, input, open};
     use peppy_client_core::IncomingSms;
     use std::sync::atomic::Ordering;
@@ -2844,6 +2930,214 @@ mod tests {
                 .code,
             "session-unavailable"
         );
+    }
+
+    fn visible_runtime_state(
+        binding: Binding,
+        session: Arc<crate::session::Session>,
+        conversation_id: &str,
+        generation: u64,
+    ) -> RuntimeState {
+        let mut state = RuntimeState::new(generation);
+        state.binding = Some(binding);
+        state.session = Some(session);
+        state.recent_entries = Some(vec![(conversation_id.into(), "Ada".into())]);
+        state.layout_cache.insert(conversation_id.into(), None);
+        state.heads.insert(
+            conversation_id.into(),
+            ActiveHead {
+                position: position(),
+                frame: None,
+                generation,
+                panel: true,
+                name: "Ada".into(),
+                glyph: HeadGlyph::Person,
+                color: [1, 2, 3],
+                label: "Ada".into(),
+                unread: 1,
+            },
+        );
+        state
+    }
+
+    fn persisted_pin_store(
+        binding: &Binding,
+        conversation_id: &str,
+    ) -> (tempfile::TempDir, PinStore) {
+        let root = tempfile::tempdir().unwrap();
+        let pins = PinStore::new(root.path());
+        pins.upsert(
+            binding,
+            Pin {
+                conversation_id: conversation_id.into(),
+                position: position(),
+            },
+        )
+        .unwrap();
+        (root, pins)
+    }
+
+    fn pin_ids(pins: &PinStore, binding: &Binding) -> Vec<String> {
+        pins.pins(binding)
+            .unwrap()
+            .into_iter()
+            .map(|pin| pin.conversation_id)
+            .collect()
+    }
+
+    fn invalidate_generation(previous: u64) -> u64 {
+        let mut fence = GenerationFence::default();
+        for _ in 0..previous {
+            fence.invalidate();
+        }
+        let cleared = fence.invalidate();
+        assert!(!fence.accepts(previous));
+        cleared
+    }
+
+    #[test]
+    fn initial_revocation_clears_visible_runtime_and_hides_panel_without_unpinning() {
+        let (fixture, session, _) = locally_saved_draft_without_sync_unlock();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let (_root, pins) = persisted_pin_store(&fixture.binding, &conversation_id);
+        let original_pins = pin_ids(&pins, &fixture.binding);
+        let mut state =
+            visible_runtime_state(fixture.binding.clone(), session, &conversation_id, 4);
+
+        let outcome = admitted_refresh_session(
+            &fixture.binding,
+            Err(BridgeError::new("revoked", "The device was revoked.")),
+        );
+
+        assert!(matches!(outcome, RefreshVisibility::Clear));
+        let labels = clear_visible_state(&mut state, invalidate_generation(4));
+        let mut hidden_panels = Vec::new();
+        hide_visible_panels(&labels, |label| hidden_panels.push(label.to_owned()));
+        assert_eq!(
+            hidden_panels,
+            vec![format!("{}{}", tray::COMPOSER_PREFIX, conversation_id)]
+        );
+        assert_eq!(state.generation, 5);
+        assert!(state.heads.is_empty());
+        assert!(state.session.is_none());
+        assert_eq!(pin_ids(&pins, &fixture.binding), original_pins);
+    }
+
+    #[test]
+    fn transient_admission_error_preserves_last_good_visible_runtime_and_pins() {
+        let (fixture, session, _) = locally_saved_draft_without_sync_unlock();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let (_root, pins) = persisted_pin_store(&fixture.binding, &conversation_id);
+        let original_pins = pin_ids(&pins, &fixture.binding);
+        let state = visible_runtime_state(fixture.binding.clone(), session, &conversation_id, 4);
+
+        let outcome = admitted_refresh_session(
+            &fixture.binding,
+            Err(BridgeError::new(
+                "network",
+                "The server is temporarily unavailable.",
+            )),
+        );
+
+        assert!(matches!(
+            outcome,
+            RefreshVisibility::Preserve {
+                clear_recents: false
+            }
+        ));
+        assert!(state.heads.contains_key(&conversation_id));
+        assert!(state.heads[&conversation_id].panel);
+        assert_eq!(state.generation, 4);
+        assert_eq!(pin_ids(&pins, &fixture.binding), original_pins);
+    }
+
+    #[test]
+    fn revocation_during_resolution_clears_visible_runtime_and_hides_panel_without_unpinning() {
+        let (fixture, session, _) = locally_saved_draft_without_sync_unlock();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let (_root, pins) = persisted_pin_store(&fixture.binding, &conversation_id);
+        let original_pins = pin_ids(&pins, &fixture.binding);
+        let mut state = visible_runtime_state(
+            fixture.binding.clone(),
+            session.clone(),
+            &conversation_id,
+            4,
+        );
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let resolution_entered = entered.clone();
+        let resolution_release = release.clone();
+        let revoked_session = session.clone();
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                tokio::join!(
+                    resolved_refresh_visibility(
+                        &session,
+                        async move {
+                            resolution_entered.notify_one();
+                            resolution_release.notified().await;
+                            Ok::<_, BridgeError>(Some(()))
+                        },
+                        async { RefreshRevalidation::Stale },
+                    ),
+                    async move {
+                        entered.notified().await;
+                        revoked_session.status.lock().unwrap().revoked = true;
+                        release.notify_one();
+                    },
+                )
+                .0
+            });
+
+        assert!(matches!(outcome, RefreshVisibility::Clear));
+        let labels = clear_visible_state(&mut state, invalidate_generation(4));
+        let mut hidden_panels = Vec::new();
+        hide_visible_panels(&labels, |label| hidden_panels.push(label.to_owned()));
+        assert_eq!(
+            hidden_panels,
+            vec![format!("{}{}", tray::COMPOSER_PREFIX, conversation_id)]
+        );
+        assert_eq!(state.generation, 5);
+        assert!(state.heads.is_empty());
+        assert_eq!(pin_ids(&pins, &fixture.binding), original_pins);
+    }
+
+    #[test]
+    fn definitive_revocation_clears_runtime_heads_without_touching_persisted_state() {
+        let (_fixture, session, _) = locally_saved_draft_without_sync_unlock();
+        let mut state = RuntimeState::new(4);
+        state.session = Some(session);
+        state.recent_entries = Some(vec![("conversation".into(), "Ada".into())]);
+        state.layout_cache.insert("conversation".into(), None);
+        state.heads.insert(
+            "conversation".into(),
+            ActiveHead {
+                position: position(),
+                frame: None,
+                generation: 4,
+                panel: true,
+                name: "Ada".into(),
+                glyph: HeadGlyph::Person,
+                color: [1, 2, 3],
+                label: "Ada".into(),
+                unread: 1,
+            },
+        );
+
+        let labels = clear_visible_state(&mut state, 5);
+
+        assert_eq!(
+            labels,
+            vec![format!("{}conversation", tray::COMPOSER_PREFIX)]
+        );
+        assert_eq!(state.generation, 5);
+        assert!(state.heads.is_empty());
+        assert!(state.session.is_none());
+        assert!(state.recent_entries.is_none());
+        assert!(state.layout_cache.is_empty());
     }
 
     #[test]

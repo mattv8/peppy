@@ -23,6 +23,7 @@ const TRANSFER_CHUNK: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NetError {
+    Cancelled,
     Offline,
     Revoked,
     Status { status: u16, code: Option<String> },
@@ -40,6 +41,9 @@ impl NetError {
 impl From<NetError> for BridgeError {
     fn from(error: NetError) -> Self {
         match error {
+            NetError::Cancelled => {
+                BridgeError::new("cancelled", "The network transfer was cancelled.")
+            }
             NetError::Offline => {
                 BridgeError::new("offline", "Could not reach the configured server.")
             }
@@ -354,7 +358,28 @@ impl Api {
     }
 
     /// Streams exactly `length` bytes of a local file as the request body.
-    pub async fn put_file(&self, path: &str, file: &Path, length: u64) -> Result<(), NetError> {
+    pub async fn put_file(
+        &self,
+        path: &str,
+        file: &Path,
+        length: u64,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), NetError> {
+        self.put_file_with_response_progress(path, file, length, cancel, || {})
+            .await
+    }
+
+    async fn put_file_with_response_progress<F>(
+        &self,
+        path: &str,
+        file: &Path,
+        length: u64,
+        cancel: &tokio_util::sync::CancellationToken,
+        response_chunk_consumed: F,
+    ) -> Result<(), NetError>
+    where
+        F: FnOnce(),
+    {
         let source = tokio::fs::File::open(file)
             .await
             .map_err(|_| NetError::Local)?;
@@ -370,9 +395,37 @@ impl Api {
             .header(header::CONTENT_TYPE, "application/octet-stream")
             .header(header::CONTENT_LENGTH, length)
             .body(reqwest::Body::wrap_stream(stream));
-        read_bounded(self.execute(request).await?, MAX_ERROR_BODY_BYTES)
-            .await
-            .map(|_| ())
+        let response = tokio::select! {
+            _ = cancel.cancelled() => return Err(NetError::Cancelled),
+            response = self.execute(request) => response?,
+        };
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_ERROR_BODY_BYTES as u64)
+        {
+            return Err(NetError::TooLarge);
+        }
+        let mut response = response;
+        let mut response_bytes = 0usize;
+        let mut response_chunk_consumed = Some(response_chunk_consumed);
+        loop {
+            let chunk = tokio::select! {
+                _ = cancel.cancelled() => return Err(NetError::Cancelled),
+                chunk = response.chunk() => chunk.map_err(|_| NetError::Offline)?,
+            };
+            let Some(chunk) = chunk else {
+                return Ok(());
+            };
+            if let Some(response_chunk_consumed) = response_chunk_consumed.take() {
+                response_chunk_consumed();
+            }
+            response_bytes = response_bytes
+                .checked_add(chunk.len())
+                .ok_or(NetError::TooLarge)?;
+            if response_bytes > MAX_ERROR_BODY_BYTES {
+                return Err(NetError::TooLarge);
+            }
+        }
     }
 
     /// Streams a response to a new owner-only file, enforcing the exact expected length.
@@ -382,8 +435,12 @@ impl Api {
         path: &str,
         target: &Path,
         expected: u64,
+        cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<(), NetError> {
-        let response = self.execute(self.transfer.get(self.url(path))).await?;
+        let response = tokio::select! {
+            _ = cancel.cancelled() => return Err(NetError::Cancelled),
+            response = self.execute(self.transfer.get(self.url(path))) => response?,
+        };
         if response
             .content_length()
             .is_some_and(|length| length != expected)
@@ -398,7 +455,10 @@ impl Api {
         let result = async {
             let mut stream = response.bytes_stream();
             let mut total = 0u64;
-            while let Some(chunk) = stream.next().await {
+            while let Some(chunk) = tokio::select! {
+                _ = cancel.cancelled() => return Err(NetError::Cancelled),
+                chunk = stream.next() => chunk,
+            } {
                 let chunk = chunk.map_err(|_| NetError::Offline)?;
                 total = total
                     .checked_add(chunk.len() as u64)
@@ -860,8 +920,9 @@ pub mod tests {
         .await;
         let api = Api::new(&origin, "t").unwrap();
         let target = dir.path().join("too-long");
+        let cancel = tokio_util::sync::CancellationToken::new();
         assert_eq!(
-            api.download_to("/x", &target, 2000).await,
+            api.download_to("/x", &target, 2000, &cancel).await,
             Err(NetError::TooLarge)
         );
         assert!(!target.exists());
@@ -872,8 +933,109 @@ pub mod tests {
         .await;
         let api = Api::new(&origin, "t").unwrap();
         let target = dir.path().join("ok");
-        api.download_to("/x", &target, 3000).await.unwrap();
+        api.download_to("/x", &target, 3000, &cancel).await.unwrap();
         assert_eq!(std::fs::read(&target).unwrap().len(), 3000);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_trickling_download_removes_its_partial_file() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (first_chunk_sent, first_chunk_seen) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n4\r\npart\r\n",
+                )
+                .await
+                .unwrap();
+            first_chunk_sent.send(()).unwrap();
+            let _ = released.await;
+            let _ = socket.write_all(b"4\r\nmore\r\n0\r\n\r\n").await;
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("attachment.part");
+        let api = Api::new(&origin, "t").unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let download = tokio::spawn({
+            let cancel = cancel.clone();
+            let target = target.clone();
+            async move { api.download_to("/attachment", &target, 8, &cancel).await }
+        });
+
+        first_chunk_seen.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while std::fs::metadata(&target)
+                .map(|metadata| metadata.len() < 4)
+                .unwrap_or(true)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        cancel.cancel();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), download)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(NetError::Cancelled)
+        );
+        assert!(!target.exists());
+        let _ = release.send(());
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_upload_while_its_response_body_is_blocked_is_prompt() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (first_chunk_consumed, first_chunk_seen) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n4\r\npart\r\n",
+                )
+                .await
+                .unwrap();
+            let _ = released.await;
+            let _ = socket.write_all(b"4\r\nmore\r\n0\r\n\r\n").await;
+        });
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"upload").unwrap();
+        let api = Api::new(&origin, "t").unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let upload = tokio::spawn({
+            let cancel = cancel.clone();
+            let path = file.path().to_owned();
+            async move {
+                api.put_file_with_response_progress("/attachment", &path, 6, &cancel, || {
+                    first_chunk_consumed.send(()).unwrap();
+                })
+                .await
+            }
+        });
+
+        first_chunk_seen.await.unwrap();
+        cancel.cancel();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), upload)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(NetError::Cancelled)
+        );
+        let _ = release.send(());
     }
 
     async fn capture_once(
@@ -1039,7 +1201,8 @@ pub mod tests {
                 "put_file" => {
                     let file = tempfile::NamedTempFile::new().unwrap();
                     std::fs::write(file.path(), b"x").unwrap();
-                    api.put_file("/v1/attachments/id/upload", file.path(), 1)
+                    let cancel = tokio_util::sync::CancellationToken::new();
+                    api.put_file("/v1/attachments/id/upload", file.path(), 1, &cancel)
                         .await
                         .unwrap();
                 }

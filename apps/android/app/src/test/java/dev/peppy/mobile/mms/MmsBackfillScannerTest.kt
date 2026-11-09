@@ -244,6 +244,26 @@ class MmsBackfillScannerTest {
         assertEquals(listOf("begin", "finish:0:false:provider_error"), calls)
     }
 
+    @Test fun admittedHistorySettlesNonRunnableScanAsProviderErrorWithoutContinuation() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(listOf(MmsBackfillScanPlan(MmsBackfillPhase.HISTORY, "3", "9", false, false, 50)))
+
+        val more = MmsBackfillScanner(core).run(
+            "generation", "scope", MmsLegacyBackfillState(null, null, null), "9", 1L, idle,
+            scanPage = {
+                calls += "scan"
+                MmsBackfillPageResult(null, exhausted = false, more = false, observations = 4, runnable = false)
+            },
+            recheck = { error("unused") },
+            historyAdmission = recordingAdmission(calls),
+        )
+
+        assertEquals(listOf("begin", "scan", "finish:4:false:provider_error"), calls)
+        assertTrue(core.advanced.isEmpty())
+        assertTrue(core.finished.isEmpty())
+        assertFalse(more)
+    }
+
     @Test fun checkpointFailureSettlesStorageErrorBeforeRethrowing() {
         val calls = mutableListOf<String>()
         val failure = IllegalStateException("checkpoint failed")

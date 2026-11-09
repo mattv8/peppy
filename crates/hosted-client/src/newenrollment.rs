@@ -139,6 +139,10 @@ impl NativeEnrollmentIdentity {
         self.credential.to_string()
     }
 
+    pub fn has_activation(&self) -> bool {
+        self.activation.is_some()
+    }
+
     pub fn into_activation(self) -> Option<NativeIdentityActivation> {
         self.activation
     }
@@ -196,22 +200,41 @@ enum PhoneFlow {
         qr: PhonePairingQr,
         transfer: TransferKeypair,
     },
-    RecipientClaimed {
-        qr: PhonePairingQr,
-        invitation_id: Uuid,
-        claim_secret: Zeroizing<String>,
-        method: EnrollmentMethod,
-        owner_transfer_public_key: [u8; 32],
-        transfer: TransferKeypair,
-    },
+    RecipientClaimed(RecipientClaim),
     PendingAdmission {
+        claim: RecipientClaim,
         context: EnrollmentContext,
         root: RootKey,
+        request: String,
     },
     PendingTransferAdmission {
+        claim: RecipientClaim,
         context: EnrollmentContext,
         handoff: Box<VerifiedHandoff>,
+        request: String,
     },
+}
+
+/// Private claimant authority retained until phone admission completes. It is never checkpointed
+/// or returned through a host-facing DTO.
+struct RecipientClaim {
+    qr: PhonePairingQr,
+    invitation_id: Uuid,
+    claim_secret: Zeroizing<String>,
+    method: EnrollmentMethod,
+    owner_transfer_public_key: [u8; 32],
+    transfer: TransferKeypair,
+}
+
+impl PhoneFlow {
+    fn recipient_claim(&self) -> Option<&RecipientClaim> {
+        match self {
+            Self::RecipientClaimed(claim)
+            | Self::PendingAdmission { claim, .. }
+            | Self::PendingTransferAdmission { claim, .. } => Some(claim),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1003,35 +1026,29 @@ impl EnrollmentClient {
         if owner_transfer_public_key != decode_b64_32(&qr.transfer_public_key)? {
             return Err(HostedClientError::InvalidRequest);
         }
-        self.phone = Some(PhoneFlow::RecipientClaimed {
+        self.phone = Some(PhoneFlow::RecipientClaimed(RecipientClaim {
             qr,
             invitation_id: claim.invitation_id,
             claim_secret: Zeroizing::new(claim.claim_secret),
             method: claim.method,
             owner_transfer_public_key,
             transfer,
-        });
+        }));
         Ok(())
     }
 
     /// Native/worker transport descriptor for claimant-authenticated invitation status polling.
     /// This intentionally contains the claim secret and must never be returned to a UI surface.
     pub fn phone_status_request(&self) -> Result<String, HostedClientError> {
-        let PhoneFlow::RecipientClaimed {
-            invitation_id,
-            claim_secret,
-            ..
-        } = self
+        let claim = self
             .phone
             .as_ref()
-            .ok_or(HostedClientError::InvalidRequest)?
-        else {
-            return Err(HostedClientError::InvalidRequest);
-        };
+            .and_then(PhoneFlow::recipient_claim)
+            .ok_or(HostedClientError::InvalidRequest)?;
         serde_json::to_string(&serde_json::json!({
             "method": "GET",
-            "path": format!("/v1/enrollment/invitations/{invitation_id}"),
-            "headers": { "Peppy-Claim-Secret": claim_secret.to_string() },
+            "path": format!("/v1/enrollment/invitations/{}", claim.invitation_id),
+            "headers": { "Peppy-Claim-Secret": claim.claim_secret.to_string() },
         }))
         .map_err(|_| HostedClientError::InvalidRequest)
     }
@@ -1040,7 +1057,7 @@ impl EnrollmentClient {
     pub fn cancel_phone_flow(&mut self) -> Result<(), HostedClientError> {
         if !matches!(
             self.phone.as_ref(),
-            Some(PhoneFlow::RecipientDraft { .. } | PhoneFlow::RecipientClaimed { .. })
+            Some(PhoneFlow::RecipientDraft { .. } | PhoneFlow::RecipientClaimed(_))
         ) {
             return Err(HostedClientError::InvalidRequest);
         }
@@ -1150,6 +1167,9 @@ impl EnrollmentClient {
     }
 
     /// Locally opens/derives the admission root and signs both mandatory enrollment proofs.
+    /// Passing no shared secret replays the exact pending request after an ambiguous transport
+    /// outcome. A shared-secret caller that receives a definitive proof rejection can pass a
+    /// corrected phrase to replace its pending proof; transfer confirmations always replay.
     pub fn confirm_phone_invitation(
         &mut self,
         status_json: String,
@@ -1160,18 +1180,20 @@ impl EnrollmentClient {
             return Err(HostedClientError::InvalidRequest);
         }
         let context = self.phone_context(&status)?;
-        let flow = self.phone.take().ok_or(HostedClientError::InvalidRequest)?;
-        let PhoneFlow::RecipientClaimed {
-            claim_secret,
-            method,
-            owner_transfer_public_key,
-            transfer,
-            ..
-        } = flow
-        else {
+        match self.phone.as_ref() {
+            Some(PhoneFlow::PendingAdmission { request, .. }) if shared_secret.is_none() => {
+                return Ok(request.clone());
+            }
+            Some(PhoneFlow::PendingTransferAdmission { request, .. }) => {
+                return Ok(request.clone());
+            }
+            Some(PhoneFlow::RecipientClaimed(_) | PhoneFlow::PendingAdmission { .. }) => {}
+            _ => return Err(HostedClientError::InvalidRequest),
+        }
+        let Some(claim) = self.phone.as_ref().and_then(PhoneFlow::recipient_claim) else {
             return Err(HostedClientError::InvalidRequest);
         };
-        let (admission_signature, pending) = match method {
+        let (admission_signature, root, handoff) = match claim.method {
             EnrollmentMethod::Transfer => {
                 let ciphertext = status
                     .encrypted_key_package
@@ -1184,8 +1206,8 @@ impl EnrollmentClient {
                     .ok_or(HostedClientError::InvalidRequest)
                     .and_then(decode_b64_24)?;
                 let handoff = open_handoff(
-                    &transfer,
-                    &owner_transfer_public_key,
+                    &claim.transfer,
+                    &claim.owner_transfer_public_key,
                     &context,
                     &EncryptedHandoff { nonce, ciphertext },
                 )
@@ -1193,13 +1215,7 @@ impl EnrollmentClient {
                 let signature = handoff
                     .sign_admission_context(&context)
                     .map_err(|_| HostedClientError::Crypto)?;
-                (
-                    signature,
-                    PhoneFlow::PendingTransferAdmission {
-                        context: context.clone(),
-                        handoff: Box::new(handoff),
-                    },
-                )
+                (signature, None, Some(Box::new(handoff)))
             }
             EnrollmentMethod::SharedSecret => {
                 if status.encrypted_key_package.is_some() || status.transfer_nonce.is_some() {
@@ -1219,13 +1235,7 @@ impl EnrollmentClient {
                     .map_err(|_| HostedClientError::Crypto)?
                     .sign_context(&context)
                     .map_err(|_| HostedClientError::Crypto)?;
-                (
-                    signature,
-                    PhoneFlow::PendingAdmission {
-                        context: context.clone(),
-                        root,
-                    },
-                )
+                (signature, Some(root), None)
             }
         };
         let transcript_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(
@@ -1239,13 +1249,33 @@ impl EnrollmentClient {
                 .map_err(|_| HostedClientError::Crypto)?,
         );
         let request = ConfirmInvitationRequest {
-            claim_secret: claim_secret.to_string(),
+            claim_secret: claim.claim_secret.to_string(),
             transcript_hash,
             device_signature,
             admission_signature,
         };
-        self.phone = Some(pending);
-        serde_json::to_string(&request).map_err(|_| HostedClientError::InvalidRequest)
+        let request =
+            serde_json::to_string(&request).map_err(|_| HostedClientError::InvalidRequest)?;
+        let flow = self.phone.take().ok_or(HostedClientError::InvalidRequest)?;
+        let claim = match flow {
+            PhoneFlow::RecipientClaimed(claim) | PhoneFlow::PendingAdmission { claim, .. } => claim,
+            _ => return Err(HostedClientError::InvalidRequest),
+        };
+        self.phone = Some(match handoff {
+            Some(handoff) => PhoneFlow::PendingTransferAdmission {
+                claim,
+                context,
+                handoff,
+                request: request.clone(),
+            },
+            None => PhoneFlow::PendingAdmission {
+                claim,
+                context,
+                root: root.ok_or(HostedClientError::InvalidRequest)?,
+                request: request.clone(),
+            },
+        });
+        Ok(request)
     }
 
     /// Accepts the server's enrolled metadata only when it matches the signed transcript, then
@@ -1281,10 +1311,10 @@ impl EnrollmentClient {
 
         let flow = self.phone.take().ok_or(HostedClientError::InvalidRequest)?;
         let (context, root, handoff) = match flow {
-            PhoneFlow::PendingAdmission { context, root } => (context, Some(root), None),
-            PhoneFlow::PendingTransferAdmission { context, handoff } => {
-                (context, None, Some(*handoff))
-            }
+            PhoneFlow::PendingAdmission { context, root, .. } => (context, Some(root), None),
+            PhoneFlow::PendingTransferAdmission {
+                context, handoff, ..
+            } => (context, None, Some(*handoff)),
             _ => return Err(HostedClientError::InvalidRequest),
         };
         if let Some(root) = root {
@@ -1533,24 +1563,20 @@ impl EnrollmentClient {
                 }
                 let _ = method;
             }
-            PhoneFlow::RecipientClaimed {
-                qr,
-                invitation_id,
-                owner_transfer_public_key,
-                transfer,
-                ..
-            } => {
-                if transcript.enrollment_id != *invitation_id
+            PhoneFlow::RecipientClaimed(claim)
+            | PhoneFlow::PendingAdmission { claim, .. }
+            | PhoneFlow::PendingTransferAdmission { claim, .. } => {
+                if transcript.enrollment_id != claim.invitation_id
                     || transcript.device_id != self.device_id
                     || transcript.role != EnrollmentRole::Gateway
                     || transcript.signing_public_key
                         != URL_SAFE_NO_PAD.encode(self.signing_public_key()?)
                     || transcript.credential_digest != credential_digest(&self.credential)
                     || transcript.owner_transfer_public_key
-                        != URL_SAFE_NO_PAD.encode(owner_transfer_public_key)
+                        != URL_SAFE_NO_PAD.encode(claim.owner_transfer_public_key)
                     || transcript.recipient_transfer_public_key
-                        != URL_SAFE_NO_PAD.encode(transfer.public_key())
-                    || transcript.nonce != token_digest_base64url(&qr.invitation_token)?
+                        != URL_SAFE_NO_PAD.encode(claim.transfer.public_key())
+                    || transcript.nonce != token_digest_base64url(&claim.qr.invitation_token)?
                 {
                     return Err(HostedClientError::InvalidRequest);
                 }
@@ -1915,7 +1941,13 @@ mod tests {
     }
 
     fn phone_roundtrip() -> (EnrollmentClient, InvitationStatus, VaultMaterial) {
-        let (owner, recipient, claimed, material) = phone_claimed_roundtrip();
+        phone_roundtrip_with(EnrollmentMethod::Transfer)
+    }
+
+    fn phone_roundtrip_with(
+        method: EnrollmentMethod,
+    ) -> (EnrollmentClient, InvitationStatus, VaultMaterial) {
+        let (owner, recipient, claimed, material) = phone_claimed_roundtrip_with(method);
         let mut spoofed = claimed.clone();
         spoofed.claim.as_mut().unwrap().credential_digest = "0".repeat(64);
         assert!(
@@ -2177,6 +2209,14 @@ mod tests {
                 .confirm_phone_invitation(tampered.to_string(), None)
                 .is_err()
         );
+        let mut incomplete = approved.clone();
+        incomplete.encrypted_key_package = None;
+        incomplete.transfer_nonce = None;
+        assert!(
+            recipient
+                .confirm_phone_invitation(serde_json::to_string(&incomplete).unwrap(), None)
+                .is_err()
+        );
         let confirm = recipient
             .confirm_phone_invitation(serde_json::to_string(&approved).unwrap(), None)
             .unwrap();
@@ -2193,6 +2233,87 @@ mod tests {
                 .finish_phone_admission(serde_json::to_string(&wrong).unwrap())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn phone_confirmation_replays_the_exact_pending_request_after_ambiguous_loss() {
+        let (mut recipient, approved, _material) = phone_roundtrip();
+        let approved = serde_json::to_string(&approved).unwrap();
+
+        let request = recipient
+            .confirm_phone_invitation(approved.clone(), None)
+            .unwrap();
+        assert_eq!(
+            recipient.confirm_phone_invitation(approved, None).unwrap(),
+            request
+        );
+        assert!(recipient.phone_status_request().is_ok());
+    }
+
+    #[test]
+    fn phone_confirmation_allows_a_corrected_shared_secret_after_rejection() {
+        let (mut recipient, approved, material) =
+            phone_roundtrip_with(EnrollmentMethod::SharedSecret);
+        let transcript = approved.transcript.as_ref().unwrap();
+        let vault_id = transcript.vault_id;
+        let device_id = transcript.device_id;
+        let approved_json = serde_json::to_string(&approved).unwrap();
+
+        let rejected_request = recipient
+            .confirm_phone_invitation(approved_json.clone(), Some("wrong phrase".into()))
+            .unwrap();
+        let status_request = recipient.phone_status_request().unwrap();
+
+        let mut missing_profile = approved.clone();
+        missing_profile.profile = None;
+        assert!(
+            recipient
+                .confirm_phone_invitation(
+                    serde_json::to_string(&missing_profile).unwrap(),
+                    Some(SECRET.into())
+                )
+                .is_err()
+        );
+        assert_eq!(recipient.phone_status_request().unwrap(), status_request);
+        assert_eq!(
+            recipient
+                .confirm_phone_invitation(approved_json.clone(), None)
+                .unwrap(),
+            rejected_request
+        );
+
+        let mut malformed_profile = approved.clone();
+        malformed_profile.profile = Some(serde_json::json!("not a profile"));
+        assert!(
+            recipient
+                .confirm_phone_invitation(
+                    serde_json::to_string(&malformed_profile).unwrap(),
+                    Some(SECRET.into())
+                )
+                .is_err()
+        );
+        assert_eq!(recipient.phone_status_request().unwrap(), status_request);
+        assert_eq!(
+            recipient
+                .confirm_phone_invitation(approved_json.clone(), None)
+                .unwrap(),
+            rejected_request
+        );
+
+        let corrected_request = recipient
+            .confirm_phone_invitation(approved_json, Some(SECRET.into()))
+            .unwrap();
+        assert_ne!(corrected_request, rejected_request);
+
+        let complete = AdmissionComplete {
+            vault_id,
+            device_id,
+            role: EnrollmentRole::Gateway,
+            material,
+        };
+        let complete = serde_json::to_string(&complete).unwrap();
+        assert!(recipient.finish_phone_admission(complete.clone()).is_ok());
+        assert!(recipient.finish_phone_admission(complete).is_err());
     }
 
     #[test]

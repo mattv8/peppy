@@ -149,7 +149,10 @@ internal class MmsBackfillScanner(private val core: MmsBackfillCore) {
                 admission?.let { historyAdmission.finishSafely(it, 0, exhausted = false, reason = "provider_error") }
                 throw error
             }
-            if (!result.runnable) continue
+            if (!result.runnable) {
+                admission?.let { historyAdmission.finishSafely(it, result.observations, exhausted = false, reason = "provider_error") }
+                continue
+            }
             try {
                 if (plan.phase == MmsBackfillPhase.PROVIDER_RESCAN) {
                     if (!canCommitProviderRescan()) continue

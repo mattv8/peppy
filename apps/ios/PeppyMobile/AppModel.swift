@@ -101,7 +101,8 @@ final class AppModel {
                 budget.maxApplyRounds = 4
             }
             let report = try await session.contactsPass(
-                reason: reason, provider: provider, preferences: preferences, budget: budget, isCancelled: isCancelled
+                reason: reason, provider: provider, preferences: preferences, budget: budget,
+                isCancelled: { isCancelled() || !preferences.load().enabled }
             )
             await self?.contactsPassFinished(report)
             return [.completed, .unchanged, .incremental].contains(report.outcome)

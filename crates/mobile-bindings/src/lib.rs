@@ -3156,6 +3156,15 @@ impl NativeClient {
             client.remove_notification(&notification_key, &instance)
         })
     }
+    pub fn remove_notification_if_current_instance(
+        &self,
+        notification_key: String,
+        instance: String,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.remove_notification_if_current_instance(&notification_key, &instance)
+        })
+    }
     pub fn notification_snapshot(&self) -> Result<NativeNotificationSnapshot, MobileBindingsError> {
         with_client(&self.client, Client::notification_snapshot).map(notification_snapshot_view)
     }
@@ -3687,16 +3696,10 @@ impl NativeClient {
         command_id: String,
     ) -> Result<u64, MobileBindingsError> {
         let command_id = parse_id(&command_id)?;
-        with_client(&self.client, Client::pending_commands).and_then(|commands| {
-            commands
-                .into_iter()
-                .find(|command| command.command_id == command_id)
-                .map(|command| {
-                    u64::try_from(command.message.record.attachments.len())
-                        .map_err(|_| MobileBindingsError::Database)
-                })
-                .unwrap_or(Err(MobileBindingsError::NotFound))
-        })
+        with_client(&self.client, |client| {
+            client.pending_command_attachment_count(command_id)
+        })?
+        .ok_or(MobileBindingsError::NotFound)
     }
 
     /// A carrier API may be invoked only when this returns NativePermitState::Permit.
@@ -5140,7 +5143,7 @@ mod tests {
     }
 
     #[test]
-    fn two_clients_sync_ack_and_execute_only_a_granted_permit() {
+    fn pending_command_attachment_count_uses_only_the_selected_eligible_payload() {
         let vault_id = uuid::Uuid::new_v4().to_string();
         let desktop_id = uuid::Uuid::new_v4().to_string();
         let gateway_id = uuid::Uuid::new_v4().to_string();
@@ -5223,12 +5226,56 @@ mod tests {
         );
         gateway.apply_pending(1).unwrap();
         let command = gateway.pending_commands().unwrap().pop().unwrap();
+
+        // A selected pending command must not decode unrelated ledger payloads.
+        // These malformed entries also distinguish a selected-payload error from
+        // an ineligible command, which must remain NotFound at the native boundary.
+        let malformed_pending = uuid::Uuid::new_v4();
+        let malformed_historical = uuid::Uuid::new_v4();
+        let connection = rusqlite::Connection::open(&gateway_path).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA key = \"x'0303030303030303030303030303030303030303030303030303030303030303'\"; \
+                 PRAGMA cipher_compatibility = 4; PRAGMA cipher_memory_security = ON; \
+                 PRAGMA temp_store = MEMORY; PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL;",
+            )
+            .unwrap();
+        let active_epoch: u32 = connection
+            .query_row("SELECT v FROM metadata WHERE k='active_epoch'", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap()
+            .parse()
+            .unwrap();
+        for (command_id, historical) in [(malformed_pending, false), (malformed_historical, true)] {
+            connection
+                .execute(
+                    "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload,historical) VALUES(?,?,?,?,?)",
+                    rusqlite::params![
+                        command_id.to_string(),
+                        active_epoch,
+                        "test-sim",
+                        "not-json",
+                        historical
+                    ],
+                )
+                .unwrap();
+        }
+        drop(connection);
         assert_eq!(
             gateway
                 .pending_command_attachment_count(command.command_id.clone())
                 .unwrap(),
             0
         );
+        assert!(matches!(
+            gateway.pending_command_attachment_count(malformed_pending.to_string()),
+            Err(MobileBindingsError::Database)
+        ));
+        assert!(matches!(
+            gateway.pending_command_attachment_count(malformed_historical.to_string()),
+            Err(MobileBindingsError::NotFound)
+        ));
         assert!(matches!(
             gateway.pending_command_attachment_count(uuid::Uuid::new_v4().to_string()),
             Err(MobileBindingsError::NotFound)
@@ -5255,6 +5302,57 @@ mod tests {
                 .state,
             NativePermitState::AlreadyAttempted
         );
+    }
+
+    #[test]
+    fn conditional_notification_removal_keeps_a_newer_instance() {
+        let vault_id = uuid::Uuid::new_v4().to_string();
+        let device_id = uuid::Uuid::new_v4().to_string();
+        let root = TempRoot::new(format!(
+            "peppy-native-notification-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let material = create_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
+        let client = open_at(&root.join("client.db"), &vault_id, &device_id);
+        client
+            .unlock(
+                material.profile_json,
+                material.header_json,
+                "test passphrase".into(),
+            )
+            .unwrap();
+
+        let capture = |instance: &str, posted_at: i64| {
+            client.capture_notification(NativeNotificationCapture {
+                notification_key: "notification-key".into(),
+                instance: instance.into(),
+                package_name: "test.package".into(),
+                app_name: "Test".into(),
+                title: "Title".into(),
+                text: "Text".into(),
+                category: None,
+                posted_at,
+                dismissible: true,
+                app_icon_png_base64: None,
+            })
+        };
+        assert_eq!(
+            capture("instance-a", 1).unwrap(),
+            NativeNotificationCaptureOutcome::Captured
+        );
+        assert_eq!(
+            capture("instance-b", 2).unwrap(),
+            NativeNotificationCaptureOutcome::Duplicate
+        );
+
+        client
+            .remove_notification_if_current_instance("notification-key".into(), "instance-a".into())
+            .unwrap();
+
+        let notifications = client.notification_snapshot().unwrap().notifications;
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].target.notification_key, "notification-key");
     }
 }
 

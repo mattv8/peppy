@@ -91,7 +91,10 @@ class ComposeDevelopmentTests(unittest.TestCase):
             result = self.render("docker-compose.yml", "infra/compose/compose.dev.yml")
         self.assertEqual(result.returncode, 0, result.stderr)
         config = json.loads(result.stdout)
-        self.assertEqual(set(config["services"]), {"postgres", "seaweedfs", "web", "dev"})
+        self.assertEqual(
+            set(config["services"]),
+            {"database-password-preflight", "postgres", "seaweedfs", "web", "dev"},
+        )
         web = config["services"]["web"]
         self.assertEqual(web["build"]["dockerfile"], "infra/docker/server.Dockerfile")
         self.assertEqual(web["build"]["target"], "web-assets")
@@ -106,6 +109,10 @@ class ComposeDevelopmentTests(unittest.TestCase):
         self.assertEqual(dev["environment"]["PEPPY_WEB_CLIENT_DIR"], "/web")
         self.assertEqual(dev["ports"], [{"mode": "ingress", "host_ip": "127.0.0.1", "target": 8080, "published": "7000", "protocol": "tcp"}])
         self.assertEqual(dev["depends_on"], {
+            "database-password-preflight": {
+                "condition": "service_completed_successfully",
+                "required": True,
+            },
             "postgres": {"condition": "service_healthy", "required": True},
             "seaweedfs": {"condition": "service_healthy", "required": True},
             "web": {"condition": "service_completed_successfully", "required": True},
@@ -261,10 +268,13 @@ class ComposeDevelopmentTests(unittest.TestCase):
             )
 
     @unittest.skipUnless(compose, "Docker Compose is unavailable")
-    def test_base_production_service_set_is_unchanged(self):
+    def test_base_production_service_set(self):
         result = self.render("docker-compose.yml")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(set(json.loads(result.stdout)["services"]), {"postgres", "seaweedfs", "migrate", "api"})
+        self.assertEqual(
+            set(json.loads(result.stdout)["services"]),
+            {"database-password-preflight", "postgres", "seaweedfs", "migrate", "api"},
+        )
 
     @staticmethod
     def database_credentials(url):

@@ -2,7 +2,9 @@
 
 use crate::common::*;
 use peppy_crypto::{KeyPurpose, derive_purpose_key, derive_root_key, encrypt};
+use rusqlite::{Connection, params};
 use serde_json::{Value, json};
+use std::path::Path;
 use tempfile::TempDir;
 
 const HINT: &[u8] = b"reinstall-stable-android-id";
@@ -47,6 +49,20 @@ fn capture(client: &Client, owner: &ClientConfig, id: &str) {
         .unwrap();
 }
 
+fn books(client: &Client) -> Value {
+    serde_json::from_str(&client.list_contact_books_json().unwrap()).unwrap()
+}
+
+fn sqlcipher(path: &Path) -> Connection {
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    connection
+}
+
 fn sync(envelopes: &[Envelope], client: &Client) -> ApplyReport {
     let start = client.receive_cursor().unwrap().0;
     for (index, envelope) in envelopes.iter().enumerate() {
@@ -62,9 +78,13 @@ fn queued(client: &Client) -> Vec<Envelope> {
 }
 
 fn tag(vault: &Vault) -> String {
+    tag_for(vault, HINT)
+}
+
+fn tag_for(vault: &Vault, hint: &[u8]) -> String {
     let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
     let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Compaction).unwrap();
-    peppy_crypto::compaction_hmac(&key, b"device-hint-v1", &[b"android", HINT])
+    peppy_crypto::compaction_hmac(&key, b"device-hint-v1", &[b"android", hint])
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
@@ -316,6 +336,290 @@ fn pending_succession_is_accepted_when_predecessor_hint_arrives_late() {
     );
     sync(&[hint(&vault, predecessor, 1)], &client);
     assert_eq!(client.quarantine_count().unwrap(), 0);
+}
+
+#[test]
+fn reverse_applied_succession_resolves_the_terminal_successor() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let a_cfg = config(&dir, "android-a", &vault);
+    let c_cfg = config(&dir, "android-c", &vault);
+    let observer = unlocked(&c_cfg, &vault);
+    let a = unlocked(&a_cfg, &vault);
+    let b = DeviceId::new();
+    let c = c_cfg.device_id;
+
+    capture(&a, &a_cfg, "address-book");
+    a.register_device_hint("android", HINT).unwrap();
+    let a_events = queued(&a);
+    sync(&a_events, &observer);
+    observer.register_device_hint("android", HINT).unwrap();
+    let a_id = a_cfg.device_id;
+    sync(
+        &[
+            hint(&vault, b, 1),
+            hint(&vault, c, 1),
+            sealed(
+                &vault,
+                c,
+                2,
+                PrivatePayload::DeviceSucceeded {
+                    predecessor: b,
+                    successor: c,
+                    platform: "android".into(),
+                    hint_tag: tag(&vault),
+                    key_epoch: 1,
+                },
+            ),
+            sealed(
+                &vault,
+                b,
+                2,
+                PrivatePayload::DeviceSucceeded {
+                    predecessor: a_id,
+                    successor: b,
+                    platform: "android".into(),
+                    hint_tag: tag(&vault),
+                    key_epoch: 1,
+                },
+            ),
+        ],
+        &observer,
+    );
+
+    let books: Value = serde_json::from_str(&observer.list_contact_books_json().unwrap()).unwrap();
+    assert_eq!(books["books"][0]["owner_device_id"], c.to_string());
+    observer
+        .observe_server_high_water(observer.receive_cursor().unwrap())
+        .unwrap();
+    assert_eq!(
+        observer.contact_book_selection().unwrap(),
+        ContactBookSelection::Inherited {
+            book_id: "address-book".into(),
+            retire_book_ids: vec![],
+        }
+    );
+    drop(observer);
+    let reopened = open(&c_cfg);
+    assert_eq!(
+        reopened.contact_book_selection().unwrap(),
+        ContactBookSelection::Inherited {
+            book_id: "address-book".into(),
+            retire_book_ids: vec![],
+        }
+    );
+}
+
+#[test]
+fn forward_succession_chain_selects_the_terminal_book_after_reopen() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let a_cfg = config(&dir, "android-a", &vault);
+    let b_cfg = config(&dir, "android-b", &vault);
+    let c_cfg = config(&dir, "android-c", &vault);
+    let a = unlocked(&a_cfg, &vault);
+    let b = unlocked(&b_cfg, &vault);
+    let c = unlocked(&c_cfg, &vault);
+
+    capture(&a, &a_cfg, "address-book");
+    a.register_device_hint("android", HINT).unwrap();
+    let a_events = queued(&a);
+    sync(&a_events, &b);
+    b.observe_server_high_water(Cursor(a_events.len() as u64))
+        .unwrap();
+    b.register_device_hint("android", HINT).unwrap();
+    let b_events = queued(&b);
+    sync(&a_events, &c);
+    sync(&b_events, &c);
+    c.observe_server_high_water(c.receive_cursor().unwrap())
+        .unwrap();
+    c.register_device_hint("android", HINT).unwrap();
+
+    assert_eq!(
+        c.contact_book_selection().unwrap(),
+        ContactBookSelection::Inherited {
+            book_id: "address-book".into(),
+            retire_book_ids: vec![],
+        }
+    );
+    drop(c);
+    let reopened = open(&c_cfg);
+    assert_eq!(
+        reopened.contact_book_selection().unwrap(),
+        ContactBookSelection::Inherited {
+            book_id: "address-book".into(),
+            retire_book_ids: vec![],
+        }
+    );
+}
+
+#[test]
+fn reopen_reconciles_a_legacy_stranded_book_to_the_authenticated_terminal_successor() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let a_cfg = config(&dir, "android-a", &vault);
+    let c_cfg = config(&dir, "android-c", &vault);
+    let a = unlocked(&a_cfg, &vault);
+    let c = unlocked(&c_cfg, &vault);
+    let b = DeviceId::new();
+
+    capture(&a, &a_cfg, "address-book");
+    sync(&queued(&a), &c);
+    c.register_device_hint("android", HINT).unwrap();
+    c.observe_server_high_water(c.receive_cursor().unwrap())
+        .unwrap();
+    drop(c);
+
+    let connection = sqlcipher(&c_cfg.database_path);
+    let body: String = connection
+        .query_row(
+            "SELECT body FROM contact_books WHERE id='address-book'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut body: Value = serde_json::from_str(&body).unwrap();
+    body["owner_device_id"] = json!(b.to_string());
+    connection
+        .execute(
+            "INSERT INTO device_successions(predecessor,successor,platform,hint_tag,key_epoch) VALUES(?,?,?,?,?),(?,?,?,?,?)",
+            params![
+                a_cfg.device_id.to_string(), b.to_string(), "android", tag(&vault), 1,
+                b.to_string(), c_cfg.device_id.to_string(), "android", tag(&vault), 1,
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE contact_books SET owner_device_id=?,body=? WHERE id='address-book'",
+            params![b.to_string(), body.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO inherited_contact_books(book_id,predecessor) VALUES('address-book',?)",
+            [a_cfg.device_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let reopened = open(&c_cfg);
+    assert_eq!(
+        reopened.contact_book_selection().unwrap(),
+        ContactBookSelection::Inherited {
+            book_id: "address-book".into(),
+            retire_book_ids: vec![],
+        }
+    );
+    drop(reopened);
+    let connection = sqlcipher(&c_cfg.database_path);
+    let repaired: String = connection
+        .query_row(
+            "SELECT body FROM contact_books WHERE id='address-book'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let repaired: Value = serde_json::from_str(&repaired).unwrap();
+    assert_eq!(repaired["owner_device_id"], c_cfg.device_id.to_string());
+}
+
+#[test]
+fn delayed_succession_waits_for_the_exact_old_hint_epoch() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let a_cfg = config(&dir, "android-a", &vault);
+    let successor_cfg = config(&dir, "android-successor", &vault);
+    let successor_client = unlocked(&successor_cfg, &vault);
+    let successor = successor_cfg.device_id;
+    let old_hint = b"old-reinstall-hint";
+    let new_hint = b"new-reinstall-hint";
+    let old_tag = tag_for(&vault, old_hint);
+
+    let source = unlocked(&a_cfg, &vault);
+    capture(&source, &a_cfg, "address-book");
+    let contact_events = queued(&source);
+    sync(&contact_events, &successor_client);
+    successor_client
+        .register_device_hint("android", old_hint)
+        .unwrap();
+    sync(
+        &[
+            sealed(
+                &vault,
+                a_cfg.device_id,
+                99,
+                PrivatePayload::DeviceHintRegistered {
+                    device_id: a_cfg.device_id,
+                    platform: "android".into(),
+                    hint_tag: tag_for(&vault, new_hint),
+                    key_epoch: 2,
+                },
+            ),
+            sealed(
+                &vault,
+                successor,
+                1,
+                PrivatePayload::DeviceHintRegistered {
+                    device_id: successor,
+                    platform: "android".into(),
+                    hint_tag: tag_for(&vault, new_hint),
+                    key_epoch: 2,
+                },
+            ),
+            sealed(
+                &vault,
+                successor,
+                2,
+                PrivatePayload::DeviceSucceeded {
+                    predecessor: a_cfg.device_id,
+                    successor,
+                    platform: "android".into(),
+                    hint_tag: old_tag.clone(),
+                    key_epoch: 1,
+                },
+            ),
+        ],
+        &successor_client,
+    );
+    assert_eq!(
+        books(&successor_client)["books"][0]["owner_device_id"],
+        a_cfg.device_id.to_string()
+    );
+
+    sync(
+        &[sealed(
+            &vault,
+            a_cfg.device_id,
+            100,
+            PrivatePayload::DeviceHintRegistered {
+                device_id: a_cfg.device_id,
+                platform: "android".into(),
+                hint_tag: old_tag,
+                key_epoch: 1,
+            },
+        )],
+        &successor_client,
+    );
+    successor_client
+        .observe_server_high_water(successor_client.receive_cursor().unwrap())
+        .unwrap();
+    assert_eq!(
+        successor_client.contact_book_selection().unwrap(),
+        ContactBookSelection::Inherited {
+            book_id: "address-book".into(),
+            retire_book_ids: vec![],
+        }
+    );
+    drop(successor_client);
+    let reopened = open(&successor_cfg);
+    assert_eq!(
+        reopened.contact_book_selection().unwrap(),
+        ContactBookSelection::Inherited {
+            book_id: "address-book".into(),
+            retire_book_ids: vec![],
+        }
+    );
 }
 
 #[test]

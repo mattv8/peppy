@@ -756,6 +756,74 @@ fn terminal_unlink_candidates_require_completion_and_are_stably_bounded() {
     assert!(client.rcs_owner_unlink_cutover_candidates().is_err());
 }
 
+#[test]
+fn link_owned_context_enumeration_recovers_every_mapped_lane() {
+    let (_directory, client, first, config) = client();
+    let connection = sqlcipher(&config.database_path);
+    authorize_local_link_gateway(&client, &connection);
+    let mut expected = vec![first];
+    let mut participants = std::collections::BTreeSet::new();
+    client.begin_rcs_link_ownership(first, "first", 1).unwrap();
+    assert!(participants.insert("+14155551000".to_owned()));
+    insert_route_proof(&connection, first, "google-first", "+14155551000");
+    for index in 0..100 {
+        let conversation_id = ConversationId::new();
+        let participant = format!("+1415555{index:04}");
+        expected.push(conversation_id);
+        assert!(participants.insert(participant.clone()));
+        client
+            .begin_rcs_link_ownership(conversation_id, &format!("token-{index}"), 1)
+            .unwrap();
+        insert_route_proof(
+            &connection,
+            conversation_id,
+            &format!("google-{index}"),
+            &participant,
+        );
+    }
+    assert_eq!(participants.len(), 101);
+    let contexts = client.rcs_link_owned_conversations().unwrap();
+    let recovered = contexts
+        .iter()
+        .map(|context| context.conversation_id.to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(contexts.len(), 101);
+    assert_eq!(
+        recovered,
+        expected
+            .into_iter()
+            .map(|conversation_id| conversation_id.to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+    assert!(
+        contexts
+            .iter()
+            .all(|context| context.owner == RcsReceiveOwner::Link)
+    );
+}
+
+fn authorize_local_link_gateway(client: &Client, connection: &Connection) {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, now_ms, now_ms)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO metadata(k,v) VALUES('rcs_mapping_context_v1',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            [serde_json::json!({
+                "link_generation": 1,
+                "session_generation": 1,
+                "context_revision": 1,
+                "link_state": 0,
+            })
+            .to_string()],
+        )
+        .unwrap();
+}
+
 fn insert_route_proof(
     connection: &Connection,
     conversation_id: ConversationId,

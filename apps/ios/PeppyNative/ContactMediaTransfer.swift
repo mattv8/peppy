@@ -69,20 +69,36 @@ struct ContactMediaTransfer: Sendable {
             limit: ServerClient.maxSmallBytes, meter: &meter
         )
         if try recordRemoval(reserved, attachmentId: object.attachmentId) { return false }
-        guard (200..<300).contains(reserved.status),
-              let remote = (try? JSONSerialization.jsonObject(with: reserved.body) as? [String: Any])?["attachment_id"] as? String
-        else { return false }
-        let put = try await server.exchange(
-            "PUT", "/v1/attachments/\(remote)/upload", body: data, contentType: "application/octet-stream",
-            limit: ServerClient.maxSmallBytes, meter: &meter
-        )
-        if try recordRemoval(put, attachmentId: object.attachmentId) { return false }
-        guard (200..<300).contains(put.status) else { return false }
+        let reservationConflict = reserved.status == 409
+        let remote: String
+        if reservationConflict {
+            // The local id is the idempotency key. A conflicting replay can only be reconciled
+            // by that key's finalization proof; it must not acknowledge an arbitrary object.
+            remote = object.attachmentId
+        } else {
+            guard (200..<300).contains(reserved.status),
+                  let value = (try? JSONSerialization.jsonObject(with: reserved.body) as? [String: Any])?["attachment_id"] as? String,
+                  !value.isEmpty
+            else { return false }
+            remote = value
+            let put = try await server.exchange(
+                "PUT", "/v1/attachments/\(remote)/upload", body: data, contentType: "application/octet-stream",
+                limit: ServerClient.maxSmallBytes, meter: &meter
+            )
+            if try recordRemoval(put, attachmentId: object.attachmentId) { return false }
+            // A lost PUT response can race an already-finalized replay. Only finalize can prove
+            // success; other failures retain the local upload for a later attempt.
+            guard (200..<300).contains(put.status) || put.status == 404 || put.status == 409 else { return false }
+        }
         let finalized = try await server.exchange(
             "POST", "/v1/attachments/\(remote)/finalize", limit: ServerClient.maxSmallBytes, meter: &meter
         )
         if try recordRemoval(finalized, attachmentId: object.attachmentId) { return false }
-        guard (200..<300).contains(finalized.status) else { return false }
+        guard (200..<300).contains(finalized.status),
+              let proof = (try? JSONSerialization.jsonObject(with: finalized.body) as? [String: Any])?["attachment_id"] as? String,
+              proof == remote,
+              !reservationConflict || proof == object.attachmentId
+        else { return false }
         try client.markAttachmentUploaded(attachmentId: object.attachmentId, remoteObjectId: remote)
         return true
     }

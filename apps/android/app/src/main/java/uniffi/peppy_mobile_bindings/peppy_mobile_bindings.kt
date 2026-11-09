@@ -1077,6 +1077,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_remove_notification(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_remove_notification_if_current_instance(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_attachment_removed_by_storage_policy(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_contact_sync_blocked(
@@ -1646,6 +1648,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_register_no_device_hint(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_remove_notification(`ptr`: Long,`notificationKey`: RustBuffer.ByValue,`instance`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_remove_notification_if_current_instance(`ptr`: Long,`notificationKey`: RustBuffer.ByValue,`instance`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_attachment_removed_by_storage_policy(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -2759,6 +2763,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_remove_notification() and 0xFFFF) != 35619) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_remove_notification_if_current_instance() and 0xFFFF) != 13196) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_attachment_removed_by_storage_policy() and 0xFFFF) != 55290) {
@@ -4034,6 +4041,8 @@ public interface NativeClientInterface {
     fun `registerNoDeviceHint`()
     
     fun `removeNotification`(`notificationKey`: kotlin.String, `instance`: kotlin.String)
+    
+    fun `removeNotificationIfCurrentInstance`(`notificationKey`: kotlin.String, `instance`: kotlin.String)
     
     fun `reportAttachmentRemovedByStoragePolicy`(`attachmentId`: kotlin.String)
     
@@ -6660,6 +6669,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     callWithHandle {
     uniffiRustCallWithError(MobileBindingsException) { _status ->
     UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_remove_notification(
+        it,
+        
+        FfiConverterString.lower(`notificationKey`),
+        FfiConverterString.lower(`instance`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `removeNotificationIfCurrentInstance`(`notificationKey`: kotlin.String, `instance`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_remove_notification_if_current_instance(
         it,
         
         FfiConverterString.lower(`notificationKey`),

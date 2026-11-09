@@ -111,6 +111,40 @@ pub enum ProviderError {
     Permanent,
     Unavailable,
 }
+
+#[derive(Clone, Copy)]
+enum DeliveryDiagnostic {
+    DatabaseFailure,
+    ProviderPermanent,
+    ProviderRetryExhausted,
+}
+
+impl DeliveryDiagnostic {
+    fn error_class(self) -> &'static str {
+        match self {
+            Self::DatabaseFailure => "database_failure",
+            Self::ProviderPermanent => "provider_permanent",
+            Self::ProviderRetryExhausted => "provider_retry_exhausted",
+        }
+    }
+}
+
+fn report_delivery_diagnostic(diagnostic: DeliveryDiagnostic) {
+    tracing::warn!(
+        operation = "wake_delivery",
+        error_class = diagnostic.error_class(),
+        "relay wake delivery failed"
+    );
+}
+
+fn report_cleanup_database_failure() {
+    tracing::warn!(
+        operation = "expired_registration_cleanup",
+        error_class = "database_failure",
+        "relay database maintenance failed"
+    );
+}
+
 pub struct UnconfiguredProvider;
 impl PushProvider for UnconfiguredProvider {
     fn configured(&self) -> bool {
@@ -772,8 +806,8 @@ async fn wake(
 /// request admission or create duplicate delivery after a 202 response.
 pub async fn deliver_one(state: &AppState) -> Result<bool, sqlx::Error> {
     let mut tx = state.pool.begin().await?;
-    let job = sqlx::query_as::<_, (Uuid, String, String, String, String)>("SELECT j.route_id,r.provider,r.token,j.opaque_nonce,j.idempotency_id FROM relay_wake_jobs j JOIN relay_routes r ON r.id=j.route_id WHERE r.revoked_at IS NULL AND j.state IN ('pending','attempted') AND j.next_attempt_at<=now() ORDER BY j.updated_at FOR UPDATE SKIP LOCKED LIMIT 1").fetch_optional(&mut *tx).await?;
-    let Some((route_id, provider_name, token, nonce, idempotency_id)) = job else {
+    let job = sqlx::query_as::<_, (Uuid, String, String, String, String, i32)>("SELECT j.route_id,r.provider,r.token,j.opaque_nonce,j.idempotency_id,j.attempts FROM relay_wake_jobs j JOIN relay_routes r ON r.id=j.route_id WHERE r.revoked_at IS NULL AND j.state IN ('pending','attempted') AND j.next_attempt_at<=now() ORDER BY j.updated_at FOR UPDATE SKIP LOCKED LIMIT 1").fetch_optional(&mut *tx).await?;
+    let Some((route_id, provider_name, token, nonce, idempotency_id, attempts)) = job else {
         tx.commit().await?;
         return Ok(false);
     };
@@ -816,9 +850,13 @@ pub async fn deliver_one(state: &AppState) -> Result<bool, sqlx::Error> {
         Err(ProviderError::Permanent) => {
             sqlx::query("UPDATE relay_wake_jobs SET state='failed',attempts=attempts+1,updated_at=now() WHERE route_id=$1 AND idempotency_id=$2 AND state='attempted'")
                 .bind(route_id).bind(&idempotency_id).execute(&mut *tx).await?;
+            report_delivery_diagnostic(DeliveryDiagnostic::ProviderPermanent);
         }
         Err(_) => {
             sqlx::query("UPDATE relay_wake_jobs SET state=CASE WHEN attempts >= 8 THEN 'failed' ELSE 'pending' END,attempts=attempts+1,next_attempt_at=now() + make_interval(secs => LEAST(3600, 5 * (2 ^ LEAST(attempts, 10)))),updated_at=now() WHERE route_id=$1 AND idempotency_id=$2 AND state='attempted'").bind(route_id).bind(&idempotency_id).execute(&mut *tx).await?;
+            if attempts >= 8 {
+                report_delivery_diagnostic(DeliveryDiagnostic::ProviderRetryExhausted);
+            }
         }
     }
     sqlx::query(
@@ -839,6 +877,23 @@ pub async fn cleanup_expired_registrations(state: &AppState) -> Result<u64, sqlx
         .await?;
     cleanup_expired_admissions(state).await?;
     Ok(deleted.rows_affected())
+}
+
+/// Runs one bounded maintenance pass without exposing provider or database error details.
+pub async fn run_maintenance_pass(state: &AppState) {
+    for _ in 0..WAKE_DELIVERY_BATCH_LIMIT {
+        match deliver_one(state).await {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(_) => {
+                report_delivery_diagnostic(DeliveryDiagnostic::DatabaseFailure);
+                break;
+            }
+        }
+    }
+    if cleanup_expired_registrations(state).await.is_err() {
+        report_cleanup_database_failure();
+    }
 }
 
 async fn cleanup_expired_admissions(state: &AppState) -> Result<u64, sqlx::Error> {
@@ -984,6 +1039,13 @@ mod tests {
         postgres::{PgConnection, PgPoolOptions},
     };
     use std::sync::Mutex as StdMutex;
+    use tracing::{Event, Subscriber, field::Field};
+    use tracing_subscriber::{
+        Layer, Registry,
+        field::Visit,
+        layer::{Context, SubscriberExt},
+        registry::LookupSpan,
+    };
 
     #[derive(Default)]
     struct FakeProvider {
@@ -1027,6 +1089,70 @@ mod tests {
                     .push((provider, token.into(), nonce.into()));
                 Ok(())
             })
+        }
+    }
+
+    struct FailingProvider(StdMutex<Vec<ProviderError>>);
+    impl PushProvider for FailingProvider {
+        fn configured(&self) -> bool {
+            true
+        }
+        fn supports(&self, _: Provider) -> bool {
+            true
+        }
+        fn provider_name(&self) -> &'static str {
+            "failing-fake"
+        }
+        fn send_challenge<'a>(&'a self, _: Provider, _: &'a str, _: &'a str) -> ProviderFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+        fn send_wake<'a>(&'a self, _: Provider, _: &'a str, _: &'a str) -> ProviderFuture<'a> {
+            let error = self.0.lock().unwrap().remove(0);
+            Box::pin(async move { Err(error) })
+        }
+    }
+
+    #[derive(Clone)]
+    struct DiagnosticCapture(Arc<StdMutex<Vec<String>>>);
+    impl<S> Layer<S> for DiagnosticCapture
+    where
+        S: Subscriber + for<'a> LookupSpan<'a>,
+    {
+        fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
+            if event.metadata().target() != "peppy_push_relay"
+                || *event.metadata().level() != tracing::Level::WARN
+            {
+                return;
+            }
+
+            struct Fields {
+                values: String,
+                has_operation: bool,
+            }
+            impl Visit for Fields {
+                fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                    self.values.push_str(field.name());
+                    self.values.push('=');
+                    self.values.push_str(&format!("{value:?}"));
+                    self.values.push(';');
+                    self.has_operation |= field.name() == "operation";
+                }
+                fn record_str(&mut self, field: &Field, value: &str) {
+                    self.values.push_str(field.name());
+                    self.values.push('=');
+                    self.values.push_str(value);
+                    self.values.push(';');
+                    self.has_operation |= field.name() == "operation";
+                }
+            }
+            let mut fields = Fields {
+                values: String::new(),
+                has_operation: false,
+            };
+            event.record(&mut fields);
+            if fields.has_operation {
+                self.0.lock().unwrap().push(fields.values);
+            }
         }
     }
     async fn test_pool() -> (PgPool, String) {
@@ -1775,6 +1901,90 @@ mod tests {
         provider.release.notify_one();
         assert!(first.await.unwrap().unwrap());
         assert_eq!(*provider.wakes.lock().unwrap(), 1);
+        cleanup(pool, schema).await;
+    }
+
+    #[tokio::test]
+    async fn maintenance_pass_reports_closed_pool_failures_without_error_details() {
+        let captured = Arc::new(StdMutex::new(Vec::new()));
+        let subscriber = Registry::default().with(DiagnosticCapture(captured.clone()));
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost:1/unused")
+            .unwrap();
+        pool.close().await;
+        let state = AppState::with_provider(pool, Arc::new(FakeProvider::default()));
+        run_maintenance_pass(&state).await;
+
+        let diagnostics = captured.lock().unwrap();
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics.iter().any(|event| {
+            event.contains("operation=wake_delivery")
+                && event.contains("error_class=database_failure")
+        }));
+        assert!(diagnostics.iter().any(|event| {
+            event.contains("operation=expired_registration_cleanup")
+                && event.contains("error_class=database_failure")
+        }));
+    }
+
+    #[tokio::test]
+    async fn terminal_delivery_failures_emit_fixed_diagnostics_and_empty_queue_is_quiet() {
+        let captured = Arc::new(StdMutex::new(Vec::new()));
+        let subscriber = Registry::default().with(DiagnosticCapture(captured.clone()));
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let (pool, schema) = test_pool().await;
+        let route_id = Uuid::new_v4();
+        let registration_id = Uuid::new_v4();
+        let route_token = "route-token-sentinel-23";
+        let opaque_nonce = "opaque-nonce-sentinel-47";
+        sqlx::query("INSERT INTO relay_registrations(id,provider,token,challenge_digest,expires_at) VALUES($1,'fcm',$2,$3,now()+interval '10 minutes')")
+            .bind(registration_id)
+            .bind(route_token)
+            .bind(vec![0_u8; 32])
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO relay_routes(id,registration_id,provider,token,manage_digest,wake_digest) VALUES($1,$2,'fcm',$3,$4,$4)")
+            .bind(route_id)
+            .bind(registration_id)
+            .bind(route_token)
+            .bind(vec![0_u8; 32])
+            .execute(&pool)
+            .await
+            .unwrap();
+        let provider = Arc::new(FailingProvider(StdMutex::new(vec![
+            ProviderError::Permanent,
+            ProviderError::Retryable,
+        ])));
+        let state = AppState::with_provider(pool.clone(), provider);
+        for (idempotency_id, attempts) in [("idem-a-7f3", 0), ("idem-b-9k2", 8)] {
+            sqlx::query("INSERT INTO relay_wake_jobs(route_id,idempotency_id,opaque_nonce,state,attempts) VALUES($1,$2,$3,'pending',$4)")
+                .bind(route_id)
+                .bind(idempotency_id)
+                .bind(opaque_nonce)
+                .bind(attempts)
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert!(deliver_one(&state).await.unwrap());
+            sqlx::query("DELETE FROM relay_wake_jobs WHERE route_id=$1")
+                .bind(route_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        assert!(!deliver_one(&state).await.unwrap());
+        let diagnostics = captured.lock().unwrap().join("\n");
+        assert!(diagnostics.contains("operation=wake_delivery"));
+        assert!(diagnostics.contains("error_class=provider_permanent"));
+        assert!(diagnostics.contains("error_class=provider_retry_exhausted"));
+        assert_eq!(captured.lock().unwrap().len(), 2);
+        for secret in [route_token, opaque_nonce, "idem-a-7f3", "idem-b-9k2"] {
+            assert!(!diagnostics.contains(secret));
+        }
         cleanup(pool, schema).await;
     }
 

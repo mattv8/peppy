@@ -185,15 +185,18 @@ class AndroidHelperTests(unittest.TestCase):
                 shutil.copy(ROOT / "infra/dev" / name, script.parent / name)
             (repo / ".env").write_text("DEBUG=true\n")
             sdk = temp / "sdk"; tools = temp / "bin"; tools.mkdir(); (sdk / "platform-tools").mkdir(parents=True)
-            log = temp / "powershell.log"; artifacts = temp / "artifacts"; artifacts.mkdir(); (artifacts / "app-debug.apk").touch()
+            log = temp / "powershell.log"; artifacts = temp / "artifacts"; artifacts.mkdir(); (artifacts / "app-sideload.apk").touch()
             adb = sdk / "platform-tools/adb.exe"
             adb.write_text("#!/bin/sh\ncase \"$*\" in *devices*) echo 'emulator-5554 device' ;; *getprop*) echo x86_64 ;; esac\n")
             wslpath = tools / "wslpath"; wslpath.write_text("#!/bin/sh\n[ \"$1\" = -u ] && echo \"$FAKE_SDK\" || echo \"WIN:$2\"\n")
-            powershell = tools / "powershell.exe"; powershell.write_text("#!/bin/sh\necho \"$@\" > \"$POWERSHELL_LOG\"\n")
+            powershell = tools / "powershell.exe"; powershell.write_text("#!/bin/sh\nprintf '%s|%s|%s|%s\\n' \"$PEPPY_HEALTH_URL\" \"$PEPPY_TLS_CERT\" \"$WSLENV\" \"$*\" > \"$POWERSHELL_LOG\"\n")
             for path in (adb, wslpath, powershell): path.chmod(0o755)
-            result = self.run_script(script, "deploy", env={"WSL_INTEROP": "1", "ANDROID_SDK_ROOT": r"C:\\Sdk", "FAKE_SDK": str(sdk), "POWERSHELL_LOG": str(log), "PEPPY_ANDROID_ARTIFACTS": str(artifacts), "PEPPY_DEV_TLS_DIR": str(temp / "tls"), "PATH": f"{tools}:{os.environ['PATH']}"})
+            result = self.run_script(script, "deploy", env={"DEBUG": "true", "WSL_INTEROP": "1", "ANDROID_SDK_ROOT": r"C:\\Sdk", "FAKE_SDK": str(sdk), "POWERSHELL_LOG": str(log), "PEPPY_ANDROID_ARTIFACTS": str(artifacts), "PEPPY_ANDROID_BUILD_VARIANT": "sideload", "PEPPY_DEV_TLS_DIR": str(temp / "tls"), "PATH": f"{tools}:{os.environ['PATH']}"})
             self.assertEqual(result.returncode, 0, result.stderr)
             command = log.read_text()
+            self.assertIn("https://127.0.0.1:7000/healthz", command)
+            self.assertIn(f"WIN:{(temp / 'tls' / 'ca.pem').resolve()}", command)
+            self.assertIn("PEPPY_HEALTH_URL/w:PEPPY_TLS_CERT/w", command)
             self.assertIn("--ssl-revoke-best-effort", command)
             self.assertIn("--cacert", command)
 
@@ -519,15 +522,20 @@ class AndroidHelperTests(unittest.TestCase):
             script.parent.mkdir(parents=True); shutil.copy(ROOT / "infra/dev/android.sh", script); shutil.copy(ROOT / "infra/dev/dev_tls.py", script.parent / "dev_tls.py"); shutil.copy(ROOT / "infra/dev/dev_port.py", script.parent / "dev_port.py")
             (repo / ".env").write_text("synthetic=1\n")
             docker = bin_dir / "docker"
-            docker.write_text("#!/bin/sh\necho \"$@\" >> \"$DOCKER_LOG\"\nexit 0\n")
+            docker.write_text("#!/bin/sh\nprintf 'destination=<%s>\\n' \"$PEPPY_ANDROID_CONTAINER_ARTIFACTS\" >> \"$DOCKER_LOG\"\nprintf 'argument=<%s>\\n' \"$@\" >> \"$DOCKER_LOG\"\nexit 0\n")
             docker.chmod(0o755)
-            env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "DOCKER_LOG": str(log), "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts")}
+            artifacts = temp / "artifact path"
+            env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "DOCKER_LOG": str(log), "PEPPY_ANDROID_ARTIFACTS": str(artifacts)}
             result = self.run_script(script, "build", env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
             calls = log.read_text()
             for volume in ("android-sdk", "android-gradle", "android-cargo", "android-target", "android-debug-keystore"):
-                self.assertIn(f"volume create peppy-{volume}-", calls)
-            self.assertIn("run --build --rm android run build", calls)
+                self.assertIn(f"argument=<peppy-{volume}-", calls)
+            self.assertIn("destination=</artifacts/android>", calls)
+            self.assertIn(f"argument=<{artifacts}:/artifacts/android>", calls)
+            self.assertIn("argument=<-v>", calls)
+            self.assertIn("argument=<android>", calls)
+            self.assertIn("argument=<build>", calls)
 
     def test_host_docker_build_passes_selected_source_tree_with_spaces_to_compose(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1062,7 +1070,8 @@ class AndroidHelperTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             docker_calls = docker_log.read_text()
             self.assertIn("compose version", docker_calls)
-            self.assertIn("run --build --rm android run test", docker_calls)
+            self.assertIn("run --build --rm -v", docker_calls)
+            self.assertIn("android run test", docker_calls)
 
     def test_smoke_requires_explicit_test_command_for_missing_apks(self):
         with tempfile.TemporaryDirectory() as temp:

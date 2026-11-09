@@ -102,6 +102,37 @@ for service, valid_states in allowed.items():
         raise SystemExit(f"{service} is in invalid state for backup: {state}")
 PYSTATE
 
+# Refuse drift between Compose's resolved named volumes and the actual source
+# containers before stopping services or creating recovery output.
+for entry in "${layout[@]}"; do
+  IFS=$'\t' read -r service target volume <<< "$entry"
+  container=$("${compose[@]}" ps --all -q "$service")
+  test -n "$container" || { echo "source container is missing: $service" >&2; exit 67; }
+  if ! mounts=$(docker inspect --format '{{json .Mounts}}' "$container"); then
+    echo "could not inspect source mounts for $service" >&2
+    exit 67
+  fi
+  if ! python3 - "$service" "$target" "$volume" "$mounts" <<'PYMOUNT'
+import json, sys
+service, target, expected_volume, mounts = sys.argv[1:]
+try:
+    actual = json.loads(mounts)
+except json.JSONDecodeError:
+    raise SystemExit(f"could not parse source mounts for {service}")
+for mount in actual:
+    if mount.get("Destination") == target:
+        if mount.get("Type") == "volume" and mount.get("Name") == expected_volume:
+            raise SystemExit(0)
+        break
+raise SystemExit(
+    f"{service} configured named-volume mount does not match source container at {target}"
+)
+PYMOUNT
+  then
+    exit 67
+  fi
+done
+
 # Compare every source container with the effective configured image before stopping anything.
 # Compose names an unnamed build output as ${project}-${service}.
 verify_image() {

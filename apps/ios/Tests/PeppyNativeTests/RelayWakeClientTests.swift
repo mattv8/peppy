@@ -242,6 +242,71 @@ import Foundation
         #expect(!(try await restarted.hasPendingCleanup()))
     }
 
+    @Test(arguments: [true, false])
+    func failedCleanupWriteRetainsAuthorityUntilAReopenedClientCanRetry(active: Bool) async throws {
+        let secure = RelayFaultStore()
+        let cleanup = CleanupPublisher()
+        let origin = try ServerOrigin(canonical: FakeServer.origin, allowLoopbackHTTP: false)
+        let transport = RelayTransport { request in
+            if request.url.path == "/v1/registrations" { return response(request, 201, ["registration_id": "00000000-0000-4000-8000-000000000001"]) }
+            if request.url.path.hasSuffix("/revoke") { return response(request, 204, [:]) }
+            if !active && request.url.path.contains("/confirm") { return response(request, 503, [:]) }
+            let body = try! JSONSerialization.jsonObject(with: request.body!) as! [String: String]
+            return response(request, 201, ["route_id": body["route_id"]!, "manage_credential": body["manage_credential"]!, "wake_credential": body["wake_credential"]!])
+        }
+        let first = RelayWakeClient(origin: origin, transport: transport, secure: secure, publisher: cleanup)
+        #expect(try await first.beginEnrollment(deviceToken: "token"))
+        if active {
+            #expect(try await first.confirm(challenge: String(repeating: "f", count: 64)))
+        } else {
+            #expect(!(try await first.confirm(challenge: String(repeating: "f", count: 64))))
+        }
+
+        secure.failWrites = true
+        await first.revoke()
+        #expect(try await first.hasPendingCleanup(), "a failed queue write keeps the active route or pending proof")
+
+        secure.failWrites = false
+        let reopened = RelayWakeClient(origin: origin, transport: transport, secure: secure, publisher: cleanup)
+        await reopened.revoke()
+        #expect(try await reopened.hasPendingCleanup())
+        await cleanup.allowRemovals()
+        await reopened.retryCleanup()
+        #expect(!(try await reopened.hasPendingCleanup()))
+    }
+
+    @Test(arguments: [true, false])
+    func secureStoreReadOrDeleteFailureNeverAcknowledgesCleanup(readFails: Bool) async throws {
+        let secure = RelayFaultStore()
+        let cleanup = CleanupPublisher()
+        let origin = try ServerOrigin(canonical: FakeServer.origin, allowLoopbackHTTP: false)
+        let transport = RelayTransport { request in
+            if request.url.path == "/v1/registrations" { return response(request, 201, ["registration_id": "00000000-0000-4000-8000-000000000001"]) }
+            if request.url.path.hasSuffix("/revoke") { return response(request, 204, [:]) }
+            let body = try! JSONSerialization.jsonObject(with: request.body!) as! [String: String]
+            return response(request, 201, ["route_id": body["route_id"]!, "manage_credential": body["manage_credential"]!, "wake_credential": body["wake_credential"]!])
+        }
+        let first = RelayWakeClient(origin: origin, transport: transport, secure: secure, publisher: cleanup)
+        #expect(try await first.beginEnrollment(deviceToken: "token"))
+        #expect(try await first.confirm(challenge: String(repeating: "f", count: 64)))
+
+        if readFails { secure.failReads = true } else { secure.failDeletes = true }
+        await first.revoke()
+        if readFails {
+            await #expect(throws: ClientError.self) { try await first.hasPendingCleanup() }
+        } else {
+            #expect(try await first.hasPendingCleanup())
+        }
+
+        secure.failReads = false
+        secure.failDeletes = false
+        let reopened = RelayWakeClient(origin: origin, transport: transport, secure: secure, publisher: cleanup)
+        await reopened.revoke()
+        await cleanup.allowRemovals()
+        await reopened.retryCleanup()
+        #expect(!(try await reopened.hasPendingCleanup()))
+    }
+
     @Test func expiredRegistrationWithIdentifierReregistersInsteadOfPinningToken() async throws {
         let clock = TestClock()
         let secure = InMemorySecureStore()
@@ -423,6 +488,40 @@ private final class TestClock: @unchecked Sendable {
     private var current = Date(timeIntervalSinceReferenceDate: 1_000)
     var value: Date { lock.withLock { current } }
     func advance(seconds: TimeInterval) { lock.withLock { current = current.addingTimeInterval(seconds) } }
+}
+private final class RelayFaultStore: SecureStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [String: Data] = [:]
+    var failWrites = false
+    var failReads = false
+    var failDeletes = false
+
+    func read(_ account: String) throws(ClientError) -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        if failReads { throw ClientError.unexpected("secure-store-read") }
+        return items[account]
+    }
+    func addIfAbsent(_ account: String, _ data: Data) throws(ClientError) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if failWrites { throw ClientError.unexpected("secure-store-write") }
+        guard items[account] == nil else { return false }
+        items[account] = data
+        return true
+    }
+    func upsert(_ account: String, _ data: Data) throws(ClientError) {
+        lock.lock()
+        defer { lock.unlock() }
+        if failWrites { throw ClientError.unexpected("secure-store-write") }
+        items[account] = data
+    }
+    func delete(_ account: String) throws(ClientError) {
+        lock.lock()
+        defer { lock.unlock() }
+        if failWrites || failDeletes { throw ClientError.unexpected("secure-store-delete") }
+        items.removeValue(forKey: account)
+    }
 }
 private func cleanupAccount(_ origin: ServerOrigin) -> String {
     "relay-wake-v2|legacy|legacy|legacy|production|\(origin.serialized)|cleanup"

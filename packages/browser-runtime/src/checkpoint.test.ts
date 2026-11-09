@@ -176,6 +176,31 @@ describe("IndexedDbCheckpointStore", () => {
     await expect(malformed.load()).rejects.toMatchObject({ code: "invalid-checkpoint" });
   });
 
+  it("fails closed without replacing orphaned checkpoint bytes", async () => {
+    const name = `test-${crypto.randomUUID()}`;
+    const store = new IndexedDbCheckpointStore(name);
+    await expect(store.load()).resolves.toEqual({ kind: "absent" });
+    store.close();
+    await alterStore(name, objectStore => objectStore.put(new Blob([encoder.encode("orphan")]), "file:client.db"));
+
+    await expect(store.load()).rejects.toMatchObject({ code: "invalid-checkpoint" });
+    await expect(store.commit(input(0))).rejects.toMatchObject({ code: "invalid-checkpoint" });
+
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const open = indexedDB.open(name, 1);
+      open.onsuccess = () => resolve(open.result);
+      open.onerror = () => reject(open.error);
+    });
+    const transaction = database.transaction("checkpoint", "readonly");
+    const orphan = await new Promise<Blob | undefined>((resolve, reject) => {
+      const request = transaction.objectStore("checkpoint").get("file:client.db");
+      request.onsuccess = () => resolve(request.result as Blob | undefined);
+      request.onerror = () => reject(request.error);
+    });
+    expect(new TextDecoder().decode(await orphan!.arrayBuffer())).toBe("orphan");
+    database.close();
+  });
+
   it("rejects generation overflow without replacing the committed checkpoint", async () => {
     const name = `test-${crypto.randomUUID()}`;
     const store = new IndexedDbCheckpointStore(name);

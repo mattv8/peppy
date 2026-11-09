@@ -159,6 +159,9 @@ export class IndexedDbCheckpointStore {
       try {
         const store = transaction.objectStore("checkpoint");
         const stored = await request(store.get(MANIFEST_KEY));
+        if (stored === undefined && await request(store.count()) !== 0) {
+          throw new CheckpointError("invalid-checkpoint");
+        }
         const previous = stored === undefined ? undefined : validateStoredManifest(stored);
         const generation = previous?.generation ?? 0;
         if (generation !== expectedGeneration || generation === Number.MAX_SAFE_INTEGER) {
@@ -198,6 +201,7 @@ export class IndexedDbCheckpointStore {
       const store = transaction.objectStore("checkpoint");
       const stored = await request(store.get(MANIFEST_KEY));
       if (stored === undefined) {
+        if (await request(store.count()) !== 0) throw new CheckpointError("invalid-checkpoint");
         await completion;
         return { kind: "absent" };
       }

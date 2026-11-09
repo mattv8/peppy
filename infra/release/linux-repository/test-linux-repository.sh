@@ -8,12 +8,15 @@ root=$(mktemp -d); trap 'rm -rf "$root"' EXIT
 expect_failure() { if "$@" >/dev/null 2>&1; then echo "expected failure: $*" >&2; exit 1; fi; }
 setup_args=(--distro debian --channel stable --repo-url https://packages.example.invalid/peppy --key-url https://packages.example.invalid/peppy/key.asc --key-fingerprint 0123456789abcdef0123456789abcdef01234567 --dry-run)
 dry_run=$("${setup[@]}" "${setup_args[@]}")
-grep -Fq 'Pin: origin packages.example.invalid' <<<"$dry_run"
+grep -Fqx 'Pin: origin packages.example.invalid' <<<"$dry_run"
 grep -Fq 'Pin-Priority: -1' <<<"$dry_run"
 grep -Fq 'Pin-Priority: 990' <<<"$dry_run"
 grep -Fq 'Wants=network-online.target' <<<"$dry_run"
 grep -Fq 'install --only-upgrade --yes peppy' <<<"$dry_run"
 if grep -Eq 'unattended-upgrades|dnf-automatic|sh -c' <<<"$dry_run"; then exit 1; fi
+port_dry_run=$("${setup[@]}" --distro debian --channel stable --repo-url https://packages.example.invalid:8443/peppy --key-url https://packages.example.invalid:8443/peppy/key.asc --key-fingerprint 0123456789abcdef0123456789abcdef01234567 --dry-run)
+grep -Fqx 'Pin: origin packages.example.invalid' <<<"$port_dry_run"
+if grep -Fqx 'Pin: origin packages.example.invalid:8443' <<<"$port_dry_run"; then exit 1; fi
 fedora_dry_run=$("${setup[@]}" --distro fedora --channel staging --repo-url https://packages.example.invalid/peppy --key-url https://packages.example.invalid/peppy/key.asc --key-fingerprint 0123456789abcdef0123456789abcdef01234567 --dry-run)
 grep -Fq 'includepkgs=peppy' <<<"$fedora_dry_run"
 grep -Fq 'dnf --assumeyes upgrade peppy' <<<"$fedora_dry_run"
@@ -21,6 +24,90 @@ expect_failure "${setup[@]}" --distro debian --channel stable --repo-url http://
 expect_failure "${setup[@]}" --distro debian --channel stable --repo-url https://one.invalid --key-url https://two.invalid/key --key-fingerprint 0123456789abcdef0123456789abcdef01234567 --dry-run
 expect_failure "${setup[@]}" --distro debian --channel stable --repo-url "https://valid.invalid/\$(bad)" --key-url https://valid.invalid/key --key-fingerprint 0123456789abcdef0123456789abcdef01234567 --dry-run
 expect_failure "${setup[@]}" --distro debian --channel stable --repo-url https://valid.invalid --key-url https://valid.invalid/key --key-fingerprint short --dry-run
+
+setup_fixture="$root/setup-peppy-updates.sh"
+sed "s|/etc/|$root/etc/|g" "$script_dir/setup-peppy-updates.sh" > "$setup_fixture"
+chmod +x "$setup_fixture"
+mkdir -p "$root/bin"
+cat > "$root/bin/id" <<'EOF'
+#!/usr/bin/env bash
+printf '0\n'
+EOF
+cat > "$root/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  [ "$1" != -o ] || { printf key > "$2"; exit 0; }
+  shift
+done
+exit 1
+EOF
+cat > "$root/bin/gpg" <<'EOF'
+#!/usr/bin/env bash
+printf 'pub:::::::::\nfpr:::::::::0123456789ABCDEF0123456789ABCDEF01234567:\n'
+EOF
+cat > "$root/bin/install" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = -d ]; then mkdir -p "${@: -1}"; else cp "${@: -2:1}" "${@: -1}"; fi
+EOF
+cat > "$root/bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$PEPPY_TEST_SYSTEMCTL_LOG"
+EOF
+chmod +x "$root/bin"/{id,curl,gpg,install,systemctl}
+reset_setup_root() {
+  rm -rf "${root:?}/etc" "${root:?}/systemctl.log" "${root:?}/dangling-target"
+  mkdir -p "$root/etc/apt/keyrings" "$root/etc/apt/sources.list.d" "$root/etc/apt/preferences.d" "$root/etc/pki/rpm-gpg" "$root/etc/yum.repos.d" "$root/etc/systemd/system"
+}
+run_setup() {
+  PATH="$root/bin:$PATH" PEPPY_TEST_SYSTEMCTL_LOG="$root/systemctl.log" "$setup_fixture" "$@"
+}
+setup_common=(--channel stable --repo-url https://packages.example.invalid/peppy --key-url https://packages.example.invalid/peppy/key.asc --key-fingerprint 0123456789abcdef0123456789abcdef01234567)
+
+reset_setup_root
+run_setup --distro debian "${setup_common[@]}"
+test -f "$root/etc/apt/keyrings/peppy.asc"
+test -f "$root/etc/apt/sources.list.d/peppy.list"
+test -f "$root/etc/apt/preferences.d/peppy"
+test -f "$root/etc/systemd/system/peppy-update.service"
+test -f "$root/etc/systemd/system/peppy-update.timer"
+
+reset_setup_root
+ln -s "$root/dangling-target" "$root/etc/systemd/system/peppy-update.timer"
+atomic_output="$root/debian-atomic-refusal.log"
+if run_setup --distro debian "${setup_common[@]}" >"$atomic_output" 2>&1; then
+  echo 'expected Debian setup to reject an occupied late destination before writing configuration' >&2
+  exit 1
+fi
+grep -Fqx "refusing to replace existing $root/etc/systemd/system/peppy-update.timer" "$atomic_output"
+test -L "$root/etc/systemd/system/peppy-update.timer"
+test ! -e "$root/dangling-target"
+test ! -e "$root/etc/apt/keyrings/peppy.asc"
+test ! -e "$root/etc/apt/sources.list.d/peppy.list"
+test ! -e "$root/etc/apt/preferences.d/peppy"
+test ! -e "$root/etc/systemd/system/peppy-update.service"
+test ! -e "$root/systemctl.log"
+
+reset_setup_root
+run_setup --distro fedora "${setup_common[@]}"
+test -f "$root/etc/pki/rpm-gpg/RPM-GPG-KEY-peppy"
+test -f "$root/etc/yum.repos.d/peppy.repo"
+test -f "$root/etc/systemd/system/peppy-update.service"
+test -f "$root/etc/systemd/system/peppy-update.timer"
+
+reset_setup_root
+ln -s "$root/dangling-target" "$root/etc/systemd/system/peppy-update.timer"
+atomic_output="$root/fedora-atomic-refusal.log"
+if run_setup --distro fedora "${setup_common[@]}" >"$atomic_output" 2>&1; then
+  echo 'expected Fedora setup to reject an occupied late destination before writing configuration' >&2
+  exit 1
+fi
+grep -Fqx "refusing to replace existing $root/etc/systemd/system/peppy-update.timer" "$atomic_output"
+test -L "$root/etc/systemd/system/peppy-update.timer"
+test ! -e "$root/dangling-target"
+test ! -e "$root/etc/pki/rpm-gpg/RPM-GPG-KEY-peppy"
+test ! -e "$root/etc/yum.repos.d/peppy.repo"
+test ! -e "$root/etc/systemd/system/peppy-update.service"
+test ! -e "$root/systemctl.log"
 
 mkdir -p "$root/bin" "$root/staged"
 make_fixture() {

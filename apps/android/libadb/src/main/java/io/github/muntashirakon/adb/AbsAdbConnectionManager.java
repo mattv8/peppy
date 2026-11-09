@@ -32,6 +32,7 @@ import io.github.muntashirakon.adb.android.AdbMdns;
 @SuppressWarnings("unused")
 public abstract class AbsAdbConnectionManager implements Closeable {
     private final Object mLock = new Object();
+    private final Object mPairingLock = new Object();
     @Nullable
     private AdbConnection mAdbConnection;
     private final PairingAttemptRegistry<PairingAttempt> mPairingAttempts = new PairingAttemptRegistry<>();
@@ -480,7 +481,7 @@ public abstract class AbsAdbConnectionManager implements Closeable {
         Object pending = null;
         PairingAttempt pairingClient = null;
         try {
-            synchronized (mLock) {
+            synchronized (mPairingLock) {
                 pending = mPairingAttempts.begin();
             }
             onPairingPendingRegistered();
@@ -488,7 +489,7 @@ public abstract class AbsAdbConnectionManager implements Closeable {
             pairingClient = createPairingAttempt(host, port, password, keyPair, getDeviceName());
             PairingAttempt connection = pairingClient;
             try (PairingAttempt ignored = connection) {
-            synchronized (mLock) {
+            synchronized (mPairingLock) {
                 mPairingAttempts.activate(pending, pairingClient);
             }
             pairingClient.start();
@@ -497,7 +498,7 @@ public abstract class AbsAdbConnectionManager implements Closeable {
         } finally {
             java.util.Arrays.fill(password, (byte) 0);
             if (pending != null) {
-                synchronized (mLock) {
+                synchronized (mPairingLock) {
                     mPairingAttempts.unregister(pending, pairingClient);
                 }
             }
@@ -521,7 +522,7 @@ public abstract class AbsAdbConnectionManager implements Closeable {
     /** Cancels an active {@link #pair(String, int, String)} call without waiting for its network operations. */
     public void cancelPairing() {
         PairingAttempt pairingConnection;
-        synchronized (mLock) {
+        synchronized (mPairingLock) {
             pairingConnection = mPairingAttempts.cancel();
         }
         if (pairingConnection != null) pairingConnection.close();

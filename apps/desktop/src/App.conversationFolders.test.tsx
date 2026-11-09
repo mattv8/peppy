@@ -265,10 +265,14 @@ describe("App conversation folders", () => {
 
     cleanup();
     snapshot = { ...snapshot, conversations: snapshot.conversations.map(conversation => conversation.id === target.id ? { ...conversation, folder: "spam", folderReason: "marked" } : conversation) };
+    changeFolder.mockClear();
     render(<App hostKind="browser" />);
     await waitFor(() => expect(document.getElementById("header-not-spam")).toBeInTheDocument());
     fireEvent.click(document.getElementById("header-not-spam")!);
-    await waitFor(() => expect(changeFolder).toHaveBeenLastCalledWith(target.id, "inbox"));
+    await waitFor(() => {
+      expect(changeFolder).toHaveBeenCalledTimes(1);
+      expect(changeFolder).toHaveBeenCalledWith(target.id, "inbox");
+    });
   });
 
   it("confirms blocked spam from the row, requests unblock, and shows the toast", async () => {

@@ -1080,6 +1080,7 @@ async fn upload_object_for_draft(
                 &format!("/v1/attachments/{remote}/upload"),
                 &path,
                 object.ciphertext_bytes,
+                &session.cancel,
             )
             .await
         {
@@ -1092,6 +1093,7 @@ async fn upload_object_for_draft(
                 record_storage_policy_removal(session, id).await?;
                 return Ok(());
             }
+            Err(NetError::Cancelled) => return Ok(()),
             Err(error) => return Err(error.into()),
         }
     }
@@ -1149,6 +1151,7 @@ async fn download_one(
             &format!("/v1/attachments/{remote}"),
             &target,
             object.ciphertext_bytes,
+            &session.cancel,
         )
         .await
     {
@@ -1157,6 +1160,7 @@ async fn download_one(
             record_storage_policy_removal(session, object.attachment_id).await?;
             return Ok(());
         }
+        Err(NetError::Cancelled) => return Ok(()),
         Err(error) => return Err(error.into()),
     }
     let (c, id, file) = (client(session), object.attachment_id, target.clone());
@@ -3300,6 +3304,27 @@ mod drain_tests {
         assert!(!join_workers(&mut workers, Duration::from_millis(1)).await);
         assert!(!workers[0].is_finished());
         assert!(join_workers(&mut workers, Duration::from_secs(1)).await);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_session_waits_for_admitted_blocking_core_work_to_drain() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::sync_channel(1);
+        session.track_worker(tokio::spawn(async move {
+            let _ = blocking(move || {
+                entered.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok::<(), BridgeError>(())
+            })
+            .await;
+        }));
+
+        entered_rx.await.unwrap();
+        assert!(!drain(&session, Duration::from_millis(1)).await);
+        release.send(()).unwrap();
+        assert!(drain(&session, Duration::from_secs(1)).await);
     }
 
     #[tokio::test]

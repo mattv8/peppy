@@ -3909,6 +3909,14 @@ describe("draft durability", () => {
 
   it("keeps local text until explicit recovery recreates a draft deleted elsewhere", async () => {
     host.drafts.set("aurora", { id: "draft-aurora", conversationId: "aurora", text: "stored", recipientIds: [], attachmentIds: [], revision: "1" });
+    const originalSave = host.save;
+    const replacementId = "replacement-aurora";
+    host.save = (input) => {
+      if (input.id !== "") return originalSave(input);
+      const replacement = { id: replacementId, conversationId: "aurora", text: input.text, recipientIds: input.recipientIds, attachmentIds: input.attachmentIds, revision: "1" };
+      host.drafts.set("aurora", replacement);
+      return replacement;
+    };
     render(<App />);
     await waitFor(() => expect(message()).toHaveValue("stored"));
     host.drafts.delete("aurora");
@@ -3921,6 +3929,8 @@ describe("draft durability", () => {
     expect(host.drafts.has("aurora")).toBe(false);
     fireEvent.click(recover);
     await waitFor(() => expect(message()).toHaveValue("local version"));
+    await waitFor(() => expect(host.drafts.get("aurora")).toMatchObject({ id: replacementId, text: "local version", attachmentIds: [] }));
+    expect(vi.mocked(bridge.save_draft)).toHaveBeenCalledWith(expect.objectContaining({ id: "", conversationId: "aurora", text: "local version" }));
   });
 
   it("requires explicit confirmation before discarding a deleted draft's local changes", async () => {
@@ -6882,6 +6892,25 @@ describe("display-only contact names", () => {
     fireEvent.mouseDown(work.closest("li")!);
     await waitFor(() => expect(save).toHaveBeenCalled());
     expect(save.mock.calls[0][0].recipientIds).toEqual(["+12025550161"]);
+  });
+
+  it("does not restore an already resolved picked contact after its next snapshot deletes it", async () => {
+    const address = "+12025550160";
+    host.contactResolution = { [address]: { bookId: "book-phone", contactId: "c-sol", displayName: "Sol Rivera", photoDataUrl: "data:image/jpeg;base64,AA==" } };
+    vi.spyOn(bridge, "search_contact_recipients").mockResolvedValue([
+      { address, bookId: "book-phone", displayName: "Sol Rivera", number: address, label: "mobile", normalized: true, contactId: "c-sol", phoneId: "p1" },
+    ]);
+    render(<App />);
+    fireEvent.click(await findNewConversationAction());
+    const picker = await screen.findByLabelText("Recipients");
+    fireEvent.change(picker, { target: { value: "Sol" } });
+    fireEvent.mouseDown((await screen.findByText("mobile · (202) 555-0160")).closest("li")!);
+    await waitFor(() => expect(screen.getByText("Sol Rivera")).toBeInTheDocument());
+
+    host.contactResolution = undefined;
+    await act(async () => hint?.());
+    await waitFor(() => expect(within(screen.getByRole("region", { name: "Message recipients" })).getByText("(202) 555-0160")).toBeInTheDocument());
+    expect(screen.queryByText("Sol Rivera")).not.toBeInTheDocument();
   });
 
   it("maps each contact result to its book, contact, and phone row identity", async () => {

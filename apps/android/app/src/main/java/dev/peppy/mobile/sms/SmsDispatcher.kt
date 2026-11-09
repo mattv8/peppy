@@ -48,11 +48,11 @@ data class DispatchSummary(
 
 /**
  * Executes pending carrier commands. Per command, strictly in order:
- *  1. permanently invalid shapes for this SMS adapter (not exactly one recipient, empty text, any
- *     attachment, more than 255 parts) take the core permit only to record FAILED_BEFORE_SUBMISSION;
- *     the OS is never called. MMS stays pending if the core blocks its permit (media unavailable);
- *  2. transient host preconditions (SEND_SMS granted, exact live route) leave the command pending
+ *  1. transient host preconditions (SEND_SMS granted, exact live route) leave the command pending
  *     with no permit;
+ *  2. permanently invalid shapes for this SMS adapter (not exactly one recipient, empty text, any
+ *     attachment, more than 255 parts) take the core permit only while that exact route remains
+ *     current to record FAILED_BEFORE_SUBMISSION; the OS is never called;
  *  3. the core permit (`beginSendAttempt` == PERMIT) durably records the attempt;
  *  4. callback aggregation is registered with unique PendingIntents;
  *  5. exactly one carrier call; no resend is ever attempted.
@@ -64,6 +64,8 @@ class SmsDispatcher(
     private val routes: List<SimRoute>,
     private val sendPermissionGranted: Boolean,
     private val callbacks: SmsCallbackStore = SmsCallbackStore(context),
+    private val currentRoutes: () -> List<SimRoute> = { routes },
+    private val mayIssueEffect: () -> Boolean = { true },
 ) {
     fun dispatch(limit: Int = MAX_COMMANDS_PER_RUN): DispatchSummary {
         var submitted = 0
@@ -72,6 +74,7 @@ class SmsDispatcher(
         var permits = 0
         var more = false
         for (pending in client.pendingCommands()) {
+            if (!mayIssueEffect()) break
             // Bound permit/carrier work per run; waiting commands do not starve later ones.
             if (permits >= limit) {
                 more = true
@@ -86,18 +89,18 @@ class SmsDispatcher(
             } catch (_: MobileBindingsException.NotFound) {
                 continue // no longer pending
             }
+            val route = SimRoutes.resolve(pending.subscriptionId, currentRoutes())
+            if (!sendPermissionGranted || route == null) {
+                waiting++
+                continue
+            }
             if (message.recipients.size != 1 || message.body.isEmpty() || attachments > 0uL) {
-                if (refuseBeforeCarrier(pending.commandId)) {
+                if (refuseBeforeCarrier(pending.commandId, pending.subscriptionId, route)) {
                     refused++
                     permits++
                 } else {
                     waiting++
                 }
-                continue
-            }
-            val route = SimRoutes.resolve(pending.subscriptionId, routes)
-            if (!sendPermissionGranted || route == null) {
-                waiting++
                 continue
             }
             val parts = try {
@@ -107,12 +110,18 @@ class SmsDispatcher(
                 continue
             }
             if (parts.isEmpty() || parts.size > CallbackIdentity.MAX_PARTS) {
-                if (refuseBeforeCarrier(pending.commandId)) {
+                if (refuseBeforeCarrier(pending.commandId, pending.subscriptionId, route)) {
                     refused++
                     permits++
                 } else {
                     waiting++
                 }
+                continue
+            }
+            // A route is a current default-SMS route, not a physical-SIM identity. Recheck it
+            // immediately before the durable permit so a changed default never authorizes a send.
+            if (!mayIssueEffect() || SimRoutes.resolve(pending.subscriptionId, currentRoutes()) != route) {
+                waiting++
                 continue
             }
             val permit = client.beginSendAttempt(pending.commandId)
@@ -147,7 +156,8 @@ class SmsDispatcher(
     }
 
     /** Takes the permit only to record a truthful terminal refusal; never calls the OS. */
-    private fun refuseBeforeCarrier(commandId: String): Boolean {
+    private fun refuseBeforeCarrier(commandId: String, subscriptionId: String, route: SimRoute): Boolean {
+        if (!mayIssueEffect() || SimRoutes.resolve(subscriptionId, currentRoutes()) != route) return false
         val permit = client.beginSendAttempt(commandId)
         if (permit.state != NativePermitState.PERMIT || permit.command?.commandId != commandId) return false
         record(commandId, NativeSendResult.FAILED_BEFORE_SUBMISSION)

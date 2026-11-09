@@ -1,6 +1,6 @@
 use peppy_push_relay::{
-    AppState, app, cleanup_expired_registrations, deliver_one, providers::ConfiguredProvider,
-    trusted_proxy_cidrs, wake_admission_limit,
+    AppState, app, providers::ConfiguredProvider, run_maintenance_pass, trusted_proxy_cidrs,
+    wake_admission_limit,
 };
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
@@ -52,14 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let worker_state = state.clone();
     tokio::spawn(async move {
         loop {
-            for _ in 0..peppy_push_relay::WAKE_DELIVERY_BATCH_LIMIT {
-                if !deliver_one(&worker_state).await.unwrap_or(false) {
-                    break;
-                }
-            }
-            if let Err(error) = cleanup_expired_registrations(&worker_state).await {
-                tracing::warn!(%error, "expired relay registration cleanup failed");
-            }
+            run_maintenance_pass(&worker_state).await;
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });

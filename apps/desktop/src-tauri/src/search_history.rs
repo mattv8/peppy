@@ -156,27 +156,58 @@ fn drive_with_token(session: Arc<Session>, attempt: uuid::Uuid, token: Cancellat
 
 /// Called by normal replay/apply after a real observation; it never opens another HTTP loop.
 async fn drive_loop(session: Arc<Session>, attempt: uuid::Uuid, token: CancellationToken) {
+    let work_session = session.clone();
+    let step_session = session.clone();
+    drive_loop_with(
+        session,
+        attempt,
+        token,
+        move || {
+            let client = work_session.client.clone();
+            async move {
+                blocking(move || client.history_search_work(attempt).map_err(core_error)).await
+            }
+        },
+        move |work| {
+            let session = step_session.clone();
+            async move { drive_step(&session, attempt, work).await }
+        },
+        || sleep(Duration::from_secs(1)),
+    )
+    .await;
+}
+
+async fn drive_loop_with<Work, WorkFuture, Step, StepFuture, Cadence, CadenceFuture>(
+    session: Arc<Session>,
+    attempt: uuid::Uuid,
+    token: CancellationToken,
+    mut work: Work,
+    mut step: Step,
+    mut cadence: Cadence,
+) where
+    Work: FnMut() -> WorkFuture,
+    WorkFuture: std::future::Future<Output = BridgeResult<HistorySearchWork>>,
+    Step: FnMut(HistorySearchWork) -> StepFuture,
+    StepFuture: std::future::Future<Output = BridgeResult<()>>,
+    Cadence: FnMut() -> CadenceFuture,
+    CadenceFuture: std::future::Future<Output = ()>,
+{
     let mut consecutive_errors = 0usize;
     loop {
         if token.is_cancelled() || session.cancel.is_cancelled() {
             return;
         }
-        let client = session.client.clone();
-        let work = blocking(move || client.history_search_work(attempt).map_err(core_error)).await;
-        let work = match work {
-            Ok(work) => {
-                consecutive_errors = 0;
-                work
-            }
+        let work = match work().await {
+            Ok(work) => work,
             Err(error) => {
                 if handle_driver_error(&session, attempt, "work", &error, &mut consecutive_errors) {
                     return;
                 }
-                sleep(Duration::from_secs(1)).await;
+                cadence().await;
                 continue;
             }
         };
-        let result = drive_step(&session, attempt, work).await;
+        let result = step(work).await;
         if let Err(error) = result {
             if handle_driver_error(&session, attempt, "step", &error, &mut consecutive_errors) {
                 return;
@@ -184,7 +215,7 @@ async fn drive_loop(session: Arc<Session>, attempt: uuid::Uuid, token: Cancellat
         } else {
             consecutive_errors = 0;
         }
-        sleep(Duration::from_secs(1)).await;
+        cadence().await;
     }
 }
 
@@ -426,6 +457,61 @@ mod tests {
 
         assert!(session.history_attempt_token(missing).is_none());
         assert_eq!(session.history_view("main"), Some(missing));
+    }
+
+    #[tokio::test]
+    async fn driver_resets_errors_only_after_a_successful_whole_iteration() {
+        let (_fixture, session) = session();
+        let started = session
+            .client
+            .start_history_search(uuid::Uuid::new_v4())
+            .unwrap();
+        let attempt = started.attempt_id.unwrap();
+        let (token, _) = session.attach_history_interest(attempt, "main");
+        let retained_token = token.clone();
+        let fallback_token = token.clone();
+        let cadence_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let test_cadence_calls = cadence_calls.clone();
+        let mut work = std::iter::repeat_n(Ok(HistorySearchWork::Wait), 6);
+        let mut steps = [
+            Err(BridgeError::new("host-state", "test failure")),
+            Err(BridgeError::new("host-state", "test failure")),
+            Ok(()),
+            Err(BridgeError::new("host-state", "test failure")),
+            Err(BridgeError::new("host-state", "test failure")),
+            Err(BridgeError::new("host-state", "test failure")),
+        ]
+        .into_iter();
+
+        drive_loop_with(
+            session.clone(),
+            attempt,
+            token,
+            move || std::future::ready(work.next().unwrap()),
+            move |_| std::future::ready(steps.next().unwrap()),
+            move || {
+                let calls = test_cadence_calls.clone();
+                let fallback_token = fallback_token.clone();
+                async move {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 5 {
+                        fallback_token.cancel();
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(cadence_calls.load(Ordering::SeqCst), 5);
+        assert!(retained_token.is_cancelled());
+        assert!(session.history_attempt_token(attempt).is_none());
+        assert_eq!(session.history_view("main"), Some(attempt));
+        assert_eq!(
+            session
+                .client
+                .history_search_status(session.history_view("main"))
+                .unwrap(),
+            started
+        );
     }
 
     #[test]

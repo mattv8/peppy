@@ -172,6 +172,7 @@ gate_env=(
   WORKFLOW_SECURITY_RESULT=success WORKFLOW_SECURITY_REQUIRED=true
   VERSION_RESULT=success VERSION_REQUIRED=true
   RELEASE_TOOLING_RESULT=success RELEASE_TOOLING_REQUIRED=true
+  RELEASE_MACOS_TOOLING_RESULT=success RELEASE_MACOS_TOOLING_REQUIRED=true
   DEVELOPMENT_TOOLS_RESULT=success DEVELOPMENT_TOOLS_REQUIRED=true
   RUST_RESULT=success RUST_REQUIRED=true
   INTEGRATION_RESULT=success INTEGRATION_REQUIRED=true
@@ -190,6 +191,7 @@ env "${gate_env[@]}" RUST_RESULT=skipped RUST_REQUIRED=false "$GATE"
 expect_failure env "${gate_env[@]}" RUST_RESULT=skipped RUST_REQUIRED=true "$GATE"
 expect_failure env "${gate_env[@]}" RUST_RESULT=failure "$GATE"
 expect_failure env "${gate_env[@]}" RUST_RESULT=cancelled "$GATE"
+expect_failure env "${gate_env[@]}" RELEASE_MACOS_TOOLING_RESULT=failure "$GATE"
 expect_failure env "${gate_env[@]}" CHANGES_RESULT=failure "$GATE"
 expect_failure env "${gate_env[@]}" RUST_RESULT=invalid "$GATE"
 expect_failure env CHANGES_RESULT=success "$GATE"

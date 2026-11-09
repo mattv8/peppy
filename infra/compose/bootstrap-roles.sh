@@ -6,6 +6,8 @@ set -eu
 : "${PEPPY_MAINTENANCE_DB_USER:?PEPPY_MAINTENANCE_DB_USER is required}"
 : "${PEPPY_MAINTENANCE_DB_PASSWORD:?PEPPY_MAINTENANCE_DB_PASSWORD is required}"
 
+sh /usr/local/bin/validate-db-passwords.sh
+
 if [ "$PEPPY_RUNTIME_DB_USER" = "$POSTGRES_USER" ] || [ "$PEPPY_MAINTENANCE_DB_USER" = "$POSTGRES_USER" ] || [ "$PEPPY_RUNTIME_DB_USER" = "$PEPPY_MAINTENANCE_DB_USER" ]; then
   echo "database runtime and maintenance roles must be distinct from the owner and each other" >&2
   exit 1

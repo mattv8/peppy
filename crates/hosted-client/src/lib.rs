@@ -874,28 +874,25 @@ mod tests {
             .unwrap();
         let complete = prepared.complete_request().unwrap();
 
-        // Test wrong operation_id
-        let wrong_op = serde_json::json!({
-            "operation_id": Uuid::new_v4().to_string(),
+        let valid = serde_json::json!({
+            "operation_id": prepared.operation_id.to_string(),
             "vault_id": prepared.vault_id.to_string(),
             "device_id": prepared.device_id.to_string(),
+            "already_provisioned": false,
         });
+        assert!(prepared.credential_json(valid.to_string()).is_ok());
+
+        // Each negative response is otherwise a valid typed completion response.
+        let mut wrong_op = valid.clone();
+        wrong_op["operation_id"] = serde_json::json!(Uuid::new_v4().to_string());
         assert!(prepared.credential_json(wrong_op.to_string()).is_err());
 
-        // Test wrong vault_id
-        let wrong_vault = serde_json::json!({
-            "operation_id": prepared.operation_id.to_string(),
-            "vault_id": Uuid::new_v4().to_string(),
-            "device_id": prepared.device_id.to_string(),
-        });
+        let mut wrong_vault = valid.clone();
+        wrong_vault["vault_id"] = serde_json::json!(Uuid::new_v4().to_string());
         assert!(prepared.credential_json(wrong_vault.to_string()).is_err());
 
-        // Test wrong device_id
-        let wrong_device = serde_json::json!({
-            "operation_id": prepared.operation_id.to_string(),
-            "vault_id": prepared.vault_id.to_string(),
-            "device_id": Uuid::new_v4().to_string(),
-        });
+        let mut wrong_device = valid;
+        wrong_device["device_id"] = serde_json::json!(Uuid::new_v4().to_string());
         assert!(prepared.credential_json(wrong_device.to_string()).is_err());
 
         // Verify material still intact after failures

@@ -10,7 +10,11 @@ mkdir -p "$fake_bin"
 mkdir -p "$root/macos/Peppy.app/Contents"
 mkdir -p "$root/dmg"
 touch "$root/dmg/Peppy.dmg"
-printf '%s\n' '<plist/>' > "$root/macos/Peppy.app/Contents/Info.plist"
+cat > "$root/macos/Peppy.app/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>org.peppy.desktop</string><key>CFBundleName</key><string>Peppy</string></dict></plist>
+PLIST
 
 cat > "$fake_bin/pnpm" <<'PNPM'
 #!/usr/bin/env bash
@@ -40,7 +44,16 @@ if [[ "$*" == *-dvvv* ]]; then
   printf 'CodeDirectory v=20500 size=123 flags=%s hashes=4+7 location=embedded\n' "$flags" >&2
 fi
 if [[ "$*" == *'--entitlements :-'* ]]; then
-  printf '<plist><dict><key>com.apple.security.app-sandbox</key><true/><key>com.apple.application-identifier</key><string>%s</string><key>com.apple.developer.team-identifier</key><string>%s</string></dict></plist>\n' "${CODESIGN_APPLICATION_IDENTIFIER-team.org.peppy.desktop}" "${CODESIGN_TEAM_IDENTIFIER-team}"
+  printf '<plist><dict><key>com.apple.security.app-sandbox</key><%s/><key>com.apple.application-identifier</key><string>%s</string><key>com.apple.developer.team-identifier</key><string>%s</string></dict></plist>\n' "${CODESIGN_SANDBOX_VALUE-true}" "${CODESIGN_APPLICATION_IDENTIFIER-team.org.peppy.desktop}" "${CODESIGN_TEAM_IDENTIFIER-team}"
+fi
+if [[ "$*" == *'--entitlements '* && "$*" != *'--entitlements :-'* ]]; then
+  entitlements=''
+  previous=''
+  for argument in "$@"; do
+    [ "$previous" != --entitlements ] || { entitlements="$argument"; break; }
+    previous="$argument"
+  done
+  printf 'entitlements|%s|%s\n' "$(/usr/bin/plutil -extract 'com\.apple\.application-identifier' raw -o - "$entitlements")" "$(/usr/bin/plutil -extract 'com\.apple\.developer\.team-identifier' raw -o - "$entitlements")" >> "$PNPM_LOG"
 fi
 if [[ "$*" == *'-d -r-'* ]]; then printf 'designated => certificate leaf[subject.OU] = "team"\n' >&2; fi
 CODESIGN
@@ -112,21 +125,6 @@ fi
 exec /usr/bin/python3 "$@"
 PYTHON
 chmod +x "$fake_bin/python3"
-
-cat > "$fake_bin/plutil" <<'PLUTIL'
-#!/usr/bin/env bash
-if [ "$1" = -replace ]; then exit 0; fi
-case "$*" in
-  *com.apple.security.app-sandbox*) printf '%s\n' 1 ;;
-  *CFBundleIdentifier*) printf '%s\n' "${PLUTIL_BUNDLE_IDENTIFIER-org.peppy.desktop}" ;;
-  *CFBundleName*) printf '%s\n' "${PLUTIL_BUNDLE_NAME-Peppy}" ;;
-  *Entitlements.com.apple.developer.team-identifier*) printf '%s\n' "${SECURITY_PROFILE_TEAM-team}" ;;
-  *Entitlements.application-identifier*) printf '%s\n' "${SECURITY_PROFILE_APPLICATION_IDENTIFIER-team.org.peppy.desktop}" ;;
-  *com.apple.developer.team-identifier*) printf '%s\n' "${CODESIGN_TEAM_IDENTIFIER-team}" ;;
-  *com.apple.application-identifier*) printf '%s\n' "${CODESIGN_APPLICATION_IDENTIFIER-team.org.peppy.desktop}" ;;
-esac
-PLUTIL
-chmod +x "$fake_bin/plutil"
 
 run_bundles() {
   local macos_mode="${8-developer-id}"
@@ -303,14 +301,15 @@ if grep -Fq "notarytool submit $root/dmg/Peppy.dmg" "$log" || grep -Fq "codesign
 fi
 
 : > "$log"
+/usr/bin/plutil -replace CFBundleIdentifier -string org.peppy.desktop.dev "$root/macos/Peppy.app/Contents/Info.plist"
 if PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app,dmg VERSION=1.2.3 TRUSTED_UPDATE_BUILD=true \
   PEPPY_UPDATE_CHANNEL=stable PEPPY_UPDATE_PUBLIC_KEY=public-key TAURI_SIGNING_PRIVATE_KEY=private-key \
   PEPPY_MACOS_SIGNING_MODE=adhoc PEPPY_BUNDLE_OUTPUT_DIR="$root/macos" \
-  PEPPY_DMG_OUTPUT_DIR="$root/dmg" \
-  PLUTIL_BUNDLE_IDENTIFIER=org.peppy.desktop.dev "$script_dir/build-desktop-bundles.sh" >/dev/null 2>&1; then
+  PEPPY_DMG_OUTPUT_DIR="$root/dmg" "$script_dir/build-desktop-bundles.sh" >/dev/null 2>&1; then
   printf 'expected trusted macOS bundle with development identity to fail\n' >&2
   exit 1
 fi
+/usr/bin/plutil -replace CFBundleIdentifier -string org.peppy.desktop "$root/macos/Peppy.app/Contents/Info.plist"
 grep -Fq 'codesign|' "$log"
 test "$(grep -c '^spctl|' "$log")" = 0
 
@@ -378,6 +377,7 @@ grep -Fq 'security|import' "$log"
 grep -Fq 'security|list-keychains -d user -s' "$log"
 grep -Fq 'security|delete-keychain' "$log"
 grep -Fq 'codesign|--force --sign Apple Distribution: Peppy (team) --keychain' "$log"
+grep -Fqx 'entitlements|team.org.peppy.desktop|team' "$log"
 grep -Fq 'productbuild|--component' "$log"
 test -f "$root/pkg/Peppy.pkg"
 if grep -Fq 'repair|' "$log" || grep -Fq '^xcrun|' "$log" || grep -Fq 'notarytool' "$log"; then
@@ -456,4 +456,5 @@ assert_app_store_failure 'app-store distribution must run in GitHub Actions' GIT
 assert_app_store_failure 'MACOS_BUILD_NUMBER is required for app-store builds' MACOS_BUILD_NUMBER=
 assert_app_store_failure 'MACOS_BUILD_NUMBER must be a positive integer' MACOS_BUILD_NUMBER=0
 assert_app_store_failure 'MACOS_BUILD_NUMBER must be a positive integer' MACOS_BUILD_NUMBER=1.2
+assert_app_store_failure 'App Store bundle is missing the app sandbox entitlement' CODESIGN_APPLICATION_IDENTIFIER=team.org.peppy.desktop CODESIGN_TEAM_IDENTIFIER=team CODESIGN_SANDBOX_VALUE=false
 printf 'desktop bundle orchestration tests passed\n'

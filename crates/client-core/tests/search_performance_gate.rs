@@ -408,7 +408,7 @@ fn synthetic_search_performance_gate() {
         all,
     ];
     println!(
-        "SEARCH_PERF_GATE 100k growth_budget={}%, growth={}%, warm_core_budget_ms={}, p95_max_ms={}, warm_core_budget_met={}",
+        "SEARCH_PERF_GATE 100k growth_budget={}%, growth={}%, informational_warm_core_budget_ms={}, informational_p95_max_ms={}, informational_warm_core_budget_met={}",
         INDEX_GROWTH_BUDGET_PERCENT,
         growth,
         CORE_WARM_BUDGET.as_millis(),

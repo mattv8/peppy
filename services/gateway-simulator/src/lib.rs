@@ -32,6 +32,8 @@ pub enum SimulatorError {
     Core,
     #[error("SIMULATED identity has prior producer history; fresh pairing required")]
     FreshPairingRequired,
+    #[error("SIMULATED attachment download could be retried without changing durable state")]
+    RecoverableAttachmentDownload,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,8 +51,8 @@ impl std::fmt::Display for RejectedEndpoint {
     }
 }
 
-/// Persisted non-secret simulator routing state.  The database key is deliberately separate and
-/// supplied through stdin or `PEPPY_SIMULATOR_DB_KEY_HEX` for developer tests.
+/// Persisted protected simulator bearer and routing state. The database key is deliberately
+/// separate and supplied through stdin or `PEPPY_SIMULATOR_DB_KEY_HEX` for developer tests.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SimulatorState {
     pub version: u8,
@@ -82,6 +84,16 @@ const SNAPSHOT_APPLY_BATCH: usize = 1_000;
 pub struct SyncReport {
     pub applied: usize,
     pub replay_backlog: bool,
+}
+
+/// One bounded, eligible publication pass for a host worker.
+///
+/// `continuation` is true only when another already-sealed envelope is eligible after this pass;
+/// it never asks a worker to spin on envelopes held by attachment dependencies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PendingPublicationReport {
+    pub uploaded: usize,
+    pub continuation: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -555,50 +567,85 @@ pub async fn upload_pending_with_transport_retention(
     token: &str,
     retention_protocol: bool,
 ) -> Result<usize, SimulatorError> {
-    let api_origin = transport.origin();
-    let http = transport.client();
     let mut uploaded = 0_usize;
     loop {
-        client
-            .seal_pending_batch(OUTBOX_BATCH)
-            .map_err(|_| SimulatorError::Core)?;
-        let pending = client
-            .pending_outbox_batch(OUTBOX_BATCH)
-            .map_err(|_| SimulatorError::Core)?;
-        if pending.is_empty() {
+        let pass = upload_pending_worker_batch_with_transport_retention(
+            client,
+            transport,
+            token,
+            retention_protocol,
+        )
+        .await?;
+        uploaded = uploaded
+            .checked_add(pass.uploaded)
+            .ok_or(SimulatorError::Response)?;
+        if pass.uploaded == 0 {
             return Ok(uploaded);
         }
-        for envelope in &pending {
-            let response = retention_request(
-                http.post(format!("{api_origin}/v1/events")),
-                retention_protocol,
-            )
-            .bearer_auth(token)
-            .json(envelope)
-            .send()
-            .await
-            .map_err(|_| SimulatorError::Http)?;
-            if response.status() == reqwest::StatusCode::CONFLICT {
-                let body = read_bounded_json_body(response).await?;
-                if is_producer_identity_conflict(reqwest::StatusCode::CONFLICT, &body) {
-                    return Err(SimulatorError::FreshPairingRequired);
-                }
-                if body
-                    .get("code")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some()
-                {
-                    return Err(SimulatorError::Rejected(RejectedEndpoint::Outbox));
-                }
-                return Err(SimulatorError::Http);
-            }
-            upload_response(response, RejectedEndpoint::Outbox).await?;
-            client
-                .ack_outbox(envelope.envelope_id)
-                .map_err(|_| SimulatorError::Core)?;
-            uploaded = uploaded.checked_add(1).ok_or(SimulatorError::Response)?;
-        }
     }
+}
+
+/// Publishes at most one host-worker batch. Public drain callers should use
+/// `upload_pending_with_transport_retention`; workers schedule a later pass from `continuation`.
+pub async fn upload_pending_worker_batch_with_transport_retention(
+    client: &Client,
+    transport: &HttpTransport,
+    token: &str,
+    retention_protocol: bool,
+) -> Result<PendingPublicationReport, SimulatorError> {
+    client
+        .seal_pending_batch(OUTBOX_BATCH)
+        .map_err(|_| SimulatorError::Core)?;
+    let pending = client
+        .pending_outbox_batch(OUTBOX_BATCH)
+        .map_err(|_| SimulatorError::Core)?;
+    if pending.is_empty() {
+        return Ok(PendingPublicationReport::default());
+    }
+    let api_origin = transport.origin();
+    let http = transport.client();
+    for envelope in &pending {
+        let response = retention_request(
+            http.post(format!("{api_origin}/v1/events")),
+            retention_protocol,
+        )
+        .bearer_auth(token)
+        .json(envelope)
+        .send()
+        .await
+        .map_err(|_| SimulatorError::Http)?;
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            let body = read_bounded_json_body(response).await?;
+            if is_producer_identity_conflict(reqwest::StatusCode::CONFLICT, &body) {
+                return Err(SimulatorError::FreshPairingRequired);
+            }
+            if body
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+            {
+                return Err(SimulatorError::Rejected(RejectedEndpoint::Outbox));
+            }
+            return Err(SimulatorError::Http);
+        }
+        upload_response(response, RejectedEndpoint::Outbox).await?;
+        client
+            .ack_outbox(envelope.envelope_id)
+            .map_err(|_| SimulatorError::Core)?;
+    }
+    // Seal only one additional record for a later worker pass. This exposes a real eligible
+    // continuation without scanning or spinning on envelopes held by media dependencies.
+    client
+        .seal_pending_batch(1)
+        .map_err(|_| SimulatorError::Core)?;
+    let continuation = !client
+        .pending_outbox_batch(1)
+        .map_err(|_| SimulatorError::Core)?
+        .is_empty();
+    Ok(PendingPublicationReport {
+        uploaded: pending.len(),
+        continuation,
+    })
 }
 
 /// Bounded native-host attachment transfer. File keys never leave client-core: this function sees
@@ -754,29 +801,37 @@ pub async fn download_media_with_transport(
                 .bearer_auth(token)
                 .send()
                 .await
-                .map_err(|_| SimulatorError::Http)?;
+                .map_err(|_| SimulatorError::RecoverableAttachmentDownload)?;
+            if matches!(
+                response.status(),
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+            ) {
+                return Err(SimulatorError::Http);
+            }
             if response.status() == reqwest::StatusCode::GONE {
-                let body = read_bounded_json_body(response).await?;
+                let body = read_bounded_json_body(response)
+                    .await
+                    .map_err(|_| SimulatorError::RecoverableAttachmentDownload)?;
                 if body["code"] == "attachment_removed_by_storage_policy" {
                     client
                         .report_attachment_removed_by_storage_policy(item.attachment_id)
                         .map_err(|_| SimulatorError::Core)?;
                     return Ok(());
                 }
-                return Err(SimulatorError::Http);
+                return Err(SimulatorError::RecoverableAttachmentDownload);
             }
             let mut stream = response
                 .error_for_status()
-                .map_err(|_| SimulatorError::Http)?
+                .map_err(|_| SimulatorError::RecoverableAttachmentDownload)?
                 .bytes_stream();
             let mut total = 0_u64;
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|_| SimulatorError::Http)?;
+                let chunk = chunk.map_err(|_| SimulatorError::RecoverableAttachmentDownload)?;
                 total = total
                     .checked_add(chunk.len() as u64)
-                    .ok_or(SimulatorError::Response)?;
+                    .ok_or(SimulatorError::RecoverableAttachmentDownload)?;
                 if total > item.ciphertext_bytes {
-                    return Err(SimulatorError::Response);
+                    return Err(SimulatorError::RecoverableAttachmentDownload);
                 }
                 tokio::io::AsyncWriteExt::write_all(&mut output, &chunk)
                     .await
@@ -785,9 +840,13 @@ pub async fn download_media_with_transport(
             tokio::io::AsyncWriteExt::flush(&mut output)
                 .await
                 .map_err(|_| SimulatorError::Io)?;
-            client
-                .install_downloaded_attachment(item.attachment_id, &target)
-                .map_err(|_| SimulatorError::Core)
+            match client.install_downloaded_attachment(item.attachment_id, &target) {
+                Ok(()) => Ok(()),
+                Err(peppy_client_core::Error::InvalidMedia) => {
+                    Err(SimulatorError::RecoverableAttachmentDownload)
+                }
+                Err(_) => Err(SimulatorError::Core),
+            }
         }
         .await;
         let _ = tokio::fs::remove_file(&target).await;
@@ -1117,6 +1176,8 @@ mod fake_http_tests {
         Complete,
         StoragePolicyRemoved,
         GenericGone,
+        EmptyGone,
+        MalformedGone,
     }
 
     #[derive(Default)]
@@ -1198,6 +1259,8 @@ mod fake_http_tests {
                 Json(serde_json::json!({"code":"not_found"})),
             )
                 .into_response(),
+            Download::EmptyGone => (StatusCode::GONE, Vec::new()).into_response(),
+            Download::MalformedGone => (StatusCode::GONE, b"not json".to_vec()).into_response(),
         }
     }
 
@@ -1315,13 +1378,13 @@ mod fake_http_tests {
         state.lock().unwrap().downloads = vec![Download::ServerError, Download::Truncated];
         assert!(matches!(
             drain_media(&desktop, &origin, "token", &desktop_dir).await,
-            Err(SimulatorError::Http)
+            Err(SimulatorError::RecoverableAttachmentDownload)
         ));
         assert!(!stale_partial.exists(), "stale partial was not removed");
         assert!(!legacy_partial.exists(), "legacy partial was not removed");
         assert!(matches!(
             drain_media(&desktop, &origin, "token", &desktop_dir).await,
-            Err(SimulatorError::Core)
+            Err(SimulatorError::RecoverableAttachmentDownload)
         ));
         assert!(
             fs::read_dir(&download_dir).unwrap().all(|entry| entry
@@ -1392,18 +1455,24 @@ mod fake_http_tests {
         upload_pending(&gateway, &origin, "token").await.unwrap();
         deliver(&desktop, &state, 1);
 
-        state.lock().unwrap().downloads = vec![Download::GenericGone];
-        assert!(matches!(
-            download_media_with_transport(
-                &desktop,
-                &private_http_transport(&origin).unwrap(),
-                "token",
-                &temp.path().join("desktop-state"),
-            )
-            .await,
-            Err(SimulatorError::Http)
-        ));
-        assert_eq!(desktop.pending_downloads().unwrap().len(), 1);
+        for failure in [
+            Download::GenericGone,
+            Download::EmptyGone,
+            Download::MalformedGone,
+        ] {
+            state.lock().unwrap().downloads = vec![failure];
+            assert!(matches!(
+                download_media_with_transport(
+                    &desktop,
+                    &private_http_transport(&origin).unwrap(),
+                    "token",
+                    &temp.path().join("desktop-state"),
+                )
+                .await,
+                Err(SimulatorError::RecoverableAttachmentDownload)
+            ));
+            assert_eq!(desktop.pending_downloads().unwrap().len(), 1);
+        }
 
         state.lock().unwrap().downloads = vec![Download::StoragePolicyRemoved];
         download_media_with_transport(

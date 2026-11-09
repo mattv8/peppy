@@ -58,6 +58,8 @@ describe("StorePlanOptions", () => {
     rerender(<StorePlanOptions purchaseOptions={{ appStore: true, website: false }} products={products} state="ready" copy={copy} onPurchase={vi.fn().mockRejectedValue({ code: "store-conflict" })} onRestore={vi.fn()} />);
     fireEvent.click(screen.getAllByRole("button", { name: "Subscribe" })[0]);
     expect(await screen.findByText(copy.billing_elsewhere_other_body)).toBeInTheDocument();
+    expect(document.getElementById("hosted-purchase-status")).toBeEmptyDOMElement();
+    expect(screen.getByRole("button", { name: copy.store_restore_cta })).toBeEnabled();
   });
 
   it.each([

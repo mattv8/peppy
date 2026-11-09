@@ -28,6 +28,7 @@ type OwnerPhoneView = { invitationId: string; sas?: string; claimDigest?: string
 export interface EnrollmentCore { invoke(request: { command: string; args: Record<string, unknown> }): Promise<unknown>; }
 export interface EnrollmentSession {
   readonly phase: SessionPhase;
+  readonly signal?: AbortSignal;
   finishEnrollment(command: "_worker_enrollment_finish_owner" | "_worker_enrollment_finish_manual" | "_worker_enrollment_finish_hosted_owner", responseJson: string, passphrase: string): Promise<void>;
   finishComputerEnrollment?(responseJson: string): Promise<void>;
   unlock(passphrase: string): Promise<void>;
@@ -83,7 +84,8 @@ export class BrowserEnrollment {
         return this.view();
       }
       if (this.session.phase !== "unenrolled") throw new Error("enrollment-state");
-      await this.initializeFresh(origin);
+      // Hosted provisioning prepares its own enrollment context from the account grant.
+      if (mode !== "hosted") await this.initializeFresh(origin);
       if (mode === "hosted") {
         if (!signedIn) this.viewValue = { mode, stage: "signin", origin };
         else {
@@ -250,6 +252,7 @@ export class BrowserEnrollment {
         return this.view();
       }
       if (this.session.phase !== "unenrolled") throw new Error("enrollment-state");
+      await this.initializeFresh(this.viewValue.origin ?? this.origin);
       const challenge = await this.request("/v1/enrollment/challenges", "POST", await this.rustRequest("_worker_enrollment_manual_challenge", { vaultId: undefined, vaultOwner }));
       const proof = await this.rustRequest("_worker_enrollment_complete_manual_challenge", { challengeJson: JSON.stringify(challenge), passphrase });
       const id = required(challenge, "enrollment_id");
@@ -927,6 +930,7 @@ export class BrowserEnrollment {
   }
 
   private fail(error: unknown): void {
+    if (this.session.signal?.aborted || this.session.phase === "closed") throw error;
     const errorCode = error instanceof HttpStatusError ? error.code ?? `http-${error.status}` : error instanceof CoreRejectedError ? error.code : error instanceof Error ? error.message : "enrollment-error";
     const { setupCodeRequired: _setupCodeRequired, ...view } = this.viewValue;
     this.viewValue = { ...view, stage: "error", errorCode };

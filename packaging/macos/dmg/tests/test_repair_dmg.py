@@ -110,6 +110,32 @@ class RepairDmgTests(unittest.TestCase):
                 repair_dmg.attached_devices(Path("/owned/image.dmg"), Path("/owned/mount"), True)
         detach.assert_called_once_with("/dev/disk81")
 
+    def test_detach_waits_for_transient_busy_device_and_recovers(self) -> None:
+        busy = subprocess.CalledProcessError(1, "hdiutil")
+        with patch("repair_dmg.run", side_effect=[busy, busy, busy, None]) as run, patch("repair_dmg.time.sleep") as sleep:
+            repair_dmg.detach("/dev/disk91")
+
+        self.assertEqual(
+            [call.args for call in run.call_args_list],
+            [
+                ("hdiutil", "detach", "/dev/disk91"),
+                ("hdiutil", "detach", "-force", "/dev/disk91"),
+                ("hdiutil", "detach", "-force", "/dev/disk91"),
+                ("hdiutil", "detach", "-force", "/dev/disk91"),
+            ],
+        )
+        self.assertEqual([call.args for call in sleep.call_args_list], [(0.25,), (0.5,)])
+
+    def test_detach_exhaustion_fails_closed_on_only_the_owned_device(self) -> None:
+        busy = subprocess.CalledProcessError(1, "hdiutil")
+        with patch("repair_dmg.run", side_effect=busy) as run, patch("repair_dmg.time.sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "owned DMG device /dev/disk91"):
+                repair_dmg.detach("/dev/disk91")
+
+        self.assertEqual(len(run.call_args_list), 6)
+        self.assertTrue(all(call.args[-1] == "/dev/disk91" for call in run.call_args_list))
+        self.assertEqual([call.args for call in sleep.call_args_list], [(0.25,), (0.5,), (1.0,), (2.0,)])
+
     def test_convert_failure_leaves_original_and_no_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             image = Path(temporary) / "image.dmg"

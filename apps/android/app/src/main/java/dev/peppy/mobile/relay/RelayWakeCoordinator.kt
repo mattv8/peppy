@@ -35,10 +35,31 @@ internal class RelayWakeActive(
     override fun toString() = "RelayWakeActive(redacted)"
 }
 
+internal enum class RelayWakePublicationAck { ACKNOWLEDGED, STALE, RETRY }
+
 internal interface RelayWakeCoordinatorStore {
     var pending: RelayWakePending?
     var active: RelayWakeActive?
     fun fingerprint(value: String): String
+    fun recoverAcknowledgedState(): Boolean = true
+    fun <T> runAcknowledgedEffect(effect: () -> T): T? = effect()
+    fun savePending(value: RelayWakePending?): Boolean { pending = value; return true }
+    fun saveActive(value: RelayWakeActive?): Boolean { active = value; return true }
+    fun acknowledgePublished(expected: RelayWakeActive): RelayWakePublicationAck {
+        val current = active ?: return RelayWakePublicationAck.STALE
+        if (current.route.routeId != expected.route.routeId || !current.identity.matches(expected.identity)) {
+            return RelayWakePublicationAck.STALE
+        }
+        val published = RelayWakeActive(
+            expected.identity, expected.relayOrigin, expected.protocol, expected.tokenFingerprint,
+            expected.route, expected.bearerToken, true,
+        )
+        return if (saveActive(published)) RelayWakePublicationAck.ACKNOWLEDGED else RelayWakePublicationAck.RETRY
+    }
+    fun promote(pending: RelayWakePending, active: RelayWakeActive): Boolean {
+        if (!saveActive(active)) return false
+        return savePending(null)
+    }
 }
 
 internal enum class RelayWakeReconcile { PENDING, REGISTERED, RETRY }
@@ -65,6 +86,7 @@ internal class RelayWakeCoordinator(
         bearerToken: String,
         supportsCandidates: Boolean,
     ): RelayWakeReconcile {
+        if (!state.recoverAcknowledgedState()) return RelayWakeReconcile.RETRY
         val active = state.active
         if (active != null && active.identity.matches(identity) && active.relayOrigin == relayOrigin &&
             active.protocol == protocol && active.tokenFingerprint == tokenFingerprint
@@ -76,7 +98,7 @@ internal class RelayWakeCoordinator(
         if (active != null) {
             // Rotate only after the old route has entered the durable cleanup queue.
             if (!retire(active)) return RelayWakeReconcile.RETRY
-            state.active = null
+            if (!state.saveActive(null)) return RelayWakeReconcile.RETRY
         }
         val pending = state.pending
         if (pending != null && (!pending.identity.matches(identity) || pending.relayOrigin != relayOrigin ||
@@ -84,7 +106,7 @@ internal class RelayWakeCoordinator(
         ) {
             // A changed binding can never resume another identity's proof.
             if (pending.registrationId != null && pending.challenge != null && !retirePending(pending)) return RelayWakeReconcile.RETRY
-            state.pending = null
+            if (!state.savePending(null)) return RelayWakeReconcile.RETRY
         }
 
         val current = state.pending
@@ -94,7 +116,7 @@ internal class RelayWakeCoordinator(
             }
             if (current.registrationId != null && nowMillis() - current.createdAtMillis >= CHALLENGE_TTL_MILLIS) {
                 if (current.challenge != null && !retirePending(current)) return RelayWakeReconcile.RETRY
-                state.pending = null
+                if (!state.savePending(null)) return RelayWakeReconcile.RETRY
                 return reconcile(identity, relayOrigin, protocol, deviceToken, tokenFingerprint, bearerToken, supportsCandidates)
             }
             if (current.registrationId == null) return register(current, deviceToken, identity, bearerToken, supportsCandidates)
@@ -105,13 +127,15 @@ internal class RelayWakeCoordinator(
 
         val candidate = RelayRoute(UUID.randomUUID().toString(), secret(), secret())
         val created = RelayWakePending(identity, relayOrigin, protocol, tokenFingerprint, null, candidate, null, nowMillis())
-        state.pending = created
+        if (!state.savePending(created)) return RelayWakeReconcile.RETRY
         return register(created, deviceToken, identity, bearerToken, supportsCandidates)
     }
 
     private fun register(pending: RelayWakePending, deviceToken: String, identity: RelayWakeIdentity, bearerToken: String, supportsCandidates: Boolean): RelayWakeReconcile {
         val response = try {
-            transport.post("/v1/registrations", JSONObject().put("provider", "fcm").put("device_token", deviceToken).toString())
+            state.runAcknowledgedEffect {
+                transport.post("/v1/registrations", JSONObject().put("provider", "fcm").put("device_token", deviceToken).toString())
+            } ?: return RelayWakeReconcile.RETRY
         } catch (_: IOException) {
             return RelayWakeReconcile.RETRY
         }
@@ -124,28 +148,32 @@ internal class RelayWakeCoordinator(
             it.identity.matches(identity) && it.relayOrigin == pending.relayOrigin && it.tokenFingerprint == pending.tokenFingerprint
         }?.challenge
         val registered = RelayWakePending(identity, pending.relayOrigin, pending.protocol, pending.tokenFingerprint, registrationId, pending.candidate, earlyChallenge, nowMillis())
-        state.pending = registered
+        if (!state.savePending(registered)) return RelayWakeReconcile.RETRY
         return if (registered.challenge != null) confirm(registered, identity, bearerToken, supportsCandidates) else RelayWakeReconcile.PENDING
     }
 
-    fun saveChallenge(challenge: String) {
-        if (!SECRET_RE.matches(challenge)) return
-        val pending = state.pending?.takeIf { it.registrationId != null } ?: return
-        state.pending = RelayWakePending(pending.identity, pending.relayOrigin, pending.protocol, pending.tokenFingerprint,
-            pending.registrationId, pending.candidate, challenge, pending.createdAtMillis)
+    fun saveChallenge(challenge: String): Boolean {
+        if (!SECRET_RE.matches(challenge) || !state.recoverAcknowledgedState()) return false
+        val pending = state.pending?.takeIf { it.registrationId != null } ?: return false
+        return state.savePending(RelayWakePending(pending.identity, pending.relayOrigin, pending.protocol, pending.tokenFingerprint,
+            pending.registrationId, pending.candidate, challenge, pending.createdAtMillis))
     }
 
     private fun confirm(pending: RelayWakePending, identity: RelayWakeIdentity, bearerToken: String, supportsCandidates: Boolean): RelayWakeReconcile {
+        if (!state.recoverAcknowledgedState()) return RelayWakeReconcile.RETRY
         val registrationId = pending.registrationId ?: return RelayWakeReconcile.PENDING
         val challenge = pending.challenge ?: return RelayWakeReconcile.PENDING
         val body = JSONObject().put("challenge", challenge).also { request ->
             if (supportsCandidates) request.put("route_id", pending.candidate.routeId)
                 .put("manage_credential", pending.candidate.manageCredential).put("wake_credential", pending.candidate.wakeCredential)
         }
-        val response = try { transport.post("/v1/registrations/$registrationId/confirm", body.toString()) } catch (_: IOException) { return RelayWakeReconcile.RETRY }
+        val response = try {
+            state.runAcknowledgedEffect { transport.post("/v1/registrations/$registrationId/confirm", body.toString()) }
+                ?: return RelayWakeReconcile.RETRY
+        } catch (_: IOException) { return RelayWakeReconcile.RETRY }
         if (response.code != 201) {
             if (response.code == 408 || response.code == 429 || response.code !in 400..499) return RelayWakeReconcile.RETRY
-            state.pending = null
+            if (!state.savePending(null)) return RelayWakeReconcile.RETRY
             return RelayWakeReconcile.RETRY
         }
         val route = try {
@@ -154,23 +182,23 @@ internal class RelayWakeCoordinator(
         } catch (_: Exception) { return RelayWakeReconcile.RETRY }
         if (supportsCandidates && !sameRoute(route, pending.candidate)) return RelayWakeReconcile.RETRY
         val active = RelayWakeActive(identity, pending.relayOrigin, pending.protocol, pending.tokenFingerprint, route, bearerToken, false)
-        state.active = active
-        state.pending = null
+        if (!state.promote(pending, active)) return RelayWakeReconcile.RETRY
         return publish(active, identity)
     }
 
     private fun publish(active: RelayWakeActive, identity: RelayWakeIdentity): RelayWakeReconcile {
-        if (!active.identity.matches(identity)) return RelayWakeReconcile.PENDING
+        if (!active.identity.matches(identity) || !state.recoverAcknowledgedState()) return RelayWakeReconcile.RETRY
         return try {
-            publishActive(active)
-            // A pause/rotation can remove this route while PUT is in flight. Never resurrect it.
-            val current = state.active
-            if (current == null || current.route.routeId != active.route.routeId || !current.identity.matches(active.identity)) {
-                retire(active)
-                return RelayWakeReconcile.RETRY
+            state.runAcknowledgedEffect { publishActive(active) } ?: return RelayWakeReconcile.RETRY
+            // Compare and acknowledge under the store lock so a concurrent archive cannot be undone.
+            when (state.acknowledgePublished(active)) {
+                RelayWakePublicationAck.ACKNOWLEDGED -> RelayWakeReconcile.REGISTERED
+                RelayWakePublicationAck.STALE -> {
+                    retire(active)
+                    RelayWakeReconcile.RETRY
+                }
+                RelayWakePublicationAck.RETRY -> RelayWakeReconcile.RETRY
             }
-            state.active = RelayWakeActive(active.identity, active.relayOrigin, active.protocol, active.tokenFingerprint, active.route, active.bearerToken, true)
-            RelayWakeReconcile.REGISTERED
         } catch (_: IOException) {
             RelayWakeReconcile.RETRY
         }

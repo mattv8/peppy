@@ -1210,4 +1210,123 @@ mod tests {
         assert!(manager.note_installed("1.0.1"));
         assert!(!pending.exists());
     }
+
+    const TEST_UPDATE_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE0OUVGNDc0NkZBNkU2RDcKUldUWDVxWnZkUFNlcERHV2cyYno4bjZBclFuQk13Z1FLMWdlVm9zb3JjYkx6Y3VuRCtLSitjWWU=";
+    const TEST_UPDATE_SIGNATURE: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUWDVxWnZkUFNlcFBGMnpzanZQL0wvVFF0QkxSbldSdmFxKzRvbUsxVUV1Z3RRcC9VU3JHaUkxdjc2MnNEeTNpZDNhb3I3YlJDOUVUeWVvdDZsTUhIcldvWjVoalVNMVFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNjQ5MDUxCWZpbGU6cGF5bG9hZAl2ZXJzaW9uOjIuMC4wCkREcTJDTE9FbDVjUW1DMmVKUkhsblpQVlZpT1pzdTFDanBQS1FvZWk0QS9YQmZrRHFHTzBCK1FNcmNySGdFUTVxVjNtbmU3NXRkRldoSnBxVVhoOUFBPT0=";
+
+    fn signed_update_manifest() -> serde_json::Value {
+        serde_json::json!({
+            "version": "2.0.0",
+            "platforms": {
+                "test-target": {
+                    "url": "https://example.invalid/package",
+                    "signature": TEST_UPDATE_SIGNATURE,
+                }
+            }
+        })
+    }
+
+    fn signed_staged_update(path: PathBuf) -> StagedUpdate {
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().plugins.0.insert(
+            "updater".into(),
+            serde_json::json!({ "pubkey": TEST_UPDATE_PUBLIC_KEY }),
+        );
+        let app = tauri::test::mock_builder()
+            .plugin(
+                tauri_plugin_updater::Builder::new()
+                    .pubkey(TEST_UPDATE_PUBLIC_KEY)
+                    .build(),
+            )
+            .build(context)
+            .unwrap();
+        let updater = app
+            .handle()
+            .updater_builder()
+            .target("test-target")
+            .endpoints(vec!["https://example.invalid/update".parse().unwrap()])
+            .unwrap()
+            .build()
+            .unwrap();
+        let update = updater
+            .restore_update(signed_update_manifest())
+            .unwrap()
+            .unwrap();
+        let staged = StagedUpdate { update, path };
+        assert_eq!(staged.verified_bytes().unwrap(), b"test");
+        staged
+    }
+
+    #[test]
+    fn install_record_write_failure_clears_restart_state_and_allows_a_repaired_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_root = cache::directory(temp.path());
+        let pending = cache_root.join("pending.json");
+        let source = temp.path().join("verified-payload");
+        std::fs::write(&source, "test").unwrap();
+        let payload = cache::commit_cached(
+            temp.path(),
+            &cache::CachedUpdate {
+                version: "2.0.0".into(),
+                channel: "stable".into(),
+                package_kind: "app".into(),
+                manifest: signed_update_manifest(),
+                payload: String::new(),
+            },
+            &source,
+        )
+        .unwrap();
+
+        let mut inner = state();
+        inner.root = Some(temp.path().to_path_buf());
+        inner.staged = Some(signed_staged_update(payload.clone()));
+        let manager = UpdateManager(Arc::new(Mutex::new(inner)));
+        manager.set_installing("2.0.0").unwrap();
+        install::write_restart_marker(temp.path(), "2.0.0", false).unwrap();
+        std::fs::create_dir(cache_root.join("settings.json")).unwrap();
+        let emitted = std::cell::Cell::new(0);
+
+        let error = crate::record_install_attempt_or_cleanup(
+            &manager,
+            temp.path(),
+            || manager.record_install_attempt("2.0.0"),
+            || emitted.set(emitted.get() + 1),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "update-cache");
+        assert!(!cache_root.join("restart.json").exists());
+        assert!(pending.exists());
+        assert!(payload.exists());
+        assert_eq!(emitted.get(), 1);
+        assert_eq!(manager.status().phase, UpdatePhase::Error);
+        assert!(manager.status().can_restart);
+        assert!(manager.staged().is_some());
+        assert_eq!(manager.0.lock().unwrap().operation, Operation::Idle);
+
+        std::fs::remove_dir(cache_root.join("settings.json")).unwrap();
+        manager.set_installing("2.0.0").unwrap();
+        crate::record_install_attempt_or_cleanup(
+            &manager,
+            temp.path(),
+            || manager.record_install_attempt("2.0.0"),
+            || panic!("a successful retry must not emit a failure state"),
+        )
+        .unwrap();
+
+        let inner = manager.0.lock().unwrap();
+        assert_eq!(inner.operation, Operation::Installing);
+        assert_eq!(inner.attempted_version.as_deref(), Some("2.0.0"));
+        drop(inner);
+        assert_eq!(
+            cache::load_settings(temp.path())
+                .unwrap()
+                .attempted_version
+                .as_deref(),
+            Some("2.0.0")
+        );
+        assert!(pending.exists());
+        assert!(payload.exists());
+        assert!(manager.staged().is_some());
+    }
 }

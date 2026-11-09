@@ -113,7 +113,19 @@ export function AttachmentStorageSettingsHost({ sessionScopeId, onManageStorage,
       if (options.appStore) { const next = await bridge.store_products(); if (sequence === loadSequence.current && epoch === hostEpoch.current) { setProducts(next); setPurchaseState(next.length ? "ready" : "unavailable"); } } else setPurchaseState("ready");
     } catch { if (sequence === loadSequence.current && epoch === hostEpoch.current) setPurchaseState("unavailable"); }
   }, []);
-  useEffect(() => { hostEpoch.current += 1; void load(); }, [load, sessionScopeId]);
+  useEffect(() => {
+    hostEpoch.current += 1;
+    loadSequence.current += 1;
+    storageRef.current = null;
+    setStorage(null);
+    setBillingSummary(emptyBilling);
+    setProducts([]);
+    setPurchaseOptions(null);
+    setPurchaseState("loading");
+    setStale(false);
+    setManageStorageError(false);
+    void load();
+  }, [load, sessionScopeId]);
   const showWebsiteManage = purchaseOptions?.website === true && billingSummary.provider !== "apple";
   const purchase = purchaseOptions ? { purchaseOptions, billingSummary, products, currentPacks: billingSummary.storagePacks, state: purchaseState, onPurchase: bridge.store_purchase, onPurchased: () => void load(), onManageAppStore: bridge.open_store_subscriptions, onManageWebsite: purchaseOptions.website ? onManageStorage : undefined, onRetry: () => void load() } : undefined;
   const manage = async () => { try { setManageStorageError(false); await onManageStorage?.(); } catch { setManageStorageError(true); } };

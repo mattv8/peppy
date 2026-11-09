@@ -986,8 +986,8 @@ where
     }
 }
 
-/// A request body whose single chunk is released by the returned sender; the
-/// receiver resolves once the server starts consuming the body.
+/// A request body whose single chunk is released by the returned sender.
+/// The receiver only confirms the client outbound stream was polled.
 fn held_body(
     bytes: Vec<u8>,
 ) -> (
@@ -1003,6 +1003,83 @@ fn held_body(
         Ok::<_, std::io::Error>(bytes)
     }));
     (body, polled_rx, release_tx)
+}
+
+#[tokio::test]
+async fn public_copy_revalidates_the_exact_bearer_after_its_body_and_vault_lock() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let attachment = server.finalized_attachment(b"private attachment").await;
+    let owner_device: Uuid =
+        sqlx::query_scalar("SELECT device_id FROM devices WHERE vault_id=$1 AND role='owner'")
+            .bind(server.vault)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+    let mut holder = server.pool.begin().await.unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    sqlx::query("SELECT 1 FROM vaults WHERE vault_id=$1 FOR UPDATE")
+        .bind(server.vault)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let (body, polled, release) = held_body(png(32));
+    let base_url = server.base_url.clone();
+    let token = server.owner_token.clone();
+    let request = tokio::spawn(async move {
+        Client::new()
+            .post(format!(
+                "{base_url}/v1/attachments/{attachment}/public-copies"
+            ))
+            .bearer_auth(token)
+            .header("x-file-name", "photo.png")
+            .body(body)
+            .send()
+            .await
+            .unwrap()
+    });
+    polled.await.unwrap();
+    release.send(()).unwrap();
+    wait_until(5, "public-copy admission blocked on the vault lock", || {
+        let admin = server.admin.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%SELECT vault_id FROM vaults%')",
+            )
+            .bind(holder_pid)
+            .fetch_one(&admin)
+            .await
+            .unwrap()
+        }
+    })
+    .await;
+    sqlx::query("UPDATE device_credentials SET revoked_at=clock_timestamp() WHERE vault_id=$1 AND device_id=$2")
+        .bind(server.vault)
+        .bind(owner_device)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+    let response = request.await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let copies: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM public_attachment_copies WHERE vault_id=$1")
+            .bind(server.vault)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+    let intents: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM storage_deletions WHERE vault_id=$1 AND reason='public_copy'",
+    )
+    .bind(server.vault)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!((copies, intents), (0, 0));
+    server.shutdown().await;
 }
 
 fn spool_entries() -> usize {

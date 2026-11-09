@@ -113,9 +113,14 @@ export class BrowserSession {
   public get signal(): AbortSignal { return this.lifetime.signal; }
   public publicIdentity(): BrowserPublicIdentity | undefined { return this.publicIdentityValue ? { ...this.publicIdentityValue } : undefined; }
 
+  /** Worker-private enrollment facade that poisons this owner after unsafe ABI/core failures. */
+  public enrollmentCore(): { invoke(request: { command: string; args: Record<string, unknown> }): Promise<CoreResult> } {
+    return { invoke: request => this.invokeEnrollment(request) };
+  }
+
   public async enroll(metadata: unknown, deviceToken: string, passphrase: string, signal?: AbortSignal): Promise<void> {
     return this.lifecycle("unenrolled", signal, async () => {
-      const identity = await this.options.core.invoke({ command: "_worker_enroll_identity", args: { metadata, deviceToken, passphrase } });
+      const identity = await this.invokeEnrollment({ command: "_worker_enroll_identity", args: { metadata, deviceToken, passphrase } });
       this.publicIdentityValue = publicIdentity(identity);
       await this.commitCheckpoint();
       this.throwIfAborted(signal);
@@ -128,7 +133,7 @@ export class BrowserSession {
   /** Completes a Rust-verified enrollment handoff without routing it through generic identity enrollment. */
   public async finishEnrollment(command: "_worker_enrollment_finish_owner" | "_worker_enrollment_finish_manual" | "_worker_enrollment_finish_hosted_owner", responseJson: string, passphrase: string, signal?: AbortSignal): Promise<void> {
     return this.lifecycle("unenrolled", signal, async () => {
-      const identity = await this.options.core.invoke({ command, args: { responseJson, passphrase } });
+      const identity = await this.invokeEnrollment({ command, args: { responseJson, passphrase } });
       this.publicIdentityValue = publicIdentity(identity);
       await this.commitCheckpoint();
       this.throwIfAborted(signal);
@@ -140,7 +145,7 @@ export class BrowserSession {
 
   public async finishComputerEnrollment(responseJson: string, signal?: AbortSignal): Promise<void> {
     return this.lifecycle("unenrolled", signal, async () => {
-      const identity = await this.options.core.invoke({ command: "_worker_enrollment_finish_computer", args: { completeJson: responseJson } });
+      const identity = await this.invokeEnrollment({ command: "_worker_enrollment_finish_computer", args: { completeJson: responseJson } });
       this.publicIdentityValue = publicIdentity(identity);
       await this.commitCheckpoint();
       this.throwIfAborted(signal);
@@ -167,7 +172,7 @@ export class BrowserSession {
     return this.lifecycle("locked", signal, async () => {
       const wrappedIdentity = this.wrappedIdentity;
       if (!wrappedIdentity) throw new CheckpointError("invalid-checkpoint");
-      const identity = await this.options.core.invoke({ command: "_worker_unlock_identity", args: { wrappedIdentity, passphrase } });
+      const identity = await this.invokeEnrollment({ command: "_worker_unlock_identity", args: { wrappedIdentity, passphrase } });
       this.publicIdentityValue = publicIdentity(identity);
       await this.commitCheckpoint();
       this.throwIfAborted(signal);
@@ -176,6 +181,18 @@ export class BrowserSession {
       this.phaseValue = "ready";
       if (remember) this.rememberUnlock(passphrase, rememberedUnlockGeneration);
     });
+  }
+
+  private async invokeEnrollment(request: { command: string; args: Record<string, unknown> }): Promise<CoreResult> {
+    if (this.fatalReported || this.lifetime.signal.aborted || this.phaseValue === "closed") {
+      throw new BrowserSessionError("closed");
+    }
+    try {
+      return await this.options.core.invoke(request);
+    } catch (error: unknown) {
+      if (!(error instanceof CoreRejectedError)) this.fatal(asError(error));
+      throw error;
+    }
   }
 
   public async rotate(profile: unknown, header: unknown, passphrase: string): Promise<void> {
@@ -378,13 +395,7 @@ export class BrowserSession {
       return await this.accessMedia(id, MAX_PLAINTEXT_MEDIA_BYTES, false, async () => {
         this.requireReady();
         const value = await this.options.core.invoke({ command: "export_attachment", args: { id, outputId } });
-        if (typeof value !== "object" || value === null || Array.isArray(value)) throw new BrowserCoreError("core-error");
-        const output = value as Record<string, unknown>;
-        const length = output.length;
-        if (output.file !== `worker-output/${outputId}` || typeof length !== "number" || !Number.isSafeInteger(length) || length < 0 || length > MAX_PLAINTEXT_MEDIA_BYTES || typeof output.displayName !== "string" || typeof output.type !== "string") throw new BrowserCoreError("core-error");
-        const bytes = new Uint8Array(this.options.filesystem.readFile(path));
-        if (bytes.byteLength !== length) throw new BrowserCoreError("core-error");
-        return { bytes, displayName: output.displayName, type: output.type };
+        return exportedAttachment(value, outputId, path, this.options.filesystem, MAX_PLAINTEXT_MEDIA_BYTES);
       });
     } finally { try { this.options.filesystem.unlink(path); } catch {} }
   }

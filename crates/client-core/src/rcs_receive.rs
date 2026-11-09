@@ -846,7 +846,7 @@ impl Client {
         }
         let rows = {
             let mut statement = tx.prepare(
-                "SELECT o.conversation_id,m.google_conversation_id,o.ownership_generation,o.history_token FROM rcs_lane_ownership o JOIN rcs_conversation_mappings m ON m.peppy_conversation_id=o.conversation_id WHERE o.owner='link' AND m.invalidated_at_ms IS NULL ORDER BY o.conversation_id LIMIT 100",
+                "SELECT o.conversation_id,m.google_conversation_id,o.ownership_generation,o.history_token FROM rcs_lane_ownership o JOIN rcs_conversation_mappings m ON m.peppy_conversation_id=o.conversation_id WHERE o.owner='link' AND m.invalidated_at_ms IS NULL ORDER BY o.conversation_id",
             )?;
             statement
                 .query_map([], |row| {

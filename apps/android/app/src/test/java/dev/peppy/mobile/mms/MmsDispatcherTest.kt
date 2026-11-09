@@ -8,10 +8,12 @@ import dev.peppy.mobile.MmsCallbackStore
 import dev.peppy.mobile.gateway.GatewayTestBase
 import dev.peppy.mobile.gateway.SharedVault
 import dev.peppy.mobile.granted
+import dev.peppy.mobile.mms.pdu.MmsPduComposer
 import dev.peppy.mobile.telephony.SimRoute
 import dev.peppy.mobile.telephony.SimRoutes
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -148,6 +150,105 @@ class MmsDispatcherTest : GatewayTestBase() {
         val (id, _) = queueMms(client, "permission", listOf("+15551234567", "+15557654321"))
         dispatcher(client, FakeMmsCarrier(), granted = false).dispatch()
         assertEquals(NativePermitState.PERMIT, client.beginSendAttempt(id).state)
+    }
+
+    @Test
+    fun stoppedDuringLimitsLookupDoesNotIssueAnInvalidShapeRefusalPermit() {
+        val client = enrollAndUnlock()
+        val (command, _) = queueMms(client, "group", listOf("+15551234567", "+15557654321"))
+        val stopped = AtomicBoolean(false)
+        val carrier = FakeMmsCarrier()
+
+        MmsDispatcher(context, client, carrier, routes, true, true, {
+            stopped.set(true)
+            generous.copy(maximumRecipients = 1)
+        }, mayIssueEffect = { !stopped.get() }).dispatch()
+
+        assertTrue(client.pendingCommands().any { it.commandId == command })
+        assertTrue(carrier.calls.isEmpty())
+    }
+
+    @Test
+    fun routeChangeDuringLimitsLookupLeavesTheCommandPending() {
+        val client = enrollAndUnlock()
+        val (command, _) = queueMms(client, "group", listOf("+15551234567", "+15557654321"))
+        var current = routes
+        val carrier = FakeMmsCarrier()
+
+        MmsDispatcher(context, client, carrier, routes, true, true, {
+            current = SimRoutes.current(defaultSmsSubscriptionId = 4)
+            generous.copy(maximumRecipients = 1)
+        }, currentRoutes = { current }).dispatch()
+
+        assertTrue(client.pendingCommands().any { it.commandId == command })
+        assertTrue(carrier.calls.isEmpty())
+    }
+
+    @Test
+    fun stoppedDuringPduPreparationDoesNotIssueValidationRefusalPermit() {
+        val client = enrollAndUnlock()
+        val attachment = File.createTempFile("peppy", ".bin").apply { writeBytes(ByteArray(4_096)); deleteOnExit() }
+        val (command, _) = queueMms(client, "", listOf("+15551234567"), attachment, "application/octet-stream")
+        val stopped = AtomicBoolean(false)
+        val carrier = FakeMmsCarrier()
+        MmsPduComposer.afterPartSizeReadForTest = { stopped.set(true) }
+        try {
+            MmsDispatcher(context, client, carrier, routes, true, true, { generous.copy(maximumPduBytes = 512) }, mayIssueEffect = { !stopped.get() }).dispatch()
+        } finally {
+            MmsPduComposer.afterPartSizeReadForTest = null
+        }
+
+        assertTrue(client.pendingCommands().any { it.commandId == command })
+        assertTrue(carrier.calls.isEmpty())
+    }
+
+    @Test
+    fun routeChangeDuringPduValidationFailureLeavesTheCommandPending() {
+        val client = enrollAndUnlock()
+        val attachment = File.createTempFile("peppy", ".bin").apply { writeBytes(ByteArray(4_096)); deleteOnExit() }
+        val (command, _) = queueMms(client, "", listOf("+15551234567"), attachment, "application/octet-stream")
+        var current = routes
+        val carrier = FakeMmsCarrier()
+        MmsPduComposer.afterPartSizeReadForTest = { current = SimRoutes.current(defaultSmsSubscriptionId = 4) }
+        try {
+            MmsDispatcher(context, client, carrier, routes, true, true, { generous.copy(maximumPduBytes = 512) }, currentRoutes = { current }).dispatch()
+        } finally {
+            MmsPduComposer.afterPartSizeReadForTest = null
+        }
+
+        assertTrue(client.pendingCommands().any { it.commandId == command })
+        assertTrue(carrier.calls.isEmpty())
+    }
+
+    @Test
+    fun routeChangeAfterPduPreparationDoesNotIssuePermitOrReroute() {
+        val client = enrollAndUnlock()
+        val attachment = File.createTempFile("peppy", ".bin").apply { writeBytes(ByteArray(64)); deleteOnExit() }
+        val (command, _) = queueMms(client, "", listOf("+15551234567"), attachment, "application/octet-stream")
+        var current = routes
+        val carrier = FakeMmsCarrier()
+        MmsPduComposer.afterPartSizeReadForTest = { current = SimRoutes.current(defaultSmsSubscriptionId = 4) }
+        try {
+            MmsDispatcher(context, client, carrier, routes, true, true, { generous }, currentRoutes = { current }).dispatch()
+        } finally {
+            MmsPduComposer.afterPartSizeReadForTest = null
+        }
+
+        assertTrue(client.pendingCommands().any { it.commandId == command })
+        assertTrue(carrier.calls.isEmpty())
+    }
+
+    @Test
+    fun invalidMmsShapeStillRefusesWhenEffectAdmissionRemainsOpen() {
+        val client = enrollAndUnlock()
+        val (command, _) = queueMms(client, "group", listOf("+15551234567", "+15557654321"))
+        val carrier = FakeMmsCarrier()
+
+        val summary = MmsDispatcher(context, client, carrier, routes, true, true, { generous.copy(maximumRecipients = 1) }).dispatch()
+
+        assertEquals(1, summary.refusedBeforeCarrier)
+        assertTrue(carrier.calls.isEmpty())
+        assertEquals("FailedBeforeSubmission", client.beginSendAttempt(command).existingSendState)
     }
 
     @Test

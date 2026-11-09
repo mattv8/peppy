@@ -3,6 +3,7 @@
 //! contact/notification, while owner state, unsent local writes and non-compactable history are
 //! untouched, and nothing visible is cleared before the whole snapshot is authenticated.
 use crate::common::*;
+use peppy_crypto::{EncryptedEnvelope, KeyPurpose, decrypt, derive_purpose_key, derive_root_key};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use tempfile::TempDir;
@@ -40,6 +41,38 @@ fn capture(client: &Client, book: &Value, contacts: Vec<Value>) {
     call(client.capture_contact_book(
         &json!({"schema_version": 1, "book": book, "contacts": contacts}).to_string(),
     ));
+}
+fn contact_upsert_envelope(
+    client: &Client,
+    vault: &Vault,
+    contact_id: &str,
+    display_name: &str,
+) -> Envelope {
+    let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
+    let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
+    client
+        .pending_outbox()
+        .unwrap()
+        .into_iter()
+        .find(|envelope| {
+            if envelope.purpose != EnvelopePurpose::Event || envelope.ciphertext.len() < 24 {
+                return false;
+            }
+            let (nonce, ciphertext) = envelope.ciphertext.split_at(24);
+            let encrypted = EncryptedEnvelope {
+                nonce: nonce.try_into().unwrap(),
+                ciphertext: ciphertext.to_vec(),
+            };
+            let Ok(plain) = decrypt(&key, &envelope.aad_bytes().unwrap(), &encrypted) else {
+                return false;
+            };
+            matches!(
+                serde_json::from_slice::<PrivatePayload>(&plain),
+                Ok(PrivatePayload::ContactUpserted { contact, .. })
+                    if contact["id"] == contact_id && contact["display_name"] == display_name
+            )
+        })
+        .expect("authenticated contact upsert must remain pending for upload")
 }
 /// Visible (non-tombstoned) contact ids of `book_id`; empty when the book is unknown.
 fn visible(client: &Client, book_id: &str) -> Vec<String> {
@@ -133,6 +166,19 @@ fn state(client: &Client) -> Option<(SnapshotProjectionState, Option<String>)> {
         .snapshot_projection_status()
         .unwrap()
         .map(|s| (s.state, s.reason))
+}
+fn wait_for_failed_snapshot(client: &Client, record_count: usize) {
+    let max_steps = record_count.saturating_mul(2).saturating_add(2);
+    for _ in 0..max_steps {
+        if matches!(state(client), Some((SnapshotProjectionState::Failed, _))) {
+            return;
+        }
+        client.apply_pending(1).unwrap();
+    }
+    panic!(
+        "snapshot did not fail after {max_steps} one-row drain/stage steps; final phase={:?}",
+        state(client)
+    );
 }
 
 struct Pair {
@@ -829,7 +875,6 @@ fn snapshot_tombstone_before_book_state_keeps_restore_data() {
         .pending_outbox()
         .unwrap()
         .iter()
-        .filter(|e| e.compaction.as_ref().is_some_and(|c| c.terminal) || true)
         .enumerate()
         .map(|(i, e)| SnapshotRecord {
             cursor: Cursor(i as u64 + 1),
@@ -847,6 +892,134 @@ fn snapshot_tombstone_before_book_state_keeps_restore_data() {
             .list_restorable_contacts_json(&json!({"book_id": BOOK}).to_string()),
     );
     assert_eq!(restorable["contacts"][0]["id"], "c1");
+}
+
+#[test]
+fn retained_tombstone_waits_for_authentication_without_blocking_recovery_or_live_replay() {
+    let mut p = pair();
+    let b = book(&p.owner_cfg, BOOK);
+    capture(
+        &p.owner,
+        &b,
+        vec![contact(BOOK, "c1", "Ada"), contact(BOOK, "c2", "Bea")],
+    );
+    p.server.upload(&p.owner);
+    p.server.sync(&p.peer);
+    assert_eq!(visible(&p.peer, BOOK), ["c1", "c2"]);
+    let original_book = call(p.peer.contact_book_view(
+        &json!({"schema_version": 1, "book_id": BOOK, "limit": 200}).to_string(),
+    ));
+
+    tombstone(&p.owner, BOOK, "remove-c2", &["c1"]);
+    capture(&p.owner, &b, vec![contact(BOOK, "c1", "Intermediate")]);
+    let corrupt_envelope =
+        contact_upsert_envelope(&p.owner, &p.vault, "c1", "Intermediate Lovelace");
+    capture(&p.owner, &b, vec![contact(BOOK, "c1", "Final")]);
+    let replacement_envelope = contact_upsert_envelope(&p.owner, &p.vault, "c1", "Final Lovelace");
+    assert_eq!(
+        corrupt_envelope.producer_device_id,
+        replacement_envelope.producer_device_id
+    );
+    assert!(
+        replacement_envelope
+            .compaction
+            .as_ref()
+            .unwrap()
+            .supersedes
+            .iter()
+            .any(|superseded| {
+                superseded.producer_device_id == corrupt_envelope.producer_device_id
+                    && superseded.producer_sequence == corrupt_envelope.producer_sequence
+            }),
+        "the later authenticated c1 upsert must explicitly supersede the corrupt candidate"
+    );
+    p.server.upload(&p.owner);
+    let high_water = p.server.log.len();
+    let mut corrupt_snapshot = full(&p.server.log);
+    let corrupt_cursor = corrupt_snapshot
+        .iter()
+        .position(|record| record.envelope.envelope_id == corrupt_envelope.envelope_id)
+        .expect("authenticated intermediate c1 upsert must be present in full snapshot");
+    corrupt_snapshot[corrupt_cursor].envelope.ciphertext[0] ^= 0x55;
+
+    let session = p
+        .peer
+        .begin_snapshot_with_compaction(
+            Cursor(high_water as u64),
+            corrupt_snapshot.len() as u64,
+            SnapshotPurpose::Resync,
+            Some(38),
+        )
+        .unwrap();
+    for record in &corrupt_snapshot {
+        p.peer
+            .append_snapshot_page(session.generation, std::slice::from_ref(record))
+            .unwrap();
+    }
+    p.peer.finish_snapshot(session.generation).unwrap();
+    wait_for_failed_snapshot(&p.peer, corrupt_snapshot.len());
+    assert!(matches!(
+        state(&p.peer),
+        Some((SnapshotProjectionState::Failed, Some(_)))
+    ));
+    for _ in 0..3 {
+        p.peer.apply_pending(1).unwrap();
+        let view = call(p.peer.contact_book_view(
+            &json!({"schema_version": 1, "book_id": BOOK, "limit": 200}).to_string(),
+        ));
+        assert_eq!(view, original_book);
+    }
+
+    let peer_cfg = p.peer_cfg.clone();
+    drop(p.peer);
+    let peer = unlocked(&peer_cfg, &p.vault);
+    assert_eq!(
+        call(peer.contact_book_view(
+            &json!({"schema_version": 1, "book_id": BOOK, "limit": 200}).to_string(),
+        )),
+        original_book
+    );
+    for _ in 0..3 {
+        peer.apply_pending(1).unwrap();
+        assert_eq!(
+            call(peer.contact_book_view(
+                &json!({"schema_version": 1, "book_id": BOOK, "limit": 200}).to_string(),
+            )),
+            original_book
+        );
+    }
+
+    let replacement = compact(&p.server.log, false);
+    assert!(
+        replacement
+            .iter()
+            .all(|record| record.cursor.0 != (corrupt_cursor + 1) as u64)
+    );
+    assert!(
+        replacement
+            .iter()
+            .any(|record| { record.envelope.envelope_id == replacement_envelope.envelope_id })
+    );
+    import(&peer, &replacement, high_water, Some(39));
+    settle_one_by_one(&peer);
+    assert_eq!(
+        state(&peer),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert_eq!(visible(&peer, BOOK), ["c1"]);
+    assert_eq!(
+        peer.replay_progress().unwrap().processed_through,
+        Cursor(high_water as u64)
+    );
+
+    capture(
+        &p.owner,
+        &b,
+        vec![contact(BOOK, "c1", "Ada"), contact(BOOK, "c3", "Cy")],
+    );
+    p.server.upload(&p.owner);
+    p.server.sync(&peer);
+    assert_eq!(visible(&peer, BOOK), ["c1", "c3"]);
 }
 
 /// Every log record as an uncompacted snapshot (the server has not compacted them yet).

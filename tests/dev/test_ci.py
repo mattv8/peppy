@@ -94,6 +94,8 @@ class CiTestRunnerTests(unittest.TestCase):
             "bash infra/release/test-compute-version.sh",
             "bash infra/release/test-release-scripts.sh",
             "just audit-secrets",
+            "python3 infra/audit/check-advisory-exceptions.py",
+            "python3 infra/audit/test-check-advisory-exceptions.py",
             "node packages/mobile-design/scripts/generate.mjs --check",
             "node --test packages/mobile-design/test/generate.test.mjs",
             "python3 tests/dev/run_parallel.py",
@@ -138,7 +140,14 @@ class CiTestRunnerTests(unittest.TestCase):
             2,
         )
 
-    def test_stops_after_a_failed_suite_and_still_cleans_disposable_infrastructure(self):
+    def test_stops_after_a_failed_source_audit_before_later_suites(self):
+        result = self.run_runner(FAIL_COMMAND="python3 infra/audit/check-advisory-exceptions.py")
+
+        self.assertNotEqual(result.returncode, 0)
+        commands = self.log_path.read_text()
+        self.assertNotIn("node packages/mobile-design/scripts/generate.mjs --check", commands)
+
+    def test_stops_after_integration_failure_and_cleans_disposable_infrastructure(self):
         result = self.run_runner(FAIL_COMMAND="cargo test --workspace --locked")
 
         self.assertNotEqual(result.returncode, 0)

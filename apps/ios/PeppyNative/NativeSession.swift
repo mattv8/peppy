@@ -301,6 +301,9 @@ public actor NativeSession {
     private var phoneProducer: NativeEnrollmentRequestProducer?
     private var phoneClaimContext: PhoneClaimContext?
     private var phoneConfirmationRequest: String?
+    /// The verified phrase remains native-only until the shared-secret identity has unlocked
+    /// its fresh epoch. It is deliberately never checkpointed or exposed to SwiftUI state.
+    private var phoneSharedSecret: String?
     private var vaultRequestProducer: NativeEnrollmentRequestProducer?
     private var vaultRequestOrigin: String?
     private var instanceSession: (origin: String, token: String, vaultID: String)?
@@ -377,7 +380,7 @@ public actor NativeSession {
             let request = try producer.createOwnerRequest(setupToken: setupToken, username: username, adminPassword: adminPassword, passphrase: secret)
             let response = try await EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin), attachmentRetention: self.attachmentRetentionHTTP).submitOwnerClaim(request)
             let enrollment = try producer.finishOwnerAdmission(response, passphrase: secret)
-            return try self.activateVerifiedEnrollment(enrollment, bindingSecret: secret)
+            return try self.activateVerifiedPhraseEnrollment(enrollment, phrase: secret)
         }
     }
 
@@ -413,7 +416,7 @@ public actor NativeSession {
             let complete = try producer.completeManualChallengeRequest(challenge: challenge, passphrase: secret)
             let response = try await host.completeManualChallenge(id: id, request: complete)
             let enrollment = try producer.finishManualAdmission(response, passphrase: secret)
-            return try self.activateVerifiedEnrollment(enrollment, bindingSecret: secret)
+            return try self.activateVerifiedPhraseEnrollment(enrollment, phrase: secret)
         }
     }
 
@@ -502,7 +505,9 @@ public actor NativeSession {
         }
         let state = try producer.parseVaultRequestStatus(response)
         if state == "denied" || state == "expired" {
+            let progress = try vaultProgress(producer: producer, state: state)
             try clearVaultRequest(origin: serverOrigin.serialized, producer: producer)
+            return progress
         } else {
             try saveVaultRequestCheckpoint(producer, origin: serverOrigin.serialized)
         }
@@ -524,7 +529,7 @@ public actor NativeSession {
             let host = EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin), attachmentRetention: self.attachmentRetentionHTTP)
             let response = try await host.createVault(request)
             let enrollment = try producer.finishOwnerAdmission(response, passphrase: vaultSecret)
-            let status = try self.activateVerifiedEnrollment(enrollment, bindingSecret: vaultSecret)
+            let status = try self.activateVerifiedPhraseEnrollment(enrollment, phrase: vaultSecret)
             try self.clearVaultRequest(origin: serverOrigin.serialized, producer: producer)
             return status
         }
@@ -631,14 +636,14 @@ public actor NativeSession {
                   let parsedState = object["state"] as? String else {
                 throw ClientError.invalidResponse("phone invitation")
             }
-            if ["expired", "denied", "consumed"].contains(parsedState) {
-                clearPhoneEnrollment()
-                throw ClientError.server(status: 410, code: parsedState)
-            }
             state = parsedState
         } catch {
             clearPhoneEnrollment(matching: producer)
             throw error
+        }
+        if ["expired", "denied", "consumed"].contains(state) {
+            clearPhoneEnrollment()
+            throw ClientError.server(status: 410, code: state)
         }
         let code: String
         do {
@@ -674,6 +679,9 @@ public actor NativeSession {
                 do {
                     request = try producer.confirmPhoneInvitationRequest(status: status, sharedSecret: sharedSecret)
                     self.phoneConfirmationRequest = request
+                    if context.method == .sharedSecret, let sharedSecret, !sharedSecret.isEmpty {
+                        self.phoneSharedSecret = sharedSecret
+                    }
                 } catch {
                     self.clearPhoneEnrollment(matching: producer)
                     throw error
@@ -687,7 +695,15 @@ public actor NativeSession {
                 throw ClientError.canceled
             }
             let enrollment = try producer.finishedPhoneAdmission(response)
-            return try self.activateVerifiedEnrollment(enrollment)
+            switch context.method {
+            case .transfer:
+                return try self.activateVerifiedEnrollment(enrollment)
+            case .sharedSecret:
+                guard let phrase = self.phoneSharedSecret, !phrase.isEmpty else {
+                    throw ClientError.missingSecret("vault shared secret")
+                }
+                return try self.activateVerifiedPhraseEnrollment(enrollment, phrase: phrase)
+            }
         }
     }
 
@@ -715,6 +731,15 @@ public actor NativeSession {
             credential: try store.token(record.identity),
             isHosted: origin.serialized == "https://peppy.pro",
             accountSession: accountSession,
+            recreateProducer: {
+                NativeOwnerPhoneProducer(client: try newNativeExistingOwnerEnrollmentClient(
+                    origin: origin.serialized,
+                    kind: .ios,
+                    deviceName: deviceName,
+                    profileJson: record.profileJson,
+                    headerJson: record.headerJson
+                ))
+            },
             shouldRotate: { stage, seconds, active, requested in
                 let nativeStage: NativeOwnerPhoneStage
                 switch stage {
@@ -896,6 +921,7 @@ public actor NativeSession {
         phoneProducer = nil
         phoneClaimContext = nil
         phoneConfirmationRequest = nil
+        phoneSharedSecret = nil
     }
 
     /// Revokes server access and deactivates the local enrollment. The encrypted database,
@@ -909,9 +935,12 @@ public actor NativeSession {
             }
             let server = try self.authenticatedServer(active)
             var meter = RequestMeter(limit: 2)
-            let response = try await server.exchange("POST", "/v1/devices/\(active.deviceId)/revoke", body: Data("{}".utf8), contentType: "application/json", limit: ServerClient.maxSmallBytes, meter: &meter)
-            // A 401 for this identity is already proof its credential is unusable; archive it.
-            guard (200..<300).contains(response.status) || response.status == 401 else { throw ClientError.server(status: response.status, code: nil) }
+            do {
+                let response = try await server.exchange("POST", "/v1/devices/\(active.deviceId)/revoke", body: Data("{}".utf8), contentType: "application/json", limit: ServerClient.maxSmallBytes, meter: &meter)
+                guard (200..<300).contains(response.status) else { throw ClientError.server(status: response.status, code: nil) }
+            } catch ClientError.unauthorized {
+                // A 401 for this identity is already proof its credential is unusable; archive it.
+            }
             guard try self.store.activeIdentity() == active else { throw ClientError.identityMismatch }
             try? self.retireRelayWakeContexts()
             self.close()
@@ -984,8 +1013,12 @@ public actor NativeSession {
             guard let record = self.record else { throw ClientError.notEnrolled }
             var meter = RequestMeter(limit: 2)
             let server = try self.authenticatedServer(record.identity)
-            let response = try await server.exchange("POST", "/v1/devices/\(deviceId)/revoke", body: Data("{}".utf8), contentType: "application/json", limit: ServerClient.maxSmallBytes, meter: &meter)
-            guard (200..<300).contains(response.status) || (deviceId == record.identity.deviceId && response.status == 401) else { throw ClientError.server(status: response.status, code: nil) }
+            do {
+                let response = try await server.exchange("POST", "/v1/devices/\(deviceId)/revoke", body: Data("{}".utf8), contentType: "application/json", limit: ServerClient.maxSmallBytes, meter: &meter)
+                guard (200..<300).contains(response.status) else { throw ClientError.server(status: response.status, code: nil) }
+            } catch ClientError.unauthorized where deviceId == record.identity.deviceId {
+                // Only self-revocation can treat an already-invalid credential as terminal.
+            }
             if deviceId == record.identity.deviceId {
                 guard self.record?.identity == record.identity, try self.store.activeIdentity() == record.identity else { throw ClientError.identityMismatch }
                 self.close(); try self.store.deactivate()
@@ -1215,8 +1248,8 @@ public actor NativeSession {
         if try store.databaseWasCreated(identity), !databaseExists(identity) { throw ClientError.localDatabaseMissing }
     }
 
-    /// `bindingSecret` is set only by owner claim, vault creation, and manual admission, where the secret was just verified.
-    private func activateVerifiedEnrollment(_ enrollment: NativeEnrollmentIdentity, bindingSecret: String? = nil) throws -> SessionStatus {
+    /// Applies a verified handoff identity to the native core.
+    private func activateVerifiedEnrollment(_ enrollment: NativeEnrollmentIdentity) throws -> SessionStatus {
         let metadata = enrollment.metadata()
         let identity = EnrollmentIdentity(origin: metadata.origin, vaultId: metadata.vaultId, deviceId: metadata.deviceId)
         guard UUID(uuidString: identity.vaultId)?.uuidString.lowercased() == identity.vaultId,
@@ -1228,8 +1261,9 @@ public actor NativeSession {
         try requireAdoptable(identity)
         let nativeClient = try openClient(identity)
         do {
-            try enrollment.activateInto(nativeClient: nativeClient)
+            // A failed handoff activation must not make its only credential unrecoverable.
             let credential = try enrollment.credentialForNativeSecureStore()
+            try enrollment.activateInto(nativeClient: nativeClient)
             let record = EnrollmentRecord(identity: identity, role: metadata.role, keyEpoch: epoch, profileJson: metadata.profileJson, headerJson: metadata.headerJson)
             try store.activate(record, token: credential)
             try store.saveKeyCache(nativeClient.exportNativeKeyCacheForNativeStorage(epoch: epoch), epoch: epoch, for: identity)
@@ -1238,9 +1272,39 @@ public actor NativeSession {
             reachability.bind(identity)
             status = SessionStatus(identity: identity, role: record.role, keyEpoch: epoch, databaseOpen: true, keysUnlocked: true)
             refreshCount()
-            if let bindingSecret {
-                VaultSecretStore(secure: store.secure).storeBinding(bindingSecret, for: identity, origin: identity.origin)
-            }
+            return status
+        } catch {
+            try? nativeClient.dispose()
+            throw error
+        }
+    }
+
+    /// Phrase-based admissions deliberately have no handoff activation package. Their phrase is
+    /// verified by the existing native unlock path before the credential is persisted.
+    private func activateVerifiedPhraseEnrollment(_ enrollment: NativeEnrollmentIdentity, phrase: String) throws -> SessionStatus {
+        let metadata = enrollment.metadata()
+        let identity = EnrollmentIdentity(origin: metadata.origin, vaultId: metadata.vaultId, deviceId: metadata.deviceId)
+        guard UUID(uuidString: identity.vaultId)?.uuidString.lowercased() == identity.vaultId,
+              UUID(uuidString: identity.deviceId)?.uuidString.lowercased() == identity.deviceId,
+              try ServerOrigin(canonical: identity.origin, allowLoopbackHTTP: allowLoopbackHTTP).serialized == identity.origin,
+              let profile = try JSONSerialization.jsonObject(with: Data(metadata.profileJson.utf8)) as? [String: Any],
+              let epoch = UInt32(exactly: profile["key_epoch"] as? Int ?? 0), epoch > 0
+        else { throw ClientError.invalidResponse("verified enrollment metadata") }
+        try requireAdoptable(identity)
+        let nativeClient = try openClient(identity)
+        do {
+            let credential = try enrollment.credentialForNativeSecureStore()
+            try nativeClient.unlock(profileJson: metadata.profileJson, headerJson: metadata.headerJson, passphrase: phrase)
+            try nativeClient.activateVerifiedEpoch(epoch: epoch)
+            let record = EnrollmentRecord(identity: identity, role: metadata.role, keyEpoch: epoch, profileJson: metadata.profileJson, headerJson: metadata.headerJson)
+            try store.activate(record, token: credential)
+            try store.saveKeyCache(nativeClient.exportNativeKeyCacheForNativeStorage(epoch: epoch), epoch: epoch, for: identity)
+            _ = VaultSecretStore(secure: store.secure).storeBinding(phrase, for: identity, origin: identity.origin)
+            client = nativeClient
+            self.record = record
+            reachability.bind(identity)
+            status = SessionStatus(identity: identity, role: record.role, keyEpoch: epoch, databaseOpen: true, keysUnlocked: true)
+            refreshCount()
             return status
         } catch {
             try? nativeClient.dispose()

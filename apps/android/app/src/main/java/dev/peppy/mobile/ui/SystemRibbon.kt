@@ -146,6 +146,15 @@ internal fun accountRibbonTitle(context: Context, notice: CachedAccountNotice, n
     return if (notice.kind == NativeAccountNoticeKind.ENDING_SCHEDULED) context.getString(copy.title, date) else context.getString(copy.title)
 }
 
+internal fun accountNoticeOpensSubscription(
+    kind: NativeAccountNoticeKind,
+    isPlay: Boolean = BuildConfig.PEPPY_DISTRIBUTION == "play",
+): Boolean =
+    isPlay && kind !in setOf(
+        NativeAccountNoticeKind.READ_ONLY_TESTER_INELIGIBLE,
+        NativeAccountNoticeKind.READ_ONLY_ACCOUNT_DELETING,
+    )
+
 internal fun buildSystemRibbonModel(context: Context, slot: RibbonSlot, nowMs: Long): SystemRibbonModel = when (slot) {
     RibbonSlot.SyncStopped -> SystemRibbonModel(
         key = "sync_stopped",
@@ -172,18 +181,18 @@ internal fun buildSystemRibbonModel(context: Context, slot: RibbonSlot, nowMs: L
         val deadline = notice.deadline?.takeIf { it * 1000 > nowMs }
         val date = deadline?.let(::formatDeadline).orEmpty()
         val bodyRes = if (notice.kind == NativeAccountNoticeKind.PAYMENT_FAILED_GRACE && deadline == null) copy.gatewayBodyNoDate else copy.gatewayBody
-        val opensSubscription = BuildConfig.PEPPY_DISTRIBUTION == "play" && notice.kind !in setOf(
-            NativeAccountNoticeKind.READ_ONLY_TESTER_INELIGIBLE,
-            NativeAccountNoticeKind.READ_ONLY_ACCOUNT_DELETING,
-        )
+        val opensSubscription = accountNoticeOpensSubscription(notice.kind)
         SystemRibbonModel(
             key = notice.kind.name,
             severity = notice.severity,
             title = accountRibbonTitle(context, notice, nowMs),
             body = context.getString(bodyRes, date),
-        actionLabel = if (opensSubscription || notice.manageUrl != null) context.getString(copy.action) else null,
+            actionLabel = if (opensSubscription || notice.manageUrl != null) context.getString(copy.action) else null,
             manageUrl = notice.manageUrl,
             dismissible = notice.dismissible,
+            actionDescription = context.getString(
+                if (opensSubscription) R.string.peppy_system_banner_opens_subscription else R.string.peppy_system_banner_opens_in_browser,
+            ),
         )
     }
 }
@@ -311,7 +320,7 @@ internal fun SystemRibbonHost(
         linkFailed = linkFailed,
         onAction = {
             if (slot is RibbonSlot.SyncStopped) onOpenSyncDetails()
-            else if (BuildConfig.PEPPY_DISTRIBUTION == "play") onOpenSubscription()
+            else if ((slot as? RibbonSlot.Account)?.notice?.kind?.let(::accountNoticeOpensSubscription) == true) onOpenSubscription()
             else if (model.manageUrl?.let { openManageUrl(context, it) } != true) linkFailed = true
         },
         onDismiss = {

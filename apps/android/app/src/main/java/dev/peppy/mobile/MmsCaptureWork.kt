@@ -518,7 +518,9 @@ internal object MmsCapture {
                     }
                     if (budgetExpired()) return@recheck null
                     val providerId = request.providerMessageId.toLongOrNull() ?: return@recheck recordOutcome(MmsBackfillRecheckOutcome.TRANSIENT_FAILURE)
-                    val record = try { diagnosticProvider.read(providerId) } catch (_: Exception) {
+                    val record = try { diagnosticProvider.read(providerId) } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
                         return@recheck recordOutcome(MmsBackfillRecheckOutcome.TRANSIENT_FAILURE)
                     } ?: return@recheck recordOutcome(MmsBackfillRecheckOutcome.UNCHANGED_UNAVAILABLE)
                     val routeId = record.subscriptionId?.takeIf { it >= 0 }?.let(SimRoutes::routeId)
@@ -527,6 +529,8 @@ internal object MmsCapture {
                     if (incoming != request.incoming) return@recheck recordOutcome(MmsBackfillRecheckOutcome.PROVIDER_CHANGED)
                     val outcome = try {
                         process(core, diagnosticProvider, tempDirectory, plan.generation, routeId, record, imported = false, existing = null)
+                    } catch (error: CancellationException) {
+                        throw error
                     } catch (_: Exception) { ProcessResult(durable = true) }
                     captured += outcome.captured
                     pending += outcome.pending

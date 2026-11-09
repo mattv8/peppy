@@ -19,10 +19,17 @@ internal class RcsReceiveCoordinator(
 
     override fun receive(recordJson: String) {
         if (!enabled()) return
-        val googleId = runCatching { JSONObject(recordJson).getString("google_conversation_id") }.getOrNull() ?: return
+        val event = parseLiveEvent(recordJson) ?: return
+        val googleId = event.googleConversationId
         val context = runCatching { core.context(googleId) }.getOrNull() ?: return
         synchronized(lock(context.conversationId)) {
-            if (enabled()) runCatching { core.ingest(context, recordJson, NativeRcsObservationProvenance.LIVE) }
+            if (!enabled()) return
+            when (event) {
+                is LiveEvent.Record -> runCatching {
+                    core.ingest(context, event.record, NativeRcsObservationProvenance.LIVE)
+                }
+                is LiveEvent.ProtocolSwitch -> runCatching { core.invalidate(context, googleId) }
+            }
         }
     }
 
@@ -70,11 +77,26 @@ internal class RcsReceiveCoordinator(
     private fun lock(conversationId: String) = locks.getOrPut(conversationId) { Any() }
     private fun NativeRcsIngestOutcome?.complete() =
         this != null && !recordOutcome.startsWith("rejected:") && statusOutcome?.startsWith("rejected:") != true
+    private fun parseLiveEvent(json: String): LiveEvent? = runCatching {
+        val envelope = JSONObject(json)
+        when (envelope.getString("code")) {
+            "ok" -> envelope.getJSONObject("record").let { record ->
+                LiveEvent.Record(record.getString("google_conversation_id"), record.toString())
+            }
+            "protocol_switch" -> LiveEvent.ProtocolSwitch(envelope.getString("google_conversation_id"))
+            else -> null
+        }
+    }.getOrNull()
     private fun parsePage(json: String): Page? = runCatching {
         val value = JSONObject(json); val records = value.optJSONArray("records") ?: JSONArray(); val signals = value.optJSONArray("signals") ?: JSONArray()
         Page(value.getString("code"), List(records.length()) { records.getJSONObject(it).toString() }, List(signals.length()) { signals.getJSONObject(it).getString("google_conversation_id") }, value.optString("next_cursor").takeIf(String::isNotEmpty), value.optBoolean("has_more"))
     }.getOrNull()
     private data class Page(val code: String, val records: List<String>, val signalGoogleIds: List<String>, val nextCursor: String?, val hasMore: Boolean)
+    private sealed interface LiveEvent {
+        val googleConversationId: String
+        data class Record(override val googleConversationId: String, val record: String) : LiveEvent
+        data class ProtocolSwitch(override val googleConversationId: String) : LiveEvent
+    }
     private companion object { const val MAX_PAGES = 32 }
 }
 

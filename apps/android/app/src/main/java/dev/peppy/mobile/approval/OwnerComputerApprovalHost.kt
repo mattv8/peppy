@@ -80,10 +80,14 @@ internal class OwnerComputerApprovalHost(
         if (approved) return@serialized active?.let(Result::Approved) ?: Result.Failed("enrollment-state")
         if (!codesMatch) return@serialized Result.Failed("codes-do-not-match")
         val initial = active ?: return@serialized Result.Failed("enrollment-state")
+        var prompted = false
         val phrase = try {
             when (val stored = secrets.read(vaultId, deviceId)) {
                 is StoredSecret.Present -> stored.value
-                StoredSecret.Missing -> prompt.ask() ?: return@serialized Result.Cancelled
+                StoredSecret.Missing -> {
+                    prompted = true
+                    prompt.ask() ?: return@serialized Result.Cancelled
+                }
             }
         } catch (_: SecureStoreUnavailable) {
             return@serialized Result.Failed("secure-store-unavailable")
@@ -95,6 +99,7 @@ internal class OwnerComputerApprovalHost(
             }
             val core = nativeClient() ?: return@serialized Result.Failed("lock-required")
             val approval = client.approve(current.invitationId, current.promptDigest, phrase, core)
+            if (prompted) secrets.saveIfMissing(vaultId, deviceId, phrase)
             val response = request("POST", "$COMPUTER_PATH/${current.invitationId}/approve", approval)
                 ?: return@serialized Result.Failed("offline")
             if (response.status !in 200..299) return@serialized Result.Failed(responseFailure(response.status))

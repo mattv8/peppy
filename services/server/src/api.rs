@@ -2799,22 +2799,28 @@ async fn ingest(
         }
         return Err(ApiError(StatusCode::CONFLICT, "idempotency_conflict"));
     }
-    if let Some(origin_tag) = e.origin_tag {
-        let existing = sqlx::query("SELECT cursor FROM encrypted_records WHERE vault_id=$1 AND origin_tag=$2 UNION ALL SELECT original_cursor AS cursor FROM compacted_records WHERE vault_id=$1 AND origin_tag=$2 LIMIT 1")
+    let indexed_origin_tag = if let Some(origin_tag) = e.origin_tag {
+        let existing = sqlx::query("SELECT cursor,producer_device_id FROM encrypted_records WHERE vault_id=$1 AND origin_tag=$2 UNION ALL SELECT original_cursor AS cursor,producer_device_id FROM compacted_records WHERE vault_id=$1 AND origin_tag=$2 LIMIT 1")
             .bind(p.vault)
             .bind(origin_tag.to_vec())
             .fetch_optional(&mut *tx)
             .await
             .map_err(|error| database_unavailable(&error, "ingest_origin_duplicate_lookup"))?;
-        if let Some(row) = existing {
-            tracing::info!(vault_id = %p.vault, "origin tag duplicate");
-            return Ok(Json(Accepted {
-                cursor: row.get::<i64, _>("cursor").to_string(),
-                duplicate: true,
-                origin_duplicate: true,
-            }));
+        match existing {
+            Some(row) if row.get::<Uuid, _>("producer_device_id") != p.device => {
+                tracing::info!(vault_id = %p.vault, "origin tag duplicate");
+                return Ok(Json(Accepted {
+                    cursor: row.get::<i64, _>("cursor").to_string(),
+                    duplicate: true,
+                    origin_duplicate: true,
+                }));
+            }
+            Some(_) => None,
+            None => Some(origin_tag),
         }
-    }
+    } else {
+        None
+    };
     let current_epoch = vault_meta.get::<i32, _>("key_epoch") as u32;
     let current_fingerprint: String = vault_meta.get("profile_fingerprint");
     match e.purpose {
@@ -2874,7 +2880,7 @@ async fn ingest(
         .bind(e.command_id.map(|v| v.0))
         .bind(digest.as_slice())
         .bind(&payload)
-        .bind(e.origin_tag.map(|tag| tag.to_vec()))
+        .bind(indexed_origin_tag.map(|tag| tag.to_vec()))
         .execute(&mut *tx)
         .await
         .map_err(|error| insert_error(error, "ingest_record_insert"))?;
@@ -5593,11 +5599,17 @@ async fn ws_session_inner(
                 Some(Ok(Message::Pong(payload))) => {
                     if challenge.as_ref().is_some_and(|token| token.as_slice() == payload.as_ref()) {
                         challenge = None;
-                        if presence_active && let Ok(mut tx) = scope::begin(&state.db, principal.vault).await
-                            && crate::presence::renew(&mut tx, principal.vault, principal.device, connection_id)
-                                .await
-                                .unwrap_or(false)
-                                && tx.commit().await.is_ok()
+                        if presence_active
+                            && let Ok(mut tx) = scope::begin(&state.db, principal.vault).await
+                            && let Ok(changed) = crate::presence::renew(
+                                &mut tx,
+                                principal.vault,
+                                principal.device,
+                                connection_id,
+                            )
+                            .await
+                            && tx.commit().await.is_ok()
+                            && changed
                         {
                             let _ = state.presence_changed.send(principal.vault);
                         }
