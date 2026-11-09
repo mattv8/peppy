@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Iterator
 
@@ -46,18 +47,22 @@ def devices_for_image(image: Path) -> set[str]:
     return devices
 
 
+DETACH_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0)
+
+
 def detach(device: str) -> None:
     try:
         run("hdiutil", "detach", device)
         return
     except subprocess.CalledProcessError:
         pass
-    for _ in range(2):
+    for delay in (*DETACH_RETRY_DELAYS, None):
         try:
             run("hdiutil", "detach", "-force", device)
             return
         except subprocess.CalledProcessError:
-            pass
+            if delay is not None:
+                time.sleep(delay)
     raise RuntimeError(f"could not detach owned DMG device {device}")
 
 
