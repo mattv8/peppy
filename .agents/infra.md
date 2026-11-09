@@ -49,17 +49,43 @@ hosted still builds or starts.
     privacy policy (`peppy-platform/web/privacy.html`) must describe.
 
   Changes limited to tests, docs, or private items need no companion.
-- The companion pull request pins the public commit in
-  `peppy-platform/docker/source-pins.json`. It updates hosted grants,
-  validators, fixtures, and policy text, and must pass private CI on both
-  PostgreSQL versions, including
+- The `platform-companion` public workflow runs on `pull_request_target` for
+  pull requests into `production`. It sends only the pull request number to the
+  private `companion-sync` workflow, which reconciles every open public pull
+  request. It maintains one companion per relevant public pull request on
+  `automation/public-pr-<N>`: a draft whose
+  `peppy-platform/docker/source-pins.json` pins the public head commit. The
+  companion is repinned on every public push and to the merge commit after the
+  public pull request merges, then marked ready for review. Its grants,
+  validators, fixtures, and policy text must pass private CI on both PostgreSQL
+  versions, including
   `docker/scripts/source_compatibility.py --require-session-renewal`.
-- Before you merge the public pull request, pin the companion to the pushed
-  public branch head and get private CI green; for local runs, check the
-  platform out so that `../peppy` points at this checkout (symlink it if the
-  directory name differs). Then merge the public pull request, let it publish,
-  repin the companion to the merged public commit, merge it, and follow
-  platform `build-publish` through rehearsal and deployment.
+- Relevance defaults to relevant. Exclusion globs live in private
+  `peppy-platform/docker/companion-paths.json`. The trigger list above still
+  defines when a companion is required: a waived or excluded pull request that
+  actually hits a trigger needs the `platform-companion` label. That label
+  forces relevance; `no-platform-companion` waives it. Labels never approve a
+  companion.
+- The advisory public commit status `hosted-compatibility` reports the
+  companion's private CI result. It is not a required public check. The private
+  required check `companion-guard` blocks stale, unpublished, or regressing
+  production pins and companion merges before the public merge commit is pinned.
+- Fixes to a companion are pushed to its bot branch. The bot never force-pushes
+  a branch that has human commits.
+- For a fork pull request, the bot posts an `error` status. A maintainer creates
+  the companion manually, through the pin-bump flow or a manual branch.
+- Recovery: manually dispatch private `companion-sync` with no input. Missed
+  events also heal on the next event. There is no scheduler.
+- Tokens: `PEPPY_PLATFORM_DISPATCH_TOKEN` (public `production` environment) can
+  dispatch any private workflow, including `build-publish`.
+  `SOURCE_PIN_PR_TOKEN` (private repository) also posts public statuses.
+- Staging pins remain with the scheduled community pin watch; they are out of
+  scope here.
+- Merging stays manual. For local runs, check the platform out so that
+  `../peppy` points at this checkout (symlink it if the directory name differs).
+  Once the public pull request has merged and the companion is repinned to its
+  merge commit and green, merge the companion, then follow platform
+  `build-publish` through rehearsal and deployment.
 - Without an explicit revision, platform `build-publish` resolves the newest
   published public release, so an incompatible release breaks the next hosted
   build until the repinned companion merges. Do not merge the public pull
