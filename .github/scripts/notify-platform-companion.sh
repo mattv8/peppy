@@ -16,13 +16,13 @@ cleanup() {
 
 trap cleanup EXIT
 
-[[ -n "${PEPPY_PLATFORM_DISPATCH_TOKEN:-}" ]] || platform_dispatch_fail "$summary_title" 'PEPPY_PLATFORM_DISPATCH_TOKEN is unavailable'
+[[ -n "${GH_TOKEN:-}" ]] || platform_dispatch_fail "$summary_title" 'GH_TOKEN is unavailable; configure secrets.PEPPY_AUTOMATION_TOKEN as GH_TOKEN'
 platform_dispatch_require_match "$summary_title" public_pr "${PUBLIC_PR:-}" '^[1-9][0-9]{0,9}$'
 
 payload_file="$(mktemp)"
 printf '{"ref":"production","inputs":{"public_pr":"%s"}}' "$PUBLIC_PR" > "$payload_file"
 
-platform_dispatch_post "$summary_title" PEPPY_PLATFORM_DISPATCH_TOKEN "$dispatch_url" "$payload_file" \
+platform_dispatch_post "$summary_title" GH_TOKEN "$dispatch_url" "$payload_file" \
   'private workflow dispatch request failed' \
   'private workflow dispatch did not queue the private workflow'
 platform_dispatch_success_summary "$summary_title" "Queued private platform companion workflow dispatch for public PR #$PUBLIC_PR."

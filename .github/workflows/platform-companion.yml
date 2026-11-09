@@ -19,5 +19,5 @@ jobs:
           persist-credentials: false
       - run: bash .github/scripts/notify-platform-companion.sh
         env:
-          PEPPY_PLATFORM_DISPATCH_TOKEN: ${{ secrets.PEPPY_PLATFORM_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ secrets.PEPPY_AUTOMATION_TOKEN }}
           PUBLIC_PR: ${{ github.event.pull_request.number }}

@@ -51,14 +51,14 @@ expect_no_text() {
 run_notifier() {
   local case_name="$1"
   shift
-  env -u GITHUB_STEP_SUMMARY PATH="$fake_bin:$PATH" \
+  env -u GITHUB_STEP_SUMMARY -u GH_TOKEN PATH="$fake_bin:$PATH" \
     CURL_ARGS="$temp_dir/curl-args-$case_name" \
     CURL_CONFIG="$temp_dir/curl-config-$case_name" \
     CURL_PAYLOAD="$temp_dir/curl-payload-$case_name" \
     "$@" bash "$NOTIFIER" 2> "$temp_dir/stderr-$case_name"
 }
 
-valid_env=(PEPPY_PLATFORM_DISPATCH_TOKEN="$token" PUBLIC_PR=42)
+valid_env=(GH_TOKEN="$token" PUBLIC_PR=42)
 run_notifier valid "${valid_env[@]}" GITHUB_STEP_SUMMARY="$temp_dir/summary-valid.md"
 expect_line "$temp_dir/curl-args-valid" "$dispatch_url"
 expect_line "$temp_dir/curl-args-valid" '--config'
@@ -71,24 +71,29 @@ expect_line "$temp_dir/curl-payload-valid" "$expected_payload"
 expect_text "$temp_dir/summary-valid.md" 'Queued private platform companion workflow dispatch for public PR #42.'
 
 newline_token="${token}"$'\n'
-run_notifier newline-token PEPPY_PLATFORM_DISPATCH_TOKEN="$newline_token" PUBLIC_PR=42
+run_notifier newline-token GH_TOKEN="$newline_token" PUBLIC_PR=42
 [[ ! -s "$temp_dir/stderr-newline-token" ]] || fail_test 'newline-terminated token dispatch wrote to stderr'
 expect_line "$temp_dir/curl-config-newline-token" "header = \"Authorization: Bearer $token\""
 expect_line "$temp_dir/curl-payload-newline-token" "$expected_payload"
 
 for invalid_pr in 0 01 42x '42;id' ''; do
   case_name="invalid-${invalid_pr//[^[:alnum:]]/_}"
-  if run_notifier "$case_name" PEPPY_PLATFORM_DISPATCH_TOKEN="$token" PUBLIC_PR="$invalid_pr"; then
+  if run_notifier "$case_name" GH_TOKEN="$token" PUBLIC_PR="$invalid_pr"; then
     fail_test "expected invalid public PR to fail: $invalid_pr"
   fi
   expect_line "$temp_dir/stderr-$case_name" 'Platform companion dispatch failed: invalid public_pr'
   [[ ! -e "$temp_dir/curl-args-$case_name" ]] || fail_test "curl was invoked for invalid public PR: $invalid_pr"
 done
 
-if run_notifier missing-token PEPPY_PLATFORM_DISPATCH_TOKEN= PUBLIC_PR=42; then
+if run_notifier missing-token GH_TOKEN= PUBLIC_PR=42; then
   fail_test 'expected missing token to fail'
 fi
-expect_line "$temp_dir/stderr-missing-token" 'Platform companion dispatch failed: PEPPY_PLATFORM_DISPATCH_TOKEN is unavailable'
+expect_line "$temp_dir/stderr-missing-token" 'Platform companion dispatch failed: GH_TOKEN is unavailable; configure secrets.PEPPY_AUTOMATION_TOKEN as GH_TOKEN'
+if run_notifier legacy-token PEPPY_PLATFORM_DISPATCH_TOKEN="$token" PUBLIC_PR=42; then
+  fail_test 'legacy token must not dispatch'
+fi
+expect_line "$temp_dir/stderr-legacy-token" 'Platform companion dispatch failed: GH_TOKEN is unavailable; configure secrets.PEPPY_AUTOMATION_TOKEN as GH_TOKEN'
+[[ ! -e "$temp_dir/curl-args-legacy-token" ]] || fail_test 'curl was invoked for a legacy-only token'
 
 if run_notifier non-204 "${valid_env[@]}" FAKE_HTTP_STATUS=202; then
   fail_test 'expected non-204 response to fail'
@@ -110,7 +115,7 @@ expect_text "$WORKFLOW" 'timeout-minutes: 5'
 expect_text "$WORKFLOW" 'environment: production'
 expect_text "$WORKFLOW" 'persist-credentials: false'
 expect_no_text "$WORKFLOW" 'ref:'
-expect_text "$WORKFLOW" 'PEPPY_PLATFORM_DISPATCH_TOKEN: ${{ secrets.PEPPY_PLATFORM_DISPATCH_TOKEN }}'
+expect_text "$WORKFLOW" 'GH_TOKEN: ${{ secrets.PEPPY_AUTOMATION_TOKEN }}'
 expect_text "$WORKFLOW" 'PUBLIC_PR: ${{ github.event.pull_request.number }}'
 expect_no_text "$WORKFLOW" 'run: ${{'
 [[ "$(grep -Fc '${{' "$WORKFLOW")" -eq 2 ]] || fail_test 'workflow must use only the dispatch secret and numeric PR expression'
