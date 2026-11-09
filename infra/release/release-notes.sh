@@ -18,7 +18,7 @@ case $version in *-*) kind=prerelease ;; *) kind='stable release' ;; esac
 if [ "${TRUSTED_UPDATE_BUILD:-false}" = true ]; then
   if [ "$component" = android ]; then
     printf 'This %s includes a signed Android APK for direct sideloading, an AAB for store tooling input, and a GPG-signed SHA256SUMS.\n\n' "$kind"
-    printf 'If the direct APK includes the Google Messages link, the protected licensing sign-off authorized it; Play/AAB builds never include it. Its notices and corresponding-source offer are available in the app under Open-source licenses.\n\n'
+    printf 'The direct APK includes the Google Messages link. The AAB and Play distribution never include it. Including the link does not by itself enable Google Messages sending or receiving. Its notices and corresponding-source offer are available in the app under Open-source licenses.\n\n'
   else
     macos_mode="${PEPPY_MACOS_SIGNING_MODE-developer-id}"
     windows_mode="${PEPPY_WINDOWS_SIGNING_MODE-authenticode}"
