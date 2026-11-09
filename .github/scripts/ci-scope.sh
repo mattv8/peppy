@@ -60,9 +60,11 @@ INTEGRATION="$(bool_or "$ALL" "$RUST_FILTER" "$DESKTOP_FILTER" "$SERVER_FILTER")
 DESKTOP_FULL="$(bool_or "$ALL" "$RUST_SHARED_FILTER" "$RUST_DESKTOP_FILTER" "$DESKTOP_FILTER")"
 DESKTOP="$(bool_or "$DESKTOP_FULL" "$INTEGRATION" "$WEB_FILTER" "$RUST_BROWSER_FILTER")"
 if [ "$DESKTOP_FULL" = true ]; then
-  DESKTOP_MATRIX='["ubuntu-24.04","macos-15","windows-2025"]'
+  DESKTOP_MATRIX='[{"os":"ubuntu-24.04","index":1,"count":1},{"os":"macos-15","index":1,"count":1},{"os":"windows-2025","index":1,"count":4},{"os":"windows-2025","index":2,"count":4},{"os":"windows-2025","index":3,"count":4},{"os":"windows-2025","index":4,"count":4}]'
+  DESKTOP_OS_MATRIX='["ubuntu-24.04","macos-15","windows-2025"]'
 else
-  DESKTOP_MATRIX='["ubuntu-24.04"]'
+  DESKTOP_MATRIX='[{"os":"ubuntu-24.04","index":1,"count":1}]'
+  DESKTOP_OS_MATRIX='["ubuntu-24.04"]'
 fi
 ANDROID="$(bool_or "$ALL" "$RUST_SHARED_FILTER" "$RUST_MOBILE_FILTER" "$ANDROID_FILTER")"
 SWIFT_BINDINGS="$(bool_or "$ALL" "$RUST_SHARED_FILTER" "$RUST_MOBILE_FILTER" "$IOS_FILTER" "$ANDROID_BINDINGS_FILTER")"
@@ -83,6 +85,7 @@ rust=$RUST
 integration=$INTEGRATION
 desktop=$DESKTOP
 desktop_matrix=$DESKTOP_MATRIX
+desktop_os_matrix=$DESKTOP_OS_MATRIX
 android=$ANDROID
 swift_bindings=$SWIFT_BINDINGS
 container_image=$CONTAINER_IMAGE

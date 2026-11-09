@@ -23,35 +23,51 @@ google_messages_setup = google_messages_steps.find { |step| step['uses']&.start_
 assert.call(google_messages_setup && google_messages_setup.fetch('uses').match?(/@\h{40}\z/) && google_messages_setup.dig('with', 'go-version') == '1.27.3' && google_messages_setup.dig('with', 'cache') == false, 'Google Messages CI must pin setup-go and the Go toolchain without saving shared caches')
 assert.call(google_messages_steps.map { |step| step['run'] }.compact == ['./prepare-libgm.sh', 'go test -race ./...', 'go vet ./...', 'test -z "$(gofmt -l .)"'], 'Google Messages CI must prepare patched libgm, run race tests and vet, and fail on unformatted Go without building an AAR')
 assert.call(ci_jobs.fetch('gate').fetch('needs').include?('google-messages-go'), 'the CI gate must wait for Google Messages Go checks')
-google_messages_gate = ci_jobs.fetch('gate').fetch('steps').find { |step| step['name'] == 'Evaluate Google Messages Go gate' }
-assert.call(google_messages_gate && google_messages_gate.fetch('env') == { 'GOOGLE_MESSAGES_GO_RESULT' => '${{ needs.google-messages-go.result }}', 'GOOGLE_MESSAGES_GO_REQUIRED' => '${{ needs.changes.outputs.android }}' }, 'the Go gate must evaluate the scoped job result')
-%w[success failure cancelled skipped].product(%w[true false]).each do |result, required|
-  _, _, status = Open3.capture3({ 'GOOGLE_MESSAGES_GO_RESULT' => result, 'GOOGLE_MESSAGES_GO_REQUIRED' => required }, 'bash', '-euo', 'pipefail', '-c', google_messages_gate.fetch('run'))
-  expected = result == 'success' || (result == 'skipped' && required == 'false')
-  assert.call(status.success? == expected, "Google Messages Go gate mishandled #{result} with required=#{required}")
-end
+gate_environment = ci_jobs.fetch('gate').fetch('steps').find { |step| step['name'] == 'Evaluate CI gate' }.fetch('env')
+assert.call(gate_environment.fetch('GOOGLE_MESSAGES_GO_RESULT') == '${{ needs.google-messages-go.result }}' && gate_environment.fetch('GOOGLE_MESSAGES_GO_REQUIRED') == '${{ needs.changes.outputs.android }}', 'the Go result must be evaluated by the common required-job gate')
 assert.call(ci_jobs.fetch('desktop').fetch('timeout-minutes') == 60, 'public CI desktop must allow 60 minutes uniformly for native cold-cache builds')
-assert.call(ci_jobs.fetch('android').fetch('timeout-minutes') == 45, 'public CI Android must allow 45 minutes for uncached native builds before Gradle lint and packaging')
+android_ci = load_workflow.call('test-android.yml')
+android_ci_jobs = android_ci.fetch('jobs')
+android_call = ci_jobs.fetch('android')
+assert.call(android_call.fetch('needs') == 'changes' && android_call.fetch('if') == "needs.changes.outputs.android == 'true'", 'public Android CI must retain the Android path scope')
+assert.call(android_call.fetch('uses') == './.github/workflows/test-android.yml', 'public Android CI must call the reusable Android validator')
+assert.call((android_call.keys & %w[runs-on timeout-minutes steps with secrets]).empty?, 'the Android reusable-workflow call must not declare invalid runner, timeout, step, input, or secret fields')
+assert.call(android_ci.fetch(true).fetch('workflow_call').nil?, 'Android validation must expose a no-input, no-secret callable interface')
+android_preparation = android_ci_jobs.fetch('android-native-preparation')
+android_ci_steps = android_preparation.fetch('steps')
+android_ci_go = android_ci_steps.find { |step| step['uses']&.start_with?('actions/setup-go@') }
+android_rust_cache = android_ci_steps.find { |step| step['uses']&.start_with?('Swatinem/rust-cache@') }
+android_rust_cache_ok = lambda do |workflow|
+  step = workflow.fetch('jobs').fetch('android-native-preparation').fetch('steps').find { |candidate| candidate['uses']&.start_with?('Swatinem/rust-cache@') }
+  with = step&.fetch('with', nil)
+  with.is_a?(Hash) && with['shared-key'] == 'ubuntu-24.04-android-ndk-27.2.12479018-android' && !with.key?('key') && with['save-if'] == "${{ github.event_name == 'push' && github.ref == 'refs/heads/production' }}"
+end
+assert.call(android_rust_cache_ok.call(android_ci), 'Android producer Rust cache must use the shared key and production-push save guard that match the production Android cache')
+android_mismatch = Marshal.load(Marshal.dump(android_ci))
+android_mismatch_step = android_mismatch.fetch('jobs').fetch('android-native-preparation').fetch('steps').find { |candidate| candidate['uses']&.start_with?('Swatinem/rust-cache@') }
+android_mismatch_step.fetch('with')['shared-key'] = 'ubuntu-24.04-android-ndk-27.2.12479018'
+assert.call(!android_rust_cache_ok.call(android_mismatch), 'Android producer Rust cache mismatch in the parsed workflow must be rejected')
+android_ci_aar = android_ci_steps.find { |step| step['name'] == 'Build Google Messages AAR and licenses' }
+assert.call(android_ci_go && android_ci_go.fetch('uses') == 'actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00' && android_ci_go.fetch('with') == { 'go-version' => '1.27.3', 'cache' => false }, 'Android preparation must pin Go 1.27.3 without a shared cache')
+assert.call(android_ci_aar && android_ci_aar.fetch('run').include?('export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"') && android_ci_aar.fetch('run').include?('apps/android/googlemessages/build-aar.sh') && android_ci_aar.fetch('run').include?('apps/android/googlemessages/check-licenses.sh') && android_ci_aar.fetch('run').include?('apps/android/googlemessages/check-licenses-test.sh'), 'Android preparation must build the Google Messages AAR and run its license checks with the pinned NDK')
+android_consumers = %w[android-debug-unit-tests android-sideload-unit-tests android-lint-and-assembly].map { |name| android_ci_jobs.fetch(name) }
+assert.call(android_consumers.all? { |job| job.fetch('needs') == 'android-native-preparation' }, 'every Android consumer must require native preparation')
+assert.call(android_consumers.all? { |job| job.fetch('steps').any? { |step| step.dig('with', 'name') == 'android-native-${{ github.sha }}' } }, 'every Android consumer must download the SHA-bound native artifact')
+android_packaging = android_ci_jobs.fetch('android-lint-and-assembly').fetch('steps').find { |step| step['name'] == 'Lint and assemble Android artifacts' }
+assert.call(!android_packaging.nil?, 'Android validation must retain the lint and packaging step')
+android_packaging_command = Shellwords.shellsplit(android_packaging.fetch('run'))
+android_packaging_flags = android_packaging_command.reject { |token| token.start_with?(':') }
+expected_android_packaging_flags = ['./gradlew', '--console=plain', '--dependency-verification=strict', '--stacktrace', '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8', '--max-workers=2', '-PpeppyGoogleMessagesLink=true']
+assert.call(android_packaging_flags == expected_android_packaging_flags, 'Android packaging must use strict dependency verification, the 4 GiB JVM override, two-worker bound, and diagnostic flags')
+android_packaging_tasks = android_packaging_command.select { |token| token.start_with?(':') }
+assert.call(android_packaging_tasks == %w[:app:verifyReleaseManifestSecurity :app:lintDebug :app:lintSideload :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleSideload :app:verifySideloadGoogleMessagesLink], 'Android packaging must verify the merged release manifest, sideload link, linting, and debug artifacts')
+android_aggregate = android_ci_jobs.fetch('android-aggregate')
+assert.call(android_aggregate.fetch('if') == '${{ always() }}' && android_aggregate.fetch('needs').sort == %w[android-debug-unit-tests android-lint-and-assembly android-native-preparation android-sideload-unit-tests], 'Android aggregate must always require preparation and every consumer')
 ci_text = File.read(File.join(root, 'workflows', 'ci.yml'))
 assert.call(ci_jobs.key?('notify-hosted-production'), 'public CI must dispatch verified hosted production evidence')
 assert.call(!ci_text.include?('create-github-app-token'), 'public CI must not mint an App token')
 assert.call(!ci_text.match?(/HOSTED_DISPATCH_APP_|HOSTED_DISPATCH_TOKEN/), 'public CI must not depend on hosted dispatch credentials')
 assert.call(ci_text.include?('PEPPY_PLATFORM_DISPATCH_TOKEN'), 'public CI must use the production-scoped dispatch token')
-android_ci_steps = ci_jobs.fetch('android').fetch('steps')
-android_ci_go = android_ci_steps.find { |step| step['uses']&.start_with?('actions/setup-go@') }
-android_ci_aar = android_ci_steps.find { |step| step['name'] == 'Build Google Messages AAR' }
-assert.call(android_ci_go && android_ci_go.fetch('uses') == 'actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00' && android_ci_go.fetch('with') == { 'go-version' => '1.27.3', 'cache' => false }, 'public Android CI must pin Go 1.27.3 without a shared cache')
-assert.call(android_ci_aar && android_ci_aar.fetch('run').include?('export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"') && android_ci_aar.fetch('run').include?('apps/android/googlemessages/build-aar.sh') && android_ci_aar.fetch('run').include?('apps/android/googlemessages/check-licenses.sh') && android_ci_aar.fetch('run').include?('apps/android/googlemessages/check-licenses-test.sh'), 'public Android CI must build the Google Messages AAR and run its license checks with the pinned NDK')
-android_ci_sideload_steps = android_ci_steps.select { |step| step['run']&.match?(/:app:\w*Sideload/) }
-assert.call(!android_ci_sideload_steps.empty? && android_ci_steps.index(android_ci_go) < android_ci_steps.index(android_ci_aar) && android_ci_sideload_steps.all? { |step| android_ci_steps.index(android_ci_aar) < android_ci_steps.index(step) }, 'public Android CI must provision Go and build the AAR before every sideload Gradle task')
-android_packaging = android_ci_steps.find { |step| step['name'] == 'Lint and assemble Android artifacts' }
-assert.call(!android_packaging.nil?, 'public CI must retain the Android lint and packaging step')
-android_packaging_command = Shellwords.shellsplit(android_packaging.fetch('run'))
-android_packaging_flags = android_packaging_command.reject { |token| token.start_with?(':') }
-expected_android_packaging_flags = ['./gradlew', '--console=plain', '--dependency-verification=strict', '--stacktrace', '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8', '--max-workers=2', '-PpeppyGoogleMessagesLink=true']
-assert.call(android_packaging_flags == expected_android_packaging_flags, 'public CI Android packaging must use strict dependency verification, the 4 GiB JVM override, two-worker bound, and diagnostic flags')
-android_packaging_tasks = android_packaging_command.select { |token| token.start_with?(':') }
-assert.call(android_packaging_tasks == %w[:app:verifyReleaseManifestSecurity :app:lintDebug :app:lintSideload :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleSideload :app:verifySideloadGoogleMessagesLink], 'public CI Android packaging must verify the merged release manifest, sideload link, linting, and debug artifacts')
 handoff = ci_jobs.fetch('notify-hosted-production')
 assert.call(handoff.fetch('if') == "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success' && needs.publish-production-server.result == 'success' && needs.publish-production-relay.result == 'success' && needs.publish-production-mcp.result == 'success'", 'hosted dispatch must require a successful production push gate and all three publishers')
 assert.call(handoff.fetch('needs').sort == %w[gate publish-production-mcp publish-production-relay publish-production-server], 'hosted dispatch must wait for the gate and all three publishers, because hosted builds require the MCP image')

@@ -3,8 +3,8 @@
 set -Eeuo pipefail
 
 JOBS=(
-  changes source-audit workflow-security version release-tooling development-tools rust integration desktop android
-  swift-bindings container-image development-artifacts
+  changes source-audit workflow-security version release-tooling development-tools rust integration frontend desktop desktop-updater android
+  google-messages-go swift-bindings container-image development-artifacts
 )
 
 prefix_for() {

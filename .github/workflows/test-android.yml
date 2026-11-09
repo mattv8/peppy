@@ -1,0 +1,270 @@
+name: Android validation
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  android-native-preparation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Restore Gradle cache
+        id: gradle-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/verification-metadata.xml') }}
+          restore-keys: gradle-${{ runner.os }}-
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: 1.98.1
+      - run: rustup target add aarch64-linux-android x86_64-linux-android
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ubuntu-24.04-android-ndk-27.2.12479018-android
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/production' }}
+          cache-on-failure: true
+      - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libssl-dev libsodium-dev
+      - name: Install Android SDK and NDK
+        run: |
+          set +e
+          set +o pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018"
+          sdkmanager_status=${PIPESTATUS[1]}
+          set -e
+          exit "$sdkmanager_status"
+      - name: Build Google Messages AAR and licenses
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+          apps/android/googlemessages/build-aar.sh
+          apps/android/googlemessages/check-licenses.sh
+          apps/android/googlemessages/check-licenses-test.sh
+      - name: Verify and build Android native libraries
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+          infra/compose/verify-android-native.sh
+      - name: Verify native RCS cross-language contract
+        env:
+          PEPPY_RCS_GO_OBSERVATION_PATH: ${{ runner.temp }}/rcs-go-observations.json
+          PEPPY_RCS_GO_RECEIVE_RECORD_PATH: ${{ runner.temp }}/rcs-go-receive-record.json
+          PEPPY_RCS_NATIVE_FIXTURE_PATH: ${{ runner.temp }}/rcs-rust-commit.json
+        run: |
+          rm -f "$PEPPY_RCS_GO_OBSERVATION_PATH" "$PEPPY_RCS_GO_RECEIVE_RECORD_PATH" "$PEPPY_RCS_NATIVE_FIXTURE_PATH"
+          (cd apps/android/googlemessages && go test -race -tags rcs_native_contract ./gmlink -run '^TestNativeRcsExport(ObservationFixture|ReceiveRecord)$' -count=1)
+          test -s "$PEPPY_RCS_GO_OBSERVATION_PATH"
+          test -s "$PEPPY_RCS_GO_RECEIVE_RECORD_PATH"
+          cargo test --locked -p peppy-mobile-bindings --lib rcs_receive_tests::go_exported_receive_record_ingests_through_mobile_boundary -- --exact
+          cargo test --locked -p peppy-client-core --test integration rcs_send::native_handoff::actual_go_observations_verify_classify_and_begin -- --exact --ignored
+          test -s "$PEPPY_RCS_NATIVE_FIXTURE_PATH"
+          (cd apps/android/googlemessages && go test -race -tags rcs_native_contract ./gmlink -run '^TestNativeRcsContractRustFixture$' -count=1)
+          cargo test --locked -p peppy-mobile-bindings --lib rcs_native::rcs_native_tests::rcs_native_live_ticket_tests::same_live_go_ticket_uses_real_rust_facts_and_commit -- --exact --ignored
+      - name: Run JVM binding smoke test
+        working-directory: apps/android
+        run: ./gradlew --console=plain --dependency-verification=strict :jvm-smoke:run
+      - name: Package verified native inputs
+        run: .github/scripts/android-ci-artifacts.sh package-artifact . android-native-artifacts "$GITHUB_SHA" debug
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: android-native-${{ github.sha }}
+          path: android-native-artifacts
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+      - name: Stop Gradle before caching
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/production' && steps.gradle-cache.outputs.cache-hit != 'true' }}
+        working-directory: apps/android
+        run: ./gradlew --stop
+      - name: Save Gradle cache
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/production' && steps.gradle-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
+
+  android-debug-unit-tests:
+    needs: android-native-preparation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android runtime dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libssl-dev libsodium-dev
+          set +e
+          set +o pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018"
+          sdkmanager_status=${PIPESTATUS[1]}
+          set -e
+          exit "$sdkmanager_status"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/verification-metadata.xml') }}
+          restore-keys: gradle-${{ runner.os }}-
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: android-native-${{ github.sha }}
+          path: android-native-artifacts
+      - name: Install native inputs
+        run: .github/scripts/android-ci-artifacts.sh install-artifact android-native-artifacts . "$GITHUB_SHA" debug
+      - name: Compile debug unit tests and prepare Robolectric runtimes
+        working-directory: apps/android
+        run: ./gradlew --console=plain --dependency-verification=strict :app:compileDebugUnitTestKotlin :app:prepareRobolectricDependencies
+      - name: Run Android debug unit tests
+        working-directory: apps/android
+        run: |
+          dump_threads() {
+            sleep 420
+            echo "::error::Android unit tests exceeded 7 minutes; dumping JVM threads"
+            jcmd -l || true
+            jcmd -l | awk '$2 !~ /JCmd/ { print $1 }' | while read -r pid; do jcmd "$pid" Thread.print || true; done
+          }
+          dump_threads &
+          watchdog_pid=$!
+          trap 'pkill -P "$watchdog_pid" 2>/dev/null || true; kill "$watchdog_pid" 2>/dev/null || true' EXIT
+          timeout --signal=TERM --kill-after=30s 8m ./gradlew --console=plain --dependency-verification=strict :app:testDebugUnitTest
+      - name: Preserve Android debug unit test failure reports
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: android-debug-unit-test-failures-${{ github.run_attempt }}
+          path: |
+            apps/android/app/build/test-results/testDebugUnitTest/*.xml
+            apps/android/app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: warn
+          retention-days: 7
+
+  android-sideload-unit-tests:
+    needs: android-native-preparation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android runtime dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libssl-dev libsodium-dev
+          set +e
+          set +o pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018"
+          sdkmanager_status=${PIPESTATUS[1]}
+          set -e
+          exit "$sdkmanager_status"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/verification-metadata.xml') }}
+          restore-keys: gradle-${{ runner.os }}-
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: android-native-${{ github.sha }}
+          path: android-native-artifacts
+      - run: .github/scripts/android-ci-artifacts.sh install-artifact android-native-artifacts . "$GITHUB_SHA" debug
+      - name: Run Android sideload unit tests and dependency boundaries
+        working-directory: apps/android
+        run: |
+          timeout --signal=TERM --kill-after=30s 13m ./gradlew --console=plain --dependency-verification=strict :app:compileSideloadUnitTestKotlin :app:testSideloadUnitTest
+          ./gradlew --console=plain --dependency-verification=strict :libadb:testDebugUnitTest :app:verifyReleaseRestrictedSetupExclusionFixtures
+      - name: Preserve Android sideload unit test failure reports
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: android-sideload-unit-test-failures-${{ github.run_attempt }}
+          path: |
+            apps/android/app/build/test-results/testSideloadUnitTest/*.xml
+            apps/android/app/build/reports/tests/testSideloadUnitTest/
+          if-no-files-found: warn
+          retention-days: 7
+
+  android-lint-and-assembly:
+    needs: android-native-preparation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android runtime dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libssl-dev libsodium-dev
+          set +e
+          set +o pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018"
+          sdkmanager_status=${PIPESTATUS[1]}
+          set -e
+          exit "$sdkmanager_status"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/verification-metadata.xml') }}
+          restore-keys: gradle-${{ runner.os }}-
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: android-native-${{ github.sha }}
+          path: android-native-artifacts
+      - run: .github/scripts/android-ci-artifacts.sh install-artifact android-native-artifacts . "$GITHUB_SHA" debug
+      - name: Lint and assemble Android artifacts
+        working-directory: apps/android
+        run: ./gradlew --console=plain --dependency-verification=strict --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 -PpeppyGoogleMessagesLink=true :app:verifyReleaseManifestSecurity :app:lintDebug :app:lintSideload :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleSideload :app:verifySideloadGoogleMessagesLink
+      - name: Verify release SMS diagnostics policy
+        working-directory: apps/android
+        run: ./gradlew --console=plain --dependency-verification=strict :app:testReleaseUnitTest --tests dev.peppy.mobile.SmsCaptureReleasePolicyTest
+
+  android-aggregate:
+    if: ${{ always() }}
+    needs:
+      - android-native-preparation
+      - android-debug-unit-tests
+      - android-sideload-unit-tests
+      - android-lint-and-assembly
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Reject incomplete Android validation
+        env:
+          PREPARATION_RESULT: ${{ needs.android-native-preparation.result }}
+          DEBUG_RESULT: ${{ needs.android-debug-unit-tests.result }}
+          SIDELOAD_RESULT: ${{ needs.android-sideload-unit-tests.result }}
+          LINT_ASSEMBLY_RESULT: ${{ needs.android-lint-and-assembly.result }}
+        run: |
+          for result in "$PREPARATION_RESULT" "$DEBUG_RESULT" "$SIDELOAD_RESULT" "$LINT_ASSEMBLY_RESULT"; do
+            test "$result" = success || { echo "required Android validation result was $result" >&2; exit 1; }
+          done
