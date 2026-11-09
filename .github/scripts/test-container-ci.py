@@ -114,7 +114,8 @@ class ContainerWorkflowTests(unittest.TestCase):
             build = next(step for step in self.jobs[job]["steps"] if step.get("uses", "").startswith("docker/build-push-action@"))
             self.assertEqual(build["with"]["cache-from"], f"type=gha,scope=container-{job}")
             self.assertIn(production_write, build["with"]["cache-to"])
-            self.assertIn(f"type=gha,mode=max,scope=container-{job}", build["with"]["cache-to"])
+            self.assertIn(f"type=gha,mode=min,scope=container-{job}", build["with"]["cache-to"])
+            self.assertNotIn("mode=max", build["with"]["cache-to"])
 
     def test_complete_fails_for_every_non_success_dependency_result(self):
         complete = self.jobs["complete"]

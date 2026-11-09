@@ -329,6 +329,8 @@ assert.call(release.fetch('jobs').fetch('publish').fetch('if').include?('!cancel
 end
 
 artifacts = load_workflow.call('build-artifacts.yml').fetch('jobs')
+artifact_workflow_text = File.read(File.join(root, 'workflows', 'build-artifacts.yml'))
+assert.call(!artifact_workflow_text.match?(%r{uses:\s*(actions/cache(/\w+)?|Swatinem/rust-cache)@}), 'build-artifacts must not restore or save Actions caches: the 10 GB repository cache limit evicts gate-critical caches')
 %w[android desktop ios].each do |component|
   job = artifacts.fetch("#{component}-development-artifacts")
   assert.call(job.fetch('if') == "inputs.build_#{component} != false", "#{component} artifact job must run unless explicitly disabled")
