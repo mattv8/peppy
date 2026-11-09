@@ -36,6 +36,17 @@ assert.call(android_ci.fetch(true).fetch('workflow_call').nil?, 'Android validat
 android_preparation = android_ci_jobs.fetch('android-native-preparation')
 android_ci_steps = android_preparation.fetch('steps')
 android_ci_go = android_ci_steps.find { |step| step['uses']&.start_with?('actions/setup-go@') }
+android_rust_cache = android_ci_steps.find { |step| step['uses']&.start_with?('Swatinem/rust-cache@') }
+android_rust_cache_ok = lambda do |workflow|
+  step = workflow.fetch('jobs').fetch('android-native-preparation').fetch('steps').find { |candidate| candidate['uses']&.start_with?('Swatinem/rust-cache@') }
+  with = step&.fetch('with', nil)
+  with.is_a?(Hash) && with['shared-key'] == 'ubuntu-24.04-android-ndk-27.2.12479018-android' && !with.key?('key') && with['save-if'] == "${{ github.event_name == 'push' && github.ref == 'refs/heads/production' }}"
+end
+assert.call(android_rust_cache_ok.call(android_ci), 'Android producer Rust cache must use the shared key and production-push save guard that match the production Android cache')
+android_mismatch = Marshal.load(Marshal.dump(android_ci))
+android_mismatch_step = android_mismatch.fetch('jobs').fetch('android-native-preparation').fetch('steps').find { |candidate| candidate['uses']&.start_with?('Swatinem/rust-cache@') }
+android_mismatch_step.fetch('with')['shared-key'] = 'ubuntu-24.04-android-ndk-27.2.12479018'
+assert.call(!android_rust_cache_ok.call(android_mismatch), 'Android producer Rust cache mismatch in the parsed workflow must be rejected')
 android_ci_aar = android_ci_steps.find { |step| step['name'] == 'Build Google Messages AAR and licenses' }
 assert.call(android_ci_go && android_ci_go.fetch('uses') == 'actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00' && android_ci_go.fetch('with') == { 'go-version' => '1.27.3', 'cache' => false }, 'Android preparation must pin Go 1.27.3 without a shared cache')
 assert.call(android_ci_aar && android_ci_aar.fetch('run').include?('export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"') && android_ci_aar.fetch('run').include?('apps/android/googlemessages/build-aar.sh') && android_ci_aar.fetch('run').include?('apps/android/googlemessages/check-licenses.sh') && android_ci_aar.fetch('run').include?('apps/android/googlemessages/check-licenses-test.sh'), 'Android preparation must build the Google Messages AAR and run its license checks with the pinned NDK')

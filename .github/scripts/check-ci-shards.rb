@@ -47,6 +47,17 @@ updater = jobs.fetch('desktop-updater')
 fail!('desktop-updater must use fail-fast false') unless updater.dig('strategy', 'fail-fast') == false
 fail!('desktop-updater must use the scoped OS matrix once per platform') unless updater.dig('strategy', 'matrix', 'os') == '${{ fromJSON(needs.changes.outputs.desktop_os_matrix) }}'
 fail!('desktop-updater must require frontend') unless updater.fetch('needs').sort == %w[changes frontend]
+rust_cache_with = lambda do |job, name|
+  step = job.fetch('steps').find { |candidate| candidate['uses']&.start_with?('Swatinem/rust-cache@') }
+  fail!("#{name} must use Swatinem/rust-cache") unless step
+  step.fetch('with')
+end
+desktop_cache = rust_cache_with.call(desktop, 'desktop')
+updater_cache = rust_cache_with.call(updater, 'desktop-updater')
+fail!('desktop and desktop-updater must share the desktop Rust cache key') unless desktop_cache['shared-key'] == '${{ matrix.os }}-desktop' && updater_cache['shared-key'] == '${{ matrix.os }}-desktop'
+fail!('desktop Rust caches must not set key alongside shared-key') if desktop_cache.key?('key') || updater_cache.key?('key')
+fail!('desktop-updater Rust cache must be restore-only') unless updater_cache['save-if'] == false
+fail!('desktop Rust cache must save only from production shard 1') unless desktop_cache['save-if'] == "${{ github.ref == 'refs/heads/production' && matrix.index == 1 }}"
 full_scope = scope_output(options[:scope], { 'FILTER_FORCE_FULL' => 'true' })
 linux_scope = scope_output(options[:scope], { 'FILTER_WEB' => 'true' })
 fail!('full desktop matrix has missing, duplicate, or invalid legs') unless JSON.parse(full_scope.fetch('desktop_matrix')) == FULL_MATRIX

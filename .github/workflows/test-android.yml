@@ -37,7 +37,7 @@ jobs:
       - run: rustup target add aarch64-linux-android x86_64-linux-android
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: ubuntu-24.04-android-ndk-27.2.12479018
+          shared-key: ubuntu-24.04-android-ndk-27.2.12479018-android
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/production' }}
           cache-on-failure: true
       - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libssl-dev libsodium-dev

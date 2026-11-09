@@ -43,4 +43,7 @@ mutate.call('frontend-overwrite', workflow_change: ->(text) { text.sub("        
 mutate.call('skipped-required-frontend', workflow_change: ->(text) { text.sub("    if: needs.changes.outputs.desktop == 'true'", '    if: false') })
 mutate.call('missing-posix-installer', workflow_change: ->(text) { text.gsub('bash .github/scripts/install-cargo-nextest.sh', 'bash missing-cargo-nextest.sh') })
 mutate.call('missing-windows-installer-test', workflow_change: ->(text) { text.sub('install-cargo-nextest.Tests.ps1', 'missing-cargo-nextest.Tests.ps1') })
+mutate.call('updater-cache-saves', workflow_change: ->(text) { text.sub("save-if: false\n          cache-on-failure: true\n      - run: cargo check --locked --no-default-features", "save-if: true\n          cache-on-failure: true\n      - run: cargo check --locked --no-default-features") })
+mutate.call('desktop-cache-saves-every-shard', workflow_change: ->(text) { text.sub("save-if: ${{ github.ref == 'refs/heads/production' && matrix.index == 1 }}", "save-if: ${{ github.ref == 'refs/heads/production' }}") })
+mutate.call('mismatched-updater-shared-key', workflow_change: ->(text) { text.sub("shared-key: ${{ matrix.os }}-desktop\n          workspaces: apps/desktop/src-tauri -> target\n          save-if: false", "shared-key: ${{ matrix.os }}-updater\n          workspaces: apps/desktop/src-tauri -> target\n          save-if: false") })
 puts 'CI topology mutation tests passed'
