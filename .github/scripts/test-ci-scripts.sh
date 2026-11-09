@@ -78,10 +78,16 @@ for name in rust integration desktop android swift_bindings container_image arti
 done
 
 for case_name in force_full desktop rust_shared rust_desktop; do
-  expect_output "$temp_dir/$case_name" 'desktop_matrix=["ubuntu-24.04","macos-15","windows-2025"]'
+  expect_output "$temp_dir/$case_name" 'desktop_matrix=[{"os":"ubuntu-24.04","index":1,"count":1},{"os":"macos-15","index":1,"count":1},{"os":"windows-2025","index":1,"count":4},{"os":"windows-2025","index":2,"count":4},{"os":"windows-2025","index":3,"count":4},{"os":"windows-2025","index":4,"count":4}]'
 done
 for case_name in server web rust_browser rust_server; do
-  expect_output "$temp_dir/$case_name" 'desktop_matrix=["ubuntu-24.04"]'
+  expect_output "$temp_dir/$case_name" 'desktop_matrix=[{"os":"ubuntu-24.04","index":1,"count":1}]'
+done
+for case_name in force_full desktop rust_shared rust_desktop; do
+  expect_output "$temp_dir/$case_name" 'desktop_os_matrix=["ubuntu-24.04","macos-15","windows-2025"]'
+done
+for case_name in server web rust_browser rust_server; do
+  expect_output "$temp_dir/$case_name" 'desktop_os_matrix=["ubuntu-24.04"]'
 done
 
 for name in rust integration desktop android swift_bindings container_image artifacts_android artifacts_desktop artifacts_ios development_artifacts; do
@@ -170,8 +176,11 @@ gate_env=(
   DEVELOPMENT_TOOLS_RESULT=success DEVELOPMENT_TOOLS_REQUIRED=true
   RUST_RESULT=success RUST_REQUIRED=true
   INTEGRATION_RESULT=success INTEGRATION_REQUIRED=true
+  FRONTEND_RESULT=success FRONTEND_REQUIRED=true
   DESKTOP_RESULT=success DESKTOP_REQUIRED=true
+  DESKTOP_UPDATER_RESULT=success DESKTOP_UPDATER_REQUIRED=true
   ANDROID_RESULT=success ANDROID_REQUIRED=true
+  GOOGLE_MESSAGES_GO_RESULT=success GOOGLE_MESSAGES_GO_REQUIRED=true
   SWIFT_BINDINGS_RESULT=success SWIFT_BINDINGS_REQUIRED=true
   CONTAINER_IMAGE_RESULT=success CONTAINER_IMAGE_REQUIRED=true
   DEVELOPMENT_ARTIFACTS_RESULT=success DEVELOPMENT_ARTIFACTS_REQUIRED=true
@@ -188,7 +197,7 @@ expect_failure env "${gate_env[@]}" RUST_RESULT=invalid "$GATE"
 expect_failure env CHANGES_RESULT=success "$GATE"
 expect_failure env "${gate_env[@]}" CHANGES_RESULT=failure RUST_RESULT=skipped RUST_REQUIRED= "$GATE"
 
-for prefix in INTEGRATION DESKTOP DEVELOPMENT_ARTIFACTS; do
+for prefix in INTEGRATION FRONTEND DESKTOP DESKTOP_UPDATER GOOGLE_MESSAGES_GO DEVELOPMENT_ARTIFACTS; do
   env "${gate_env[@]}" "${prefix}_RESULT=skipped" "${prefix}_REQUIRED=false" "$GATE"
   expect_failure env "${gate_env[@]}" "${prefix}_RESULT=skipped" "${prefix}_REQUIRED=true" "$GATE"
   expect_failure env "${gate_env[@]}" "${prefix}_RESULT=failure" "$GATE"
@@ -207,6 +216,11 @@ echo 'CI script tests passed'
 bash "$SCRIPT_DIR/test-hosted-production-handoff.sh"
 bash "$SCRIPT_DIR/test-release-context-guard.sh"
 ruby "$SCRIPT_DIR/test-release-workflows.rb"
+python3 "$SCRIPT_DIR/test-container-ci.py"
+ruby "$SCRIPT_DIR/test-artifact-cache.rb"
+python3 "$SCRIPT_DIR/test-rust-test-shards.py"
+bash "$SCRIPT_DIR/test-android-ci-artifacts.sh"
+ruby "$SCRIPT_DIR/test-ci-topology.rb"
 "$SCRIPT_DIR/test-release-signing-readiness.sh"
 "$SCRIPT_DIR/test-publish-community-image.sh"
 ruby "$SCRIPT_DIR/test-contribution-policy.rb"

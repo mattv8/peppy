@@ -3,6 +3,7 @@ retries = 0
 
 [profile.ci]
 test-threads = 4
+retries = 0
 fail-fast = false
 failure-output = "immediate-final"
 slow-timeout = { period = "60s" }

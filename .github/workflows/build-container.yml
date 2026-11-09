@@ -18,7 +18,7 @@ defaults:
     shell: bash
 
 jobs:
-  container-image:
+  server:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -27,7 +27,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ inputs.ref || github.sha }}
-      - name: Build container images
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - id: metadata
         env:
           VERSION: ${{ inputs.version }}
         run: |
@@ -35,21 +36,25 @@ jobs:
             echo "version must match X.Y.Z or X.Y.Z-prerelease" >&2
             exit 1
           fi
-          for image in peppy-server peppy-push-relay peppy-mcp; do
-            dockerfile="infra/docker/${image#peppy-}.Dockerfile"
-            if [[ "$image" == peppy-server ]]; then dockerfile=infra/docker/server.Dockerfile; fi
-            docker_args=(
-              --file "$dockerfile"
-              --tag "$image:ci"
-              --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY"
-              --label "org.opencontainers.image.revision=$(git rev-parse HEAD)"
-              --label "org.opencontainers.image.title=$image"
-              --label "org.opencontainers.image.licenses=Apache-2.0"
-            )
-            if [[ -n "$VERSION" ]]; then docker_args+=(--label "org.opencontainers.image.version=$VERSION"); fi
-            docker build "${docker_args[@]}" .
-          done
-      - run: |
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [[ -n "$VERSION" ]]; then echo "version_label=org.opencontainers.image.version=$VERSION" >> "$GITHUB_OUTPUT"; fi
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: infra/docker/server.Dockerfile
+          load: true
+          push: false
+          tags: peppy-server:ci
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.metadata.outputs.revision }}
+            org.opencontainers.image.title=peppy-server
+            org.opencontainers.image.licenses=Apache-2.0
+            ${{ steps.metadata.outputs.version_label }}
+          cache-from: type=gha,scope=container-server
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/production' && 'type=gha,mode=max,scope=container-server' || '' }}
+      - name: Check server image
+        run: |
           docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges:true --entrypoint /bin/sh \
             peppy-server:ci -ec '
@@ -59,6 +64,42 @@ jobs:
               command -v ldd >/dev/null
               ! ldd /usr/local/bin/peppy-server | grep "not found"
             '
+
+  relay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - id: metadata
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ -n "$VERSION" && ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "version must match X.Y.Z or X.Y.Z-prerelease" >&2
+            exit 1
+          fi
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [[ -n "$VERSION" ]]; then echo "version_label=org.opencontainers.image.version=$VERSION" >> "$GITHUB_OUTPUT"; fi
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: infra/docker/push-relay.Dockerfile
+          load: true
+          push: false
+          tags: peppy-push-relay:ci
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.metadata.outputs.revision }}
+            org.opencontainers.image.title=peppy-push-relay
+            org.opencontainers.image.licenses=Apache-2.0
+            ${{ steps.metadata.outputs.version_label }}
+          cache-from: type=gha,scope=container-relay
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/production' && 'type=gha,mode=max,scope=container-relay' || '' }}
       - name: Check relay image
         run: |
           docker run --rm --network none --read-only --cap-drop ALL \
@@ -70,5 +111,57 @@ jobs:
               command -v ldd >/dev/null
               ! ldd /usr/local/bin/peppy-push-relay | grep "not found"
             '
+
+  mcp:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - id: metadata
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ -n "$VERSION" && ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "version must match X.Y.Z or X.Y.Z-prerelease" >&2
+            exit 1
+          fi
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [[ -n "$VERSION" ]]; then echo "version_label=org.opencontainers.image.version=$VERSION" >> "$GITHUB_OUTPUT"; fi
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: infra/docker/mcp.Dockerfile
+          load: true
+          push: false
+          tags: peppy-mcp:ci
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.metadata.outputs.revision }}
+            org.opencontainers.image.title=peppy-mcp
+            org.opencontainers.image.licenses=Apache-2.0
+            ${{ steps.metadata.outputs.version_label }}
+          cache-from: type=gha,scope=container-mcp
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/production' && 'type=gha,mode=max,scope=container-mcp' || '' }}
       - name: Check MCP image
         run: bash infra/docker/test-mcp-image.sh peppy-mcp:ci
+
+  complete:
+    if: ${{ always() }}
+    needs: [server, relay, mcp]
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Require every container image validation
+        env:
+          SERVER_RESULT: ${{ needs.server.result }}
+          RELAY_RESULT: ${{ needs.relay.result }}
+          MCP_RESULT: ${{ needs.mcp.result }}
+        run: |
+          for result in "$SERVER_RESULT" "$RELAY_RESULT" "$MCP_RESULT"; do
+            [[ "$result" == success ]] || exit 1
+          done
