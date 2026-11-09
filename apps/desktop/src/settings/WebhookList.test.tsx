@@ -165,7 +165,7 @@ describe("WebhookList", () => {
 
     const alert = await within(row(zapier.id)).findByRole("alert");
     expect(alert).toHaveTextContent("This webhook no longer exists.");
-    expect(within(row(zapier.id)).getByRole("button", { name: "Delete" })).toHaveFocus();
+    await waitFor(() => expect(within(row(zapier.id)).getByRole("button", { name: "Delete" })).toHaveFocus());
   });
 
   it("refocuses Delete after a delayed deletion failure", async () => {
@@ -177,6 +177,6 @@ describe("WebhookList", () => {
     pending.reject({ code: "webhook_not_found", message: "gone" });
 
     await within(row(zapier.id)).findByRole("alert");
-    expect(within(row(zapier.id)).getByRole("button", { name: "Delete" })).toHaveFocus();
+    await waitFor(() => expect(within(row(zapier.id)).getByRole("button", { name: "Delete" })).toHaveFocus());
   });
 });

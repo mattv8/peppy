@@ -264,7 +264,7 @@ describe("SetupLanding", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /already use peppy/i })).toHaveFocus());
     fireEvent.click(screen.getByRole("button", { name: /i'm new to peppy/i }));
     fireEvent.click(await screen.findByRole("button", { name: "Back" }));
-    expect(await screen.findByRole("button", { name: /already use peppy/i })).toHaveFocus();
+    await waitFor(() => expect(screen.getByRole("button", { name: /already use peppy/i })).toHaveFocus());
   });
 
   it("does not restore a hidden enrollment when a late discovery resolves after Back", async () => {
@@ -2489,7 +2489,7 @@ describe("SetupLanding", () => {
       fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
       fireEvent.click(await screen.findByRole("button", { name: "Finish connection" }));
       fireEvent.click(await screen.findByRole("button", { name: "Discard this attempt" }));
-      expect(screen.getByRole("button", { name: "Keep trying" })).toHaveFocus();
+      await waitFor(() => expect(screen.getByRole("button", { name: "Keep trying" })).toHaveFocus());
       fireEvent.click(screen.getByRole("button", { name: "Retry finishing" }));
       expect(screen.queryByRole("button", { name: "Keep trying" })).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Finish connection" })).toBeDisabled();
