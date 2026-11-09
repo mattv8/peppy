@@ -14,12 +14,13 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
-use peppy_client_core::IncomingSms;
+use peppy_client_core::{DraftPushOutcome, IncomingSms};
 use serde_json::json;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
+use tokio::time::{sleep, Duration};
 
 fn unlock(session: &crate::session::Session, fixture: &Fixture) {
     session
@@ -768,6 +769,336 @@ fn saved_draft_for_target(
         .unwrap();
     assert_eq!(saved.conversation_id, target);
     (target, saved)
+}
+
+fn synced_pending_draft(
+    session: &crate::session::Session,
+) -> (String, crate::DraftView, crate::DraftView) {
+    session.client.set_draft_sync_supported(true).unwrap();
+    let (target, accepted) = saved_draft_for_target(session, "accepted");
+    let push = session.client.pending_draft_pushes().unwrap().remove(0);
+    session
+        .client
+        .record_draft_push(
+            push.draft_id,
+            push.revision_id,
+            DraftPushOutcome::Accepted {
+                branch_id: uuid::Uuid::new_v4(),
+                expires_at_ms: 4_102_444_800_000,
+                conflict: false,
+            },
+        )
+        .unwrap();
+    let pending = session
+        .save_draft(&input(
+            &accepted.id,
+            &target,
+            "pending",
+            &["+15555550100"],
+            &accepted.revision,
+        ))
+        .unwrap();
+    assert_eq!(session.client.pending_draft_pushes().unwrap().len(), 1);
+    (target, accepted, pending)
+}
+
+fn known_gateway(session: &crate::session::Session) -> String {
+    let gateway_id = uuid::Uuid::new_v4().to_string();
+    session.set_status(|status| {
+        status.gateways = vec![gateway(&gateway_id, true, true)];
+        status.gateways_known = true;
+    });
+    gateway_id
+}
+
+fn pending_send_input(
+    target: &str,
+    draft: &crate::DraftView,
+    gateway_id: &str,
+) -> crate::DraftInput {
+    routed(
+        input(&draft.id, target, "", &[], &draft.revision),
+        gateway_id,
+        "sim-1",
+    )
+}
+
+fn put_response(conflict: bool, duplicate: bool, revision_id: &str) -> String {
+    json!({
+        "branch_id": uuid::Uuid::new_v4(),
+        "revision_id": revision_id,
+        "expires_at": "2099-12-01T00:00:00Z",
+        "conflict": conflict,
+        "duplicate": duplicate,
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn pending_synced_draft_send_pushes_then_remotely_accepts_once() {
+    let (origin, seen) = crate::contacts::tests::mock_server(|method, path, body| {
+        if method == "PUT" && path.starts_with("/v1/drafts/") {
+            return (
+                200,
+                put_response(false, false, path.rsplit('/').next().unwrap()),
+            );
+        }
+        if method == "POST" && path.ends_with("/send") {
+            let command_id = serde_json::from_str::<serde_json::Value>(body).unwrap()["command_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            return (
+                200,
+                json!({ "command_id": command_id, "duplicate": false }).to_string(),
+            );
+        }
+        (404, "{}".into())
+    })
+    .await;
+    let fixture = fixture_at(&origin);
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+    let gateway_id = known_gateway(&session);
+    let (target, _, pending) = synced_pending_draft(&session);
+
+    let sent = send_draft_for_window(
+        &state(&fixture),
+        &label(&target),
+        session,
+        pending_send_input(&target, &pending, &gateway_id),
+    )
+    .await
+    .unwrap();
+
+    assert!(sent.accepted);
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        seen.iter()
+            .filter(|request| request.method == "PUT")
+            .count(),
+        1
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|request| request.path.ends_with("/send"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn conflicting_inline_push_requires_review_without_remote_send() {
+    for duplicate in [false, true] {
+        let (origin, seen) = crate::contacts::tests::mock_server(move |method, path, _| {
+            if method == "PUT" && path.starts_with("/v1/drafts/") {
+                return (
+                    200,
+                    put_response(true, duplicate, path.rsplit('/').next().unwrap()),
+                );
+            }
+            (404, "{}".into())
+        })
+        .await;
+        let fixture = fixture_at(&origin);
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+        unlock(&session, &fixture);
+        let gateway_id = known_gateway(&session);
+        let (target, _, pending) = synced_pending_draft(&session);
+
+        let error = send_draft_for_window(
+            &state(&fixture),
+            &label(&target),
+            session,
+            pending_send_input(&target, &pending, &gateway_id),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.code, "draft-review-required");
+        assert_eq!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.path.ends_with("/send"))
+                .count(),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn offline_inline_push_returns_sync_offline_without_remote_send() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+    let gateway_id = known_gateway(&session);
+    let (target, _, pending) = synced_pending_draft(&session);
+
+    let error = send_draft_for_window(
+        &state(&fixture),
+        &label(&target),
+        session,
+        pending_send_input(&target, &pending, &gateway_id),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "draft-sync-offline");
+}
+
+#[tokio::test]
+async fn terminal_inline_push_returns_draft_sent_without_remote_send() {
+    let (origin, seen) = crate::contacts::tests::mock_server(|method, path, _| {
+        if method == "PUT" && path.starts_with("/v1/drafts/") {
+            return (410, json!({ "code": "draft_sent" }).to_string());
+        }
+        (404, "{}".into())
+    })
+    .await;
+    let fixture = fixture_at(&origin);
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+    let gateway_id = known_gateway(&session);
+    let (target, _, pending) = synced_pending_draft(&session);
+
+    let error = send_draft_for_window(
+        &state(&fixture),
+        &label(&target),
+        session,
+        pending_send_input(&target, &pending, &gateway_id),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "draft-sent");
+    assert_eq!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.path.ends_with("/send"))
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn held_draft_push_lock_times_out_then_allows_a_later_send() {
+    let (origin, seen) = crate::contacts::tests::mock_server(|method, path, body| {
+        if method == "PUT" && path.starts_with("/v1/drafts/") {
+            return (
+                200,
+                put_response(false, false, path.rsplit('/').next().unwrap()),
+            );
+        }
+        if method == "POST" && path.ends_with("/send") {
+            let command_id = serde_json::from_str::<serde_json::Value>(body).unwrap()["command_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            return (
+                200,
+                json!({ "command_id": command_id, "duplicate": false }).to_string(),
+            );
+        }
+        (404, "{}".into())
+    })
+    .await;
+    let fixture = fixture_at(&origin);
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+    let gateway_id = known_gateway(&session);
+    let (target, _, pending) = synced_pending_draft(&session);
+    let lock = session.draft_push_lock.lock().await;
+
+    let error = send_draft_for_window(
+        &state(&fixture),
+        &label(&target),
+        session.clone(),
+        pending_send_input(&target, &pending, &gateway_id),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "draft-syncing");
+    assert_eq!(
+        error.message,
+        "This draft could not be synced. Try sending again."
+    );
+    drop(lock);
+
+    let mut current = pending_send_input(&target, &pending, &gateway_id);
+    current.expected_revision = session
+        .client
+        .compose_draft(pending.id.parse().unwrap())
+        .unwrap()
+        .unwrap()
+        .revision
+        .to_string();
+
+    let sent = send_draft_for_window(&state(&fixture), &label(&target), session, current)
+        .await
+        .unwrap();
+    assert!(sent.accepted);
+    assert_eq!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.path.ends_with("/send"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn released_draft_push_lock_before_timeout_allows_send() {
+    let (origin, seen) = crate::contacts::tests::mock_server(|method, path, body| {
+        if method == "PUT" && path.starts_with("/v1/drafts/") {
+            return (
+                200,
+                put_response(false, false, path.rsplit('/').next().unwrap()),
+            );
+        }
+        if method == "POST" && path.ends_with("/send") {
+            let command_id = serde_json::from_str::<serde_json::Value>(body).unwrap()["command_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            return (
+                200,
+                json!({ "command_id": command_id, "duplicate": false }).to_string(),
+            );
+        }
+        (404, "{}".into())
+    })
+    .await;
+    let fixture = fixture_at(&origin);
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+    let gateway_id = known_gateway(&session);
+    let (target, _, pending) = synced_pending_draft(&session);
+    let lock = session.draft_push_lock.lock().await;
+    let send_state = state(&fixture);
+    let send_label = label(&target);
+    let send_session = session.clone();
+    let input = pending_send_input(&target, &pending, &gateway_id);
+    let send = tokio::spawn(async move {
+        send_draft_for_window(&send_state, &send_label, send_session, input).await
+    });
+    sleep(Duration::from_millis(50)).await;
+    let puts = || {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.method == "PUT")
+            .count()
+    };
+    assert_eq!(puts(), 0, "the inline push must wait for the held lock");
+    assert!(!send.is_finished());
+    drop(lock);
+
+    let sent = send.await.unwrap().unwrap();
+    assert!(sent.accepted);
+    assert_eq!(puts(), 1);
 }
 
 #[test]
