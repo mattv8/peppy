@@ -146,6 +146,8 @@ pub struct Session {
     pub attachment_retention_epoch: std::sync::atomic::AtomicU64,
     /// Serializes host maintenance triggered by the outbound and replay workers.
     pub attachment_retention_maintenance: tokio::sync::Mutex<()>,
+    /// Serializes draft revision pushes between the worker and an immediate send.
+    pub(crate) draft_push_lock: tokio::sync::Mutex<()>,
     /// Supervisor tasks are retained until an update restart has observed their completion.
     workers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pub notifier: Notifier,
@@ -522,6 +524,7 @@ pub fn open_session(
         attachment_retention_replay_observed: AtomicBool::new(false),
         attachment_retention_epoch: std::sync::atomic::AtomicU64::new(0),
         attachment_retention_maintenance: tokio::sync::Mutex::new(()),
+        draft_push_lock: tokio::sync::Mutex::new(()),
         workers: Mutex::new(Vec::new()),
         notifier,
         mismatch: AtomicBool::new(false),
