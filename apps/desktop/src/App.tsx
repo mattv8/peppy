@@ -13,7 +13,7 @@ import {
   type WheelEvent,
 } from "react";
 import { flushSync } from "react-dom";
-import { MAX_DRAFT_ATTACHMENTS, type ConversationFolder, type GatewayAvailability, type LocalSearchHit, type LocalSearchRequest } from "@peppy/desktop-ui/bridge-contracts";
+import { MAX_DRAFT_ATTACHMENTS, type ConversationFolder, type GatewayAvailability, type LocalSearchHit, type LocalSearchRequest, type OneTimeCodeTarget } from "@peppy/desktop-ui/bridge-contracts";
 import {
   AppTitlebar,
   attachmentStorageRemovalText,
@@ -161,6 +161,7 @@ import { hiddenTimeIds } from "./conversation/timestamp-bursts";
 import { createSeenReactionLedger, linkReactions, locateReactionTarget, NO_REACTIONS, ReactionBadges, ReactionNotice, ReactionSettings, useSeenBadges, useShowReactions, type ActorName, type ReactionNoticeInfo, type ReactionTargetResult, type SeenReactionLedger } from "./reactions";
 import { normalizeReactionText, quoteMatches } from "./reactions/parse";
 import { FALLBACK_ERROR, errorCode, errorText } from "./bridge/bridgeErrors";
+import { OneTimeCodeButton } from "./one-time-code/OneTimeCodeButton";
 import {
   DraftStore,
   blankContent,
@@ -769,6 +770,7 @@ function MessageList({
   releaseMedia,
   mediaRetryKey,
   onOpenExternal,
+  onCopyOneTimeCode,
   searchTargetId,
   detachedHistory,
   onLoadNewer,
@@ -814,6 +816,7 @@ function MessageList({
   releaseMedia(id: string, url: string): void;
   mediaRetryKey: unknown;
   onOpenExternal?: (url: string) => Promise<void>;
+  onCopyOneTimeCode(target: OneTimeCodeTarget, code: string): Promise<void>;
   searchTargetId?: string;
   detachedHistory?: DetachedHistory;
   onLoadNewer(control: HTMLElement): void;
@@ -1074,6 +1077,9 @@ function MessageList({
               })}
               {chromeless && message.body && <p data-message-caption><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
               {chromeless && message.subject && <p className="message-subject">Subject: <bdi>{message.subject}</bdi></p>}
+              {message.sender === "other" && message.oneTimeCode && conversation?.folder !== "spam" && (
+                <OneTimeCodeButton key={`${message.id}:${message.oneTimeCode}`} variant="message" hookId={message.id} target={{ kind: "message", messageId: message.id }} code={message.oneTimeCode} onCopy={onCopyOneTimeCode} />
+              )}
             </article>
           );
           return (
@@ -3240,6 +3246,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }).catch(() => {}).finally(() => ids.forEach(id => pending.delete(id)));
   };
   useEffect(() => seenReactions.subscribe(() => setReactionSeenRevision(value => value + 1)), [seenReactions]);
+  const copyOneTimeCode = async (target: OneTimeCodeTarget, code: string) => {
+    await bridge.copy_one_time_code(target, code);
+    if (target.kind === "message") seenMessageIds.current.add(target.messageId);
+    else void refresh().catch(() => undefined);
+  };
   const captureReactionLayout = (): ReactionLayoutSnapshot | null => searchReadGate.current ? null
     : { bottom: nearBottom.current && !detachedHistoryRef.current, anchor: captureHistoryAnchor() };
   const restoreReactionLayout = (layout: ReactionLayoutSnapshot) => {
@@ -5095,6 +5106,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       onPublish={(file) => void publish(file)}
       onRetryAttachment={(file) => void retryAttachment(file)}
       onSaveAttachment={(file) => void saveAttachment(file)}
+      onCopyOneTimeCode={copyOneTimeCode}
       listRef={setMessageListNode}
       onScroll={onMessageScroll}
       onWheel={onMessageWheel}
@@ -5640,6 +5652,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 setNotificationActionNotice("");
                 void bridge.set_app_muted(filter.sourceDeviceId, filter.packageName, filter.appName, true).then(() => refresh()).catch(error => setNotificationActionNotice(`Could not mute app. ${errorText(error)}`));
               }}
+              onCopyOneTimeCode={copyOneTimeCode}
               onSeen={targets => {
                 return bridge.mark_notifications_seen(targets).then(() => refresh()).catch(error => {
                   setNotificationActionNotice(errorText(error));

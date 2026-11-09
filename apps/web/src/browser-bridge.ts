@@ -3,7 +3,7 @@ import type {
   ContactEditRequestInput, ContactEditStatus, ContactScanStatus, ContactSyncStatus, ContactView,
   DesktopBridge, DesktopSnapshot, DeviceRosterView, Draft, DraftInput, HistoryPage,
   HistorySearchAttemptInput, HistorySearchSnapshot, LocalSearchPage, LocalSearchRequest, MaximizeButtonRegion, MediaCursor, MediaOpen, MediaPage, MessageWindow,
-  MessageWindowRequest, NotificationCheck, NotificationPreferences, NotificationTarget, PublicCopy,
+  MessageWindowRequest, NotificationCheck, NotificationPreferences, NotificationTarget, OneTimeCodeTarget, PublicCopy,
   RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput, StartHistorySearchInput,
   BillingSummaryView, HostedSignInProvider, PurchaseOptions, StartupStatus, StoreProduct,
   AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult, ConversationFolder, NotificationPersistence, NotificationPersistenceSettings, PastedImage,
@@ -295,6 +295,15 @@ function generatedSecretDialog(passphrase: string): Promise<boolean> {
   });
 }
 
+async function writeClipboardText(text: string): Promise<void> {
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("Clipboard is unavailable.");
+    await navigator.clipboard.writeText(text);
+  } catch {
+    throw new BrowserBridgeError("clipboard-unavailable", "The code could not be copied.");
+  }
+}
+
 function chooseFile(accept: string, multiple = false): Promise<File[]> {
   return new Promise((resolve) => {
     const input = document.createElement("input");
@@ -515,6 +524,16 @@ export class BrowserBridge implements DesktopBridge {
   public send_draft(input: SendDraftInput): Promise<{ accepted: boolean; status: "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown"; reason?: string; revision?: string }> { return this.call("send_draft", { input }); }
   public discard_draft(input: { id: string; conversationId: string; expectedRevision: string }): Promise<void> { return this.call("discard_draft", { input }); }
   public mark_seen(visibleMessageIds: string[]): Promise<void> { return this.call("mark_seen", { visibleMessageIds }); }
+  /** Copies first; the read mark runs only after the clipboard accepts the code. */
+  public async copy_one_time_code(target: OneTimeCodeTarget, code: string): Promise<void> {
+    await writeClipboardText(code);
+    try {
+      if (target.kind === "message") await this.mark_seen([target.messageId]);
+      else await this.mark_notifications_seen([target.target]);
+    } catch {
+      // The code is already on the clipboard; a failed read mark must not report the copy as failed.
+    }
+  }
   public async mark_all_read(): Promise<string> {
     const batches = unreadMessageBatches(await this.call("unread_message_batches"));
     let changed = 0n;
