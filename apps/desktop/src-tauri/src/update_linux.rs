@@ -1157,7 +1157,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     mod packagekit_peer_fixture {
         use super::*;
-        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        use std::sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        };
         use tokio::sync::Notify;
         use zbus::{
             connection::Builder, interface, object_server::SignalEmitter,
@@ -1216,7 +1219,7 @@ mod tests {
 
         #[interface(name = "org.freedesktop.PackageKit.Transaction")]
         impl FakePackageKitTransaction {
-            async fn set_hints(&self, _: Vec<String>) -> zbus::fdo::Result<()> {
+            async fn set_hints(&self, _hints: Vec<String>) -> zbus::fdo::Result<()> {
                 self.state.set_hints_calls.fetch_add(1, Ordering::SeqCst);
                 if self.state.fail_hints.load(Ordering::SeqCst) {
                     Err(zbus::fdo::Error::Failed(
@@ -1229,8 +1232,8 @@ mod tests {
 
             async fn install_files(
                 &self,
-                _: u64,
-                _: Vec<String>,
+                _flags: u64,
+                _files: Vec<String>,
                 #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
             ) -> zbus::fdo::Result<()> {
                 self.mutate(emitter).await
@@ -1238,8 +1241,8 @@ mod tests {
 
             async fn update_packages(
                 &self,
-                _: u64,
-                _: Vec<String>,
+                _flags: u64,
+                _files: Vec<String>,
                 #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
             ) -> zbus::fdo::Result<()> {
                 self.mutate(emitter).await
