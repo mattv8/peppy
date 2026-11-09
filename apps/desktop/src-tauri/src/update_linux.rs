@@ -629,7 +629,7 @@ impl PackageKitBackend for ZbusPackageKit {
     async fn available(&self) -> bool {
         self.connection
             .call_method(
-                Self::SERVICE,
+                Some(Self::SERVICE),
                 Self::ROOT_PATH,
                 Some(Self::ROOT_INTERFACE),
                 "GetTransactionList",
@@ -643,7 +643,7 @@ impl PackageKitBackend for ZbusPackageKit {
         let reply = match self
             .connection
             .call_method(
-                Self::SERVICE,
+                Some(Self::SERVICE),
                 Self::ROOT_PATH,
                 Some(Self::ROOT_INTERFACE),
                 "GetTransactionList",
