@@ -1,8 +1,8 @@
 # Google Messages link
 
-This Go module builds the Android bridge for the Google Messages link. Direct
-APKs include it only when the trusted release has a nonempty protected
-`PEPPY_GOOGLE_MESSAGES_LICENSE_SIGNOFF` variable; Play/AAB builds never include it.
+This Go module builds the Android bridge for the Google Messages link. Trusted
+direct APKs always include it; Play/AAB builds never include it. Local sideload
+builds opt in with `-PpeppyGoogleMessagesLink=true`.
 
 ## Pins
 
@@ -23,5 +23,4 @@ go vet ./...
 checks and applies the private safety patch, and verifies the resulting tree.
 
 Peppy's Go code is Apache-2.0. The private patch contains AGPL-3.0-or-later
-libgm source excerpts; any binary linking libgm is AGPL-3.0-covered. The
-protected licensing sign-off controls whether a trusted direct APK includes it.
+libgm source excerpts; any binary linking libgm is AGPL-3.0-covered.

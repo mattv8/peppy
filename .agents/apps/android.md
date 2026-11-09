@@ -64,7 +64,7 @@ Evidence boundary: a Pixel 7 on Android 17 with Google Messages 20261020 showed 
 
 The Google Messages link runs libgm in the native Android host on the gateway phone. Send and receive code paths exist in the core and host, but production activation (the native send executor and receive sink) remains disabled pending owner approval. Tests, Go checks, and packaged artifacts are separate evidence from owner-approved real-account linking and message delivery. The in-app link copy describes what the link may do once activated; it is not evidence that sending or receiving works. Do not claim RCS send, receive, media, or group support from the link until that activation is approved and verified.
 
-`peppyGoogleMessagesLink` defaults to `false` for every distribution. A local sideload build can opt in with `-PpeppyGoogleMessagesLink=true` after building the AAR. Debug and Play builds exclude libgm, `libgojni.so`, and link notices. Trusted release builds create the AAR and pass that flag only when the protected `PEPPY_GOOGLE_MESSAGES_LICENSE_SIGNOFF` variable is nonempty; otherwise their direct APK excludes libgm. The distribution verifier receives an explicit libgm-present or libgm-absent expectation. Play/AAB builds never include libgm.
+`peppyGoogleMessagesLink` defaults to `false` for every distribution. A local sideload build can opt in with `-PpeppyGoogleMessagesLink=true` after building the AAR. Debug and Play builds exclude libgm, `libgojni.so`, and link notices. Trusted release builds always create the AAR and pass that flag to the direct APK build, so the direct APK always includes libgm; the distribution verifier expects it present. Play/AAB builds never include libgm.
 
 ### Native RCS implementation traps
 
