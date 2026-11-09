@@ -4251,16 +4251,6 @@
         }
       }
     },
-    "peppy.google_messages_link_signin_blocked_action": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Google blocked sign-in"
-          }
-        }
-      }
-    },
     "peppy.google_messages_link_signin_load_error": {
       "localizations": {
         "en": {

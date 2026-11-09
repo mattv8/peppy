@@ -2,7 +2,10 @@ package dev.peppy.mobile.googlemessages
 
 import android.app.Activity
 import android.os.Looper
+import android.view.View
+import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.widget.Button
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -99,6 +102,29 @@ class LinkSignInActivityTest {
         shadowOf(Looper.getMainLooper()).idle()
 
         assertFalse(statusReadOnMain.get())
+        controller.destroy()
+    }
+
+    @Test
+    fun `sign-in screen keeps Cancel without Google blocked sign-in`() {
+        val startup = ControlledStartup()
+        LinkSignInActivityTestHooks.startupExecutor = startup::capture
+        LinkSignInActivityTestHooks.awaitSignInReady = { true }
+        LinkRuntimeTestHooks.engine = availableEngine(object : LinkedHandle() {
+            override fun status() = "{\"state\":\"unlinked\"}"
+        })
+        LinkRuntimeTestHooks.storeFactory = { EmptyLinkStateStorage }
+
+        val controller = Robolectric.buildActivity(LinkSignInActivity::class.java).setup()
+        val activity = controller.get()
+        startup.run()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        val buttonTexts = descendantViews(activity.window.decorView)
+            .filterIsInstance<Button>()
+            .map { it.text.toString() }
+        assertTrue(buttonTexts.contains("Cancel"))
+        assertFalse(buttonTexts.contains("Google blocked sign-in"))
         controller.destroy()
     }
 
@@ -215,6 +241,13 @@ class LinkSignInActivityTest {
         val next = LinkSignInRuntime.acquireLease()
         assertNotNull(next)
         LinkSignInRuntime.releaseLease(requireNotNull(next))
+    }
+
+    private fun descendantViews(view: View): Sequence<View> = sequence {
+        yield(view)
+        if (view is ViewGroup) {
+            for (index in 0 until view.childCount) yieldAll(descendantViews(view.getChildAt(index)))
+        }
     }
 
     private fun availableEngine(handle: LinkHandle) = object : LinkEngine {

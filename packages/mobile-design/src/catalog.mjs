@@ -425,7 +425,6 @@ export const catalog = Object.freeze({
   google_messages_link_signin_title: "Sign in to Google",
   google_messages_link_signin_loading: "Loading Google sign-in…",
   google_messages_link_signin_blocked_hint: "Google may refuse sign-in in an app.",
-  google_messages_link_signin_blocked_action: "Google blocked sign-in",
   google_messages_link_signin_load_error: "Could not load Google's sign-in page. Check your connection and try again.",
   google_messages_link_confirm_title: "Finish linking",
   google_messages_link_confirm_body: "You are signed in. Nothing is saved if you cancel.",

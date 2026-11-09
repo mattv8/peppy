@@ -121,10 +121,6 @@ class LinkSignInActivity : AppCompatActivity() {
         addView(host)
         addView(webView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         addView(Button(this@LinkSignInActivity).apply {
-            text = getString(R.string.peppy_google_messages_link_signin_blocked_action)
-            setOnClickListener { wipe { finishWith(OUTCOME_BLOCKED) } }
-        })
-        addView(Button(this@LinkSignInActivity).apply {
             text = getString(R.string.peppy_cancel)
             setOnClickListener { wipe { finishWith(OUTCOME_CANCELLED) } }
         })
