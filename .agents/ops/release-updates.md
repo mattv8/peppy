@@ -53,11 +53,10 @@ Configure the following protected inputs before enabling an update release:
   64-hex-digit SHA-256 fingerprint of the Android release certificate. The
   publisher independently verifies final staged APK and AAB assets against it
   before checksums or GitHub Release creation.
-- `PEPPY_GOOGLE_MESSAGES_LICENSE_SIGNOFF` protected environment variable: a
-  nonempty value permits the trusted direct APK build to create the libgm AAR
-  and pass `-PpeppyGoogleMessagesLink=true`. Without it, the direct APK excludes
-  libgm; Play/AAB builds always exclude it. Trusted libgm builds require Go
-  `1.27.3`, JDK 17, NDK `27.2.12479018`, and the AAR build inputs.
+
+Trusted direct APK builds always create the libgm AAR and link it, which requires
+Go `1.27.3`, JDK 17, NDK `27.2.12479018`, and the AAR build inputs. Play/AAB
+builds never include libgm.
 
 The trusted build fails closed when its channel, updater key, required selected
 platform credentials, or explicit mode value is invalid. It never downgrades a
@@ -118,10 +117,11 @@ signed direct-sideload artifact; the AAB is an upload input for store tooling,
 not directly installable. Google Play enrollment is not required to sideload the
 APK.
 
-When a direct APK includes libgm, its release notes must say that inclusion
-required the protected licensing sign-off, that the Play/AAB build does not
-include the link, and that the in-app **Open-source licenses** page contains the
-Google Messages notices and corresponding-source offer.
+Trusted direct APK release notes must say that the APK includes the Google
+Messages link, that the AAB and Play distribution never include it, that including
+the link does not by itself enable Google Messages sending or receiving, and that
+the in-app **Open-source licenses** page contains the Google Messages notices and
+corresponding-source offer.
 
 Protected environments must permit deployment only from `production` for
 `updates-stable` and from `staging` for `updates-staging`. The only trusted

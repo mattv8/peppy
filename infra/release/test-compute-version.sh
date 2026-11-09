@@ -190,6 +190,12 @@ printf '%s\n' "$notes" | grep -F 'iOS archive remains unsigned' >/dev/null
 if printf '%s\n' "$notes" | grep -F 'Android APK' >/dev/null; then exit 1; fi
 android_notes=$(cd "$repo" && TRUSTED_UPDATE_BUILD=true "$script_dir/release-notes.sh" 0.2.0-staging.9 --component android)
 printf '%s\n' "$android_notes" | grep -F 'signed Android APK for direct sideloading' >/dev/null
+if printf '%s\n' "$android_notes" | grep -Eqi 'sign-?off|LICENSE_SIGNOFF|authorized it'; then exit 1; fi
+printf '%s\n' "$android_notes" | grep -F 'The direct APK includes the Google Messages link' >/dev/null
+printf '%s\n' "$android_notes" | grep -F 'The AAB and Play distribution never include it' >/dev/null
+printf '%s\n' "$android_notes" | grep -F 'does not by itself enable Google Messages sending or receiving' >/dev/null
+printf '%s\n' "$android_notes" | grep -F 'corresponding-source offer' >/dev/null
+printf '%s\n' "$android_notes" | grep -F 'Open-source licenses' >/dev/null
 if printf '%s\n' "$android_notes" | grep -Eq 'Tauri|RPM|macOS'; then exit 1; fi
 printf '%s\n' "$notes" | grep -F '### macOS first launch' >/dev/null
 printf '%s\n' "$notes" | grep -Fx '```sh' >/dev/null
