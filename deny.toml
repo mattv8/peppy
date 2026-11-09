@@ -23,6 +23,12 @@ ignore = [
   { id = "RUSTSEC-2026-0371", reason = "Transitive zbus_names via Tauri plugins on zbus 5; no released compatible zbus 6 migration. Track upstream Tauri and notify-rust updates. [expires: 2027-02-01]" },
   { id = "RUSTSEC-2026-0372", reason = "Transitive zvariant_derive via Tauri plugins on zbus 5; no released compatible zbus 6 migration. Track upstream Tauri and notify-rust updates. [expires: 2027-02-01]" },
   { id = "RUSTSEC-2026-0374", reason = "Transitive build-time parser via UniFFI CLI bindgen and Askama 0.16.1; no released compatible replacement. Remove after Askama replaces basic-toml in a release. [expires: 2027-02-01]" },
+  # This one is a runtime vulnerability in the bundled SQLite. No release fixes
+  # the SQLCipher bundle, and SQLx 0.8 pins libsqlite3-sys 0.30. Peppy opens only
+  # app-managed databases, and SQLCipher HMAC-checks each page before decrypting,
+  # so a crafted -wal without the key fails the open instead of leaking memory.
+  # Upgrade rusqlite as soon as a SQLCipher bundle with SQLite 3.54+ is released.
+  { id = "RUSTSEC-2026-0459", reason = "Bundled SQLCipher 4.5.7 (SQLite 3.45.3) via rusqlite 0.32; no patched SQLCipher bundle and SQLx 0.8 pins libsqlite3-sys 0.30. Only app-managed databases are opened; browser checkpoints exclude -wal; compatibility-4 page HMAC rejects an unkeyed crafted -wal before decryption. Upgrade when a SQLCipher bundle with SQLite 3.54+ ships. [expires: 2027-01-09]" },
 ]
 
 [bans]
