@@ -1308,7 +1308,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             std::fs::create_dir_all(dir.path().join("runtime")).unwrap();
             let config = WorkerConfig {
-                api_url: "http://api.test:8080".into(),
+                api_url: "http://192.0.2.1:8080".into(),
                 public_api_url: "https://api.test".into(),
                 state_dir: dir.path().to_path_buf(),
                 key_file: dir.path().join("key"),
