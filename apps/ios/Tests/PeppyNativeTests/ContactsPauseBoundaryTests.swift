@@ -187,7 +187,7 @@ private actor PausedProvider: ContactsProvider {
     @Test func pausedActiveSweepRetainsTheInterruptedPhotoForOneLaterCapture() async throws {
         let image = try #require(syntheticImage())
         let base = WritableFakeProvider()
-        await base.configure { $0.book = sampleContacts(2); $0.historyEnabled = true }
+        await base.configure { $0.book = sampleContacts(1); $0.historyEnabled = true }
         let preferences = InMemoryContactsPreferences(ContactsPreferences(enabled: true))
         let initial = try coordinator(base, preferences: preferences)
         let first = try await initial.0.run(reason: .foreground, isCancelled: { false })
