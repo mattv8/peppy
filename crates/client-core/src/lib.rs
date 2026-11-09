@@ -54,6 +54,7 @@ mod message_history_protocol;
 mod message_history_requests;
 mod message_origin;
 mod notification_preferences;
+pub mod one_time_code;
 mod sender_blocklist;
 #[cfg(feature = "test-support")]
 mod test_support;
@@ -119,6 +120,7 @@ pub use mms_backfill::{
     MmsBackfillRecheck, MmsBackfillRecheckConditions, MmsBackfillRecheckOutcome,
     MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBackfillStatus, MmsLegacyBackfillState,
 };
+pub use one_time_code::{OneTimeCode, OneTimeCodeSource};
 use peppy_crypto::FileKey;
 use peppy_crypto::enrollment::{
     EncryptedHandoff, EnrollmentContext, EnrollmentPurpose, EnrollmentRole, HandoffRootPackage,
@@ -671,6 +673,8 @@ pub struct MirroredNotification {
     pub dismissible: bool,
     pub seen: bool,
     pub dismissal_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub one_time_code: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -744,6 +748,26 @@ pub struct BannerCandidate {
     pub source_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_icon_png_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub one_time_code: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum OneTimeCodeTarget {
+    Message {
+        #[serde(rename = "messageId")]
+        message_id: String,
+    },
+    Notification {
+        target: NotificationTarget,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OneTimeCodeMatch {
+    pub code: String,
+    pub conversation_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -5314,6 +5338,66 @@ impl Client {
         )?;
         tx.commit()?;
         Ok(true)
+    }
+
+    pub fn one_time_code_for(
+        &self,
+        target: &OneTimeCodeTarget,
+    ) -> Result<Option<OneTimeCodeMatch>, Error> {
+        let store = self.lock()?;
+        if store
+            .active_epoch
+            .is_none_or(|epoch| !store.keys.contains_key(&epoch))
+        {
+            return Ok(None);
+        }
+        match target {
+            OneTimeCodeTarget::Message { message_id } => {
+                let row: Option<(String, String)> = store
+                    .conn
+                    .query_row(
+                        "SELECT payload,conversation_id FROM messages WHERE id=?",
+                        [message_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                let Some((payload, conversation_id)) = row else {
+                    return Ok(None);
+                };
+                let payload = decode::<MessagePayload>(payload.as_bytes())?;
+                if payload.direction != Direction::Incoming {
+                    return Ok(None);
+                }
+                let effective_folder = conversation_folders::effective_folder_sql(
+                    "(SELECT MAX(m.sort_at_ms) FROM messages m WHERE m.conversation_id=f.conversation_id)",
+                );
+                let spam: bool = store.conn.query_row(
+                    &format!("SELECT EXISTS(SELECT 1 FROM conversation_folders f WHERE f.conversation_id=? AND ({effective_folder})='spam')"),
+                    [&conversation_id],
+                    |row| row.get(0),
+                )?;
+                Ok((!spam)
+                    .then(|| one_time_code::detect(&payload.body))
+                    .flatten()
+                    .map(|code| OneTimeCodeMatch {
+                        code: code.code,
+                        conversation_id: Some(conversation_id),
+                    }))
+            }
+            OneTimeCodeTarget::Notification { target } => {
+                let row: Option<(String, String)> = store.conn.query_row(
+                    "SELECT text,title FROM notifications WHERE source_device_id=? AND notification_key=? AND lifetime=? AND removed=0",
+                    params![target.source_device_id, target.notification_key, target.lifetime],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ).optional()?;
+                Ok(row
+                    .and_then(|(text, title)| one_time_code::detect_notification(&text, &title))
+                    .map(|code| OneTimeCodeMatch {
+                        code: code.code,
+                        conversation_id: None,
+                    }))
+            }
+        }
     }
 
     /// Freezes the IDs currently unread in batches that keep later writes bounded.

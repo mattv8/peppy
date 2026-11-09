@@ -256,6 +256,8 @@ pub struct MessageView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sender_address: Option<String>,
     pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub one_time_code: Option<String>,
     /// Empty only when the provider did not supply a timestamp; never synthesized from arrival.
     pub timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -712,6 +714,10 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
             .then(|| message.payload.sender_address.clone())
             .flatten(),
         body: message.payload.body.clone(),
+        one_time_code: (message.payload.direction == Direction::Incoming)
+            .then(|| peppy_client_core::one_time_code::detect(&message.payload.body))
+            .flatten()
+            .map(|code| code.code),
         timestamp: positive_ms_to_decimal(message.payload.sent_at_ms).unwrap_or_default(),
         status: message.send_state.map(send_state_label),
         status_at: positive_ms_to_decimal(message.status_at_ms),
@@ -1044,6 +1050,54 @@ mod tests {
             serde_json::to_value(without_status_time)
                 .unwrap()
                 .get("statusAt")
+                .is_none()
+        );
+    }
+
+    fn message_with_body(direction: Direction, body: &str) -> Message {
+        Message {
+            payload: MessagePayload {
+                record: MessageRecord {
+                    message_id: MessageId::new(),
+                    conversation_id: ConversationId::new(),
+                    source_sequence: SourceSequence(1),
+                    attachments: vec![],
+                },
+                source_device_id: DeviceId::new(),
+                provider_message_id: None,
+                sender_address: None,
+                recipients: vec![],
+                subject: None,
+                body: body.into(),
+                transport: Transport::Sms,
+                direction,
+                imported: false,
+                sent_at_ms: Some(2),
+                ordered_at_ms: None,
+                mms_context: None,
+            },
+            seen: false,
+            send_state: None,
+            status_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn one_time_code_is_offered_only_for_incoming_messages() {
+        let body = "Your verification code is 482913.";
+        let incoming = message_view(&message_with_body(Direction::Incoming, body), vec![]);
+        assert_eq!(incoming.one_time_code.as_deref(), Some("482913"));
+        assert_eq!(
+            serde_json::to_value(&incoming).unwrap()["oneTimeCode"],
+            "482913"
+        );
+
+        let outgoing = message_view(&message_with_body(Direction::Outgoing, body), vec![]);
+        assert_eq!(outgoing.one_time_code, None);
+        assert!(
+            serde_json::to_value(&outgoing)
+                .unwrap()
+                .get("oneTimeCode")
                 .is_none()
         );
     }
