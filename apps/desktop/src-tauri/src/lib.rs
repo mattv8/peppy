@@ -69,6 +69,7 @@ mod search_history;
 mod secure_store;
 #[cfg(test)]
 mod security_tests;
+mod sensitive_clipboard;
 mod session;
 mod snap_layout;
 mod startup;
