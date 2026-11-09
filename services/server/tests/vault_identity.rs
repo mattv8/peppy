@@ -159,20 +159,24 @@ impl Server {
         self.task.abort();
         let _ = self.task.await;
         self.pool.close().await;
-        // A closed client connection's backend can still be finishing a
-        // maintenance statement; wait for it so DROP SCHEMA cannot deadlock.
-        sqlx::query(
-            "SELECT pg_terminate_backend(pid, 10000) FROM pg_stat_activity WHERE application_name=$1",
-        )
-        .bind(&self.application_name)
-        .execute(&self.admin)
-        .await
-        .unwrap();
+        terminate_backends(&self.admin, &self.application_name).await;
         sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
             .execute(&self.admin)
             .await
             .unwrap();
     }
+}
+
+// A closed client connection's backend can still be finishing a maintenance
+// statement; wait for it so DROP SCHEMA cannot deadlock.
+async fn terminate_backends(admin: &PgPool, application_name: &str) {
+    sqlx::query(
+        "SELECT pg_terminate_backend(pid, 10000) FROM pg_stat_activity WHERE application_name=$1",
+    )
+    .bind(application_name)
+    .execute(admin)
+    .await
+    .unwrap();
 }
 
 fn identity_request(vault: Uuid, owner: Uuid, profile: &KeyProfile, operation: Uuid) -> Value {
@@ -828,10 +832,12 @@ async fn binary_database_restore_preserves_the_established_identity() {
         .await
         .unwrap();
     let database_url = std::env::var("TEST_DATABASE_URL").unwrap();
+    let restore_application_name = format!("vault_identity_restore_{}", Uuid::new_v4().simple());
     let mut restore_url: url::Url = database_url.parse().unwrap();
     restore_url
         .query_pairs_mut()
-        .append_pair("options", &format!("-csearch_path={restore_schema}"));
+        .append_pair("options", &format!("-csearch_path={restore_schema}"))
+        .append_pair("application_name", &restore_application_name);
     let restore_pool = PgPoolOptions::new()
         .max_connections(4)
         .connect(restore_url.as_str())
@@ -885,6 +891,7 @@ async fn binary_database_restore_preserves_the_established_identity() {
     task.abort();
     let _ = task.await;
     restore_pool.close().await;
+    terminate_backends(&server.admin, &restore_application_name).await;
     sqlx::query(&format!("DROP SCHEMA {restore_schema} CASCADE"))
         .execute(&server.admin)
         .await
