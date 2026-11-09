@@ -6909,7 +6909,7 @@ describe("display-only contact names", () => {
 
     host.contactResolution = undefined;
     await act(async () => hint?.());
-    await waitFor(() => expect(screen.getByText("(202) 555-0160")).toBeInTheDocument());
+    await waitFor(() => expect(within(screen.getByRole("region", { name: "Message recipients" })).getByText("(202) 555-0160")).toBeInTheDocument());
     expect(screen.queryByText("Sol Rivera")).not.toBeInTheDocument();
   });
 
