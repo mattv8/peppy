@@ -1,5 +1,6 @@
 //! Running-process notification activation. OS callbacks retain identifiers only.
 use crate::{error::BridgeResult, session::Session, AppState};
+use peppy_client_core::OneTimeCodeTarget;
 use peppy_desktop_api::{
     NotificationActivation, NotificationActivationDestination as Destination,
     NotificationActivationTarget,
@@ -83,6 +84,7 @@ pub fn post(
     title: String,
     body: String,
     icon: Option<crate::notification_icon::Icon>,
+    copy: Option<OneTimeCodeTarget>,
 ) -> Result<(), PostError> {
     post_with_activation(
         app,
@@ -95,6 +97,7 @@ pub fn post(
         title,
         body,
         icon,
+        copy,
     )
 }
 
@@ -105,6 +108,7 @@ pub fn post_test(app: &tauri::AppHandle, title: &str, body: &str) -> Result<(), 
         tokio_util::sync::CancellationToken::new(),
         title.to_owned(),
         body.to_owned(),
+        None,
         None,
     )
     .map_err(|_| ())
@@ -117,6 +121,7 @@ fn post_with_activation(
     title: String,
     body: String,
     icon: Option<crate::notification_icon::Icon>,
+    copy: Option<OneTimeCodeTarget>,
 ) -> Result<(), PostError> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
@@ -130,6 +135,7 @@ fn post_with_activation(
                 title,
                 body,
                 icon,
+                copy,
             });
             // OS completion can wake state listeners, and shutdown takes this
             // mutex. Never hold it while waiting for backend acceptance.
@@ -137,9 +143,72 @@ fn post_with_activation(
             return acceptance.and_then(owner::Acceptance::wait);
         }
     }
+    // Only the Linux fallback posts Copy actions; it needs the posting generation to resolve the
+    // session at action time. Other fallbacks carry no copy request.
+    #[cfg(target_os = "linux")]
+    let fallback_copy = copy.and_then(|target| {
+        activation.as_ref().map(|activation| fallback::CopyRequest {
+            session_generation: activation.session_generation.clone(),
+            target,
+        })
+    });
+    #[cfg(not(target_os = "linux"))]
+    let fallback_copy = {
+        let _ = (activation, copy);
+        None
+    };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let _ = (activation, cancel);
-    fallback::post(app, &title, &body, icon).map_err(|_| PostError::Failed)
+    let _ = cancel;
+    fallback::post(app, &title, &body, icon, fallback_copy).map_err(|_| PostError::Failed)
+}
+
+/// Runs a popup's Copy action. The owner thread has already checked the generation; this
+/// repeats the check under the session guard so retirement that lands in between still
+/// wins. Copy never navigates, shows a window, or reports an error surface.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn copy_from_popup(app: &tauri::AppHandle, generation: &str, target: &OneTimeCodeTarget) {
+    let state = app.state::<AppState>();
+    // The guard is held through the clipboard write on purpose. Retirement cancels while it holds
+    // this guard, so a copy that passed the check finishes before its session can retire. The
+    // write never takes the session lock (it only uses the session it was handed), so there is no
+    // lock cycle. Command handlers similarly hold their session while blocking work runs.
+    let session = tauri::async_runtime::block_on(state.session.lock());
+    copy_from_popup_in(
+        &state,
+        session.as_deref(),
+        generation,
+        target,
+        crate::one_time_code::write_clipboard_text,
+    );
+}
+
+/// The popup Copy gate: the same generation, cancellation and unlock rules as the in-app
+/// notification commands. A locked app, stale generation or revoked session writes nothing.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn copy_from_popup_in(
+    state: &AppState,
+    session: Option<&Session>,
+    generation: &str,
+    target: &OneTimeCodeTarget,
+    write: impl FnOnce(&str) -> Result<(), ()>,
+) {
+    let Some(session) =
+        session.filter(|session| current(Some(session), generation) && unlocked(state, session))
+    else {
+        return;
+    };
+    let _ = crate::one_time_code::copy_and_mark_with(session, target, None, write);
+}
+
+/// Owner-thread admission for an activation: its cancellation and session generation must
+/// still be current before any click or copy is published.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+fn activation_admitted(
+    session: Option<&Session>,
+    cancel: &tokio_util::sync::CancellationToken,
+    generation: &str,
+) -> bool {
+    !cancel.is_cancelled() && current(session, generation)
 }
 
 impl ActivationState {
@@ -235,11 +304,23 @@ fn activate(
     activation: NotificationActivation,
     cancel: &tokio_util::sync::CancellationToken,
     sequence: u64,
+    copy: Option<OneTimeCodeTarget>,
 ) {
     let state = app.state::<AppState>();
     // Lock order is session -> pending, also used by both IPC commands.
     let session = tauri::async_runtime::block_on(state.session.lock());
-    if cancel.is_cancelled() || !current(session.as_deref(), &activation.session_generation) {
+    if !activation_admitted(session.as_deref(), cancel, &activation.session_generation) {
+        return;
+    }
+    if let Some(target) = copy {
+        // Hand the clipboard and Client work to a blocking thread; the owner thread only
+        // checks generation and cancellation. A copy never publishes a navigation click.
+        drop(session);
+        let app = app.clone();
+        let generation = activation.session_generation;
+        drop(tauri::async_runtime::spawn_blocking(move || {
+            copy_from_popup(&app, &generation, &target)
+        }));
         return;
     }
     if !state
@@ -421,6 +502,88 @@ mod tests {
     }
 
     #[test]
+    fn popup_copy_writes_and_marks_nothing_while_locked_or_stale() {
+        use peppy_client_core::IncomingSms;
+        use std::{cell::Cell, sync::Arc};
+
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = crate::tests::open(&fixture, &fixture.binding, &[]);
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, crate::tests::PHRASE)
+            .unwrap();
+        let captured = session
+            .client
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+15555550401".into(),
+                body: "Your verification code is 482913".into(),
+                provider_message_id: Some("popup-copy".into()),
+                imported: false,
+            })
+            .unwrap();
+        let message_id = session.client.messages(captured.conversation_id).unwrap()[0]
+            .payload
+            .record
+            .message_id
+            .to_string();
+        let target = OneTimeCodeTarget::Message { message_id };
+        let unread = || {
+            session
+                .client
+                .list_conversations()
+                .unwrap()
+                .into_iter()
+                .find(|item| item.conversation_id == captured.conversation_id)
+                .unwrap()
+                .unread_count
+        };
+        let state = AppState::new(
+            fixture.dir.path().to_owned(),
+            Arc::new(crate::secure_store::MemoryStore::default()),
+            crate::tests::noop(),
+        );
+        let writes = Cell::new(0);
+        let generation = session.generation.clone();
+
+        state.app_locked.store(true, Ordering::Release);
+        copy_from_popup_in(&state, Some(&session), &generation, &target, |_| {
+            writes.set(writes.get() + 1);
+            Ok(())
+        });
+        assert_eq!(writes.get(), 0, "a locked app copies nothing");
+        assert_eq!(unread(), 1, "a locked app marks nothing read");
+
+        state.app_locked.store(false, Ordering::Release);
+        copy_from_popup_in(&state, Some(&session), "stale-generation", &target, |_| {
+            writes.set(writes.get() + 1);
+            Ok(())
+        });
+        assert_eq!(writes.get(), 0, "a stale generation copies nothing");
+        assert_eq!(unread(), 1);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        assert!(!activation_admitted(
+            Some(&session),
+            &cancel,
+            "stale-generation"
+        ));
+        assert!(activation_admitted(Some(&session), &cancel, &generation));
+        cancel.cancel();
+        assert!(!activation_admitted(Some(&session), &cancel, &generation));
+
+        copy_from_popup_in(&state, Some(&session), &generation, &target, |_| {
+            writes.set(writes.get() + 1);
+            Ok(())
+        });
+        assert_eq!(
+            writes.get(),
+            1,
+            "the same gate copies when unlocked and current"
+        );
+        assert_eq!(unread(), 0);
+    }
+
+    #[test]
     fn notification_mapping_preserves_source_tuple_and_never_guesses_from_body() {
         let mut candidate = peppy_client_core::BannerCandidate {
             id: "banner".into(),
@@ -436,6 +599,7 @@ mod tests {
             created_at: 0,
             source_name: None,
             app_icon_png_base64: None,
+            one_time_code: None,
         };
         assert_eq!(
             destination(&candidate),

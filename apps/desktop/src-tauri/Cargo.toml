@@ -69,8 +69,8 @@ cocoa = "0.26"
 objc = "0.2"
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSString", "NSError", "NSArray", "NSObject", "NSProcessInfo", "NSURL"] }
-objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationSettings", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger", "UNNotificationSound", "UNNotificationAttachment"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSString", "NSError", "NSArray", "NSObject", "NSProcessInfo", "NSURL", "NSSet"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationSettings", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger", "UNNotificationSound", "UNNotificationAttachment", "UNNotificationAction", "UNNotificationCategory"] }
 objc2-service-management = { version = "0.3", default-features = false, features = ["std", "SMAppService"] }
 objc2-authentication-services = { version = "0.3", default-features = false, features = ["std", "block2", "ASFoundation", "ASWebAuthenticationSession", "ASWebAuthenticationSessionCallback"] }
 swift-rs = "1.0.9"

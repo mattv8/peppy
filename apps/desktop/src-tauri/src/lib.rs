@@ -58,6 +58,7 @@ mod notification_icon;
 mod notification_permission;
 mod notification_persistence;
 mod notifications;
+mod one_time_code;
 mod origin;
 mod purchases;
 #[cfg(test)]
@@ -98,7 +99,7 @@ use error::{core_error, BridgeError, BridgeResult};
 use notifications::{NotificationPreferences, NotificationSettings, NotificationView};
 use peppy_client_core::{
     AttachmentId, AttachmentInfo, ConversationFolder, ConversationId, DraftId, LocalSearchRequest,
-    MessageId, NativePlaintextFile, NotificationTarget, SearchIndexState,
+    MessageId, NativePlaintextFile, NotificationTarget, OneTimeCodeTarget, SearchIndexState,
 };
 use peppy_desktop_api::compose::{self, DiscardDraftInput};
 #[cfg(target_os = "macos")]
@@ -228,6 +229,7 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "send_typing",
     "set_typing_sharing",
     "mark_seen",
+    "copy_one_time_code",
     "pick_attachments",
     "prepare_pasted_attachment",
     "retry_attachment",
@@ -2923,6 +2925,42 @@ async fn mark_seen(
         )?
     };
     blocking(move || session.mark_seen_scoped(&visible_message_ids, conversation)).await
+}
+
+/// Copies a one-time code and then marks its item read. The code is re-derived natively; the
+/// renderer never supplies it. Clipboard failure leaves the item unread.
+#[tauri::command]
+async fn copy_one_time_code(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    target: OneTimeCodeTarget,
+) -> BridgeResult<()> {
+    let operation = admit_update_operation(&state)?;
+    one_time_code::require_target_window(&target, window.label())?;
+    if !window.is_visible().unwrap_or(false)
+        || window.is_minimized().unwrap_or(true)
+        || !window.is_focused().unwrap_or(false)
+    {
+        return Err(BridgeError::new(
+            "window-not-visible",
+            "One-time codes can only be copied from a visible focused window.",
+        ));
+    }
+    let session = state.require_session_admitted(&operation).await?;
+    let conversation = if window.label() == tray::MAIN
+        || matches!(target, OneTimeCodeTarget::Notification { .. })
+    {
+        None
+    } else {
+        let source = tray::composer_conversation(window.label()).ok_or_else(window_error)?;
+        effective_composer_conversation(
+            &state,
+            window.label(),
+            &session,
+            Some(&source.to_string()),
+        )?
+    };
+    blocking(move || one_time_code::copy_and_mark(&session, &target, conversation)).await
 }
 
 #[tauri::command]
@@ -6602,6 +6640,7 @@ pub fn run() {
         live_typing::send_typing,
         live_typing::set_typing_sharing,
         mark_seen,
+        copy_one_time_code,
         mark_all_read,
         pick_attachments,
         prepare_pasted_attachment,

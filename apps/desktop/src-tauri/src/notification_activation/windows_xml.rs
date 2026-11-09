@@ -6,6 +6,7 @@ pub(crate) fn toast_xml(
     icon_uri: Option<&str>,
     audio: &str,
     persistence: NotificationPersistence,
+    copy_action: bool,
 ) -> String {
     let icon = icon_uri.map_or_else(String::new, |uri| {
         format!(
@@ -13,13 +14,25 @@ pub(crate) fn toast_xml(
             escape_attribute(uri)
         )
     });
-    let (attributes, actions) = match persistence.seconds {
+    // Indefinite banners keep the system dismiss action. Every action lives in this one
+    // `<actions>` element, so a copy action never duplicates it.
+    let (attributes, dismiss) = match persistence.seconds {
         Some(seconds) if seconds <= 7 => (" duration=\"short\"", ""),
         Some(_) => (" duration=\"long\"", ""),
         None => (
             " scenario=\"reminder\"",
-            "<actions><action content=\"\" arguments=\"dismiss\" activationType=\"system\"/></actions>",
+            "<action content=\"\" arguments=\"dismiss\" activationType=\"system\"/>",
         ),
+    };
+    let copy = if copy_action {
+        "<action content=\"Copy code\" arguments=\"copy-code\" activationType=\"foreground\"/>"
+    } else {
+        ""
+    };
+    let actions = if dismiss.is_empty() && copy.is_empty() {
+        String::new()
+    } else {
+        format!("<actions>{dismiss}{copy}</actions>")
     };
     format!(
         "<toast{attributes}><visual><binding template=\"ToastGeneric\">{icon}<text>{}</text><text>{}</text></binding></visual>{audio}{actions}</toast>",
@@ -67,6 +80,7 @@ mod tests {
                 Some("file:///C:/A&B<>'\".png"),
                 "<audio silent=\"true\"/>",
                 NotificationPersistence { seconds: Some(5) },
+                false,
             ),
             "<toast duration=\"short\"><visual><binding template=\"ToastGeneric\"><image placement=\"appLogoOverride\" src=\"file:///C:/A&amp;B&lt;&gt;&apos;&quot;.png\"/><text>T&lt;&amp;&gt;\"'</text><text>B&lt;&amp;&gt;\"'</text></binding></visual><audio silent=\"true\"/></toast>"
         );
@@ -81,6 +95,7 @@ mod tests {
                 Some("file:///icon\u{0000}.png"),
                 "",
                 NotificationPersistence { seconds: Some(5) },
+                false,
             ),
             "<toast duration=\"short\"><visual><binding template=\"ToastGeneric\"><image placement=\"appLogoOverride\" src=\"file:///icon.png\"/><text>valid\t\n\r\u{D7FF}\u{E000}</text><text>body\u{10FFFF}</text></binding></visual></toast>"
         );
@@ -95,6 +110,7 @@ mod tests {
                 None,
                 "<audio src=\"ms-winsoundevent:Notification.Default\"/>",
                 NotificationPersistence { seconds: Some(60) },
+                false,
             ),
             "<toast duration=\"long\"><visual><binding template=\"ToastGeneric\"><text>Title</text><text></text></binding></visual><audio src=\"ms-winsoundevent:Notification.Default\"/></toast>"
         );
@@ -110,7 +126,8 @@ mod tests {
                 "",
                 NotificationPersistence {
                     seconds: Some(seconds)
-                }
+                },
+                false,
             )
             .starts_with("<toast duration=\"short\">"));
         }
@@ -122,13 +139,62 @@ mod tests {
                 "",
                 NotificationPersistence {
                     seconds: Some(seconds)
-                }
+                },
+                false,
             )
             .starts_with("<toast duration=\"long\">"));
         }
         assert_eq!(
-            toast_xml("", "", None, "<audio silent=\"true\"/>", NotificationPersistence { seconds: None }),
+            toast_xml(
+                "",
+                "",
+                None,
+                "<audio silent=\"true\"/>",
+                NotificationPersistence { seconds: None },
+                false,
+            ),
             "<toast scenario=\"reminder\"><visual><binding template=\"ToastGeneric\"><text></text><text></text></binding></visual><audio silent=\"true\"/><actions><action content=\"\" arguments=\"dismiss\" activationType=\"system\"/></actions></toast>"
         );
+    }
+
+    #[test]
+    fn merges_copy_action_with_each_persistence_mode() {
+        for persistence in [
+            NotificationPersistence { seconds: Some(5) },
+            NotificationPersistence { seconds: Some(60) },
+            NotificationPersistence { seconds: None },
+        ] {
+            let xml = toast_xml("", "", None, "", persistence, true);
+            assert_eq!(xml.matches("<actions>").count(), 1);
+            assert!(xml.contains("content=\"Copy code\" arguments=\"copy-code\""));
+        }
+    }
+
+    #[test]
+    fn indefinite_copy_keeps_dismiss_and_copy_in_one_actions_element() {
+        assert_eq!(
+            toast_xml(
+                "",
+                "",
+                None,
+                "",
+                NotificationPersistence { seconds: None },
+                true,
+            ),
+            "<toast scenario=\"reminder\"><visual><binding template=\"ToastGeneric\"><text></text><text></text></binding></visual><actions><action content=\"\" arguments=\"dismiss\" activationType=\"system\"/><action content=\"Copy code\" arguments=\"copy-code\" activationType=\"foreground\"/></actions></toast>"
+        );
+    }
+
+    #[test]
+    fn copy_absent_leaves_persistence_xml_unchanged() {
+        for (seconds, expected) in [
+            (Some(5), "<toast duration=\"short\"><visual><binding template=\"ToastGeneric\"><text></text><text></text></binding></visual></toast>"),
+            (None, "<toast scenario=\"reminder\"><visual><binding template=\"ToastGeneric\"><text></text><text></text></binding></visual><actions><action content=\"\" arguments=\"dismiss\" activationType=\"system\"/></actions></toast>"),
+        ] {
+            assert_eq!(
+                toast_xml("", "", None, "", NotificationPersistence { seconds }, false),
+                expected
+            );
+        }
     }
 }

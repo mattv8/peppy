@@ -89,7 +89,7 @@ pub(crate) struct Fixture {
     pub header: VaultCheckHeader,
 }
 
-fn fixture() -> Fixture {
+pub(crate) fn fixture() -> Fixture {
     // Port 9 (discard) on loopback: nothing listens; these tests never touch the network.
     fixture_at("http://127.0.0.1:9")
 }
@@ -591,7 +591,7 @@ fn assert_sanitized(json: &str, dir: &Path) {
     );
 }
 
-fn unlock(session: &Session, fixture: &Fixture) {
+pub(crate) fn unlock(session: &Session, fixture: &Fixture) {
     session
         .client
         .unlock(&fixture.profile, &fixture.header, PHRASE)

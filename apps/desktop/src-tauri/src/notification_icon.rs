@@ -278,6 +278,7 @@ mod tests {
             created_at: 0,
             source_name: Some("Calendar".into()),
             app_icon_png_base64: Some(encoded),
+            one_time_code: None,
         };
         let full = NotificationPreferences::default();
         assert!(matches!(
@@ -301,11 +302,13 @@ mod tests {
         assert!(for_candidate(&source, &candidate, true).is_none());
         let missing_icon = BannerCandidate {
             app_icon_png_base64: None,
+            one_time_code: None,
             ..candidate.clone()
         };
         assert!(for_candidate(&full, &missing_icon, false).is_none());
         let invalid_icon = BannerCandidate {
             app_icon_png_base64: Some("not-base64".into()),
+            one_time_code: None,
             ..candidate.clone()
         };
         assert!(for_candidate(&full, &invalid_icon, false).is_none());
