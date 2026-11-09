@@ -781,7 +781,7 @@ jobs:
           persist-credentials: false
       - name: Dispatch hosted production workflow
         env:
-          PEPPY_PLATFORM_DISPATCH_TOKEN: ${{ secrets.PEPPY_PLATFORM_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ secrets.PEPPY_AUTOMATION_TOKEN }}
           SOURCE_REVISION: ${{ github.sha }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}

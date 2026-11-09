@@ -76,9 +76,12 @@ hosted still builds or starts.
   the companion manually, through the pin-bump flow or a manual branch.
 - Recovery: manually dispatch private `companion-sync` with no input. Missed
   events also heal on the next event. There is no scheduler.
-- Tokens: `PEPPY_PLATFORM_DISPATCH_TOKEN` (public `production` environment) can
-  dispatch any private workflow, including `build-publish`.
-  `SOURCE_PIN_PR_TOKEN` (private repository) also posts public statuses.
+- Tokens: configure the same `PEPPY_AUTOMATION_TOKEN` repository secret value in
+  both repositories. Public production notifiers inject it only as `GH_TOKEN`
+  and can dispatch private workflows, including `build-publish`; the private
+  companion notifier uses its own same-named secret for public status writes.
+  GitHub does not share repository secrets, so migration requires configuring
+  the secret in each repository; do not infer equality from the shared name.
 - Staging pins remain with the scheduled community pin watch; they are out of
   scope here.
 - Merging stays manual. For local runs, check the platform out so that

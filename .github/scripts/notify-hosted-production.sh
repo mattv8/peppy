@@ -16,7 +16,7 @@ cleanup() {
 
 trap cleanup EXIT
 
-[[ -n "${PEPPY_PLATFORM_DISPATCH_TOKEN:-}" ]] || platform_dispatch_fail "$summary_title" 'PEPPY_PLATFORM_DISPATCH_TOKEN is unavailable'
+[[ -n "${GH_TOKEN:-}" ]] || platform_dispatch_fail "$summary_title" 'GH_TOKEN is unavailable; configure secrets.PEPPY_AUTOMATION_TOKEN as GH_TOKEN'
 platform_dispatch_require_match "$summary_title" source_revision "${SOURCE_REVISION:-}" '^[0-9a-f]{40}$'
 platform_dispatch_require_match "$summary_title" public_run_id "${RUN_ID:-}" '^[1-9][0-9]*$'
 platform_dispatch_require_match "$summary_title" public_run_attempt "${RUN_ATTEMPT:-}" '^[1-9][0-9]*$'
@@ -27,7 +27,7 @@ payload_file="$(mktemp)"
 printf '{"ref":"production","inputs":{"environment":"production","source_revision":"%s","public_run_id":"%s","public_run_attempt":"%s","server_digest":"%s","relay_digest":"%s"}}' \
   "$SOURCE_REVISION" "$RUN_ID" "$RUN_ATTEMPT" "$SERVER_DIGEST" "$RELAY_DIGEST" > "$payload_file"
 
-platform_dispatch_post "$summary_title" PEPPY_PLATFORM_DISPATCH_TOKEN "$dispatch_url" "$payload_file" \
+platform_dispatch_post "$summary_title" GH_TOKEN "$dispatch_url" "$payload_file" \
   'private workflow dispatch request failed' \
   'private workflow dispatch did not queue the private workflow'
 platform_dispatch_success_summary "$summary_title" \
