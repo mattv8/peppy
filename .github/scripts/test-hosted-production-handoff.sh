@@ -125,6 +125,18 @@ expect_line "$valid_payload" "$expected_payload"
 expect_text "$valid_summary" 'Queued private production workflow dispatch'
 expect_no_text "$valid_summary" "$token"
 
+newline_token="${token}"$'\n'
+newline_args="$temp_dir/curl-args-newline-token"
+newline_config="$temp_dir/curl-config-newline-token"
+newline_payload="$temp_dir/curl-payload-newline-token"
+newline_stderr="$temp_dir/stderr-newline-token"
+run_notifier "$newline_stderr" "$newline_args" "$newline_config" "$newline_payload" \
+  PEPPY_PLATFORM_DISPATCH_TOKEN="$newline_token" SOURCE_REVISION="$source_revision" RUN_ID=123 RUN_ATTEMPT=2 \
+  SERVER_DIGEST="$server_digest" RELAY_DIGEST="$relay_digest"
+[[ ! -s "$newline_stderr" ]] || fail_test 'newline-terminated token dispatch wrote to stderr'
+expect_line "$newline_config" "header = \"Authorization: Bearer $token\""
+expect_line "$newline_payload" "$expected_payload"
+
 expect_rejected 'PEPPY_PLATFORM_DISPATCH_TOKEN is unavailable' "${valid_env[@]}" PEPPY_PLATFORM_DISPATCH_TOKEN=
 expect_rejected 'invalid source_revision' "${valid_env[@]}" SOURCE_REVISION='0123456789abcdef0123456789abcdef01234567;id'
 expect_rejected 'invalid public_run_id' "${valid_env[@]}" RUN_ID='123;id'
