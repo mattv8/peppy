@@ -1194,7 +1194,6 @@ export class BrowserWorkerHost {
     if (mutationChanged || successfulSideEffect || generationChanged) {
       this.changed();
       if (response.ok && command === "save_draft") this.dependencies.network?.draftSaved?.();
-      if (command === "unlock") void this.startSearchIndexWhenReady();
       if (command === "load_state" && generationChanged) this.dependencies.network?.wake?.();
       if (command === "retry_attachment") this.dependencies.network?.retryAttachment?.(requiredId(request.args));
       if (command === "send_draft" || command === "retry_attachment" || command === "request_contact_sync" || command === "request_attachment_download" || command === "media_sync_request" || command === "load_media" || command === "save_attachment") this.dependencies.network?.wake?.();

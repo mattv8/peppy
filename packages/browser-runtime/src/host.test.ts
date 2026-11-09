@@ -661,18 +661,20 @@ describe("browser host RPC", () => {
 
   it("forgets remembered recovery when a ready enrollment activation is revoked", async () => {
     const session = new FakeSession();
+    session.phase = "unenrolled";
     const clearRememberedUnlock = vi.fn(async () => undefined);
     session.clearRememberedUnlock = clearRememberedUnlock;
-    const start = vi.fn()
-      .mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(new TransportError("revoked"));
+    const start = vi.fn().mockRejectedValueOnce(new TransportError("revoked"));
     const host = new BrowserWorkerHost({
       locks: locks(),
       boot: async () => session,
       network: {
         start,
         stop: async () => undefined,
-        enrollmentCreateOwner: async () => ({ mode: "community" as const, stage: "ready" as const }),
+        enrollmentCreateOwner: async () => {
+          session.phase = "ready";
+          return { mode: "community" as const, stage: "ready" as const };
+        },
       } as unknown as import("./host.js").BrowserNetwork,
     });
     const attached = port();
@@ -2404,6 +2406,7 @@ describe("browser host RPC", () => {
     expect(response(attached, 2)).toMatchObject({ ok: true, value: { stage: "computer_connected" } });
 
     const waitingSession = new FakeSession();
+    waitingSession.phase = "unenrolled";
     const waitingStart = vi.fn(async () => undefined);
     const waiting = new BrowserWorkerHost({ locks: locks(), boot: async () => waitingSession, network: { start: waitingStart, stop: async () => undefined, enrollmentConfirmComputer: async () => ({ mode: "community" as const, stage: "computer_waiting" as const }) } as unknown as import("./host.js").BrowserNetwork });
     const waitingPort = port();
@@ -2413,6 +2416,7 @@ describe("browser host RPC", () => {
     expect(waitingStart).not.toHaveBeenCalled();
 
     const errorSession = new FakeSession();
+    errorSession.phase = "unenrolled";
     const errorStart = vi.fn(async () => undefined);
     const error = new BrowserWorkerHost({ locks: locks(), boot: async () => errorSession, network: { start: errorStart, stop: async () => undefined, enrollmentConfirmComputer: async () => ({ mode: "community" as const, stage: "error" as const, errorCode: "failed" }) } as unknown as import("./host.js").BrowserNetwork });
     const errorPort = port();

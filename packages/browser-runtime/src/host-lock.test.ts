@@ -70,6 +70,7 @@ function ownerSession() {
     unlock: async () => undefined,
     enroll: async () => undefined,
     finishEnrollment: async () => undefined,
+    enrollmentCore: () => ({ invoke: hoisted.invoke }),
     shutdown() { session.phase = "closed"; },
     drain: async () => undefined,
   };

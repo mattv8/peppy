@@ -1872,7 +1872,7 @@ describe("BrowserEnrollment", () => {
     await expect(enrollment.discover()).resolves.toMatchObject({ mode: "hosted", stage: "signin" });
 
     expect(requestedPaths).toEqual(["/hosted/v1/enrollment/config", "/hosted/v1/web/app-session"]);
-    expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_enrollment_new", args: { origin, deviceName: "Peppy Browser" } });
+    expect(core.invoke).not.toHaveBeenCalledWith(expect.objectContaining({ command: "_worker_enrollment_new" }));
   });
 
   it.each([
