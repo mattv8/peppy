@@ -226,32 +226,6 @@ jobs:
         with:
           toolchain: 1.98.1
       - run: rustup target add aarch64-linux-android x86_64-linux-android
-      - name: Restore Android Rust release dependency cache
-        id: android-rust-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            target/debug/deps
-            target/debug/.fingerprint
-            target/debug/build
-            target/release/deps
-            target/release/.fingerprint
-            target/release/build
-            target/aarch64-linux-android/release/deps
-            target/aarch64-linux-android/release/.fingerprint
-            target/aarch64-linux-android/release/build
-            target/x86_64-linux-android/release/deps
-            target/x86_64-linux-android/release/.fingerprint
-            target/x86_64-linux-android/release/build
-          key: rust-android-artifacts-${{ runner.os }}-${{ runner.arch }}-1.98.1-host-debug-cross-release-mobile-bindings-default-ndk-27.2.12479018-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mobile-bindings/Cargo.toml') }}
-      - name: Restore Android Gradle cache
-        id: android-gradle-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-android-artifacts-${{ runner.os }}-${{ hashFiles('apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/verification-metadata.xml') }}
       - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libssl-dev libsodium-dev
       - name: Install Android NDK
         run: |
@@ -355,38 +329,6 @@ jobs:
           fi
           mkdir -p ../../dist/android-release
           install -m 0644 app/build/outputs/apk/debug/app-debug.apk ../../dist/android-release/peppy-android-debug.apk
-      - name: Stop Android Gradle daemon before caching
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/production' && steps.android-gradle-cache.outputs.cache-hit != 'true' }}
-        working-directory: apps/android
-        run: ./gradlew --stop
-      - name: Save Android Rust release dependency cache
-        id: android-rust-cache-save
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/production' && steps.android-rust-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            target/debug/deps
-            target/debug/.fingerprint
-            target/debug/build
-            target/release/deps
-            target/release/.fingerprint
-            target/release/build
-            target/aarch64-linux-android/release/deps
-            target/aarch64-linux-android/release/.fingerprint
-            target/aarch64-linux-android/release/build
-            target/x86_64-linux-android/release/deps
-            target/x86_64-linux-android/release/.fingerprint
-            target/x86_64-linux-android/release/build
-          key: rust-android-artifacts-${{ runner.os }}-${{ runner.arch }}-1.98.1-host-debug-cross-release-mobile-bindings-default-ndk-27.2.12479018-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mobile-bindings/Cargo.toml') }}
-      - name: Save Android Gradle cache
-        id: android-gradle-cache-save
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/production' && steps.android-gradle-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-android-artifacts-${{ runner.os }}-${{ hashFiles('apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/verification-metadata.xml') }}
       - if: inputs.trusted_update_build
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
@@ -452,15 +394,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: 1.98.1
-      - name: Restore desktop Rust release dependency cache
-        id: desktop-rust-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            apps/desktop/src-tauri/target/release/deps
-            apps/desktop/src-tauri/target/release/.fingerprint
-            apps/desktop/src-tauri/target/release/build
-          key: rust-desktop-artifacts-${{ matrix.name }}-${{ runner.arch }}-1.98.1-release-default-self-update-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}
       - name: Remove preinstalled package-manager shims
         if: runner.os == 'Windows'
         run: npm uninstall --global yarn pnpm
@@ -564,16 +497,6 @@ jobs:
             cd apps/desktop/src-tauri/target/release/bundle/macos
             tar -czf "$archive" -- *.app
           )
-      - name: Save desktop Rust release dependency cache
-        id: desktop-rust-cache-save
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/production' && steps.desktop-rust-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            apps/desktop/src-tauri/target/release/deps
-            apps/desktop/src-tauri/target/release/.fingerprint
-            apps/desktop/src-tauri/target/release/build
-          key: rust-desktop-artifacts-${{ matrix.name }}-${{ runner.arch }}-1.98.1-release-default-self-update-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: desktop-${{ matrix.name }}-${{ inputs.trusted_update_build && 'release' || 'development' }}-artifacts
@@ -593,43 +516,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: 1.98.1
-      - name: Restore iOS Rust release dependency cache
-        id: ios-rust-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            target/debug/deps
-            target/debug/.fingerprint
-            target/debug/build
-            target/aarch64-apple-ios/release/deps
-            target/aarch64-apple-ios/release/.fingerprint
-            target/aarch64-apple-ios/release/build
-            target/aarch64-apple-ios-sim/release/deps
-            target/aarch64-apple-ios-sim/release/.fingerprint
-            target/aarch64-apple-ios-sim/release/build
-          key: rust-ios-artifacts-${{ runner.os }}-${{ runner.arch }}-1.98.1-release-mobile-bindings-default-aarch64-apple-ios-aarch64-apple-ios-sim-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mobile-bindings/Cargo.toml') }}
       - name: Build simulator app and unsigned device archive
         env:
           PEPPY_GOOGLE_IOS_CLIENT_ID: ${{ vars.PEPPY_GOOGLE_IOS_CLIENT_ID }}
           PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID: ${{ vars.PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID }}
           PEPPY_GOOGLE_REVERSED_CLIENT_ID: ${{ vars.PEPPY_GOOGLE_REVERSED_CLIENT_ID }}
         run: infra/build/build-ios-artifacts.sh
-      - name: Save iOS Rust release dependency cache
-        id: ios-rust-cache-save
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/production' && steps.ios-rust-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            target/debug/deps
-            target/debug/.fingerprint
-            target/debug/build
-            target/aarch64-apple-ios/release/deps
-            target/aarch64-apple-ios/release/.fingerprint
-            target/aarch64-apple-ios/release/build
-            target/aarch64-apple-ios-sim/release/deps
-            target/aarch64-apple-ios-sim/release/.fingerprint
-            target/aarch64-apple-ios-sim/release/build
-          key: rust-ios-artifacts-${{ runner.os }}-${{ runner.arch }}-1.98.1-release-mobile-bindings-default-aarch64-apple-ios-aarch64-apple-ios-sim-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mobile-bindings/Cargo.toml') }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: ios-${{ inputs.trusted_update_build && 'release' || 'development' }}-artifacts
