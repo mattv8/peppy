@@ -21,4 +21,27 @@ class NavigationAllowlistTest {
         assertFalse(NavigationAllowlist.isConfig("https://messages.google.com/accounts/SetOSID"))
         assertEquals("navigation_blocked:example.com/a", NavigationAllowlist.blockedCode("https://example.com/a?value=x"))
     }
+
+    @Test fun `blocks only unpermitted Messages subresources`() {
+        listOf(
+            "https://www.gstatic.com/signin/v2/slid.css",
+            "https://ssl.gstatic.com/accounts/v1.js",
+            "https://fonts.gstatic.com/s/font.woff2",
+            "https://apis.google.com/js/api.js",
+            "https://play.google.com/log",
+            "https://accounts.google.com/gsi/client",
+            "https://messages.google.com/web/config?pli=1",
+            "https://messages.google.com/accounts/SetOSID",
+        ).forEach { assertFalse(NavigationAllowlist.blocksSubresource(it)) }
+
+        listOf(
+            "https://messages.google.com/web/conversations",
+            "http://messages.google.com/web/config",
+            "HTTPS://MESSAGES.GOOGLE.COM/web/conversations",
+            "https://messages.google.com./web/conversations",
+            "https://messages.google.com/invalid path",
+        ).forEach { assertTrue(NavigationAllowlist.blocksSubresource(it)) }
+
+        assertFalse(NavigationAllowlist.blocksSubresource("https://example.com/invalid path"))
+    }
 }

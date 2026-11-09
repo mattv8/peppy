@@ -137,7 +137,7 @@ class LinkSignInActivity : AppCompatActivity() {
             !NavigationAllowlist.permits(request.url.toString())
 
         override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
-            if (NavigationAllowlist.permits(request.url.toString())) null else blockedResponse()
+            if (NavigationAllowlist.blocksSubresource(request.url.toString())) blockedResponse() else null
 
         override fun onPageFinished(view: WebView, url: String) {
             if (NavigationAllowlist.isConfig(url) && cookiesCaptured.compareAndSet(false, true)) {

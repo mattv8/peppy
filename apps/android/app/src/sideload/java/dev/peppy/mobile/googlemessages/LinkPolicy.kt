@@ -67,6 +67,16 @@ object NavigationAllowlist {
             host == MESSAGES_HOST && uri.path in messagesPaths)
     }.getOrDefault(false)
 
+    fun blocksSubresource(url: String): Boolean {
+        val uri = runCatching { URI(url) }.getOrNull()
+        return if (uri != null) {
+            uri.host?.trimEnd('.').equals(MESSAGES_HOST, ignoreCase = true) && !permits(url)
+        } else {
+            url.startsWith("http://$MESSAGES_HOST", ignoreCase = true) ||
+                url.startsWith("https://$MESSAGES_HOST", ignoreCase = true)
+        }
+    }
+
     fun isConfig(url: String): Boolean = runCatching {
         val uri = URI(url)
         uri.scheme == "https" && uri.host == MESSAGES_HOST && uri.path == CONFIG_PATH
