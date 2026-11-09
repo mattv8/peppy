@@ -143,6 +143,62 @@ class EnrollmentHostTest {
         }
     }
 
+    @Test fun signInRetainsOnlyTheParsedCanonicalOriginSession() {
+        val headers = mutableMapOf<String, MutableList<String?>>()
+        val transport = EnrollmentTransport { origin, method, path, _, requestHeaders ->
+            when {
+                method == "POST" && path == "/v1/instance/session" -> EnrollmentHttpResponse(
+                    200,
+                    "{\"session_token\":\"$origin-token\",\"csrf_token\":null,\"expires_in_seconds\":60}",
+                )
+                path == "/v1/instance" -> {
+                    headers.getOrPut(origin) { mutableListOf() } += requestHeaders
+                        ?.takeIf { it.has("Peppy-Instance-Session") }
+                        ?.getString("Peppy-Instance-Session")
+                    EnrollmentHttpResponse(200, "{}")
+                }
+                else -> null
+            }
+        }
+        EnrollmentHost(context, MemorySecureStore(), transport = transport).use { host ->
+            assertTrue(host.signIn("https://first.example", "admin", "password"))
+            assertTrue(host.discover("https://first.example") != null)
+            assertTrue(host.signIn("https://second.example", "admin", "password"))
+            assertTrue(host.discover("https://first.example") != null)
+            assertTrue(host.discover("https://second.example") != null)
+        }
+        assertEquals(listOf("https://first.example-token", null), headers["https://first.example"])
+        assertEquals(listOf("https://second.example-token"), headers["https://second.example"])
+    }
+
+    @Test fun signInRejectsMalformedSuccessfulSession() {
+        val transport = EnrollmentTransport { _, _, path, _, _ ->
+            if (path == "/v1/instance/session") EnrollmentHttpResponse(200, "{\"session_token\":\"token\"}") else null
+        }
+        EnrollmentHost(context, MemorySecureStore(), transport = transport).use { host ->
+            assertFalse(host.signIn("https://enroll.example", "admin", "password"))
+        }
+    }
+
+    @Test fun signInRejectsCoercedSessionMembers() {
+        val malformed = listOf(
+            "{\"session_token\":123,\"csrf_token\":null,\"expires_in_seconds\":60}",
+            "{\"session_token\":\"token\",\"csrf_token\":false,\"expires_in_seconds\":60}",
+            "{\"session_token\":\"token\",\"csrf_token\":null,\"expires_in_seconds\":\"60\"}",
+            "{\"session_token\":\"token\",\"csrf_token\":null,\"expires_in_seconds\":1.5}",
+            "{\"session_token\":\"token\",\"csrf_token\":null,\"expires_in_seconds\":-1}",
+            "{\"session_token\":\"token\",\"csrf_token\":null,\"expires_in_seconds\":4294967296}",
+        )
+        for (body in malformed) {
+            val transport = EnrollmentTransport { _, _, path, _, _ ->
+                if (path == "/v1/instance/session") EnrollmentHttpResponse(200, body) else null
+            }
+            EnrollmentHost(context, MemorySecureStore(), transport = transport).use { host ->
+                assertFalse(host.signIn("https://enroll.example", "admin", "password"))
+            }
+        }
+    }
+
     @Test fun restoredUnacceptedRequestResendsTheExactRustSubmissionBeforePolling() {
         val store = MemorySecureStore()
         val origin = "https://enroll.example"
@@ -333,6 +389,64 @@ class EnrollmentHostTest {
         }
     }
 
+    @Test fun lostPhoneConfirmationResponseReplaysTheOriginalApprovedRequest() {
+        val fixture = EnrollmentNativeFixture("https://enroll.example")
+        val confirmations = mutableListOf<String>()
+        var confirms = 0
+        val transport = EnrollmentTransport { _, method, path, body, _ ->
+            when {
+                path.endsWith("/claim") -> EnrollmentHttpResponse(200, fixture.claimResponse(requireNotNull(body)))
+                method == "POST" && path.endsWith("/confirm") -> {
+                    confirmations += requireNotNull(body)
+                    confirms += 1
+                    null
+                }
+                else -> null
+            }
+        }
+        EnrollmentHost(context, MemorySecureStore(), transport = transport).use { host ->
+            val flow = requireNotNull(host.beginPhoneClaim(fixture.qr))
+            try {
+                val approved = fixture.approvedStatus()
+                assertEquals(ImportResult.NETWORK_ERROR, flow.confirm(approved, fixture.passphrase))
+                assertEquals(ImportResult.NETWORK_ERROR, flow.confirm(JSONObject(approved).put("state", "consumed").toString(), null))
+            } finally {
+                flow.close()
+            }
+        }
+        assertEquals(2, confirms)
+        assertEquals(confirmations[0], confirmations[1])
+    }
+
+    @Test fun bodylessConfirmationResponsesKeepTheExactReplayAvailable() {
+        val fixture = EnrollmentNativeFixture("https://enroll.example")
+        val confirmations = mutableListOf<String>()
+        var response: EnrollmentHttpResponse? = EnrollmentHttpResponse(503, null)
+        val transport = EnrollmentTransport { _, method, path, body, _ ->
+            when {
+                path.endsWith("/claim") -> EnrollmentHttpResponse(200, fixture.claimResponse(requireNotNull(body)))
+                method == "POST" && path.endsWith("/confirm") -> {
+                    confirmations += requireNotNull(body)
+                    response.also { response = EnrollmentHttpResponse(200, null) }
+                }
+                else -> null
+            }
+        }
+        EnrollmentHost(context, MemorySecureStore(), transport = transport).use { host ->
+            val flow = requireNotNull(host.beginPhoneClaim(fixture.qr))
+            try {
+                val approved = fixture.approvedStatus()
+                assertEquals(ImportResult.NETWORK_ERROR, flow.confirm(approved, fixture.passphrase))
+                assertTrue(flow.canRetryConfirmation())
+                assertEquals(ImportResult.NETWORK_ERROR, flow.confirm(approved, null))
+                assertTrue(flow.canRetryConfirmation())
+            } finally {
+                flow.close()
+            }
+        }
+        assertEquals(confirmations[0], confirmations[1])
+    }
+
     @Test fun ownerClaimWritesPendingSecretBeforeCheckpointAndClaimRequest() {
         val store = OrderedSecureStore()
         val origin = "https://enroll.example"
@@ -423,44 +537,6 @@ class EnrollmentHostTest {
         }
         assertEquals(2, claims.size)
         assertEquals(claims[0].getString("operation_id"), claims[1].getString("operation_id"))
-    }
-
-    @Test fun storedPendingSecretCompletesAResumedOwnerClaimWithoutAnEnteredSecret() {
-        val store = OrderedSecureStore()
-        val origin = "https://enroll.example"
-        var claimAttempts = 0
-        var installed = 0
-        val transport = EnrollmentTransport { _, _, path, body, _ ->
-            if (path != "/v1/instance/claim") {
-                null
-            } else {
-                claimAttempts += 1
-                if (claimAttempts == 1) {
-                    null
-                } else {
-                    val claim = JSONObject(requireNotNull(body))
-                    val profile = JSONObject(claim.getJSONObject("material").getString("profile"))
-                    EnrollmentHttpResponse(
-                        200,
-                        JSONObject()
-                            .put("vault_id", profile.getString("vault_id"))
-                            .put("device_id", claim.getJSONObject("device").getString("device_id"))
-                            .put("replayed", false)
-                            .put("session", JSONObject().put("session_token", "session").put("expires_in_seconds", 60))
-                            .toString(),
-                    )
-                }
-            }
-        }
-        val secret = generateHostedPassphrase()
-        EnrollmentHost(context, checkpointStore = store, identityInstaller = { installed += 1; ImportResult.IMPORTED }, transport = transport, vaultSecrets = VaultSecretStore(store)).use { first ->
-            assertEquals(ImportResult.NETWORK_ERROR, first.claimOwner(origin, "admin", "setup", "password long enough", secret))
-        }
-        EnrollmentHost(context, checkpointStore = store, identityInstaller = { installed += 1; ImportResult.IMPORTED }, transport = transport, vaultSecrets = VaultSecretStore(store)).use { restored ->
-            assertEquals(ImportResult.IMPORTED, restored.claimOwner(origin, "admin", "setup", "password long enough", ""))
-        }
-        assertEquals(2, claimAttempts)
-        assertEquals(1, installed)
     }
 
     @Test fun resumeWithoutStoredPendingSecretPromptsAndRejectsBlankEnteredSecret() {

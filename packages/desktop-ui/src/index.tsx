@@ -536,10 +536,12 @@ export function RecipientChipInput({
         } else if (event.key === "Backspace" && !value && recipients.length) {
           onCommit(recipients.slice(0, -1).map((recipient) => recipient.id));
         } else if (event.key === "Backspace" && event.currentTarget.selectionStart === event.currentTarget.selectionEnd && event.currentTarget.selectionStart && !/\d/.test(value[event.currentTarget.selectionStart - 1])) {
-          event.preventDefault();
           let digitIndex = event.currentTarget.selectionStart - 1;
           while (digitIndex >= 0 && !/\d/.test(value[digitIndex])) digitIndex -= 1;
-          if (digitIndex >= 0) updateValue(`${value.slice(0, digitIndex)}${value.slice(digitIndex + 1)}`, digitIndex);
+          if (digitIndex >= 0) {
+            event.preventDefault();
+            updateValue(`${value.slice(0, digitIndex)}${value.slice(digitIndex + 1)}`, digitIndex);
+          }
         }
       }}
       onBlur={(event) => {

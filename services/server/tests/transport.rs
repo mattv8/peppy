@@ -62,6 +62,31 @@ async fn presence_leases_require_a_responsive_pong_and_cleanup_on_close() {
     .await
     .unwrap();
     assert!(touched);
+    sqlx::query("UPDATE device_sockets SET lease_until=now() - interval '1 second' WHERE vault_id=$1 AND device_id=$2 AND connection_id=$3")
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .bind(connection)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
+    assert!(
+        !presence::renew(&mut tx, server.vault, server.owner_device, connection)
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+    let renewed: bool = sqlx::query_scalar("SELECT lease_until > now() FROM device_sockets WHERE vault_id=$1 AND device_id=$2 AND connection_id=$3")
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .bind(connection)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+    assert!(
+        renewed,
+        "a non-broadcasting renewal must still extend the lease"
+    );
     assert!(
         presence::close(&server.pool, server.vault, connection)
             .await
@@ -1602,7 +1627,7 @@ async fn exact_retry_returns_cursor_and_changed_identity_or_sequence_conflicts()
 }
 
 #[tokio::test]
-async fn origin_tags_deduplicate_across_producers_and_preserve_existing_retry_behavior() {
+async fn origin_tags_allow_distinct_same_producer_records_and_deduplicate_cross_producer_records() {
     let server = TestServer::start().await;
     let replacement = server.provision_device("device").await;
     let tag = [7; 32];
@@ -1617,19 +1642,62 @@ async fn origin_tags_deduplicate_across_producers_and_preserve_existing_retry_be
     assert_eq!(status, StatusCode::OK, "{accepted}");
     assert_eq!(accepted, json!({"cursor":"1","duplicate":false}));
 
-    let duplicate = with_origin_tag(
+    let same_producer_request = with_origin_tag(
         set_fingerprint(
-            event(server.vault, replacement.id, 1, Uuid::new_v4(), 2),
+            event(server.vault, server.owner_device, 2, Uuid::new_v4(), 2),
             &server.fingerprint,
         ),
         tag,
     );
-    let (status, duplicate) = server
-        .post(&replacement.token, "/v1/events", &duplicate)
+    let same_producer_id: Uuid = same_producer_request["envelope_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let (status, same_producer) = server
+        .post(&server.owner_token, "/v1/events", &same_producer_request)
         .await;
-    assert_eq!(status, StatusCode::OK, "{duplicate}");
+    assert_eq!(status, StatusCode::OK, "{same_producer}");
+    assert_eq!(same_producer, json!({"cursor":"2","duplicate":false}));
+    let (indexed_origin_tag_is_null, serialized_origin_tag): (bool, Option<String>) =
+        sqlx::query_as(
+            "SELECT origin_tag IS NULL, envelope->>'origin_tag' FROM encrypted_records WHERE vault_id=$1 AND envelope_id=$2",
+        )
+        .bind(server.vault)
+        .bind(same_producer_id)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+    assert!(indexed_origin_tag_is_null);
     assert_eq!(
-        duplicate,
+        serialized_origin_tag,
+        Some(base64::engine::general_purpose::STANDARD.encode(tag))
+    );
+    let (status, retry) = server
+        .post(&server.owner_token, "/v1/events", &same_producer_request)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{retry}");
+    assert_eq!(retry, json!({"cursor":"2","duplicate":true}));
+    let mut changed_same_producer = same_producer_request.clone();
+    changed_same_producer["ciphertext"] = json!("AQIE");
+    let (status, changed) = server
+        .post(&server.owner_token, "/v1/events", &changed_same_producer)
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{changed}");
+
+    let cross_producer = with_origin_tag(
+        set_fingerprint(
+            event(server.vault, replacement.id, 1, Uuid::new_v4(), 3),
+            &server.fingerprint,
+        ),
+        tag,
+    );
+    let (status, cross_producer) = server
+        .post(&replacement.token, "/v1/events", &cross_producer)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{cross_producer}");
+    assert_eq!(
+        cross_producer,
         json!({"cursor":"1","duplicate":true,"origin_duplicate":true})
     );
     let event_count: i64 = sqlx::query_scalar("SELECT count(*) FROM event_log WHERE vault_id=$1")
@@ -1637,7 +1705,7 @@ async fn origin_tags_deduplicate_across_producers_and_preserve_existing_retry_be
         .fetch_one(&server.pool)
         .await
         .unwrap();
-    assert_eq!(event_count, 1);
+    assert_eq!(event_count, 2);
 
     let (status, retry) = server.post(&server.owner_token, "/v1/events", &first).await;
     assert_eq!(status, StatusCode::OK, "{retry}");
@@ -1651,7 +1719,7 @@ async fn origin_tags_deduplicate_across_producers_and_preserve_existing_retry_be
         .post(&replacement.token, "/v1/events", &untagged)
         .await;
     assert_eq!(status, StatusCode::OK, "{untagged}");
-    assert_eq!(untagged, json!({"cursor":"2","duplicate":false}));
+    assert_eq!(untagged, json!({"cursor":"3","duplicate":false}));
 
     let other_vault = Uuid::new_v4();
     let (profile, fingerprint) = profile(other_vault, 1);
@@ -1697,12 +1765,46 @@ async fn origin_tags_deduplicate_across_producers_and_preserve_existing_retry_be
         json!({"cursor":"77","duplicate":true,"origin_duplicate":true})
     );
 
+    let concurrent = [3_u64, 4]
+        .into_iter()
+        .map(|sequence| {
+            with_origin_tag(
+                set_fingerprint(
+                    event(
+                        server.vault,
+                        server.owner_device,
+                        sequence,
+                        Uuid::new_v4(),
+                        sequence as u8,
+                    ),
+                    &server.fingerprint,
+                ),
+                [10; 32],
+            )
+        })
+        .map(|request| {
+            let base_url = server.base_url.clone();
+            let token = server.owner_token.clone();
+            tokio::spawn(send_detached(
+                Client::new()
+                    .post(format!("{base_url}/v1/events"))
+                    .bearer_auth(token)
+                    .json(&request),
+            ))
+        })
+        .collect::<Vec<_>>();
+    for task in concurrent {
+        let (status, body) = task.await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["duplicate"], false);
+    }
+
     let tagged_command = with_origin_tag(
         set_fingerprint(
             command(
                 server.vault,
                 server.owner_device,
-                2,
+                5,
                 Uuid::new_v4(),
                 Uuid::new_v4(),
                 replacement.id,
@@ -1716,6 +1818,151 @@ async fn origin_tags_deduplicate_across_producers_and_preserve_existing_retry_be
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
     assert_eq!(rejected["code"], "invalid_envelope");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn compacted_same_producer_extra_origin_record_keeps_its_exact_retry_identity() {
+    let server = TestServer::start().await;
+    let tag = [11; 32];
+    let tag_base64 = base64::engine::general_purpose::STANDARD.encode(tag);
+    let representative = with_origin_tag(
+        set_fingerprint(
+            event(server.vault, server.owner_device, 1, Uuid::new_v4(), 1),
+            &server.fingerprint,
+        ),
+        tag,
+    );
+    let representative_id: Uuid = representative["envelope_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(server.commit(&representative).await, "1");
+    let extra_id = Uuid::new_v4();
+    let extra = with_origin_tag(
+        set_fingerprint(
+            event(server.vault, server.owner_device, 2, extra_id, 2),
+            &server.fingerprint,
+        ),
+        tag,
+    );
+    assert_eq!(server.commit(&extra).await, "2");
+    let extra_envelope: Envelope = serde_json::from_value(extra.clone()).unwrap();
+    let extra_digest = extra_envelope.wire_digest().unwrap();
+    let (retained_envelope, retained_digest): (Value, Vec<u8>) = sqlx::query_as(
+        "SELECT envelope, cipher_digest FROM encrypted_records WHERE vault_id=$1 AND envelope_id=$2",
+    )
+    .bind(server.vault)
+    .bind(extra_id)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        retained_envelope,
+        serde_json::to_value(&extra_envelope).unwrap()
+    );
+    assert_eq!(retained_digest, extra_digest.as_slice());
+    let compactor = set_fingerprint(
+        compacting_event(
+            server.vault,
+            server.owner_device,
+            3,
+            Uuid::new_v4(),
+            vec![(server.owner_device, 1), (server.owner_device, 2)],
+        ),
+        &server.fingerprint,
+    );
+    assert_eq!(server.commit(&compactor).await, "3");
+    let (status, _) = server
+        .post(&server.owner_token, "/v1/compaction/capability", &json!({}))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    age_and_prune(&server).await;
+    sqlx::query(
+        "UPDATE record_compaction SET created_at=now()-interval '91 days' WHERE vault_id=$1",
+    )
+    .bind(server.vault)
+    .execute(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(compact_records(&server.pool).await.unwrap(), 2);
+    let (indexed_tag_is_null, original_cursor, compacted_digest): (bool, i64, Vec<u8>) = sqlx::query_as(
+        "SELECT origin_tag IS NULL, original_cursor, cipher_digest FROM compacted_records WHERE vault_id=$1 AND envelope_id=$2",
+    )
+    .bind(server.vault)
+    .bind(extra_id)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert!(indexed_tag_is_null);
+    assert_eq!(original_cursor, 2);
+    assert_eq!(compacted_digest, extra_digest.as_slice());
+    let (representative_live, representative_compacted): (bool, bool) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM encrypted_records WHERE vault_id=$1 AND envelope_id=$2), EXISTS(SELECT 1 FROM compacted_records WHERE vault_id=$1 AND envelope_id=$2)",
+    )
+    .bind(server.vault)
+    .bind(representative_id)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (representative_live, representative_compacted),
+        (false, true)
+    );
+    let (status, retry) = server.post(&server.owner_token, "/v1/events", &extra).await;
+    assert_eq!(status, StatusCode::OK, "{retry}");
+    assert_eq!(retry, json!({"cursor":"2","duplicate":true}));
+    let mut changed = extra.clone();
+    changed["ciphertext"] = json!("AQIE");
+    let (status, conflict) = server
+        .post(&server.owner_token, "/v1/events", &changed)
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+
+    let third_same_producer = with_origin_tag(
+        set_fingerprint(
+            event(server.vault, server.owner_device, 4, Uuid::new_v4(), 4),
+            &server.fingerprint,
+        ),
+        tag,
+    );
+    let (status, admitted) = server
+        .post(&server.owner_token, "/v1/events", &third_same_producer)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{admitted}");
+    assert_eq!(admitted, json!({"cursor":"4","duplicate":false}));
+    let third_id: Uuid = third_same_producer["envelope_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let third_indexed_tag_is_null: bool = sqlx::query_scalar(
+        "SELECT origin_tag IS NULL FROM encrypted_records WHERE vault_id=$1 AND envelope_id=$2",
+    )
+    .bind(server.vault)
+    .bind(third_id)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert!(third_indexed_tag_is_null);
+    let (status, retry) = server
+        .post(&server.owner_token, "/v1/events", &third_same_producer)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{retry}");
+    assert_eq!(retry, json!({"cursor":"4","duplicate":true}));
+    let representative_indexes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (SELECT origin_tag FROM encrypted_records WHERE vault_id=$1 UNION ALL SELECT origin_tag FROM compacted_records WHERE vault_id=$1) records WHERE origin_tag=$2",
+    )
+    .bind(server.vault)
+    .bind(tag.to_vec())
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        representative_indexes, 1,
+        "tag {tag_base64} must retain one indexed representative"
+    );
     server.shutdown().await;
 }
 
@@ -1844,6 +2091,73 @@ async fn websocket_presence_hint_is_vault_scoped_and_tracks_pong_and_close() {
         .find(|entry| entry["device_id"] == device.id.to_string())
         .unwrap();
     assert_eq!(seen["presence"]["state"], "seen");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn websocket_pongs_commit_renewals_even_when_another_socket_is_responsive() {
+    let server = TestServer::start().await;
+    let device = server.provision_device("device").await;
+    let mut observer = server.connect_ws(&server.owner_token).await;
+    send_hello(&mut observer, "0").await;
+    assert_eq!(next_json(&mut observer, 3).await["type"], "ready");
+    answer_ping(&mut observer, "observer initial challenge", 5).await;
+    wait_for_responsive_sockets(&server, server.owner_device, 1).await;
+    assert_eq!(
+        next_json(&mut observer, 5).await["type"],
+        "presence_changed"
+    );
+    let mut first = server.connect_ws(&device.token).await;
+    send_hello(&mut first, "0").await;
+    assert_eq!(next_json(&mut first, 3).await["type"], "ready");
+    let mut second = server.connect_ws(&device.token).await;
+    send_hello(&mut second, "0").await;
+    assert_eq!(next_json(&mut second, 3).await["type"], "ready");
+
+    answer_ping(&mut first, "first socket initial challenge", 5).await;
+    wait_for_responsive_sockets(&server, device.id, 1).await;
+    assert_eq!(
+        next_json(&mut observer, 5).await["type"],
+        "presence_changed"
+    );
+    let (first_connection, first_lease_ms): (Uuid, i64) = sqlx::query_as(
+        "SELECT connection_id, (EXTRACT(EPOCH FROM lease_until) * 1000)::bigint FROM device_sockets WHERE vault_id=$1 AND device_id=$2 AND responsive",
+    )
+    .bind(server.vault)
+    .bind(device.id)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    answer_ping(&mut second, "second socket initial challenge", 5).await;
+    wait_for_responsive_sockets(&server, device.id, 2).await;
+    assert_no_text_frame(&mut observer, Duration::from_millis(500)).await;
+    sqlx::query("UPDATE device_sockets SET lease_until=now()-interval '1 second' WHERE vault_id=$1 AND connection_id=$2")
+        .bind(server.vault)
+        .bind(first_connection)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    answer_ping(&mut first, "first socket renewal challenge", 25).await;
+    wait_until(5, "first socket renewed beyond its original lease", || {
+        let pool = server.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT (EXTRACT(EPOCH FROM lease_until) * 1000)::bigint > $3 FROM device_sockets WHERE vault_id=$1 AND connection_id=$2",
+            )
+            .bind(server.vault)
+            .bind(first_connection)
+            .bind(first_lease_ms)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    })
+    .await;
+    first.close(None).await.unwrap();
+    wait_for_responsive_sockets(&server, device.id, 1).await;
+    second.close(None).await.unwrap();
+    wait_for_responsive_sockets(&server, device.id, 0).await;
+    observer.close(None).await.unwrap();
     server.shutdown().await;
 }
 
@@ -2146,6 +2460,42 @@ async fn send_hello(ws: &mut Ws, resume_cursor: &str) {
     ))
     .await
     .unwrap();
+}
+
+async fn answer_ping(ws: &mut Ws, label: &str, seconds: u64) {
+    tokio::time::timeout(Duration::from_secs(seconds), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(tungstenite::Message::Ping(payload))) => {
+                    ws.send(tungstenite::Message::Pong(payload)).await.unwrap();
+                    return;
+                }
+                Some(Ok(tungstenite::Message::Text(_)))
+                | Some(Ok(tungstenite::Message::Pong(_))) => {}
+                other => panic!("{label} stream ended before its Ping: {other:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {label}"));
+}
+
+async fn wait_for_responsive_sockets(server: &TestServer, device: Uuid, expected: i64) {
+    wait_until(5, "responsive socket commits", || {
+        let pool = server.pool.clone();
+        async move {
+            let actual: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM device_sockets WHERE vault_id=$1 AND device_id=$2 AND responsive AND lease_until > now()",
+            )
+            .bind(server.vault)
+            .bind(device)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            actual == expected
+        }
+    })
+    .await;
 }
 
 /// Reads the next text frame as JSON, responding to control pings.
@@ -3236,6 +3586,83 @@ async fn key_profiles_are_owner_only_immutable_forward_and_gate_epochs() {
             .await
             .is_err()
     );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn key_profile_admission_revalidates_the_exact_owner_after_the_vault_lock() {
+    let server = TestServer::start().await;
+    let (profile_two, fingerprint_two) = profile(server.vault, 2);
+    let request = json!({
+        "key_epoch": 2,
+        "public_key_profile": profile_two,
+        "encrypted_vault_check_header": base64::engine::general_purpose::STANDARD.encode([2_u8; 80]),
+        "profile_fingerprint": fingerprint_two,
+        "admission_public_key": admission_public_key(server.vault, 2),
+    });
+    let (holder, holder_pid) = hold_vault_lock(&server).await;
+    let base_url = server.base_url.clone();
+    let token = server.owner_token.clone();
+    let task = tokio::spawn(send_detached(
+        Client::new()
+            .post(format!("{base_url}/v1/vault/key-profiles"))
+            .bearer_auth(token)
+            .json(&request),
+    ));
+    wait_for_lock_waiter(&server, holder_pid, "SELECT key_epoch FROM vaults").await;
+    revoke_credential_and_release(holder, server.owner_device).await;
+    let (status, body) = finish_blocked(task).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let profiles: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM vault_key_profiles WHERE vault_id=$1")
+            .bind(server.vault)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+    assert_eq!(profiles, 1);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn key_profile_activation_revalidates_the_owner_role_after_the_vault_lock() {
+    let server = TestServer::start().await;
+    let (profile_two, fingerprint_two) = profile(server.vault, 2);
+    let request = json!({
+        "key_epoch": 2,
+        "public_key_profile": profile_two,
+        "encrypted_vault_check_header": base64::engine::general_purpose::STANDARD.encode([2_u8; 80]),
+        "profile_fingerprint": fingerprint_two,
+        "admission_public_key": admission_public_key(server.vault, 2),
+    });
+    let (status, body) = server
+        .post(&server.owner_token, "/v1/vault/key-profiles", &request)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (mut holder, holder_pid) = hold_vault_lock(&server).await;
+    let base_url = server.base_url.clone();
+    let token = server.owner_token.clone();
+    let task = tokio::spawn(send_detached(
+        Client::new()
+            .post(format!("{base_url}/v1/vault/key-profiles/2/activate"))
+            .bearer_auth(token)
+            .json(&json!({})),
+    ));
+    wait_for_lock_waiter(&server, holder_pid, "SELECT key_epoch FROM vaults").await;
+    sqlx::query("UPDATE devices SET role='device' WHERE vault_id=$1 AND device_id=$2")
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+    let (status, body) = finish_blocked(task).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let epoch: i32 = sqlx::query_scalar("SELECT key_epoch FROM vaults WHERE vault_id=$1")
+        .bind(server.vault)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+    assert_eq!(epoch, 1);
     server.shutdown().await;
 }
 

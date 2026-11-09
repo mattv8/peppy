@@ -40,7 +40,7 @@ export function MediaLightbox({ items: initialItems, initialAttachmentId, initia
   const [items, setItems] = useState(openableInitialItems);
   const [index, setIndex] = useState(() => Math.max(0, openableInitialItems.findIndex(item => item.attachment.id === initialAttachmentId && (!initialMessageId || item.message.id === initialMessageId))));
   const [loadedOriginal, setLoadedOriginal] = useState<{ attachmentId: string; url: string }>(); const [pendingAttachmentId, setPendingAttachmentId] = useState<string>(); const [loadError, setLoadError] = useState<string>(); const [actionError, setActionError] = useState<string>(); const [saving, setSaving] = useState(false); const [savePending, setSavePending] = useState(false); const [paging, setPaging] = useState(false); const [previousExhausted, setPreviousExhausted] = useState(!hasPreviousPage); const [nextExhausted, setNextExhausted] = useState(!hasNextPage);
-  const requestVersion = useRef(0); const requested = useRef(false); const itemsRef = useRef(items); itemsRef.current = items;
+  const requestVersion = useRef(0); const requested = useRef(false); const itemsRef = useRef(items); const navigationGeneration = useRef(0); const saveTargetId = useRef<string | undefined>(undefined); itemsRef.current = items;
   const actions = useMediaActions();
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const retryButtonRef = useRef<HTMLButtonElement>(null);
@@ -64,7 +64,7 @@ export function MediaLightbox({ items: initialItems, initialAttachmentId, initia
   useEffect(() => () => { requestVersion.current += 1; }, []);
   // Keyed only on the loaded pair: a new releaseMedia identity must not release the URL still on screen.
   useEffect(() => { if (loadedOriginal) return () => releaseMedia?.(loadedOriginal.attachmentId, loadedOriginal.url); }, [loadedOriginal]);
-  useEffect(() => { requestVersion.current += 1; setLoadedOriginal(undefined); setPendingAttachmentId(undefined); setSavePending(false); setLoadError(undefined); setActionError(undefined); requested.current = false; }, [item?.attachment.id]);
+  useEffect(() => { navigationGeneration.current += 1; requestVersion.current += 1; saveTargetId.current = undefined; setLoadedOriginal(undefined); setPendingAttachmentId(undefined); setSaving(false); setSavePending(false); setLoadError(undefined); setActionError(undefined); requested.current = false; }, [item?.attachment.id]);
   useEffect(() => { if (item && !removedRemoteOnly && !mediaState(item).startsWith("unsupported")) void request(); }, [item?.attachment.id, removedRemoteOnly]);
   useEffect(() => { if (item && !removedRemoteOnly && !url && (pending && requested.current || originalPending(item.attachment))) void check(); }, [removedRemoteOnly, retryKey]);
   useEffect(() => { if (!pending) { setStillWaiting(false); return; } const timer = window.setTimeout(() => setStillWaiting(true), 15000); return () => window.clearTimeout(timer); }, [item?.attachment.id, pending]);
@@ -92,8 +92,23 @@ export function MediaLightbox({ items: initialItems, initialAttachmentId, initia
     } catch { setActionError("Couldn't load more media."); } finally { setPaging(false); }
   };
   useEffect(() => { const onKeyDown = (event: KeyboardEvent) => { if (event.target instanceof HTMLMediaElement) return; if (event.key === "ArrowLeft") void navigate(-1); if (event.key === "ArrowRight") void navigate(1); }; document.addEventListener("keydown", onKeyDown); return () => document.removeEventListener("keydown", onKeyDown); });
-  const save = async () => { if (!item) return; setSaving(true); setActionError(undefined); try { await saveMedia(item.attachment.id); setSavePending(false); } catch (saveError) { if (isMediaPending(saveError)) setSavePending(true); else setActionError("Could not save media."); } finally { setSaving(false); } };
-  useEffect(() => { if (savePending && !saving) void save(); }, [retryKey]);
+  const save = async (target = item?.attachment.id, generation = navigationGeneration.current) => {
+    if (!target) return;
+    saveTargetId.current = target;
+    setSaving(true);
+    setActionError(undefined);
+    try {
+      await saveMedia(target);
+      if (generation === navigationGeneration.current && item?.attachment.id === target) setSavePending(false);
+    } catch (saveError) {
+      if (generation !== navigationGeneration.current || item?.attachment.id !== target) return;
+      if (isMediaPending(saveError)) setSavePending(true);
+      else setActionError("Could not save media.");
+    } finally {
+      if (generation === navigationGeneration.current && item?.attachment.id === target) setSaving(false);
+    }
+  };
+  useEffect(() => { if (savePending && !saving && saveTargetId.current === item?.attachment.id) void save(saveTargetId.current); }, [retryKey]);
   const failed = !removedRemoteOnly && (item?.attachment.state === "failed" || (!url && Boolean(loadError)));
   useEffect(() => { if (!failed) return; const focused = document.activeElement; if (focused === closeButtonRef.current || focused === stageRef.current) retryButtonRef.current?.focus(); }, [failed]);
   useEffect(() => { closeButtonRef.current?.focus(); }, []);

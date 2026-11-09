@@ -107,6 +107,8 @@ extension AppModel {
         contactsPreferences.save(preferences)
         contacts.enabled = false
         contacts.intent = .stopped
+        remoteScanFollowUpQueued = false
+        Task { await contactPasses.cancel() }
     }
 
     /// The new-contact account is an owner setting in the core, not a phone preference.
@@ -144,7 +146,11 @@ extension AppModel {
     }
 
     func contactsPassFinished(_ report: ContactsSyncReport) async {
+        // Pause is a fence, not merely a presentation preference. A pass that was already
+        // suspended must not restore state or schedule a follow-up after it observes the fence.
+        guard contactsPreferences.load().enabled else { return }
         await publishServerReachability()
+        guard contactsPreferences.load().enabled else { return }
         contacts.lastReport = report
         if report.outcome != .busy && report.outcome != .disabled { contacts.lastPassDate = Date() }
         contacts.error = report.syncError

@@ -273,10 +273,20 @@ const ENROLLMENT_ACTIVATIONS = new Set([
   "enrollment_create_owner",
   "enrollment_connect_shared_secret",
   "enrollment_create_vault",
+  "enrollment_confirm_computer",
 ]);
 
 function isReadyEnrollmentView(value: unknown): boolean {
   return typeof value === "object" && value !== null && !Array.isArray(value) && (value as Record<string, unknown>).stage === "ready";
+}
+
+function isActivationView(command: string, value: unknown): boolean {
+  return isReadyEnrollmentView(value)
+    || command === "enrollment_confirm_computer"
+      && typeof value === "object"
+      && value !== null
+      && !Array.isArray(value)
+      && (value as Record<string, unknown>).stage === "computer_connected";
 }
 
 function isIndexing(value: unknown): boolean {
@@ -291,6 +301,16 @@ function isSearchIndexState(value: unknown): value is { indexState: "indexing" |
 function isTransientSearchIndexError(error: unknown): boolean {
   return error instanceof BrowserSessionError && error.code === "busy"
     || error instanceof CoreRejectedError && error.code === "unavailable";
+}
+
+function fatalDiagnostic(error: Error): "checkpoint-conflict" | "checkpoint-invalid" | "storage-unavailable" | "core-runtime-failure" {
+  if (error instanceof CheckpointError) {
+    if (error.code === "storage-conflict") return "checkpoint-conflict";
+    if (error.code === "invalid-checkpoint") return "checkpoint-invalid";
+    return "storage-unavailable";
+  }
+  // BrowserCore deliberately normalizes malformed ABI, poison, and WASM traps to BrowserCoreError.
+  return "core-runtime-failure";
 }
 
 function safeSnapshot(phase: BrowserSessionPhase): Record<string, unknown> {
@@ -894,6 +914,8 @@ export class BrowserWorkerHost {
   private rememberedUnlockValidation?: Promise<void>;
   private deviceSessionScope?: { binding: string; id: string };
   private producerAdmissionReady = false;
+  private networkStarted = false;
+  private networkStarting?: Promise<void>;
   private lastRememberedUnlockValidationAt = 0;
 
   public constructor(private readonly dependencies: BrowserHostDependencies) {}
@@ -983,8 +1005,7 @@ export class BrowserWorkerHost {
         } : undefined;
       }, Date.now, ids => ids.forEach(id => this.presentationRecipients.delete(id)));
       this.unsubscribeNetwork = this.dependencies.network?.subscribeChanges?.(() => this.changed());
-      if (owner.owner.phase === "ready") { const ready = await this.dependencies.network?.start(); this.producerAdmissionReady = ready !== false; }
-      void this.startSearchIndexWhenReady();
+      if (owner.owner.phase === "ready") await this.startNetwork();
     } catch (error) {
       if (error instanceof TransportError && error.kind === "revoked") {
         await this.stop("revoked");
@@ -1079,11 +1100,9 @@ export class BrowserWorkerHost {
     }
     if (request.command.startsWith("enrollment_")) {
       const response = await this.enrollment(request);
-      if (response.ok && ENROLLMENT_ACTIVATIONS.has(request.command) && this.owner.owner.phase === "ready" && isReadyEnrollmentView(response.value)) {
+      if (response.ok && ENROLLMENT_ACTIVATIONS.has(request.command) && this.owner.owner.phase === "ready" && isActivationView(request.command, response.value)) {
         try {
-          const ready = await this.dependencies.network?.start();
-          this.producerAdmissionReady = ready !== false;
-          void this.startSearchIndexWhenReady();
+          await this.startNetwork();
         } catch (error) {
           port.postMessage({ id: request.id, ok: false, error: errorFor(error) });
           await this.stop(error instanceof TransportError && error.kind === "revoked" ? "revoked" : "unavailable");
@@ -1154,8 +1173,7 @@ export class BrowserWorkerHost {
     }
     if (response.ok && command === "unlock") {
       try {
-        const ready = await this.dependencies.network?.start();
-        this.producerAdmissionReady = ready !== false;
+        await this.startNetwork();
       } catch (error) {
         response = { id: request.id, ok: false, error: errorFor(error) };
         if (this.ports.has(port)) port.postMessage(response);
@@ -1184,6 +1202,26 @@ export class BrowserWorkerHost {
     if (response.ok && command === "search_local") {
       this.recordSearchIndexState(response.value);
       if (isIndexing(response.value)) this.scheduleSearchIndex();
+    }
+  }
+
+  private async startNetwork(): Promise<void> {
+    if (this.networkStarted) return;
+    const owner = this.owner;
+    if (!owner || this.stopping) return;
+    this.networkStarting ??= Promise.resolve()
+      .then(() => this.dependencies.network?.start())
+      .then(ready => {
+        if (this.owner !== owner || owner.owner.phase !== "ready" || this.stopping) return;
+        this.networkStarted = true;
+        this.producerAdmissionReady = ready !== false;
+        void this.startSearchIndexWhenReady();
+      });
+    const starting = this.networkStarting;
+    try {
+      await starting;
+    } finally {
+      if (this.networkStarting === starting && !this.networkStarted) this.networkStarting = undefined;
     }
   }
 
@@ -1446,6 +1484,7 @@ export class BrowserWorkerHost {
       const displayName = typeof request.args.displayName === "string" ? request.args.displayName : undefined;
       const waitingOnly = request.args.waitingOnly;
       if (waitingOnly !== undefined && typeof waitingOnly !== "boolean") throw { code: "invalid-request" };
+      if (request.command === "enrollment_set_hosted_csrf" && !csrf) throw { code: "invalid-request" };
       const value = request.command === "enrollment_discover" ? await network.enrollmentDiscover(typeof request.args.origin === "string" ? request.args.origin : undefined)
        : request.command === "enrollment_create_owner" && passphrase ? await network.enrollmentCreateOwner({ ...(setupToken ? { setupToken } : {}), ...(adminPassword ? { adminPassword } : {}), passphrase }, username)
           : request.command === "enrollment_sign_in" ? await network.enrollmentSignIn(adminPassword ?? "", username)
@@ -1475,7 +1514,7 @@ export class BrowserWorkerHost {
                                          : request.command === "enrollment_approve_vault_request" && typeof request.args.requestId === "string" ? (await network.enrollmentApproveVaultRequest(request.args.requestId), undefined)
                                            : request.command === "enrollment_deny_vault_request" && typeof request.args.requestId === "string" ? (await network.enrollmentDenyVaultRequest(request.args.requestId), undefined)
                            : undefined;
-      if (value === undefined && !["enrollment_cancel", "enrollment_sign_out", "enrollment_revoke_invite", "enrollment_approve_vault_request", "enrollment_deny_vault_request"].includes(request.command)) throw { code: "invalid-request" };
+      if (value === undefined && !["enrollment_cancel", "enrollment_sign_out", "enrollment_set_hosted_csrf", "enrollment_revoke_invite", "enrollment_approve_vault_request", "enrollment_deny_vault_request"].includes(request.command)) throw { code: "invalid-request" };
       if (request.command === "enrollment_status") this.scheduleRememberedUnlockValidation();
       if (request.command === "enrollment_sign_out" && recoveryClearFailed) return { id: request.id, ok: false, error: RECOVERY_CLEAR_ERROR };
       return { id: request.id, ok: true, value };
@@ -1532,7 +1571,10 @@ export class BrowserWorkerHost {
     }
   }
 
-  private async fatal(_error: Error): Promise<void> { await this.stop("fatal"); }
+  private async fatal(error: Error): Promise<void> {
+    console.error("Browser worker fatal", fatalDiagnostic(error));
+    await this.stop("fatal");
+  }
 
   private portMediaLeases(port: BrowserPort): MediaLeases {
     return {
@@ -1942,7 +1984,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       const session = await BrowserSession.boot({ origin: origins.logicalOrigin, core, filesystem: module.FS, checkpoint: new IndexedDbCheckpointStore(OWNER_NAME), rememberedUnlock: browserRememberedUnlock(origins.fetchBase), liveTeardown: () => liveSupervisor?.stop() ?? Promise.resolve(), onFatal });
       activeSession = session;
         enrollmentAbort = new AbortController();
-        enrollment = new BrowserEnrollment(core, session, origins.logicalOrigin, undefined, origins.fetchBase, enrollmentAbort.signal);
+        enrollment = new BrowserEnrollment(session.enrollmentCore(), session, origins.logicalOrigin, undefined, origins.fetchBase, enrollmentAbort.signal);
        publicTransport = new OriginTransport({ origin: self.location.origin, deviceToken: () => session.tokenForTransport() });
        liveSupervisor = new LiveSupervisor({
          transport: publicTransport,

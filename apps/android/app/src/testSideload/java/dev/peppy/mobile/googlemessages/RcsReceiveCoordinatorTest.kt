@@ -144,6 +144,28 @@ class RcsReceiveCoordinatorTest {
         assertEquals(listOf(NativeRcsObservationProvenance.LIVE, NativeRcsObservationProvenance.HISTORICAL), core.provenances)
     }
 
+    @Test fun `live Go envelope ingests only its inner record`() {
+        val context = receiveContext("core-a", "google-a")
+        val core = FakeCore(contextByGoogle = mapOf("google-a" to context))
+
+        coordinator(core).receive(liveRecord("google-a"))
+
+        assertEquals(1, core.ingestedRecords.size)
+        assertEquals("google-a", JSONObject(core.ingestedRecords.single()).getString("google_conversation_id"))
+        assertEquals(null, JSONObject(core.ingestedRecords.single()).opt("code"))
+        assertEquals(listOf(NativeRcsObservationProvenance.LIVE), core.provenances)
+    }
+
+    @Test fun `live protocol switch invalidates its current context without ingestion`() {
+        val context = receiveContext("core-a", "google-a")
+        val core = FakeCore(contextByGoogle = mapOf("google-a" to context))
+
+        coordinator(core).receive(JSONObject().put("code", "protocol_switch").put("google_conversation_id", "google-a").toString())
+
+        assertEquals(listOf("google-a"), core.invalidations)
+        assertTrue(core.ingestedRecords.isEmpty())
+    }
+
     @Test fun `cancellation during a page prevents later records and checkpoint`() {
         val context = receiveContext("core-a", "google-a")
         val cancelled = AtomicBoolean()
@@ -306,7 +328,18 @@ private fun receiveContext(conversationId: String, googleId: String, token: Stri
 
 private fun accepted() = NativeRcsIngestOutcome("inserted", "status_applied", null)
 private fun refused(code: String = "identity_conflict") = NativeRcsIngestOutcome("rejected:$code", null, null)
-private fun liveRecord(googleId: String) = JSONObject().put("google_conversation_id", googleId).toString()
+private fun liveRecord(googleId: String) = JSONObject()
+    .put("code", "ok")
+    .put("record", JSONObject()
+        .put("google_message_id", "message-1")
+        .put("google_conversation_id", googleId)
+        .put("direction", "incoming")
+        .put("body", "synthetic body")
+        .put("sent_at_ms", 1_735_689_600_123L)
+        .put("status", "delivered")
+        .put("tmp_id", "tmp-1")
+        .put("rcs_reported", true))
+    .toString()
 private fun page(
     records: Int = 0,
     recordValues: List<JSONObject> = List(records) { JSONObject().put("google_message_id", "message-$it") },

@@ -998,6 +998,135 @@ fn coalesced_os_update_removal_retires_the_captured_lifetime() {
 }
 
 #[test]
+fn conditional_removal_preserves_a_newer_captured_instance() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone_config = config(&dir, "conditional", &vault);
+    let desktop_config = config(&dir, "conditional-desktop", &vault);
+    let phone = unlocked(&phone_config, &vault);
+    let desktop = unlocked(&desktop_config, &vault);
+    let mut server = Server::default();
+    phone
+        .capture_notification(capture("key", "A", "first"))
+        .unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+    desktop
+        .dismiss_notification(
+            desktop.notification_snapshot().unwrap().notifications[0]
+                .target
+                .clone(),
+        )
+        .unwrap();
+    server.upload(&desktop);
+    server.sync(&phone);
+    let lifetime = phone.notification_snapshot().unwrap().notifications[0]
+        .target
+        .lifetime
+        .clone();
+    assert_eq!(
+        phone
+            .capture_notification(capture("key", "B", "first"))
+            .unwrap(),
+        NotificationCaptureOutcome::Duplicate
+    );
+
+    phone
+        .remove_notification_if_current_instance("key", "A")
+        .unwrap();
+    let snapshot = phone.notification_snapshot().unwrap();
+    assert_eq!(snapshot.notifications.len(), 1);
+    assert_eq!(snapshot.notifications[0].target.lifetime, lifetime);
+    assert!(snapshot.notifications[0].dismissal_pending);
+    assert_eq!(
+        phone.pending_notification_dismissals(10).unwrap()[0].instance,
+        "B"
+    );
+}
+
+#[test]
+fn conditional_removal_retires_only_its_current_lifetime_and_is_idempotent() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone_config = config(&dir, "conditional-retire", &vault);
+    let desktop_config = config(&dir, "conditional-retire-desktop", &vault);
+    let phone = unlocked(&phone_config, &vault);
+    let desktop = unlocked(&desktop_config, &vault);
+    let mut server = Server::default();
+    phone
+        .capture_notification(capture("key", "A", "first"))
+        .unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+    desktop
+        .dismiss_notification(
+            desktop.notification_snapshot().unwrap().notifications[0]
+                .target
+                .clone(),
+        )
+        .unwrap();
+    server.upload(&desktop);
+    server.sync(&phone);
+    assert!(phone.notification_snapshot().unwrap().notifications[0].dismissal_pending);
+    let old_lifetime = phone.notification_snapshot().unwrap().notifications[0]
+        .target
+        .lifetime
+        .clone();
+    phone
+        .remove_notification_if_current_instance("key", "A")
+        .unwrap();
+    assert!(
+        phone
+            .notification_snapshot()
+            .unwrap()
+            .notifications
+            .is_empty()
+    );
+    assert!(
+        phone
+            .pending_notification_dismissals(10)
+            .unwrap()
+            .is_empty()
+    );
+    let outbox_after_removal = phone.pending_outbox().unwrap().len();
+    phone
+        .remove_notification_if_current_instance("key", "A")
+        .unwrap();
+    assert_eq!(phone.pending_outbox().unwrap().len(), outbox_after_removal);
+    phone
+        .capture_notification(capture("key", "B", "second"))
+        .unwrap();
+    let snapshot = phone.notification_snapshot().unwrap();
+    assert_eq!(snapshot.notifications.len(), 1);
+    assert_ne!(snapshot.notifications[0].target.lifetime, old_lifetime);
+    assert!(!snapshot.notifications[0].dismissal_pending);
+}
+
+#[test]
+fn conditional_removal_validates_inputs() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone = unlocked(&config(&dir, "conditional-invalid", &vault), &vault);
+    assert!(matches!(
+        phone.remove_notification_if_current_instance("", "A"),
+        Err(Error::InvalidRequest("notification"))
+    ));
+    assert!(matches!(
+        phone.remove_notification_if_current_instance("key", ""),
+        Err(Error::InvalidRequest("notification"))
+    ));
+    let over_limit = "x".repeat(513);
+    assert!(matches!(
+        phone.remove_notification("key", &over_limit),
+        Err(Error::InvalidRequest("notification"))
+    ));
+    assert!(matches!(
+        phone.remove_notification_if_current_instance("key", &over_limit),
+        Err(Error::InvalidRequest("notification"))
+    ));
+}
+
+#[test]
 fn os_updates_keep_pending_dismissal_executable_without_duplicate_history() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();

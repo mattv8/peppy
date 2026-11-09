@@ -1231,7 +1231,17 @@ fn scan_checkpoint_is_owner_only_bounded_and_survives_reopen() {
     );
     assert!(state(&p.peer, json!({"book_id": BOOK, "checkpoint": {"a": 1}})).is_err());
 
-    let reopened = open(&p.owner_cfg);
+    let Pair {
+        _dir,
+        vault: _,
+        owner_cfg,
+        peer_cfg: _,
+        owner,
+        peer: _,
+        server: _,
+    } = p;
+    drop(owner);
+    let reopened = open(&owner_cfg);
     assert_eq!(
         call(state(&reopened, json!({"book_id": BOOK})))["checkpoint"],
         checkpoint

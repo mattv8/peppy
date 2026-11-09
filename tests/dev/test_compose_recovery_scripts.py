@@ -7,6 +7,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 from collections.abc import Callable
 from hashlib import sha256
 
@@ -14,6 +15,7 @@ from hashlib import sha256
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BACKUP = ROOT / "infra/compose/backup.sh"
 RESTORE = ROOT / "infra/compose/restore.sh"
+PASSWORD_PREFLIGHT = ROOT / "infra/compose/validate-db-passwords.sh"
 
 POSTGRES_ID = "sha256:" + "a" * 64
 SEAWEED_ID = "sha256:" + "b" * 64
@@ -72,6 +74,9 @@ if args[0] == "inspect":
     service = args[-1].removeprefix("container-")
     if "{{.State.ExitCode}}" in args:
         print(json.loads(os.environ["EXIT_CODES"])[service])
+        sys.exit(0)
+    if "{{json .Mounts}}" in args:
+        print(json.dumps(json.loads(os.environ["RUNNING_MOUNTS"])[service]))
         sys.exit(0)
     print(json.loads(os.environ["RUNNING_IDS"])[service])
     sys.exit(0)
@@ -156,6 +161,24 @@ def ps_state(mcp_states: dict[str, str]) -> tuple[str, str]:
     return running, json.dumps(services)
 
 
+def configured_mounts(config: str) -> dict[str, list[dict[str, str]]]:
+    parsed = json.loads(config)
+    mounts: dict[str, list[dict[str, str]]] = {}
+    for service in ("postgres", "seaweedfs", "mcp"):
+        if service not in parsed["services"]:
+            continue
+        mounts[service] = [
+            {
+                "Type": "volume",
+                "Name": parsed["volumes"][volume["source"]]["name"],
+                "Destination": volume["target"],
+            }
+            for volume in parsed["services"][service].get("volumes", [])
+            if volume.get("type") == "volume"
+        ]
+    return mounts
+
+
 def share_volume_name(key: str, name: str) -> Callable[[dict], None]:
     def mutate(config: dict) -> None:
         config["volumes"][key]["name"] = name
@@ -192,6 +215,145 @@ def write_restore_archive(root: pathlib.Path, artifacts: tuple[str, ...], config
 
 
 class ComposeRecoveryScriptTests(unittest.TestCase):
+    PASSWORDS = {
+        "POSTGRES_PASSWORD": "owner_password-1",
+        "PEPPY_RUNTIME_DB_PASSWORD": "runtime.password~2",
+        "PEPPY_MAINTENANCE_DB_PASSWORD": "maintenance_password_3",
+    }
+    COMPOSE_FIXTURE_ENVIRONMENT = {
+        "PEPPY_ENV": "development",
+        "POSTGRES_DB": "peppy",
+        "POSTGRES_USER": "peppy",
+        **PASSWORDS,
+        "PEPPY_RUNTIME_DB_USER": "peppy_runtime",
+        "PEPPY_MAINTENANCE_DB_USER": "peppy_maintenance",
+        "S3_ACCESS_KEY": "test_access",
+        "S3_SECRET_KEY": "test_secret",
+        "S3_BUCKET": "peppy-private",
+        "PEPPY_REPLAY_RETENTION_DAYS": "30",
+        "VAULT_ATTACHMENT_QUOTA_BYTES": "536870912",
+        "PUBLIC_API_URL": "http://127.0.0.1:7000",
+        "PUBLIC_ATTACHMENT_URL": "http://127.0.0.1:7000",
+        "WEB_CLIENT_ACCOUNT_URL": "",
+        "WEB_UI_ENABLED": "true",
+        "PEPPY_SETUP_TOKEN": "",
+        "TRUSTED_PROXY_CIDRS": "",
+        "API_HOST_PORT": "7000",
+        "PEPPY_SOURCE_TREE": str(ROOT),
+        "DEV_UID": "1000",
+        "DEV_GID": "1000",
+        "BIND_ADDR": "0.0.0.0:8080",
+        "PEPPY_SIMULATOR_PASSPHRASE": "",
+        "PEPPY_DEMO_ADMIN_PASSWORD": "",
+        "DEBUG": "false",
+        "PEPPY_ACCEPT_ANDROID_LICENSES": "",
+        "PEPPY_ANDROID_ABI": "",
+        "PEPPY_ANDROID_BUILD_VARIANT": "debug",
+        "PEPPY_ANDROID_FORCE_NATIVE_CLEAN": "",
+        "PEPPY_ANDROID_CONTAINER_ARTIFACTS": "/artifacts/android",
+    }
+
+    def run_password_preflight(self, passwords: dict[str, str]):
+        return subprocess.run(
+            ["sh", str(PASSWORD_PREFLIGHT)],
+            env=os.environ | passwords,
+            text=True,
+            capture_output=True,
+        )
+
+    def effective_compose_config(self, *compose_files: pathlib.Path) -> dict:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as environment_file:
+            environment_file.write(
+                "".join(f"{key}={value}\n" for key, value in self.COMPOSE_FIXTURE_ENVIRONMENT.items())
+            )
+            environment_file.flush()
+            result = subprocess.run(
+                [
+                    "docker",
+                    "compose",
+                    "--project-directory",
+                    str(ROOT),
+                    "--env-file",
+                    environment_file.name,
+                    *sum((["-f", str(compose_file)] for compose_file in compose_files), []),
+                    "config",
+                    "--format",
+                    "json",
+                ],
+                env=os.environ | self.COMPOSE_FIXTURE_ENVIRONMENT,
+                text=True,
+                capture_output=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    @staticmethod
+    def preflight_dependency(service: dict) -> dict:
+        return service["depends_on"]["database-password-preflight"]
+
+    def test_database_password_preflight_rejects_each_password_in_fresh_and_prior_success_invocations(self):
+        for prior_state in ("fresh", "existing"):
+            for password_name in self.PASSWORDS:
+                with self.subTest(prior_state=prior_state, password_name=password_name):
+                    if prior_state == "existing":
+                        previous = self.run_password_preflight(self.PASSWORDS)
+                        self.assertEqual(previous.returncode, 0, previous.stderr)
+
+                    unsafe_passwords = self.PASSWORDS | {password_name: "not:uri-safe"}
+                    result = self.run_password_preflight(unsafe_passwords)
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("URI-unreserved", result.stderr)
+                    self.assertNotIn(unsafe_passwords[password_name], result.stderr)
+
+    def test_database_password_preflight_does_not_evaluate_rejected_passwords(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = pathlib.Path(directory) / "evaluated"
+            unsafe_password = f"$(touch {marker})"
+            result = self.run_password_preflight(self.PASSWORDS | {"PEPPY_RUNTIME_DB_PASSWORD": unsafe_password})
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(marker.exists())
+
+    def test_database_password_preflight_accepts_uri_unreserved_values(self):
+        result = self.run_password_preflight(self.PASSWORDS)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_effective_compose_config_gates_all_database_consumers_on_preflight(self):
+        root_config = self.effective_compose_config(ROOT / "docker-compose.yml")
+        dev_config = self.effective_compose_config(ROOT / "docker-compose.yml", ROOT / "infra/compose/compose.dev.yml")
+
+        preflight = root_config["services"]["database-password-preflight"]
+        self.assertEqual(preflight["image"], root_config["services"]["postgres"]["image"])
+        self.assertEqual(preflight["entrypoint"], ["/bin/sh", "/usr/local/bin/validate-db-passwords.sh"])
+        self.assertEqual(preflight["environment"], self.PASSWORDS)
+        self.assertEqual(
+            preflight["configs"],
+            [{"source": "database-password-preflight", "target": "/usr/local/bin/validate-db-passwords.sh"}],
+        )
+        self.assertNotIn("volumes", preflight)
+        self.assertEqual(preflight["tmpfs"], ["/var/lib/postgresql"])
+
+        for config, service_names in ((root_config, ("postgres", "migrate", "api")), (dev_config, ("postgres", "dev"))):
+            for service_name in service_names:
+                with self.subTest(service=service_name):
+                    self.assertEqual(
+                        self.preflight_dependency(config["services"][service_name]),
+                        {"condition": "service_completed_successfully", "required": True},
+                    )
+
+    def test_effective_compose_config_ignores_inherited_password_sentinels(self):
+        inherited = {name: f"inherited-{name.lower()}" for name in self.PASSWORDS}
+
+        with unittest.mock.patch.dict(os.environ, inherited):
+            root_config = self.effective_compose_config(ROOT / "docker-compose.yml")
+            rendered = json.dumps(root_config)
+
+        self.assertEqual(root_config["services"]["database-password-preflight"]["environment"], self.PASSWORDS)
+        for sentinel in inherited.values():
+            self.assertNotIn(sentinel, rendered)
+
     def fake_docker_root(self) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -231,6 +393,7 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
             "PS_ALL": ps_all,
             "EXIT_CODES": json.dumps(exit_codes or {"mcp-state-init": 0}),
         }
+        environment["RUNNING_MOUNTS"] = json.dumps(configured_mounts(environment["COMPOSE_CONFIG"]))
         return root, destination, log, environment
 
     def restore_fixture(
@@ -381,6 +544,36 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
 
                 self.assert_backup_refused_before_stop(result, log, destination)
                 self.assertNotIn('"run"', log.read_text())
+
+    def test_actual_named_volume_mount_drift_fails_before_stopping_services(self):
+        root, destination, log, environment = self.backup_fixture("server:community", "seaweed:community")
+        mounts = json.loads(environment["RUNNING_MOUNTS"])
+        mounts["seaweedfs"][0]["Name"] = "unexpected-seaweed-data"
+        environment["RUNNING_MOUNTS"] = json.dumps(mounts)
+
+        result = self.run_backup(root, destination, environment)
+
+        self.assert_backup_refused_before_stop(result, log, destination)
+        self.assertIn("configured named-volume mount", result.stderr)
+
+    def test_actual_mcp_named_volume_mount_type_or_target_drift_fails_before_stopping_services(self):
+        for drift in ("type", "target"):
+            with self.subTest(drift=drift):
+                root, destination, log, environment = self.backup_fixture(
+                    "server:community", "seaweed:community", mcp_overlay=True
+                )
+                mounts = json.loads(environment["RUNNING_MOUNTS"])
+                control_mount = next(mount for mount in mounts["mcp"] if mount["Destination"] == "/run/peppy-mcp")
+                if drift == "type":
+                    control_mount["Type"] = "bind"
+                else:
+                    control_mount["Destination"] = "/run/unexpected-mcp"
+                environment["RUNNING_MOUNTS"] = json.dumps(mounts)
+
+                result = self.run_backup(root, destination, environment)
+
+                self.assert_backup_refused_before_stop(result, log, destination)
+                self.assertIn("configured named-volume mount", result.stderr)
 
     def test_orphan_mcp_containers_without_overlay_keep_baseline_behavior(self):
         root, destination, log, environment = self.backup_fixture(

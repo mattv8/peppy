@@ -279,17 +279,20 @@ internal object ContactMapping {
 
     /** Provider rows for a core create request's top-level contact fields. */
     fun newFields(request: JSONObject): List<NewField> {
+        fun optionalText(key: String): String? = request.optString(key).takeIf { request.has(key) && !request.isNull(key) && it.isNotBlank() }
         val out = mutableListOf<NewField>()
         val name = request.optJSONObject("name")
-        val parts = NAME_PARTS.mapNotNull { (key, column) -> name?.optString(key)?.takeIf { it.isNotEmpty() }?.let { column to it } }.toMap()
-        val display = request.optString("display_name").takeIf { it.isNotBlank() }
+        val parts = NAME_PARTS.mapNotNull { (key, column) ->
+            name?.optString(key)?.takeIf { name.has(key) && !name.isNull(key) && it.isNotEmpty() }?.let { column to it }
+        }.toMap()
+        val display = optionalText("display_name")
         if (parts.isNotEmpty()) out += NewField(Kind.NAME, parts)
         else if (display != null) out += NewField(Kind.NAME, mapOf(StructuredName.DISPLAY_NAME to display))
-        request.optString("nickname").takeIf { it.isNotBlank() }?.let { out += NewField(Kind.NICKNAME, mapOf(Nickname.NAME to it)) }
-        val company = request.optString("organization").takeIf { it.isNotBlank() }
-        val title = request.optString("title").takeIf { it.isNotBlank() }
+        optionalText("nickname")?.let { out += NewField(Kind.NICKNAME, mapOf(Nickname.NAME to it)) }
+        val company = optionalText("organization")
+        val title = optionalText("title")
         if (company != null || title != null) out += NewField(Kind.ORGANIZATION, mapOf(Organization.COMPANY to company, Organization.TITLE to title).filterValues { it != null })
-        request.optString("notes").takeIf { it.isNotBlank() }?.let { out += NewField(Kind.NOTE, mapOf(Note.NOTE to it)) }
+        optionalText("notes")?.let { out += NewField(Kind.NOTE, mapOf(Note.NOTE to it)) }
         request.optJSONObject("birthday")?.let(::startDate)?.let {
             out += NewField(Kind.EVENT, mapOf(Event.START_DATE to it, Event.TYPE to Event.TYPE_BIRTHDAY.toString()))
         }

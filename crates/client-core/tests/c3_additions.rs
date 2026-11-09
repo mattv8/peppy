@@ -532,7 +532,7 @@ fn authenticated_read_state_with_out_of_range_supersedes_is_quarantined_not_stal
         command_id: None,
         vault_id: vault.id,
         producer_device_id: DeviceId::new(),
-        producer_sequence: SourceSequence(u64::MAX),
+        producer_sequence: SourceSequence(1),
         key_epoch: 1,
         crypto_suite: vault.profile.crypto_suite,
         profile_fingerprint: vault.profile.fingerprint().unwrap(),

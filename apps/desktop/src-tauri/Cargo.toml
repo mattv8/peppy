@@ -81,11 +81,15 @@ swift-rs = { version = "1.0.9", features = ["build"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5", default-features = false, features = ["tokio"], optional = true }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+zbus = { version = "5", default-features = false, features = ["tokio", "p2p"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 # Official Win32 Credential UI bindings; the dialog uses DO_NOT_PERSIST.
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security_Credentials", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_Registry", "Win32_UI_HiDpi", "Win32_UI_Accessibility", "Foundation", "UI_Notifications", "Data_Xml_Dom", "Win32_System_WinRT"] }
 
 [dev-dependencies]
+tauri = { version = "2", features = ["test"] }
 tempfile = "3"
 peppy-client-core = { path = "../../../crates/client-core", version = "0.1.0", features = ["test-support"] }
 # Real local server/core loopback test (ignored unless TEST_DATABASE_URL is provided).

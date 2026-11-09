@@ -1065,6 +1065,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func removeNotification(notificationKey: String, instance: String) throws 
     
+    func removeNotificationIfCurrentInstance(notificationKey: String, instance: String) throws 
+    
     func reportAttachmentRemovedByStoragePolicy(attachmentId: String) throws 
     
     func reportContactSyncBlocked(inputJson: String) throws  -> String
@@ -2908,6 +2910,16 @@ open func registerNoDeviceHint()throws   {try rustCallWithError(FfiConverterType
 open func removeNotification(notificationKey: String, instance: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_remove_notification(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(notificationKey),
+        FfiConverterString.lower(instance),uniffiCallStatus
+    )
+}
+}
+    
+open func removeNotificationIfCurrentInstance(notificationKey: String, instance: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_remove_notification_if_current_instance(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(notificationKey),
         FfiConverterString.lower(instance),uniffiCallStatus
@@ -18179,6 +18191,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_remove_notification() != 35619) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_remove_notification_if_current_instance() != 13196) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_attachment_removed_by_storage_policy() != 55290) {

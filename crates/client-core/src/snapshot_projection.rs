@@ -58,6 +58,8 @@ const GC_BATCH: i64 = 2_000;
 const PROMOTE_PAGE: i64 = 256;
 /// Journal reason for compactable rows the authoritative snapshot proved superseded.
 pub(crate) const SUPERSEDED_REASON: &str = "snapshot_superseded";
+/// Load-bearing literal shared with the eligible-journal partial index. It isolates both RCS
+/// and compactable contact records imported by an authoritative snapshot.
 pub(crate) const RCS_ISOLATED_REASON: &str = "snapshot_rcs_isolated";
 const SNAPSHOT_IMPORT_ORIGIN_PREFIX: &str = "snapshot_import_origin:";
 const SNAPSHOT_IMPORT_OBSERVED_PREFIX: &str = "snapshot_import_observed:";
@@ -441,7 +443,10 @@ pub(crate) fn isolate_snapshot_rcs_event(
     cursor: i64,
     wire: &[u8],
 ) -> Result<(), Error> {
-    if authenticated_rcs_event(ctx, wire) && has_snapshot_import_origin(conn, cursor)? {
+    let compactable_contact = compactable(wire) && is_authenticated_contact(ctx, wire);
+    if (authenticated_rcs_event(ctx, wire) || compactable_contact)
+        && has_snapshot_import_origin(conn, cursor)?
+    {
         conn.execute(
             "UPDATE journal SET reason=? WHERE cursor=? AND status='pending'",
             params![RCS_ISOLATED_REASON, cursor],
@@ -573,13 +578,19 @@ pub(crate) fn advance(
         }
         return Ok(Some(high_water));
     }
-    promote(conn, generation, high_water, &ctx.device_id.to_string())?;
+    promote(
+        conn,
+        ctx,
+        generation,
+        high_water,
+        &ctx.device_id.to_string(),
+    )?;
     Ok(None)
 }
 
-/// RCS status/fact/metadata events retained by an in-flight authoritative snapshot must not
-/// update the live projection before that snapshot promotes. Other replay events keep their
-/// normal apply path, and malformed records remain available for the regular quarantine path.
+/// RCS events and compactable contacts retained by an in-flight authoritative snapshot must not
+/// update live state before promotion. Contacts otherwise retain their normal suppression path;
+/// malformed records remain available for the regular quarantine path.
 pub(crate) enum RcsLiveApply {
     Defer,
     ApplyOrdinary,
@@ -591,14 +602,18 @@ pub(crate) fn rcs_live_apply(
     cursor: i64,
     wire: &[u8],
 ) -> Result<Option<RcsLiveApply>, Error> {
-    if !authenticated_rcs_event(ctx, wire) {
+    let rcs_event = authenticated_rcs_event(ctx, wire);
+    let compactable_contact = compactable(wire) && is_authenticated_contact(ctx, wire);
+    if !rcs_event && !compactable_contact {
         return Ok(None);
     }
     if has_snapshot_import_origin(conn, cursor)? {
         isolate_snapshot_rcs_event(conn, ctx, cursor, wire)?;
         Ok(Some(RcsLiveApply::Defer))
-    } else {
+    } else if rcs_event {
         Ok(Some(RcsLiveApply::ApplyOrdinary))
+    } else {
+        Ok(None)
     }
 }
 
@@ -1033,7 +1048,13 @@ pub(super) fn stage_removal(
 /// Reconciles remote-owned compactable rows against the complete stage (caller's
 /// transaction). Absent remote rows are removed; staged rows merge through the live gates so a
 /// snapshot can never roll a revision, generation or source sequence back.
-fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Result<(), Error> {
+fn promote(
+    conn: &Connection,
+    ctx: &Ctx,
+    generation: i64,
+    high_water: i64,
+    me: &str,
+) -> Result<(), Error> {
     // Contact books owned elsewhere; deleting a book cascades to its contacts.
     conn.execute(
         "DELETE FROM contact_books WHERE owner_device_id!=?1 AND NOT EXISTS(SELECT 1 FROM projection_books s WHERE s.generation=?2 AND s.book_id=contact_books.id)",
@@ -1111,7 +1132,7 @@ fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Res
         "INSERT INTO rcs_conversation_metadata(conversation_id,transport,rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,producer_device_id,source_sequence) SELECT conversation_id,'rcs',rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,producer_device_id,source_sequence FROM projection_rcs_conversation_metadata WHERE generation=? ON CONFLICT(conversation_id) DO UPDATE SET rcs_encryption=excluded.rcs_encryption,rcs_history_gap=excluded.rcs_history_gap,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,producer_device_id=excluded.producer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>rcs_conversation_metadata.logical_revision OR (excluded.logical_revision=rcs_conversation_metadata.logical_revision AND excluded.writer_device_id>rcs_conversation_metadata.writer_device_id)",
         [generation],
     )?;
-    release_promoted_snapshot_origins(conn, generation)?;
+    release_promoted_snapshot_origins(conn, ctx, generation, high_water)?;
 
     // App filters (any source, any writer). This device's own write is kept while there is
     // no proof the snapshot covers it: its outbox row's echo is not journaled at or below the
@@ -1321,16 +1342,41 @@ fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Res
     Ok(())
 }
 
-fn release_promoted_snapshot_origins(conn: &Connection, generation: i64) -> Result<(), Error> {
-    let cursors = "SELECT cursor FROM projection_retained WHERE generation=?1 UNION SELECT cursor FROM projection_legacy_retained WHERE generation=?1";
+fn release_promoted_snapshot_origins(
+    conn: &Connection,
+    ctx: &Ctx,
+    generation: i64,
+    high_water: i64,
+) -> Result<(), Error> {
+    let retained = "SELECT cursor FROM projection_retained WHERE generation=?1 UNION SELECT cursor FROM projection_legacy_retained WHERE generation=?1";
     conn.execute(
-        &format!("DELETE FROM metadata WHERE k IN (SELECT ?2 || cursor FROM ({cursors}))"),
+        &format!("DELETE FROM metadata WHERE k IN (SELECT ?2 || cursor FROM ({retained}))"),
         params![generation, SNAPSHOT_IMPORT_ORIGIN_PREFIX],
     )?;
     conn.execute(
-        &format!("UPDATE journal SET reason=NULL WHERE reason=?2 AND cursor IN ({cursors})"),
+        &format!("UPDATE journal SET reason=NULL WHERE reason=?2 AND cursor IN ({retained})"),
         params![generation, RCS_ISOLATED_REASON],
     )?;
+
+    // Omitted RCS events retain the established origin fence: unlike contacts, their historical
+    // facts are not proven absent merely because a newer compacted snapshot omitted the cursor.
+    // Immutable journal bytes let us release only authenticated compactable contact origins.
+    let omitted_contacts = {
+        let mut query =
+            conn.prepare("SELECT cursor,wire FROM journal WHERE cursor<=? AND reason=?")?;
+        query
+            .query_map(params![high_water, RCS_ISOLATED_REASON], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|(_, wire)| compactable(wire) && is_authenticated_contact(ctx, wire))
+            .map(|(cursor, _)| cursor)
+            .collect::<Vec<_>>()
+    };
+    for cursor in omitted_contacts {
+        release_snapshot_origin_at_cursor(conn, cursor)?;
+    }
     Ok(())
 }
 
@@ -1381,6 +1427,9 @@ impl Suppression {
             |r| r.get(0),
         )?;
         if retained {
+            if self.state != "promoted" && is_authenticated_contact(ctx, wire) {
+                return Ok(Some(SuppressionDecision::Defer));
+            }
             return Ok(None);
         }
         if self.state != "promoted" {
@@ -1645,6 +1694,43 @@ mod tests {
             )
             .unwrap(),
             (5, true)
+        );
+    }
+
+    #[test]
+    fn staged_rcs_metadata_keeps_the_monotonic_revision_writer_tuple() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        let conversation_id = crate::ConversationId::new();
+        let producer = crate::DeviceId::new();
+        for (revision, encrypted) in [(2, true), (1, false)] {
+            assert!(
+                reduce(
+                    &conn,
+                    1,
+                    "device",
+                    &producer.to_string(),
+                    1,
+                    PrivatePayload::RcsConversationMetadata(crate::RcsConversationMetadata {
+                        conversation_id,
+                        transport: crate::RcsConversationTransport::Rcs,
+                        rcs_encryption: Some(encrypted),
+                        rcs_history_gap: false,
+                        logical_revision: revision,
+                        writer_device_id: producer.to_string(),
+                    }),
+                )
+                .unwrap()
+            );
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT logical_revision,writer_device_id,rcs_encryption FROM projection_rcs_conversation_metadata WHERE generation=1 AND conversation_id=?",
+                [conversation_id.to_string()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?)),
+            )
+            .unwrap(),
+            (2, producer.to_string(), true)
         );
     }
 

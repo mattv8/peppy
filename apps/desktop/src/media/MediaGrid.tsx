@@ -110,9 +110,9 @@ function Carousel({ group, onOpen, messageTitle }: { group: MessageGroup; onOpen
   const noteState = groupSyncState === "requesting" ? "requesting" : requestableAttachments.length === 0 ? "queued" : groupSyncState;
   const groupStatus = holdNoteText(noteState, Boolean(actions?.canRequestMediaSync), pendingAttachments.find(({ attachment }) => attachment.error)?.attachment.error);
   const groupLabel = requestableAttachments.length ? `Sync ${requestableAttachments.length} images` : "Requested";
-  return <><div ref={carouselRef} tabIndex={-1} data-media-carousel data-sync-owner={allHeld ? "group" : undefined} data-sync={groupSyncState} role="region" aria-roledescription="carousel" aria-label={`Images, ${total} total`} data-slide-count={total} data-has-peek={total >= 4 || undefined} data-can-scroll-prev={scrollState.previous || undefined} data-can-scroll-next={scrollState.next || undefined}>
+  return <><div ref={carouselRef} tabIndex={-1} data-media-carousel data-media-group={group.id} data-sync-owner={allHeld ? "group" : undefined} data-sync={groupSyncState} role="region" aria-roledescription="carousel" aria-label={`Images, ${total} total`} data-slide-count={total} data-has-peek={total >= 4 || undefined} data-can-scroll-prev={scrollState.previous || undefined} data-can-scroll-next={scrollState.next || undefined}>
     <div ref={trackRef} className="carousel-track">
-      {group.attachments.map(({ attachment, message }, index) => <div key={`${message.id}:${attachment.id}`} ref={(element) => { slideRefs.current[index] = element; }} data-media-slide data-slide-index={index} role="group" aria-roledescription="slide" aria-label={`${index + 1} of ${total}`} title={messageTitle?.(message)}>
+      {group.attachments.map(({ attachment, message }, index) => <div key={`${message.id}:${attachment.id}`} ref={(element) => { slideRefs.current[index] = element; }} data-media-slide data-media-attachment={attachment.id} data-media-message={message.id} data-slide-index={index} role="group" aria-roledescription="slide" aria-label={`${index + 1} of ${total}`} title={messageTitle?.(message)}>
         <MediaTile attachment={attachment} message={message} variant="slide" label={`Photo, ${index + 1} of ${total}`} onOpen={() => onOpen({ attachment, message })} suppressHeldControl={allHeld} prefetchIds={[group.attachments[index + 1] ? demandTarget(group.attachments[index + 1].attachment) : undefined]} bodyRef={bodyRefCallbacks[index]} onBodyKeyDown={(event) => {
           if (event.key === "ArrowLeft" && moveFocus(index, -1)) event.preventDefault();
           if (event.key === "ArrowRight" && moveFocus(index, 1)) event.preventDefault();
@@ -136,7 +136,7 @@ function Group({ group, onOpen, renderMessageMeta, messageRef, renderCaption, me
       {finalMessage?.body && <p data-group-caption>{renderCaption?.(finalMessage) ?? finalMessage.body}</p>}
       {finalMessage?.subject && <p data-group-subject>Subject: {finalMessage.subject}</p>}
     </article>;
-  return <div className={`message-row ${group.messages[0].sender}`} data-message-group={group.id} data-sender={group.messages[0].sender} data-sender-gutter={sender?.gutter ? "" : undefined} data-sender-run-start={sender?.start ? "" : undefined} data-sender-run-end={sender?.end ? "" : undefined}>
+  return <div className={`message-row ${group.messages[0].sender}`} data-message-group={group.id} data-media-group={group.id} data-sender={group.messages[0].sender} data-sender-gutter={sender?.gutter ? "" : undefined} data-sender-run-start={sender?.start ? "" : undefined} data-sender-run-end={sender?.end ? "" : undefined}>
     {sender?.label}
     {sender ? <div className="message-sender-line" data-sender-line>{sender.avatar ?? (sender.gutter && <span className="message-sender-gutter" aria-hidden="true" />)}{article}</div> : article}
     {group.messages.map((message) => <div key={message.id} ref={messageRef?.(message)} data-message-row={message.id}><div data-message-id={message.id} data-message-meta={message.id}>{renderMessageMeta?.(message)}</div></div>)}

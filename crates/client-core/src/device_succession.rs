@@ -127,9 +127,7 @@ pub(crate) fn apply_succession(
         hint_tag,
         key_epoch,
     )? {
-        if can_be_pending(conn, &predecessor, &successor)? {
-            conn.execute("INSERT OR IGNORE INTO pending_device_successions(predecessor,successor,platform,hint_tag,key_epoch,producer) VALUES(?,?,?,?,?,?)", params![predecessor.to_string(), successor.to_string(), platform, hint_tag, key_epoch, producer.to_string()])?;
-        }
+        conn.execute("INSERT OR IGNORE INTO pending_device_successions(predecessor,successor,platform,hint_tag,key_epoch,producer) VALUES(?,?,?,?,?,?)", params![predecessor.to_string(), successor.to_string(), platform, hint_tag, key_epoch, producer.to_string()])?;
         return Ok(false);
     }
     accept(
@@ -146,6 +144,7 @@ pub(crate) fn evaluate_succession(conn: &Connection, ctx: &Ctx) -> Result<(), Er
     if !initial_replay::caught_up(conn)? {
         return Ok(());
     }
+    reconcile_terminal_book_owners(conn)?;
     let own = ctx.device_id.to_string();
     if conn
         .query_row(
@@ -279,31 +278,22 @@ fn accept(
     tag: &str,
     epoch: u32,
 ) -> Result<bool, Error> {
-    if conn
+    // A device can succeed only once. Its recorded successor may already have succeeded, though:
+    // delayed delivery of A→B after B→C must transfer A's books to terminal C.
+    let predecessor_already_succeeded = conn
         .query_row(
-            "SELECT 1 FROM device_successions WHERE predecessor=? OR successor=? LIMIT 1",
-            params![predecessor.to_string(), successor.to_string()],
+            "SELECT 1 FROM device_successions WHERE predecessor=? LIMIT 1",
+            [predecessor.to_string()],
             |_| Ok(()),
         )
         .optional()?
-        .is_some()
-    {
+        .is_some();
+    if predecessor_already_succeeded {
         return Ok(false);
     }
-    let mut cursor = successor.to_string();
-    while let Some(next) = conn
-        .query_row(
-            "SELECT successor FROM device_successions WHERE predecessor=?",
-            [&cursor],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()?
-    {
-        if next == predecessor.to_string() {
-            return Ok(false);
-        }
-        cursor = next;
-    }
+    let Some(terminal) = terminal_successor(conn, predecessor, successor)? else {
+        return Ok(false);
+    };
     conn.execute("INSERT OR IGNORE INTO device_successions(predecessor,successor,platform,hint_tag,key_epoch) VALUES(?,?,?,?,?)", params![predecessor.to_string(), successor.to_string(), platform, tag, epoch])?;
     if conn.changes() == 0 {
         return Ok(false);
@@ -317,7 +307,7 @@ fn accept(
     for (book_id, body) in books {
         let mut body: serde_json::Value =
             serde_json::from_str(&body).map_err(|_| Error::Database)?;
-        body["owner_device_id"] = serde_json::Value::String(successor.to_string());
+        body["owner_device_id"] = serde_json::Value::String(terminal.to_string());
         conn.execute(
             "INSERT OR IGNORE INTO inherited_contact_books(book_id,predecessor) VALUES(?,?)",
             params![book_id, predecessor.to_string()],
@@ -325,13 +315,13 @@ fn accept(
         conn.execute(
             "UPDATE contact_books SET owner_device_id=?,body=? WHERE id=?",
             params![
-                successor.to_string(),
+                terminal.to_string(),
                 serde_json::to_string(&body).map_err(|_| Error::Database)?,
                 book_id
             ],
         )?;
     }
-    crate::requeue_successor_invalid_payload(conn, successor)?;
+    crate::requeue_successor_invalid_payload(conn, &terminal)?;
     Ok(true)
 }
 
@@ -343,25 +333,66 @@ pub(crate) fn complete_takeover_scan(conn: &Connection, book_id: &str) -> Result
     Ok(())
 }
 
-fn can_be_pending(
+fn terminal_successor(
     conn: &Connection,
     predecessor: &DeviceId,
     successor: &DeviceId,
-) -> Result<bool, Error> {
-    for device in [predecessor, successor] {
-        if conn
-            .query_row(
-                "SELECT 1 FROM device_hints WHERE device_id=? LIMIT 1",
-                [device.to_string()],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_none()
-        {
-            return Ok(true);
+) -> Result<Option<DeviceId>, Error> {
+    let mut terminal = successor.to_string();
+    while let Some(next) = conn
+        .query_row(
+            "SELECT successor FROM device_successions WHERE predecessor=?",
+            [&terminal],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        if next == predecessor.to_string() {
+            return Ok(None);
         }
+        terminal = next;
     }
-    Ok(false)
+    terminal.parse().map(Some).map_err(|_| Error::Database)
+}
+
+/// Repairs books written by older reverse-delivery code from the authenticated stored chain.
+fn reconcile_terminal_book_owners(conn: &Connection) -> Result<(), Error> {
+    let books = conn
+        .prepare("SELECT id,owner_device_id,body FROM contact_books")?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (book_id, owner, body) in books {
+        let owner: DeviceId = owner.parse().map_err(|_| Error::Database)?;
+        let Some(terminal) = terminal_successor(conn, &owner, &owner)? else {
+            continue;
+        };
+        if terminal == owner {
+            continue;
+        }
+        let mut body: serde_json::Value =
+            serde_json::from_str(&body).map_err(|_| Error::Database)?;
+        body["owner_device_id"] = serde_json::Value::String(terminal.to_string());
+        conn.execute(
+            "INSERT OR IGNORE INTO inherited_contact_books(book_id,predecessor) VALUES(?,?)",
+            params![book_id, owner.to_string()],
+        )?;
+        conn.execute(
+            "UPDATE contact_books SET owner_device_id=?,body=? WHERE id=?",
+            params![
+                terminal.to_string(),
+                serde_json::to_string(&body).map_err(|_| Error::Database)?,
+                book_id
+            ],
+        )?;
+        crate::requeue_successor_invalid_payload(conn, &terminal)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn local_hint_registered(conn: &Connection) -> Result<bool, Error> {

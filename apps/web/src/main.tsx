@@ -61,6 +61,7 @@ function showStartupFailure(reason: string): void {
   page.setAttribute("role", "main");
   page.setAttribute("aria-labelledby", "browser-startup-failure-heading");
   const section = document.createElement("section");
+  section.id = "browser-startup-failure-content";
   const title = document.createElement("h1");
   title.id = "browser-startup-failure-heading";
   title.tabIndex = -1;

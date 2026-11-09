@@ -113,6 +113,15 @@ class OwnerComputerApprovalHostTest {
         assertEquals(1, client.approvalBodies.size)
     }
 
+    @Test fun `verified prompted phrase is saved without replacing an existing binding`() = runBlocking {
+        val store = Store()
+        val (host, _, _) = host(store = store)
+        host.scan("qr")
+        assertTrue(host.approve(true, SecretPrompt { "prompted phrase".toCharArray() }) is OwnerComputerApprovalHost.Result.Approved)
+        assertEquals("prompted phrase", String((VaultSecretStore(store).read("vault", "device") as dev.peppy.mobile.security.StoredSecret.Present).value))
+        assertFalse(VaultSecretStore(store).saveIfMissing("vault", "device", "replacement".toCharArray()))
+    }
+
     @Test fun `approved request does not retry approval or send cancellation`() = runBlocking {
         val store = Store()
         VaultSecretStore(store).saveIfMissing("vault", "device", "phrase".toCharArray())

@@ -603,6 +603,21 @@ describe("ContactsView", () => {
       });
     });
 
+    it("submits a confirmed delete once while the request is unsettled", async () => {
+      const submission = deferred<Awaited<ReturnType<typeof bridge.submit_contact_edit>>>();
+      vi.mocked(bridge.submit_contact_edit).mockReturnValue(submission.promise);
+      render(<ContactsView />);
+      fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
+      fireEvent.click(screen.getByLabelText("Delete contact"));
+      const confirm = screen.getByLabelText("Confirm delete");
+      fireEvent.click(confirm);
+      fireEvent.click(confirm);
+      expect(bridge.submit_contact_edit).toHaveBeenCalledTimes(1);
+      await act(async () => submission.resolve({ state: "rejected", reason: "No longer available" }));
+      fireEvent.click(screen.getByLabelText("Confirm delete"));
+      expect(bridge.submit_contact_edit).toHaveBeenCalledTimes(2);
+    });
+
     it("clears contact selection after delete", async () => {
       vi.mocked(bridge.submit_contact_edit).mockResolvedValue({
         state: "applied",
@@ -750,10 +765,12 @@ describe("ContactsView", () => {
 
     it("reloads contacts after successful save", async () => {
       vi.mocked(bridge.list_contacts).mockClear();
-      vi.mocked(bridge.list_contacts).mockResolvedValue([mockContactAurora]);
+      vi.mocked(bridge.list_contacts).mockResolvedValueOnce([mockContactAurora]).mockResolvedValueOnce([mockContactAurora]);
+      vi.mocked(bridge.submit_contact_edit).mockResolvedValue({ state: "pending", requestId: "new-contact" });
 
       render(<ContactsView />);
       await screen.findByText("Pixel 8");
+      expect(bridge.list_contacts).toHaveBeenCalledTimes(1);
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -763,7 +780,8 @@ describe("ContactsView", () => {
       fireEvent.click(screen.getByText("Save"));
 
       await waitFor(() => {
-        expect(vi.mocked(bridge.list_contacts).mock.calls.length).toBeGreaterThan(0);
+        expect(vi.mocked(bridge.submit_contact_edit).mock.calls).toHaveLength(1);
+        expect(vi.mocked(bridge.list_contacts).mock.calls).toHaveLength(2);
       });
     });
   });

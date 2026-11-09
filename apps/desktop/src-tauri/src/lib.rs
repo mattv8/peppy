@@ -5662,6 +5662,22 @@ async fn restart_for_update(
 }
 
 #[cfg(feature = "self-update")]
+fn record_install_attempt_or_cleanup(
+    updates: &updates::UpdateManager,
+    root: &std::path::Path,
+    record_attempt: impl FnOnce() -> BridgeResult<()>,
+    emit: impl FnOnce(),
+) -> BridgeResult<()> {
+    if let Err(error) = record_attempt() {
+        updates::install::clear_restart_marker(root);
+        updates.install_failed("Could not record the update installation.");
+        emit();
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "self-update")]
 async fn install_staged_update(
     app: &tauri::AppHandle,
     state: &AppState,
@@ -5720,9 +5736,12 @@ async fn install_staged_update(
         state.updates.emit(app);
         return Err(error);
     }
-    state
-        .updates
-        .record_install_attempt(&staged.update.version)?;
+    record_install_attempt_or_cleanup(
+        &state.updates,
+        &state.root,
+        || state.updates.record_install_attempt(&staged.update.version),
+        || state.updates.emit(app),
+    )?;
     let install_guard = permit.commit();
     #[cfg(target_os = "linux")]
     if matches!(status.package_kind.as_str(), "deb" | "rpm") {

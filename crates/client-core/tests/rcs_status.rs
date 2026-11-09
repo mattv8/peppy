@@ -110,6 +110,84 @@ fn status(status: RcsProjectedStatus) -> RcsStatusApplication {
     }
 }
 
+fn mapping_observation() -> RcsMappingObservation {
+    RcsMappingObservation {
+        google_conversation_id: "conversation-local".into(),
+        google_candidate_count: 1,
+        participants: vec![RcsParticipantObservation {
+            identity: "peer-local".into(),
+            google_participant_id: "google-peer".into(),
+            identifier_type: 1,
+            is_visible: true,
+            is_me: false,
+        }],
+        conversation_type: RcsConversationType::Rcs,
+        status: "eligible".into(),
+        send_mode: RcsSendMode::Automatic,
+        read_only: false,
+        default_outgoing: true,
+        selected_sim_id: "android-subscription-7".into(),
+        selected_sim_own_identity: "+12025550100".into(),
+        carrier_binding: NativeCarrierRouteBinding {
+            carrier_route_id: "android-subscription-7".into(),
+            android_subscription_id: 7,
+            is_current_default_sms: true,
+            own_number_raw: "+12025550100".into(),
+            own_number_source: NativeOwnNumberSource::SubscriptionManagerPhoneNumber,
+            route_observed_at_ms: 1_000,
+            route_context_revision: 1,
+            same_handset_evidence_id: "verified-handset".into(),
+        },
+        outgoing: NativeRcsOutgoing {
+            outgoing_id: "google-outgoing".into(),
+            sim_participant_id: "google-outgoing".into(),
+            own_identity_raw: "+12025550100".into(),
+            sim_payload: NativeRcsSimPayload {
+                two: 2,
+                sim_number: 7,
+            },
+            rcs_chats_enabled: true,
+        },
+        native_evidence: NativeRcsEvidence {
+            lifetime: NativeRcsLifetime {
+                runtime_id: "runtime".into(),
+                run_generation: 1,
+                link_generation: 1,
+                session_generation: 1,
+                context_revision: 1,
+            },
+            lookup_id: "lookup".into(),
+            lookup_complete: true,
+            google_candidate_count: 1,
+            settings_revision: 1,
+            settings_provenance: NativeSettingsProvenance::CurrentEvent,
+            settings_observed_at_ms: 1_000,
+            settings_stream_epoch: 1,
+            settings_currentness: NativeSettingsCurrentness::ContinuousVerifiedFeed,
+            current_settings_sims: vec![NativeRcsOutgoing {
+                outgoing_id: "google-outgoing".into(),
+                sim_participant_id: "google-outgoing".into(),
+                own_identity_raw: "+12025550100".into(),
+                sim_payload: NativeRcsSimPayload {
+                    two: 2,
+                    sim_number: 7,
+                },
+                rcs_chats_enabled: true,
+            }],
+            settings_validated_at_ms: 1_000,
+            conversation_observed_at_ms: 1_000,
+        },
+        identity_region: "US".into(),
+        observed_at_ms: 1_000,
+        context_revision: 1,
+        link_generation: 1,
+        session_generation: 1,
+        canonicalizer_revision: 1,
+        mapping_revision: 1,
+        link_state: RcsLinkState::Linked,
+    }
+}
+
 fn record(body: &str) -> RcsProjectedRecord {
     RcsProjectedRecord {
         google_message_id: "provider-message".into(),
@@ -1828,13 +1906,6 @@ fn incoming_rcs_replay_stale_writer_and_page_floor_are_rejected_without_rows() {
     let mut page = record("page");
     page.google_message_id = "page-message".into();
     page.history_token = Some("page-token".into());
-    page.sent_at_ms = Some(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64
-            + 1,
-    );
     page.sent_at_ms = Some(10);
     assert_eq!(
         client
@@ -2138,62 +2209,86 @@ fn outgoing_tmp_echo_binds_existing_message_and_replays_after_reopen() {
 fn matched_echo_status_replicates_without_provider_identifiers() {
     let directory = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();
-    let first_config = config(&directory, "first", &vault);
-    let second_config = config(&directory, "second", &vault);
-    let first = unlocked(&first_config, &vault);
-    let second = unlocked(&second_config, &vault);
-    let conversation = ConversationId::new();
-    let first_owner = first
-        .begin_rcs_link_ownership(conversation, "first", 0)
+    let sender_config = config(&directory, "sender", &vault);
+    let gateway_config = config(&directory, "gateway", &vault);
+    let sender = common::unlocked(&sender_config, &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let captured = gateway
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "peer-local".into(),
+            body: String::new(),
+            provider_message_id: Some("provider-local".into()),
+            imported: true,
+        })
         .unwrap();
-    let second_owner = second
-        .begin_rcs_link_ownership(conversation, "second", 0)
-        .unwrap();
-    first
-        .ingest_rcs_projected_record(
-            conversation,
-            first_owner.ownership_generation,
-            record("body"),
+    let observation = mapping_observation();
+    assert!(matches!(
+        gateway.verify_rcs_mapping(&observation, 1_000).unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    let queued = sender
+        .queue_send(
+            OutgoingSms {
+                conversation_id: captured.conversation_id,
+                recipients: vec!["peer-local".into()],
+                body: "outgoing body".into(),
+            },
+            GatewayRoute::RcsLink {
+                gateway_device_id: gateway_config.device_id,
+            },
         )
         .unwrap();
-    second
-        .ingest_rcs_projected_record(
-            conversation,
-            second_owner.ownership_generation,
-            record("body"),
-        )
+    let mut server = Server::default();
+    server.upload(&sender);
+    server.sync(&gateway);
+    let permit = gateway
+        .begin_rcs_send_attempt(queued.command_id, &observation, 1_000)
         .unwrap();
-    let before = only_message(&first, conversation).send_state;
+    let owner = gateway
+        .begin_rcs_link_ownership(captured.conversation_id, "gateway", 0)
+        .unwrap();
+    let mut echo = record("outgoing body");
+    echo.direction = Direction::Outgoing;
+    echo.google_conversation_id = observation.google_conversation_id.clone();
+    echo.tmp_id = Some(permit.tmp_id().into());
     assert_eq!(
-        first
+        gateway
+            .ingest_rcs_projected_record(captured.conversation_id, owner.ownership_generation, echo)
+            .unwrap(),
+        RcsReceiveOutcome::OutgoingMatched
+    );
+    let mut projected_status = status(RcsProjectedStatus::Read);
+    projected_status.google_conversation_id = observation.google_conversation_id;
+    projected_status.tmp_id = Some(permit.tmp_id().into());
+    assert_eq!(
+        gateway
             .apply_rcs_projected_status(
-                conversation,
-                first_owner.ownership_generation,
-                status(RcsProjectedStatus::Read)
+                captured.conversation_id,
+                owner.ownership_generation,
+                projected_status
             )
             .unwrap(),
         RcsReceiveOutcome::StatusApplied
     );
-    assert_eq!(only_message(&first, conversation).send_state, before);
-    let mut server = Server::default();
-    for envelope in first.pending_outbox().unwrap() {
-        let serialized = serde_json::to_string(&envelope).unwrap();
-        assert!(!serialized.contains("provider-message"));
-        assert!(!serialized.contains("provider-conversation"));
-    }
-    server.upload(&first);
-    server.sync(&second);
-    let connection = Connection::open(&second_config.database_path).unwrap();
-    connection
-        .execute_batch(
-            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
-        )
+    server.upload(&gateway);
+    server.sync(&sender);
+    let replicated = sender
+        .messages(captured.conversation_id)
+        .unwrap()
+        .into_iter()
+        .find(|message| message.payload.record.message_id == queued.message_id)
         .unwrap();
-    let payload: String = connection
-        .query_row("SELECT payload FROM messages LIMIT 1", [], |row| row.get(0))
-        .unwrap();
-    assert!(!payload.contains("provider-message"));
-    assert!(!payload.contains("provider-conversation"));
+    assert_eq!(
+        sender.rcs_message_status(queued.message_id).unwrap(),
+        Some(RcsMessageStatusProjection {
+            status: RcsMessageStatus::Read,
+            rcs_reported: true,
+        })
+    );
+    let decrypted = serde_json::to_string(&replicated.payload).unwrap();
+    assert!(!decrypted.contains("provider-message"));
+    assert!(!decrypted.contains("conversation-local"));
 }
 
 #[test]

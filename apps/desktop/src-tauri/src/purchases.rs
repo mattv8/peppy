@@ -236,7 +236,13 @@ where
     Fut: std::future::Future<Output = BridgeResult<bool>>,
 {
     if result == AppleTransactionResult::Granted {
-        finish(transaction_id.ok_or_else(invalid_response)?.to_owned()).await?;
+        let finished = finish(transaction_id.ok_or_else(invalid_response)?.to_owned()).await?;
+        if !finished {
+            return Err(BridgeError::new(
+                "store-unavailable",
+                "The App Store could not finalize this purchase.",
+            ));
+        }
     }
     Ok(result)
 }
@@ -310,7 +316,9 @@ pub(crate) fn start(app: tauri::AppHandle) {
             }
             let state = app_for_updates.state::<AppState>();
             let hosted = app_for_updates.state::<HostedState>();
-            let _ = reconcile_unfinished(&state, &hosted).await;
+            report_launch_reconciliation(reconcile_unfinished(&state, &hosted).await, |code| {
+                eprintln!("peppy: unfinished App Store reconciliation failed: {code}");
+            });
             let Ok(mut updates) = storekit::observe_transaction_updates() else {
                 return;
             };
@@ -332,24 +340,74 @@ pub(crate) fn start(app: tauri::AppHandle) {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 async fn reconcile_unfinished(state: &AppState, hosted: &HostedState) -> BridgeResult<()> {
     let transactions = storekit::unfinished().await.map_err(storekit_error)?;
-    let mut failures = 0;
-    for transaction in transactions {
-        if reconcile_transaction(
+    reconcile_transactions(transactions, |transaction| async move {
+        reconcile_transaction(
             state,
             hosted,
             &transaction.signed_transaction,
             Some(&transaction.transaction_id),
         )
         .await
-        .is_err()
-        {
+    })
+    .await
+}
+
+async fn reconcile_transactions<T, F, Fut>(
+    transactions: impl IntoIterator<Item = T>,
+    mut reconcile: F,
+) -> BridgeResult<()>
+where
+    F: FnMut(T) -> Fut,
+    Fut: std::future::Future<Output = BridgeResult<AppleTransactionResult>>,
+{
+    let mut failures = 0;
+    for transaction in transactions {
+        if !restore_result_is_success(reconcile(transaction).await) {
             failures += 1;
         }
     }
-    if failures != 0 {
-        eprintln!("peppy: {failures} unfinished App Store transactions could not be reconciled");
+    restore_reconciliation_result(failures)
+}
+
+async fn restore_after_sync<T, F, Fut>(
+    synced: bool,
+    transactions: impl IntoIterator<Item = T>,
+    reconcile: F,
+) -> BridgeResult<()>
+where
+    F: FnMut(T) -> Fut,
+    Fut: std::future::Future<Output = BridgeResult<AppleTransactionResult>>,
+{
+    if !synced {
+        return Err(BridgeError::new(
+            "store-unavailable",
+            "The App Store could not sync purchases.",
+        ));
     }
-    Ok(())
+    reconcile_transactions(transactions, reconcile).await
+}
+
+fn restore_result_is_success(result: BridgeResult<AppleTransactionResult>) -> bool {
+    matches!(
+        result,
+        Ok(AppleTransactionResult::Granted | AppleTransactionResult::Pending)
+    )
+}
+
+fn report_launch_reconciliation(result: BridgeResult<()>, mut report: impl FnMut(&'static str)) {
+    if let Err(error) = result {
+        report(error.code);
+    }
+}
+
+fn restore_reconciliation_result(failures: usize) -> BridgeResult<()> {
+    if failures == 0 {
+        return Ok(());
+    }
+    Err(BridgeError::new(
+        "store-unavailable",
+        "Some App Store transactions could not be reconciled.",
+    ))
 }
 
 #[tauri::command]
@@ -466,7 +524,7 @@ pub(crate) async fn store_restore(
     if Distribution::detect() != Distribution::AppStore {
         return Err(unsupported());
     }
-    storekit::sync().await.map_err(storekit_error)?;
+    let synced = storekit::sync().await.map_err(storekit_error)?;
     let mut transactions = HashSet::new();
     transactions.extend(storekit::unfinished().await.map_err(storekit_error)?);
     transactions.extend(
@@ -474,24 +532,18 @@ pub(crate) async fn store_restore(
             .await
             .map_err(storekit_error)?,
     );
-    let mut failures = 0;
-    for transaction in transactions {
-        if reconcile_transaction(
-            &state,
-            &hosted,
+    let state = &*state;
+    let hosted = &*hosted;
+    restore_after_sync(synced, transactions, |transaction| async move {
+        reconcile_transaction(
+            state,
+            hosted,
             &transaction.signed_transaction,
             Some(&transaction.transaction_id),
         )
         .await
-        .is_err()
-        {
-            failures += 1;
-        }
-    }
-    if failures != 0 {
-        eprintln!("peppy: {failures} restored App Store transactions could not be reconciled");
-    }
-    Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -528,8 +580,14 @@ mod tests {
     };
 
     async fn transaction_server(status: StatusCode) -> String {
-        async fn handler(State(status): State<StatusCode>) -> (StatusCode, &'static str) {
-            (status, r#"{"result":"granted"}"#)
+        transaction_server_response(status, r#"{"result":"granted"}"#).await
+    }
+
+    async fn transaction_server_response(status: StatusCode, body: &'static str) -> String {
+        async fn handler(
+            State((status, body)): State<(StatusCode, &'static str)>,
+        ) -> (StatusCode, &'static str) {
+            (status, body)
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -539,7 +597,7 @@ mod tests {
                 listener,
                 Router::new()
                     .route(routes::APPLE_TRANSACTIONS, post(handler))
-                    .with_state(status),
+                    .with_state((status, body)),
             )
             .await
             .unwrap();
@@ -600,6 +658,77 @@ mod tests {
                 "{status}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn reconciliation_retains_granted_transaction_when_storekit_does_not_finish() {
+        let error =
+            reconcile_posted_transaction(AppleTransactionResult::Granted, Some("42"), |_| async {
+                Ok(false)
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, "store-unavailable");
+    }
+
+    #[tokio::test]
+    async fn restore_orchestration_rejects_false_sync_and_failed_reconciliation() {
+        let false_sync = restore_after_sync(false, [()], |_| async {
+            panic!("a false StoreKit sync must not reconcile transactions")
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(false_sync.code, "store-unavailable");
+
+        for (status, body) in [
+            (StatusCode::CONFLICT, r#"{"result":"granted"}"#),
+            (StatusCode::OK, r#"{"result":"rejected"}"#),
+        ] {
+            let origin = transaction_server_response(status, body).await;
+            let finishes = Arc::new(AtomicUsize::new(0));
+            let result = post_transaction_at(&origin, "test-token", "signed").await;
+            let failure = restore_after_sync(true, [result], |result| {
+                let finishes = finishes.clone();
+                async move {
+                    let result = result?;
+                    reconcile_posted_transaction(result, Some("42"), move |_| async move {
+                        finishes.fetch_add(1, Ordering::SeqCst);
+                        Ok(true)
+                    })
+                    .await
+                }
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(failure.code, "store-unavailable", "{status}");
+            assert_eq!(finishes.load(Ordering::SeqCst), 0, "{status}");
+        }
+
+        let transport_failure =
+            post_transaction_at("http://127.0.0.1:1", "test-token", "signed").await;
+        let error = restore_after_sync(true, [transport_failure], |result| async move { result })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "store-unavailable");
+    }
+
+    #[tokio::test]
+    async fn restore_orchestration_accepts_pending_and_reports_launch_failures_safely() {
+        let origin = transaction_server(StatusCode::ACCEPTED).await;
+        let pending = post_transaction_at(&origin, "test-token", "signed").await;
+        restore_after_sync(true, [pending], |result| async move { result })
+            .await
+            .unwrap();
+
+        let mut diagnostics = Vec::new();
+        report_launch_reconciliation(
+            Err(BridgeError::new("store-unavailable", "not logged")),
+            |code| diagnostics.push(code),
+        );
+        assert_eq!(diagnostics, ["store-unavailable"]);
+
+        report_launch_reconciliation(Ok(()), |_| panic!("successful reconciliation is quiet"));
     }
 
     #[tokio::test]

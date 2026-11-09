@@ -100,6 +100,12 @@ fn capture_us_region(gateway: &Client, gateway_config: &ClientConfig) {
 }
 
 fn carrier_command() -> (tempfile::TempDir, Vault, ClientConfig, Client, CommandId) {
+    carrier_command_on_sim("android-subscription-7")
+}
+
+fn carrier_command_on_sim(
+    subscription_id: &str,
+) -> (tempfile::TempDir, Vault, ClientConfig, Client, CommandId) {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
     let sender_config = config(&directory, "sender", &vault);
@@ -124,7 +130,7 @@ fn carrier_command() -> (tempfile::TempDir, Vault, ClientConfig, Client, Command
             },
             GatewayRoute::Carrier {
                 gateway_device_id: gateway_config.device_id,
-                subscription_id: "android-subscription-7".into(),
+                subscription_id: subscription_id.into(),
             },
         )
         .unwrap();
@@ -464,16 +470,37 @@ fn automatic_admission_invalidates_carrier_proof_for_same_context_contradictions
 }
 
 #[test]
-fn automatic_admission_rejects_a_mapping_on_a_different_sim() {
-    let (_directory, _vault, _config, gateway, command_id) = carrier_command();
-    let mut current = observation("peer-local", 1);
-    current.selected_sim_id = "other-sim".into();
+fn automatic_admission_rejects_a_valid_mapping_on_a_different_command_sim() {
+    let (_directory, _vault, config, gateway, command_id) =
+        carrier_command_on_sim("android-subscription-8");
+    let current = observation("peer-local", 1);
+    assert!(matches!(
+        gateway.verify_rcs_mapping(&current, 1_000).unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
     assert_eq!(
         gateway
             .begin_automatic_send_attempt(command_id, Some(&current), 1_000)
             .unwrap(),
         AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
     );
+    assert_eq!(attempt_count(&config, command_id), 0);
+    assert_eq!(rcs_ledger_count(&config, command_id), 0);
+
+    let (_directory, _vault, config, gateway, command_id) = carrier_command();
+    let current = observation("peer-local", 1);
+    assert!(matches!(
+        gateway.verify_rcs_mapping(&current, 1_000).unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    assert!(matches!(
+        gateway
+            .begin_automatic_send_attempt(command_id, Some(&current), 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::Rcs(_)
+    ));
+    assert_eq!(attempt_count(&config, command_id), 1);
+    assert_eq!(rcs_ledger_count(&config, command_id), 1);
 }
 
 fn encrypted_connection(config: &ClientConfig) -> rusqlite::Connection {
@@ -2174,7 +2201,8 @@ fn automatic_carrier_upgrade_remains_frozen_as_rcs_outcome_unknown_after_reopen(
 
 #[test]
 fn automatic_original_sim_mismatch_invalidates_existing_proof_across_reopen() {
-    let (_directory, vault, config, gateway, command_id) = carrier_command();
+    let (_directory, vault, config, gateway, command_id) =
+        carrier_command_on_sim("android-subscription-8");
     capture_us_region(&gateway, &config);
     let mut unknown = observation("peer-local", 1);
     unknown.google_candidate_count = 0;
@@ -2183,8 +2211,11 @@ fn automatic_original_sim_mismatch_invalidates_existing_proof_across_reopen() {
     gateway
         .record_carrier_only_proof(&carrier_proof(&command), 1_000)
         .unwrap();
-    let mut wrong_sim = observation("peer-local", 2);
-    wrong_sim.selected_sim_id = "different-sim".into();
+    let wrong_sim = observation("peer-local", 2);
+    assert!(matches!(
+        gateway.verify_rcs_mapping(&wrong_sim, 1_000).unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
 
     assert_eq!(
         gateway
@@ -2206,6 +2237,7 @@ fn automatic_original_sim_mismatch_invalidates_existing_proof_across_reopen() {
         AutomaticPermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
     );
     assert_eq!(attempt_count(&config, command_id), 0);
+    assert_eq!(rcs_ledger_count(&config, command_id), 0);
 }
 
 #[test]

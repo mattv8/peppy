@@ -1,5 +1,6 @@
 package dev.peppy.mobile.account
 
+import dev.peppy.mobile.ui.accountNoticeOpensSubscription
 import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -132,6 +133,13 @@ class AccountAccessPolicyTest {
         val (cleared, action) = accountNotificationStep(active, deleting)
         assertEquals(AccountNotificationAction.Clear, action)
         assertEquals(AccountEpisode(), cleared)
+    }
+
+    @Test fun accountOnlyNoticesNeverRouteToPlaySubscriptions() {
+        assertFalse(accountNoticeOpensSubscription(NativeAccountNoticeKind.READ_ONLY_ACCOUNT_DELETING, isPlay = true))
+        assertFalse(accountNoticeOpensSubscription(NativeAccountNoticeKind.READ_ONLY_TESTER_INELIGIBLE, isPlay = true))
+        assertTrue(accountNoticeOpensSubscription(NativeAccountNoticeKind.READ_ONLY_PAST_DUE, isPlay = true))
+        assertFalse(accountNoticeOpensSubscription(NativeAccountNoticeKind.READ_ONLY_PAST_DUE, isPlay = false))
     }
 
     @Test fun warningsNeverNotify() {

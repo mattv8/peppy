@@ -1,5 +1,7 @@
 name: peppy
 
+x-postgres-image: &postgres-image postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f
+
 x-server-environment: &server-environment
   PEPPY_ENV: ${PEPPY_ENV:-development}
   RUNNING_IN_CONTAINER: "1"
@@ -16,8 +18,22 @@ x-server-environment: &server-environment
   PEPPY_WEB_CLIENT_ACCOUNT_URL: ${WEB_CLIENT_ACCOUNT_URL:-}
 
 services:
+  database-password-preflight:
+    image: *postgres-image
+    entrypoint: ["/bin/sh", "/usr/local/bin/validate-db-passwords.sh"]
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      PEPPY_RUNTIME_DB_PASSWORD: ${PEPPY_RUNTIME_DB_PASSWORD:?set in .env}
+      PEPPY_MAINTENANCE_DB_PASSWORD: ${PEPPY_MAINTENANCE_DB_PASSWORD:?set in .env}
+    configs:
+      - source: database-password-preflight
+        target: /usr/local/bin/validate-db-passwords.sh
+    tmpfs:
+      - /var/lib/postgresql
+    restart: "no"
+
   postgres:
-    image: postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f
+    image: *postgres-image
     environment:
       POSTGRES_DB: ${POSTGRES_DB:?set in .env}
       POSTGRES_USER: ${POSTGRES_USER:?set in .env}
@@ -29,6 +45,10 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql
       - ./infra/compose/bootstrap-roles.sh:/docker-entrypoint-initdb.d/10-peppy-roles.sh:ro
+      - ./infra/compose/validate-db-passwords.sh:/usr/local/bin/validate-db-passwords.sh:ro
+    depends_on:
+      database-password-preflight:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -71,6 +91,8 @@ services:
       DATABASE_URL: postgres://${PEPPY_RUNTIME_DB_USER:?set in .env}:${PEPPY_RUNTIME_DB_PASSWORD:?set in .env}@postgres:5432/${POSTGRES_DB:?set in .env}
       DATABASE_MIGRATION_URL: postgres://${POSTGRES_USER:?set in .env}:${POSTGRES_PASSWORD:?set in .env}@postgres:5432/${POSTGRES_DB:?set in .env}
     depends_on:
+      database-password-preflight:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     networks: [private]
@@ -88,6 +110,8 @@ services:
       PEPPY_SETUP_TOKEN: ${PEPPY_SETUP_TOKEN:-}
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
     depends_on:
+      database-password-preflight:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       seaweedfs:
@@ -122,6 +146,8 @@ volumes:
   seaweed-filer-data:
 
 configs:
+  database-password-preflight:
+    file: ./infra/compose/validate-db-passwords.sh
   seaweed-entrypoint:
     file: ./infra/docker/seaweedfs-entrypoint.sh
   seaweed-s3-config:

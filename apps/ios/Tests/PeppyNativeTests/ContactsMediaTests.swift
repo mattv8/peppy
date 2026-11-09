@@ -480,13 +480,112 @@ actor RereadDriftProvider: ContactsProvider {
         await owner.close()
     }
 
-    @Test func aPeerPhotoEditWaitsForTheVerifiedDownloadThenWritesTheOS() async throws {
+    @Test(arguments: [false, true])
+    func lostFinalizeResponseReconcilesAfterReopenWithLiveOrExpiredReservation(_ expiredReservation: Bool) async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let store = InMemorySecureStore()
+        let directory = temporaryDirectory()
+        let deviceId = UUID().uuidString.lowercased()
+        let owner = try await session(server, deviceId: deviceId, store: store, directory: directory)
+        let provider = WritableFakeProvider()
+        await provider.configure { $0.book = sampleContacts(1); $0.photos = ["os-c0": syntheticImage()!] }
+        let preferences = InMemoryContactsPreferences(ContactsPreferences(enabled: true))
+        let loss = FinalizeResponseLoss()
+        server.mutate { fake in
+            fake.override = { request in
+                guard request.method == "POST", request.url.path.hasSuffix("/finalize"), loss.consume() else { return nil }
+                let id = request.url.path.split(separator: "/")[2]
+                guard var attachment = fake.attachments[String(id)] else { return nil }
+                attachment.finalized = true
+                fake.attachments[String(id)] = attachment
+                return fake.reply(request, 503, ["code": "temporarily_unavailable"])
+            }
+        }
+
+        let first = try await owner.contactsPass(reason: .backgroundProcessing, provider: provider, preferences: preferences, isCancelled: { false })
+        #expect(first.media.uploaded == 0 && first.media.failed == 1)
+        let original = try #require(server.attachments.first)
+        #expect(original.value.finalized && original.value.references.isEmpty)
+        let ciphertext = try #require(original.value.body)
+        await owner.close()
+        // Model the server's two replay boundaries, without advancing a wall clock: a live
+        // reservation replays and PUT returns 404 for the finalized object; an expired
+        // reservation returns a conflict. Neither response alone proves upload completion.
+        server.mutate { fake in
+            fake.override = { request in
+                if expiredReservation && request.url.path == "/v1/attachments/reserve" {
+                    return fake.reply(request, 409, ["code": "attachment_reservation_conflict"])
+                }
+                return nil
+            }
+        }
+        let reopened = NativeSession(
+            secureStore: store, transport: DeviceScopedTransport(server: server, deviceId: deviceId),
+            databaseDirectory: directory, allowLoopbackHTTP: false
+        )
+        _ = try await reopened.open()
+        let retryStart = server.paths.count
+        let second = try await reopened.contactsPass(reason: .backgroundProcessing, provider: provider, preferences: preferences, isCancelled: { false })
+        #expect(second.media.uploaded == 1 && second.media.failed == 0)
+        #expect(server.paths.filter { $0.hasSuffix("/finalize") }.count == 2)
+        let retryPaths = Array(server.paths.dropFirst(retryStart))
+        #expect(retryPaths.contains("POST /v1/attachments/\(original.key)/finalize"))
+        #expect(retryPaths.contains("PUT /v1/attachments/\(original.key)/upload") == !expiredReservation)
+        let preserved = try #require(server.attachments[original.key])
+        #expect(server.attachments.count == 1 && preserved.body == ciphertext)
+        #expect(!preserved.references.isEmpty)
+        await reopened.close()
+    }
+
+    @Test(arguments: ["wrong-id", "empty", "not-found", "conflict"])
+    func unprovenFinalizeNeverAcknowledgesOrPublishesThePhoto(_ responseKind: String) async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let owner = try await session(server)
+        let provider = WritableFakeProvider()
+        await provider.configure { $0.book = sampleContacts(1); $0.photos = ["os-c0": syntheticImage()!] }
+        let preferences = InMemoryContactsPreferences(ContactsPreferences(enabled: true))
+        server.mutate { fake in
+            fake.override = { request in
+                guard request.method == "POST", request.url.path.hasSuffix("/finalize") else { return nil }
+                switch responseKind {
+                case "wrong-id": return fake.reply(request, 200, ["attachment_id": "00000000-0000-0000-0000-000000000001"])
+                case "empty": return HTTPResponse(status: 200, url: request.url, body: Data())
+                case "not-found": return fake.reply(request, 404, ["code": "upload_reservation_not_found"])
+                default: return fake.reply(request, 409, ["code": "attachment_reservation_conflict"])
+                }
+            }
+        }
+        let refused = try await owner.contactsPass(reason: .backgroundProcessing, provider: provider, preferences: preferences, isCancelled: { false })
+        #expect(refused.media.uploaded == 0 && refused.media.failed == 1)
+        #expect(refused.media.registered == 0)
+        #expect(!server.paths.contains { $0.hasSuffix("/references") })
+        let originalId = try #require(server.attachments.keys.first)
+        server.mutate { $0.override = nil }
+        let recovered = try await owner.contactsPass(reason: .backgroundProcessing, provider: provider, preferences: preferences, isCancelled: { false })
+        #expect(recovered.media.uploaded == 1 && recovered.media.failed == 0)
+        #expect(recovered.media.registered >= 1)
+        #expect(server.attachments.count == 1)
+        #expect(server.attachments[originalId]?.finalized == true)
+        await owner.close()
+    }
+
+    @Test(arguments: [false, true])
+    func aPeerPhotoEditWaitsForVerifiedDownloadAndCurrentSyncIntent(_ pauseDuringDownload: Bool) async throws {
         let server = try FakeServer(passphrase: passphrase)
         let ownerDevice = UUID().uuidString.lowercased()
-        let owner = try await session(server, deviceId: ownerDevice)
+        let preferences = InMemoryContactsPreferences(ContactsPreferences(enabled: true))
+        let owner = NativeSession(
+            secureStore: InMemorySecureStore(),
+            transport: PauseOnPhotoDownloadTransport(
+                inner: DeviceScopedTransport(server: server, deviceId: ownerDevice),
+                preferences: preferences, pause: pauseDuringDownload
+            ),
+            databaseDirectory: temporaryDirectory(), allowLoopbackHTTP: false
+        )
+        _ = try await owner.importCredential(server.credential(deviceId: ownerDevice))
+        _ = try await owner.unlock(passphrase: passphrase)
         let provider = WritableFakeProvider()
         await provider.configure { $0.book = sampleContacts(2) }
-        let preferences = InMemoryContactsPreferences(ContactsPreferences(enabled: true))
         let first = try await owner.contactsPass(reason: .foreground, provider: provider, preferences: preferences, isCancelled: { false })
         let bookId = try #require(first.bookId)
 
@@ -511,9 +610,20 @@ actor RereadDriftProvider: ContactsProvider {
         #expect(media.uploaded == 1 && media.registered >= 1)
         try await sync(requester, server)
 
-        let report = try await owner.contactsPass(reason: .foreground, provider: provider, preferences: preferences, isCancelled: { false })
-        #expect(report.applied == 1 && report.waitingMedia == 0 && report.failed == 0)
+        let cancelled: @Sendable () -> Bool = { !preferences.load().enabled }
+        var report = try await owner.contactsPass(reason: .foreground, provider: provider, preferences: preferences, isCancelled: cancelled)
         #expect(report.media.downloaded == 1)
+        if pauseDuringDownload {
+            #expect(!preferences.load().enabled)
+            #expect(report.applied == 0)
+            #expect(await provider.saves.isEmpty)
+            #expect(await provider.photos.isEmpty)
+            // The downloaded bytes may be retained, but pause must not spend an edit permit.
+            // Resuming the same request can still perform its one authorized OS write.
+            preferences.save(ContactsPreferences(enabled: true))
+            report = try await owner.contactsPass(reason: .foreground, provider: provider, preferences: preferences, isCancelled: cancelled)
+        }
+        #expect(report.applied == 1 && report.waitingMedia == 0 && report.failed == 0)
         let written = try #require(await provider.photos["os-c0"])
         #expect(ContactPhotoSource.format(written) == .jpeg, "the OS receives the core-normalized JPEG")
         #expect(await provider.saves.count == 1)
@@ -788,6 +898,36 @@ actor RereadDriftProvider: ContactsProvider {
         #expect(server.paths.contains("GET /v1/snapshot"))
         let again = try await ForegroundSync(client: client, server: serverClient(server), vaultId: server.vaultId).run()
         #expect(!again.repairSnapshotStarted)
+    }
+}
+
+private final class FinalizeResponseLoss: @unchecked Sendable {
+    private let lock = NSLock()
+    private var remaining = 1
+
+    func consume() -> Bool {
+        lock.withLock {
+            guard remaining > 0 else { return false }
+            remaining -= 1
+            return true
+        }
+    }
+}
+
+private struct PauseOnPhotoDownloadTransport: HTTPTransport {
+    let inner: DeviceScopedTransport
+    let preferences: InMemoryContactsPreferences
+    let pause: Bool
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        let response = try await inner.send(request)
+        let parts = request.url.path.split(separator: "/")
+        if pause, request.method == "GET", response.status == 200,
+           parts.count == 3, parts[0] == "v1", parts[1] == "attachments",
+           UUID(uuidString: String(parts[2])) != nil {
+            preferences.save(ContactsPreferences(enabled: false))
+        }
+        return response
     }
 }
 

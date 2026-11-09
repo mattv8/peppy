@@ -591,7 +591,36 @@ internal fun EnrollmentScreen(
                 val flow = phone
                 if (terminal != null) {
                     Text(terminal, Modifier.testTag("phone-terminal-error").semantics { liveRegion = LiveRegionMode.Assertive })
-                    Button(onClick = { resetPhone() }, modifier = Modifier.testTag("phone-retry")) { Text(stringResource(R.string.peppy_try_again)) }
+                    Button(onClick = {
+                        if (phoneConfirming) return@Button
+                        val retryStatus = phoneStatus
+                        if (flow == null || retryStatus == null || !flow.canRetryConfirmation()) {
+                            resetPhone()
+                        } else if (flow.needsCorrectedPhrase()) {
+                            phoneTerminal = null
+                        } else {
+                            val generation = scanGeneration
+                            val retryPhrase = phoneSecret.takeIf(String::isNotBlank)
+                            phoneTerminal = null
+                            phoneConfirming = true
+                            scope.launch(Dispatchers.IO) {
+                                val result = flow.confirm(retryStatus, retryPhrase)
+                                withContext(Dispatchers.Main) {
+                                    if (!scannerActive || generation != scanGeneration || phone !== flow) return@withContext
+                                    phoneConfirming = false
+                                    if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) {
+                                        onEnrolled()
+                                    } else {
+                                        phoneTerminal = when (result) {
+                                            ImportResult.NETWORK_ERROR, ImportResult.SERVER_REJECTED -> networkFailed
+                                            else -> importMessage(result)
+                                        }
+                                        if (!flow.canRetryConfirmation()) flow.close()
+                                    }
+                                }
+                            }
+                        }
+                    }, modifier = Modifier.testTag("phone-retry")) { Text(stringResource(R.string.peppy_try_again)) }
                 } else if (flow == null) {
                     if (cameraGranted) {
                         scanner(Modifier.fillMaxWidth().weight(1f).testTag("enrollment-qr-scanner"), { raw ->
@@ -649,6 +678,7 @@ internal fun EnrollmentScreen(
                     }
                 } else {
                     LaunchedEffect(flow) {
+                        if (phoneState == EnrollmentHost.PhoneState.APPROVED || phoneConfirming) return@LaunchedEffect
                         var networkFailures = 0
                         repeat(150) {
                             val current = withContext(Dispatchers.IO) { flow.status() }
@@ -699,7 +729,7 @@ internal fun EnrollmentScreen(
                                                         ImportResult.NETWORK_ERROR, ImportResult.SERVER_REJECTED -> networkFailed
                                                         else -> importMessage(result)
                                                     }
-                                                    flow.close()
+                                                    if (!flow.canRetryConfirmation()) flow.close()
                                                 },
                                             )
                                         }
@@ -744,8 +774,29 @@ internal fun EnrollmentScreen(
                                 modifier = Modifier.fillMaxWidth().testTag("phone-shared-secret"),
                             )
                             Button(
-                                onClick = { phoneStatus?.let { status -> run { flow.confirm(status, phoneSecret.takeIf(String::isNotBlank)) } } },
-                                enabled = phoneState == EnrollmentHost.PhoneState.APPROVED && phoneSecret.isNotBlank() && !busy,
+                                onClick = { phoneStatus?.let { status ->
+                                    if (phoneConfirming) return@let
+                                    val generation = scanGeneration
+                                    val enteredPhrase = phoneSecret.takeIf(String::isNotBlank)
+                                    phoneConfirming = true
+                                    scope.launch(Dispatchers.IO) {
+                                        val result = flow.confirm(status, enteredPhrase)
+                                        withContext(Dispatchers.Main) {
+                                            if (!scannerActive || generation != scanGeneration || phone !== flow) return@withContext
+                                            phoneConfirming = false
+                                            if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) {
+                                                onEnrolled()
+                                            } else {
+                                                phoneTerminal = when (result) {
+                                                    ImportResult.NETWORK_ERROR, ImportResult.SERVER_REJECTED -> networkFailed
+                                                    else -> importMessage(result)
+                                                }
+                                                if (!flow.canRetryConfirmation()) flow.close()
+                                            }
+                                        }
+                                    }
+                                } },
+                                enabled = phoneState == EnrollmentHost.PhoneState.APPROVED && phoneSecret.isNotBlank() && !busy && !phoneConfirming,
                                 modifier = Modifier.testTag("phone-confirm"),
                             ) { Text(stringResource(R.string.peppy_continue)) }
                         } else if (phoneConfirming && phoneState == EnrollmentHost.PhoneState.APPROVED) {

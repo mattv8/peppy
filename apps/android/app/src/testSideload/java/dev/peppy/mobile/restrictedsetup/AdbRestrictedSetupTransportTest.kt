@@ -7,6 +7,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class AdbRestrictedSetupTransportTest {
@@ -92,15 +93,32 @@ class AdbRestrictedSetupTransportTest {
         assertTrue(result.exceptionOrNull() is PairingRejectedException)
     }
 
+    @Test fun `close failure preserves manager ownership for a controller retry`() {
+        val failure = IOException("socket teardown failed")
+        val manager = FakeManager(closeFailure = failure)
+        val transport = AdbRestrictedSetupTransport("dev.peppy.mobile", managerFactory = { manager })
+
+        val first = runCatching { transport.close() }
+        val second = runCatching { transport.close() }
+
+        assertSame(failure, first.exceptionOrNull())
+        assertSame(failure, second.exceptionOrNull())
+        assertEquals(2, manager.cancelCalls)
+        assertEquals(2, manager.closeCalls)
+        assertFalse(manager.destroyed)
+    }
+
     private class FakeManager(
         private val rejectPairing: Boolean = false,
         private val outputChunks: Map<FixedShellCommand, List<String>> = emptyMap(),
         private val readFailures: Map<FixedShellCommand, IOException> = emptyMap(),
+        private val closeFailure: IOException? = null,
     ) : AdbRestrictedSetupManager {
         val commands = mutableListOf<String>()
         val events = mutableListOf<String>()
         var cancelCalls = 0
         var closeCalls = 0
+        var destroyed = false
         override fun pair(host: String, port: Int, code: ByteArray) {
             if (rejectPairing) throw AdbPairingCodeRejectedException()
         }
@@ -130,6 +148,10 @@ class AdbRestrictedSetupTransportTest {
             }
         }
         override fun cancelPairing() { cancelCalls++ }
-        override fun close() { closeCalls++ }
+        override fun close() {
+            closeCalls++
+            closeFailure?.let { throw it }
+            destroyed = true
+        }
     }
 }

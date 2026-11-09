@@ -61,7 +61,7 @@ class SmsNativeCaptureTest : GatewayTestBase() {
         val result = SmsCapture.reconcile(SmsReconciliationPlan("shared-generation", SmsCapture.PROVIDER_SCOPE, 0, 42, 42), core, provider(replacement))
         assertEquals(1, result.summary.captured)
         assertTrue(result.exhausted)
-        val repeatedResult = SmsCapture.reconcile(SmsReconciliationPlan("shared-generation", SmsCapture.PROVIDER_SCOPE, 0, 10, 42), core, provider(replacement))
+        val repeatedResult = SmsCapture.reconcile(SmsReconciliationPlan("shared-generation", SmsCapture.PROVIDER_SCOPE, 0, 42, 42), core, provider(replacement))
         assertEquals(0, repeatedResult.summary.captured)
         assertTrue(
             client.planSmsScans("shared-generation", SmsCapture.PROVIDER_SCOPE, "10")

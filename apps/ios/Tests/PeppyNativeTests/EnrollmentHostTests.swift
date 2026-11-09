@@ -90,6 +90,24 @@ import Testing
         #expect(transport.statusRequests == 1)
     }
 
+    @Test(arguments: ["denied", "expired"])
+    func vaultRequestTerminalProgressIsReturnedBeforeItsCheckpointIsCleared(_ terminalState: String) async throws {
+        let transport = RecoveringVaultRequestTransport(firstSubmissionFails: false, statusState: terminalState)
+        let store = InMemorySecureStore()
+        let token = Data(repeating: 0, count: 32).base64EncodedString().replacingOccurrences(of: "=", with: "")
+        let session = NativeSession(secureStore: store, transport: transport, databaseDirectory: temporaryDirectory(), allowLoopbackHTTP: false)
+
+        _ = try await session.beginVaultRequest(
+            inviteLink: "https://enroll.example.test/#invite=\(token)", displayName: "Taylor", expectedOrigin: nil, deviceName: "iPhone"
+        )
+        let progress = try await session.vaultRequestStatus(origin: "https://enroll.example.test")
+
+        #expect(progress.state == terminalState)
+        await #expect(throws: ClientError.notEnrolled) {
+            _ = try await session.vaultRequestStatus(origin: "https://enroll.example.test")
+        }
+    }
+
     @Test func rejectsAnInvitationIdentifierThatIsNotCanonicalUUID() async throws {
         let transport = EnrollmentTransport()
         let origin = try ServerOrigin(canonical: "https://enroll.example.test", allowLoopbackHTTP: false)
@@ -99,6 +117,18 @@ import Testing
             _ = try await host.confirmPhoneInvitation(id: "not-an-id", request: "{}")
         }
         #expect(transport.request == nil)
+    }
+
+    @Test func cancellationAcceptsAnEmpty204ButJSONEndpointsRemainStrict() async throws {
+        let transport = EmptyCancellationTransport()
+        let origin = try ServerOrigin(canonical: "https://enroll.example.test", allowLoopbackHTTP: false)
+        let host = EnrollmentHost(origin: origin, transport: transport)
+        let id = "4a440c5f-8cae-4e4b-aae2-7472c64a08a1"
+
+        try await host.cancelPhoneInvitation(id: id, credential: "owner")
+        await #expect(throws: ClientError.invalidResponse("/v1/enrollment/invitations/\(id)")) {
+            _ = try await host.phoneInvitationStatus(id: id, credential: "owner")
+        }
     }
 
     @Test func pinsHostedAccountSessionToHostedConfiguration() async throws {
@@ -224,12 +254,25 @@ private final class EnrollmentTransport: HTTPTransport, @unchecked Sendable {
     }
 }
 
+private final class EmptyCancellationTransport: HTTPTransport, @unchecked Sendable {
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        let status = request.method == "DELETE" ? 204 : 200
+        return HTTPResponse(status: status, url: request.url, body: Data())
+    }
+}
+
 private final class RecoveringVaultRequestTransport: HTTPTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var requestID = ""
-    private var firstSubmission = true
+    private var firstSubmission: Bool
+    private let statusState: String
     private(set) var submissions = 0
     private(set) var statusRequests = 0
+
+    init(firstSubmissionFails: Bool = true, statusState: String = "pending") {
+        firstSubmission = firstSubmissionFails
+        self.statusState = statusState
+    }
 
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         try lock.withLock {
@@ -245,7 +288,7 @@ private final class RecoveringVaultRequestTransport: HTTPTransport, @unchecked S
                 return response(request, ["request_id": requestID, "expires_in_seconds": 60])
             case ("GET", "/v1/instance/vault-requests/\(requestID)"):
                 statusRequests += 1
-                return response(request, ["request_id": requestID, "state": "pending", "expires_in_seconds": 60])
+                return response(request, ["request_id": requestID, "state": statusState, "expires_in_seconds": 60])
             default:
                 return HTTPResponse(status: 404, url: request.url, body: Data("{\"code\":\"request_not_found\"}".utf8))
             }

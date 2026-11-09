@@ -20,6 +20,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::str::FromStr;
 use tauri::{State, WebviewWindow};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 const COMPUTER_ENROLLMENT_PATH: &str = "/v1/enrollment/computers";
 // Webhook list responses can exceed the general JSON limit; the server bounds them at 2 MiB.
@@ -94,6 +95,41 @@ async fn current(
     Ok(())
 }
 
+struct McpAccountAuthorization {
+    account: Option<Zeroizing<String>>,
+    revision: Option<u64>,
+}
+
+async fn begin_mcp_account_post<T, B>(
+    state: &AppState,
+    session: &std::sync::Arc<crate::session::Session>,
+    hosted: &crate::hosted::HostedState,
+    path: &str,
+    body: &B,
+) -> BridgeResult<(T, McpAccountAuthorization)>
+where
+    T: DeserializeOwned,
+    B: Serialize + ?Sized,
+{
+    let account =
+        crate::enrollment::hosted_account_header(state, hosted, session.api.origin()).await?;
+    let revision = match account.as_deref() {
+        Some(bearer) => Some(hosted.capture_mcp_account_session(bearer).await?),
+        None => None,
+    };
+    let response = mcp_account_post(
+        state,
+        session,
+        hosted,
+        revision,
+        path,
+        body,
+        account.as_deref().map(String::as_str),
+    )
+    .await?;
+    Ok((response, McpAccountAuthorization { account, revision }))
+}
+
 pub(crate) async fn mcp_account_post<T, B>(
     state: &AppState,
     session: &std::sync::Arc<crate::session::Session>,
@@ -161,21 +197,10 @@ pub async fn mcp_enable(
             "Only an owner can enable MCP.",
         ));
     }
-    let account = crate::enrollment::hosted_account_header(&state, &hosted).await?;
-    let account_generation = match account.as_deref() {
-        Some(bearer) => Some(hosted.capture_mcp_account_session(bearer).await?),
-        None => None,
-    };
-    let prepared: McpEnrollmentPreparation = mcp_account_post(
-        &state,
-        &session,
-        &hosted,
-        account_generation,
-        "/v1/mcp/device/prepare",
-        &(),
-        account.as_deref().map(String::as_str),
-    )
-    .await?;
+    let (prepared, authorization): (McpEnrollmentPreparation, _) =
+        begin_mcp_account_post(&state, &session, &hosted, "/v1/mcp/device/prepare", &()).await?;
+    let account = authorization.account;
+    let account_generation = authorization.revision;
     let vault =
         crate::sync::fetch_vault(&session.api, &binding.vault_id, &binding.device_id).await?;
     current(&state, &session).await?;
@@ -911,5 +936,113 @@ mod tests {
             request.contains("peppy-account-session: account")
                 || request.contains("Peppy-Account-Session: account")
         );
+    }
+
+    #[tokio::test]
+    async fn switched_mcp_post_selects_account_for_the_captured_destination() {
+        use crate::secure_store::SecretStore;
+        use peppy_hosted_api::enrollment::DeploymentMode;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let community_origin = format!("http://{}", listener.local_addr().unwrap());
+        let request = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0; 4096];
+            let read = socket.read(&mut buffer).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+            String::from_utf8(buffer[..read].to_vec()).unwrap()
+        });
+        let community_fixture = crate::tests::fixture_at(&community_origin);
+        let community_session = std::sync::Arc::new(crate::tests::open(
+            &community_fixture,
+            &community_fixture.binding,
+            &[],
+        ));
+        let hosted_origin = crate::hosted::hosted_origin().unwrap();
+        let hosted_fixture = crate::tests::fixture_at(&hosted_origin);
+        let hosted_session = std::sync::Arc::new(crate::tests::open(
+            &hosted_fixture,
+            &hosted_fixture.binding,
+            &[],
+        ));
+        let store = std::sync::Arc::new(crate::secure_store::MemoryStore::default());
+        store
+            .set(
+                &format!("hosted-session:{hosted_origin}"),
+                br#"{"account_id":"account","bearer":"account-session","expires_at_unix":18446744073709551615}"#,
+            )
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::new(root.path().to_path_buf(), store, std::sync::Arc::new(|| {}));
+        let hosted = crate::hosted::HostedState::default();
+
+        state
+            .update_config(|config| {
+                config.origin = Some(community_fixture.binding.origin.clone());
+                config.remember(&community_fixture.binding);
+                config.active = Some(community_fixture.binding.clone());
+            })
+            .unwrap();
+        *state.session.lock().await = Some(community_session.clone());
+        let captured = state.require_session().await.unwrap();
+
+        crate::enrollment::set_discovered_controller_for_test(
+            &state,
+            hosted_origin.clone(),
+            DeploymentMode::Hosted,
+        );
+        state
+            .update_config(|config| {
+                config.origin = Some(hosted_fixture.binding.origin.clone());
+                config.remember(&hosted_fixture.binding);
+                config.active = Some(hosted_fixture.binding.clone());
+            })
+            .unwrap();
+        *state.session.lock().await = Some(hosted_session);
+
+        let error = match begin_mcp_account_post::<serde_json::Value, _>(
+            &state,
+            &captured,
+            &hosted,
+            "/v1/mcp/device/prepare",
+            &(),
+        )
+        .await
+        {
+            Ok(_) => panic!("the captured community destination must reject Hosted authorization"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "origin-binding");
+        assert_eq!(
+            error.message,
+            "The enrollment destination changed before account authorization."
+        );
+
+        crate::enrollment::set_discovered_controller_for_test(
+            &state,
+            community_origin,
+            DeploymentMode::Community,
+        );
+        state
+            .update_config(|config| {
+                config.origin = Some(community_fixture.binding.origin.clone());
+                config.active = Some(community_fixture.binding.clone());
+            })
+            .unwrap();
+        *state.session.lock().await = Some(captured.clone());
+        let (_response, authorization): (serde_json::Value, _) =
+            begin_mcp_account_post(&state, &captured, &hosted, "/v1/mcp/device/prepare", &())
+                .await
+                .unwrap();
+        assert!(authorization.account.is_none());
+        assert!(!request
+            .await
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("peppy-account-session:"));
     }
 }

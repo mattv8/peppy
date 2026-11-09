@@ -239,21 +239,21 @@ describe("AttachmentStorageSettingsHost", () => {
     expect(screen.getByRole("button", { name: "Manage storage on the website" })).toBeInTheDocument();
   });
 
-  it("keeps a late device-a status from replacing device-b storage", async () => {
+  it("clears a loaded device-a status before device-b becomes unavailable", async () => {
     const deviceA = deferred<import("../bridge/bridge").AttachmentRetentionStatusResult>();
     const deviceB = deferred<import("../bridge/bridge").AttachmentRetentionStatusResult>();
     vi.mocked(bridge.attachment_retention_status!)
       .mockReturnValueOnce(deviceA.promise)
       .mockReturnValueOnce(deviceB.promise);
     const { rerender } = render(<AttachmentStorageSettingsHost sessionScopeId="device-a" />);
+    await act(async () => deviceA.resolve(status({ usedBytes: 20_000_000_000 })));
+    expect(await screen.findByText("20 GB")).toBeInTheDocument();
 
     rerender(<AttachmentStorageSettingsHost sessionScopeId="device-b" />);
     expect(screen.queryByText("20 GB")).not.toBeInTheDocument();
 
-    await act(async () => deviceB.resolve(status({ usedBytes: 30_000_000_000 })));
-    expect(await screen.findByText("30 GB")).toBeInTheDocument();
-    await act(async () => deviceA.resolve(status({ usedBytes: 20_000_000_000 })));
-    expect(screen.getByText("30 GB")).toBeInTheDocument();
+    await act(async () => deviceB.resolve({ kind: "temporarily_unavailable" }));
+    expect(await screen.findByText(/Storage policy status is unavailable/)).toBeInTheDocument();
     expect(screen.queryByText("20 GB")).not.toBeInTheDocument();
   });
 

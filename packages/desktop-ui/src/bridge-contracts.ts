@@ -1,6 +1,7 @@
 /**
  * UI-only native boundary. These DTOs intentionally contain no credentials,
- * cryptographic material, device tokens, or raw filesystem paths.
+ * cryptographic material, root or device keys, device tokens, or raw filesystem paths.
+ * Renderer-visible invitation and webhook secrets are explicit, narrowly scoped exceptions.
  */
 import type {
   HistorySearchAttemptInput,
@@ -152,7 +153,7 @@ export type HostedAccountView = { available: boolean; signedIn: boolean; account
 export type StartupStatus = { state: "on" | "off" | "approval_needed" | "unavailable"; background: boolean };
 export type PurchaseOptions = { appStore: boolean; website: boolean };
 export type StoreProduct = { id: string; kind: "plan" | "storage"; displayName: string; displayPrice: string; period: "month" | "year"; storageBytes?: number };
-/** Sanitized enrollment state. Secrets and device credentials remain in the platform host. */
+/** Sanitized enrollment state. Root/private keys and device credentials remain host-side; the rendered QR payload may intentionally contain an enrollment invitation secret. */
 export type EnrollmentView = {
   mode: "community" | "hosted";
   stage: "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_approved" | "phone_connected" | "expired" | "error" | "invite_request" | "invite_waiting" | "invite_approved" | "invite_denied" | "invite_expired";

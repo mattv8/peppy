@@ -312,7 +312,7 @@ export function ContactForm({
         </p>
       )}
       <div id="contact-form-body">
-        <section data-form-section="name">
+        <section data-form-section="name" data-contact-form-section="given-name">
           <label htmlFor="contact-form-given-name">Given name</label>
           <input
             id="contact-form-given-name"
@@ -325,7 +325,7 @@ export function ContactForm({
           />
         </section>
 
-        <section data-form-section="name">
+        <section data-form-section="name" data-contact-form-section="family-name">
           <label htmlFor="contact-form-family-name">Family name</label>
           <input
             id="contact-form-family-name"

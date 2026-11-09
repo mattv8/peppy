@@ -14,12 +14,19 @@ function deferred<T>() {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("MediaPanel", () => {
-  it("loads newest-first pages and retries failures", async () => {
-    const loadPage = vi.fn().mockResolvedValueOnce({ items: [item("one")], nextCursor: "next" }).mockResolvedValueOnce({ items: [item("two")], nextCursor: undefined });
+  it("retries a rejected page with the same cursor without duplicating the first page", async () => {
+    const loadPage = vi.fn()
+      .mockResolvedValueOnce({ items: [item("one")], nextCursor: "next" })
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({ items: [item("two")], nextCursor: undefined });
     render(<MediaPanel loadPage={loadPage} onOpen={vi.fn()} />);
     expect(await screen.findByRole("button", { name: "one" })).toBeInTheDocument();
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Load more" })));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load media.");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByRole("button", { name: "two" })).toBeInTheDocument();
+    expect(loadPage).toHaveBeenLastCalledWith("next");
+    expect(screen.getAllByRole("button", { name: "one" })).toHaveLength(1);
   });
 
   it("uses MediaTile cells with tile hooks", async () => {

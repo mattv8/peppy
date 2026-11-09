@@ -5,11 +5,12 @@ import datetime as dt
 import os
 import re
 import sys
+import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 
 
 EXPIRY = re.compile(r"\[expires: (\d{4}-\d{2}-\d{2})\]$")
-EXCEPTION = re.compile(r'\{\s*id\s*=\s*"(?P<id>[^"]+)"\s*,\s*reason\s*=\s*"(?P<reason>[^"]*)"\s*\}')
 MAX_REVIEW_WINDOW = dt.timedelta(days=180)
 
 
@@ -18,14 +19,31 @@ def today() -> dt.date:
 
 
 def advisory_ignores(path: Path) -> list[dict[str, str]]:
-    text = path.read_text()
-    section = re.search(r"^\[advisories\]$(.*?)(?=^\[|\Z)", text, re.MULTILINE | re.DOTALL)
-    if section is None:
+    try:
+        with path.open("rb") as config_file:
+            config = tomllib.load(config_file)
+    except tomllib.TOMLDecodeError as error:
+        raise ValueError(f"cannot parse {path} as TOML: {error}") from error
+
+    advisories = config.get("advisories")
+    if advisories is None:
         return []
-    matches = list(EXCEPTION.finditer(section.group(1)))
-    if section.group(1).count("id =") != len(matches):
-        raise ValueError("cannot parse every advisory exception")
-    return [match.groupdict() for match in matches]
+    if not isinstance(advisories, Mapping):
+        raise ValueError("advisories must be a TOML table")
+    ignores = advisories.get("ignore", [])
+    if not isinstance(ignores, list):
+        raise ValueError("advisories.ignore must be a list of exception tables")
+
+    exceptions: list[dict[str, str]] = []
+    for index, exception in enumerate(ignores, start=1):
+        if not isinstance(exception, Mapping) or set(exception) != {"id", "reason"}:
+            raise ValueError(f"advisories.ignore entry {index} must contain only id and reason")
+        identifier = exception["id"]
+        reason = exception["reason"]
+        if not isinstance(identifier, str) or not identifier or not isinstance(reason, str):
+            raise ValueError(f"advisories.ignore entry {index} must use nonempty string id and string reason")
+        exceptions.append({"id": identifier, "reason": reason})
+    return exceptions
 
 
 def validate(path: Path, reference_date: dt.date) -> list[str]:
@@ -37,7 +55,11 @@ def validate(path: Path, reference_date: dt.date) -> list[str]:
         if not expiry_match:
             errors.append(f"{identifier}: reason must end with [expires: YYYY-MM-DD]")
             continue
-        expiry = dt.date.fromisoformat(expiry_match.group(1))
+        try:
+            expiry = dt.date.fromisoformat(expiry_match.group(1))
+        except ValueError:
+            errors.append(f"{identifier}: expiry date is invalid")
+            continue
         if expiry <= reference_date:
             errors.append(f"{identifier}: exception expired on {expiry}")
         elif expiry > reference_date + MAX_REVIEW_WINDOW:
@@ -50,7 +72,10 @@ def main() -> int:
     if len(sys.argv) > 2:
         print("usage: check-advisory-exceptions.py [deny.toml]", file=sys.stderr)
         return 2
-    errors = validate(path, today())
+    try:
+        errors = validate(path, today())
+    except ValueError as error:
+        errors = [str(error)]
     if errors:
         print("advisory exception policy failed:", *errors, sep="\n", file=sys.stderr)
         return 1

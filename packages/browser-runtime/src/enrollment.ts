@@ -83,7 +83,8 @@ export class BrowserEnrollment {
         return this.view();
       }
       if (this.session.phase !== "unenrolled") throw new Error("enrollment-state");
-      await this.initializeFresh(origin);
+      // Hosted provisioning prepares its own enrollment context from the account grant.
+      if (mode !== "hosted") await this.initializeFresh(origin);
       if (mode === "hosted") {
         if (!signedIn) this.viewValue = { mode, stage: "signin", origin };
         else {
@@ -250,6 +251,7 @@ export class BrowserEnrollment {
         return this.view();
       }
       if (this.session.phase !== "unenrolled") throw new Error("enrollment-state");
+      await this.initializeFresh(this.viewValue.origin ?? this.origin);
       const challenge = await this.request("/v1/enrollment/challenges", "POST", await this.rustRequest("_worker_enrollment_manual_challenge", { vaultId: undefined, vaultOwner }));
       const proof = await this.rustRequest("_worker_enrollment_complete_manual_challenge", { challengeJson: JSON.stringify(challenge), passphrase });
       const id = required(challenge, "enrollment_id");

@@ -4,13 +4,49 @@ import { CheckpointError, type CheckpointInput, IndexedDbCheckpointStore, Runtim
 import { CoreRejectedError, type CoreResult } from "./core.js";
 import { type EmscriptenFilesystem } from "./filesystem.js";
 import { BrowserSession, BrowserSessionError } from "./session.js";
-import { BrowserWorkerHost, dispatchBrowserRpc, type BrowserPort } from "./host.js";
+import { browserHostDependencies, BrowserWorkerHost, dispatchBrowserRpc, type BrowserPort } from "./host.js";
 import type { OwnerLockManager } from "./owner.js";
 
 const encoder = new TextEncoder();
 const id = "123e4567-e89b-12d3-a456-426614174000";
 const cipherPath = `client.db.media/cipher/${id}.ppss`;
 const previewIds = Array.from({ length: 24 }, (_, index) => `123e4567-e89b-12d3-a456-${String(index + 1).padStart(12, "0")}`);
+
+const productionHostFixture = vi.hoisted(() => ({
+  core: undefined as { invoke(request: { command: string; args: Record<string, unknown> }): Promise<CoreResult> } | undefined,
+  filesystem: undefined as EmscriptenFilesystem | undefined,
+  liveTeardown: undefined as Promise<void> | undefined,
+}));
+
+vi.mock("./core.js", async importOriginal => {
+  const actual = await importOriginal<typeof import("./core.js")>();
+  return {
+    ...actual,
+    BrowserCore: class {
+      public invoke(request: { command: string; args: Record<string, unknown> }): Promise<CoreResult> {
+        if (!productionHostFixture.core) throw new Error("production core fixture is unavailable");
+        return productionHostFixture.core.invoke(request);
+      }
+    },
+  };
+});
+
+vi.mock("./live.js", async importOriginal => {
+  const actual = await importOriginal<typeof import("./live.js")>();
+  return {
+    ...actual,
+    LiveSupervisor: class {
+      public async stop(): Promise<void> { await productionHostFixture.liveTeardown; }
+    },
+  };
+});
+
+vi.mock("/core/peppy-browser-core.js", () => ({
+  default: async () => {
+    if (!productionHostFixture.filesystem) throw new Error("production filesystem fixture is unavailable");
+    return { FS: productionHostFixture.filesystem };
+  },
+}));
 
 function cipherPathFor(attachmentId: string): string { return `client.db.media/cipher/${attachmentId}.ppss`; }
 
@@ -352,6 +388,97 @@ describe("BrowserSession", () => {
     failedFs.seedDatabase();
     await expect(failed.finishEnrollment("_worker_enrollment_finish_manual", "admission-response", "vault-secret")).rejects.toMatchObject({ code: "invalid-request" });
     expect(failed.phase).toBe("unenrolled");
+  });
+
+  it("closes the owner before a poisoned enrollment invocation can checkpoint or continue", async () => {
+    const fs = new MemoryFs();
+    const core = new TrustedCore();
+    core.finishFailure = new WebAssembly.RuntimeError("fixture trap");
+    const session = await BrowserSession.boot(sessionOptions(core, fs, new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`)));
+    fs.seedDatabase();
+
+    await expect(session.finishEnrollment("_worker_enrollment_finish_owner", "admission-response", "vault-secret")).rejects.toBeInstanceOf(WebAssembly.RuntimeError);
+    expect(session.phase).toBe("closed");
+    expect(core.commands).not.toContain("_worker_checkpoint_identity");
+    await expect(session.finishEnrollment("_worker_enrollment_finish_owner", "admission-response", "vault-secret")).rejects.toBeInstanceOf(BrowserSessionError);
+  });
+
+  it("fences the production enrollment facade during asynchronous fatal teardown while preserving handled rejections", async () => {
+    const fs = new MemoryFs();
+    const core = new TrustedCore();
+    const teardown = deferred();
+    const onFatal = vi.fn();
+    const session = await BrowserSession.boot({ ...sessionOptions(core, fs, new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`), onFatal), liveTeardown: () => teardown.promise });
+    const facade = session.enrollmentCore();
+    const invoke = vi.spyOn(core, "invoke").mockRejectedValueOnce(new WebAssembly.RuntimeError("trap"));
+
+    await expect(facade.invoke({ command: "_worker_enrollment_prepare_hosted_owner", args: {} })).rejects.toBeInstanceOf(WebAssembly.RuntimeError);
+    await expect(facade.invoke({ command: "_worker_enrollment_clear_vault_request", args: {} })).rejects.toMatchObject({ code: "closed" });
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    teardown.release();
+
+    const recoverable = await BrowserSession.boot(sessionOptions(new TrustedCore(), new MemoryFs(), new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`)));
+    const recoveryFacade = recoverable.enrollmentCore();
+    const recoveryCore = (recoveryFacade as unknown as { invoke(request: { command: string; args: Record<string, unknown> }): Promise<CoreResult> });
+    await expect(recoveryCore.invoke({ command: "_worker_enrollment_prepare_hosted_owner", args: {} })).resolves.toEqual({});
+  });
+
+  it("stops the production enrollment wiring once and fences an accepted continuation during fatal teardown", async () => {
+    const pendingVaultRequest = deferred();
+    const liveTeardown = deferred();
+    class PoisonedEnrollmentCore extends TrustedCore {
+      public override async invoke(request: { command: string; args: Record<string, unknown> }): Promise<CoreResult> {
+        this.commands.push(request.command);
+        if (request.command === "_worker_enrollment_pending_vault_request") {
+          await pendingVaultRequest.promise;
+          return { origin: "https://peppy.test", requestId: "request-1", displayName: "Taylor" };
+        }
+        if (request.command === "_worker_enrollment_new") throw new WebAssembly.RuntimeError("fixture trap");
+        return super.invoke(request);
+      }
+    }
+
+    const core = new PoisonedEnrollmentCore();
+    productionHostFixture.core = core;
+    productionHostFixture.filesystem = new MemoryFs();
+    productionHostFixture.liveTeardown = liveTeardown.promise;
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input), "https://peppy.test").pathname;
+      if (path === "/web/config.json" || path === "/hosted/v1/enrollment/config") return new Response(null, { status: 404 });
+      if (path === "/v1/instance") return new Response(JSON.stringify({ mode: "community", claimed: false }));
+      throw new Error(`unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetcher);
+    vi.stubGlobal("self", { location: { origin: "https://peppy.test" } });
+
+    try {
+      const host = new BrowserWorkerHost(browserHostDependencies(locks(), () => undefined));
+      const attached = workerPort();
+      await host.attach(attached);
+
+      attached.emit({ id: 1, command: "enrollment_cancel", args: {} });
+      await vi.waitFor(() => expect(core.commands).toContain("_worker_enrollment_pending_vault_request"));
+      attached.emit({ id: 2, command: "enrollment_discover", args: {} });
+      await vi.waitFor(() => expect(core.commands).toContain("_worker_enrollment_new"));
+      await vi.waitFor(() => expect(attached.messages).toContainEqual(expect.objectContaining({ id: 2, ok: false })));
+
+      pendingVaultRequest.release();
+      await vi.waitFor(() => expect(attached.messages).toContainEqual(expect.objectContaining({ id: 1, ok: false, error: expect.objectContaining({ code: "closed" }) })));
+      expect(core.commands).not.toContain("_worker_enrollment_clear_vault_request");
+      expect(core.commands).not.toContain("_worker_checkpoint_identity");
+
+      liveTeardown.release();
+      await vi.waitFor(() => expect(attached.messages).toContainEqual({ event: "stopped", reason: "fatal" }));
+      expect(attached.messages.filter(message => typeof message === "object" && message !== null && "event" in message && message.event === "stopped")).toHaveLength(1);
+    } finally {
+      pendingVaultRequest.release();
+      liveTeardown.release();
+      productionHostFixture.core = undefined;
+      productionHostFixture.filesystem = undefined;
+      productionHostFixture.liveTeardown = undefined;
+      vi.unstubAllGlobals();
+    }
   });
 
   it("keeps an old checkpoint after a rejected unlock and permits a retry", async () => {

@@ -396,6 +396,24 @@ def verify_writers_stopped(root: Path) -> None:
         raise RepairError(f"refusing migration repair while code writers are running: {', '.join(sorted(writers))}")
 
 
+def stop_and_verify_writers(root: Path) -> None:
+    stop_error: RepairError | None = None
+    try:
+        run_just(root, "_dev-up-stop-writers")
+    except RepairError as error:
+        stop_error = error
+
+    try:
+        verify_writers_stopped(root)
+    except RepairError as error:
+        if stop_error:
+            raise RepairError(f"could not stop and verify development writers: {stop_error}; {error}") from error
+        raise RepairError(f"could not verify development writers are stopped: {error}") from error
+
+    if stop_error:
+        raise RepairError(f"could not stop development writers: {stop_error}") from stop_error
+
+
 def dev_up(root: Path) -> None:
     if not is_local_docker_host(docker_endpoint(dict(os.environ))):
         raise RepairError("refusing migration repair against a non-local Docker endpoint")
@@ -423,8 +441,25 @@ def dev_up(root: Path) -> None:
         try:
             run_just(root, "_dev-up-start")
         except RepairError as error:
+            try:
+                stop_and_verify_writers(root)
+            except RepairError as cleanup_error:
+                if backup:
+                    raise RepairError(
+                        "forward migration or startup failed; could not confirm code writers are stopped. "
+                        f"Startup error: {error}. Cleanup error: {cleanup_error}. "
+                        "Do not restore while writers may be running; stop and verify them first. "
+                        f"Once writers are stopped and verified, restore retained backup before retrying: {restore_command(root, backup)}"
+                    ) from cleanup_error
+                raise RepairError(
+                    "forward migration or startup failed; could not confirm code writers are stopped. "
+                    f"Startup error: {error}. Cleanup error: {cleanup_error}"
+                ) from cleanup_error
             if backup:
-                raise RepairError(f"forward migration or startup failed; code remains stopped. Restore retained backup before retrying: {restore_command(root, backup)}") from error
+                raise RepairError(
+                    "forward migration or startup failed; code remains stopped. "
+                    f"Startup error: {error}. Restore retained backup before retrying: {restore_command(root, backup)}"
+                ) from error
             raise
 
 

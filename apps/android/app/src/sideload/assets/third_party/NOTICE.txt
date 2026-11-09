@@ -42,7 +42,7 @@ Apache-2.0.txt contains that license. Upstream BSD-3-Clause attributions for
 Cameron Gutman (2013) and Sam Palmer (2020) are retained in BSD-3-Clause.txt.
 The upstream MIT notice for Google Inc. (2013) is retained in MIT.txt.
 
-Conscrypt 2.5.3
+Conscrypt 2.8.0
 ---------------
 Package: org.conscrypt:conscrypt-android
 License: Apache License 2.0; see Apache-2.0.txt. Conscrypt's upstream NOTICE
@@ -51,7 +51,7 @@ refers to are also the Apache License 2.0. Conscrypt's native library
 (libconscrypt_jni.so) includes BoringSSL, which is covered by the OpenSSL,
 SSLeay, ISC and MIT terms reproduced in BoringSSL-LICENSE.txt.
 
-Bouncy Castle 1.81
+Bouncy Castle 1.86
 ------------------
 Packages: bcprov-jdk15to18, bcpkix-jdk15to18, and bcutil-jdk15to18.
 License: Bouncy Castle's MIT-style license; see BouncyCastle-LICENSE.txt.

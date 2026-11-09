@@ -17,6 +17,8 @@ import androidx.work.OutOfQuotaPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
 import dev.peppy.mobile.account.AccountAccessState
 import dev.peppy.mobile.account.isAccountPolicyDenial
 import dev.peppy.mobile.attachments.AttachmentRetentionDriver
@@ -301,6 +303,8 @@ class GatewaySync(
     private val messagingApp: () -> Unit = {},
     /** Fences transport completions from a vault/device binding replaced while the pass was active. */
     private val sessionCurrent: () -> Boolean = { true },
+    /** Cancellation fences phases before they admit new permits or invoke host effects. */
+    private val effectPermitted: () -> Boolean = { true },
     private val nowMs: () -> Long = { System.currentTimeMillis() },
 ) {
     private enum class GatewayPhase(val code: Long) {
@@ -324,6 +328,7 @@ class GatewaySync(
     private var accountPaused = false
 
     fun run(): PassResult {
+        ensureEffectsPermitted()
         if (state.phase == SyncPhase.RECOVERY_REQUIRED) {
             // Withdraw routes so the desktop stops offering this gateway; nothing else.
             phase(GatewayPhase.RECOVERY_WITHDRAW) { publish(SimRoutes.capabilityReport(emptyList(), sendPermissionGranted = false)); false }
@@ -351,6 +356,7 @@ class GatewaySync(
             retentionAllowsProducers = false
             failure = error
         }
+        ensureEffectsPermitted()
         phase(GatewayPhase.CAPABILITIES) { publish(capabilities); false }
         // Probe even when live replay does not need a resync; unknown/failed capability is false.
         phase(GatewayPhase.COMPACTION_CAPABILITY) { probeSnapshotCapability(); false }
@@ -402,6 +408,7 @@ class GatewaySync(
 
     private fun phase(phase: GatewayPhase, block: () -> Boolean) {
         try {
+            ensureEffectsPermitted()
             if (SyncDiagnostics.measurePhase(phase.code, block)) more = true
         } catch (error: GatewayAuthException) {
             throw error
@@ -414,6 +421,10 @@ class GatewaySync(
             if (!transient) throw error
             if (failure == null) failure = error
         }
+    }
+
+    private fun ensureEffectsPermitted() {
+        if (!effectPermitted()) throw CancellationException("gateway pass cancelled")
     }
 
     private fun publish(report: JSONObject) {
@@ -658,6 +669,7 @@ class GatewaySync(
         val batch = client.pendingOutboxJsonBatch(OUTBOX_BATCH.toULong())
         if (batch.isEmpty() && state.softRejection != null) state.clearSoftRejection()
         for (envelope in batch) {
+            ensureEffectsPermitted()
             val response = http.postJson("/v1/events", envelope)
             when {
                 response.ok -> {
@@ -754,13 +766,14 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
     /** One-time and periodic passes share the core; never run two passes concurrently. */
     override suspend fun doWork(): Result = PASS.withLock {
         withContext(Dispatchers.IO) {
-            if (!SyncDiagnostics.enabled) return@withContext runPass()
+            val job = currentCoroutineContext()[kotlinx.coroutines.Job]
+            if (!SyncDiagnostics.enabled) return@withContext runPass(job)
             val metadata = gatewayDiagnosticMetadata()
             val traceId = SyncDiagnostics.newTraceId()
             SyncDiagnostics.withTrace(traceId) {
                 SyncDiagnostics.record(SyncTraceEvent.GATEWAY_START, SyncTraceField.PARENT_ID to metadata.parent, SyncTraceField.TRACE_ID to metadata.requestTrace, SyncTraceField.ENQUEUED_MS to (metadata.enqueuedMs ?: 0L), SyncTraceField.ATTEMPT to runAttemptCount.toLong(), *metadata.delayFields())
                 try {
-                    runPass().also { result ->
+                    runPass(job).also { result ->
                         val outcome = when (result) {
                             Result.success() -> GATEWAY_OUTCOME_SUCCESS
                             Result.retry() -> GATEWAY_OUTCOME_RETRY
@@ -776,15 +789,15 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         }
     }
 
-    private fun runPass(): Result {
+    private fun runPass(job: kotlinx.coroutines.Job?): Result {
         GatewayStateStore(applicationContext).migrateRejectionPolicy(System.currentTimeMillis())
         val captureHint = GatewayWork.beginPass(applicationContext)
-        val result = pass(captureHint)
+        val result = pass(captureHint, job)
         if (result == Result.success()) GatewayWork.finishPass()
         return result
     }
 
-    private fun pass(captureHint: Boolean): Result {
+    private fun pass(captureHint: Boolean, job: kotlinx.coroutines.Job?): Result {
         val callbacks = SmsCallbackStore(applicationContext)
         val mmsCallbacks = MmsCallbackStore(applicationContext)
         callbacks.purgeOlderThan(TimeUnit.DAYS.toMillis(7))
@@ -820,10 +833,12 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
             state = GatewayStateStore(applicationContext),
             deviceId = session.deviceId,
             dispatch = {
-                val mms = MmsDispatcher(applicationContext, session.client, AndroidMmsCarrier(applicationContext), routes, sendGranted, mmsEnabled).dispatch()
+                val mms = MmsDispatcher(applicationContext, session.client, AndroidMmsCarrier(applicationContext), routes, sendGranted, mmsEnabled,
+                    currentRoutes = SimRoutes::current, mayIssueEffect = { job?.isActive != false }).dispatch()
                 val used = mms.submitted + mms.refusedBeforeCarrier
                 val sms = GatewayDispatchPolicy.sms(policy?.captureSms == true) {
-                    SmsDispatcher(applicationContext, session.client, AndroidSmsCarrier(applicationContext), routes, sendGranted, callbacks)
+                    SmsDispatcher(applicationContext, session.client, AndroidSmsCarrier(applicationContext), routes, sendGranted, callbacks,
+                        currentRoutes = SimRoutes::current, mayIssueEffect = { job?.isActive != false })
                         .dispatch((SmsDispatcher.MAX_COMMANDS_PER_RUN - used).coerceAtLeast(0))
                 }
                 DispatchSummary(
@@ -869,6 +884,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
             },
             messagingApp = { MessagingAppSync.forGateway(applicationContext, session.client).run() },
             sessionCurrent = { NativeGateway.isCurrent(applicationContext, session) },
+            effectPermitted = { job?.isActive != false },
         )
         val result = try {
             sync.run()

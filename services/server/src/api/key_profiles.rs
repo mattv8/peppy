@@ -19,7 +19,7 @@ use sqlx::Row;
 
 use super::{
     ApiError, ApiResult, ApiState, Operation, auth_with_mode, authorize, database_unavailable,
-    owner, validate_profile,
+    owner, revalidate_principal, validate_profile,
 };
 
 const MAX_CHECK_HEADER_BYTES: usize = 1_048_576;
@@ -99,6 +99,9 @@ pub(super) async fn register(
             .fetch_one(&mut *tx)
             .await
             .map_err(|error| database_unavailable(&error, "key_profile_lock"))?;
+    if revalidate_principal(&mut tx, &p).await? != "owner" {
+        return Err(ApiError(StatusCode::FORBIDDEN, "owner_required"));
+    }
     if let Some(existing) = sqlx::query("SELECT p.public_key_profile,p.encrypted_vault_check_header,p.profile_fingerprint,p.activated_at IS NOT NULL AS activated,a.profile_fingerprint AS admission_profile_fingerprint,a.admission_public_key FROM vault_key_profiles p LEFT JOIN vault_admission_keys a ON a.vault_id=p.vault_id AND a.key_epoch=p.key_epoch WHERE p.vault_id=$1 AND p.key_epoch=$2")
         .bind(p.vault)
         .bind(epoch)
@@ -189,6 +192,9 @@ pub(super) async fn activate(
             .fetch_one(&mut *tx)
             .await
             .map_err(|error| database_unavailable(&error, "key_activate_lock"))?;
+    if revalidate_principal(&mut tx, &p).await? != "owner" {
+        return Err(ApiError(StatusCode::FORBIDDEN, "owner_required"));
+    }
     let profile = sqlx::query("SELECT p.public_key_profile,p.encrypted_vault_check_header,p.profile_fingerprint,a.admission_public_key FROM vault_key_profiles p LEFT JOIN vault_admission_keys a ON a.vault_id=p.vault_id AND a.key_epoch=p.key_epoch AND a.profile_fingerprint=p.profile_fingerprint WHERE p.vault_id=$1 AND p.key_epoch=$2")
         .bind(p.vault)
         .bind(key_epoch)

@@ -563,6 +563,27 @@ object NativeGateway {
         }
     }
 
+    /** Installs a shared-secret admission after the Rust-produced header verifies the entered phrase. */
+    internal fun installPhraseEnrollmentIdentity(
+        context: Context,
+        identity: NativeEnrollmentIdentity,
+        passphrase: String,
+    ): ImportResult {
+        val metadata = identity.metadata()
+        val credential = try {
+            DeviceCredential(metadata.origin, metadata.vaultId, metadata.deviceId, identity.credentialForNativeSecureStore())
+        } catch (_: MobileBindingsException) {
+            return ImportResult.SERVER_REJECTED
+        }
+        val installed = persistVerified(context, credential, VaultMaterial(metadata.profileJson, metadata.headerJson))
+        if (installed != ImportResult.IMPORTED && installed != ImportResult.UPDATED) return installed
+        return when (unlock(context, passphrase)) {
+            UnlockResult.UNLOCKED -> installed
+            UnlockResult.WRONG_PASSPHRASE -> ImportResult.SERVER_REJECTED
+            UnlockResult.NOT_ENROLLED, UnlockResult.DATABASE_UNAVAILABLE, UnlockResult.FAILED, UnlockResult.SUPERSEDED -> ImportResult.STORAGE_ERROR
+        }
+    }
+
     internal sealed interface VaultCheck {
         class Verified(val material: VaultMaterial) : VaultCheck
         data object NotGateway : VaultCheck

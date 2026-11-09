@@ -200,11 +200,15 @@ describe("DraftStore authoritative coordination", () => {
   it("saves edits made during deleted-draft recovery against the new identity", async () => {
     let resolveCreate!: (value: Draft) => void;
     const writes: DraftInput[] = [];
+    let durable = draft({ text: "old" });
     const store = new DraftStore(async input => {
       writes.push(input);
-      if (input.id) throw { code: "not-found", message: "deleted" };
+      if (input.id === "draft-one") throw { code: "not-found", message: "deleted" };
       if (!resolveCreate) return new Promise(resolve => { resolveCreate = resolve; });
-      return draft({ ...input, revision: "3" });
+      if (input.id === "") return new Promise(resolve => { resolveCreate = resolve; });
+      expect(input).toMatchObject({ id: "replacement", expectedRevision: durable.revision });
+      durable = draft({ ...durable, ...input, revision: "3" });
+      return durable;
     }, events);
     store.adopt("conversation-one", draft({ text: "old" }));
     await store.edit("conversation-one", { text: "first" });
@@ -212,9 +216,12 @@ describe("DraftStore authoritative coordination", () => {
     const recovery = store.saveAsNew("conversation-one");
     await vi.waitFor(() => expect(resolveCreate).toBeTypeOf("function"));
     await store.edit("conversation-one", { text: "during recovery", attachmentIds: ["new-file"] });
-    resolveCreate(draft({ id: "replacement", text: "first", revision: "2" }));
+    durable = draft({ id: "replacement", text: "first", revision: "2" });
+    resolveCreate(durable);
     await expect(recovery).resolves.toEqual({ ok: true });
     await vi.waitFor(() => expect(writes.at(-1)).toMatchObject({ id: "replacement", expectedRevision: "2", text: "during recovery", attachmentIds: ["new-file"] }));
+    await expect(store.flush("conversation-one")).resolves.toEqual({ ok: true });
+    expect(durable).toMatchObject({ id: "replacement", revision: "3", text: "during recovery", attachmentIds: ["new-file"] });
   });
 
   it("ignores a deleted-draft recovery completion after session reset", async () => {

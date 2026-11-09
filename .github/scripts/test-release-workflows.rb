@@ -21,7 +21,7 @@ assert.call(google_messages_go.dig('defaults', 'run', 'working-directory') == 'a
 google_messages_steps = google_messages_go.fetch('steps')
 google_messages_setup = google_messages_steps.find { |step| step['uses']&.start_with?('actions/setup-go@') }
 assert.call(google_messages_setup && google_messages_setup.fetch('uses').match?(/@\h{40}\z/) && google_messages_setup.dig('with', 'go-version') == '1.27.3' && google_messages_setup.dig('with', 'cache') == false, 'Google Messages CI must pin setup-go and the Go toolchain without saving shared caches')
-assert.call(google_messages_steps.map { |step| step['run'] }.compact == ['./prepare-libgm.sh', 'go test -race ./...', 'go vet ./...', 'test -z "$(gofmt -l .)"'], 'Google Messages CI must prepare patched libgm, run race tests and vet, and fail on unformatted Go without building an AAR')
+assert.call(google_messages_steps.map { |step| step['run'] }.compact == ['./prepare-libgm.sh', 'go test -race ./...', 'go test -race go.mau.fi/mautrix-gmessages/pkg/libgm', 'go vet ./...', 'go vet go.mau.fi/mautrix-gmessages/pkg/libgm', 'test -z "$(gofmt -l .)"'], 'Google Messages CI must test and vet the patched libgm package explicitly alongside the module-wide checks')
 assert.call(ci_jobs.fetch('gate').fetch('needs').include?('google-messages-go'), 'the CI gate must wait for Google Messages Go checks')
 google_messages_gate = ci_jobs.fetch('gate').fetch('steps').find { |step| step['name'] == 'Evaluate Google Messages Go gate' }
 assert.call(google_messages_gate && google_messages_gate.fetch('env') == { 'GOOGLE_MESSAGES_GO_RESULT' => '${{ needs.google-messages-go.result }}', 'GOOGLE_MESSAGES_GO_REQUIRED' => '${{ needs.changes.outputs.android }}' }, 'the Go gate must evaluate the scoped job result')
@@ -276,8 +276,31 @@ end
 trusted_contexts = 'workflow_dispatch:refs/heads/production:stable|push:refs/heads/production:stable|push:refs/heads/staging:staging'
 helper = File.read(File.join(__dir__, 'release-context-guard.sh'))
 assert.call(helper.include?(trusted_contexts), 'context helper must define the trusted context matrix')
+assert.call(helper.include?('actual_sha=$(git rev-parse HEAD)'), 'context helper must verify the checked-out revision before protected repository code runs')
 assert.call(desktop_steps.fetch(desktop_guard_index - 2).fetch('run').include?(trusted_contexts), 'artifact pre-check must match the context helper matrix')
 assert.call(publisher_steps.fetch(publisher_guard_index - 2).fetch('run').include?(trusted_contexts), 'publish pre-check must match the context helper matrix')
+Dir.mktmpdir('peppy-release-context') do |fixture|
+  Open3.capture3('git', 'init', '--quiet', fixture).then { |_, stderr, status| assert.call(status.success?, "release context fixture git init failed: #{stderr}") }
+  File.write(File.join(fixture, 'fixture'), "trusted\n")
+  %w[user.email fixture@example.invalid user.name fixture].each_slice(2) do |key, value|
+    _, stderr, status = Open3.capture3('git', '-C', fixture, 'config', key, value)
+    assert.call(status.success?, "release context fixture git config failed: #{stderr}")
+  end
+  _, stderr, status = Open3.capture3('git', '-C', fixture, 'add', 'fixture')
+  assert.call(status.success?, "release context fixture git add failed: #{stderr}")
+  _, stderr, status = Open3.capture3('git', '-C', fixture, 'commit', '--quiet', '-m', 'fixture')
+  assert.call(status.success?, "release context fixture git commit failed: #{stderr}")
+  trusted_sha, stderr, status = Open3.capture3('git', '-C', fixture, 'rev-parse', 'HEAD')
+  assert.call(status.success?, "release context fixture SHA lookup failed: #{stderr}")
+  trusted_env = {
+    'CHANNEL' => 'stable', 'REQUESTED_SHA' => trusted_sha.strip, 'GITHUB_SHA' => trusted_sha.strip,
+    'GITHUB_EVENT_NAME' => 'workflow_dispatch', 'GITHUB_REF' => 'refs/heads/production'
+  }
+  _, stderr, status = Open3.capture3(trusted_env, 'bash', File.join(__dir__, 'release-context-guard.sh'), chdir: fixture)
+  assert.call(status.success?, "trusted release context must pass: #{stderr}")
+  _, _, status = Open3.capture3(trusted_env.merge('REQUESTED_SHA' => 'arbitrary-ref'), 'bash', File.join(__dir__, 'release-context-guard.sh'), chdir: fixture)
+  assert.call(!status.success?, 'arbitrary release refs must fail before protected checkout work')
+end
 
 image_needs = release.fetch('jobs').fetch('publish-server-image').fetch('needs')
 assert.call(!release.fetch('jobs').key?('container'), 'release must not rebuild container images after the CI gate')
@@ -318,6 +341,14 @@ artifacts = load_workflow.call('build-artifacts.yml').fetch('jobs')
   assert.call(job.fetch('if') == "inputs.build_#{component} != false", "#{component} artifact job must run unless explicitly disabled")
 end
 desktop_steps = artifacts.fetch('desktop-development-artifacts').fetch('steps')
+desktop_precheck = desktop_steps.find { |step| step['name'] == 'Reject untrusted updater build context' }
+desktop_checkout = desktop_steps.find { |step| step['uses']&.start_with?('actions/checkout@') }
+desktop_guard = desktop_steps.find { |step| step['name'] == 'Verify checked-out trusted updater context' }
+assert.call(desktop_precheck.fetch('if') == "inputs.trusted_update_build || inputs.macos_distribution == 'app-store'", 'App Store builds must validate trusted ref context before checkout')
+assert.call(desktop_guard.fetch('if') == "inputs.trusted_update_build || inputs.macos_distribution == 'app-store'", 'App Store builds must verify checked-out HEAD before repository code receives secrets')
+assert.call(desktop_steps.index(desktop_precheck) < desktop_steps.index(desktop_checkout) && desktop_steps.index(desktop_checkout) < desktop_steps.index(desktop_guard), 'trusted desktop context checks must bracket checkout')
+desktop_matrix = artifacts.fetch('desktop-development-artifacts').dig('strategy', 'matrix')
+assert.call(desktop_matrix.include?('fromJSON') && desktop_matrix.include?('"bundles":"app"') && desktop_matrix.include?('"path":"apps/desktop/src-tauri/target/release/bundle/macos/*.pkg"'), 'App Store builds must run only one macOS app/package matrix entry')
 mode_validation = desktop_steps.find { |step| step['run'] == 'bash .github/scripts/release-signing-readiness.sh --validate-modes' }
 assert.call(!mode_validation.nil?, 'trusted builds must validate both signing modes before platform work')
 mode_env = mode_validation.fetch('env')
@@ -520,6 +551,17 @@ release_tooling_sdk = release_tooling_steps.find { |step| step['name'] == 'Insta
 assert.call(!release_tooling_java.nil? && release_tooling_java.fetch('with') == { 'distribution' => 'temurin', 'java-version' => '17' }, 'release tooling must install Temurin JDK 17')
 assert.call(!release_tooling_sdk.nil? && release_tooling_sdk.fetch('run').include?('platforms;android-35') && release_tooling_sdk.fetch('run').include?('build-tools;35.0.0'), 'release tooling must install the Android signing test SDK platform and build tools')
 assert.call(release_tooling_steps.index(release_tooling_java) < release_tooling_steps.index(release_tooling_sdk) && release_tooling_steps.index(release_tooling_sdk) < release_tooling_steps.index(release_tooling_steps.find { |step| step['run'] == 'infra/release/test-android-signing.sh' }), 'release tooling must set up JDK and SDK before real Android signing tests')
+assert.call(release_tooling_steps.none? { |step| step['run'] == 'infra/release/test-desktop-bundles.sh' }, 'Ubuntu release tooling must not run the native macOS plutil fixture')
+release_macos_tooling = ci_jobs.fetch('release-macos-tooling')
+assert.call(release_macos_tooling.fetch('runs-on') == 'macos-15' && release_macos_tooling.fetch('timeout-minutes') == 10, 'native release tooling must run on macOS')
+release_macos_steps = release_macos_tooling.fetch('steps')
+release_macos_node = release_macos_steps.find { |step| immutable_action_ref.call(step['uses'], 'actions/setup-node') }
+assert.call(release_macos_node && release_macos_node.fetch('with') == { 'node-version-file' => '.node-version' }, 'native release tooling must provision the existing Node prerequisite without installing dependencies')
+assert.call(release_macos_steps.any? { |step| step['run'] == 'infra/release/test-desktop-bundles.sh' }, 'native release tooling must run the real plutil desktop-bundle fixture')
+gate = ci_jobs.fetch('gate')
+assert.call(gate.fetch('needs').include?('release-macos-tooling'), 'the required CI gate must wait for native macOS release tooling')
+gate_env = gate.fetch('steps').find { |step| step['name'] == 'Evaluate CI gate' }.fetch('env')
+assert.call(gate_env == gate_env.merge('RELEASE_MACOS_TOOLING_RESULT' => '${{ needs.release-macos-tooling.result }}', 'RELEASE_MACOS_TOOLING_REQUIRED' => 'true'), 'the CI gate must require macOS native release tooling for every change, including infra/release paths')
 trusted_android_build_steps = android_steps.select { |step| step['name'] == 'Build trusted Android release artifacts' }
 assert.call(trusted_android_build_steps.length == 1, 'trusted Android builds must have exactly one release build step')
 Dir.mktmpdir('peppy-android-release-test') do |fixture|

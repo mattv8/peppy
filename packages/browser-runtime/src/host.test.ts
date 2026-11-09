@@ -548,17 +548,21 @@ describe("browser host RPC", () => {
     expect(start).toHaveBeenCalledTimes(1);
   });
 
-  it("releases a ready owner after boot negotiation failure so a retry can start", async () => {
-    const ownerLocks = locks();
+  it("releases a failed owner and retries startup with a newly acquired owner", async () => {
+    const start = vi.fn()
+      .mockRejectedValueOnce(new TransportError("offline"))
+      .mockResolvedValueOnce(true);
+    const boot = vi.fn(async () => new FakeSession());
+    const host = new BrowserWorkerHost({ locks: locks(), boot, network: { start, stop: async () => undefined } as unknown as import("./host.js").BrowserNetwork });
     const failedPort = port();
-    const failed = new BrowserWorkerHost({ locks: ownerLocks, boot: async () => new FakeSession(), network: { start: async () => { throw new TransportError("offline"); }, stop: async () => undefined } as unknown as import("./host.js").BrowserNetwork });
-    await failed.attach(failedPort);
+    await host.attach(failedPort);
     expect(failedPort.closed).toBe(true);
 
     const retryPort = port();
-    const retry = new BrowserWorkerHost({ locks: ownerLocks, boot: async () => new FakeSession(), network: { start: async () => true, stop: async () => undefined } as unknown as import("./host.js").BrowserNetwork });
-    await retry.attach(retryPort);
+    await host.attach(retryPort);
     expect(retryPort.messages).toContainEqual({ event: "ready", version: 1 });
+    expect(boot).toHaveBeenCalledTimes(2);
+    expect(start).toHaveBeenCalledTimes(2);
   });
 
   it("gates special attachment producers during the unlock negotiation window", async () => {
@@ -792,6 +796,8 @@ describe("browser host RPC", () => {
   it("rejects history renderer extras and never exposes worker-only proof commands", async () => {
     const session = new FakeSession();
     await expect(dispatchBrowserRpc(session, { id: 1, command: "_worker_history_search_work", args: {} }))
+      .resolves.toMatchObject({ ok: false, error: { code: "invalid-request" } });
+    await expect(dispatchBrowserRpc(session, { id: 2, command: "_worker_draft_mark_push_attempt", args: {} }))
       .resolves.toMatchObject({ ok: false, error: { code: "invalid-request" } });
     const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
     const attached = port();
@@ -2054,10 +2060,17 @@ describe("browser host RPC", () => {
     });
     const attached = port();
     await host.attach(attached);
-    reportFatal(new Error("trap"));
-    await eventually(() => terminated);
-    expect(attached.closed).toBe(true);
-    expect(terminated).toBe(true);
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      reportFatal(new BrowserCoreError("core-error", { draftId: "secret-draft" }));
+      await eventually(() => terminated);
+      expect(attached.closed).toBe(true);
+      expect(terminated).toBe(true);
+      expect(diagnostic).toHaveBeenCalledWith("Browser worker fatal", "core-runtime-failure");
+      expect(diagnostic.mock.calls.flat().join(" ")).not.toContain("secret-draft");
+    } finally {
+      diagnostic.mockRestore();
+    }
   });
 
   it("overlays a pending epoch mismatch and routes a ready-session passphrase to manual rotation", async () => {
@@ -2278,6 +2291,7 @@ describe("browser host RPC", () => {
     await host.attach(attached);
 
     attached.emit({ id: 1, command: "enrollment_status", args: {} });
+    (host as unknown as { dependencies: { network: { enrollmentStatus(): Promise<unknown> } } }).dependencies.network.enrollmentStatus = async () => ({ mode: "community", stage: "computer_connected" });
     attached.emit({ id: 2, command: "enrollment_status", args: {} });
     await vi.advanceTimersByTimeAsync(0);
 
@@ -2366,6 +2380,108 @@ describe("browser host RPC", () => {
     await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
     expect(attached.messages).toContainEqual(expect.objectContaining({ id: 1, ok: true, value: expect.objectContaining({ stage: "error" }) }));
     expect(start).not.toHaveBeenCalled();
+  });
+
+  it("starts sync exactly once for a ready computer confirmation, but not for waiting or error views", async () => {
+    const session = new FakeSession();
+    session.phase = "unenrolled";
+    const start = vi.fn(async () => undefined);
+    const enrollmentConfirmComputer = vi.fn(async () => {
+      session.phase = "ready";
+      return { mode: "community" as const, stage: "computer_connected" as const, computerClaimant: true };
+    });
+    const enrollmentStatus = vi.fn(async () => ({ mode: "community" as const, stage: "computer_connected" as const, computerClaimant: true }));
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: { start, stop: async () => undefined, enrollmentConfirmComputer, enrollmentStatus } as unknown as import("./host.js").BrowserNetwork });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "enrollment_confirm_computer", args: {} });
+    await eventually(() => start.mock.calls.length === 1);
+    expect(start).toHaveBeenCalledTimes(1);
+    await eventually(() => session.calls.some(call => call.command === "search_local"));
+    attached.emit({ id: 2, command: "enrollment_status", args: {} });
+    await eventually(() => response(attached, 2) !== undefined);
+    expect(response(attached, 2)).toMatchObject({ ok: true, value: { stage: "computer_connected" } });
+
+    const waitingSession = new FakeSession();
+    const waitingStart = vi.fn(async () => undefined);
+    const waiting = new BrowserWorkerHost({ locks: locks(), boot: async () => waitingSession, network: { start: waitingStart, stop: async () => undefined, enrollmentConfirmComputer: async () => ({ mode: "community" as const, stage: "computer_waiting" as const }) } as unknown as import("./host.js").BrowserNetwork });
+    const waitingPort = port();
+    await waiting.attach(waitingPort);
+    waitingPort.emit({ id: 1, command: "enrollment_confirm_computer", args: {} });
+    await eventually(() => response(waitingPort, 1) !== undefined);
+    expect(waitingStart).not.toHaveBeenCalled();
+
+    const errorSession = new FakeSession();
+    const errorStart = vi.fn(async () => undefined);
+    const error = new BrowserWorkerHost({ locks: locks(), boot: async () => errorSession, network: { start: errorStart, stop: async () => undefined, enrollmentConfirmComputer: async () => ({ mode: "community" as const, stage: "error" as const, errorCode: "failed" }) } as unknown as import("./host.js").BrowserNetwork });
+    const errorPort = port();
+    await error.attach(errorPort);
+    errorPort.emit({ id: 1, command: "enrollment_confirm_computer", args: {} });
+    await eventually(() => response(errorPort, 1) !== undefined);
+    expect(errorStart).not.toHaveBeenCalled();
+  });
+
+  it("coalesces accepted computer activations while startup is pending and rejects late startup after terminal stop", async () => {
+    const session = new FakeSession();
+    session.phase = "unenrolled";
+    const startup = deferred();
+    const start = vi.fn(() => startup.promise);
+    const enrollmentConfirmComputer = vi.fn(async () => {
+      session.phase = "ready";
+      return { mode: "community" as const, stage: "computer_connected" as const, computerClaimant: true };
+    });
+    let fatal!: (error: Error) => void;
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async (_signal, onFatal) => { fatal = onFatal; return session; },
+      network: {
+        start,
+        stop: async () => undefined,
+        enrollmentConfirmComputer,
+      } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "enrollment_confirm_computer", args: {} });
+    await eventually(() => start.mock.calls.length === 1);
+    attached.emit({ id: 2, command: "enrollment_confirm_computer", args: {} });
+    await eventually(() => enrollmentConfirmComputer.mock.calls.length === 2);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(enrollmentConfirmComputer).toHaveBeenCalledTimes(2);
+    expect(start).toHaveBeenCalledTimes(1);
+    const lifecycle = host as unknown as { networkStarted: boolean; producerAdmissionReady: boolean };
+    expect(lifecycle.networkStarted).toBe(false);
+    expect(lifecycle.producerAdmissionReady).toBe(false);
+
+    fatal(new Error("terminal"));
+    await eventually(() => attached.closed);
+    startup.release();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(lifecycle.networkStarted).toBe(false);
+    expect(lifecycle.producerAdmissionReady).toBe(false);
+    expect(session.calls.filter(call => call.command === "search_local")).toEqual([]);
+
+    const replacement = port();
+    await host.attach(replacement);
+    expect(replacement.closed).toBe(true);
+  });
+
+  it("acknowledges only a valid hosted CSRF callback", async () => {
+    const setCsrf = vi.fn();
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => new FakeSession(), network: { start: async () => undefined, stop: async () => undefined, enrollmentSetHostedCsrf: setCsrf } as unknown as import("./host.js").BrowserNetwork });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "enrollment_set_hosted_csrf", args: { csrf: "csrf" } });
+    attached.emit({ id: 2, command: "enrollment_set_hosted_csrf", args: {} });
+    attached.emit({ id: 3, command: "enrollment_set_hosted_csrf", args: { csrf: "" } });
+    await eventually(() => response(attached, 3) !== undefined);
+    expect(setCsrf).toHaveBeenCalledTimes(1);
+    expect(attached.messages).toContainEqual({ id: 1, ok: true, value: undefined });
+    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 2, ok: false, error: expect.objectContaining({ code: "invalid-request" }) }));
+    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 3, ok: false, error: expect.objectContaining({ code: "invalid-request" }) }));
   });
 
   it("does not start sync or broadcast when an activating enrollment mutation fails", async () => {

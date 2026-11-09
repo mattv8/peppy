@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 JOBS=(
-  changes source-audit workflow-security version release-tooling development-tools rust integration desktop android
+  changes source-audit workflow-security version release-tooling release-macos-tooling development-tools rust integration desktop android
   swift-bindings container-image development-artifacts
 )
 

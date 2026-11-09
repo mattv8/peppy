@@ -81,6 +81,8 @@ main() {
     bash infra/release/test-release-asset-groups.sh
     bash infra/release/test-release-prefixes.sh
     just audit-secrets
+    python3 infra/audit/check-advisory-exceptions.py
+    python3 infra/audit/test-check-advisory-exceptions.py
 
     suite "Development tooling"
     node packages/mobile-design/scripts/generate.mjs --check

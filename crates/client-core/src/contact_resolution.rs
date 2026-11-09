@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 const BATCH: i64 = 200;
+const MAX_DISPLAY_REFRESH_PAGES: usize = 64;
 const MAX_ADDRESSES: usize = 100;
 const MAX_ADDRESS_BYTES: usize = 256;
 const ORIGINAL: i64 = 0;
@@ -447,7 +448,7 @@ pub(crate) fn current_display_resolver(
 ) -> Result<Option<DisplayResolver<'_>>, Error> {
     let prepared = prepare_refresh(conn)?;
     let mut after = None;
-    for _ in 0..64 {
+    for _ in 0..MAX_DISPLAY_REFRESH_PAGES {
         let (has_more, next) = refresh_page(conn, &prepared, after.as_ref())?;
         if !has_more {
             return display_resolver(conn).map(Some);
@@ -484,6 +485,10 @@ pub(crate) fn resolve(conn: &mut Connection, input: &str) -> Result<String, Erro
     let mut matches = Vec::new();
     let mut ambiguous = Vec::new();
     for address in addresses {
+        if more_indexing {
+            ambiguous.push(json!(address));
+            continue;
+        }
         if let Some(candidate) = choose(
             candidates(conn, &address, source, &books, &visible_book_ids)?,
             source,

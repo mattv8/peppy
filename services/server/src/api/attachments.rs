@@ -1487,6 +1487,7 @@ pub(super) async fn create_public_copy(
         .await
         .map_err(|error| database_unavailable(&error, "public_copy_begin"))?;
     lock_vault(&mut tx, principal.vault).await?;
+    revalidate_principal(&mut tx, &principal).await?;
     withdraw_legacy_retention_mutation(&mut tx, &h, principal.vault, principal.device).await?;
     removal_error(&mut tx, principal.vault, attachment_id).await?;
     let used = quota_used(&mut tx, principal.vault).await?;

@@ -1,5 +1,6 @@
 use super::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use rusqlite::Transaction;
 
 type ExistingNotification = (
     String,
@@ -207,20 +208,52 @@ impl Client {
             return Err(Error::InvalidRequest("notification"));
         }
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::remove_notification_tail(&tx, &ctx, notification_key, instance, None)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Removes this lifetime only if the core's current OS instance still matches `instance`.
+    pub fn remove_notification_if_current_instance(
+        &self,
+        notification_key: &str,
+        instance: &str,
+    ) -> Result<(), Error> {
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        if !valid(notification_key) || !valid(instance) {
+            return Err(Error::InvalidRequest("notification"));
+        }
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::remove_notification_tail(&tx, &ctx, notification_key, instance, Some(instance))?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn remove_notification_tail(
+        tx: &Transaction<'_>,
+        ctx: &Ctx<'_>,
+        notification_key: &str,
+        instance: &str,
+        required_current_instance: Option<&str>,
+    ) -> Result<(), Error> {
         let row: Option<(String, String)> = tx.query_row("SELECT lifetime,instance FROM notifications WHERE source_device_id=? AND notification_key=? AND removed=0", params![ctx.device_id.to_string(),notification_key], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
-        let Some((lifetime, _current_instance)) = row else {
+        let Some((lifetime, current_instance)) = row else {
             return Ok(());
         };
-        // The Android host verifies that this key is no longer active before calling us.
-        // Its removal may name an update coalesced (or dropped while locked) before capture.
+        if required_current_instance.is_some_and(|expected| expected != current_instance) {
+            return Ok(());
+        }
+        // Unconditional callers no longer mirror this key; they may name an update coalesced
+        // (or dropped while locked) before capture. Conditional callers preserve newer instances.
         let target = NotificationTarget {
             source_device_id: ctx.device_id.to_string(),
             notification_key: notification_key.into(),
             lifetime,
         };
         let (_, seq) = enqueue(
-            &tx,
-            &ctx,
+            tx,
+            ctx,
             EnvelopePurpose::Event,
             None,
             None,
@@ -229,8 +262,8 @@ impl Client {
                 instance: instance.into(),
             },
         )?;
-        remove_applied(&tx, &target, seq)?;
-        Ok(tx.commit()?)
+        remove_applied(tx, &target, seq)?;
+        Ok(())
     }
 
     pub fn notification_snapshot(&self) -> Result<NotificationSnapshot, Error> {

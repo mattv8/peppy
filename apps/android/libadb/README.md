@@ -15,9 +15,9 @@ framing semantics.
 
 ## Third-party dependencies and licenses
 
-- Conscrypt (`org.conscrypt:conscrypt-android:2.5.3`) — Apache-2.0.
+- Conscrypt (`org.conscrypt:conscrypt-android:2.8.0`) — Apache-2.0.
 - spake2-android (`com.github.MuntashirAkon.spake2-java:spake2-android:2.2.1`) — LGPL-3.0. Its dynamically loaded native library is a separate `libspake2.so`. Source: <https://github.com/MuntashirAkon/spake2-java/tree/2.2.1>.
-- Bouncy Castle (`org.bouncycastle:bcprov-jdk15to18:1.81`, `org.bouncycastle:bcpkix-jdk15to18:1.81`, and transitive `org.bouncycastle:bcutil-jdk15to18:1.81`) — MIT-style license.
+- Bouncy Castle (`org.bouncycastle:bcprov-jdk15to18:1.86`, `org.bouncycastle:bcpkix-jdk15to18:1.86`, and transitive `org.bouncycastle:bcutil-jdk15to18:1.86`) — MIT-style license.
 
 The upstream Apache-2.0 license is in [LICENSE](LICENSE). Source files retain
 their upstream license headers.

@@ -116,6 +116,8 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const [loadError, setLoadError] = useState("");
   const [validationError, setValidationError] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const deleteInFlight = useRef(false);
+  useEffect(() => { deleteInFlight.current = false; }, [selected?.bookId, selected?.id]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<ReactNode>("");
   const [offset, setOffset] = useState(0);
@@ -509,7 +511,9 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       setConfirmDelete(true);
       return;
     }
+    if (deleteInFlight.current) return;
 
+    deleteInFlight.current = true;
     setError("");
     setBusy(true);
 
@@ -525,13 +529,11 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
 
       if (outcome.state === "rejected") {
         setError(outcome.reason);
-        setBusy(false);
         return;
       }
 
       if (outcome.state === "conflict") {
         setError(`Conflict: ${outcome.conflictSummary}`);
-        setBusy(false);
         return;
       }
 
@@ -543,6 +545,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
     } finally {
+      deleteInFlight.current = false;
       setBusy(false);
     }
   };

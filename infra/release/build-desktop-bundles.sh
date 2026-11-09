@@ -106,8 +106,8 @@ package_app_store() {
   decode_base64 "$APPLE_MAS_CERTIFICATE_P12" > "$application_certificate"
   decode_base64 "$APPLE_MAS_INSTALLER_CERTIFICATE" > "$installer_certificate"
   security cms -D -i "$profile" > "$profile_xml"
-  team_id=$(plutil -extract Entitlements.com.apple.developer.team-identifier raw -o - "$profile_xml")
-  application_identifier=$(plutil -extract Entitlements.application-identifier raw -o - "$profile_xml")
+  team_id=$(plutil -extract 'Entitlements.com\.apple\.developer\.team-identifier' raw -o - "$profile_xml")
+  application_identifier=$(plutil -extract 'Entitlements.application-identifier' raw -o - "$profile_xml")
   [ -n "$team_id" ] || { echo 'App Store provisioning profile does not declare a team identifier' >&2; return 1; }
   [ "$application_identifier" = "$team_id.org.peppy.desktop" ] || { echo "App Store provisioning profile application identifier must equal $team_id.org.peppy.desktop" >&2; return 1; }
   security create-keychain -p "$keychain_password" "$keychain"
@@ -121,17 +121,17 @@ package_app_store() {
   security import "$application_certificate" -k "$keychain" -P "$APPLE_MAS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
   security import "$installer_certificate" -k "$keychain" -P "$APPLE_MAS_CERTIFICATE_PASSWORD" -T /usr/bin/productbuild
   cp packaging/macos/app-store/entitlements.plist "$entitlements"
-  plutil -replace com.apple.application-identifier -string "$application_identifier" "$entitlements"
-  plutil -replace com.apple.developer.team-identifier -string "$team_id" "$entitlements"
+  plutil -replace 'com\.apple\.application-identifier' -string "$application_identifier" "$entitlements"
+  plutil -replace 'com\.apple\.developer\.team-identifier' -string "$team_id" "$entitlements"
   while IFS= read -r -d '' app; do
     install -m 0644 "$profile" "$app/Contents/embedded.provisionprofile"
     plutil -replace CFBundleVersion -string "$MACOS_BUILD_NUMBER" "$app/Contents/Info.plist"
     codesign --force --sign "$APPLE_MAS_SIGNING_IDENTITY" --keychain "$keychain" --entitlements "$entitlements" "$app"
     codesign --verify --deep --strict --verbose=2 "$app"
     codesign -d --entitlements :- "$app" > "$signed_entitlements"
-    plutil -extract com.apple.security.app-sandbox raw -o - "$signed_entitlements" | grep -Fqx 1 || { echo 'App Store bundle is missing the app sandbox entitlement' >&2; return 1; }
-    signed_team_id=$(plutil -extract com.apple.developer.team-identifier raw -o - "$signed_entitlements")
-    signed_application_identifier=$(plutil -extract com.apple.application-identifier raw -o - "$signed_entitlements")
+    plutil -extract 'com\.apple\.security\.app-sandbox' raw -o - "$signed_entitlements" | grep -Fqx true || { echo 'App Store bundle is missing the app sandbox entitlement' >&2; return 1; }
+    signed_team_id=$(plutil -extract 'com\.apple\.developer\.team-identifier' raw -o - "$signed_entitlements")
+    signed_application_identifier=$(plutil -extract 'com\.apple\.application-identifier' raw -o - "$signed_entitlements")
     [ "$signed_team_id" = "$team_id" ] || { echo 'App Store bundle team identifier does not match the provisioning profile' >&2; return 1; }
     [ "$signed_application_identifier" = "$application_identifier" ] || { echo 'App Store bundle application identifier does not match the provisioning profile' >&2; return 1; }
     codesign -d -r- "$app" 2>&1 | grep -Fq "$team_id" || { echo 'App Store bundle designated requirement does not match the provisioning-profile team' >&2; return 1; }

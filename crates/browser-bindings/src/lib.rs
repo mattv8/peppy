@@ -14,7 +14,7 @@ use peppy_desktop_api::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json, value::RawValue};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Component, Path, PathBuf},
     str::FromStr,
     sync::{Mutex, OnceLock},
@@ -341,6 +341,7 @@ impl BrowserCore {
             | "_worker_draft_finish_bootstrap"
             | "_worker_draft_pending_uploads"
             | "_worker_draft_pending_pushes"
+            | "_worker_draft_mark_push_attempt"
             | "_worker_draft_record_push"
             | "_worker_draft_pending_discards"
             | "_worker_draft_record_discard"
@@ -492,6 +493,10 @@ impl BrowserCore {
             .iter()
             .map(|draft| (draft.conversation_id, draft))
             .collect();
+        let conversation_ids: HashSet<_> = conversations
+            .iter()
+            .map(|conversation| conversation.conversation_id)
+            .collect();
         let requested = requested.filter(|id| {
             conversations.iter().any(|item| item.conversation_id == *id)
                 || drafts.iter().any(|draft| draft.conversation_id == *id)
@@ -588,11 +593,10 @@ impl BrowserCore {
                 rcs_history_gap: rcs_metadata.is_some_and(|item| item.rcs_history_gap),
             });
         }
-        for draft in drafts.iter().filter(|draft| {
-            !conversations
-                .iter()
-                .any(|conversation| conversation.conversation_id == draft.conversation_id)
-        }) {
+        for draft in drafts
+            .iter()
+            .filter(|draft| !conversation_ids.contains(&draft.conversation_id))
+        {
             views.push(dto::ConversationView {
                 id: draft.conversation_id.to_string(),
                 name: if draft.recipients.is_empty() {
@@ -1304,6 +1308,16 @@ mod tests {
         value(&core.dispatch(
             &json!({"command":"unlock","args":{"profile":profile,"header":header,"passphrase":"passphrase"}}).to_string(),
         ));
+        value(&core.dispatch(
+            &json!({"command":"set_host_context","args":{"connection":"connected","origin":"https://peppy.test/","deviceRole":"device","gateways":[{"id":device,"name":"Gateway","simId":"sim-1","online":true,"simulated":true,"supportsSms":true,"supportsMms":true}]}}).to_string(),
+        ));
+        value(&core.dispatch(
+            r#"{"command":"set_server_compaction_support","args":{"supported":true,"active":true}}"#,
+        ));
+        core.client()
+            .unwrap()
+            .set_server_compaction_state(true, true)
+            .unwrap();
         let reopened_snapshot = value(&core.dispatch(
             &json!({"command":"snapshot","args":{"conversationId":conversation}}).to_string(),
         ));
@@ -1723,8 +1737,18 @@ mod tests {
     fn draft_snapshot_and_cas_match_the_existing_ui_contract() {
         let root = tempfile::tempdir().unwrap();
         let mut core = BrowserCore::new(root.path().to_owned());
+        let vault = VaultId::new();
         let device = DeviceId::new();
-        open(&mut core, VaultId::new(), device, [7; 32]);
+        open(&mut core, vault, device, [7; 32]);
+        let profile = KeyProfile::new(vault.0, 1).unwrap();
+        let header = create_vault_check_header(
+            &derive_root_key("passphrase", &profile).unwrap(),
+            profile.clone(),
+        )
+        .unwrap();
+        value(&core.dispatch(
+            &json!({"command":"unlock","args":{"profile":profile,"header":header,"passphrase":"passphrase"}}).to_string(),
+        ));
         let draft = value(&core.dispatch(&json!({"command":"save_draft","args":{"id":"new","conversationId":"","text":"keep this draft","recipientIds":["+15555550100"],"attachmentIds":[],"gatewayId":device,"simId":"sim-1","expectedRevision":"0"}}).to_string()));
         let snapshot = value(&core.dispatch(r#"{"command":"snapshot"}"#));
         assert_eq!(snapshot["conversations"][0]["id"], draft["conversationId"]);
@@ -1761,6 +1785,91 @@ mod tests {
                 .revision
                 .to_string(),
             saved["revision"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn dispatch_marks_only_the_current_pending_draft_push_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(root.path().to_owned());
+        let vault = VaultId::new();
+        let device = DeviceId::new();
+        open(&mut core, vault, device, [7; 32]);
+        let profile = KeyProfile::new(vault.0, 1).unwrap();
+        let header = create_vault_check_header(
+            &derive_root_key("passphrase", &profile).unwrap(),
+            profile.clone(),
+        )
+        .unwrap();
+        value(&core.dispatch(
+            &json!({"command":"unlock","args":{"profile":profile,"header":header,"passphrase":"passphrase"}}).to_string(),
+        ));
+        value(
+            &core.dispatch(
+                r#"{"command":"_worker_draft_sync_supported","args":{"supported":true}}"#,
+            ),
+        );
+        value(
+            &core
+                .dispatch(r#"{"command":"_worker_draft_finish_bootstrap","args":{"draftIds":[]}}"#),
+        );
+        let draft = core
+            .client()
+            .unwrap()
+            .recipientless_compose_draft()
+            .unwrap();
+        let first = core
+            .client()
+            .unwrap()
+            .save_compose_draft(
+                draft.draft_id,
+                draft.revision,
+                ComposeDraftUpdate {
+                    text: "first pending".into(),
+                    recipients: vec!["+15555550100".into()],
+                    attachment_ids: vec![],
+                    route: None,
+                },
+            )
+            .unwrap();
+        let current =
+            value(&core.dispatch(r#"{"command":"_worker_draft_pending_pushes","args":{}}"#));
+        let first_revision = current["pushes"][0]["revisionId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let updated = core
+            .client()
+            .unwrap()
+            .save_compose_draft(
+                first.draft_id,
+                first.revision,
+                ComposeDraftUpdate {
+                    text: "updated".into(),
+                    recipients: vec!["+15555550100".into()],
+                    attachment_ids: vec![],
+                    route: None,
+                },
+            )
+            .unwrap();
+        let pushes =
+            value(&core.dispatch(r#"{"command":"_worker_draft_pending_pushes","args":{}}"#));
+        let current_revision = pushes["pushes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|push| push["revisionId"] != first_revision)
+            .unwrap()["revisionId"]
+            .as_str()
+            .unwrap();
+
+        let stale: Value = serde_json::from_str(&core.dispatch(&json!({"command":"_worker_draft_mark_push_attempt","args":{"draftId":updated.draft_id,"revisionId":first_revision}}).to_string())).unwrap();
+        assert_eq!(stale["ok"], true);
+        assert_eq!(stale["value"]["attempted"], false);
+        assert_eq!(
+            value(&core.dispatch(&json!({"command":"_worker_draft_mark_push_attempt","args":{"draftId":updated.draft_id,"revisionId":current_revision}}).to_string()))["attempted"],
+            true
         );
     }
 

@@ -40,22 +40,25 @@ class MmsDispatcher(
     private val routes: List<SimRoute>, private val sendPermissionGranted: Boolean, private val enabled: Boolean,
     private val limits: (Int) -> MmsLimits = { MmsLimits.forSubscription(context, it) },
     private val callbacks: MmsCallbackStore = MmsCallbackStore(context),
+    private val currentRoutes: () -> List<SimRoute> = { routes },
+    private val mayIssueEffect: () -> Boolean = { true },
 ) {
     fun dispatch(limit: Int = SmsDispatcher.MAX_COMMANDS_PER_RUN): DispatchSummary = synchronized(DISPATCH_LOCK) {
         var submitted = 0; var refused = 0; var waiting = 0; var permits = 0; var fitPreparations = 0; var more = false
         val blockedThreads = mutableSetOf<String>()
         fun waitForEarlier(thread: String?) { waiting++; thread?.let(blockedThreads::add) }
         for (pending in client.pendingCommands()) {
+            if (!mayIssueEffect()) break
             if (pending.message.transport != "mms") continue
             if (permits >= limit) { more = true; break }
-            val route = SimRoutes.resolve(pending.subscriptionId, routes)
+            val route = SimRoutes.resolve(pending.subscriptionId, currentRoutes())
             val thread = route?.let { "${it.subscriptionId}:${pending.message.recipients.sorted().joinToString(",")}" }
             if (thread != null && thread in blockedThreads) { waiting++; continue }
             if (!enabled || !sendPermissionGranted || route == null) { waitForEarlier(thread); continue }
             val cap = limits(route.subscriptionId)
             if (!cap.enabled || pending.message.recipients.size !in 1..cap.maximumRecipients ||
                 (pending.message.body.isEmpty() && pending.message.attachmentIds.isEmpty())) {
-                if (refuse(pending.commandId)) { refused++; permits++ } else waiting++
+                if (refuse(pending.commandId, pending.subscriptionId, route)) { refused++; permits++ } else waiting++
                 continue
             }
             val directory = File(context.filesDir, "mms-pdu")
@@ -82,7 +85,7 @@ class MmsDispatcher(
                 callbacks.deletePrepared(pending.commandId)
                 if (error.message == "output directory does not exist" || error.message == "part is not a regular file") {
                     waitForEarlier(thread)
-                } else if (refuse(pending.commandId)) {
+                } else if (refuse(pending.commandId, pending.subscriptionId, route)) {
                     refused++; permits++
                 } else waitForEarlier(thread)
                 continue
@@ -95,6 +98,13 @@ class MmsDispatcher(
             val sent = try { MmsCallbackIntents.create(context, pending.commandId) } catch (_: RuntimeException) { callbacks.deletePrepared(pending.commandId); waitForEarlier(thread); continue }
             val uri = try { FileProvider.getUriForFile(context, "${context.packageName}.mms-files", output) }
             catch (_: IllegalArgumentException) { callbacks.deletePrepared(pending.commandId); waitForEarlier(thread); continue }
+            // Preparation can take long enough for the default route to change. Do not issue a
+            // permit or redirect the prepared PDU to a replacement route.
+            if (!mayIssueEffect() || SimRoutes.resolve(pending.subscriptionId, currentRoutes()) != route) {
+                callbacks.deletePrepared(pending.commandId)
+                waitForEarlier(thread)
+                continue
+            }
             val permit = client.beginSendAttempt(pending.commandId)
             val command = permit.command
             if (permit.state != NativePermitState.PERMIT || command?.commandId != pending.commandId) { callbacks.deletePrepared(pending.commandId); waitForEarlier(thread); continue }
@@ -138,7 +148,8 @@ class MmsDispatcher(
             return output
         } finally { handles.forEach { it.close() } }
     }
-    private fun refuse(commandId: String): Boolean {
+    private fun refuse(commandId: String, subscriptionId: String, route: SimRoute): Boolean {
+        if (!mayIssueEffect() || SimRoutes.resolve(subscriptionId, currentRoutes()) != route) return false
         val permit = client.beginSendAttempt(commandId)
         if (permit.state != NativePermitState.PERMIT || permit.command?.commandId != commandId) return false
         record(commandId, NativeSendResult.FAILED_BEFORE_SUBMISSION); return true

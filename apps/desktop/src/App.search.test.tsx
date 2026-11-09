@@ -391,16 +391,18 @@ describe("App search navigation", () => {
 
   it("does not mark the search target read before target positioning settles", async () => {
     const animationFrames: FrameRequestCallback[] = [];
-    const observerCallbacks: ((entries: { target: Element; isIntersecting: boolean }[]) => void)[] = [];
+    const observers: { callback(entries: { target: Element; isIntersecting: boolean; intersectionRect: { width: number; height: number } }[]): void; targets: Element[] }[] = [];
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       animationFrames.push(callback);
       return animationFrames.length;
     });
     vi.stubGlobal("IntersectionObserver", class {
-      constructor(private callback: (entries: { target: Element; isIntersecting: boolean }[]) => void) {
-        observerCallbacks.push(callback);
+      private readonly observer: { callback(entries: { target: Element; isIntersecting: boolean; intersectionRect: { width: number; height: number } }[]): void; targets: Element[] };
+      constructor(callback: (entries: { target: Element; isIntersecting: boolean; intersectionRect: { width: number; height: number } }[]) => void) {
+        this.observer = { callback, targets: [] };
+        observers.push(this.observer);
       }
-      observe() {}
+      observe(target: Element) { this.observer.targets.push(target); }
       disconnect() {}
       unobserve() {}
       takeRecords() { return []; }
@@ -416,9 +418,14 @@ describe("App search navigation", () => {
 
     await activate({ kind: "message", conversationId: "conv-aurora", messageId: "read-gated-target", title: "Aurora", snippet: "target", timestamp: "1788435180000" });
     const row = await screen.findByText("read-gated-target").then(node => node.closest("[data-message-id]")!);
-    observerCallbacks.at(-1)?.([{ target: row, isIntersecting: true }]);
+    const observer = observers.find(({ targets }) => targets.includes(row));
+    expect(observer).toBeDefined();
+    observer?.callback([{ target: row, isIntersecting: true, intersectionRect: { width: 1, height: 1 } }]);
 
     expect(bridge.mark_seen).not.toHaveBeenCalled();
+    await act(async () => animationFrames.splice(0).forEach((frame) => frame(0)));
+    observer?.callback([{ target: row, isIntersecting: true, intersectionRect: { width: 1, height: 1 } }]);
+    await waitFor(() => expect(bridge.mark_seen).toHaveBeenCalledWith(["read-gated-target"]));
   });
 
   it("consumes a contact target once so returning to Contacts does not reapply it", async () => {

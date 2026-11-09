@@ -411,8 +411,7 @@ impl BrowserCore {
         Ok(json!({"previewUrl": preview_url}))
     }
 
-    /// Writes a metadata-free derivative to a private Worker hand-off file. Publication and any
-    /// public URL remain a future, explicitly confirmed host operation.
+    /// Writes a metadata-free derivative to a private Worker hand-off file.
     fn public_image(&self, args: Value) -> Result<Value, Failure> {
         let id = attachment_id(&args)?;
         let output_id = args

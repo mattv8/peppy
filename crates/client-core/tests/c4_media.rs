@@ -639,27 +639,48 @@ fn attachment_remote_object_id_persists_uploaded_object_across_reopen() {
 fn attachment_remote_object_id_returns_downloaded_object() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
-    let cfg = config(&dir, "test", &vault);
-    let client = unlocked(&cfg, &vault);
+    let sender = unlocked(&config(&dir, "sender", &vault), &vault);
+    let receiver = unlocked(&config(&dir, "receiver", &vault), &vault);
+    let mut server = Server::default();
+    let mut objects = Objects::default();
     let picture = image(5_000, 5);
     let part_path = dir.path().join("part-1");
     fs::write(&part_path, &picture).unwrap();
-    let info = client
+    let info = sender
         .prepare_attachment(&part_path, "image/png", "test.png")
         .unwrap();
-    let remote_id = uuid::Uuid::new_v4().to_string();
-    client
-        .mark_attachment_uploaded(info.attachment_id, &remote_id)
+    sender
+        .capture_incoming_mms(IncomingMms {
+            conversation_id: None,
+            sender_address: ADDRESS.into(),
+            recipients: vec![ADDRESS.into()],
+            subject: None,
+            body: String::new(),
+            provider_message_id: Some("downloaded-object".into()),
+            imported: false,
+            attachment_ids: vec![info.attachment_id],
+        })
         .unwrap();
-    // Simulate download scenario: state changes to Available after install
+    assert_eq!(objects.upload_all(&sender), 1);
+    assert_eq!(server.upload(&sender), 1);
+    server.sync(&receiver);
+
+    let download_request = receiver.pending_downloads().unwrap().pop().unwrap();
+    assert_eq!(
+        receiver.attachment_info(info.attachment_id).unwrap().state,
+        AttachmentState::PendingDownload
+    );
     let download = dir.path().join("download.bin");
-    fs::write(&download, &picture).unwrap();
-    client
+    objects.download_to(&download_request, &download);
+    receiver
         .install_downloaded_attachment(info.attachment_id, &download)
         .unwrap();
-    // After available state, should still return the remote object ID
     assert_eq!(
-        client.attachment_remote_object_id(info.attachment_id),
-        Ok(Some(remote_id.clone()))
+        receiver.attachment_info(info.attachment_id).unwrap().state,
+        AttachmentState::Available
+    );
+    assert_eq!(
+        receiver.attachment_remote_object_id(info.attachment_id),
+        Ok(download_request.remote_object_id)
     );
 }

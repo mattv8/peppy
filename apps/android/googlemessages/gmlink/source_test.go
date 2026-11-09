@@ -97,6 +97,67 @@ func funcBody(t *testing.T, files []*ast.File, name string) *ast.BlockStmt {
 	return nil
 }
 
+func emittedCallCodes(files []*ast.File) []eventCode {
+	var codes []eventCode
+	walkNodes(files, func(node ast.Node) {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return
+		}
+		add := func(kindIndex, codeIndex int) {
+			kind, okKind := literalArg(call, kindIndex)
+			code, okCode := literalArg(call, codeIndex)
+			if okKind && okCode {
+				codes = append(codes, eventCode{kind, code})
+			}
+		}
+		switch calleeName(call) {
+		case "emit":
+			add(0, 1)
+		case "emitFor":
+			add(1, 2)
+		case "transitionFor":
+			if code, ok := literalArg(call, 2); ok {
+				codes = append(codes, eventCode{"link", code})
+			}
+		case "stopFatalFor", "signOutIfFor":
+			if code, ok := literalArg(call, 1); ok {
+				codes = append(codes, eventCode{"link", code})
+			}
+		case "pairFailure":
+			if code, ok := literalArg(call, 0); ok {
+				codes = append(codes, eventCode{"link", code})
+			}
+		}
+	})
+	return codes
+}
+
+func fixedCallCodes(files []*ast.File) []string {
+	var codes []string
+	walkNodes(files, func(node ast.Node) {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return
+		}
+		index := -1
+		switch calleeName(call) {
+		case "New", "pairFailure", "signOut":
+			index = 0
+		case "stopFatalFor", "signOutIfFor":
+			index = 1
+		case "transitionFor":
+			index = 2
+		}
+		if index >= 0 {
+			if code, ok := literalArg(call, index); ok {
+				codes = append(codes, code)
+			}
+		}
+	})
+	return codes
+}
+
 // TestEveryEmittedCodeIsListed checks every literal event code the sources can emit
 // against the shared list in events.go.
 func TestEveryEmittedCodeIsListed(t *testing.T) {
@@ -112,29 +173,9 @@ func TestEveryEmittedCodeIsListed(t *testing.T) {
 			t.Errorf("emitted %s/%s is not in the shared event list", kind, code)
 		}
 	}
-	walkNodes(files, func(node ast.Node) {
-		call, ok := node.(*ast.CallExpr)
-		if !ok {
-			return
-		}
-		switch calleeName(call) {
-		case "emit":
-			kind, okKind := literalArg(call, 0)
-			code, okCode := literalArg(call, 1)
-			if okKind && okCode {
-				check(kind, code)
-			}
-		case "transitionFor", "stopFatalFor", "pairFailure":
-			// These emit on the link kind (transition takes state first, then code).
-			index := 0
-			if calleeName(call) == "transitionFor" {
-				index = 1
-			}
-			if code, ok := literalArg(call, index); ok {
-				check("link", code)
-			}
-		}
-	})
+	for _, code := range emittedCallCodes(files) {
+		check(code.kind, code.code)
+	}
 	// The pair's deferred restore emits whatever pairCode returns.
 	ast.Inspect(funcBody(t, files, "pairCode"), func(node ast.Node) bool {
 		if ret, ok := node.(*ast.ReturnStmt); ok {
@@ -164,26 +205,9 @@ func TestEveryReturnedErrorIsFixedCode(t *testing.T) {
 			t.Errorf("%q is not a fixed code", code)
 		}
 	}
-	walkNodes(files, func(node ast.Node) {
-		call, ok := node.(*ast.CallExpr)
-		if !ok {
-			return
-		}
-		switch calleeName(call) {
-		case "New":
-			if code, ok := literalArg(call, 0); ok {
-				check(code)
-			}
-		case "pairFailure", "stopFatalFor", "signOut", "signOutIfFor":
-			if code, ok := literalArg(call, 0); ok {
-				check(code)
-			}
-		case "transitionFor":
-			if code, ok := literalArg(call, 1); ok {
-				check(code)
-			}
-		}
-	})
+	for _, code := range fixedCallCodes(files) {
+		check(code)
+	}
 	for _, name := range []string{"pairCode", "transportStopFor"} {
 		ast.Inspect(funcBody(t, files, name), func(node ast.Node) bool {
 			var values []ast.Expr
@@ -205,6 +229,57 @@ func TestEveryReturnedErrorIsFixedCode(t *testing.T) {
 	}
 	if checked < 10 {
 		t.Fatalf("only %d error and stop codes found; the scan is not reading the sources", checked)
+	}
+}
+
+func TestCodeLiteralArgumentPositionsRejectInvalidLiterals(t *testing.T) {
+	tests := []struct {
+		name          string
+		source        string
+		kind          string
+		code          string
+		emittedListed bool
+		fixed         bool
+		fixedValid    bool
+	}{
+		{"emitFor valid", `func f() { link.emitFor(1, "conn", "ready", 0) }`, "conn", "ready", true, false, false},
+		{"emitFor unlisted", `func f() { link.emitFor(1, "conn", "unlisted_code", 0) }`, "conn", "unlisted_code", false, false, false},
+		{"transitionFor valid", `func f() { link.transitionFor(1, "state", "relink_needed") }`, "link", "relink_needed", true, true, true},
+		{"transitionFor unlisted", `func f() { link.transitionFor(1, "state", "unlisted_code") }`, "link", "unlisted_code", false, true, true},
+		{"transitionFor malformed", `func f() { link.transitionFor(1, "state", "Invalid-Code") }`, "link", "Invalid-Code", false, true, false},
+		{"stopFatalFor valid", `func f() { link.stopFatalFor(1, "persist_failed", false) }`, "link", "persist_failed", true, true, true},
+		{"stopFatalFor unlisted", `func f() { link.stopFatalFor(1, "unlisted_code", false) }`, "link", "unlisted_code", false, true, true},
+		{"stopFatalFor malformed", `func f() { link.stopFatalFor(1, "Invalid-Code", false) }`, "link", "Invalid-Code", false, true, false},
+		{"signOutIfFor valid", `func f() { link.signOutIfFor(1, "signed_out", allowed) }`, "link", "signed_out", true, true, true},
+		{"signOutIfFor unlisted", `func f() { link.signOutIfFor(1, "unlisted_code", allowed) }`, "link", "unlisted_code", false, true, true},
+		{"signOutIfFor malformed", `func f() { link.signOutIfFor(1, "Invalid-Code", allowed) }`, "link", "Invalid-Code", false, true, false},
+		{"pairFailure valid", `func f() { _ = pairFailure("pair_failed") }`, "link", "pair_failed", true, true, true},
+		{"pairFailure unlisted", `func f() { _ = pairFailure("unlisted_code") }`, "link", "unlisted_code", false, true, true},
+		{"pairFailure malformed", `func f() { _ = pairFailure("Invalid-Code") }`, "link", "Invalid-Code", false, true, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			file, err := parser.ParseFile(token.NewFileSet(), "synthetic.go", "package gmlink\n"+test.source, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			emitted := emittedCallCodes([]*ast.File{file})
+			if len(emitted) != 1 || emitted[0] != (eventCode{test.kind, test.code}) {
+				t.Fatalf("emitted scanner codes = %#v, want %#v", emitted, []eventCode{{test.kind, test.code}})
+			}
+			if isEventCode(emitted[0].kind, emitted[0].code) != test.emittedListed {
+				t.Fatalf("emitted scanner listed = %t, want %t", isEventCode(emitted[0].kind, emitted[0].code), test.emittedListed)
+			}
+			if test.fixed {
+				fixed := fixedCallCodes([]*ast.File{file})
+				if len(fixed) != 1 || fixed[0] != test.code {
+					t.Fatalf("fixed-code scanner codes = %#v, want %#v", fixed, []string{test.code})
+				}
+				if fixedCodePattern.MatchString(fixed[0]) != test.fixedValid {
+					t.Fatalf("fixed-code scanner valid = %t, want %t", fixedCodePattern.MatchString(fixed[0]), test.fixedValid)
+				}
+			}
+		})
 	}
 }
 

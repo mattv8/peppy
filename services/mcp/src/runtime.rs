@@ -466,14 +466,17 @@ impl Runtime {
                 return Err(RuntimeError::Sync);
             }
         };
-        if peppy_gateway_simulator::download_media_with_transport(
+        if let Err(error) = peppy_gateway_simulator::download_media_with_transport(
             &self.client,
             &self.transport,
             &self.credential,
             &self.state_dir,
         )
         .await
-        .is_err()
+            && !matches!(
+                error,
+                peppy_gateway_simulator::SimulatorError::RecoverableAttachmentDownload
+            )
         {
             self.mark_offline().await;
             return Err(RuntimeError::Sync);
@@ -490,26 +493,31 @@ impl Runtime {
             self.mark_offline().await;
             return Err(RuntimeError::Sync);
         }
-        if let Err(error) = peppy_gateway_simulator::upload_pending_with_transport_retention(
-            &self.client,
-            &self.transport,
-            &self.credential,
-            retention_protocol,
-        )
-        .await
-        {
-            match error {
-                peppy_gateway_simulator::SimulatorError::Rejected(
-                    peppy_gateway_simulator::RejectedEndpoint::Outbox,
-                ) => {
-                    self.mark_offline().await;
-                    return Err(RuntimeError::OutboxRejected);
-                }
-                _ => {
-                    self.mark_offline().await;
-                    return Err(RuntimeError::Sync);
-                }
-            }
+        let publication =
+            match peppy_gateway_simulator::upload_pending_worker_batch_with_transport_retention(
+                &self.client,
+                &self.transport,
+                &self.credential,
+                retention_protocol,
+            )
+            .await
+            {
+                Ok(publication) => publication,
+                Err(error) => match error {
+                    peppy_gateway_simulator::SimulatorError::Rejected(
+                        peppy_gateway_simulator::RejectedEndpoint::Outbox,
+                    ) => {
+                        self.mark_offline().await;
+                        return Err(RuntimeError::OutboxRejected);
+                    }
+                    _ => {
+                        self.mark_offline().await;
+                        return Err(RuntimeError::Sync);
+                    }
+                },
+            };
+        if publication.continuation {
+            self.request_sync();
         }
         *self.state.lock().await = RuntimeState::Online;
         *self.last_synced_at.lock().await = Some(SystemTime::now());
@@ -524,8 +532,8 @@ impl Runtime {
         let response = self
             .transport
             .client()
-            .post(format!(
-                "{}/v1/attachments/retention/capability",
+            .put(format!(
+                "{}/v1/devices/self/retention-capability",
                 self.transport.origin()
             ))
             .bearer_auth(self.credential.as_str())
@@ -610,8 +618,8 @@ impl Runtime {
                 let response = self
                     .transport
                     .client()
-                    .post(format!(
-                        "{}/v1/attachments/retention/capability",
+                    .put(format!(
+                        "{}/v1/devices/self/retention-capability",
                         self.transport.origin()
                     ))
                     .bearer_auth(self.credential.as_str())
@@ -842,9 +850,14 @@ fn runtime_aad(vault_id: VaultId, device_id: DeviceId) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashSet,
         fs,
         path::PathBuf,
-        sync::{Arc as StdArc, Mutex as StdMutex},
+        sync::{
+            Arc as StdArc, Mutex as StdMutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
 
     use super::*;
@@ -856,7 +869,9 @@ mod tests {
         response::{IntoResponse, Response},
         routing::{get, post, put},
     };
-    use peppy_client_core::{IncomingMms, KeyProfile, VaultCheckHeader};
+    use peppy_client_core::{IncomingMms, VaultCheckHeader};
+
+    use crate::{config::WorkerConfig, registry::RuntimeRegistry};
 
     #[derive(Clone, Copy)]
     enum EventResponse {
@@ -873,10 +888,33 @@ mod tests {
         ciphertext: Vec<u8>,
         event_response: EventResponse,
         reject_media: bool,
+        download_status: StatusCode,
+        retention_status: StatusCode,
+        retention_readiness: Vec<bool>,
         transfers: usize,
+        sync_passes: usize,
+        publication_gate: Option<StdArc<WorkerPublicationGate>>,
     }
 
     type SharedFixture = StdArc<StdMutex<SyncFixture>>;
+
+    struct WorkerPublicationGate {
+        pause_after: usize,
+        posts: AtomicUsize,
+        entered: Notify,
+        release: Notify,
+    }
+
+    impl WorkerPublicationGate {
+        fn after(posts: usize) -> StdArc<Self> {
+            StdArc::new(Self {
+                pause_after: posts,
+                posts: AtomicUsize::new(0),
+                entered: Notify::new(),
+                release: Notify::new(),
+            })
+        }
+    }
 
     fn policy_rejection() -> Response {
         (
@@ -887,7 +925,8 @@ mod tests {
     }
 
     async fn fixture_devices(State(fixture): State<SharedFixture>) -> Response {
-        let fixture = fixture.lock().unwrap();
+        let mut fixture = fixture.lock().unwrap();
+        fixture.sync_passes += 1;
         if !fixture.devices_status.is_success() {
             return fixture.devices_status.into_response();
         }
@@ -911,16 +950,27 @@ mod tests {
         State(fixture): State<SharedFixture>,
         Json(envelope): Json<serde_json::Value>,
     ) -> Response {
-        let mut fixture = fixture.lock().unwrap();
-        fixture.transfers += 1;
-        match fixture.event_response {
-            EventResponse::Accept => {
-                fixture.events.push(envelope);
-                Json(serde_json::json!({"cursor":fixture.events.len().to_string(),"duplicate":false})).into_response()
-            }
-            EventResponse::PolicyRejected => policy_rejection(),
-            EventResponse::BodilessRejected => StatusCode::FORBIDDEN.into_response(),
+        let (response, gate) = {
+            let mut fixture = fixture.lock().unwrap();
+            fixture.transfers += 1;
+            let gate = fixture.publication_gate.clone();
+            let response = match fixture.event_response {
+                EventResponse::Accept => {
+                    fixture.events.push(envelope);
+                    Json(serde_json::json!({"cursor":fixture.events.len().to_string(),"duplicate":false})).into_response()
+                }
+                EventResponse::PolicyRejected => policy_rejection(),
+                EventResponse::BodilessRejected => StatusCode::FORBIDDEN.into_response(),
+            };
+            (response, gate)
+        };
+        if let Some(gate) = gate
+            && gate.posts.fetch_add(1, Ordering::SeqCst) + 1 == gate.pause_after
+        {
+            gate.entered.notify_one();
+            gate.release.notified().await;
         }
+        response
     }
 
     async fn fixture_reserve(State(fixture): State<SharedFixture>) -> Response {
@@ -949,10 +999,24 @@ mod tests {
         StatusCode::NO_CONTENT
     }
 
+    async fn fixture_retention(
+        State(fixture): State<SharedFixture>,
+        Json(request): Json<serde_json::Value>,
+    ) -> StatusCode {
+        let mut fixture = fixture.lock().unwrap();
+        fixture.retention_readiness.push(
+            request
+                .get("cleanup_ready")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap(),
+        );
+        fixture.retention_status
+    }
+
     async fn fixture_download(State(fixture): State<SharedFixture>) -> (StatusCode, Vec<u8>) {
         let mut fixture = fixture.lock().unwrap();
         fixture.transfers += 1;
-        (StatusCode::OK, fixture.ciphertext.clone())
+        (fixture.download_status, fixture.ciphertext.clone())
     }
 
     fn test_runtime(path: &std::path::Path, origin: String) -> Runtime {
@@ -1006,7 +1070,12 @@ mod tests {
             ciphertext: Vec::new(),
             event_response: EventResponse::Accept,
             reject_media: false,
+            download_status: StatusCode::OK,
+            retention_status: StatusCode::NO_CONTENT,
+            retention_readiness: Vec::new(),
             transfers: 0,
+            sync_passes: 0,
+            publication_gate: None,
         }));
         let router = Router::new()
             .route("/v1/devices", get(fixture_devices))
@@ -1019,14 +1088,51 @@ mod tests {
             .route("/v1/attachments/{id}/upload", put(fixture_upload))
             .route("/v1/attachments/{id}/finalize", post(fixture_finalize))
             .route(
-                "/v1/attachments/retention/capability",
-                post(fixture_no_content),
+                "/v1/devices/self/retention-capability",
+                put(fixture_retention),
             )
             .route("/v1/compaction/capability", post(fixture_no_content))
             .route("/v1/attachments/{id}", get(fixture_download))
             .with_state(fixture.clone());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         (runtime, fixture, server)
+    }
+
+    fn registry_config(path: &std::path::Path) -> WorkerConfig {
+        WorkerConfig {
+            api_url: "http://127.0.0.1:1".into(),
+            public_api_url: "http://127.0.0.1:1".into(),
+            state_dir: path.join("registry-state"),
+            key_file: path.join("registry-key"),
+            worker_token_file: path.join("worker-token"),
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+        }
+    }
+
+    async fn wait_for_events(fixture: &SharedFixture, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while fixture.lock().unwrap().events.len() < expected {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("registry worker did not publish the expected envelopes");
+    }
+
+    async fn wait_for_sync_passes(fixture: &SharedFixture, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while fixture.lock().unwrap().sync_passes < expected {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("registry worker did not start the expected pass");
+    }
+
+    async fn wait_for_publication_gate(gate: &WorkerPublicationGate) {
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .expect("registry worker did not reach the gated publication");
     }
 
     fn fixture_gateway(path: &std::path::Path, runtime: &Runtime) -> Client {
@@ -1039,7 +1145,7 @@ mod tests {
             DatabaseKey::new(&[8; 32]).unwrap(),
         )
         .unwrap();
-        let profile = KeyProfile::new(runtime.vault_id.0, 1).unwrap();
+        let profile = runtime.client.active_key_profile().unwrap();
         let phrase = "correct horse battery staple";
         let root = peppy_crypto::derive_root_key(phrase, &profile).unwrap();
         let header: VaultCheckHeader =
@@ -1061,6 +1167,97 @@ mod tests {
                 attachment_ids: Vec::new(),
             })
             .unwrap();
+    }
+
+    fn queue_publishable_text(runtime: &Runtime, provider_message_id: &str) -> String {
+        queue_outbox(&runtime.client, provider_message_id);
+        runtime.client.seal_pending_batch(1).unwrap();
+        let pending = runtime.client.pending_outbox_batch(1).unwrap();
+        assert_eq!(pending.len(), 1, "the independent text must be publishable");
+        pending[0].envelope_id.to_string()
+    }
+
+    async fn queue_remote_attachment(runtime: &Runtime) {
+        let gateway = fixture_gateway(&runtime.state_dir, runtime);
+        let source = runtime.state_dir.join("incoming.png");
+        fs::write(
+            &source,
+            fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/fixtures/media/valid-1x1.png"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let attachment = gateway
+            .prepare_attachment(&source, "image/png", "incoming.png")
+            .unwrap();
+        gateway
+            .capture_incoming_mms(IncomingMms {
+                conversation_id: None,
+                sender_address: "+15555550104".into(),
+                body: "attachment remains pending".into(),
+                recipients: Vec::new(),
+                subject: None,
+                provider_message_id: Some("fixture-pending-download".into()),
+                imported: false,
+                attachment_ids: vec![attachment.attachment_id],
+            })
+            .unwrap();
+        peppy_gateway_simulator::upload_media_with_transport(
+            &gateway,
+            &runtime.transport,
+            &runtime.credential,
+        )
+        .await
+        .unwrap();
+        peppy_gateway_simulator::upload_pending_with_transport(
+            &gateway,
+            &runtime.transport,
+            &runtime.credential,
+        )
+        .await
+        .unwrap();
+    }
+
+    fn queue_dependent_mms(runtime: &Runtime) {
+        let source = runtime.state_dir.join("dependent.png");
+        fs::write(
+            &source,
+            fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/fixtures/media/valid-1x1.png"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let attachment = runtime
+            .client
+            .prepare_attachment(&source, "image/png", "dependent.png")
+            .unwrap();
+        runtime
+            .client
+            .capture_incoming_mms(IncomingMms {
+                conversation_id: None,
+                sender_address: "+15555550105".into(),
+                body: "dependent MMS remains held".into(),
+                recipients: Vec::new(),
+                subject: None,
+                provider_message_id: Some("fixture-dependent-mms".into()),
+                imported: false,
+                attachment_ids: vec![attachment.attachment_id],
+            })
+            .unwrap();
+    }
+
+    fn posted_envelope_ids(fixture: &SharedFixture) -> Vec<String> {
+        fixture
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .map(|event| event["envelope_id"].as_str().unwrap().to_owned())
+            .collect()
     }
 
     #[tokio::test]
@@ -1184,6 +1381,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recoverable_incoming_attachment_failure_holds_dependent_mms_and_publishes_text_once() {
+        for corrupt_ciphertext in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let (runtime, fixture, server) = sync_fixture(temp.path()).await;
+            queue_remote_attachment(&runtime).await;
+            let text_id = queue_publishable_text(&runtime, "fixture-independent-text");
+            queue_dependent_mms(&runtime);
+            {
+                let mut fixture_state = fixture.lock().unwrap();
+                if corrupt_ciphertext {
+                    fixture_state.ciphertext[0] ^= 1;
+                } else {
+                    fixture_state.download_status = StatusCode::NOT_FOUND;
+                }
+                fixture_state.reject_media = true;
+            }
+
+            runtime.sync_once().await.unwrap();
+
+            assert_eq!(runtime.state().await, RuntimeState::Online);
+            assert_eq!(
+                posted_envelope_ids(&fixture)
+                    .iter()
+                    .filter(|id| *id == &text_id)
+                    .count(),
+                1
+            );
+            assert_eq!(posted_envelope_ids(&fixture).len(), 2);
+            assert!(!runtime.client.pending_downloads().unwrap().is_empty());
+            assert_eq!(runtime.client.pending_uploads().unwrap().len(), 1);
+            assert!(runtime.client.pending_outbox_batch(100).unwrap().is_empty());
+
+            runtime.sync_once().await.unwrap();
+            assert_eq!(
+                posted_envelope_ids(&fixture)
+                    .iter()
+                    .filter(|id| *id == &text_id)
+                    .count(),
+                1,
+                "the independent text is posted exactly once"
+            );
+            assert_eq!(posted_envelope_ids(&fixture).len(), 2);
+            assert!(!runtime.client.pending_downloads().unwrap().is_empty());
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn attachment_download_auth_failure_prevents_publishable_text_publication() {
+        for status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
+            let temp = tempfile::tempdir().unwrap();
+            let (runtime, fixture, server) = sync_fixture(temp.path()).await;
+            queue_remote_attachment(&runtime).await;
+            let text_id = queue_publishable_text(&runtime, "fixture-auth-blocked-text");
+            fixture.lock().unwrap().download_status = status;
+
+            assert!(matches!(runtime.sync_once().await, Err(RuntimeError::Sync)));
+            assert_eq!(runtime.state().await, RuntimeState::Offline);
+            assert_eq!(posted_envelope_ids(&fixture).len(), 1);
+            assert!(!posted_envelope_ids(&fixture).contains(&text_id));
+            assert_eq!(
+                runtime.client.pending_outbox_batch(1).unwrap()[0]
+                    .envelope_id
+                    .to_string(),
+                text_id
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn local_storage_failure_prevents_publishable_text_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, fixture, server) = sync_fixture(temp.path()).await;
+        queue_remote_attachment(&runtime).await;
+        let text_id = queue_publishable_text(&runtime, "fixture-storage-blocked-text");
+        let scratch = runtime.state_dir.join("SIMULATED-downloads");
+        fs::write(&scratch, b"not a directory").unwrap();
+
+        assert!(matches!(runtime.sync_once().await, Err(RuntimeError::Sync)));
+        assert_eq!(runtime.state().await, RuntimeState::Offline);
+        assert_eq!(posted_envelope_ids(&fixture).len(), 1);
+        assert!(!posted_envelope_ids(&fixture).contains(&text_id));
+        assert_eq!(
+            runtime.client.pending_outbox_batch(1).unwrap()[0]
+                .envelope_id
+                .to_string(),
+            text_id
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn fatal_core_download_failure_prevents_publishable_text_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, fixture, server) = sync_fixture(temp.path()).await;
+        queue_remote_attachment(&runtime).await;
+        let text_id = queue_publishable_text(&runtime, "fixture-core-blocked-text");
+        let staging_dir = runtime.state_dir.join("vault.sqlite.media").join("tmp");
+        fs::remove_dir(&staging_dir).unwrap();
+        fs::write(&staging_dir, b"not a directory").unwrap();
+
+        assert!(matches!(runtime.sync_once().await, Err(RuntimeError::Sync)));
+        assert_eq!(runtime.state().await, RuntimeState::Offline);
+        assert_eq!(posted_envelope_ids(&fixture).len(), 1);
+        assert!(!posted_envelope_ids(&fixture).contains(&text_id));
+        assert_eq!(
+            runtime.client.pending_outbox_batch(1).unwrap()[0]
+                .envelope_id
+                .to_string(),
+            text_id
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn sync_uploads_an_attachment_and_its_dependent_envelope_in_one_pass() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, fixture, server) = sync_fixture(temp.path()).await;
@@ -1221,6 +1534,235 @@ mod tests {
         assert_eq!(fixture.lock().unwrap().events.len(), 1);
         assert!(runtime.client.pending_uploads().unwrap().is_empty());
         assert!(runtime.client.pending_outbox_batch(100).unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn retention_capability_uses_the_device_put_route_for_readiness() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, fixture, server) = sync_fixture(temp.path()).await;
+
+        runtime.sync_once().await.unwrap();
+
+        assert_eq!(
+            fixture.lock().unwrap().retention_readiness,
+            vec![false, true]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn retention_capability_put_preserves_the_legacy_unsupported_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, fixture, server) = sync_fixture(temp.path()).await;
+        fixture.lock().unwrap().retention_status = StatusCode::METHOD_NOT_ALLOWED;
+
+        runtime.sync_once().await.unwrap();
+
+        assert_eq!(fixture.lock().unwrap().retention_readiness, vec![false]);
+        assert!(
+            !runtime
+                .client
+                .attachment_retention_protocol_enabled()
+                .unwrap()
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn bounded_publication_schedules_an_eligible_follow_up_pass() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, fixture, server) = sync_fixture(temp.path()).await;
+        for index in 0..101 {
+            queue_outbox(&runtime.client, &format!("fixture-bounded-{index}"));
+        }
+
+        runtime.sync_once().await.unwrap();
+
+        assert_eq!(fixture.lock().unwrap().events.len(), 100);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            runtime.sync_requested(),
+        )
+        .await
+        .expect("an eligible sealed envelope schedules a later pass");
+        runtime.sync_once().await.unwrap();
+        assert_eq!(fixture.lock().unwrap().events.len(), 101);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_worker_yields_between_publication_batches_and_delivers_each_envelope_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, fixture, server) = sync_fixture(temp.path()).await;
+        for index in 0..101 {
+            queue_outbox(&runtime.client, &format!("fixture-worker-fairness-{index}"));
+        }
+        let vault_id = runtime.vault_id().0;
+        let gate = WorkerPublicationGate::after(100);
+        fixture.lock().unwrap().publication_gate = Some(gate.clone());
+        let registry = RuntimeRegistry::open(registry_config(temp.path())).unwrap();
+        registry.insert(runtime).await.unwrap();
+        let runtime = registry.get(vault_id).await.unwrap();
+
+        wait_for_publication_gate(&gate).await;
+        let read_acquired = StdArc::new(Notify::new());
+        let release_read = StdArc::new(Notify::new());
+        let reader_runtime = runtime.clone();
+        let reader_acquired = read_acquired.clone();
+        let reader_release = release_read.clone();
+        let reader = tokio::spawn(async move {
+            let _work = reader_runtime.work_guard().await;
+            reader_acquired.notify_one();
+            reader_release.notified().await;
+        });
+        tokio::task::yield_now().await;
+        gate.release.notify_one();
+
+        tokio::time::timeout(Duration::from_secs(2), read_acquired.notified())
+            .await
+            .expect("queued MCP read did not acquire work between publication batches");
+        assert_eq!(fixture.lock().unwrap().events.len(), 100);
+
+        release_read.notify_one();
+        reader.await.unwrap();
+        wait_for_events(&fixture, 101).await;
+        let published = fixture
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .map(|event| serde_json::to_vec(event).unwrap())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            published.len(),
+            101,
+            "an envelope was published more than once"
+        );
+        registry.shutdown().await;
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_worker_revocation_fences_the_queued_publication_pass() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, fixture, server) = sync_fixture(temp.path()).await;
+        for index in 0..101 {
+            queue_outbox(&runtime.client, &format!("fixture-worker-revoke-{index}"));
+        }
+        let vault_id = runtime.vault_id().0;
+        let device_id = runtime.device_id().0;
+        let gate = WorkerPublicationGate::after(100);
+        fixture.lock().unwrap().publication_gate = Some(gate.clone());
+        let registry = RuntimeRegistry::open(registry_config(temp.path())).unwrap();
+        registry.insert(runtime).await.unwrap();
+        let runtime = registry.get(vault_id).await.unwrap();
+
+        wait_for_publication_gate(&gate).await;
+        let read_acquired = StdArc::new(Notify::new());
+        let release_read = StdArc::new(Notify::new());
+        let reader_runtime = runtime.clone();
+        let reader_acquired = read_acquired.clone();
+        let reader_release = release_read.clone();
+        let reader = tokio::spawn(async move {
+            let _work = reader_runtime.work_guard().await;
+            reader_acquired.notify_one();
+            reader_release.notified().await;
+        });
+        tokio::task::yield_now().await;
+        gate.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), read_acquired.notified())
+            .await
+            .expect("queued MCP read did not acquire work before revocation");
+
+        let revoke = tokio::spawn(async move { registry.revoke(vault_id, device_id).await });
+        tokio::task::yield_now().await;
+        release_read.notify_one();
+        reader.await.unwrap();
+        revoke.await.unwrap().unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(fixture.lock().unwrap().events.len(), 100);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_worker_quiesces_when_only_a_held_attachment_envelope_remains() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, fixture, server) = sync_fixture(temp.path()).await;
+        let source = temp.path().join("held-worker-image.png");
+        fs::write(
+            &source,
+            fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/fixtures/media/valid-1x1.png"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let attachment = runtime
+            .client
+            .prepare_attachment(&source, "image/png", "held-worker-image.png")
+            .unwrap();
+        runtime
+            .client
+            .capture_incoming_mms(IncomingMms {
+                conversation_id: None,
+                sender_address: "+15555550104".into(),
+                body: "held worker attachment".into(),
+                recipients: Vec::new(),
+                subject: None,
+                provider_message_id: Some("fixture-held-worker".into()),
+                imported: false,
+                attachment_ids: vec![attachment.attachment_id],
+            })
+            .unwrap();
+        fixture.lock().unwrap().reject_media = true;
+        let vault_id = runtime.vault_id().0;
+        let registry = RuntimeRegistry::open(registry_config(temp.path())).unwrap();
+        registry.insert(runtime).await.unwrap();
+
+        wait_for_sync_passes(&fixture, 1).await;
+        let runtime = registry.get(vault_id).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while runtime.state().await != RuntimeState::Online {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("held-only publication pass did not settle");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(fixture.lock().unwrap().sync_passes, 1);
+        assert_eq!(fixture.lock().unwrap().events.len(), 0);
+        assert_eq!(runtime.client.pending_outbox_batch(1).unwrap().len(), 0);
+        assert_eq!(runtime.client.pending_uploads().unwrap().len(), 1);
+        registry.shutdown().await;
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_worker_coalesces_wakes_arriving_during_a_successful_final_pass() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, fixture, server) = sync_fixture(temp.path()).await;
+        for index in 0..100 {
+            queue_outbox(&runtime.client, &format!("fixture-worker-wake-{index}"));
+        }
+        let vault_id = runtime.vault_id().0;
+        let gate = WorkerPublicationGate::after(100);
+        fixture.lock().unwrap().publication_gate = Some(gate.clone());
+        let registry = RuntimeRegistry::open(registry_config(temp.path())).unwrap();
+        registry.insert(runtime).await.unwrap();
+        let runtime = registry.get(vault_id).await.unwrap();
+
+        wait_for_publication_gate(&gate).await;
+        for _ in 0..3 {
+            runtime.request_sync();
+        }
+        gate.release.notify_one();
+        wait_for_sync_passes(&fixture, 2).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(fixture.lock().unwrap().sync_passes, 2);
+        assert_eq!(fixture.lock().unwrap().events.len(), 100);
+        registry.shutdown().await;
         server.abort();
     }
 

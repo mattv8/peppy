@@ -548,7 +548,7 @@ describe("WebhookEditorModal", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Send test" }));
       typeInto("Name (optional)", "Changed");
-      resolveTest({ ok: true, statusCode: 200, durationMs: 142, error: null });
+      await act(async () => resolveTest({ ok: true, statusCode: 200, durationMs: 142, error: null }));
 
       await waitFor(() => expect(screen.queryByText("200 OK · 142 ms")).not.toBeInTheDocument());
     });

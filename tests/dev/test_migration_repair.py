@@ -213,7 +213,12 @@ class MigrationRepairTests(unittest.TestCase):
             "PEPPY_MAINTENANCE_DB_PASSWORD": "synthetic-maintenance-password",
         }
         try:
-            command = ["docker", "run", "--detach", "--name", container, "-v", f"{volume}:/var/lib/postgresql", "-v", f"{ROOT / 'infra/compose/bootstrap-roles.sh'}:/docker-entrypoint-initdb.d/10-peppy-roles.sh:ro"]
+            command = [
+                "docker", "run", "--detach", "--name", container,
+                "-v", f"{volume}:/var/lib/postgresql",
+                "-v", f"{ROOT / 'infra/compose/bootstrap-roles.sh'}:/docker-entrypoint-initdb.d/10-peppy-roles.sh:ro",
+                "-v", f"{ROOT / 'infra/compose/validate-db-passwords.sh'}:/usr/local/bin/validate-db-passwords.sh:ro",
+            ]
             for name, value in environment.items():
                 command.extend(("-e", f"{name}={value}"))
             subprocess.run(command + [image], check=True, stdout=subprocess.DEVNULL)
@@ -298,6 +303,75 @@ class MigrationRepairTests(unittest.TestCase):
                 with self.assertRaisesRegex(repair.RepairError, "backup failed"):
                     repair.dev_up(root)
             self.assertNotIn("_dev-up-start", calls)
+
+    def test_startup_failure_stops_and_verifies_partially_started_writers_before_restore_advice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            migrations = root / "services/server/migrations/down"
+            migrations.mkdir(parents=True)
+            (migrations.parent / "0001_example.sql").write_text("CREATE TABLE example ();\n")
+            (migrations / "0001_example.down.sql").write_text("DROP TABLE example;\n")
+            backup = root / "repair.dump"
+            backup.write_bytes(b"backup")
+            calls = []
+
+            def run_just(_root, recipe):
+                calls.append(recipe)
+                if recipe == "_dev-up-start":
+                    raise repair.RepairError("api started before migration failed")
+
+            success = type("Result", (), {"returncode": 0})()
+            with mock.patch.object(repair, "docker_endpoint", return_value="unix:///docker.sock"), \
+                 mock.patch.object(repair, "transition_lock", return_value=contextlib.nullcontext()), \
+                 mock.patch.object(repair, "run_just", side_effect=run_just), \
+                 mock.patch.object(repair, "verify_development_compose"), \
+                 mock.patch.object(repair, "bootstrap_development_roles"), \
+                 mock.patch.object(repair, "verify_writers_stopped", side_effect=lambda _root: calls.append("writers")), \
+                 mock.patch.object(repair, "read_applied", return_value=[]), \
+                 mock.patch.object(repair, "current_database", return_value="peppy"), \
+                 mock.patch.object(repair, "repair", return_value=backup), \
+                 mock.patch.object(repair, "restore_command", return_value="restore repair.dump"), \
+                 mock.patch.object(repair.subprocess, "run", return_value=success):
+                with self.assertRaisesRegex(repair.RepairError, "code remains stopped.*repair.dump"):
+                    repair.dev_up(root)
+
+            self.assertEqual(calls[-3:], ["_dev-up-start", "_dev-up-stop-writers", "writers"])
+
+    def test_startup_failure_reports_cleanup_failure_and_keeps_backup_diagnostic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            migrations = root / "services/server/migrations/down"
+            migrations.mkdir(parents=True)
+            (migrations.parent / "0001_example.sql").write_text("CREATE TABLE example ();\n")
+            (migrations / "0001_example.down.sql").write_text("DROP TABLE example;\n")
+            backup = root / "repair.dump"
+            backup.write_bytes(b"backup")
+
+            writer_stops = 0
+
+            def run_just(_root, recipe):
+                nonlocal writer_stops
+                if recipe == "_dev-up-start":
+                    raise repair.RepairError("startup failed")
+                if recipe == "_dev-up-stop-writers":
+                    writer_stops += 1
+                    if writer_stops == 2:
+                        raise repair.RepairError("writer stop failed")
+
+            success = type("Result", (), {"returncode": 0})()
+            with mock.patch.object(repair, "docker_endpoint", return_value="unix:///docker.sock"), \
+                 mock.patch.object(repair, "transition_lock", return_value=contextlib.nullcontext()), \
+                 mock.patch.object(repair, "run_just", side_effect=run_just), \
+                 mock.patch.object(repair, "verify_development_compose"), \
+                 mock.patch.object(repair, "bootstrap_development_roles"), \
+                 mock.patch.object(repair, "verify_writers_stopped", side_effect=[None, repair.RepairError("api still running")]), \
+                 mock.patch.object(repair, "read_applied", return_value=[]), \
+                 mock.patch.object(repair, "current_database", return_value="peppy"), \
+                 mock.patch.object(repair, "repair", return_value=backup), \
+                 mock.patch.object(repair, "restore_command", return_value="restore repair.dump"), \
+                 mock.patch.object(repair.subprocess, "run", return_value=success):
+                with self.assertRaisesRegex(repair.RepairError, "Startup error: startup failed.*Cleanup error:.*writer stop failed.*api still running.*Do not restore while writers may be running; stop and verify them first.*Once writers are stopped and verified.*repair.dump"):
+                    repair.dev_up(root)
 
     def test_transition_lock_serializes_callers(self):
         with tempfile.TemporaryDirectory() as directory:

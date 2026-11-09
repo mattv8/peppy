@@ -354,35 +354,15 @@ jobs:
     environment: "${{ inputs.macos_distribution == 'app-store' && 'mac-app-store' || inputs.trusted_update_build && format('updates-{0}', inputs.update_channel) || 'development-artifacts' }}"
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            name: linux
-            bundles: appimage,deb,rpm
-            posix_bundles: appimage deb rpm
-            path: dist/desktop-linux-bundles.tar.gz
-          - os: macos-26
-            name: macos
-            bundles: app,dmg
-            posix_bundles: macos
-            path: |
-              apps/desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz
-              apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
-              dist/desktop-macos-app.tar.gz
-          - os: windows-2025
-            name: windows
-            bundles: nsis,msi
-            path: |
-              apps/desktop/src-tauri/target/release/bundle/nsis/**
-              apps/desktop/src-tauri/target/release/bundle/msi/**
+      matrix: ${{ fromJSON(inputs.macos_distribution == 'app-store' && '{"include":[{"os":"macos-26","name":"macos","bundles":"app","posix_bundles":"macos","path":"apps/desktop/src-tauri/target/release/bundle/macos/*.pkg"}]}' || '{"include":[{"os":"ubuntu-24.04","name":"linux","bundles":"appimage,deb,rpm","posix_bundles":"appimage deb rpm","path":"dist/desktop-linux-bundles.tar.gz"},{"os":"macos-26","name":"macos","bundles":"app,dmg","posix_bundles":"macos","path":"apps/desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz\napps/desktop/src-tauri/target/release/bundle/dmg/*.dmg\ndist/desktop-macos-app.tar.gz"},{"os":"windows-2025","name":"windows","bundles":"nsis,msi","path":"apps/desktop/src-tauri/target/release/bundle/nsis/**\napps/desktop/src-tauri/target/release/bundle/msi/**"}]}') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
       - name: Reject untrusted updater build context
-        if: inputs.trusted_update_build
+        if: inputs.trusted_update_build || inputs.macos_distribution == 'app-store'
         shell: bash
         env:
-          CHANNEL: ${{ inputs.update_channel }}
+          CHANNEL: ${{ inputs.macos_distribution == 'app-store' && 'stable' || inputs.update_channel }}
           REQUESTED_REF: ${{ inputs.ref }}
         run: |
           [ "$REQUESTED_REF" = "$GITHUB_SHA" ] || { echo 'trusted updater build ref must equal the triggering SHA' >&2; exit 1; }
@@ -394,10 +374,10 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
       - name: Verify checked-out trusted updater context
-        if: inputs.trusted_update_build
+        if: inputs.trusted_update_build || inputs.macos_distribution == 'app-store'
         shell: bash
         env:
-          CHANNEL: ${{ inputs.update_channel }}
+          CHANNEL: ${{ inputs.macos_distribution == 'app-store' && 'stable' || inputs.update_channel }}
           REQUESTED_SHA: ${{ inputs.ref }}
         run: bash .github/scripts/release-context-guard.sh
       - name: Validate protected signing policy

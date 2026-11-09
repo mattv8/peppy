@@ -11,6 +11,7 @@ import dev.peppy.mobile.security.CredentialParser
 import dev.peppy.mobile.security.SecureStoreUnavailable
 import dev.peppy.mobile.security.StoredSecret
 import dev.peppy.mobile.security.VaultSecretStore
+import dev.peppy.mobile.security.strictUInt
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
@@ -74,10 +75,13 @@ internal class EnrollmentHost(
 
     private enum class Operation { OWNER, MANUAL, VAULT_REQUEST }
     private data class ActiveClient(val origin: String, val operation: Operation, val client: NativeEnrollmentClient)
+    private data class InstanceSession(val origin: String, val token: String)
+    private data class PhoneConfirmationAttempt(val path: String, val headers: JSONObject, val body: String)
 
     private val hostedAccount by lazy { HostedAccountClient(AndroidHostedSecureStore(context)) }
     private val clientLock = Any()
     private var activeClient: ActiveClient? = null
+    private var instanceSession: InstanceSession? = null
     @Volatile private var lastErrorCode: String? = null
     @Volatile private var lastPhoneClaimFailure: PhoneClaimFailure? = null
 
@@ -139,7 +143,7 @@ internal class EnrollmentHost(
             ?: return ImportResult.NETWORK_ERROR
         claimErrorResult(response)?.let { return it }
         if (recordError(response)) return ImportResult.SERVER_REJECTED
-        val result = install(client.finishOwnerAdmission(response, passphrase), origin)
+        val result = installPhrase(client.finishOwnerAdmission(response, passphrase), passphrase, origin)
         if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) {
             clearOwnerCheckpoint(origin)
             closeActiveClient()
@@ -201,11 +205,7 @@ internal class EnrollmentHost(
             recordError(complete)
             return if (completeResponse.status in TRANSIENT_STATUSES) ImportResult.NETWORK_ERROR else ImportResult.SERVER_REJECTED
         }
-        val result = install(client.finishManualAdmission(complete, secret))
-        if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) {
-            val credential = NativeGateway.accountCredential(context)
-            if (credential != null) vaultSecrets.saveIfMissing(credential.vaultId, credential.deviceId, secret.toCharArray())
-        }
+        val result = installPhrase(client.finishManualAdmission(complete, secret), secret)
         if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) closeActiveClient()
         result
         } catch (_: Exception) {
@@ -218,7 +218,11 @@ internal class EnrollmentHost(
         return try {
             val body = JSONObject().put("username", username).put("admin_password", password).put("client", "android").toString()
             val response = enrollmentRequest(origin, "POST", "/v1/instance/session", body) ?: return false
-            if (response.isSuccess) return true
+            if (response.isSuccess) {
+                val session = response.body?.let { parseInstanceSession(origin, it) } ?: return false
+                instanceSession = session
+                return true
+            }
             response.body?.let(::recordError)
             false
         } catch (_: Exception) { false }
@@ -325,7 +329,7 @@ internal class EnrollmentHost(
             recordError(responseBody)
             return if (response.status in TRANSIENT_STATUSES) ImportResult.NETWORK_ERROR else ImportResult.SERVER_REJECTED
         }
-        val result = install(client.finishOwnerAdmission(responseBody, passphrase), origin)
+        val result = installPhrase(client.finishOwnerAdmission(responseBody, passphrase), passphrase, origin)
         if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) {
             client.clearVaultRequest()
             clearVaultRequestCheckpoint(origin)
@@ -385,9 +389,20 @@ internal class EnrollmentHost(
         private val client: NativeEnrollmentClient,
         private val sharedSecret: Boolean,
     ) : AutoCloseable {
+        private val stateLock = Any()
         @Volatile private var closed = false
+        private var approvedStatus: String? = null
+        private var preparedPhrase: CharArray? = null
+        private var preparedRequestBody: String? = null
+        private var confirmationInFlight = false
+        private var installAdmitted = false
+        private var clientDisposed = false
+        @Volatile private var retryAvailable = false
+        @Volatile private var needsCorrectedPhrase = false
 
         fun requiresSharedSecret(): Boolean = sharedSecret
+        fun canRetryConfirmation(): Boolean = retryAvailable
+        fun needsCorrectedPhrase(): Boolean = needsCorrectedPhrase
 
         fun status(): String? = try {
             val descriptor = JSONObject(client.phoneStatusRequest())
@@ -418,31 +433,125 @@ internal class EnrollmentHost(
         fun sas(status: String): String? = try { client.phoneSas(status) } catch (_: Exception) { null }
 
         fun confirm(status: String, secret: String?): ImportResult {
-            if (sharedSecret && secret.isNullOrBlank()) return ImportResult.SERVER_REJECTED
+            val attempt = prepareConfirmation(status, secret) ?: return ImportResult.SERVER_REJECTED
             return try {
-                val descriptor = JSONObject(client.phoneStatusRequest())
-                val path = descriptor.getString("path")
-                val complete = request(
+                val response = enrollmentRequest(
                     origin,
                     "POST",
-                    "$path/confirm",
-                    client.confirmPhoneInvitationRequest(status, secret),
-                    descriptor.getJSONObject("headers"),
-                ) ?: return ImportResult.NETWORK_ERROR
-                val result = synchronized(this) {
-                    if (closed) return ImportResult.SERVER_REJECTED
-                    install(client.finishPhoneAdmission(complete))
+                    attempt.path,
+                    attempt.body,
+                    attempt.headers,
+                ) ?: run {
+                    markConfirmationRetryable()
+                    return ImportResult.NETWORK_ERROR
                 }
+                if (!response.isSuccess) {
+                    if (response.status in TRANSIENT_STATUSES) {
+                        markConfirmationRetryable()
+                        return ImportResult.NETWORK_ERROR
+                    }
+                    val complete = response.body
+                    if (sharedSecret && complete != null && recordError(complete) && lastErrorCode == "invitation_proof_mismatch") {
+                        markConfirmationNeedsCorrectedPhrase()
+                    }
+                    return ImportResult.SERVER_REJECTED
+                }
+                val complete = response.body ?: run {
+                    markConfirmationRetryable()
+                    return ImportResult.NETWORK_ERROR
+                }
+                val phrase = synchronized(stateLock) {
+                    if (closed) return ImportResult.SERVER_REJECTED
+                    confirmationInFlight = false
+                    installAdmitted = true
+                    if (sharedSecret) String(requireNotNull(preparedPhrase)) else null
+                }
+                val identity = client.finishPhoneAdmission(complete)
+                val result = if (phrase != null) installPhrase(identity, phrase) else install(identity)
                 if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) close()
+                synchronized(stateLock) { retryAvailable = false }
                 result
             } catch (_: Exception) {
                 ImportResult.SERVER_REJECTED
+            } finally {
+                retireConfirmation()
             }
         }
 
-        @Synchronized override fun close() {
-            if (closed) return
-            closed = true
+        private fun prepareConfirmation(status: String, secret: String?): PhoneConfirmationAttempt? = synchronized(stateLock) {
+            if (closed || confirmationInFlight || installAdmitted || (sharedSecret && secret.isNullOrBlank() && preparedRequestBody == null)) {
+                return@synchronized null
+            }
+            try {
+                retryAvailable = false
+                needsCorrectedPhrase = false
+                val descriptor = JSONObject(client.phoneStatusRequest())
+                val path = descriptor.getString("path") + "/confirm"
+                val originalStatus = approvedStatus ?: status.also { approvedStatus = it }
+                val body = preparedRequestBody ?: client.confirmPhoneInvitationRequest(originalStatus, secret).also {
+                    preparedRequestBody = it
+                    if (sharedSecret) {
+                        clearPreparedPhraseLocked()
+                        preparedPhrase = requireNotNull(secret).toCharArray()
+                    }
+                }
+                confirmationInFlight = true
+                PhoneConfirmationAttempt(path, descriptor.getJSONObject("headers"), body)
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        private fun markConfirmationRetryable() = synchronized(stateLock) {
+            if (!closed) retryAvailable = true
+        }
+
+        private fun markConfirmationNeedsCorrectedPhrase() = synchronized(stateLock) {
+            if (closed) return@synchronized
+            preparedRequestBody = null
+            clearPreparedPhraseLocked()
+            retryAvailable = true
+            needsCorrectedPhrase = true
+        }
+
+        private fun retireConfirmation() {
+            val dispose = synchronized(stateLock) {
+                confirmationInFlight = false
+                installAdmitted = false
+                if (closed && !clientDisposed) {
+                    clientDisposed = true
+                    true
+                } else {
+                    false
+                }
+            }
+            if (dispose) disposeClient()
+        }
+
+        override fun close() {
+            val dispose = synchronized(stateLock) {
+                if (closed) return@synchronized false
+                closed = true
+                retryAvailable = false
+                needsCorrectedPhrase = false
+                preparedRequestBody = null
+                clearPreparedPhraseLocked()
+                if (!confirmationInFlight && !installAdmitted && !clientDisposed) {
+                    clientDisposed = true
+                    true
+                } else {
+                    false
+                }
+            }
+            if (dispose) disposeClient()
+        }
+
+        private fun clearPreparedPhraseLocked() {
+            preparedPhrase?.fill('\u0000')
+            preparedPhrase = null
+        }
+
+        private fun disposeClient() {
             try { client.cancelPhoneFlow() } catch (_: Exception) { }
             client.close()
         }
@@ -556,6 +665,20 @@ internal class EnrollmentHost(
         identity.close()
     }
 
+    private fun installPhrase(identity: NativeEnrollmentIdentity, passphrase: String, pendingOrigin: String? = null): ImportResult = try {
+        val metadata = identity.metadata()
+        NativeGateway.installPhraseEnrollmentIdentity(context, identity, passphrase).also { result ->
+            if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) {
+                vaultSecrets.saveIfMissing(metadata.vaultId, metadata.deviceId, passphrase.toCharArray())
+                if (pendingOrigin != null) {
+                    try { vaultSecrets.movePendingToBinding(pendingOrigin, metadata.vaultId, metadata.deviceId) } catch (_: Exception) { }
+                }
+            }
+        }
+    } finally {
+        identity.close()
+    }
+
     private fun failedPhoneClaim(client: NativeEnrollmentClient?, failure: PhoneClaimFailure): PhoneEnrollment? {
         lastPhoneClaimFailure = failure
         try { client?.close() } catch (_: Exception) { }
@@ -574,7 +697,9 @@ internal class EnrollmentHost(
 
     private fun enrollmentRequest(origin: String, method: String, path: String, body: String?, headers: JSONObject? = null): EnrollmentHttpResponse? {
         if (CredentialParser.canonicalOrigin(origin) != origin || !path.startsWith("/v1/") || path.contains('#') || (path.contains('?') && !path.endsWith("?wait=15"))) return null
-        transport?.let { return it.request(origin, method, path, body, headers) }
+        val requestHeaders = headers ?: JSONObject()
+        instanceSession?.takeIf { it.origin == origin }?.let { requestHeaders.put("Peppy-Instance-Session", it.token) }
+        transport?.let { return it.request(origin, method, path, body, requestHeaders) }
         val connection = try { URL(origin + path).openConnection() as HttpURLConnection } catch (_: Exception) { return null }
         return try {
             connection.instanceFollowRedirects = false
@@ -583,7 +708,7 @@ internal class EnrollmentHost(
             connection.readTimeout = ENROLLMENT_TIMEOUT_MS
             connection.setRequestProperty("Accept", "application/json")
             hostedAccountHeader(origin)?.let { connection.setRequestProperty("Peppy-Account-Session", it) }
-            headers?.keys()?.forEach { name -> connection.setRequestProperty(name, headers.getString(name)) }
+            requestHeaders.keys().forEach { name -> connection.setRequestProperty(name, requestHeaders.getString(name)) }
             body?.let { value ->
                 val bytes = value.toByteArray()
                 connection.doOutput = true
@@ -603,7 +728,9 @@ internal class EnrollmentHost(
 
     private fun claimRequest(origin: String, body: String): String? {
         if (CredentialParser.canonicalOrigin(origin) != origin) return null
-        transport?.let { return it.request(origin, "POST", "/v1/instance/claim", body, null)?.takeIf(EnrollmentHttpResponse::isSuccess)?.body }
+        val headers = instanceSession?.takeIf { it.origin == origin }
+            ?.let { JSONObject().put("Peppy-Instance-Session", it.token) }
+        transport?.let { return it.request(origin, "POST", "/v1/instance/claim", body, headers)?.takeIf(EnrollmentHttpResponse::isSuccess)?.body }
         val connection = try { URL(origin + "/v1/instance/claim").openConnection() as HttpURLConnection } catch (_: Exception) { return null }
         return try {
             connection.instanceFollowRedirects = false
@@ -613,6 +740,7 @@ internal class EnrollmentHost(
             connection.setRequestProperty("Accept", "application/json")
             connection.setRequestProperty("Content-Type", "application/json")
             hostedAccountHeader(origin)?.let { connection.setRequestProperty("Peppy-Account-Session", it) }
+            headers?.keys()?.forEach { name -> connection.setRequestProperty(name, headers.getString(name)) }
             val bytes = body.toByteArray()
             connection.doOutput = true
             connection.setFixedLengthStreamingMode(bytes.size)
@@ -629,6 +757,17 @@ internal class EnrollmentHost(
 
     private fun hostedAccountHeader(origin: String): String? =
         if (origin == HostedAccountClient.ORIGIN) hostedAccount.enrollmentSessionHeader() else null
+
+    private fun parseInstanceSession(origin: String, body: String): InstanceSession? = try {
+        val session = JSONObject(body)
+        if (session.length() != 3 || !session.has("csrf_token")) return null
+        val token = session.opt("session_token") as? String ?: return null
+        val csrf = session.opt("csrf_token")
+        if (token.isBlank() || (csrf !== JSONObject.NULL && csrf !is String)) return null
+        if (session.strictUInt("expires_in_seconds") == null) null else InstanceSession(origin, token)
+    } catch (_: Exception) {
+        null
+    }
 
     private companion object {
         const val OWNER_CHECKPOINT_PREFIX = "self-hosted-owner-enrollment-checkpoint-v1-"

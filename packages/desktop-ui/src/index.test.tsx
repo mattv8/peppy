@@ -1347,15 +1347,17 @@ describe("desktop UI controls", () => {
   it("does not trap Backspace at leading phone-number formatting characters", () => {
     renderRecipientPanel();
     const input = screen.getByLabelText("Recipients") as HTMLInputElement;
-    fireEvent.change(input, { target: { value: "2025550100" } });
+    fireEvent.change(input, { target: { value: "(" } });
     input.setSelectionRange(1, 1);
-    fireEvent.keyDown(input, { key: "Backspace" });
-    expect(input).toHaveValue("(202) 555-0100");
+    const openingParen = new KeyboardEvent("keydown", { key: "Backspace", cancelable: true, bubbles: true });
+    act(() => input.dispatchEvent(openingParen));
+    expect(openingParen.defaultPrevented).toBe(false);
 
-    fireEvent.change(input, { target: { value: "+12025550100" } });
+    fireEvent.change(input, { target: { value: "+" } });
     input.setSelectionRange(1, 1);
-    fireEvent.keyDown(input, { key: "Backspace" });
-    expect(input).toHaveValue("+1 202 555 0100");
+    const plus = new KeyboardEvent("keydown", { key: "Backspace", cancelable: true, bubbles: true });
+    act(() => input.dispatchEvent(plus));
+    expect(plus.defaultPrevented).toBe(false);
   });
 
   it("removes the preceding digit when Backspace follows phone-number punctuation", () => {
@@ -1363,7 +1365,9 @@ describe("desktop UI controls", () => {
     const input = screen.getByLabelText("Recipients") as HTMLInputElement;
     fireEvent.change(input, { target: { value: "2025550100" } });
     input.setSelectionRange(6, 6);
-    fireEvent.keyDown(input, { key: "Backspace" });
+    const punctuation = new KeyboardEvent("keydown", { key: "Backspace", cancelable: true, bubbles: true });
+    act(() => input.dispatchEvent(punctuation));
+    expect(punctuation.defaultPrevented).toBe(true);
     expect((input.value.match(/\d/g) ?? [])).toHaveLength(9);
     expect(input).not.toHaveValue("(202) 555-0100");
   });

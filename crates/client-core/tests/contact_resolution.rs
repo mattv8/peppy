@@ -344,6 +344,121 @@ fn updated_and_deleted_contacts_stop_resolving_before_index_cleanup() {
 }
 
 #[test]
+fn incomplete_refresh_withholds_a_tail_match_until_the_index_is_current() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "owner", &vault);
+    let client = unlocked(&cfg, &vault);
+    let contacts = (0..201)
+        .map(|number| {
+            contact(
+                "book",
+                &format!("c{number:03}"),
+                &format!("Contact {number}"),
+                &format!("+1202555{number:04}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    capture(&client, &cfg, "book", "US", "1", Value::Array(contacts));
+
+    let first = resolve(&client, &["+12025550200"]);
+    assert_eq!(first["matches"], json!([]));
+    assert_eq!(first["ambiguous"], json!(["+12025550200"]));
+    assert_eq!(first["more_indexing"], true);
+
+    let settled = resolve(&client, &["+12025550200"]);
+    assert_eq!(settled["matches"][0]["contact_id"], "c200");
+    assert_eq!(settled["more_indexing"], false);
+}
+
+#[test]
+fn incomplete_refresh_withholds_stale_tail_numbers_and_head_tail_duplicates() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "owner", &vault);
+    let client = unlocked(&cfg, &vault);
+    let contacts = (0..201)
+        .map(|number| {
+            contact(
+                "book",
+                &format!("c{number:03}"),
+                &format!("Contact {number}"),
+                &format!("+1202555{number:04}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    capture(&client, &cfg, "book", "US", "1", Value::Array(contacts));
+    resolve(&client, &["+12025550200"]);
+    resolve(&client, &["+12025550200"]);
+
+    let changed_contacts = (0..201)
+        .map(|number| {
+            let phone = if number == 200 {
+                "+12025559999".to_owned()
+            } else {
+                format!("+1202555{number:04}")
+            };
+            contact(
+                "book",
+                &format!("c{number:03}"),
+                &format!("Changed {number}"),
+                &phone,
+            )
+        })
+        .collect::<Vec<_>>();
+    capture(
+        &client,
+        &cfg,
+        "book",
+        "US",
+        "2",
+        Value::Array(changed_contacts),
+    );
+    let incomplete = resolve(&client, &["+12025550200", "+12025559999"]);
+    assert_eq!(incomplete["matches"], json!([]));
+    assert_eq!(
+        incomplete["ambiguous"],
+        json!(["+12025550200", "+12025559999"])
+    );
+    assert_eq!(incomplete["more_indexing"], true);
+    let settled = resolve(&client, &["+12025550200", "+12025559999"]);
+    assert_eq!(settled["matches"][0]["contact_id"], "c200");
+    assert_eq!(settled["ambiguous"], json!(["+12025550200"]));
+
+    let duplicate_contacts = (0..201)
+        .map(|number| {
+            let phone = if number == 200 {
+                "+12025550000".to_owned()
+            } else {
+                format!("+1202555{number:04}")
+            };
+            contact(
+                "book",
+                &format!("c{number:03}"),
+                &format!("Duplicate {number}"),
+                &phone,
+            )
+        })
+        .collect::<Vec<_>>();
+    capture(
+        &client,
+        &cfg,
+        "book",
+        "US",
+        "3",
+        Value::Array(duplicate_contacts),
+    );
+    let incomplete = resolve(&client, &["+12025550000"]);
+    assert_eq!(incomplete["matches"], json!([]));
+    assert_eq!(incomplete["ambiguous"], json!(["+12025550000"]));
+    assert_eq!(incomplete["more_indexing"], true);
+    let settled = resolve(&client, &["+12025550000"]);
+    assert_eq!(settled["matches"], json!([]));
+    assert_eq!(settled["ambiguous"], json!(["+12025550000"]));
+    assert_eq!(settled["more_indexing"], false);
+}
+
+#[test]
 fn superseded_retired_contacts_do_not_starve_visible_successor_indexing() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();

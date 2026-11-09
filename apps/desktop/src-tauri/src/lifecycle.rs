@@ -1183,6 +1183,20 @@ mod tests {
     }
 
     #[test]
+    fn topology_gate_rejects_a_second_update_admission_until_the_first_releases() {
+        let mut gate = TopologyGate::default();
+        gate.reserve("first-update".into(), Operation::Update)
+            .unwrap();
+        assert!(gate
+            .reserve("second-update".into(), Operation::Update)
+            .is_err());
+        assert!(gate.release("first-update"));
+        assert!(gate
+            .reserve("second-update".into(), Operation::Update)
+            .is_ok());
+    }
+
+    #[test]
     fn native_close_policy_distinguishes_main_panel_and_composer() {
         assert_eq!(
             close_operation(true, true, false),

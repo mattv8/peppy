@@ -32,6 +32,7 @@ struct Fixture {
     _directory: tempfile::TempDir,
     client: Client,
     conversation_id: ConversationId,
+    ownership_generation: u64,
 }
 
 fn seeded_client() -> Fixture {
@@ -125,6 +126,7 @@ fn seeded_client() -> Fixture {
         _directory: directory,
         client,
         conversation_id,
+        ownership_generation: generation,
     }
 }
 
@@ -220,4 +222,34 @@ fn desktop_rcs_views_do_not_leak_provider_identity() {
     ] {
         assert_no_sentinels(path, &value);
     }
+}
+
+#[test]
+fn read_status_does_not_reuse_delivery_timestamp() {
+    let fixture = seeded_client();
+    let mut delivered = find_body(
+        &fixture.client.messages(fixture.conversation_id).unwrap(),
+        DELIVERED_BODY,
+    )
+    .clone();
+    delivered.status_at_ms = Some(12_345);
+
+    fixture
+        .client
+        .apply_rcs_projected_status(
+            fixture.conversation_id,
+            fixture.ownership_generation,
+            RcsStatusApplication {
+                google_message_id: GOOGLE_MESSAGE_SENTINEL.into(),
+                google_conversation_id: GOOGLE_CONVERSATION_SENTINEL.into(),
+                tmp_id: Some(TMP_ID_SENTINEL.into()),
+                status: RcsProjectedStatus::Read,
+            },
+        )
+        .unwrap();
+
+    let view = rcs_receive::message_view(&fixture.client, &delivered, vec![]).unwrap();
+    assert_eq!(view.status, Some("read"));
+    assert_eq!(view.status_at, None);
+    assert!(view.rcs_reported);
 }

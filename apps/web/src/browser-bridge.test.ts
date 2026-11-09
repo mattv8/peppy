@@ -238,6 +238,121 @@ describe("BrowserBridge", () => {
     await expect(state).resolves.toEqual({ mode: "browser" });
   });
 
+  it("dismisses an open secret dialog before notifying stopped listeners", async () => {
+    const restoreShowModal = stubShowModal();
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const trigger = document.createElement("button");
+    document.body.append(trigger);
+    trigger.focus();
+    let stoppedWithDialog = false;
+    bridge.onStopped(() => { stoppedWithDialog = document.getElementById("browser-unlock") !== null; });
+    try {
+      const pending = bridge.unlock_sync();
+      const input = document.getElementById("browser-unlock-passphrase") as HTMLInputElement;
+      input.value = "secret";
+      port.reply({ event: "stopped", reason: "fatal" });
+      await expect(pending).resolves.toBeUndefined();
+      expect(input.value).toBe("");
+      expect(document.getElementById("browser-unlock")).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+      expect(stoppedWithDialog).toBe(false);
+      expect(port.sent.filter(message => (message as { command?: string }).command === "unlock")).toEqual([]);
+    } finally {
+      trigger.remove();
+      restoreShowModal();
+    }
+  });
+
+  const stoppedCredentialCases: Array<[string, string, string[], (bridge: BrowserBridge) => Promise<unknown>]> = [
+    ["owner credentials", "browser-enrollment-owner", ["setupToken", "adminPassword", "adminPasswordConfirm"], (bridge: BrowserBridge) => bridge.enrollment_create_owner()],
+    ["owner setup-code correction", "browser-enrollment-owner-code", ["setupToken"], (bridge: BrowserBridge) => bridge.enrollment_create_owner()],
+    ["vault credentials", "browser-enrollment-vault", ["adminPassword", "adminPasswordConfirm"], (bridge: BrowserBridge) => bridge.enrollment_create_vault({ username: "vault" })],
+    ["vault password correction", "browser-enrollment-vault-password", ["adminPassword", "adminPasswordConfirm"], (bridge: BrowserBridge) => bridge.enrollment_create_vault({ username: "vault" })],
+    ["community sign-in", "browser-enrollment-signin", ["adminPassword"], (bridge: BrowserBridge) => bridge.enrollment_sign_in()],
+    ["shared-secret admission", "browser-enrollment-secret", ["passphrase"], (bridge: BrowserBridge) => bridge.enrollment_connect_shared_secret()],
+  ];
+
+  it.each(stoppedCredentialCases)("scrubs and cancels %s when the worker stops", async (_name, id, fields, begin) => {
+    const restoreShowModal = stubShowModal();
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const state = bridge as unknown as {
+      enrollmentMode: "community";
+      setupCodeRequired: boolean;
+      ownerClaimDraft?: { adminPassword: string; passphrase: string };
+      vaultClaimDraft?: { username: string; adminPassword: string; passphrase: string };
+    };
+    state.enrollmentMode = "community";
+    if (id === "browser-enrollment-owner-code") state.ownerClaimDraft = { adminPassword: "retained-owner-password", passphrase: "retained-owner-secret" };
+    if (id === "browser-enrollment-vault-password") state.vaultClaimDraft = { username: "vault", adminPassword: "", passphrase: "retained-vault-secret" };
+    const trigger = document.createElement("button");
+    document.body.append(trigger);
+    trigger.focus();
+    let draftsClearedBeforeStopped = false;
+    bridge.onStopped(() => { draftsClearedBeforeStopped = state.ownerClaimDraft === undefined && state.vaultClaimDraft === undefined; });
+    try {
+      const pending = begin(bridge);
+      const inputs = fields.map(name => document.getElementById(`${id}-${name}`) as HTMLInputElement);
+      inputs.forEach(input => { input.value = "secret"; });
+      port.reply({ event: "stopped", reason: "fatal" });
+
+      await expect(pending).rejects.toMatchObject({ code: "stopped" });
+      expect(inputs.map(input => input.value)).toEqual(fields.map(() => ""));
+      expect(document.getElementById(id)).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+      expect(draftsClearedBeforeStopped).toBe(true);
+      expect(port.sent).toEqual([]);
+    } finally {
+      trigger.remove();
+      restoreShowModal();
+    }
+  });
+
+  const generatedPhraseCases: Array<[string, string, (bridge: BrowserBridge) => Promise<unknown>]> = [
+    ["owner", "browser-enrollment-owner", (bridge: BrowserBridge) => bridge.enrollment_create_owner()],
+    ["vault", "browser-enrollment-vault", (bridge: BrowserBridge) => bridge.enrollment_create_vault({ username: "vault" })],
+  ];
+
+  it.each(generatedPhraseCases)("scrubs the generated phrase acknowledgement for %s before it can invoke the enrollment RPC", async (_name, formId, begin) => {
+    const restoreShowModal = stubShowModal();
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const state = bridge as unknown as { enrollmentMode: "community"; setupCodeRequired: boolean };
+    state.enrollmentMode = "community";
+    const trigger = document.createElement("button");
+    document.body.append(trigger);
+    trigger.focus();
+    try {
+      const pending = begin(bridge);
+      for (const field of ["setupToken", "adminPassword", "adminPasswordConfirm"]) {
+        const input = document.getElementById(`${formId}-${field}`) as HTMLInputElement | null;
+        if (input) input.value = field.includes("Password") ? "password-password" : "setup-token";
+      }
+      document.getElementById(`${formId}-form`)!.dispatchEvent(new Event("submit", { cancelable: true }));
+      await vi.waitFor(() => expect(port.sent).toContainEqual(expect.objectContaining({ command: "enrollment_generate_secret" })));
+      const generated = port.sent.find(message => (message as { command?: string }).command === "enrollment_generate_secret") as { id: number; command: string };
+      expect(generated.command).toBe("enrollment_generate_secret");
+      port.reply({ id: generated.id, ok: true, value: { passphrase: "generated phrase" } });
+      await vi.waitFor(() => expect(document.getElementById("browser-enrollment-owner-secret")).not.toBeNull());
+      const secret = document.getElementById("browser-enrollment-owner-secret-passphrase") as HTMLInputElement;
+      const acknowledgement = document.getElementById("browser-enrollment-owner-secret-acknowledged") as HTMLInputElement;
+      acknowledgement.checked = true;
+      acknowledgement.dispatchEvent(new Event("change"));
+      port.reply({ event: "stopped", reason: "fatal" });
+
+      await expect(pending).rejects.toMatchObject({ code: "stopped" });
+      expect(secret.value).toBe("");
+      expect(acknowledgement.checked).toBe(false);
+      expect(document.getElementById("browser-enrollment-owner-secret")).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+      expect(port.sent.filter(message => (message as { command?: string }).command === "enrollment_create_owner" || (message as { command?: string }).command === "enrollment_create_vault")).toEqual([]);
+    } finally {
+      trigger.remove();
+      restoreShowModal();
+    }
+  });
+
   it("flushes pending draft sync when the page hides or unloads, then removes lifecycle listeners", () => {
     const port = new TestPort();
     const bridge = new BrowserBridge(port as unknown as MessagePort);

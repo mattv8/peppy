@@ -8,6 +8,7 @@ export function renderUnsupportedPage(container: HTMLElement, reasons: string[])
   page.setAttribute("role", "main");
   page.setAttribute("aria-label", "Browser not supported");
   const section = document.createElement("section");
+  section.id = "browser-unsupported-content";
   const heading = document.createElement("h1");
   heading.id = "unsupported-heading";
   heading.tabIndex = -1;

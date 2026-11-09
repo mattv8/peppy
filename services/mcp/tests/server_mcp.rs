@@ -419,6 +419,7 @@ async fn run_owner_enrollment_smoke() {
             .unwrap(),
         incoming_image_bytes
     );
+    wait_for_retention_ready(&pool, vault, prepared.pairing.recipient.device.device_id).await;
     let conversations = public_mcp(
         &http,
         &server_origin,
@@ -667,6 +668,7 @@ async fn run_owner_enrollment_smoke() {
         &token_file,
     )
     .await;
+    wait_for_retention_ready(&pool, vault, prepared.pairing.recipient.device.device_id).await;
     let restarted_read = wait_for_public_messages(
         &http,
         &server_origin,
@@ -1165,6 +1167,27 @@ async fn assert_queued_command_total(pool: &sqlx::PgPool, vault: Uuid, expected:
         expected,
         "the fixture command total changed across retry or restart"
     );
+}
+
+async fn wait_for_retention_ready(pool: &sqlx::PgPool, vault: Uuid, device: Uuid) {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let readiness: Option<(bool, bool)> = sqlx::query_as(
+                "SELECT cleanup_ready,reconciliation_needed FROM attachment_retention_devices WHERE vault_id=$1 AND device_id=$2",
+            )
+            .bind(vault)
+            .bind(device)
+            .fetch_optional(pool)
+            .await
+            .unwrap();
+            if readiness == Some((true, false)) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("worker did not publish retention readiness");
 }
 
 async fn wait_for_public_messages(

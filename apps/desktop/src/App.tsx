@@ -1952,12 +1952,27 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   // Names of contacts picked from search, shown on chips until the next native snapshot
   // resolves the same addresses. Display only; recipient IDs stay phone addresses.
   const [chosenContacts, setChosenContacts] = useState<ContactResolutionMap>({});
+  const chosenContactsScope = useRef(snapshot?.sessionScopeId);
   const rememberContact = useCallback((suggestion: RecipientSuggestion) => {
+    if (snapshot?.contactResolution?.[suggestion.id]) return;
     setChosenContacts((current) => ({
       ...current,
       [suggestion.id]: { contactId: "", bookId: "", displayName: suggestion.label, photoDataUrl: suggestion.avatarUrl },
     }));
-  }, []);
+  }, [snapshot?.contactResolution]);
+  useEffect(() => {
+    if (chosenContactsScope.current !== snapshot?.sessionScopeId) {
+      chosenContactsScope.current = snapshot?.sessionScopeId;
+      setChosenContacts({});
+      return;
+    }
+    const resolved = snapshot?.contactResolution;
+    if (!resolved) return;
+    setChosenContacts((current) => {
+      const unresolved = Object.fromEntries(Object.entries(current).filter(([address]) => !resolved[address]));
+      return Object.keys(unresolved).length === Object.keys(current).length ? current : unresolved;
+    });
+  }, [snapshot?.contactResolution, snapshot?.sessionScopeId]);
   const [origin, setOrigin] = useState(() => browserHost ? fixedOrigin ?? "" : "");
   const [loading, setLoading] = useState(true);
   const [reenrolRequired, setReenrolRequired] = useState(false);
@@ -4462,7 +4477,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const resolution = useMemo<ContactResolutionMap>(() => ({ ...(snapshot?.contactResolution ?? {}), ...chosenContacts }), [snapshot?.contactResolution, chosenContacts]);
+  const resolution = useMemo<ContactResolutionMap>(() => ({ ...chosenContacts, ...(snapshot?.contactResolution ?? {}) }), [snapshot?.contactResolution, chosenContacts]);
   const conversationRows = useMemo<Conversation[]>(() => {
     const combined = [
       ...store.localDrafts().map((local) => {

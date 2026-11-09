@@ -2,7 +2,8 @@
 
 /**
  * UI-only native boundary. These DTOs intentionally contain no credentials,
- * cryptographic material, device tokens, or raw filesystem paths.
+ * cryptographic material, root or device keys, device tokens, or raw filesystem paths.
+ * Renderer-visible invitation and webhook secrets are explicit, narrowly scoped exceptions.
  */
 import type {
   ConnectionState,
@@ -162,6 +163,7 @@ export {
   type TypingSignal,
 } from "@peppy/desktop-ui/bridge-contracts";
 
+/** Extends the sanitized enrollment DTO; the QR payload may intentionally render an invitation secret, never root/private keys or device credentials. */
 export type EnrollmentView = SharedEnrollmentView & { computerClaimant?: ComputerClaimantView };
 export type DesktopBridge = Omit<SharedDesktopBridge, "enrollment_discover"> & { enrollment_discover(origin?: string): Promise<EnrollmentView> };
 

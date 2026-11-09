@@ -17,21 +17,29 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import java.util.concurrent.atomic.AtomicBoolean
 import uniffi.peppy_mobile_bindings.NativeClient
+import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.NativePermitState
 
 
 /** Records carrier calls; can be told to throw like SmsManager does. */
-class FakeCarrier(private val partSize: Int = 10, var failure: RuntimeException? = null) : SmsCarrier {
+class FakeCarrier(
+    private val partSize: Int = 10,
+    var failure: RuntimeException? = null,
+    var onDivide: (() -> Unit)? = null,
+    var onSend: (() -> Unit)? = null,
+) : SmsCarrier {
     data class Call(val subscriptionId: Int, val destination: String, val parts: List<String>, val sent: List<PendingIntent>, val delivered: List<PendingIntent>)
 
     val calls = mutableListOf<Call>()
 
-    override fun divide(subscriptionId: Int, body: String) = body.chunked(partSize)
+    override fun divide(subscriptionId: Int, body: String) = body.chunked(partSize).also { onDivide?.invoke() }
 
     override fun send(subscriptionId: Int, destination: String, parts: List<String>, sent: List<PendingIntent>, delivered: List<PendingIntent>) {
         failure?.let { throw it }
         calls += Call(subscriptionId, destination, parts, sent, delivered)
+        onSend?.invoke()
     }
 }
 
@@ -122,6 +130,82 @@ class SmsDispatcherTest : GatewayTestBase() {
         assertTrue(carrier.calls.isEmpty())
         assertEquals(1, summary.refusedBeforeCarrier)
         assertEquals("FailedBeforeSubmission", permitState(client, tooLong).existingSendState)
+    }
+
+    @Test
+    fun stoppedDuringAttachmentLookupDoesNotIssueAnInvalidShapeRefusalPermit() {
+        val client = enrollAndUnlock()
+        val command = queueCommand(client, route, "valid core command")
+        val stopped = AtomicBoolean(false)
+        val stoppingClient = object : NativeClientInterface by client {
+            override fun pendingCommands() = client.pendingCommands().map { pending ->
+                if (pending.commandId == command) {
+                    pending.copy(message = pending.message.copy(recipients = emptyList()))
+                } else {
+                    pending
+                }
+            }
+
+            override fun pendingCommandAttachmentCount(commandId: String): ULong {
+                stopped.set(true)
+                return client.pendingCommandAttachmentCount(commandId)
+            }
+        }
+        val carrier = FakeCarrier()
+
+        SmsDispatcher(context, stoppingClient, carrier, routes, true, mayIssueEffect = { !stopped.get() }).dispatch()
+
+        assertEquals(listOf(command), client.pendingCommands().map { it.commandId })
+        assertTrue(carrier.calls.isEmpty())
+    }
+
+    @Test
+    fun routeChangeDuringDivisionDoesNotIssuePermitOrReroute() {
+        val client = enrollAndUnlock()
+        val command = queueCommand(client, route, "hello")
+        var current = routes
+        val carrier = FakeCarrier(onDivide = { current = SimRoutes.current(defaultSmsSubscriptionId = 4) })
+
+        SmsDispatcher(context, client, carrier, routes, true, currentRoutes = { current }).dispatch()
+
+        assertTrue(client.pendingCommands().any { it.commandId == command })
+        assertTrue(carrier.calls.isEmpty())
+    }
+
+    @Test
+    fun routeChangeBeforeTooManyPartsRefusalLeavesTheCommandPending() {
+        val client = enrollAndUnlock()
+        val command = queueCommand(client, route, "x".repeat(256))
+        var current = routes
+        val carrier = FakeCarrier(partSize = 1, onDivide = { current = SimRoutes.current(defaultSmsSubscriptionId = 4) })
+
+        SmsDispatcher(context, client, carrier, routes, true, currentRoutes = { current }).dispatch()
+
+        assertTrue(client.pendingCommands().any { it.commandId == command })
+        assertTrue(carrier.calls.isEmpty())
+    }
+
+    @Test
+    fun stopAfterFirstCarrierSubmissionPreventsASecondPermit() {
+        val client = enrollAndUnlock()
+        val firstRecipient = nextTestRecipient()
+        val secondRecipient = nextTestRecipient()
+        val commandsByRecipient = mapOf(
+            firstRecipient to queueCommand(client, route, "first", listOf(firstRecipient)),
+            secondRecipient to queueCommand(client, route, "second", listOf(secondRecipient)),
+        )
+        val stopped = AtomicBoolean(false)
+        val carrier = FakeCarrier(onSend = { stopped.set(true) })
+
+        val summary = SmsDispatcher(context, client, carrier, routes, true, mayIssueEffect = { !stopped.get() }).dispatch()
+
+        assertEquals(1, summary.submitted)
+        val submittedCommand = commandsByRecipient.getValue(carrier.calls.single().destination)
+        assertEquals("SubmittedToOs", permitState(client, submittedCommand).existingSendState)
+        assertEquals(
+            commandsByRecipient.values.toSet() - submittedCommand,
+            client.pendingCommands().map { it.commandId }.toSet(),
+        )
     }
 
     @Test

@@ -81,7 +81,7 @@ export function StorePlanOptions({ purchaseOptions, products, state, copy, subsc
       }
     } catch (error) {
       const code = storeErrorCode(error);
-      if (code === "store-conflict") setConflict(true);
+      if (code === "store-conflict") { setPurchaseStatus("idle"); setConflict(true); }
       else setPurchaseStatus(code === "store-rejected" ? "rejected" : code === "store-unavailable" ? "unavailable" : "error");
       returnFocus();
     }

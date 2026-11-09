@@ -49,12 +49,13 @@ internal class AdbRestrictedSetupTransport(
 
     override fun close() = synchronized(this) {
         if (closed) return
-        closed = true
-        manager?.cancelPairing()
-        runCatching { manager?.close() }
+        val activeManager = manager ?: return
+        activeManager.cancelPairing()
+        activeManager.close()
         manager = null
         identity?.destroy()
         identity = null
+        closed = true
     }
 
     private fun runFixedShellCommand(command: FixedShellCommand, tolerateEofAfterWrite: Boolean) {
@@ -118,7 +119,6 @@ internal class AdbRestrictedSetupTransport(
             }
         }
         override fun cancelPairing() {
-            super.cancelPairing()
             val pairing = synchronized(pairingLock) {
                 pairingCancelled = true
                 livePairing

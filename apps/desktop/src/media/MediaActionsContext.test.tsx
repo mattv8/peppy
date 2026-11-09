@@ -96,12 +96,17 @@ describe("MediaActionsProvider", () => {
   it("moves feedback into an open dialog at announce time", async () => {
     const props = defaults();
     props.onSave.mockResolvedValue("pending");
-    renderActions(props);
+    const view = renderActions(props);
     const dialog = document.createElement("dialog");
     dialog.setAttribute("open", "");
     document.body.append(dialog);
-    fireEvent.click(screen.getByText("save"));
-    await waitFor(() => expect(dialog.querySelector("#media-action-status")).toHaveTextContent("Downloading Photo"));
+    try {
+      fireEvent.click(screen.getByText("save"));
+      await waitFor(() => expect(dialog.querySelector("#media-action-status")).toHaveTextContent("Downloading Photo"));
+    } finally {
+      view.unmount();
+      dialog.remove();
+    }
   });
 
   it("releases media when copy image loading fails", async () => {

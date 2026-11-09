@@ -379,6 +379,7 @@ struct NativeContactsCoordinator {
         }
         let existing = selected.book
         let access = try await provider.access()
+        guard !isCancelled() else { return ContactsSyncReport(outcome: .partial) }
         let bookId = selected.id
         let generation = existing?.generation ?? "1"
         var report = ContactsSyncReport(outcome: .partial)
@@ -392,7 +393,9 @@ struct NativeContactsCoordinator {
             report.outcome = .noAccess
             return report
         }
-        let book = bookBody(id: bookId, generation: generation, access: access, containers: try await provider.containers())
+        let containers = try await provider.containers()
+        guard !isCancelled() else { return report }
+        let book = bookBody(id: bookId, generation: generation, access: access, containers: containers)
         // Book state is republished by the core only when it changed (or on its heartbeat).
         _ = try capture(book: book, entries: [])
         if access == .limited { try reportPendingScanBlocked(bookId: bookId, reason: "limited_access") }
@@ -441,9 +444,11 @@ struct NativeContactsCoordinator {
             guard !isCancelled() else { return true }
             // A changed contact that is no longer readable (deleted, moved out of grant) needs the full scan.
             guard let contact = try await provider.contact(id: id) else { return false }
+            guard !isCancelled() else { return true }
             contacts.append(contact)
         }
         guard try await provider.access() == .full else { return false }
+        guard !isCancelled() else { return true }
         let accepted = try captureRepresentable(book: book, contacts: contacts, report: &report)
         checkpoint.addPhotoKeys(accepted)
         guard accepted.count == contacts.count else {
@@ -462,6 +467,7 @@ struct NativeContactsCoordinator {
     ) async throws {
         let tokenBefore = await provider.historyToken()
         let accessBefore = try await provider.access()
+        guard !isCancelled() else { return }
         if checkpoint.scanId != nil && (accessBefore != .full || checkpoint.scanHistoryToken != tokenBefore) {
             try abandonScan(&checkpoint)
             try writeCheckpoint(bookId, checkpoint)
@@ -470,8 +476,10 @@ struct NativeContactsCoordinator {
         let input: ContactsPassInput
         if accessBefore == .full {
             let fetched = try await provider.fetchPage(after: checkpoint.scanCursor, limit: Self.batchSize, isCancelled: isCancelled)
+            guard !isCancelled() else { return }
             page = fetched
             let accessAfter = try await provider.access()
+            guard !isCancelled() else { return }
             input = ContactsPassInput(
                 reason: reason, access: accessAfter, contacts: fetched.contacts, containers: [],
                 cancelled: isCancelled(), limitExceeded: fetched.limitExceeded,
@@ -480,6 +488,7 @@ struct NativeContactsCoordinator {
         } else {
             page = nil
             input = try await ContactsPass(provider: provider).capture(reason: reason, isCancelled: isCancelled)
+            guard !isCancelled() else { return }
         }
         report.access = input.access
         report.limitExceeded = input.limitExceeded
@@ -552,7 +561,9 @@ struct NativeContactsCoordinator {
                 checkpoint.sweepOffset = 0
             }
         } else {
-            let limitedBook = bookBody(id: bookId, generation: generation, access: input.access, containers: try await provider.containers())
+            let containers = try await provider.containers()
+            guard !isCancelled() else { return }
+            let limitedBook = bookBody(id: bookId, generation: generation, access: input.access, containers: containers)
             var start = 0
             while start < input.contacts.count {
                 if isCancelled() { break }
@@ -607,7 +618,7 @@ struct NativeContactsCoordinator {
         do {
             while consumed < checkpoint.pendingPhotoKeys.count, reads < budget.reads, !isCancelled() {
                 let key = checkpoint.pendingPhotoKeys[consumed]
-                try await checkPhoto(sourceKey: key, core: nil, book: book, bookId: bookId, reads: &reads, report: &report)
+                guard try await checkPhoto(sourceKey: key, core: nil, book: book, bookId: bookId, reads: &reads, report: &report, isCancelled: isCancelled) else { break }
                 consumed += 1
                 if examined % 20 == 0 {
                     checkpoint.pendingPhotoKeys.removeFirst(consumed)
@@ -634,8 +645,8 @@ struct NativeContactsCoordinator {
                 guard reads < budget.reads, examined < budget.sweep, !isCancelled() else { break }
                 if let contactId = item["id"] as? String,
                    let context = try? sourceContext(bookId: bookId, contactId: contactId) {
-                    try await checkPhoto(sourceKey: context.sourceKey, core: context, book: book, bookId: bookId,
-                                         reads: &reads, report: &report)
+                    guard try await checkPhoto(sourceKey: context.sourceKey, core: context, book: book, bookId: bookId,
+                                               reads: &reads, report: &report, isCancelled: isCancelled) else { break }
                 }
                 checkpoint.sweepOffset += 1
                 examined += 1
@@ -648,16 +659,18 @@ struct NativeContactsCoordinator {
     /// `null` photo is sent only when the OS confirms the contact has none.
     func checkPhoto(
         sourceKey: String, core: SourceContext?, book: [String: Any], bookId: String, reads: inout Int,
-        report: inout ContactsSyncReport
-    ) async throws {
-        guard let contact = try await provider.contact(id: sourceKey) else { return }
+        report: inout ContactsSyncReport, isCancelled: @escaping @Sendable () -> Bool
+    ) async throws -> Bool {
+        let contact = try await provider.contact(id: sourceKey)
+        guard !isCancelled() else { return false }
+        guard let contact else { return true }
         let context: SourceContext
         if let core {
             context = core
         } else if let found = try? sourceContext(bookId: bookId, sourceKey: sourceKey) {
             context = found
         } else {
-            return
+            return true
         }
         let storedHash = context.provenance["photo_source_hash"] as? String
         let corePhoto = context.observed["photo"] != nil && !(context.observed["photo"] is NSNull)
@@ -665,10 +678,11 @@ struct NativeContactsCoordinator {
         if contact.hasImage {
             reads += 1
             observed = try await provider.photo(id: sourceKey, thumbnail: false)
+            guard !isCancelled() else { return false }
         }
         switch observed {
         case .none:
-            guard corePhoto || storedHash != nil else { return }
+            guard corePhoto || storedHash != nil else { return true }
             do {
                 _ = try capture(book: book, entries: [Self.entry(contact, photo: .remove, hash: nil)])
                 report.photosRemoved += 1
@@ -679,8 +693,8 @@ struct NativeContactsCoordinator {
             report.photoFailures += 1
         case let .data(data):
             let hash = ContactPhotoSource.sourceHash(data)
-            if hash == storedHash && corePhoto { return }
-            guard let attachmentId = prepare(data) else { report.photoFailures += 1; return }
+            if hash == storedHash && corePhoto { return true }
+            guard let attachmentId = prepare(data) else { report.photoFailures += 1; return true }
             do {
                 _ = try capture(book: book, entries: [Self.entry(contact, photo: .set(attachmentId), hash: hash)])
                 report.photosCaptured += 1
@@ -689,6 +703,7 @@ struct NativeContactsCoordinator {
                 report.photoFailures += 1
             }
         }
+        return true
     }
 
     /// OS bytes → core normalizer (bounded, encrypted, tracked). Nil when the image is unusable.
@@ -941,6 +956,7 @@ struct NativeContactsCoordinator {
                 guard let media, !checkpoint.isDead(attachment, now: now) else { report.waitingMedia += 1; continue }
                 let gone = try await media.transfer.download(only: [attachment], meter: &media.meter, report: &media.report)
                 if gone.contains(attachment) { checkpoint.deadDownloads[attachment] = now }
+                guard !isCancelled() else { return }
                 permit = try call(client.nextContactApplyPermit, ["schema_version": 1, "request_id": id])
             }
             switch permit["status"] as? String {
@@ -1047,6 +1063,7 @@ struct NativeContactsCoordinator {
                 let contact = ContactsCoreMapping.platform(fields, id: "", knownItemIds: [:])
                 // Pre-write evidence lets an interrupted create be settled later without a retry.
                 if access == .full, let before = try? await createMatches(request, verifyPhoto: false, isCancelled: isCancelled), before.complete, before.contacts.count <= 200 {
+                    guard !isCancelled() else { return .failed("canceled") }
                     // Best effort: without evidence an interrupted create simply stays outcome-unknown.
                     _ = try? call(client.contactApplyEvidenceJson, [
                         "schema_version": 1, "request_id": requestId, "before_source_ids": before.contacts.map(\.id),
@@ -1060,6 +1077,7 @@ struct NativeContactsCoordinator {
                 let context = try sourceContext(bookId: bookId, contactId: contactId)
                 sourceKey = context.sourceKey
                 guard let fresh = try await provider.contact(id: context.sourceKey) else { return .failed(access == .limited ? "out_of_grant" : "not_found") }
+                guard !isCancelled() else { return .failed("canceled") }
                 guard currentMatches(fresh, current: current, context: context) else {
                     _ = try? capture(book: book, entries: [Self.textEntry(fresh)])
                     return .failed("stale_item")
@@ -1067,7 +1085,7 @@ struct NativeContactsCoordinator {
                 if photoOp != nil, !(await photoMatches(fresh, current: current, context: context)) {
                     var reads = 0
                     var report = ContactsSyncReport(outcome: .partial)
-                    if !isCancelled() { try? await checkPhoto(sourceKey: context.sourceKey, core: context, book: book, bookId: bookId, reads: &reads, report: &report) }
+                    if !isCancelled() { _ = try? await checkPhoto(sourceKey: context.sourceKey, core: context, book: book, bookId: bookId, reads: &reads, report: &report, isCancelled: isCancelled) }
                     return .failed("stale_item")
                 }
                 let desired = try ContactsCoreMapping.applying(
@@ -1083,6 +1101,7 @@ struct NativeContactsCoordinator {
                 guard let contactId = request["contact_id"] as? String else { return .failed("invalid_request") }
                 let context = try sourceContext(bookId: bookId, contactId: contactId)
                 guard let fresh = try await provider.contact(id: context.sourceKey) else { return .failed(access == .limited ? "out_of_grant" : "not_found") }
+                guard !isCancelled() else { return .failed("canceled") }
                 guard currentMatches(fresh, current: current, context: context) else {
                     _ = try? capture(book: book, entries: [Self.textEntry(fresh)])
                     return .failed("stale_item")

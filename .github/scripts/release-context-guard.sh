@@ -12,6 +12,12 @@ set -euo pipefail
   exit 1
 }
 
+actual_sha=$(git rev-parse HEAD)
+[[ "$actual_sha" = "$GITHUB_SHA" ]] || {
+  echo 'checked-out release SHA must equal the triggering SHA' >&2
+  exit 1
+}
+
 case "$GITHUB_EVENT_NAME:$GITHUB_REF:$CHANNEL" in
   workflow_dispatch:refs/heads/production:stable|push:refs/heads/production:stable|push:refs/heads/staging:staging) ;;
   *)
