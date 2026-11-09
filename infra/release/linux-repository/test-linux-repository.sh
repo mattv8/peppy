@@ -55,7 +55,7 @@ printf '%s\n' "$*" >> "$PEPPY_TEST_SYSTEMCTL_LOG"
 EOF
 chmod +x "$root/bin"/{id,curl,gpg,install,systemctl}
 reset_setup_root() {
-  rm -rf "$root/etc" "$root/systemctl.log" "$root/dangling-target"
+  rm -rf "${root:?}/etc" "${root:?}/systemctl.log" "${root:?}/dangling-target"
   mkdir -p "$root/etc/apt/keyrings" "$root/etc/apt/sources.list.d" "$root/etc/apt/preferences.d" "$root/etc/pki/rpm-gpg" "$root/etc/yum.repos.d" "$root/etc/systemd/system"
 }
 run_setup() {

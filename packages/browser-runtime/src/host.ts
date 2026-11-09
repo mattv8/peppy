@@ -1,4 +1,4 @@
-import { IndexedDbCheckpointStore } from "./checkpoint.js";
+import { CheckpointError, IndexedDbCheckpointStore } from "./checkpoint.js";
 import { BrowserCore, CoreRejectedError, type CoreResult, type EmscriptenCoreModule } from "./core.js";
 import { type EmscriptenFilesystem } from "./filesystem.js";
 import { acquireWorkerOwner, type OwnerLockManager, type WorkerOwner } from "./owner.js";

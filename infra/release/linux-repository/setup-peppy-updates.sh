@@ -10,7 +10,14 @@ url_authority() { printf '%s\n' "${1#https://}" | sed 's#/.*##'; }
 url_hostname() { url_authority "$1" | sed 's/:[0-9][0-9]*$//'; }
 write_file() {
   local path=$1 content=$2
-  if "$dry_run"; then printf '+ write %s\n%s\n' "$path" "$content"; else [ ! -e "$path" ] && [ ! -L "$path" ] || fail "refusing to replace existing $path"; printf '%s\n' "$content" > "$path"; fi
+  if "$dry_run"; then
+    printf '+ write %s\n%s\n' "$path" "$content"
+  else
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      fail "refusing to replace existing $path"
+    fi
+    printf '%s\n' "$content" > "$path"
+  fi
 }
 
 distro=''; repo_url=''; key_url=''; fingerprint=''; channel=''; dry_run=false
@@ -37,7 +44,9 @@ fi
 if [ "$distro" = debian ]; then
   if ! "$dry_run"; then
     for destination in /etc/apt/keyrings/peppy.asc /etc/apt/sources.list.d/peppy.list /etc/apt/preferences.d/peppy /etc/systemd/system/peppy-update.service /etc/systemd/system/peppy-update.timer; do
-      [ ! -e "$destination" ] && [ ! -L "$destination" ] || fail "refusing to replace existing $destination"
+      if [ -e "$destination" ] || [ -L "$destination" ]; then
+        fail "refusing to replace existing $destination"
+      fi
     done
   fi
   if "$dry_run"; then printf '+ install -d -m 0755 /etc/apt/keyrings\n'; else install -d -m 0755 /etc/apt/keyrings; fi
@@ -61,7 +70,9 @@ ExecStart=/usr/bin/apt-get install --only-upgrade --yes peppy'
 else
   if ! "$dry_run"; then
     for destination in /etc/pki/rpm-gpg/RPM-GPG-KEY-peppy /etc/yum.repos.d/peppy.repo /etc/systemd/system/peppy-update.service /etc/systemd/system/peppy-update.timer; do
-      [ ! -e "$destination" ] && [ ! -L "$destination" ] || fail "refusing to replace existing $destination"
+      if [ -e "$destination" ] || [ -L "$destination" ]; then
+        fail "refusing to replace existing $destination"
+      fi
     done
   fi
   if "$dry_run"; then printf '+ install -d -m 0755 /etc/pki/rpm-gpg\n'; else install -d -m 0755 /etc/pki/rpm-gpg; fi
