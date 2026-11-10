@@ -230,11 +230,11 @@ val sourceDiffSha256 = validatedMetadata(providers.gradleProperty("peppySourceDi
 // fails the test immediately. Each needs its own configuration, or Gradle keeps only the newest.
 val robolectricDependencyDirectory = layout.buildDirectory.dir("robolectric-dependencies")
 val robolectricDependencies = listOf(
-    "org.robolectric:android-all-instrumented:8.0.0_r4-robolectric-r1-i7",
-    "org.robolectric:android-all-instrumented:11-robolectric-6757853-i7",
-    "org.robolectric:android-all-instrumented:12-robolectric-7732740-i7",
-    "org.robolectric:android-all-instrumented:14-robolectric-10818077-i7",
-    "org.robolectric:android-all-instrumented:15-robolectric-13954326-i7",
+    "org.robolectric:android-all-instrumented:17-robolectric-16653203-i7",
+    "org.robolectric:android-all-instrumented:17-robolectric-16653203-i7",
+    "org.robolectric:android-all-instrumented:17-robolectric-16653203-i7",
+    "org.robolectric:android-all-instrumented:17-robolectric-16653203-i7",
+    "org.robolectric:android-all-instrumented:17-robolectric-16653203-i7",
 ).mapIndexed { index, coordinate ->
     configurations.create("robolectricDependency$index").also { configuration ->
         dependencies.add(configuration.name, coordinate)
