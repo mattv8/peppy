@@ -56,8 +56,14 @@ function useViewerTitle() {
 function MediaViewerShell({ state, close, retry }: { state: ViewerState; close: () => void; retry?: () => void }) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const retryRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => { (state === "error" ? retryRef.current ?? closeRef.current : closeRef.current)?.focus(); }, [state]);
-  const content = state === "loading" ? <div data-lightbox-loading role="status"><Loader2 className="lightbox-spinner" size={28} aria-hidden="true" /><span className="visually-hidden">Loading media</span></div> : state === "error" ? <div data-lightbox-failure role="alert"><ImageOff size={28} aria-hidden="true" /><span>Couldn&apos;t open this media</span>{retry && <button ref={retryRef} id="lightbox-retry-btn" type="button" onClick={retry}><RotateCw size={14} aria-hidden="true" />Retry</button>}</div> : <p role="status">This media is no longer available.</p>;
+  useEffect(() => {
+    (state === "error" ? retryRef.current ?? closeRef.current : closeRef.current)?.focus();
+  }, [state]);
+  const content = state === "loading"
+    ? <div data-lightbox-loading role="status"><Loader2 className="lightbox-spinner" size={28} aria-hidden="true" /><span className="visually-hidden">Loading media</span></div>
+    : state === "error"
+      ? <div data-lightbox-failure role="alert"><ImageOff size={28} aria-hidden="true" /><span>Couldn&apos;t open this media</span>{retry && <button ref={retryRef} id="lightbox-retry-btn" type="button" onClick={retry}><RotateCw size={14} aria-hidden="true" />Retry</button>}</div>
+      : <p role="status">This media is no longer available.</p>;
   return <main
     id="media-viewer-window"
     data-lightbox
@@ -122,6 +128,20 @@ export function MediaViewerWindow({ conversationId, attachmentId, messageId, clo
     retryKey={retryKey}
     hasPreviousPage={Boolean(cache.current.newerCursor)}
     hasNextPage={Boolean(cache.current.olderCursor)}
-    loadAdjacentPage={async direction => { const cursor = direction === "previous" ? cache.current.newerCursor : cache.current.olderCursor; if (!cursor) return undefined; const page = direction === "previous" ? await bridge.media_page_newer(conversationId, cursor as never, PAGE_SIZE) : await bridge.media_page(conversationId, cursor as never, PAGE_SIZE); const pageItems = unique(page.items.map(toItem)).filter(item => !cache.current.items.some(known => known.message.id === item.message.id && known.attachment.id === item.attachment.id)); const ordered = direction === "previous" ? pageItems.reverse() : pageItems; cache.current.items = direction === "previous" ? [...ordered, ...cache.current.items] : [...cache.current.items, ...ordered]; if (direction === "previous") cache.current.newerCursor = page.nextCursor; else cache.current.olderCursor = page.nextCursor; return { items: ordered, hasNextPage: Boolean(page.nextCursor), cursor: page.nextCursor }; }}
+    loadAdjacentPage={async direction => {
+      const cursor = direction === "previous"
+        ? cache.current.newerCursor
+        : cache.current.olderCursor;
+      if (!cursor) return undefined;
+      const page = direction === "previous"
+        ? await bridge.media_page_newer(conversationId, cursor as never, PAGE_SIZE)
+        : await bridge.media_page(conversationId, cursor as never, PAGE_SIZE);
+      const pageItems = unique(page.items.map(toItem)).filter(item => !cache.current.items.some(known => known.message.id === item.message.id && known.attachment.id === item.attachment.id));
+      const ordered = direction === "previous" ? pageItems.reverse() : pageItems;
+      cache.current.items = direction === "previous" ? [...ordered, ...cache.current.items] : [...cache.current.items, ...ordered];
+      if (direction === "previous") cache.current.newerCursor = page.nextCursor;
+      else cache.current.olderCursor = page.nextCursor;
+      return { items: ordered, hasNextPage: Boolean(page.nextCursor), cursor: page.nextCursor };
+    }}
   /> </MediaActionsProvider>;
 }
