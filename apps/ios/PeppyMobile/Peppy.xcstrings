@@ -4381,16 +4381,6 @@
         }
       }
     },
-    "peppy.google_messages_link_status_label": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Status"
-          }
-        }
-      }
-    },
     "peppy.google_messages_link_status_unlinked": {
       "localizations": {
         "en": {
@@ -4501,16 +4491,6 @@
         }
       }
     },
-    "peppy.google_messages_link_connection_label": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Connection"
-          }
-        }
-      }
-    },
     "peppy.google_messages_link_connection_connected": {
       "localizations": {
         "en": {
@@ -4616,7 +4596,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Last answer from Google Messages"
+            "value": "Last answer"
           }
         }
       }

@@ -19,15 +19,19 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -178,12 +182,32 @@ class GoogleMessagesLinkPanelTest {
     }
 
     @Test fun `linked details present health, typing, battery and unlink actions`() = panel("linked", PanelSurface.Details) {
-        compose.onNodeWithTag("google-messages-link-connection").fetchSemanticsNode()
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        compose.onNodeWithTag("google-messages-link-status").fetchSemanticsNode()
+        compose.onNodeWithTag("google-messages-link-chip").fetchSemanticsNode()
+        check(compose.onAllNodesWithText(context.getString(R.string.peppy_google_messages_link_connection_connected)).fetchSemanticsNodes().isEmpty())
         compose.onNodeWithTag("google-messages-link-check-now").fetchSemanticsNode()
         compose.onNodeWithTag("google-messages-link-unlink").fetchSemanticsNode()
         compose.onNodeWithTag("google-messages-link-battery-row").fetchSemanticsNode()
         compose.onNodeWithTag("google-messages-link-typing-row").fetchSemanticsNode()
     }
+
+    @Test fun `healthy card shows the last answer and no connection row`() = panel("linked") {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        compose.onNodeWithTag("google-messages-link-last-ok").fetchSemanticsNode()
+        compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_last_ok_label)).fetchSemanticsNode()
+        check(compose.onAllNodesWithTag("google-messages-link-connection").fetchSemanticsNodes().isEmpty())
+        check(compose.onAllNodesWithText(context.getString(R.string.peppy_google_messages_link_connection_connected)).fetchSemanticsNodes().isEmpty())
+    }
+
+    @Test fun `degraded card with the link not running keeps help, last answer, reconnect and manage`() =
+        degradedCard(FakeHandle("linked").apply { running = false }, R.string.peppy_google_messages_link_help_not_running, "google-messages-link-reconnect")
+
+    @Test fun `degraded card with the phone not responding keeps help, last answer, check now and manage`() =
+        degradedCard(FakeHandle("linked").apply { phoneResponding = false }, R.string.peppy_google_messages_link_help_phone_not_responding, "google-messages-link-check-now")
+
+    @Test fun `degraded card with an unconfirmed link keeps help, last answer, check now and manage`() =
+        degradedCard(FakeHandle("linked").apply { healthy = false }, R.string.peppy_google_messages_link_help_unconfirmed, "google-messages-link-check-now")
 
     @Test fun `linked not running card offers reconnect and manage`() {
         showPanel(FakePanelHost(FakeHandle("linked").apply { running = false }), readinessTag = "google-messages-link-chip")
@@ -1056,6 +1080,83 @@ class GoogleMessagesLinkPanelTest {
         check(compose.onAllNodesWithTag("google-messages-link-emoji", useUnmergedTree = false).fetchSemanticsNodes().isEmpty())
     }
 
+    @Test fun `narrow large-text card keeps re-link and manage reachable`() {
+        showNarrowLargeTextCard(FakePanelHost(FakeHandle("needs_relink")))
+        assertReachable("google-messages-link-relink")
+        assertReachable("google-messages-link-manage")
+    }
+
+    @Test fun `narrow large-text card keeps sign in again and manage reachable`() {
+        showNarrowLargeTextCard(FakePanelHost(FakeHandle("signed_out")))
+        assertReachable("google-messages-link-sign-in-again")
+        assertReachable("google-messages-link-manage")
+    }
+
+    @Test fun `narrow large-text card keeps reconnect and manage reachable`() {
+        showNarrowLargeTextCard(FakePanelHost(FakeHandle("linked").apply { running = false }))
+        assertReachable("google-messages-link-reconnect")
+        assertReachable("google-messages-link-manage")
+    }
+
+    @Test fun `action row sits side by side at normal text in a wide enough card`() {
+        showNarrowLargeTextCard(FakePanelHost(FakeHandle("needs_relink")), fontScale = 1f, containerWidth = 360.dp)
+        assertEquals(boundsTop("google-messages-link-relink"), boundsTop("google-messages-link-manage"))
+    }
+
+    @Test fun `action row stacks at normal text when the card is under 260 dp wide`() {
+        showNarrowLargeTextCard(FakePanelHost(FakeHandle("needs_relink")), fontScale = 1f, containerWidth = 280.dp)
+        assertTrue(boundsTop("google-messages-link-manage") > boundsTop("google-messages-link-relink"))
+    }
+
+    @Test fun `notice dismiss stays reachable and dismisses at large text`() {
+        showNarrowLargeTextCard(FakePanelHost(FakeHandle("linked")), notice = "unlinked_done")
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notice-dismiss").fetchSemanticsNodes().isNotEmpty() }
+        assertReachable("google-messages-link-notice-dismiss")
+        compose.onNodeWithTag("google-messages-link-notice-dismiss").performClick()
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isEmpty() }
+    }
+
+    @Test fun `details needs re-link status line shows the chip without a last answer`() = panel("needs_relink", PanelSurface.Details) {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        compose.onNodeWithTag("google-messages-link-status").fetchSemanticsNode()
+        compose.onNodeWithTag("google-messages-link-chip").fetchSemanticsNode()
+        compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_status_needs_relink)).fetchSemanticsNode()
+        check(compose.onAllNodesWithTag("google-messages-link-last-ok").fetchSemanticsNodes().isEmpty())
+    }
+
+    /** Degraded linked card: the help line, last answer, the primary action and Manage are all present. */
+    private fun degradedCard(handle: FakeHandle, helpText: Int, primaryTag: String) {
+        showPanel(FakePanelHost(handle), readinessTag = "google-messages-link-chip")
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        compose.onNodeWithText(context.getString(helpText)).fetchSemanticsNode()
+        compose.onNodeWithTag("google-messages-link-last-ok").fetchSemanticsNode()
+        compose.onNodeWithTag(primaryTag).fetchSemanticsNode()
+        compose.onNodeWithTag("google-messages-link-manage").fetchSemanticsNode()
+    }
+
+    /** Renders the card in a narrow container. The defaults are 2x font scale in 280 dp, the narrowest width the card supports. */
+    private fun showNarrowLargeTextCard(host: FakePanelHost, notice: String? = null, fontScale: Float = 2f, containerWidth: Dp = 280.dp) {
+        GoogleMessagesLinkTestHooks.available = true
+        compose.setContent {
+            val density = LocalDensity.current
+            CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale)) {
+                PeppyTheme {
+                    Column(Modifier.width(containerWidth).height(480.dp).verticalScroll(rememberScrollState())) {
+                        GoogleMessagesLinkPanel(host, onChanged = {}, onManage = {}, notice = notice)
+                    }
+                }
+            }
+        }
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-chip").fetchSemanticsNodes().isNotEmpty() }
+    }
+
+    private fun boundsTop(tag: String) = compose.onNodeWithTag(tag).getBoundsInRoot().top
+
+    /** Scrolls to a control in the narrow container and checks it is still a full touch target. */
+    private fun assertReachable(tag: String) {
+        compose.onNodeWithTag(tag).performScrollTo().assertIsDisplayed().assertHeightIsAtLeast(48.dp)
+    }
+
     private fun resumedOwner(): LifecycleOwner = object : LifecycleOwner {
         override val lifecycle = LifecycleRegistry(this).apply { currentState = Lifecycle.State.RESUMED }
     }
@@ -1122,6 +1223,8 @@ class GoogleMessagesLinkPanelTest {
 
     private open class FakeHandle(var state: String) : LinkHandle {
         var running = true
+        var phoneResponding = true
+        var healthy = true
         var stopCode = ""
         var relinkCalls = 0
         var unlinkCalls = 0
@@ -1135,7 +1238,7 @@ class GoogleMessagesLinkPanelTest {
         override fun unlink() { unlinkCalls++; unlinkAction() }
         override fun stop() = Unit
         override fun close() = Unit
-        override fun status() = statusJson(state, running, stopCode)
+        override fun status() = statusJson(state, running, stopCode, phoneResponding, healthy)
     }
 
     private class FakePanelHost(
@@ -1258,8 +1361,8 @@ class GoogleMessagesLinkPanelTest {
         const val UNLINKED_JSON = """{"seq":1,"state":"unlinked","running":false,"healthy":false,"phone_responding":false,"last_ok_ms":0,"stop_code":""}"""
         const val PAIRING_JSON = """{"seq":1,"state":"pairing","running":false,"healthy":false,"phone_responding":false,"last_ok_ms":0,"stop_code":""}"""
 
-        fun statusJson(state: String, running: Boolean = true, stopCode: String = "") =
-            """{"seq":1,"state":"$state","running":$running,"healthy":true,"phone_responding":true,"last_ok_ms":0,"stop_code":"$stopCode"}"""
+        fun statusJson(state: String, running: Boolean = true, stopCode: String = "", phoneResponding: Boolean = true, healthy: Boolean = true) =
+            """{"seq":1,"state":"$state","running":$running,"healthy":$healthy,"phone_responding":$phoneResponding,"last_ok_ms":0,"stop_code":"$stopCode"}"""
     }
 
     private class InMemoryStore : LinkStateStorage {
