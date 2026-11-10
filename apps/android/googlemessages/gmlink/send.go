@@ -118,7 +118,7 @@ func (link *Link) PrepareRcs(requestJSON string) string {
 	if conversation == nil {
 		return sendJSON(rcsSendResult{Code: "rejected"})
 	}
-	payload, code := validatedPayload(conversation, link.settings, rcsSendRequest{TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID, Content: request.Content})
+	payload, code := validatedPayload(conversation, link.settings, rcsSendRequest{TmpID: request.TmpID, GoogleConversationID: request.GoogleConversationID, Content: request.Content}, false)
 	if code != "" {
 		return sendJSON(rcsSendResult{Code: "rejected"})
 	}
@@ -181,7 +181,7 @@ func (link *Link) CommitPreparedRcs(ticketID, permitJSON string) string {
 		link.mu.Unlock()
 		return sendJSON(rcsSendResult{Code: "rejected"})
 	}
-	payload, code := validatedPayload(current, link.settings, rcsSendRequest{TmpID: permit.TmpID, GoogleConversationID: permit.GoogleConversationID, Content: permit.Content})
+	payload, code := validatedPayload(current, link.settings, rcsSendRequest{TmpID: permit.TmpID, GoogleConversationID: permit.GoogleConversationID, Content: permit.Content}, false)
 	effect := link.sendMessage
 	link.mu.Unlock()
 	if code != "" || !proto.Equal(payload, ticket.payload) {
@@ -250,7 +250,7 @@ func (link *Link) sendAdmissionCurrent(ticket *preparedRcsTicket) bool {
 	if current == nil || !proto.Equal(current, ticket.conversation) {
 		return false
 	}
-	payload, code := validatedPayload(current, link.settings, rcsSendRequest{TmpID: ticket.request.TmpID, GoogleConversationID: ticket.request.GoogleConversationID, Content: ticket.request.Content})
+	payload, code := validatedPayload(current, link.settings, rcsSendRequest{TmpID: ticket.request.TmpID, GoogleConversationID: ticket.request.GoogleConversationID, Content: ticket.request.Content}, false)
 	return code == "" && proto.Equal(payload, ticket.payload)
 }
 
@@ -360,7 +360,7 @@ func (link *Link) currentSettings() (*gmproto.Settings, string) {
 	return link.settings, ""
 }
 
-func validatedPayload(conversation *gmproto.Conversation, settings *gmproto.Settings, request rcsSendRequest) (*gmproto.SendMessageRequest, string) {
+func validatedPayload(conversation *gmproto.Conversation, settings *gmproto.Settings, request rcsSendRequest, allowGroup bool) (*gmproto.SendMessageRequest, string) {
 	if conversation.GetConversationID() != request.GoogleConversationID || conversation.GetType() != gmproto.ConversationType_RCS || conversation.GetStatus() != gmproto.ConversationStatus_ACTIVE {
 		return nil, "conversation_changed"
 	}
@@ -368,7 +368,7 @@ func validatedPayload(conversation *gmproto.Conversation, settings *gmproto.Sett
 		return nil, "conversation_not_writable"
 	}
 	others := visibleOtherParticipants(conversation)
-	if len(others) != 1 {
+	if len(others) != 1 && (!allowGroup || !conversation.GetIsGroupChat()) {
 		return nil, "conversation_not_one_to_one"
 	}
 	outgoingID := conversation.GetDefaultOutgoingID()

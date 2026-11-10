@@ -1,8 +1,11 @@
 package gmlink
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"slices"
 	"sort"
+	"strings"
 	"unicode/utf8"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
@@ -35,14 +38,15 @@ type groupSnapshotBinding struct {
 // These local observations are sensitive, never send eligibility or membership
 // proofs. Rust owns phone normalization, self identity proof and proof hashes.
 type groupProjection struct {
-	ConversationID string
-	Group          bool
-	Type           int32
-	Status         int32
-	ReadOnly       bool
-	SendMode       int32
-	ParticipantIDs []string
-	Binding        groupSnapshotBinding
+	ConversationID     string
+	Group              bool
+	Type               int32
+	Status             int32
+	ReadOnly           bool
+	SendMode           int32
+	ParticipantIDs     []string
+	CanonicalAddresses []string
+	Binding            groupSnapshotBinding
 }
 
 type groupSnapshot struct {
@@ -74,15 +78,15 @@ func (link *Link) captureGroupSnapshot() groupSnapshot {
 	return view
 }
 
-// lookupGroup compares opaque ParticipantID bytes, not phone identities. It
+// lookupGroup compares canonical visible phone-number sets, never opaque Google IDs. It
 // checks captured binding consistency, not atomic freshness against a live Link.
 // Snapshot revisions include name-only changes; they are not membership revisions.
-func lookupGroup(view groupSnapshot, expectedToken string, requestedIDs []string) (groupProjection, groupResultCode) {
+func lookupGroup(view groupSnapshot, expectedToken string, requestedAddresses []string) (groupProjection, groupResultCode) {
 	binding := view.binding
 	if !view.accepted || binding.token != expectedToken || binding.token != snapshotToken(binding.generation, binding.streamEpoch, binding.snapshotRevision) {
 		return groupProjection{}, groupStale
 	}
-	requested, ok := groupRequestSet(requestedIDs)
+	requested, ok := groupRequestSet(requestedAddresses)
 	if !ok {
 		return groupProjection{}, groupRejected
 	}
@@ -102,7 +106,11 @@ func lookupGroup(view groupSnapshot, expectedToken string, requestedIDs []string
 			uncertain = true
 			continue
 		}
-		if slices.Equal(projection.ParticipantIDs, requested) {
+		members := projection.CanonicalAddresses
+		if len(members) == 0 {
+			members = projection.ParticipantIDs
+		}
+		if slices.Equal(members, requested) {
 			match = projection
 			matches++
 		}
@@ -127,7 +135,7 @@ func projectGroup(c *gmproto.Conversation) (groupProjection, groupResultCode) {
 	if !c.GetIsGroupChat() || !knownGroupType(c.GetType()) || !knownGroupStatus(c.GetStatus()) || !knownGroupSendMode(c.GetSendMode()) {
 		return groupProjection{}, groupUnsupported
 	}
-	ids, seen, selfCount := make([]string, 0), map[string]struct{}{}, 0
+	ids, addresses, seen, selfCount := make([]string, 0), make([]string, 0), map[string]struct{}{}, 0
 	for _, participant := range c.GetParticipants() {
 		if participant == nil || !participant.GetIsVisible() {
 			continue
@@ -147,7 +155,11 @@ func projectGroup(c *gmproto.Conversation) (groupProjection, groupResultCode) {
 			}
 			continue
 		}
+		address, canonical := canonicalGoogleNumber(participant.GetID().GetNumber(), participant.GetFormattedNumber())
 		ids = append(ids, id)
+		if canonical {
+			addresses = append(addresses, address)
+		}
 		if len(ids) > groupParticipantLimit {
 			return groupProjection{}, groupRejected
 		}
@@ -156,11 +168,74 @@ func projectGroup(c *gmproto.Conversation) (groupProjection, groupResultCode) {
 		return groupProjection{}, groupRejected
 	}
 	sort.Strings(ids)
+	if len(addresses) != len(ids) {
+		addresses = nil
+	}
+	sort.Strings(addresses)
+	for index := 1; index < len(addresses); index++ {
+		if addresses[index-1] == addresses[index] {
+			return groupProjection{}, groupRejected
+		}
+	}
 	return groupProjection{
 		ConversationID: c.GetConversationID(), Group: c.GetIsGroupChat(),
 		Type: int32(c.GetType()), Status: int32(c.GetStatus()),
-		ReadOnly: c.GetReadOnly(), SendMode: int32(c.GetSendMode()), ParticipantIDs: ids,
+		ReadOnly: c.GetReadOnly(), SendMode: int32(c.GetSendMode()), ParticipantIDs: ids, CanonicalAddresses: addresses,
 	}, groupResolved
+}
+
+func canonicalGoogleNumber(rawNumber, formattedNumber string) (string, bool) {
+	for _, value := range []string{rawNumber, formattedNumber} {
+		value = strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(value, " ", ""), "-", ""), "(", "")
+		value = strings.ReplaceAll(value, ")", "")
+		if len(value) < 2 || value[0] != '+' || len(value) > groupStringLimit {
+			continue
+		}
+		for _, digit := range value[1:] {
+			if digit < '0' || digit > '9' {
+				value = ""
+				break
+			}
+		}
+		if value != "" {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+func participantDisplayName(participant *gmproto.Participant) string {
+	if participant == nil {
+		return ""
+	}
+	if participant.GetFullName() != "" {
+		return participant.GetFullName()
+	}
+	return participant.GetFirstName()
+}
+
+func groupMemberDigest(conversation *gmproto.Conversation) string {
+	if conversation == nil {
+		return ""
+	}
+	members := make([]string, 0, len(conversation.GetParticipants()))
+	seen := make(map[string]struct{})
+	for _, participant := range conversation.GetParticipants() {
+		if participant == nil || !participant.GetIsVisible() || participant.GetIsMe() {
+			continue
+		}
+		address, ok := canonicalGoogleNumber(participant.GetID().GetNumber(), participant.GetFormattedNumber())
+		if !ok {
+			return ""
+		}
+		if _, duplicate := seen[address]; !duplicate {
+			seen[address] = struct{}{}
+			members = append(members, address)
+		}
+	}
+	sort.Strings(members)
+	digest := sha256.Sum256([]byte(strings.Join(members, "\n")))
+	return base64.StdEncoding.EncodeToString(digest[:])
 }
 
 func groupRequestSet(ids []string) ([]string, bool) {

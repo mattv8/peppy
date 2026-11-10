@@ -21,6 +21,32 @@ func TestConversationFacadeRequiresVerification(t *testing.T) {
 	}
 }
 
+func TestConversationCandidateSnapshotIncludesGroupRosterFacts(t *testing.T) {
+	link, _ := openSafetyLink(t, nil)
+	setTestOwnerVerification(link)
+	stage2SeedCompleteIndex(t, link, &gmproto.Conversation{
+		ConversationID: "group", Name: "Weekend", IsGroupChat: true, Type: gmproto.ConversationType_RCS, Status: gmproto.ConversationStatus_ACTIVE,
+		Participants: []*gmproto.Participant{
+			{IsVisible: true, IsMe: true, ID: &gmproto.SmallInfo{Number: "+15551230000"}},
+			{IsVisible: true, FullName: "Alex", ID: &gmproto.SmallInfo{Number: "+15551230001"}},
+			{IsVisible: false, ID: &gmproto.SmallInfo{Number: "+15551230002"}},
+		},
+	})
+	var snapshot struct {
+		Conversations []conversationCandidateRecord `json:"conversations"`
+	}
+	if err := json.Unmarshal([]byte(link.ConversationCandidateSnapshot()), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Conversations) != 1 {
+		t.Fatalf("conversations = %d", len(snapshot.Conversations))
+	}
+	record := snapshot.Conversations[0]
+	if !record.IsGroupChat || record.Name != "Weekend" || record.InvisibleParticipantCount != 1 || record.MemberDigest == "" || record.Participants[1].CanonicalAddress != "+15551230001" || !record.Participants[1].CanonicalAddressPresent || record.Participants[1].DisplayName != "Alex" || record.Participants[2].CanonicalAddressPresent {
+		t.Fatalf("record = %#v", record)
+	}
+}
+
 func TestRefreshConversationIndexUsesClosedCodes(t *testing.T) {
 	for refusal, want := range map[string]string{
 		"":                            "ok",

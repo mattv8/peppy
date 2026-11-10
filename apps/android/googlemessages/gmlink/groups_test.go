@@ -57,6 +57,23 @@ func TestGroupProjectionBoundsAndVisibility(t *testing.T) {
 	}
 }
 
+func TestGroupLookupMatchesCanonicalNumbersNotOpaqueIDs(t *testing.T) {
+	conversation := validGroupConversation()
+	conversation.Participants[0].ID.Number = "+15551230002"
+	conversation.Participants[0].ID.ParticipantID = "opaque-first"
+	conversation.Participants[1].ID.Number = "+15551230001"
+	conversation.Participants = append(conversation.Participants,
+		&gmproto.Participant{IsVisible: true, ID: &gmproto.SmallInfo{ParticipantID: "opaque-second", Number: "+15551230003"}},
+		&gmproto.Participant{IsVisible: false, ID: &gmproto.SmallInfo{ParticipantID: "hidden", Number: "+15551230004"}},
+	)
+	_, view := groupViewFixture(t, conversation)
+	result := assertGroupLookup(t, view, []string{"+15551230003", "+15551230002"}, groupResolved)
+	if !reflect.DeepEqual(result.CanonicalAddresses, []string{"+15551230002", "+15551230003"}) {
+		t.Fatalf("canonical addresses = %v", result.CanonicalAddresses)
+	}
+	assertGroupLookup(t, view, []string{"opaque-first", "opaque-second"}, groupNotFound)
+}
+
 func TestGroupProjectionRejectsMalformedVisibleFacts(t *testing.T) {
 	for name, mutate := range map[string]func(*gmproto.Conversation){
 		"hidden_self":         func(c *gmproto.Conversation) { c.Participants[1].IsVisible = false },

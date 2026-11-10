@@ -15,7 +15,7 @@ func (link *Link) BindNativeRcsFacts(ticketID, factsJSON string) string {
 		request.PeppyConversationID != mapping.ConversationID || request.CanonicalRecipient != mapping.Proof.CanonicalParticipant ||
 		mapping.GoogleConversationID != observation.GoogleConversationID || mapping.MappingRevision != observation.MappingRevision ||
 		mapping.VerifiedAtMS != observation.ObservedAtMS || mapping.Proof.IdentityRegion != observation.IdentityRegion ||
-		mapping.ProofVersion != 2 || mapping.Class != "OneToOne" {
+		mapping.ProofVersion != 2 || (ticket.group && mapping.Class != "Group") || (!ticket.group && mapping.Class != "OneToOne") {
 		return link.rejectNativeTargetLocked(ticket, ticketID)
 	}
 	ticket.facts = &facts

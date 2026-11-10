@@ -22,6 +22,7 @@ const (
 type typingRecord struct {
 	GoogleConversationID string `json:"google_conversation_id"`
 	State                string `json:"state"`
+	Participant          string `json:"participant"`
 }
 
 type typingProjection struct {
@@ -47,12 +48,14 @@ func projectTypingData(data *gmproto.TypingData, old bool, conversations []*gmpr
 		return typingProjection{Code: "typing_ignored"}
 	}
 	state, ok := typingStateFor(data.GetType())
-	if !ok || !typingParticipantMatches(data, conversations) {
+	participant, ok := typingParticipant(data, conversations)
+	if !ok {
 		return typingProjection{Code: "typing_ignored"}
 	}
 	return typingProjection{Code: "ok", Record: &typingRecord{
 		GoogleConversationID: data.GetConversationID(),
 		State:                string(state),
+		Participant:          participant,
 	}}
 }
 
@@ -67,18 +70,33 @@ func typingStateFor(value gmproto.TypingTypes) (typingState, bool) {
 	}
 }
 
-func typingParticipantMatches(data *gmproto.TypingData, conversations []*gmproto.Conversation) bool {
+func typingParticipant(data *gmproto.TypingData, conversations []*gmproto.Conversation) (string, bool) {
 	for _, conversation := range conversations {
 		if conversation == nil || conversation.GetConversationID() != data.GetConversationID() {
 			continue
 		}
-		participants := visibleOtherParticipants(conversation)
-		return len(participants) == 1 && participants[0].GetID().GetNumber() == data.GetUser().GetNumber()
+		for _, participant := range visibleOtherParticipants(conversation) {
+			address, ok := canonicalGoogleNumber(participant.GetID().GetNumber(), participant.GetFormattedNumber())
+			if !ok {
+				if !conversation.GetIsGroupChat() && participant.GetID().GetNumber() == data.GetUser().GetNumber() {
+					return data.GetUser().GetNumber(), true
+				}
+				continue
+			}
+			userAddress, userOK := canonicalGoogleNumber(data.GetUser().GetNumber(), "")
+			if userOK && address == userAddress {
+				return address, true
+			}
+			if !conversation.GetIsGroupChat() && participant.GetID().GetNumber() == data.GetUser().GetNumber() {
+				return data.GetUser().GetNumber(), true
+			}
+		}
+		return "", false
 	}
-	return false
+	return "", false
 }
 
-// typingSetArguments admits only a current start intent for a known one-to-one conversation.
+// typingSetArguments admits a current start intent for a known RCS conversation.
 func typingSetArguments(intent gatewayTypingIntent, conversations []*gmproto.Conversation, simPayload *gmproto.SIMPayload) (*typingSetRequest, string) {
 	if intent.RemainingValidityMS == 0 || intent.RemainingValidityMS > uint64(typingRequestTimeout/time.Millisecond) {
 		return nil, "typing_invalid"
@@ -102,7 +120,7 @@ func typingConversationFor(id string, conversations []*gmproto.Conversation) (*g
 	}
 	for _, conversation := range conversations {
 		if conversation != nil && conversation.GetConversationID() == id {
-			if len(visibleOtherParticipants(conversation)) != 1 {
+			if !conversation.GetIsGroupChat() && len(visibleOtherParticipants(conversation)) != 1 {
 				return nil, "typing_not_one_to_one"
 			}
 			return conversation, ""
@@ -189,7 +207,7 @@ func (link *Link) SetTyping(intentJSON string) string {
 		return "typing_stale"
 	}
 	conversation := link.currentSupportedRcsConversationLocked(intent.ConversationID, generation, streamEpoch)
-	if conversation == nil {
+	if conversation == nil || conversation.GetIsGroupChat() && !link.hasGroupsVerificationLocked() {
 		link.mu.Unlock()
 		return "typing_refused"
 	}
@@ -245,6 +263,7 @@ func typingSIMPayload(conversation *gmproto.Conversation, settings *gmproto.Sett
 func (link *Link) typingAdmissionCurrent(generation, streamEpoch uint64, conversationID string) bool {
 	link.mu.Lock()
 	defer link.mu.Unlock()
+	conversation := link.currentSupportedRcsConversationLocked(conversationID, generation, streamEpoch)
 	return !link.closed && link.generation == generation && link.runGeneration == generation && link.streamEpoch == streamEpoch && link.hasTypingOutboundVerificationLocked() &&
-		link.currentSupportedRcsConversationLocked(conversationID, generation, streamEpoch) != nil
+		conversation != nil && (!conversation.GetIsGroupChat() || link.hasGroupsVerificationLocked())
 }
