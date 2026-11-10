@@ -71,14 +71,14 @@ describe("McpDeviceSettings", () => {
     it("does not offer custody consent while a session remains locked", async () => {
       renderSettings({ sessionKey: "still-present-session", unlocked: false });
       expect(await screen.findByText(/unlock this vault/i)).toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: /review custody consent/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /enable Peppy MCP/i })).not.toBeInTheDocument();
       expect(bridge.mcp_enable).not.toHaveBeenCalled();
     });
 
     it("keeps enable disabled until custody consent is selected", async () => {
       renderSettings();
-      fireEvent.click(await screen.findByRole("button", { name: /review custody consent/i }));
-      const enable = screen.getByRole("button", { name: /enable Peppy MCP/i });
+      fireEvent.click(await screen.findByText("Enable"));
+      const enable = document.getElementById("mcp-custody-consent-enable")!;
       expect(enable).toBeDisabled();
       fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt this vault/i }));
       expect(enable).toBeEnabled();
@@ -86,7 +86,7 @@ describe("McpDeviceSettings", () => {
 
     it("identifies the authenticated vault in custody consent", async () => {
       renderSettings({ sessionKey: "malformed-session" });
-      fireEvent.click(await screen.findByRole("button", { name: /review custody consent/i }));
+      fireEvent.click(await screen.findByText("Enable"));
       expect(screen.getByRole("dialog")).toHaveTextContent(VAULT_ID);
       expect(screen.getByRole("dialog")).not.toHaveTextContent("malformed-session");
     });
@@ -95,12 +95,12 @@ describe("McpDeviceSettings", () => {
       vi.mocked(bridge.mcp_status).mockResolvedValue({ available: true, serverOrigin: "https://vault.example", hosted: true, device: null } as unknown as McpDeviceStatus);
       renderSettings();
       expect(await screen.findByText(/authenticated vault context is unavailable/i)).toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: /review custody consent/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /enable Peppy MCP/i })).not.toBeInTheDocument();
     });
 
     it("does not hand off keys when consent is cancelled", async () => {
       renderSettings();
-      fireEvent.click(await screen.findByRole("button", { name: /review custody consent/i }));
+      fireEvent.click(await screen.findByText("Enable"));
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
       expect(bridge.mcp_enable).not.toHaveBeenCalled();
     });
@@ -108,22 +108,22 @@ describe("McpDeviceSettings", () => {
     it("keeps enable failures actionable", async () => {
       vi.mocked(bridge.mcp_enable).mockRejectedValue(new Error("Unlock this vault to approve MCP."));
       renderSettings();
-      fireEvent.click(await screen.findByRole("button", { name: /review custody consent/i }));
+      fireEvent.click(await screen.findByText("Enable"));
       fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt this vault/i }));
-      fireEvent.click(screen.getByRole("button", { name: /enable Peppy MCP/i }));
+      fireEvent.click(document.getElementById("mcp-custody-consent-enable")!);
       await waitFor(() => expect(screen.getByRole("dialog")).toHaveTextContent("Unlock this vault to approve MCP."));
     });
 
     it("clears an enable error after cancel and does not show it on reopen", async () => {
       vi.mocked(bridge.mcp_enable).mockRejectedValueOnce({ code: "unknown", message: "Enable failed" });
       renderSettings();
-      fireEvent.click(await screen.findByRole("button", { name: /review custody consent/i }));
+      fireEvent.click(await screen.findByText("Enable"));
       fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt this vault/i }));
-      fireEvent.click(screen.getByRole("button", { name: /enable Peppy MCP/i }));
+      fireEvent.click(document.getElementById("mcp-custody-consent-enable")!);
       expect(await within(screen.getByRole("dialog")).findByRole("alert")).toHaveTextContent("Enable failed");
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
       expect(screen.queryByText("Enable failed")).not.toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: /review custody consent/i }));
+      fireEvent.click(screen.getByText("Enable"));
       expect(screen.queryByText("Enable failed")).not.toBeInTheDocument();
     });
 
@@ -131,9 +131,9 @@ describe("McpDeviceSettings", () => {
       vi.mocked(bridge.mcp_status).mockResolvedValueOnce(ready).mockResolvedValueOnce(onlineStatus);
       vi.mocked(bridge.mcp_enable).mockRejectedValueOnce({ code: "mcp_device_conflict", message: "already configured" });
       renderSettings();
-      fireEvent.click(await screen.findByRole("button", { name: /review custody consent/i }));
+      fireEvent.click(await screen.findByText("Enable"));
       fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt this vault/i }));
-      fireEvent.click(screen.getByRole("button", { name: /enable Peppy MCP/i }));
+      fireEvent.click(document.getElementById("mcp-custody-consent-enable")!);
       const dialog = screen.getByRole("dialog");
       expect(await within(dialog).findByRole("alert")).toHaveTextContent("Peppy MCP is already set up. Close this to see its current status.");
       expect(within(dialog).getByRole("button", { name: /enable Peppy MCP/i })).toBeDisabled();
@@ -142,11 +142,11 @@ describe("McpDeviceSettings", () => {
     it("keeps custody consent open for a native setup-in-progress error and silently refreshes status", async () => {
       vi.mocked(bridge.mcp_enable).mockRejectedValue({ code: "server-rejected", message: "The server rejected the request (HTTP 409, mcp_enable_in_progress)." });
       renderSettings();
-      fireEvent.click(await screen.findByRole("button", { name: /review custody consent/i }));
+      fireEvent.click(await screen.findByText("Enable"));
       fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt this vault/i }));
-      fireEvent.click(screen.getByRole("button", { name: /enable Peppy MCP/i }));
+      fireEvent.click(document.getElementById("mcp-custody-consent-enable")!);
       expect(await within(screen.getByRole("dialog")).findByRole("alert")).toHaveTextContent("Peppy MCP setup is already running. Wait a few minutes, then try again.");
-      expect(screen.getByRole("button", { name: /enable Peppy MCP/i })).toBeEnabled();
+      expect(within(screen.getByRole("dialog")).getByRole("button", { name: /enable Peppy MCP/i })).toBeEnabled();
       expect(bridge.mcp_status).toHaveBeenCalledTimes(2);
     });
 
@@ -154,9 +154,9 @@ describe("McpDeviceSettings", () => {
       const enable = deferred<McpDeviceStatus>();
       vi.mocked(bridge.mcp_enable).mockReturnValue(enable.promise);
       const { rerender } = renderSettings();
-      fireEvent.click(await screen.findByRole("button", { name: /review custody consent/i }));
+      fireEvent.click(await screen.findByText("Enable"));
       fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt/i }));
-      fireEvent.click(screen.getByRole("button", { name: /enable Peppy MCP/i }));
+      fireEvent.click(document.getElementById("mcp-custody-consent-enable")!);
       rerender(<McpDeviceSettings roster={owner} serverOffline={false} accountReadOnly={false} sessionKey="vault-b" unlocked />);
       await act(async () => enable.resolve({ ...ready, device: { deviceId: "stale", name: "Peppy MCP", state: "online", lastSyncedAt: null, cleanupPending: false } }));
       expect(screen.queryByText("Online")).not.toBeInTheDocument();
@@ -188,7 +188,7 @@ describe("McpDeviceSettings", () => {
       renderSettings();
       expect(await screen.findByRole("alert")).toHaveTextContent("Server unavailable");
       fireEvent.click(screen.getByRole("button", { name: "Retry MCP status" }));
-      await waitFor(() => expect(screen.getByRole("button", { name: /review custody consent/i })).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByRole("button", { name: /enable Peppy MCP/i })).toBeInTheDocument());
     });
 
     it("does not fetch or revoke grants for a nonowner or while offline", async () => {
@@ -756,9 +756,9 @@ describe("McpDeviceSettings", () => {
 
     /** Opens the consent from the unenrolled row, consents, and enables; the enable result is whatever the bridge mock returns. */
     async function enableFromRow() {
-      fireEvent.click(screen.getByRole("button", { name: /review custody consent/i }));
+      fireEvent.click(screen.getByText("Enable"));
       fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt/i }));
-      fireEvent.click(screen.getByRole("button", { name: /enable Peppy MCP/i }));
+      fireEvent.click(document.getElementById("mcp-custody-consent-enable")!);
       await settle();
     }
 
@@ -883,7 +883,7 @@ describe("McpDeviceSettings", () => {
       expect(within(dialog).queryByRole("heading", { name: "Authorized clients" })).toBeNull();
       expect(within(dialog).queryByText("https://vault.example/mcp")).toBeNull();
       expect(bridge.mcp_grants).not.toHaveBeenCalled();
-      expect(screen.getByRole("button", { name: "Review custody consent for Peppy MCP" })).toHaveTextContent("Re-enable");
+      expect(screen.getByRole("button", { name: "Re-enable Peppy MCP" })).toHaveTextContent("Re-enable");
     });
 
     it("drops the re-enable instruction when re-enable is unavailable", async () => {
