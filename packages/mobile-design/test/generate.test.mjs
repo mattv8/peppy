@@ -368,13 +368,31 @@ test("Google Messages link copy avoids protocol and maturity claims", () => {
   const maturityPattern = new RegExp(`\\b(${maturityTerms.join("|")})\\b`, "i");
   for (const [key, value] of Object.entries(catalog)) {
     if (!key.startsWith("google_messages_link_")) continue;
-    assert.doesNotMatch(value, /\bRCS\b/i, `${key} must not name a protocol`);
     assert.doesNotMatch(value, maturityPattern, `${key} must use production-ready copy`);
   }
+  assert.match(catalog.google_messages_link_help_body, /one-to-one/);
+  assert.match(catalog.google_messages_link_help_body, /not supported yet/);
+});
+
+test("typing copy describes one-to-one RCS typing and leaves groups unsupported", () => {
+  const typingKeys = ["typing_share_hint", "google_messages_link_help_body", "google_messages_link_consent_p_scope"];
+  const oldClaim = /typing[^.]*(do not work|does not work|not supported yet|changes nothing)/i;
+  for (const key of typingKeys) {
+    assert.doesNotMatch(catalog[key], oldClaim, `${key} must not say typing is unsupported`);
+  }
+  assert.match(catalog.typing_share_hint, /one-to-one RCS chats/);
+  assert.match(catalog.typing_share_hint, /Group chats are not supported yet/);
+  assert.match(catalog.google_messages_link_help_body, /Typing indicators work in one-to-one chats/);
+  assert.match(catalog.google_messages_link_consent_p_scope, /Typing indicators in those chats work too/);
+});
+
+test("restricted message access copy points to MMS sync details", () => {
+  assert.match(catalog.google_messages_link_help_body, /RCS messages in chats the link has not claimed need restricted message access \(see MMS → Sync details\)\./);
+  assert.match(catalog.mms_restricted_help, /run it with external Android Debug Bridge \(adb\)/);
 });
 
 test("Google Messages link copy does not deny sending or reading", () => {
-  for (const key of ["google_messages_link_unlinked_body", "google_messages_link_linked_body", "google_messages_link_consent_p_scope"]) {
+  for (const key of ["google_messages_link_card_not_linked_body", "google_messages_link_consent_p_scope"]) {
     assert.doesNotMatch(catalog[key], /(does not|doesn't|cannot) send or read|not send or read/i, `${key} must not deny sending or reading`);
   }
 });
@@ -395,7 +413,7 @@ test("RCS-adjacent shared copy stays neutral about link availability", () => {
 
 test("Google Messages link device status help is generated for the Peppy table", () => {
   const copy = {
-    google_messages_link_remote_help_attention: "Open Peppy on that phone, find Google Messages link, and follow the steps there.",
+    google_messages_link_remote_help_attention: "Open Peppy on that phone, go to the SMS tab, and follow the steps in the Google Messages card.",
     google_messages_link_remote_help_unresponsive: "Make sure that phone is online and Google Messages is not stopped.",
     google_messages_link_remote_help_unconfirmed: "Peppy has not had a recent answer from the link on that phone. Some chats may wait to send until it does.",
   };

@@ -120,7 +120,7 @@ func typingContext(parent context.Context, remaining time.Duration) (context.Con
 
 func (link *Link) projectTypingEventFor(queued queuedEvent, data *gmproto.TypingData) {
 	link.mu.Lock()
-	if link.closed || queued.generation != link.generation || queued.streamEpoch != link.streamEpoch || !link.streamSourceMatchesLocked(queued.streamSource) || !link.hasOwnerVerificationLocked() {
+	if link.closed || queued.generation != link.generation || queued.streamEpoch != link.streamEpoch || !link.streamSourceMatchesLocked(queued.streamSource) || !link.hasReceiveVerificationLocked() {
 		link.mu.Unlock()
 		return
 	}
@@ -184,7 +184,7 @@ func (link *Link) SetTyping(intentJSON string) string {
 	defer link.rpcMu.Unlock()
 	link.mu.Lock()
 	ok = !link.closed && link.state == stateLinked && link.running && link.client == client && link.runGeneration == generation && link.generation == generation && link.streamEpoch == streamEpoch
-	if !ok || !link.hasOwnerVerificationLocked() {
+	if !ok || !link.hasTypingOutboundVerificationLocked() {
 		link.mu.Unlock()
 		return "typing_stale"
 	}
@@ -245,6 +245,6 @@ func typingSIMPayload(conversation *gmproto.Conversation, settings *gmproto.Sett
 func (link *Link) typingAdmissionCurrent(generation, streamEpoch uint64, conversationID string) bool {
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	return !link.closed && link.generation == generation && link.runGeneration == generation && link.streamEpoch == streamEpoch && link.hasOwnerVerificationLocked() &&
+	return !link.closed && link.generation == generation && link.runGeneration == generation && link.streamEpoch == streamEpoch && link.hasTypingOutboundVerificationLocked() &&
 		link.currentSupportedRcsConversationLocked(conversationID, generation, streamEpoch) != nil
 }

@@ -255,6 +255,7 @@ fn candidate_snapshot(google_conversation_id: &str, recipient: &str) -> String {
         "stream_epoch": 1,
         "revision": 1,
         "run_incarnation": "runtime",
+        "pairing_evidence_id": "pairing",
         "complete": true,
         "conversations": [{
             "google_conversation_id": google_conversation_id,
@@ -263,6 +264,7 @@ fn candidate_snapshot(google_conversation_id: &str, recipient: &str) -> String {
             "classification": "eligible",
             "group": false,
             "visible_non_self_count": 1,
+            "last_message_ms": 0,
             "participants": [{
                 "participant_id": "google-peer",
                 "identifier_type": 1,
@@ -1327,7 +1329,7 @@ fn receive_context_exports_require_current_local_link_ownership() {
             now_ms,
         )?;
         Ok(core
-            .begin_rcs_link_ownership(fixture.conversation_id.parse().unwrap(), "page-token", 1)?
+            .begin_rcs_link_ownership(fixture.conversation_id.parse().unwrap(), 1)?
             .ownership_generation)
     })
     .unwrap();
@@ -1351,6 +1353,9 @@ fn receive_context_exports_require_current_local_link_ownership() {
     assert_eq!(context.expectation.link_generation, 1);
     assert_eq!(context.expectation.session_generation, 1);
     assert_eq!(context.expectation.context_revision, 1);
+    assert!(context.watermark_ms > 0);
+    assert!(context.resume_hint.is_none());
+    assert!(!context.incomplete);
     let owned = fixture
         .gateway
         .gateway_rcs_link_owned_conversations()
@@ -1447,6 +1452,61 @@ fn receive_context_exports_require_current_local_link_ownership() {
 }
 
 #[test]
+fn bootstrap_batch_json_resolves_candidates_in_input_order() {
+    let fixture = fixture();
+    let candidates = json!([
+        {"participantIdentity": "peer-local", "googleConversationId": "conversation-local"},
+        {"participantIdentity": "   ", "googleConversationId": "conversation-local"},
+        {"participantIdentity": "unknown-peer", "googleConversationId": "conversation-local"},
+    ])
+    .to_string();
+    assert_eq!(
+        gateway_resolve_rcs_bootstrap_conversations(fixture.gateway.clone(), candidates).unwrap(),
+        vec![
+            NativeRcsBootstrapResolution::Resolved {
+                conversation_id: fixture.conversation_id.clone(),
+            },
+            NativeRcsBootstrapResolution::InvalidIdentity,
+            NativeRcsBootstrapResolution::Missing,
+        ]
+    );
+}
+
+#[test]
+fn bootstrap_batch_json_rejects_unknown_fields_oversize_and_too_many_candidates() {
+    let fixture = fixture();
+    let unknown = json!([
+        {"participantIdentity": "peer-local", "googleConversationId": "conversation-local", "extra": true},
+    ])
+    .to_string();
+    assert!(matches!(
+        gateway_resolve_rcs_bootstrap_conversations(fixture.gateway.clone(), unknown),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+    let oversize = json!(
+        (0..40)
+            .map(|_| json!({"participantIdentity": "a".repeat(2_000), "googleConversationId": "conversation-local"}))
+            .collect::<Vec<_>>()
+    )
+    .to_string();
+    assert!(oversize.len() > 65_536);
+    assert!(matches!(
+        gateway_resolve_rcs_bootstrap_conversations(fixture.gateway.clone(), oversize),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+    let too_many = json!(
+        (0..41)
+            .map(|index| json!({"participantIdentity": format!("peer-{index}"), "googleConversationId": "conversation-local"}))
+            .collect::<Vec<_>>()
+    )
+    .to_string();
+    assert!(matches!(
+        gateway_resolve_rcs_bootstrap_conversations(fixture.gateway.clone(), too_many),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+}
+
+#[test]
 fn receive_context_exports_refuse_a_foreign_current_gateway_and_closed_client() {
     let fixture = fixture();
     let now_ms = std::time::SystemTime::now()
@@ -1462,7 +1522,7 @@ fn receive_context_exports_refuse_a_foreign_current_gateway_and_closed_client() 
             now_ms,
             now_ms,
         )?;
-        core.begin_rcs_link_ownership(fixture.conversation_id.parse().unwrap(), "page-token", 1)?;
+        core.begin_rcs_link_ownership(fixture.conversation_id.parse().unwrap(), 1)?;
         Ok(())
     })
     .unwrap();

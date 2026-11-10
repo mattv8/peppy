@@ -9,12 +9,6 @@
     <uses-permission android:name="android.permission.READ_PHONE_STATE" tools:node="remove" />
 
     <application>
-        <activity
-            android:name="dev.peppy.mobile.googlemessages.LinkSignInActivity"
-            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|fontScale|density"
-            android:exported="false"
-            android:theme="@style/GoogleMessagesLinkSignInTheme"
-            android:windowSoftInputMode="adjustResize" />
         <service
             android:name="dev.peppy.mobile.restrictedsetup.RestrictedSetupService"
             android:exported="false"
@@ -22,17 +16,5 @@
         <receiver
             android:name="dev.peppy.mobile.restrictedsetup.RestrictedSetupReplyReceiver"
             android:exported="false" />
-        <service
-            android:name="dev.peppy.mobile.googlemessages.GoogleMessagesLinkService"
-            android:exported="false"
-            android:foregroundServiceType="remoteMessaging" />
-        <receiver
-            android:name="dev.peppy.mobile.googlemessages.LinkRestartReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-            </intent-filter>
-        </receiver>
     </application>
 </manifest>

@@ -108,7 +108,7 @@ func (link *Link) PrepareRcs(requestJSON string) string {
 	if link.preparedTicket != nil || link.nativeTicket != nil || link.nativeInFlight != nil || link.sendAdmissionInFlight {
 		return sendJSON(rcsSendResult{Code: "busy"})
 	}
-	if link.closed || !link.hasOwnerVerificationLocked() || link.runGeneration != link.generation {
+	if link.closed || !link.hasSendVerificationLocked() || link.runGeneration != link.generation {
 		return sendJSON(rcsSendResult{Code: "rejected"})
 	}
 	if request.SnapshotToken != snapshotToken(link.generation, link.streamEpoch, link.indexRevision) {
@@ -177,7 +177,7 @@ func (link *Link) CommitPreparedRcs(ticketID, permitJSON string) string {
 	}
 	link.mu.Lock()
 	current := link.currentSupportedRcsConversationLocked(ticket.request.GoogleConversationID, generation, streamEpoch)
-	if current == nil || link.indexRevision != ticket.revision || !link.hasOwnerVerificationLocked() {
+	if current == nil || link.indexRevision != ticket.revision || !link.hasSendVerificationLocked() {
 		link.mu.Unlock()
 		return sendJSON(rcsSendResult{Code: "rejected"})
 	}
@@ -237,13 +237,13 @@ func (link *Link) lockRPC(ctx context.Context) bool {
 func (link *Link) ticketCurrent(ticket *preparedRcsTicket) bool {
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	return link.nowForTicketLocked().Before(ticket.expiresAt) && !link.closed && link.generation == ticket.generation && link.runGeneration == ticket.generation && link.streamEpoch == ticket.streamEpoch && link.indexRevision == ticket.revision && link.hasOwnerVerificationLocked()
+	return link.nowForTicketLocked().Before(ticket.expiresAt) && !link.closed && link.generation == ticket.generation && link.runGeneration == ticket.generation && link.streamEpoch == ticket.streamEpoch && link.indexRevision == ticket.revision && link.hasSendVerificationLocked()
 }
 
 func (link *Link) sendAdmissionCurrent(ticket *preparedRcsTicket) bool {
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	if !link.nowForTicketLocked().Before(ticket.expiresAt) || link.closed || link.generation != ticket.generation || link.runGeneration != ticket.generation || link.streamEpoch != ticket.streamEpoch || link.indexRevision != ticket.revision || !link.hasOwnerVerificationLocked() {
+	if !link.nowForTicketLocked().Before(ticket.expiresAt) || link.closed || link.generation != ticket.generation || link.runGeneration != ticket.generation || link.streamEpoch != ticket.streamEpoch || link.indexRevision != ticket.revision || !link.hasSendVerificationLocked() {
 		return false
 	}
 	current := link.currentSupportedRcsConversationLocked(ticket.request.GoogleConversationID, ticket.generation, ticket.streamEpoch)

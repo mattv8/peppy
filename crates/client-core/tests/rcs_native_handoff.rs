@@ -387,6 +387,7 @@ fn candidate_snapshot(
     run_generation: u64,
     stream_epoch: u64,
     revision: u64,
+    pairing_evidence_id: &str,
     google_conversation_id: &str,
     recipient: &str,
 ) -> String {
@@ -397,6 +398,7 @@ fn candidate_snapshot(
         "stream_epoch": stream_epoch,
         "revision": revision,
         "run_incarnation": runtime_id,
+        "pairing_evidence_id": pairing_evidence_id,
         "complete": true,
         "conversations": [{
             "google_conversation_id": google_conversation_id,
@@ -405,6 +407,7 @@ fn candidate_snapshot(
             "classification": "eligible",
             "group": false,
             "visible_non_self_count": 1,
+            "last_message_ms": 0,
             "participants": [{
                 "participant_id": "google-peer",
                 "identifier_type": 1,
@@ -572,7 +575,15 @@ fn lifecycle_changes_fence_old_snapshots_and_failed_retries() {
         apply_tuple(&mut successor, tuple, 2, 1_001);
         gateway.verify_rcs_mapping(&successor, 1_001).unwrap();
 
-        let old_snapshot = candidate_snapshot("runtime", 1, 1, 1, "conversation-local", recipient);
+        let old_snapshot = candidate_snapshot(
+            "runtime",
+            1,
+            1,
+            1,
+            "verified-handset",
+            "conversation-local",
+            recipient,
+        );
         assert!(matches!(
             gateway.classify_and_commit_rcs_target(
                 conversation_id,
@@ -587,6 +598,7 @@ fn lifecycle_changes_fence_old_snapshots_and_failed_retries() {
             case.run_generation,
             case.stream_epoch,
             1,
+            case.pairing_id,
             &successor.google_conversation_id,
             recipient,
         );
@@ -711,7 +723,15 @@ fn legacy_context_requires_a_genuine_refresh_before_classification() {
             .remove("go_pairing_evidence_id");
         replace_metadata(&config, key, &value.to_string());
     }
-    let legacy_snapshot = candidate_snapshot("runtime", 1, 1, 1, "conversation-local", recipient);
+    let legacy_snapshot = candidate_snapshot(
+        "runtime",
+        1,
+        1,
+        1,
+        "verified-handset",
+        "conversation-local",
+        recipient,
+    );
     assert!(matches!(
         gateway.classify_and_commit_rcs_target(conversation_id, recipient, &legacy_snapshot, 1_000),
         Ok(RcsTargetClassification::Unknown { .. })
@@ -730,6 +750,7 @@ fn legacy_context_requires_a_genuine_refresh_before_classification() {
         41,
         73,
         1,
+        "verified-handset",
         "conversation-local",
         recipient,
     );

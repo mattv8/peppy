@@ -105,6 +105,11 @@ DEX_PREFIX = b"Ldev/peppy/gmlink/"
 AGPL_TEXT = b"GNU AFFERO GENERAL PUBLIC LICENSE"
 GOOGLE_MESSAGES_NOTICE = b"Third-party notices for the Google Messages link"
 GOOGLE_MESSAGES_NOTICE_FILENAME = "NOTICE-google-messages.txt"
+RESTRICTED_SETUP_DEX = re.compile(rb"L(?:dev/peppy/mobile/restrictedsetup|io/github/muntashirakon)/[A-Za-z0-9_$/]+;")
+PERMITTED_RESTRICTED_SETUP_DEX = re.compile(
+    rb"Ldev/peppy/mobile/restrictedsetup/RestrictedSetupEntryKt(?:\$\$ExternalSyntheticLambda\d+)?;"
+)
+RESTRICTED_SETUP_NATIVE_LIBRARIES = ("libadb", "libspake2", "libconscrypt_jni")
 
 
 def required_license_assets(inventory_path):
@@ -145,8 +150,25 @@ def contents(archive_path):
         raise SystemExit(f"could not inspect archive {archive_path}: {error}")
 
 
+def logical_entries(entries):
+    return {name.removeprefix("base/"): content for name, content in entries.items()}
+
+
 def dex_contains(entries):
     return any(DEX_PATTERN.fullmatch(name) and DEX_PREFIX in content for name, content in entries.items())
+
+
+def missing_link_content(entries):
+    for abi in DIRECT_ABIS:
+        required_library = f"lib/{abi}/libgojni.so"
+        if required_library not in entries:
+            return required_library
+    if not dex_contains(entries):
+        return "dev/peppy/gmlink/ dex classes"
+    for asset in DIRECT_ASSETS:
+        if asset not in entries:
+            return asset
+    return None
 
 
 def prohibited(entries):
@@ -167,27 +189,75 @@ def prohibited(entries):
     return None
 
 
+def unexpected_third_party_asset(entries, allowed_assets):
+    for name, content in entries.items():
+        if name in allowed_assets:
+            continue
+        if name.startswith("assets/third_party/"):
+            return "unexpected third-party asset"
+    return None
+
+
+def unexpected_link_content(entries):
+    unexpected_asset = unexpected_third_party_asset(entries, DIRECT_ASSETS)
+    if unexpected_asset:
+        return unexpected_asset
+    for name, content in entries.items():
+        if name in DIRECT_ASSETS:
+            continue
+        if (
+            AGPL_TEXT in content
+            or GOOGLE_MESSAGES_NOTICE in content
+            or pathlib.PurePosixPath(name).name == GOOGLE_MESSAGES_NOTICE_FILENAME
+        ):
+            return "unexpected Google Messages license text"
+    return None
+
+
+def restricted_setup_found(entries):
+    for name, content in entries.items():
+        if DEX_PATTERN.fullmatch(name) and any(
+            not PERMITTED_RESTRICTED_SETUP_DEX.fullmatch(match.group(0))
+            for match in RESTRICTED_SETUP_DEX.finditer(content)
+        ):
+            return "restricted setup dex classes"
+    if any(
+        library in pathlib.PurePosixPath(name).name.lower()
+        for name in entries
+        for library in RESTRICTED_SETUP_NATIVE_LIBRARIES
+    ):
+        return "restricted setup native libraries"
+    return None
+
+
+link_expected = sys.argv[3] == "true"
+
 direct_entries = contents(pathlib.Path(sys.argv[1]))
-if sys.argv[3] == "true":
-    for abi in DIRECT_ABIS:
-        required_library = f"lib/{abi}/libgojni.so"
-        if required_library not in direct_entries:
-            raise SystemExit(f"direct APK is missing {required_library}")
-    if not dex_contains(direct_entries):
-        raise SystemExit("direct APK is missing dev/peppy/gmlink/ dex classes")
-    for asset in DIRECT_ASSETS:
-        if asset not in direct_entries:
-            raise SystemExit(f"direct APK is missing {asset}")
+if link_expected:
+    missing = missing_link_content(direct_entries)
+    if missing:
+        raise SystemExit(f"direct APK is missing {missing}")
 else:
     found = prohibited(direct_entries)
     if found:
         raise SystemExit(f"direct APK contains {found}")
 
-play_archives = (("Play AAB", pathlib.Path(sys.argv[2])),) + tuple(
-    (f"Play APK {pathlib.Path(path).name}", pathlib.Path(path)) for path in sys.argv[5:]
-)
-for label, archive_path in play_archives:
-    found = prohibited(contents(archive_path))
+play_aab = logical_entries(contents(pathlib.Path(sys.argv[2])))
+if link_expected:
+    missing = missing_link_content(play_aab)
+    if missing:
+        raise SystemExit(f"Play AAB is missing {missing}")
+
+play_archives = [("Play AAB", play_aab)] + [
+    (f"Play APK {pathlib.Path(path).name}", logical_entries(contents(pathlib.Path(path))))
+    for path in sys.argv[5:]
+]
+for label, entries in play_archives:
+    found = restricted_setup_found(entries)
+    if not found:
+        found = unexpected_link_content(entries) if link_expected else prohibited(entries)
+    if not found and not link_expected:
+        found = unexpected_third_party_asset(entries, ())
     if found:
         raise SystemExit(f"{label} contains {found}")
 PY

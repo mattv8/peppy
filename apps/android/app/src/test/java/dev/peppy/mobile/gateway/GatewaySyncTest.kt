@@ -32,6 +32,7 @@ import org.robolectric.annotation.Config
 import uniffi.peppy_mobile_bindings.NativeClient
 import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.NativeIncomingSms
+import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativePermitState
 import uniffi.peppy_mobile_bindings.NativeSnapshotProjectionState
 import java.util.concurrent.CountDownLatch
@@ -493,6 +494,26 @@ class GatewaySyncTest : GatewayTestBase() {
         assertNotNull("transient failure is reported for retry", result.failure)
         assertEquals(1, uploads())
         assertTrue(client.pendingOutboxJsonBatch(10uL).isEmpty())
+    }
+
+    @Test
+    fun applyProgressAfterAJournalFailureRequestsTheNativeRcsWake() {
+        val client = live()
+        val (_, wire) = desktopCommandEnvelope(SimRoutes.routeId(3), "apply after journal failure")
+        events = JSONArray().put(record(1, wire))
+        var applyCalls = 0
+        val transientApplyFailure = object : NativeClientInterface by client {
+            override fun applyPending(limit: ULong) = if (++applyCalls == 2) {
+                throw MobileBindingsException.InvalidRequest()
+            } else {
+                client.applyPending(limit)
+            }
+        }
+
+        assertTrue(sync(transientApplyFailure).run().commandsProgressed)
+        events = JSONArray()
+
+        assertTrue(sync(transientApplyFailure).run().commandsProgressed)
     }
 
     @Test

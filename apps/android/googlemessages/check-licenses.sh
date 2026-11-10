@@ -3,7 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 inventory=${LICENSE_INVENTORY:-"$root/license-inventory.json"}
-gmlink_assets="$root/../app/src/sideloadGmlinkOn/assets/third_party"
+gmlink_assets="$root/../app/src/gmlinkOn/assets/third_party"
 notice=${GOOGLE_MESSAGES_NOTICE:-"$gmlink_assets/NOTICE-google-messages.txt"}
 aar=${GOOGLE_MESSAGES_AAR:-"$root/build/gmlink.aar"}
 if [ ! -f "$aar" ]; then

@@ -4,6 +4,8 @@ import android.content.ContentProvider
 import android.content.ContentValues
 import android.database.Cursor
 import android.database.MatrixCursor
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteException
 import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.*
@@ -30,7 +32,7 @@ class MmsProviderTest {
     @Before fun setUp() {
         provider = Robolectric.buildContentProvider(FakeMmsProvider::class.java).create().get()
         ShadowContentResolver.registerProviderInternal("mms", provider)
-        reader = MmsProviderReader(ApplicationProvider.getApplicationContext())
+        reader = MmsProviderReader(ApplicationProvider.getApplicationContext(), MmsOptionalColumns())
     }
 
     @Test fun preservesAddressGroupsAndInvalidSubscriptionIsNull() {
@@ -168,46 +170,172 @@ class MmsProviderTest {
         assertThrows(MmsProviderException::class.java) { reader.readPartText(utf16.copy(charset = 9999)) }
     }
 
-    private fun message(id: Long, type: Int, box: Int = 1, sub: Int = 1, subject: String? = null, dateSeconds: Long? = 1, expirySeconds: Long? = null) = Msg(id, type, box, sub, subject, dateSeconds, expirySeconds)
+    @Test fun providerWithoutFlagColumnsStillReadsAndFlagsDefaultToFalse() {
+        provider.optionalColumns = false
+        provider.messages += message(1, 128)
+        provider.parts[1] = listOf(part(10))
+
+        val record = reader.read(1)!!
+
+        assertNull(record.error)
+        assertFalse(record.restricted)
+        assertFalse(record.textOnly)
+    }
+
+    @Test fun providerWithFlagColumnsReadsRestrictedAndTextOnly() {
+        provider.messages += message(1, 128, restricted = true, textOnly = true)
+        provider.messages += message(2, 128)
+        provider.parts[1] = listOf(part(10)); provider.parts[2] = listOf(part(20))
+
+        val flagged = reader.read(1)!!
+        val plain = reader.read(2)!!
+
+        assertTrue(flagged.restricted)
+        assertTrue(flagged.textOnly)
+        assertFalse(plain.restricted)
+        assertFalse(plain.textOnly)
+    }
+
+    @Test fun optionalColumnsAreProbedOnceWhenProviderHasThem() {
+        (1..3).forEach { id -> provider.messages += message(id.toLong(), 128); provider.parts[id.toLong()] = listOf(part(id.toLong())) }
+
+        repeat(3) { reader.read(1); reader.read(2); reader.read(3) }
+
+        assertEquals(1, provider.probes)
+    }
+
+    @Test fun optionalColumnsAreProbedOnceWhenProviderLacksThem() {
+        provider.optionalColumns = false
+        (1..3).forEach { id -> provider.messages += message(id.toLong(), 128); provider.parts[id.toLong()] = listOf(part(id.toLong())) }
+
+        repeat(3) { reader.read(1); reader.read(2); reader.read(3) }
+
+        assertEquals(1, provider.probes)
+    }
+
+    @Test fun legacySqliteSchemaWithoutFlagColumnsFallsBackAndReadsRowsWithFlagsFalse() {
+        SQLiteDatabase.create(null).use { db ->
+            createMmsTables(db, flagColumns = false)
+            db.insertMessage(1); db.insertMessage(2)
+            val sqlite = registerSqliteProvider(db)
+            assertThrows(SQLiteException::class.java) { db.query("pdu", arrayOf("_id", "restricted"), null, null, null, null, null) }
+            val legacyReader = MmsProviderReader(ApplicationProvider.getApplicationContext(), MmsOptionalColumns())
+
+            val first = legacyReader.read(1)!!
+            val second = legacyReader.read(2)!!
+            val page = legacyReader.page(0, 50)
+
+            assertNull(first.error); assertNull(second.error)
+            assertEquals(listOf(1L, 2L), page.records.map { it.id })
+            assertTrue(page.records.all { it.ready && !it.restricted && !it.textOnly })
+            assertEquals(1, sqlite.optionalProbes)
+        }
+    }
+
+    @Test fun modernSqliteSchemaReadsRestrictedAndTextOnlyFlags() {
+        SQLiteDatabase.create(null).use { db ->
+            createMmsTables(db, flagColumns = true)
+            db.insertMessage(1, restricted = true, textOnly = true)
+            db.insertMessage(2, restricted = false, textOnly = false)
+            val sqlite = registerSqliteProvider(db)
+            val modernReader = MmsProviderReader(ApplicationProvider.getApplicationContext(), MmsOptionalColumns())
+
+            val flagged = modernReader.read(1)!!
+            val plain = modernReader.read(2)!!
+
+            assertTrue(flagged.restricted); assertTrue(flagged.textOnly)
+            assertFalse(plain.restricted); assertFalse(plain.textOnly)
+            assertEquals(1, sqlite.optionalProbes)
+        }
+    }
+
+    private fun registerSqliteProvider(db: SQLiteDatabase): SqliteMmsProvider {
+        val sqlite = Robolectric.buildContentProvider(SqliteMmsProvider::class.java).create().get()
+        sqlite.database = db
+        ShadowContentResolver.registerProviderInternal("mms", sqlite)
+        return sqlite
+    }
+
+    private fun message(
+        id: Long,
+        type: Int,
+        box: Int = 1,
+        sub: Int = 1,
+        subject: String? = null,
+        dateSeconds: Long? = 1,
+        expirySeconds: Long? = null,
+        restricted: Boolean = false,
+        textOnly: Boolean = false,
+    ) = Msg(id, type, box, sub, subject, dateSeconds, expirySeconds, restricted, textOnly)
     private fun part(id: Long) = Part(id)
 
-    data class Msg(val id: Long, val type: Int, val box: Int, val sub: Int, val subject: String?, val dateSeconds: Long?, val expirySeconds: Long?)
+    data class Msg(
+        val id: Long,
+        val type: Int,
+        val box: Int,
+        val sub: Int,
+        val subject: String?,
+        val dateSeconds: Long?,
+        val expirySeconds: Long?,
+        val restricted: Boolean = false,
+        val textOnly: Boolean = false,
+    )
     data class Part(val id: Long)
+    /** Rejects unknown projection columns like real providers do when a column is absent from the schema. */
     class FakeMmsProvider : ContentProvider() {
         val messages = mutableListOf<Msg>(); val parts = mutableMapOf<Long, List<Part>>(); val addresses = mutableMapOf<Long, List<Pair<String, Int>>>()
         var returnNull = false
         var nullMessageCursor = false
         var nullAddressCursor = false
         var nullPartsCursor = false
+        /** Whether the schema has the optional `restricted` and `text_only` columns (absent on Android 14 AOSP). */
+        var optionalColumns = true
+        /** Queries of the base URI whose projection names an optional column; the production probe. */
+        var probes = 0
         override fun onCreate() = true
         override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor? {
             if (returnNull) return null
             val segments = uri.pathSegments
-            return when {
-                segments.isEmpty() -> MatrixCursor(arrayOf("_id")).also { c ->
-                    messages.filter { message ->
-                        when (selection) {
-                            "_id > ?" -> message.id > selectionArgs!!.single().toLong()
-                            "_id <= ? AND _id > ?" -> message.id <= selectionArgs!![0].toLong() && message.id > selectionArgs[1].toLong()
-                            "_id < ? AND _id > ?" -> message.id < selectionArgs!![0].toLong() && message.id > selectionArgs[1].toLong()
-                            else -> true
-                        }
-                    }.let { rows ->
-                        if (sortOrder?.contains("DESC") == true) rows.sortedByDescending { it.id } else rows.sortedBy { it.id }
-                    }.forEach { c.addRow(arrayOf(it.id)) }
-                }
-                segments.size == 2 && segments[1] == "addr" -> if (nullAddressCursor) null else MatrixCursor(arrayOf("address", "type")).also { c -> addresses[segments[0].toLong()].orEmpty().forEach { c.addRow(arrayOf<Any?>(it.first, it.second)) } }
-                segments.firstOrNull() == "part" -> if (nullPartsCursor) null else MatrixCursor(arrayOf("_id", "seq", "ct", "name", "fn", "chset", "text")).also { c ->
-                    parts[selectionArgs!!.single().toLong()].orEmpty().forEachIndexed { i, p -> c.addRow(arrayOf<Any?>(p.id, i, "text/plain", null, null, 106, null)) }
-                }
-                else -> if (nullMessageCursor) null else MatrixCursor(arrayOf("_id", "thread_id", "sub_id", "msg_box", "date", "tr_id", "sub", "m_type", "exp")).also { c ->
-                    messages.find { it.id == segments.single().toLong() }?.let { m -> c.addRow(arrayOf<Any?>(m.id, 1, m.sub, m.box, m.dateSeconds, null, m.subject, m.type, m.expirySeconds)) }
-                }
+            val isAddress = segments.size == 2 && segments[1] == "addr"
+            val isPart = segments.firstOrNull() == "part"
+            val isBase = segments.isEmpty()
+            val nullCursor = when { isBase -> false; isAddress -> nullAddressCursor; isPart -> nullPartsCursor; else -> nullMessageCursor }
+            if (nullCursor) return null
+            val known = when {
+                isBase -> setOf("_id") + if (optionalColumns) OPTIONAL_COLUMNS else emptySet()
+                isAddress -> setOf("address", "type")
+                isPart -> setOf("_id", "seq", "ct", "name", "fn", "chset", "text")
+                else -> setOf("_id", "thread_id", "sub_id", "msg_box", "date", "tr_id", "sub", "m_type", "exp") + if (optionalColumns) OPTIONAL_COLUMNS else emptySet()
             }
+            val requested = projection?.toList().orEmpty()
+            if (isBase && requested.any { it in OPTIONAL_COLUMNS }) probes++
+            requested.firstOrNull { it !in known }?.let { throw IllegalArgumentException("Unknown column $it") }
+            val rows: List<Map<String, Any?>> = when {
+                isBase -> messages.filter { message ->
+                    when (selection) {
+                        "_id > ?" -> message.id > selectionArgs!!.single().toLong()
+                        "_id <= ? AND _id > ?" -> message.id <= selectionArgs!![0].toLong() && message.id > selectionArgs[1].toLong()
+                        "_id < ? AND _id > ?" -> message.id < selectionArgs!![0].toLong() && message.id > selectionArgs[1].toLong()
+                        else -> true
+                    }
+                }.let { rows -> if (sortOrder?.contains("DESC") == true) rows.sortedByDescending { it.id } else rows.sortedBy { it.id } }
+                    .map { mapOf("_id" to it.id) }
+                isAddress -> addresses[segments[0].toLong()].orEmpty().map { mapOf("address" to it.first, "type" to it.second) }
+                isPart -> parts[selectionArgs!!.single().toLong()].orEmpty().mapIndexed { i, p -> mapOf("_id" to p.id, "seq" to i, "ct" to "text/plain", "chset" to 106) }
+                else -> messages.find { it.id == segments.single().toLong() }?.let { listOf(messageRow(it)) }.orEmpty()
+            }
+            val columns = requested.toTypedArray()
+            return MatrixCursor(columns).also { c -> rows.forEach { row -> c.addRow(columns.map { row[it] }.toTypedArray()) } }
         }
+        private fun messageRow(m: Msg): Map<String, Any?> = mapOf(
+            "_id" to m.id, "thread_id" to 1L, "sub_id" to m.sub.toLong(), "msg_box" to m.box.toLong(), "date" to m.dateSeconds,
+            "tr_id" to null, "sub" to m.subject, "m_type" to m.type.toLong(), "exp" to m.expirySeconds,
+            "restricted" to (if (m.restricted) 1L else 0L), "text_only" to (if (m.textOnly) 1L else 0L),
+        )
         override fun getType(uri: Uri): String? = null
         override fun insert(uri: Uri, values: ContentValues?): Uri? = null
         override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int = 0
         override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?): Int = 0
+        companion object { private val OPTIONAL_COLUMNS = setOf("restricted", "text_only") }
     }
 }

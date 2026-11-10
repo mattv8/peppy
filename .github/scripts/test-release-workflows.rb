@@ -551,7 +551,7 @@ workflow_text = Dir[File.join(root, 'workflows', '*.{yml,yaml}')].sort.map { |pa
 assert.call(!workflow_text.include?('peppyGoogleMessagesLink=false'), 'workflows must not disable the Google Messages link with a default-off flag')
 assert.call(!workflow_text.include?('PEPPY_GOOGLE_MESSAGES_LICENSE_SIGNOFF'), 'workflows must not retain the obsolete Google Messages licensing sign-off variable')
 android_build_script = File.read(File.join(root, '..', 'apps', 'android', 'app', 'build.gradle.kts'))
-assert.call(android_build_script.include?('require(explicit != true) { "peppyGoogleMessagesLink cannot be enabled for Play distribution" }'), 'Play distribution must reject the Google Messages link during configuration')
+assert.call(android_build_script.include?('tasks.register("verifyReleaseGoogleMessagesLink")'), 'release builds must verify Google Messages link presence or absence')
 workflow_text.each_line.select { |line| line.include?(':app:bundleRelease') }.each do |line|
   assert.call(line.include?('-PpeppyDistribution=play'), 'every Play bundle invocation must explicitly select the Play distribution')
 end
@@ -629,7 +629,7 @@ Dir.mktmpdir('peppy-android-release-test') do |fixture|
   direct_invocation, play_invocation = invocations
   [
     [direct_invocation, 'direct', %w[:app:verifyReleaseManifestSecurity :app:lintSideload :app:assembleSideload :app:verifySideloadGoogleMessagesLink]],
-    [play_invocation, 'play', %w[:app:verifyReleaseManifestSecurity :app:lintRelease :app:bundleRelease :app:mergeReleaseNativeDebugMetadata]]
+    [play_invocation, 'play', %w[:app:verifyReleaseManifestSecurity :app:lintRelease :app:bundleRelease :app:mergeReleaseNativeDebugMetadata :app:verifyReleaseGoogleMessagesLink]]
   ].each do |arguments, distribution, expected_tasks|
     assert.call(arguments.first == './gradlew', "trusted Android #{distribution} build must run the project gradlew")
     options = arguments.drop(1).reject { |token| token.start_with?(':', '-P') }
@@ -639,7 +639,7 @@ Dir.mktmpdir('peppy-android-release-test') do |fixture|
     assert.call(arguments.include?('-PpeppyVersionName=1.2.3') && arguments.include?('-PpeppyVersionCode=45'), "trusted Android #{distribution} build must receive the release version arguments")
   end
   assert.call(direct_invocation.count('-PpeppyGoogleMessagesLink=true') == 1, 'trusted direct Android build must enable the Google Messages link exactly once without a sign-off variable')
-  assert.call(play_invocation.count('-PpeppyGoogleMessagesLink=true').zero?, 'trusted Play Android build must not enable the Google Messages link')
+  assert.call(play_invocation.count('-PpeppyGoogleMessagesLink=true') == 1, 'trusted Play Android build must enable the Google Messages link exactly once')
 end
 
 puts 'release workflow tests passed'

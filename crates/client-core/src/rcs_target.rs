@@ -88,6 +88,8 @@ struct ConversationCandidateSnapshot {
     stream_epoch: u64,
     revision: u64,
     run_incarnation: String,
+    #[serde(rename = "pairing_evidence_id")]
+    _pairing_evidence_id: String,
     complete: bool,
     conversations: Vec<ConversationCandidateRecord>,
 }
@@ -101,6 +103,8 @@ struct ConversationCandidateRecord {
     classification: CandidateClassification,
     group: bool,
     visible_non_self_count: usize,
+    #[serde(rename = "last_message_ms")]
+    _last_message_ms: i64,
     participants: Vec<ConversationCandidateParticipant>,
 }
 
@@ -538,8 +542,47 @@ mod tests {
             classification,
             group: visible_non_self_count > 1,
             visible_non_self_count,
+            _last_message_ms: 0,
             participants,
         }
+    }
+
+    #[test]
+    fn parses_every_current_go_snapshot_field() {
+        let snapshot = serde_json::from_str::<ConversationCandidateSnapshot>(
+            r#"{
+                "code":"conversation_candidate_snapshot",
+                "snapshot_token":"1:2:7",
+                "generation":1,
+                "stream_epoch":2,
+                "revision":7,
+                "run_incarnation":"runtime-id",
+                "pairing_evidence_id":"pairing-id",
+                "complete":true,
+                "conversations":[{
+                    "google_conversation_id":"google-conversation",
+                    "conversation_type":2,
+                    "conversation_status":1,
+                    "classification":"eligible",
+                    "group":false,
+                    "visible_non_self_count":1,
+                    "last_message_ms":1700000000000,
+                    "participants":[{
+                        "participant_id":"google-participant",
+                        "identifier_type":1,
+                        "raw_number":"+12025550123",
+                        "formatted_number":"(202) 555-0123",
+                        "participant_id_present":true,
+                        "number_present":true,
+                        "visible":true,
+                        "self":false
+                    }]
+                }]
+            }"#,
+        )
+        .expect("current Go snapshot should satisfy Rust's strict DTO");
+
+        assert_eq!(snapshot.conversations.len(), 1);
     }
 
     #[test]
@@ -793,6 +836,7 @@ mod tests {
             stream_epoch: 2,
             revision: 3,
             run_incarnation: "runtime".into(),
+            _pairing_evidence_id: "pairing".into(),
             complete: true,
             conversations: Vec::new(),
         };
@@ -855,6 +899,7 @@ mod tests {
             "stream_epoch":2,
             "revision":3,
             "run_incarnation":"runtime",
+            "pairing_evidence_id":"pairing",
             "complete":true,
             "conversations":[{
                 "google_conversation_id":"google-id",
@@ -863,6 +908,7 @@ mod tests {
                 "classification":"eligible",
                 "group":false,
                 "visible_non_self_count":1,
+                "last_message_ms":0,
                 "participants":[{
                     "participant_id":"peer",
                     "identifier_type":1,

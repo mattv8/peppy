@@ -2,6 +2,7 @@ package gmlink
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,8 +132,14 @@ func typingLink(host Host, conversation *gmproto.Conversation) *Link {
 		conversationIndexComplete:    true,
 		conversationIndexGeneration:  7,
 		conversationIndexStreamEpoch: 3,
-		ownerVerification:            &ownerVerification{generation: 7},
-		changes:                      make(chan any, 8),
+		ownerVerification: &ownerVerification{generation: 7, Capabilities: []string{
+			verificationCapabilityReceive,
+			verificationCapabilityIndex,
+			verificationCapabilitySend,
+			verificationCapabilityTyping,
+			verificationCapabilityGroups,
+		}},
+		changes: make(chan any, 8),
 		conversationRecords: map[string]*gmproto.Conversation{
 			conversation.GetConversationID(): conversation,
 		},
@@ -393,6 +400,134 @@ func TestSetTypingRejectsValidityOverCap(t *testing.T) {
 
 	if got != "typing_invalid" || calls != 0 {
 		t.Fatalf("result = %q, calls = %d", got, calls)
+	}
+}
+
+// productionTypingLink takes its outbound typing capability from the production mint.
+// It only indexes what a current stream would have produced; it sets no capabilities.
+func productionTypingLink(conversation *gmproto.Conversation) *Link {
+	link := productionVerificationLink()
+	link.client = &libgm.Client{}
+	link.runCtx = context.Background()
+	link.conversationIndexComplete = true
+	link.conversationIndexGeneration = link.generation
+	link.conversationIndexStreamEpoch = link.streamEpoch
+	link.conversationRecords[conversation.GetConversationID()] = conversation
+	link.settings = typingSettings()
+	link.typingNow = func() time.Time { return time.Unix(0, 0) }
+	return link
+}
+
+func TestProductionTypingAdmitsCurrentRcsOneToOne(t *testing.T) {
+	conversation := typingConversation("synthetic-conversation", true)
+	conversation.DefaultOutgoingID = "self-sim"
+	link := productionTypingLink(conversation)
+	var gotConversation string
+	var gotSIM int32
+	calls := 0
+	link.setTyping = func(_ context.Context, conversationID string, payload *gmproto.SIMPayload) error {
+		calls++
+		gotConversation, gotSIM = conversationID, payload.GetSIMNumber()
+		return nil
+	}
+	captured, restore := captureUpstreamOutput(t)
+
+	got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","remaining_validity_ms":5000,"link_generation":7}`)
+
+	restore()
+	if got != "ok" || calls != 1 || gotConversation != "synthetic-conversation" || gotSIM != 1 {
+		t.Fatalf("result = %q, calls = %d, conversation = %q, sim = %d", got, calls, gotConversation, gotSIM)
+	}
+	assertNoParticipantOutput(t, captured.String())
+}
+
+func TestProductionTypingRefusesUnsafeIntents(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		intent    string
+		configure func(*Link, *gmproto.Conversation)
+		want      string
+	}{
+		{
+			name:   "stale generation",
+			intent: `{"conversation_id":"synthetic-conversation","state":"started","remaining_validity_ms":100,"link_generation":6}`,
+			want:   "typing_stale",
+		},
+		{
+			name:   "stream rotated since mint",
+			intent: `{"conversation_id":"synthetic-conversation","state":"started","remaining_validity_ms":100,"link_generation":7}`,
+			configure: func(link *Link, _ *gmproto.Conversation) {
+				link.queueEventFor(link.generation, &libgm.StreamOpened{Source: libgm.StreamSource{ListenID: 2, PollAttempt: 1}})
+			},
+			want: "typing_refused",
+		},
+		{
+			name:   "missing sim payload",
+			intent: `{"conversation_id":"synthetic-conversation","state":"started","remaining_validity_ms":100,"link_generation":7}`,
+			configure: func(link *Link, _ *gmproto.Conversation) {
+				link.settings = &gmproto.Settings{}
+			},
+			want: "typing_refused",
+		},
+		{
+			name:   "group",
+			intent: `{"conversation_id":"synthetic-conversation","state":"started","remaining_validity_ms":100,"link_generation":7}`,
+			configure: func(link *Link, conversation *gmproto.Conversation) {
+				link.conversationRecords[conversation.GetConversationID()] = typingGroup(conversation.GetConversationID())
+			},
+			want: "typing_refused",
+		},
+		{
+			name:   "validity over five seconds",
+			intent: `{"conversation_id":"synthetic-conversation","state":"started","remaining_validity_ms":5001,"link_generation":7}`,
+			want:   "typing_invalid",
+		},
+		{
+			name:   "stopped never reaches google",
+			intent: `{"conversation_id":"synthetic-conversation","state":"stopped","remaining_validity_ms":100,"link_generation":7}`,
+			want:   "typing_stopped",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			conversation := typingConversation("synthetic-conversation", true)
+			conversation.DefaultOutgoingID = "self-sim"
+			link := productionTypingLink(conversation)
+			if test.configure != nil {
+				test.configure(link, conversation)
+			}
+			calls := 0
+			link.setTyping = func(context.Context, string, *gmproto.SIMPayload) error { calls++; return nil }
+			captured, restore := captureUpstreamOutput(t)
+
+			got := link.SetTyping(test.intent)
+
+			restore()
+			if got != test.want || calls != 0 {
+				t.Fatalf("result = %q, calls = %d", got, calls)
+			}
+			assertNoParticipantOutput(t, captured.String())
+		})
+	}
+}
+
+func TestProductionTypingKeepsGroupsRefused(t *testing.T) {
+	link := productionTypingLink(typingGroup("synthetic-conversation"))
+	if link.hasGroupsVerificationLocked() {
+		t.Fatal("groups minted in production")
+	}
+	calls := 0
+	link.setTyping = func(context.Context, string, *gmproto.SIMPayload) error { calls++; return nil }
+	if got := link.SetTyping(`{"conversation_id":"synthetic-conversation","state":"started","remaining_validity_ms":100,"link_generation":7}`); got != "typing_refused" || calls != 0 {
+		t.Fatalf("group result = %q, calls = %d", got, calls)
+	}
+}
+
+func assertNoParticipantOutput(t *testing.T, output string) {
+	t.Helper()
+	for _, secret := range []string{"synthetic-conversation", "synthetic-participant", "synthetic-self", "synthetic-other"} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("upstream output leaked %q: %q", secret, output)
+		}
 	}
 }
 

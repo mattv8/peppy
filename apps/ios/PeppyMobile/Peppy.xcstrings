@@ -46,7 +46,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "In chats that use your Google Messages link, the other person sees that you are typing. Their view may take a few seconds to clear after you stop."
+            "value": "Typing indicators work in one-to-one RCS chats through Google Messages. When this is on, the other person sees when you are typing in those chats. Turn it off to stop that. You still see when they are typing. Group chats are not supported yet."
           }
         }
       }
@@ -4241,26 +4241,6 @@
         }
       }
     },
-    "peppy.google_messages_link_signin_blocked_hint": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Google may refuse sign-in in an app."
-          }
-        }
-      }
-    },
-    "peppy.google_messages_link_signin_blocked_action": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Google blocked sign-in"
-          }
-        }
-      }
-    },
     "peppy.google_messages_link_signin_load_error": {
       "localizations": {
         "en": {
@@ -4316,7 +4296,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Peppy cannot start linking right now. Close this screen and check the link in Settings."
+            "value": "Peppy cannot start linking right now. Close this screen and check Google Messages on the SMS tab."
           }
         }
       }
@@ -4327,6 +4307,76 @@
           "stringUnit": {
             "state": "translated",
             "value": "Google Messages link"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_card_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Messages (RCS)"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_card_not_linked_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Link Google Messages so Peppy can send and receive one-to-one RCS text chats that already have a thread in Google Messages on this phone."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_not_messaging_app": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy does not become your messaging app."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_help_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "About Google Messages (RCS)"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_help_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy sends and receives one-to-one RCS chats through Google Messages on this phone. Typing indicators work in one-to-one chats. Group chats, photos and other media are not supported yet. RCS messages in chats the link has not claimed need restricted message access (see MMS → Sync details). Linking replaces any Messages for Web browser session on this account. A new contact with no Google Messages chat stays SMS."
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_action_manage": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Manage link"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_details_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Messages"
           }
         }
       }
@@ -4357,6 +4407,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Working…"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_link_notice_cutover_ambiguous": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy switched these chats back to SMS after unlinking. Some messages that arrived around the switch back to SMS may be missing in Peppy; they are still on your phone."
           }
         }
       }
@@ -4441,16 +4501,6 @@
         }
       }
     },
-    "peppy.google_messages_link_unlinked_body": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Link Peppy to Google Messages on this phone. Peppy can then use Google Messages for chats that support it. Peppy does not become your messaging app."
-          }
-        }
-      }
-    },
     "peppy.google_messages_link_action_link": {
       "localizations": {
         "en": {
@@ -4497,16 +4547,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Peppy waits until you confirm. Tapping a different emoji stops the link."
-          }
-        }
-      }
-    },
-    "peppy.google_messages_link_linked_body": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Peppy keeps a connection to Google Messages open on this phone, so it can use Google Messages for chats that support it. Your Google sign-in stays on this phone."
           }
         }
       }
@@ -4566,7 +4606,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Open Peppy on that phone, find Google Messages link, and follow the steps there."
+            "value": "Open Peppy on that phone, go to the SMS tab, and follow the steps in the Google Messages card."
           }
         }
       }
@@ -4886,7 +4926,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Linking lets Peppy use Google Messages on this phone for chats that support it. Peppy may send and receive messages in those chats through Google Messages. They pass through Google as they do in Google Messages, and Peppy syncs them to your other Peppy devices like your other messages. Peppy does not become your messaging app."
+            "value": "Linking lets Peppy send and receive one-to-one RCS text chats that already have a thread in Google Messages on this phone. Messages in those chats pass through Google as they do in Google Messages, and Peppy syncs them to your other Peppy devices like your other messages. Typing indicators in those chats work too. They go to your other Peppy devices through your configured server, and you can turn off sharing your typing at any time. Peppy does not become your messaging app."
           }
         }
       }
@@ -5051,6 +5091,16 @@
         }
       }
     },
+    "peppy.google_messages_link_notice_unlink_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlink did not finish. Try again."
+          }
+        }
+      }
+    },
     "peppy.google_messages_link_notice_unlink_remote_failed": {
       "localizations": {
         "en": {
@@ -5166,7 +5216,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Google blocked sign-in in this app. Peppy cannot get around that, so it cannot link this phone right now. Try again later."
+            "value": "Google did not allow sign-in in this app. Peppy cannot get around that, so it cannot link this phone right now. Try again later."
           }
         }
       }

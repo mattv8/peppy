@@ -612,3 +612,155 @@ fn initial_mapping_requires_one_sim_participant_id_join_before_card_validation()
         RcsMappingOutcome::Refused(RcsMappingRefusal::IneligibleConversation)
     );
 }
+
+#[test]
+fn bootstrap_resolution_uses_the_same_canonical_lookup_as_verify() {
+    let (_directory, _config, client, conversation_id) = client_with_participant("raw-peer");
+    let google_id = observation("raw-peer", 1).google_conversation_id;
+    assert_eq!(
+        client
+            .resolve_rcs_bootstrap_conversation("raw-peer", &google_id)
+            .unwrap(),
+        RcsBootstrapResolution::Resolved { conversation_id }
+    );
+    assert!(matches!(
+        client
+            .verify_rcs_mapping(&observation("raw-peer", 1), 1_000)
+            .unwrap(),
+        RcsMappingOutcome::Mapped(mapping) if mapping.conversation_id == conversation_id
+    ));
+
+    let international = format!("+{}{}", "1202", "5550123");
+    let formatted = format!("+{} {}", "1", "202 555 0123");
+    let (_directory, _config, client, conversation_id) = client_with_participant(&formatted);
+    assert_eq!(
+        client
+            .resolve_rcs_bootstrap_conversation(&international, &google_id)
+            .unwrap(),
+        RcsBootstrapResolution::Resolved { conversation_id }
+    );
+}
+
+#[test]
+fn bootstrap_resolution_refuses_missing_ambiguous_invalid_and_conflicting_candidates() {
+    let (_directory, _config, client, _conversation_id) = client_with_participant("2025550123");
+    let google_id = observation("raw-peer", 1).google_conversation_id;
+    let international = format!("+{}{}", "1202", "5550123");
+    assert_eq!(
+        client
+            .resolve_rcs_bootstrap_conversation(&international, &google_id)
+            .unwrap(),
+        RcsBootstrapResolution::Missing
+    );
+    assert_eq!(
+        client
+            .resolve_rcs_bootstrap_conversation("   ", &google_id)
+            .unwrap(),
+        RcsBootstrapResolution::InvalidIdentity
+    );
+
+    capture_in_conversation(&client, "raw-dup", "dup-a");
+    capture_in_conversation(&client, "raw-dup", "dup-b");
+    assert_eq!(
+        client
+            .resolve_rcs_bootstrap_conversation("raw-dup", &google_id)
+            .unwrap(),
+        RcsBootstrapResolution::Ambiguous
+    );
+
+    let (_directory, _config, client, _conversation_id) = client_with_participant("raw-peer");
+    assert!(matches!(
+        client
+            .verify_rcs_mapping(&observation("raw-peer", 1), 1_000)
+            .unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    assert_eq!(
+        client
+            .resolve_rcs_bootstrap_conversation("raw-peer", "another-google-conversation")
+            .unwrap(),
+        RcsBootstrapResolution::AlreadyMappedElsewhere
+    );
+    capture_in_conversation(&client, "raw-other", "other-row");
+    assert_eq!(
+        client
+            .resolve_rcs_bootstrap_conversation("raw-other", &google_id)
+            .unwrap(),
+        RcsBootstrapResolution::AlreadyMappedElsewhere
+    );
+}
+
+#[test]
+fn bootstrap_batch_matches_single_candidate_resolution_in_input_order() {
+    let (_directory, _config, client, conv_e164) = client_with_participant("+1 202 555 0123");
+    let conv_nat = capture_in_conversation(&client, "2025550123", "nat-row");
+    let conv_raw = capture_in_conversation(&client, "raw-peer", "peer-row");
+    capture_in_conversation(&client, "raw-dup", "dup-a");
+    capture_in_conversation(&client, "raw-dup", "dup-b");
+    assert!(matches!(
+        client
+            .verify_rcs_mapping(&observation("raw-peer", 1), 1_000)
+            .unwrap(),
+        RcsMappingOutcome::Mapped(mapping) if mapping.conversation_id == conv_raw
+    ));
+    capture_in_conversation(&client, "raw-other", "other-row");
+
+    let google = "google-conversation";
+    let unmapped = "google-unmapped";
+    let candidates = [
+        ("raw-other", google),
+        ("raw-dup", unmapped),
+        ("   ", google),
+        ("+12025550199", unmapped),
+        ("+12025550123", unmapped),
+        ("2025550123", unmapped),
+        ("raw-peer", "another-google-conversation"),
+        ("raw-peer", google),
+    ];
+    let expected = [
+        RcsBootstrapResolution::AlreadyMappedElsewhere,
+        RcsBootstrapResolution::Ambiguous,
+        RcsBootstrapResolution::InvalidIdentity,
+        RcsBootstrapResolution::Missing,
+        RcsBootstrapResolution::Resolved {
+            conversation_id: conv_e164,
+        },
+        RcsBootstrapResolution::Resolved {
+            conversation_id: conv_nat,
+        },
+        RcsBootstrapResolution::AlreadyMappedElsewhere,
+        RcsBootstrapResolution::Resolved {
+            conversation_id: conv_raw,
+        },
+    ];
+    let batch = client
+        .resolve_rcs_bootstrap_conversations(&candidates)
+        .unwrap();
+    assert_eq!(batch, expected);
+    for ((identity, google_id), resolution) in candidates.iter().zip(&batch) {
+        assert_eq!(
+            client
+                .resolve_rcs_bootstrap_conversation(identity, google_id)
+                .unwrap(),
+            *resolution
+        );
+    }
+}
+
+#[test]
+fn bootstrap_batch_accepts_forty_and_rejects_forty_one_candidates() {
+    let (_directory, _config, client, _conversation_id) = client_with_participant("raw-peer");
+    let google_id = observation("raw-peer", 1).google_conversation_id;
+    let candidate = ("raw-peer", google_id.as_str());
+    assert_eq!(
+        client
+            .resolve_rcs_bootstrap_conversations(&[candidate; 40])
+            .unwrap()
+            .len(),
+        40
+    );
+    assert_eq!(
+        client.resolve_rcs_bootstrap_conversations(&[candidate; 41]),
+        Err(Error::InvalidRequest("too many bootstrap candidates"))
+    );
+}

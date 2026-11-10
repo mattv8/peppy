@@ -10,14 +10,22 @@ use rusqlite::{Connection, OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const RCS_MAPPING_PROOF_VERSION: u32 = 2;
 pub const RCS_MAPPING_FRESHNESS_MS: i64 = 30_000;
 const MAX_PROVIDER_ROUTE_MESSAGE_SCAN: usize = 10_000;
+const MAX_RCS_BOOTSTRAP_CANDIDATES: usize = 40;
 
 #[cfg(test)]
 static PROVIDER_ROUTE_SCAN_QUERIES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+
+// Per-thread so parallel unit tests that also verify mappings cannot skew the count.
+#[cfg(test)]
+thread_local! {
+    static IDENTITY_SCAN_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RcsMappingClass {
@@ -129,6 +137,17 @@ impl RcsMappingRefusal {
 pub enum RcsMappingOutcome {
     Mapped(RcsMapping),
     Refused(RcsMappingRefusal),
+}
+
+/// Read-only resolution of a bootstrap candidate to its single local conversation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RcsBootstrapResolution {
+    Resolved { conversation_id: ConversationId },
+    Missing,
+    Ambiguous,
+    Uncertain,
+    InvalidIdentity,
+    AlreadyMappedElsewhere,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -304,34 +323,37 @@ fn verify(
         ));
     };
 
-    let (conversations, uncertain) = peppy_conversations_for_identity(conn, &participant)?;
-    if uncertain {
-        return Ok(RcsMappingOutcome::Refused(
-            RcsMappingRefusal::PeppyConversationUncertain,
-        ));
-    }
-    let [conversation_id] = conversations.as_slice() else {
-        return Ok(RcsMappingOutcome::Refused(if conversations.is_empty() {
-            RcsMappingRefusal::PeppyConversationMissing
-        } else {
-            RcsMappingRefusal::PeppyConversationAmbiguous
-        }));
-    };
-    if has_other_active_mapping(conn, *conversation_id, &observation.google_conversation_id)? {
-        return Ok(RcsMappingOutcome::Refused(
-            RcsMappingRefusal::MappingConflict,
-        ));
-    }
-    if has_google_mapping_for_other_conversation(
-        conn,
-        *conversation_id,
-        &observation.google_conversation_id,
-    )? {
-        return Ok(RcsMappingOutcome::Refused(
-            RcsMappingRefusal::MappingConflict,
-        ));
-    }
-    if let Some(current_revision) = highest_revision(conn, *conversation_id)?
+    let matches = peppy_conversations_for_identity(conn, &participant)?;
+    let conversation_id =
+        match resolve_identity_conversation(conn, &matches, &observation.google_conversation_id)? {
+            RcsBootstrapResolution::Resolved { conversation_id } => conversation_id,
+            RcsBootstrapResolution::Missing => {
+                return Ok(RcsMappingOutcome::Refused(
+                    RcsMappingRefusal::PeppyConversationMissing,
+                ));
+            }
+            RcsBootstrapResolution::Ambiguous => {
+                return Ok(RcsMappingOutcome::Refused(
+                    RcsMappingRefusal::PeppyConversationAmbiguous,
+                ));
+            }
+            RcsBootstrapResolution::Uncertain => {
+                return Ok(RcsMappingOutcome::Refused(
+                    RcsMappingRefusal::PeppyConversationUncertain,
+                ));
+            }
+            RcsBootstrapResolution::InvalidIdentity => {
+                return Ok(RcsMappingOutcome::Refused(
+                    RcsMappingRefusal::InvalidIdentity,
+                ));
+            }
+            RcsBootstrapResolution::AlreadyMappedElsewhere => {
+                return Ok(RcsMappingOutcome::Refused(
+                    RcsMappingRefusal::MappingConflict,
+                ));
+            }
+        };
+    if let Some(current_revision) = highest_revision(conn, conversation_id)?
         && observation.mapping_revision <= current_revision
     {
         return Ok(RcsMappingOutcome::Refused(
@@ -347,7 +369,7 @@ fn verify(
         digest,
     };
     Ok(RcsMappingOutcome::Mapped(RcsMapping {
-        conversation_id: *conversation_id,
+        conversation_id,
         google_conversation_id: observation.google_conversation_id.clone(),
         class,
         proof_version: RCS_MAPPING_PROOF_VERSION,
@@ -373,6 +395,73 @@ pub(crate) fn canonical_recipient(identity: &str) -> Option<String> {
 
 fn canonical_identity(identity: &str) -> Option<String> {
     canonical_recipient(identity)
+}
+
+/// Resolves up to `MAX_RCS_BOOTSTRAP_CANDIDATES` `(participant, google id)` pairs with one
+/// history scan. Results keep the input order; invalid identities resolve per candidate.
+pub(crate) fn resolve_rcs_bootstrap_conversations(
+    conn: &Connection,
+    candidates: &[(&str, &str)],
+) -> Result<Vec<RcsBootstrapResolution>, Error> {
+    if candidates.len() > MAX_RCS_BOOTSTRAP_CANDIDATES {
+        return Err(Error::InvalidRequest("too many bootstrap candidates"));
+    }
+    let identities = candidates
+        .iter()
+        .map(|(identity, _)| canonical_identity(identity))
+        .collect::<Vec<_>>();
+    let requested = identities
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let matches = identity_conversations(conn, &requested)?;
+    let no_matches = IdentityConversations::default();
+    identities
+        .iter()
+        .zip(candidates)
+        .map(|(identity, (_, google_conversation_id))| {
+            let Some(identity) = identity else {
+                return Ok(RcsBootstrapResolution::InvalidIdentity);
+            };
+            let found = matches.get(identity).unwrap_or(&no_matches);
+            resolve_identity_conversation(conn, found, google_conversation_id)
+        })
+        .collect()
+}
+
+pub(crate) fn resolve_rcs_bootstrap_conversation(
+    conn: &Connection,
+    participant_identity: &str,
+    google_conversation_id: &str,
+) -> Result<RcsBootstrapResolution, Error> {
+    resolve_rcs_bootstrap_conversations(conn, &[(participant_identity, google_conversation_id)])?
+        .pop()
+        .ok_or(Error::Database)
+}
+
+/// The one rule shared by bootstrap resolution and mapping verification.
+fn resolve_identity_conversation(
+    conn: &Connection,
+    matches: &IdentityConversations,
+    google_conversation_id: &str,
+) -> Result<RcsBootstrapResolution, Error> {
+    if matches.uncertain {
+        return Ok(RcsBootstrapResolution::Uncertain);
+    }
+    let mut conversations = matches.conversations.iter();
+    let Some(conversation_id) = conversations.next().copied() else {
+        return Ok(RcsBootstrapResolution::Missing);
+    };
+    if conversations.next().is_some() {
+        return Ok(RcsBootstrapResolution::Ambiguous);
+    }
+    if has_other_active_mapping(conn, conversation_id, google_conversation_id)?
+        || has_google_mapping_for_other_conversation(conn, conversation_id, google_conversation_id)?
+    {
+        return Ok(RcsBootstrapResolution::AlreadyMappedElsewhere);
+    }
+    Ok(RcsBootstrapResolution::Resolved { conversation_id })
 }
 
 fn canonical_e164(identity: &str) -> Option<String> {
@@ -491,33 +580,61 @@ fn validated_visible_participants(
         .ok_or(RcsMappingRefusal::ParticipantAmbiguous)
 }
 
+#[derive(Default)]
+pub(crate) struct IdentityConversations {
+    pub(crate) conversations: BTreeSet<ConversationId>,
+    pub(crate) uncertain: bool,
+}
+
 pub(crate) fn peppy_conversations_for_identity(
     conn: &Connection,
     identity: &str,
-) -> Result<(Vec<ConversationId>, bool), Error> {
+) -> Result<IdentityConversations, Error> {
+    let requested = BTreeSet::from([identity.to_owned()]);
+    Ok(identity_conversations(conn, &requested)?
+        .remove(identity)
+        .unwrap_or_default())
+}
+
+/// Scans message history once for all requested canonical identities.
+fn identity_conversations(
+    conn: &Connection,
+    requested: &BTreeSet<String>,
+) -> Result<BTreeMap<String, IdentityConversations>, Error> {
+    let mut matches = BTreeMap::<String, IdentityConversations>::new();
+    if requested.is_empty() {
+        return Ok(matches);
+    }
+    #[cfg(test)]
+    IDENTITY_SCAN_QUERIES.with(|count| count.set(count.get() + 1));
     let mut statement = conn.prepare("SELECT conversation_id,payload FROM messages")?;
     let rows = statement.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
-    let mut conversations = std::collections::BTreeSet::new();
-    let mut uncertain = false;
     for row in rows {
         let (conversation_id, payload) = row?;
         let payload: crate::MessagePayload = crate::decode(payload.as_bytes())?;
         let identities = payload
             .sender_address
             .iter()
-            .chain(payload.recipients.iter());
-        let identities = identities
+            .chain(payload.recipients.iter())
             .filter_map(|address| canonical_identity(address))
-            .collect::<std::collections::BTreeSet<_>>();
-        if identities.contains(identity) && payload.mms_context.is_some() {
-            uncertain = true;
-        } else if identities.len() == 1 && identities.contains(identity) {
-            conversations.insert(crate::parse(&conversation_id).map_err(|_| Error::Database)?);
+            .collect::<BTreeSet<_>>();
+        for identity in identities
+            .iter()
+            .filter(|identity| requested.contains(*identity))
+        {
+            let entry = matches.entry(identity.clone()).or_default();
+            if payload.mms_context.is_some() {
+                entry.uncertain = true;
+            } else if identities.len() == 1 {
+                entry
+                    .conversations
+                    .insert(crate::parse(&conversation_id).map_err(|_| Error::Database)?);
+            }
         }
     }
-    Ok((conversations.into_iter().collect(), uncertain))
+    Ok(matches)
 }
 
 pub(crate) fn peppy_conversations_for_identity_set(
@@ -1097,8 +1214,7 @@ pub(crate) fn mapping_observation_status(
     let proof_matches = visible.as_ref().is_some_and(|visible| {
         mapping.proof.digest == proof_digest(observation, mapping.class, &own_identity, visible)
     });
-    let (conversations, uncertain) =
-        peppy_conversations_for_identity(conn, &mapping.proof.canonical_participant)?;
+    let matches = peppy_conversations_for_identity(conn, &mapping.proof.canonical_participant)?;
     let exact = observation.google_candidate_count == 1
         && observation.conversation_type == RcsConversationType::Rcs
         && observation.status == "eligible"
@@ -1107,8 +1223,9 @@ pub(crate) fn mapping_observation_status(
         && observation.default_outgoing
         && native_observation_is_current(observation, now_ms, &own_identity)
         && proof_matches
-        && !uncertain
-        && conversations.as_slice() == [mapping.conversation_id];
+        && !matches.uncertain
+        && matches.conversations.len() == 1
+        && matches.conversations.contains(&mapping.conversation_id);
     Ok(if exact {
         MappingObservationStatus::Exact
     } else {
@@ -1483,7 +1600,9 @@ fn invalidate_for_refusal(
             .find(|identity| own_identity.as_deref() != Some(identity.as_str()))
             .or(own_identity);
         if let Some(participant) = participant {
-            for conversation_id in peppy_conversations_for_identity(conn, &participant)?.0 {
+            for conversation_id in
+                peppy_conversations_for_identity(conn, &participant)?.conversations
+            {
                 conn.execute(
                     "UPDATE rcs_conversation_mappings SET invalidated_at_ms=verified_at_ms, invalidation_code=? WHERE peppy_conversation_id=? AND invalidated_at_ms IS NULL",
                     params![code, conversation_id.to_string()],
@@ -1787,5 +1906,32 @@ mod tests {
             PROVIDER_ROUTE_SCAN_QUERIES.load(std::sync::atomic::Ordering::Relaxed),
             1
         );
+    }
+
+    #[test]
+    fn bootstrap_batch_scans_message_history_once_per_batch() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages(conversation_id TEXT NOT NULL,payload TEXT NOT NULL,local_order INTEGER NOT NULL);",
+        )
+        .unwrap();
+        for size in [1, 40] {
+            let owned = (0..size)
+                .map(|index| {
+                    (
+                        format!("participant-{index}"),
+                        "google-conversation".to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let candidates = owned
+                .iter()
+                .map(|(identity, google)| (identity.as_str(), google.as_str()))
+                .collect::<Vec<_>>();
+            IDENTITY_SCAN_QUERIES.with(|count| count.set(0));
+            let resolutions = resolve_rcs_bootstrap_conversations(&conn, &candidates).unwrap();
+            assert_eq!(resolutions, vec![RcsBootstrapResolution::Missing; size]);
+            assert_eq!(IDENTITY_SCAN_QUERIES.with(std::cell::Cell::get), 1);
+        }
     }
 }

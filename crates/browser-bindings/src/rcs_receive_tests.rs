@@ -53,7 +53,7 @@ fn core() -> (tempfile::TempDir, Client, ConversationId, u64, MessageId) {
         .unwrap();
     let conversation_id = ConversationId::new();
     let ownership = client
-        .begin_rcs_link_ownership(conversation_id, SENTINELS[3], now - 1)
+        .begin_rcs_link_ownership(conversation_id, now - 1)
         .unwrap();
     let outcome = client
         .ingest_rcs_projected_record(
@@ -68,7 +68,6 @@ fn core() -> (tempfile::TempDir, Client, ConversationId, u64, MessageId) {
                 tmp_id: Some(SENTINELS[2].into()),
                 rcs_reported: true,
                 e2ee_reported: Some(true),
-                history_token: Some(SENTINELS[3].into()),
             },
         )
         .unwrap();
@@ -110,7 +109,6 @@ fn core() -> (tempfile::TempDir, Client, ConversationId, u64, MessageId) {
                 tmp_id: None,
                 rcs_reported: false,
                 e2ee_reported: None,
-                history_token: None,
             },
         )
         .unwrap();
@@ -478,7 +476,6 @@ fn browser_rcs_reported_message_without_status_row_preserves_reported_fact() {
                 tmp_id: None,
                 rcs_reported: false,
                 e2ee_reported: None,
-                history_token: None,
             },
         )
         .unwrap();
@@ -551,7 +548,6 @@ fn browser_rcs_history_gap_is_projected_after_detector_overflow() {
                 tmp_id: None,
                 rcs_reported: true,
                 e2ee_reported: Some(true),
-                history_token: None,
             },
         )
         .unwrap();
@@ -606,7 +602,7 @@ fn rcs_conversation(
         .unwrap();
     let conversation = ConversationId::new();
     let ownership = client
-        .begin_rcs_link_ownership(conversation, SENTINELS[3], now - 1)
+        .begin_rcs_link_ownership(conversation, now - 1)
         .unwrap();
     client
         .ingest_rcs_projected_record(
@@ -621,7 +617,6 @@ fn rcs_conversation(
                 tmp_id: None,
                 rcs_reported,
                 e2ee_reported: encryption,
-                history_token: None,
             },
         )
         .unwrap();

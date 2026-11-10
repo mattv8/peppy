@@ -50,11 +50,11 @@ func preparedRcsFixtureWithPhone(t *testing.T) (*Link, *phoneFixture, func(), st
 	setSafetyState(link, stateLinked, auth)
 	done := startSafetyRun(t, link)
 	awaitStreamOpen(t, link)
-	setTestOwnerVerification(link)
 	link.queueEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{SIMParticipant: &gmproto.SIMParticipant{ID: "synthetic-outgoing"}, SIMData: &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}}, RCSChats: &gmproto.RCSChats{Enabled: true}}}}})
-	if err := link.RefreshConversationIndex(); err != nil {
-		t.Fatal(err)
+	if result := link.RefreshConversationIndex(); result != `{"code":"ok"}` {
+		t.Fatal(result)
 	}
+	setTestOwnerVerification(link)
 	var snapshot struct {
 		SnapshotToken string `json:"snapshot_token"`
 	}
@@ -481,11 +481,11 @@ func TestPrepareRcsBindsOneTicketToTheCurrentStage2Target(t *testing.T) {
 	setSafetyState(link, stateLinked, auth)
 	done := startSafetyRun(t, link)
 	awaitStreamOpen(t, link)
-	setTestOwnerVerification(link)
 	link.queueEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{SIMParticipant: &gmproto.SIMParticipant{ID: "synthetic-outgoing"}, SIMData: &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}}, RCSChats: &gmproto.RCSChats{Enabled: true}}}}})
-	if err := link.RefreshConversationIndex(); err != nil {
-		t.Fatal(err)
+	if result := link.RefreshConversationIndex(); result != `{"code":"ok"}` {
+		t.Fatal(result)
 	}
+	setTestOwnerVerification(link)
 	snapshot := link.ConversationCandidateSnapshot()
 	var envelope struct {
 		SnapshotToken string `json:"snapshot_token"`
@@ -532,8 +532,8 @@ func TestLegacySendRcsDoesNotSubmitWithoutPrepareCommit(t *testing.T) {
 	awaitStreamOpen(t, link)
 	setTestOwnerVerification(link)
 	link.queueEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{SIMParticipant: &gmproto.SIMParticipant{ID: "synthetic-outgoing"}, SIMData: &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}}, RCSChats: &gmproto.RCSChats{Enabled: true}}}}})
-	if err := link.RefreshConversationIndex(); err != nil {
-		t.Fatal(err)
+	if result := link.RefreshConversationIndex(); result != `{"code":"ok"}` {
+		t.Fatal(result)
 	}
 	result := link.SendRcs(`{"command_id":"synthetic-command","tmp_id":"00000000-0000-4000-8000-000000000000","google_conversation_id":"synthetic-conversation","mapping_revision":1,"proof_digest":"synthetic-proof","content":"synthetic-content"}`)
 	if got := decodeSendCode(t, result); got != "pending_prepare" {

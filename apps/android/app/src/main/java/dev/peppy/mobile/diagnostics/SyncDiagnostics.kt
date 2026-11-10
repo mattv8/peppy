@@ -15,7 +15,7 @@ internal enum class SyncTraceField(val code: Long) {
 }
 
 internal object SyncDiagnosticStage { const val SMS_LIVE = 1L; const val SMS_HISTORY = 2L; const val SMS_RECHECK = 3L; const val SMS_RECONCILIATION = 4L; const val MMS = 5L; const val GATEWAY = 6L; const val CONTACT_FULL = 7L; const val CONTACT_INCREMENTAL = 8L; const val SOCKET = 9L; const val NOTIFICATION = 10L }
-internal object SyncDiagnosticReason { const val UNKNOWN = 0L; const val MORE = 1L; const val HINT = 2L; const val BUDGET = 3L; const val PROVIDER_ERROR = 4L; const val CORE_ERROR = 5L; const val COMPLETE = 6L; const val CONNECTED = 7L; const val RECONNECTING = 8L; const val LOCKED = 9L }
+internal object SyncDiagnosticReason { const val UNKNOWN = 0L; const val MORE = 1L; const val HINT = 2L; const val BUDGET = 3L; const val PROVIDER_ERROR = 4L; const val CORE_ERROR = 5L; const val COMPLETE = 6L; const val CONNECTED = 7L; const val RECONNECTING = 8L; const val LOCKED = 9L; const val RCS_PROVIDER_ALERT = 10L; const val RCS_PROVIDER_ROUTE_ERROR = 11L; const val RCS_PROVIDER_PRE_PROOF = 12L; const val RCS_PROVIDER_GUARD_BAND = 13L }
 
 /** Runtime-opt-in, fixed-vocabulary timing telemetry. Values are numeric to prevent content logging. */
 internal object SyncDiagnostics {

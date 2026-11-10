@@ -2,7 +2,7 @@
 mod common;
 
 use common::*;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -59,6 +59,18 @@ fn sqlcipher(path: &Path) -> Connection {
         )
         .unwrap();
     connection
+}
+
+/// The stored local recovery record for a conversation, parsed from SQLCipher metadata.
+fn recovery_json(config: &ClientConfig, conversation_id: ConversationId) -> serde_json::Value {
+    let json: String = sqlcipher(&config.database_path)
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [format!("rcs_recovery:{conversation_id}")],
+            |row| row.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&json).unwrap()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,7 +134,7 @@ fn receive_rows(connection: &Connection) -> ReceiveRows {
 fn link_ownership_is_generation_fenced_and_identities_are_replayed() {
     let (_directory, client, conversation_id, _config) = client();
     let ownership = client
-        .begin_rcs_link_ownership(conversation_id, "opaque-page-token", 41)
+        .begin_rcs_link_ownership(conversation_id, 41)
         .unwrap();
     assert_eq!(ownership.owner, RcsReceiveOwner::Link);
     assert_eq!(ownership.ownership_generation, 1);
@@ -131,8 +143,7 @@ fn link_ownership_is_generation_fenced_and_identities_are_replayed() {
             conversation_id,
             ownership.ownership_generation,
             "google-message",
-            "google-conversation",
-            Some("opaque-page-token"),
+            "google-conversation"
         ),
         Ok(RcsIdentityOutcome::Recorded)
     ));
@@ -141,8 +152,7 @@ fn link_ownership_is_generation_fenced_and_identities_are_replayed() {
             conversation_id,
             ownership.ownership_generation,
             "google-message",
-            "google-conversation",
-            None,
+            "google-conversation"
         ),
         Ok(RcsIdentityOutcome::Duplicate)
     ));
@@ -151,8 +161,7 @@ fn link_ownership_is_generation_fenced_and_identities_are_replayed() {
             conversation_id,
             ownership.ownership_generation + 1,
             "stale-message",
-            "google-conversation",
-            None,
+            "google-conversation"
         ),
         Ok(RcsIdentityOutcome::Rejected(RcsReceiveCode::OwnershipStale))
     ));
@@ -162,7 +171,7 @@ fn link_ownership_is_generation_fenced_and_identities_are_replayed() {
 fn unlink_freezes_link_and_marks_ambiguous_detectors_for_alert() {
     let (_directory, client, conversation_id, _config) = client();
     let link = client
-        .begin_rcs_link_ownership(conversation_id, "opaque-page-token", 10)
+        .begin_rcs_link_ownership(conversation_id, 10)
         .unwrap();
     client
         .record_rcs_provider_detector(
@@ -203,36 +212,16 @@ fn unlink_freezes_link_and_marks_ambiguous_detectors_for_alert() {
             conversation_id,
             link.ownership_generation,
             "late-message",
-            "google-conversation",
-            None,
+            "google-conversation"
         ),
         Ok(RcsIdentityOutcome::Rejected(RcsReceiveCode::OwnershipStale))
     ));
 }
 
 #[test]
-fn history_tokens_are_canonical_opaque_values() {
-    let (_directory, client, conversation_id, _config) = client();
-    assert!(matches!(
-        client.begin_rcs_link_ownership(conversation_id, "not canonical", 1),
-        Err(Error::InvalidRequest(_))
-    ));
-    assert!(matches!(
-        client.begin_rcs_link_ownership(conversation_id, "", 1),
-        Err(Error::InvalidRequest(_))
-    ));
-    assert!(matches!(
-        client.begin_rcs_link_ownership(conversation_id, &"a".repeat(4_097), 1),
-        Err(Error::InvalidRequest(_))
-    ));
-}
-
-#[test]
-fn duplicate_link_identity_advances_a_valid_checkpoint_and_rejected_writes_do_not() {
+fn duplicate_link_identity_is_idempotent_and_rejected_writes_change_nothing() {
     let (_directory, client, conversation_id, config) = client();
-    let owner = client
-        .begin_rcs_link_ownership(conversation_id, "initial", 0)
-        .unwrap();
+    let owner = client.begin_rcs_link_ownership(conversation_id, 0).unwrap();
     assert_eq!(
         client
             .record_rcs_link_identity(
@@ -240,7 +229,6 @@ fn duplicate_link_identity_advances_a_valid_checkpoint_and_rejected_writes_do_no
                 owner.ownership_generation,
                 "message",
                 "conversation",
-                Some("first"),
             )
             .unwrap(),
         RcsIdentityOutcome::Recorded
@@ -252,22 +240,13 @@ fn duplicate_link_identity_advances_a_valid_checkpoint_and_rejected_writes_do_no
                 owner.ownership_generation,
                 "message",
                 "conversation",
-                Some("second"),
             )
             .unwrap(),
         RcsIdentityOutcome::Duplicate
     );
+    let before = recovery_json(&config, conversation_id);
     drop(client);
     let reopened = open(&config);
-    assert_eq!(
-        reopened
-            .rcs_receive_state(conversation_id)
-            .unwrap()
-            .unwrap()
-            .history_token
-            .as_deref(),
-        Some("second")
-    );
     assert_eq!(
         reopened
             .record_rcs_link_identity(
@@ -275,40 +254,26 @@ fn duplicate_link_identity_advances_a_valid_checkpoint_and_rejected_writes_do_no
                 owner.ownership_generation + 1,
                 "message",
                 "conversation",
-                Some("rejected"),
             )
             .unwrap(),
         RcsIdentityOutcome::Rejected(RcsReceiveCode::OwnershipStale)
     );
-    assert_eq!(
-        reopened
-            .rcs_receive_state(conversation_id)
-            .unwrap()
-            .unwrap()
-            .history_token
-            .as_deref(),
-        Some("second")
-    );
+    assert_eq!(recovery_json(&config, conversation_id), before);
 }
 
 #[test]
 fn identity_is_scoped_to_the_google_conversation_and_stale_writes_are_refused() {
     let (_directory, client, first, _config) = client();
     let second = ConversationId::new();
-    let first_owner = client
-        .begin_rcs_link_ownership(first, "token-one", 7)
-        .unwrap();
-    let second_owner = client
-        .begin_rcs_link_ownership(second, "token-two", 9)
-        .unwrap();
+    let first_owner = client.begin_rcs_link_ownership(first, 7).unwrap();
+    let second_owner = client.begin_rcs_link_ownership(second, 9).unwrap();
     assert_eq!(
         client
             .record_rcs_link_identity(
                 first,
                 first_owner.ownership_generation,
                 "message",
-                "chat-one",
-                None
+                "chat-one"
             )
             .unwrap(),
         RcsIdentityOutcome::Recorded
@@ -319,8 +284,7 @@ fn identity_is_scoped_to_the_google_conversation_and_stale_writes_are_refused() 
                 second,
                 second_owner.ownership_generation,
                 "message",
-                "chat-two",
-                None
+                "chat-two"
             )
             .unwrap(),
         RcsIdentityOutcome::Recorded
@@ -331,8 +295,7 @@ fn identity_is_scoped_to_the_google_conversation_and_stale_writes_are_refused() 
                 first,
                 first_owner.ownership_generation + 1,
                 "late",
-                "chat-one",
-                None
+                "chat-one"
             )
             .unwrap(),
         RcsIdentityOutcome::Rejected(RcsReceiveCode::OwnershipStale)
@@ -343,14 +306,14 @@ fn identity_is_scoped_to_the_google_conversation_and_stale_writes_are_refused() 
 fn proof_handover_cutover_and_relink_preserve_generations() {
     let (_directory, client, conversation_id, _config) = client();
     let link = client
-        .begin_rcs_link_ownership(conversation_id, "token-one", 21)
+        .begin_rcs_link_ownership(conversation_id, 21)
         .unwrap();
     assert_eq!(link.detector_floor, 21);
     let no_alert = client.begin_rcs_unlink_cutover(conversation_id).unwrap();
     assert!(!no_alert.ambiguous_detector_alert);
     assert_eq!(no_alert.freeze_detector_floor, 21);
     let relink = client
-        .begin_rcs_link_ownership(conversation_id, "token-two", 30)
+        .begin_rcs_link_ownership(conversation_id, 30)
         .unwrap();
     assert_eq!(relink.owner, RcsReceiveOwner::Link);
     assert_eq!(relink.ownership_generation, link.ownership_generation + 2);
@@ -376,7 +339,7 @@ fn proof_handover_cutover_and_relink_preserve_generations() {
 fn detector_records_never_create_messages_or_link_identities() {
     let (_directory, client, conversation_id, config) = client();
     let link = client
-        .begin_rcs_link_ownership(conversation_id, "token", 10)
+        .begin_rcs_link_ownership(conversation_id, 10)
         .unwrap();
     let connection = sqlcipher(&config.database_path);
     let before = receive_rows(&connection);
@@ -455,9 +418,7 @@ fn detector_records_never_create_messages_or_link_identities() {
 #[test]
 fn detector_pruning_keeps_unresolved_ambiguous_window_rows() {
     let (_directory, client, conversation_id, config) = client();
-    let link = client
-        .begin_rcs_link_ownership(conversation_id, "token", 0)
-        .unwrap();
+    let link = client.begin_rcs_link_ownership(conversation_id, 0).unwrap();
     for provider_row_id in 0..1_024 {
         client
             .record_rcs_provider_detector(
@@ -516,9 +477,7 @@ fn detector_pruning_keeps_unresolved_ambiguous_window_rows() {
 #[test]
 fn detector_overflow_sets_alert_without_dropping_unresolved_rows() {
     let (_directory, client, conversation_id, config) = client();
-    let link = client
-        .begin_rcs_link_ownership(conversation_id, "token", 0)
-        .unwrap();
+    let link = client.begin_rcs_link_ownership(conversation_id, 0).unwrap();
     for provider_row_id in 0..1_024 {
         client
             .record_rcs_provider_detector(
@@ -572,9 +531,7 @@ fn detector_overflow_sets_alert_without_dropping_unresolved_rows() {
 #[test]
 fn overflow_cutover_keeps_high_water_and_stronger_alert() {
     let (_directory, client, conversation_id, _config) = client();
-    let link = client
-        .begin_rcs_link_ownership(conversation_id, "token", 0)
-        .unwrap();
+    let link = client.begin_rcs_link_ownership(conversation_id, 0).unwrap();
     for provider_row_id in 0..=1_024 {
         client
             .record_rcs_provider_detector(
@@ -606,7 +563,7 @@ fn overflow_cutover_keeps_high_water_and_stronger_alert() {
 fn cutover_never_moves_the_detector_floor_backwards() {
     let (_directory, client, conversation_id, _config) = client();
     let first = client
-        .begin_rcs_link_ownership(conversation_id, "first", 100)
+        .begin_rcs_link_ownership(conversation_id, 100)
         .unwrap();
     client
         .record_rcs_provider_detector(
@@ -623,7 +580,7 @@ fn cutover_never_moves_the_detector_floor_backwards() {
         .unwrap();
     client.begin_rcs_unlink_cutover(conversation_id).unwrap();
     let relink = client
-        .begin_rcs_link_ownership(conversation_id, "second", 200)
+        .begin_rcs_link_ownership(conversation_id, 200)
         .unwrap();
     assert_eq!(
         client
@@ -636,55 +593,150 @@ fn cutover_never_moves_the_detector_floor_backwards() {
 }
 
 #[test]
-fn checkpoint_advances_duplicate_and_empty_pages_but_rejects_stale_writers() {
-    let (_directory, client, conversation_id, _config) = client();
-    let ownership = client
-        .begin_rcs_link_ownership(conversation_id, "first", 0)
+fn recovery_progress_and_completion_are_generation_fenced() {
+    let (_directory, client, conversation_id, config) = client();
+    let ownership = client.begin_rcs_link_ownership(conversation_id, 0).unwrap();
+    let generation = ownership.ownership_generation;
+    let proof = recovery_json(&config, conversation_id)["watermark_ms"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(
+        client
+            .record_rcs_recovery_progress(conversation_id, generation, 50, "page-one")
+            .unwrap(),
+        RcsRecoveryOutcome::Recorded
+    );
+    let progressed = recovery_json(&config, conversation_id);
+    assert_eq!(
+        progressed,
+        serde_json::json!({
+            "v": 1,
+            "watermark_ms": proof,
+            "resume_hint": {"target_ms": 50, "cursor": "page-one"},
+            "incomplete": true
+        })
+    );
+    assert_eq!(
+        client
+            .record_rcs_recovery_progress(conversation_id, generation + 1, 60, "stale")
+            .unwrap(),
+        RcsRecoveryOutcome::Rejected(RcsReceiveCode::OwnershipStale)
+    );
+    assert_eq!(
+        client
+            .complete_rcs_recovery(conversation_id, generation + 1, 60)
+            .unwrap(),
+        RcsRecoveryOutcome::Rejected(RcsReceiveCode::OwnershipStale)
+    );
+    assert_eq!(
+        client
+            .clear_rcs_recovery_hint(conversation_id, generation + 1)
+            .unwrap(),
+        RcsRecoveryOutcome::Rejected(RcsReceiveCode::OwnershipStale)
+    );
+    assert_eq!(recovery_json(&config, conversation_id), progressed);
+    assert_eq!(
+        client
+            .record_rcs_recovery_progress(conversation_id, generation, 50, "not canonical")
+            .unwrap(),
+        RcsRecoveryOutcome::Rejected(RcsReceiveCode::CursorInvalid)
+    );
+    assert_eq!(recovery_json(&config, conversation_id), progressed);
+}
+
+#[test]
+fn complete_takes_the_maximum_watermark_and_clears_the_gap() {
+    let (_directory, client, conversation_id, config) = client();
+    let generation = client
+        .begin_rcs_link_ownership(conversation_id, 0)
+        .unwrap()
+        .ownership_generation;
+    let proof = recovery_json(&config, conversation_id)["watermark_ms"]
+        .as_i64()
         .unwrap();
     client
-        .record_rcs_link_identity(
-            conversation_id,
-            ownership.ownership_generation,
-            "message",
-            "chat",
-            None,
-        )
+        .record_rcs_recovery_progress(conversation_id, generation, proof + 500, "cursor")
         .unwrap();
     assert_eq!(
         client
-            .checkpoint_rcs_history(conversation_id, ownership.ownership_generation, "duplicate")
+            .complete_rcs_recovery(conversation_id, generation, proof + 200)
             .unwrap(),
-        RcsIdentityOutcome::Recorded
+        RcsRecoveryOutcome::Recorded
     );
     assert_eq!(
-        client
-            .checkpoint_rcs_history(conversation_id, ownership.ownership_generation, "empty")
-            .unwrap(),
-        RcsIdentityOutcome::Recorded
+        recovery_json(&config, conversation_id),
+        serde_json::json!({
+            "v": 1,
+            "watermark_ms": proof + 200,
+            "resume_hint": null,
+            "incomplete": false
+        })
     );
+    client
+        .complete_rcs_recovery(conversation_id, generation, proof + 100)
+        .unwrap();
+    assert_eq!(
+        recovery_json(&config, conversation_id)["watermark_ms"],
+        proof + 200
+    );
+}
+
+#[test]
+fn cleared_hint_keeps_the_gap_open_for_a_later_retry() {
+    let (_directory, client, conversation_id, config) = client();
+    let generation = client
+        .begin_rcs_link_ownership(conversation_id, 0)
+        .unwrap()
+        .ownership_generation;
+    client
+        .record_rcs_recovery_progress(conversation_id, generation, 50, "cursor")
+        .unwrap();
     assert_eq!(
         client
-            .checkpoint_rcs_history(conversation_id, ownership.ownership_generation + 1, "stale")
+            .clear_rcs_recovery_hint(conversation_id, generation)
             .unwrap(),
-        RcsIdentityOutcome::Rejected(RcsReceiveCode::OwnershipStale)
+        RcsRecoveryOutcome::Recorded
     );
+    let state = recovery_json(&config, conversation_id);
+    assert!(state["resume_hint"].is_null(), "{state}");
+    assert_eq!(state["incomplete"], true, "{state}");
+}
+
+#[test]
+fn recovery_writes_never_enqueue_replication_or_touch_conversation_metadata() {
+    let (_directory, client, conversation_id, config) = client();
+    let generation = client
+        .begin_rcs_link_ownership(conversation_id, 0)
+        .unwrap()
+        .ownership_generation;
+    let connection = sqlcipher(&config.database_path);
+    let outbox_before: i64 = connection
+        .query_row("SELECT COUNT(*) FROM outbox", [], |row| row.get(0))
+        .unwrap();
+    let metadata_before = client.rcs_conversation_metadata(conversation_id).unwrap();
+    client
+        .record_rcs_recovery_progress(conversation_id, generation, 50, "cursor")
+        .unwrap();
+    client
+        .complete_rcs_recovery(conversation_id, generation, 50)
+        .unwrap();
+    client
+        .clear_rcs_recovery_hint(conversation_id, generation)
+        .unwrap();
+    let outbox_after: i64 = connection
+        .query_row("SELECT COUNT(*) FROM outbox", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(outbox_after, outbox_before);
     assert_eq!(
-        client
-            .rcs_receive_state(conversation_id)
-            .unwrap()
-            .unwrap()
-            .history_token
-            .as_deref(),
-        Some("empty")
+        client.rcs_conversation_metadata(conversation_id).unwrap(),
+        metadata_before
     );
 }
 
 #[test]
 fn receive_state_survives_reopen() {
     let (directory, client, conversation_id, config) = client();
-    let ownership = client
-        .begin_rcs_link_ownership(conversation_id, "token", 7)
-        .unwrap();
+    let ownership = client.begin_rcs_link_ownership(conversation_id, 7).unwrap();
     client
         .record_rcs_provider_detector(
             conversation_id,
@@ -706,7 +758,6 @@ fn receive_state_survives_reopen() {
         .unwrap();
     assert_eq!(state.owner, RcsReceiveOwner::Link);
     assert_eq!(state.ownership_generation, ownership.ownership_generation);
-    assert_eq!(state.history_token.as_deref(), Some("token"));
     assert_eq!(
         (
             state.detector_floor,
@@ -721,10 +772,10 @@ fn receive_state_survives_reopen() {
 #[test]
 fn terminal_unlink_candidates_require_completion_and_are_stably_bounded() {
     let (_directory, client, first, _config) = client();
-    client.begin_rcs_link_ownership(first, "first", 1).unwrap();
-    for index in 0..100 {
+    client.begin_rcs_link_ownership(first, 1).unwrap();
+    for _ in 0..100 {
         client
-            .begin_rcs_link_ownership(ConversationId::new(), &format!("token{index}"), 1)
+            .begin_rcs_link_ownership(ConversationId::new(), 1)
             .unwrap();
     }
     assert!(client.rcs_owner_unlink_cutover_candidates().is_err());
@@ -763,23 +814,36 @@ fn link_owned_context_enumeration_recovers_every_mapped_lane() {
     authorize_local_link_gateway(&client, &connection);
     let mut expected = vec![first];
     let mut participants = std::collections::BTreeSet::new();
-    client.begin_rcs_link_ownership(first, "first", 1).unwrap();
+    client.begin_rcs_link_ownership(first, 1).unwrap();
     assert!(participants.insert("+14155551000".to_owned()));
     insert_route_proof(&connection, first, "google-first", "+14155551000");
+    connection
+        .execute(
+            "INSERT INTO metadata(k,v) VALUES(?,?)",
+            rusqlite::params![format!("rcs_link_owner_google:{first}"), "google-first"],
+        )
+        .unwrap();
     for index in 0..100 {
         let conversation_id = ConversationId::new();
         let participant = format!("+1415555{index:04}");
         expected.push(conversation_id);
         assert!(participants.insert(participant.clone()));
-        client
-            .begin_rcs_link_ownership(conversation_id, &format!("token-{index}"), 1)
-            .unwrap();
+        client.begin_rcs_link_ownership(conversation_id, 1).unwrap();
         insert_route_proof(
             &connection,
             conversation_id,
             &format!("google-{index}"),
             &participant,
         );
+        connection
+            .execute(
+                "INSERT INTO metadata(k,v) VALUES(?,?)",
+                rusqlite::params![
+                    format!("rcs_link_owner_google:{conversation_id}"),
+                    format!("google-{index}"),
+                ],
+            )
+            .unwrap();
     }
     assert_eq!(participants.len(), 101);
     let contexts = client.rcs_link_owned_conversations().unwrap();
@@ -848,7 +912,7 @@ fn insert_route_proof(
 fn provider_row_routing_uses_exact_proofs_without_creating_domain_rows() {
     let (_directory, client, link_conversation, config) = client();
     client
-        .begin_rcs_link_ownership(link_conversation, "cursor", 1)
+        .begin_rcs_link_ownership(link_conversation, 1)
         .unwrap();
     let connection = sqlcipher(&config.database_path);
     insert_route_proof(
@@ -874,9 +938,11 @@ fn provider_row_routing_uses_exact_proofs_without_creating_domain_rows() {
             provider_type: 1,
             observed_at_ms: 1_000,
             addresses: vec!["+1 (415) 555-2671".into()],
+            restricted: true,
+            text_only: true,
         })
         .unwrap();
-    assert_eq!(route, RcsProviderRowRoute::DetectorRecorded);
+    assert_eq!(route, RcsProviderRowRoute::Provider);
     assert_eq!(
         connection
             .query_row("SELECT COUNT(*) FROM messages", [], |row| row
@@ -903,6 +969,8 @@ fn provider_row_routing_uses_exact_proofs_without_creating_domain_rows() {
                 provider_type: 1,
                 observed_at_ms: 1_001,
                 addresses: vec!["+14155552671".into()],
+                restricted: true,
+                text_only: true,
             })
             .unwrap(),
         RcsProviderRowRoute::Provider
@@ -915,6 +983,8 @@ fn provider_row_routing_uses_exact_proofs_without_creating_domain_rows() {
                 provider_type: 1,
                 observed_at_ms: 1_001,
                 addresses: vec!["+14155559999".into()],
+                restricted: true,
+                text_only: true,
             })
             .unwrap(),
         RcsProviderRowRoute::Provider
@@ -929,6 +999,8 @@ fn provider_row_routing_uses_exact_proofs_without_creating_domain_rows() {
                 provider_type: 1,
                 observed_at_ms: 1_002,
                 addresses: vec!["+14155552671".into()],
+                restricted: true,
+                text_only: true,
             })
             .unwrap(),
         RcsProviderRowRoute::Alert
@@ -953,13 +1025,48 @@ fn provider_row_routing_refuses_a_foreign_current_gateway() {
                 provider_type: 1,
                 observed_at_ms: 1_000,
                 addresses: vec!["+14155552671".into()],
+                restricted: true,
+                text_only: true,
             })
             .is_err()
     );
 }
 
 #[test]
-fn raw_identity_link_lane_routes_to_detector() {
+fn unrestricted_provider_row_returns_provider_without_reading_mapping_state() {
+    let (_directory, client, _conversation, config) = client();
+    let connection = sqlcipher(&config.database_path);
+    connection
+        .execute(
+            "INSERT INTO rcs_conversation_mappings(peppy_conversation_id,google_conversation_id,class,proof_version,proof_hash,mapping_revision,verified_at_ms) VALUES('not-a-conversation','google','one_to_one',2,?,1,1000)",
+            [vec![0_u8; 32]],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO rcs_mapping_proofs(peppy_conversation_id,mapping_revision,canonical_participant,identity_region,own_identity) VALUES('not-a-conversation',1,'+14155552671','US','+14155550100')",
+            [],
+        )
+        .unwrap();
+
+    assert_eq!(
+        client
+            .route_rcs_provider_row(RcsProviderRow {
+                provider_row_id: 1,
+                provider_thread_id: 1,
+                provider_type: 1,
+                observed_at_ms: 1_000,
+                addresses: vec!["+14155552671".into()],
+                restricted: false,
+                text_only: true,
+            })
+            .unwrap(),
+        RcsProviderRowRoute::Provider
+    );
+}
+
+#[test]
+fn restricted_text_row_before_proof_time_returns_provider() {
     let (_directory, client, _unused, config) = client();
     let captured = client
         .capture_incoming(IncomingSms {
@@ -971,7 +1078,7 @@ fn raw_identity_link_lane_routes_to_detector() {
         })
         .unwrap();
     client
-        .begin_rcs_link_ownership(captured.conversation_id, "raw-link", 1)
+        .begin_rcs_link_ownership(captured.conversation_id, 1)
         .unwrap();
     let connection = sqlcipher(&config.database_path);
     insert_route_proof(
@@ -988,14 +1095,16 @@ fn raw_identity_link_lane_routes_to_detector() {
                 provider_type: 1,
                 observed_at_ms: 1_000,
                 addresses: vec!["peer-local".into()],
+                restricted: true,
+                text_only: true,
             })
             .unwrap(),
-        RcsProviderRowRoute::DetectorRecorded
+        RcsProviderRowRoute::Provider
     );
 }
 
 #[test]
-fn exact_raw_identity_link_lane_without_mapping_never_routes_provider() {
+fn restricted_text_row_without_mapping_returns_provider() {
     let (_directory, client, _unused, _config) = client();
     let captured = client
         .capture_incoming(IncomingSms {
@@ -1007,9 +1116,9 @@ fn exact_raw_identity_link_lane_without_mapping_never_routes_provider() {
         })
         .unwrap();
     client
-        .begin_rcs_link_ownership(captured.conversation_id, "unmapped-link", 1)
+        .begin_rcs_link_ownership(captured.conversation_id, 1)
         .unwrap();
-    assert_ne!(
+    assert_eq!(
         client
             .route_rcs_provider_row(RcsProviderRow {
                 provider_row_id: 102,
@@ -1017,6 +1126,8 @@ fn exact_raw_identity_link_lane_without_mapping_never_routes_provider() {
                 provider_type: 1,
                 observed_at_ms: 1_000,
                 addresses: vec!["unmapped-peer".into()],
+                restricted: true,
+                text_only: true,
             })
             .unwrap(),
         RcsProviderRowRoute::Provider
@@ -1036,7 +1147,7 @@ fn outage_provider_routing_preserves_detector_floor_for_local_link_lane() {
         })
         .unwrap();
     let owner = client
-        .begin_rcs_link_ownership(captured.conversation_id, "outage-link", 0)
+        .begin_rcs_link_ownership(captured.conversation_id, 0)
         .unwrap();
     let states = [
         (RcsCapabilityState::SignedOut, true, true),
@@ -1075,17 +1186,19 @@ fn outage_provider_routing_preserves_detector_floor_for_local_link_lane() {
                     provider_type: 1,
                     observed_at_ms,
                     addresses: vec!["outage-peer".into()],
+                    restricted: true,
+                    text_only: true,
                 })
                 .unwrap(),
-            RcsProviderRowRoute::DetectorRecorded
+            RcsProviderRowRoute::Provider
         );
     }
     assert_eq!(owner.owner, RcsReceiveOwner::Link);
     let cutover = client
         .begin_rcs_unlink_cutover(captured.conversation_id)
         .unwrap();
-    assert_eq!(cutover.freeze_detector_floor, 5);
-    assert!(cutover.ambiguous_detector_alert);
+    assert_eq!(cutover.freeze_detector_floor, 0);
+    assert!(!cutover.ambiguous_detector_alert);
 }
 
 #[test]
@@ -1101,7 +1214,7 @@ fn group_provider_row_never_routes_into_a_single_participant_link_lane() {
         })
         .unwrap();
     client
-        .begin_rcs_link_ownership(captured.conversation_id, "group-link", 0)
+        .begin_rcs_link_ownership(captured.conversation_id, 0)
         .unwrap();
     let connection = sqlcipher(&config.database_path);
     let before = receive_rows(&connection);
@@ -1113,9 +1226,732 @@ fn group_provider_row_never_routes_into_a_single_participant_link_lane() {
                 provider_type: 2,
                 observed_at_ms: 1_000,
                 addresses: vec!["group-peer-a".into(), "group-peer-b".into()],
+                restricted: true,
+                text_only: true,
             })
             .unwrap(),
         RcsProviderRowRoute::Alert
     );
     assert_eq!(receive_rows(&connection), before);
+}
+
+const CLAIM_GOOGLE_ID: &str = "google-conversation";
+const CLAIM_PARTICIPANT: &str = "raw-peer";
+
+fn claim_observation(participant: &str, revision: u64) -> RcsMappingObservation {
+    RcsMappingObservation {
+        google_conversation_id: CLAIM_GOOGLE_ID.into(),
+        google_candidate_count: 1,
+        participants: vec![RcsParticipantObservation {
+            identity: participant.into(),
+            google_participant_id: "google-peer".into(),
+            identifier_type: 1,
+            is_visible: true,
+            is_me: false,
+        }],
+        conversation_type: RcsConversationType::Rcs,
+        status: "eligible".into(),
+        send_mode: RcsSendMode::Automatic,
+        read_only: false,
+        default_outgoing: true,
+        selected_sim_id: "android-subscription-7".into(),
+        selected_sim_own_identity: "+12025550100".into(),
+        carrier_binding: NativeCarrierRouteBinding {
+            carrier_route_id: "android-subscription-7".into(),
+            android_subscription_id: 7,
+            is_current_default_sms: true,
+            own_number_raw: "+12025550100".into(),
+            own_number_source: NativeOwnNumberSource::SubscriptionManagerPhoneNumber,
+            route_observed_at_ms: 1_000,
+            route_context_revision: 1,
+            same_handset_evidence_id: "verified-handset".into(),
+        },
+        outgoing: NativeRcsOutgoing {
+            outgoing_id: "google-outgoing".into(),
+            sim_participant_id: "google-outgoing".into(),
+            own_identity_raw: "+12025550100".into(),
+            sim_payload: NativeRcsSimPayload {
+                two: 2,
+                sim_number: 7,
+            },
+            rcs_chats_enabled: true,
+        },
+        native_evidence: NativeRcsEvidence {
+            lifetime: NativeRcsLifetime {
+                runtime_id: "runtime".into(),
+                run_generation: 1,
+                link_generation: 4,
+                session_generation: 7,
+                context_revision: 1,
+            },
+            lookup_id: "lookup".into(),
+            lookup_complete: true,
+            google_candidate_count: 1,
+            settings_revision: 1,
+            settings_provenance: NativeSettingsProvenance::CurrentEvent,
+            settings_observed_at_ms: 1_000,
+            settings_stream_epoch: 1,
+            settings_currentness: NativeSettingsCurrentness::ContinuousVerifiedFeed,
+            current_settings_sims: vec![NativeRcsOutgoing {
+                outgoing_id: "google-outgoing".into(),
+                sim_participant_id: "google-outgoing".into(),
+                own_identity_raw: "+12025550100".into(),
+                sim_payload: NativeRcsSimPayload {
+                    two: 2,
+                    sim_number: 7,
+                },
+                rcs_chats_enabled: true,
+            }],
+            settings_validated_at_ms: 1_000,
+            conversation_observed_at_ms: 1_000,
+        },
+        identity_region: "ZZ".into(),
+        observed_at_ms: 1_000,
+        link_generation: 4,
+        session_generation: 7,
+        context_revision: 1,
+        canonicalizer_revision: 1,
+        mapping_revision: revision,
+        link_state: RcsLinkState::Linked,
+    }
+}
+
+fn claim_request(conversation_id: ConversationId) -> RcsLinkOwnershipClaim {
+    RcsLinkOwnershipClaim {
+        conversation_id,
+        google_conversation_id: CLAIM_GOOGLE_ID.into(),
+        mapping_revision: 1,
+        provider_floor: 3,
+        expected_lifecycle_generation: 1,
+        expected_link_generation: 4,
+        expected_session_generation: 7,
+        expected_context_revision: 1,
+    }
+}
+
+fn claim_client() -> (tempfile::TempDir, Client, ConversationId, ClientConfig) {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-claim", &vault);
+    let client = open(&config);
+    let conversation = client
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: CLAIM_PARTICIPANT.into(),
+            body: String::new(),
+            provider_message_id: Some("claim-provider".into()),
+            imported: true,
+        })
+        .unwrap()
+        .conversation_id;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, now, now)
+        .unwrap();
+    (directory, client, conversation, config)
+}
+
+fn verify_claim_mapping(client: &Client, conversation_id: ConversationId, revision: u64) {
+    client
+        .capture_incoming(IncomingSms {
+            conversation_id: Some(conversation_id),
+            sender_address: CLAIM_PARTICIPANT.into(),
+            body: String::new(),
+            provider_message_id: Some(format!("claim-provider-{revision}")),
+            imported: true,
+        })
+        .unwrap();
+    let outcome = client
+        .verify_rcs_mapping(&claim_observation(CLAIM_PARTICIPANT, revision), 1_000)
+        .unwrap();
+    assert!(
+        matches!(outcome, RcsMappingOutcome::Mapped(_)),
+        "{outcome:?}"
+    );
+}
+
+#[test]
+fn claim_refuses_missing_stale_mismatched_unlinked_and_stale_generations() {
+    let (_directory, client, conversation, _config) = claim_client();
+    assert_eq!(
+        client
+            .claim_rcs_link_ownership(claim_request(conversation))
+            .unwrap(),
+        RcsLinkOwnershipClaimOutcome::Refused
+    );
+    verify_claim_mapping(&client, conversation, 1);
+    for refused in [
+        {
+            let mut v = claim_request(conversation);
+            v.mapping_revision = 2;
+            v
+        },
+        {
+            let mut v = claim_request(conversation);
+            v.google_conversation_id = "other".into();
+            v
+        },
+        {
+            let mut v = claim_request(conversation);
+            v.expected_lifecycle_generation += 1;
+            v
+        },
+        {
+            let mut v = claim_request(conversation);
+            v.expected_link_generation += 1;
+            v
+        },
+        {
+            let mut v = claim_request(conversation);
+            v.expected_session_generation += 1;
+            v
+        },
+        {
+            let mut v = claim_request(conversation);
+            v.expected_context_revision += 1;
+            v
+        },
+    ] {
+        assert_eq!(
+            client.claim_rcs_link_ownership(refused).unwrap(),
+            RcsLinkOwnershipClaimOutcome::Refused
+        );
+    }
+}
+
+#[test]
+fn claim_owns_publishes_and_reclaims_without_resetting_watermark() {
+    let (_directory, client, conversation, config) = claim_client();
+    verify_claim_mapping(&client, conversation, 1);
+    let claimed = match client
+        .claim_rcs_link_ownership(claim_request(conversation))
+        .unwrap()
+    {
+        RcsLinkOwnershipClaimOutcome::Claimed(value) => value,
+        RcsLinkOwnershipClaimOutcome::Refused => panic!("claim refused"),
+    };
+    assert_eq!(claimed.owner, RcsReceiveOwner::Link);
+    assert_eq!(
+        recovery_json(&config, conversation),
+        serde_json::json!({
+            "v": 1,
+            "watermark_ms": claimed.proof_time_ms,
+            "resume_hint": null,
+            "incomplete": false
+        })
+    );
+    assert_eq!(
+        client.rcs_link_owned_conversations().unwrap()[0].conversation_id,
+        conversation
+    );
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    client
+        .publish_rcs_eligibility_from_lifecycle(&[conversation], now)
+        .unwrap();
+    assert!(
+        client
+            .rcs_eligibility_projection(conversation, config.device_id, now)
+            .unwrap()
+            .is_some()
+    );
+    verify_claim_mapping(&client, conversation, 2);
+    let mut re_claim = claim_request(conversation);
+    re_claim.mapping_revision = 2;
+    let re_claimed = match client.claim_rcs_link_ownership(re_claim).unwrap() {
+        RcsLinkOwnershipClaimOutcome::Claimed(value) => value,
+        RcsLinkOwnershipClaimOutcome::Refused => panic!("reclaim refused"),
+    };
+    assert_eq!(re_claimed.proof_time_ms, claimed.proof_time_ms);
+    assert_eq!(
+        recovery_json(&config, conversation)["watermark_ms"],
+        claimed.proof_time_ms
+    );
+}
+
+#[test]
+fn claim_initial_floor_and_router_guard_band() {
+    let (_directory, client, conversation, _config) = claim_client();
+    verify_claim_mapping(&client, conversation, 1);
+    let before = now_ms();
+    let ownership = match client
+        .claim_rcs_link_ownership(claim_request(conversation))
+        .unwrap()
+    {
+        RcsLinkOwnershipClaimOutcome::Claimed(value) => value,
+        RcsLinkOwnershipClaimOutcome::Refused => panic!("claim refused"),
+    };
+    let after = now_ms();
+    assert!(
+        (before - 15 * 60 * 1_000..=after - 15 * 60 * 1_000).contains(&ownership.proof_time_ms)
+    );
+    for (offset, restricted, text_only, expected, reason) in [
+        (
+            121_000,
+            true,
+            true,
+            RcsProviderRowRoute::DetectorRecorded,
+            None,
+        ),
+        (
+            60_000,
+            true,
+            true,
+            RcsProviderRowRoute::Provider,
+            Some(RcsProviderRouteReason::GuardBand),
+        ),
+        (
+            121_000,
+            true,
+            false,
+            RcsProviderRowRoute::Provider,
+            Some(RcsProviderRouteReason::NotRestrictedText),
+        ),
+        (
+            121_000,
+            false,
+            true,
+            RcsProviderRowRoute::Provider,
+            Some(RcsProviderRouteReason::NotRestrictedText),
+        ),
+    ] {
+        let routed = client
+            .route_rcs_provider_row_result(RcsProviderRow {
+                provider_row_id: offset,
+                provider_thread_id: 1,
+                provider_type: 1,
+                observed_at_ms: ownership.proof_time_ms + offset,
+                addresses: vec![CLAIM_PARTICIPANT.into()],
+                restricted,
+                text_only,
+            })
+            .unwrap();
+        assert_eq!(routed.route, expected);
+        assert_eq!(routed.reason, reason);
+    }
+    let pre_proof = client
+        .route_rcs_provider_row_result(RcsProviderRow {
+            provider_row_id: 122_000,
+            provider_thread_id: 1,
+            provider_type: 1,
+            observed_at_ms: ownership.proof_time_ms,
+            addresses: vec![CLAIM_PARTICIPANT.into()],
+            restricted: true,
+            text_only: true,
+        })
+        .unwrap();
+    assert_eq!(pre_proof.route, RcsProviderRowRoute::Provider);
+    assert_eq!(pre_proof.reason, Some(RcsProviderRouteReason::PreProof));
+}
+
+const CLAIM_GOOGLE_ID_TWO: &str = "google-conversation-two";
+
+fn claimed(outcome: RcsLinkOwnershipClaimOutcome) -> RcsOwnership {
+    match outcome {
+        RcsLinkOwnershipClaimOutcome::Claimed(value) => value,
+        RcsLinkOwnershipClaimOutcome::Refused => panic!("claim refused"),
+    }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+fn historical_record(google_message_id: &str, sent_at_ms: i64) -> RcsProjectedRecord {
+    RcsProjectedRecord {
+        google_message_id: google_message_id.into(),
+        google_conversation_id: CLAIM_GOOGLE_ID.into(),
+        direction: Direction::Incoming,
+        body: "history".into(),
+        sent_at_ms: Some(sent_at_ms),
+        tmp_id: None,
+        rcs_reported: false,
+        e2ee_reported: None,
+    }
+}
+
+/// Unlocked variant of `claim_client` with a current gateway, so ingest and context writes run.
+fn unlocked_claim_client() -> (tempfile::TempDir, Client, ConversationId, ClientConfig) {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-claim-unlocked", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = client
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: CLAIM_PARTICIPANT.into(),
+            body: String::new(),
+            provider_message_id: Some("claim-provider".into()),
+            imported: true,
+        })
+        .unwrap()
+        .conversation_id;
+    let now = now_ms();
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, now, now)
+        .unwrap();
+    client
+        .publish_rcs_capability(
+            &RcsLinkStatusEvent {
+                gateway_device_id: config.device_id,
+                state: RcsCapabilityState::Linked,
+                availability: true,
+                health: true,
+                phone_responsive: true,
+                observed_at_ms: now,
+                capability_revision: 2,
+                feature_bits: 1,
+                linked_since_ms: Some(now),
+            },
+            &[],
+            now,
+        )
+        .unwrap();
+    (directory, client, conversation, config)
+}
+
+#[test]
+fn claim_changed_google_id_begins_a_fenced_generation() {
+    let (_directory, client, conversation, config) = unlocked_claim_client();
+    verify_claim_mapping(&client, conversation, 1);
+    let first = claimed(
+        client
+            .claim_rcs_link_ownership(claim_request(conversation))
+            .unwrap(),
+    );
+
+    client
+        .invalidate_rcs_context_for_google_event(
+            conversation,
+            CLAIM_GOOGLE_ID,
+            RcsContextExpectation {
+                ownership_generation: first.ownership_generation,
+                link_generation: 4,
+                session_generation: 7,
+                context_revision: 1,
+            },
+        )
+        .unwrap();
+    client
+        .capture_incoming(IncomingSms {
+            conversation_id: Some(conversation),
+            sender_address: CLAIM_PARTICIPANT.into(),
+            body: String::new(),
+            provider_message_id: Some("claim-provider-two".into()),
+            imported: true,
+        })
+        .unwrap();
+    let mut observation = claim_observation(CLAIM_PARTICIPANT, 2);
+    observation.google_conversation_id = CLAIM_GOOGLE_ID_TWO.into();
+    observation.context_revision = 2;
+    observation.native_evidence.lifetime.context_revision = 2;
+    observation.carrier_binding.route_context_revision = 2;
+    let outcome = client.verify_rcs_mapping(&observation, 1_000).unwrap();
+    assert!(
+        matches!(outcome, RcsMappingOutcome::Mapped(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        client.rcs_receive_context(CLAIM_GOOGLE_ID_TWO).unwrap(),
+        None
+    );
+    assert!(
+        client
+            .rcs_link_owned_conversations()
+            .unwrap()
+            .iter()
+            .all(|context| context.conversation_id != conversation)
+    );
+    let mismatched_owner = client
+        .route_rcs_provider_row_result(RcsProviderRow {
+            provider_row_id: 700,
+            provider_thread_id: 7,
+            provider_type: 1,
+            observed_at_ms: now_ms(),
+            addresses: vec![CLAIM_PARTICIPANT.into()],
+            restricted: true,
+            text_only: true,
+        })
+        .unwrap();
+    assert_eq!(mismatched_owner.route, RcsProviderRowRoute::Provider);
+    assert_eq!(
+        mismatched_owner.reason,
+        Some(RcsProviderRouteReason::NotLinkOwned)
+    );
+
+    client
+        .record_rcs_recovery_progress(conversation, first.ownership_generation, 1, "old-cursor")
+        .unwrap();
+
+    let before = now_ms();
+    let mut request = claim_request(conversation);
+    request.google_conversation_id = CLAIM_GOOGLE_ID_TWO.into();
+    request.mapping_revision = 2;
+    request.expected_context_revision = 2;
+    let second = claimed(client.claim_rcs_link_ownership(request).unwrap());
+    assert!(second.ownership_generation > first.ownership_generation);
+    assert!(second.proof_time_ms >= before - 15 * 60 * 1_000);
+    assert_eq!(
+        recovery_json(&config, conversation),
+        serde_json::json!({
+            "v": 1,
+            "watermark_ms": second.proof_time_ms,
+            "resume_hint": null,
+            "incomplete": false
+        })
+    );
+
+    assert_eq!(
+        client
+            .ingest_rcs_projected_observation(
+                conversation,
+                first.ownership_generation,
+                historical_record("stale-old", now_ms()),
+                RcsObservationProvenance::Live
+            )
+            .unwrap(),
+        RcsReceiveOutcome::Rejected(RcsReceiveCode::OwnershipStale)
+    );
+    assert_eq!(
+        client
+            .record_rcs_link_identity(
+                conversation,
+                first.ownership_generation,
+                "stale-old",
+                CLAIM_GOOGLE_ID
+            )
+            .unwrap(),
+        RcsIdentityOutcome::Rejected(RcsReceiveCode::OwnershipStale)
+    );
+    assert_eq!(
+        client
+            .record_rcs_recovery_progress(conversation, first.ownership_generation, 2, "stale")
+            .unwrap(),
+        RcsRecoveryOutcome::Rejected(RcsReceiveCode::OwnershipStale)
+    );
+}
+
+#[test]
+fn claim_initial_floor_accepts_recent_history_and_rejects_older_provider_floor() {
+    let (_directory, client, conversation, _config) = unlocked_claim_client();
+    verify_claim_mapping(&client, conversation, 1);
+    let ownership = claimed(
+        client
+            .claim_rcs_link_ownership(claim_request(conversation))
+            .unwrap(),
+    );
+    let recent = now_ms() - 5 * 60 * 1_000;
+
+    assert_eq!(
+        client
+            .ingest_rcs_projected_observation(
+                conversation,
+                ownership.ownership_generation,
+                historical_record("recent", recent),
+                RcsObservationProvenance::Historical,
+            )
+            .unwrap(),
+        RcsReceiveOutcome::Inserted
+    );
+    assert_eq!(
+        client
+            .ingest_rcs_projected_observation(
+                conversation,
+                ownership.ownership_generation,
+                historical_record("older-than-window", ownership.proof_time_ms - 1),
+                RcsObservationProvenance::Historical,
+            )
+            .unwrap(),
+        RcsReceiveOutcome::Rejected(RcsReceiveCode::ProviderFloor)
+    );
+}
+
+#[test]
+fn cutover_alert_read_reports_only_ambiguous_provider_windows() {
+    let (_directory, client, conversation, _config) = client();
+    assert_eq!(
+        client.rcs_cutover_alerts().unwrap(),
+        RcsCutoverAlerts {
+            count: 0,
+            conversation_ids: vec![]
+        }
+    );
+    let clean = ConversationId::new();
+    client.begin_rcs_link_ownership(clean, 10).unwrap();
+    assert!(
+        !client
+            .begin_rcs_unlink_cutover(clean)
+            .unwrap()
+            .ambiguous_detector_alert
+    );
+    assert_eq!(client.rcs_cutover_alerts().unwrap().count, 0);
+
+    let link = client.begin_rcs_link_ownership(conversation, 10).unwrap();
+    client
+        .record_rcs_provider_detector(
+            conversation,
+            link.ownership_generation,
+            RcsProviderDetector {
+                provider_row_id: 11,
+                provider_thread_id: 2,
+                provider_type: 132,
+                observed_at_ms: 101,
+                observed_generation: link.ownership_generation,
+            },
+        )
+        .unwrap();
+    assert!(
+        client
+            .begin_rcs_unlink_cutover(conversation)
+            .unwrap()
+            .ambiguous_detector_alert
+    );
+    assert_eq!(
+        client.rcs_cutover_alerts().unwrap(),
+        RcsCutoverAlerts {
+            count: 1,
+            conversation_ids: vec![conversation]
+        }
+    );
+}
+
+#[test]
+fn cutover_to_provider_deletes_link_owner_and_recovery_state() {
+    let (_directory, client, conversation, config) = unlocked_claim_client();
+    verify_claim_mapping(&client, conversation, 1);
+    claimed(
+        client
+            .claim_rcs_link_ownership(claim_request(conversation))
+            .unwrap(),
+    );
+    let connection = sqlcipher(&config.database_path);
+    let key = format!("rcs_link_owner_google:{conversation}");
+    let recovery_key = format!("rcs_recovery:{conversation}");
+    let stored = |connection: &Connection, key: &str| -> Option<String> {
+        connection
+            .query_row("SELECT v FROM metadata WHERE k=?", [key], |row| row.get(0))
+            .optional()
+            .unwrap()
+    };
+    assert_eq!(stored(&connection, &key).as_deref(), Some(CLAIM_GOOGLE_ID));
+    assert!(stored(&connection, &recovery_key).is_some());
+    client.begin_rcs_unlink_cutover(conversation).unwrap();
+    assert_eq!(stored(&connection, &key), None);
+    assert_eq!(stored(&connection, &recovery_key), None);
+}
+
+#[test]
+fn missing_or_corrupt_recovery_state_falls_back_to_the_proof_floor() {
+    let (_directory, client, conversation, config) = unlocked_claim_client();
+    verify_claim_mapping(&client, conversation, 1);
+    let owned = claimed(
+        client
+            .claim_rcs_link_ownership(claim_request(conversation))
+            .unwrap(),
+    );
+    let connection = sqlcipher(&config.database_path);
+    let recovery_key = format!("rcs_recovery:{conversation}");
+    let floor = RcsRecoveryState {
+        watermark_ms: owned.proof_time_ms,
+        resume_hint: None,
+        incomplete: true,
+    };
+    for stored in [None, Some("not json")] {
+        connection
+            .execute("DELETE FROM metadata WHERE k=?", [&recovery_key])
+            .unwrap();
+        if let Some(value) = stored {
+            connection
+                .execute(
+                    "INSERT INTO metadata(k,v) VALUES(?,?)",
+                    [recovery_key.as_str(), value],
+                )
+                .unwrap();
+        }
+        let enumerated = client.rcs_link_owned_conversations().unwrap();
+        assert_eq!(owned_recovery(&enumerated, conversation), &floor);
+        assert_eq!(
+            client
+                .rcs_receive_context(CLAIM_GOOGLE_ID)
+                .unwrap()
+                .unwrap()
+                .recovery,
+            floor
+        );
+    }
+    assert_eq!(
+        client
+            .complete_rcs_recovery(
+                conversation,
+                owned.ownership_generation,
+                owned.proof_time_ms + 10
+            )
+            .unwrap(),
+        RcsRecoveryOutcome::Recorded
+    );
+    assert_eq!(
+        recovery_json(&config, conversation)["watermark_ms"],
+        owned.proof_time_ms + 10
+    );
+}
+
+fn owned_recovery(
+    contexts: &[RcsReceiveContext],
+    conversation: ConversationId,
+) -> &RcsRecoveryState {
+    &contexts
+        .iter()
+        .find(|context| context.conversation_id == conversation)
+        .unwrap()
+        .recovery
+}
+
+#[test]
+fn link_owned_context_exposes_watermark_and_resume_hint() {
+    let (_directory, client, conversation, _config) = unlocked_claim_client();
+    verify_claim_mapping(&client, conversation, 1);
+    let owned = claimed(
+        client
+            .claim_rcs_link_ownership(claim_request(conversation))
+            .unwrap(),
+    );
+    client
+        .record_rcs_recovery_progress(
+            conversation,
+            owned.ownership_generation,
+            owned.proof_time_ms + 500,
+            "page-cursor",
+        )
+        .unwrap();
+    let expected = RcsRecoveryState {
+        watermark_ms: owned.proof_time_ms,
+        resume_hint: Some(RcsResumeHint {
+            target_ms: owned.proof_time_ms + 500,
+            cursor: "page-cursor".into(),
+        }),
+        incomplete: true,
+    };
+    let enumerated = client
+        .rcs_link_owned_conversations()
+        .unwrap()
+        .into_iter()
+        .find(|context| context.conversation_id == conversation)
+        .unwrap();
+    assert_eq!(enumerated.recovery, expected);
+    assert_eq!(
+        client
+            .rcs_receive_context(CLAIM_GOOGLE_ID)
+            .unwrap()
+            .unwrap()
+            .recovery,
+        expected
+    );
 }

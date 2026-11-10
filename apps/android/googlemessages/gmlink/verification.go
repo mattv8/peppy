@@ -1,36 +1,62 @@
 package gmlink
 
-import "encoding/json"
-
 const (
-	ownerVerificationProcedureRevision = "g0-libgm-verification-v1"
-	pinnedLibgmRevision                = "v0.2610.1-0.20261103213626-d9140a5e807e"
+	verificationCapabilityReceive = "receive"
+	verificationCapabilityIndex   = "index"
+	verificationCapabilitySend    = "send"
+	verificationCapabilityTyping  = "typing"
+	verificationCapabilityGroups  = "groups"
 )
 
-// ownerVerification is runtime-only evidence. It is intentionally not a
-// boolean and is never restored from persisted link state.
+// ownerVerification is runtime-only stream authority.
 type ownerVerification struct {
-	ProcedureRevision string   `json:"procedure_revision"`
-	LibgmRevision     string   `json:"libgm_revision"`
-	Capabilities      []string `json:"capabilities"`
-	EvidenceReference string   `json:"evidence_reference"`
-	Lifetime          string   `json:"lifetime"`
-	generation        uint64
+	Capabilities []string
+	generation   uint64
 }
 
-// SetOwnerVerification reserves the native handoff API, but no production
-// producer exists in Stage 1. Rejecting all input prevents a caller-supplied
-// JSON record from becoming send authority.
-func (link *Link) SetOwnerVerification(evidenceJSON string) error {
-	var evidence ownerVerification
-	if err := json.Unmarshal([]byte(evidenceJSON), &evidence); err != nil ||
-		evidence.ProcedureRevision != ownerVerificationProcedureRevision ||
-		evidence.LibgmRevision != pinnedLibgmRevision || evidence.EvidenceReference == "" || evidence.Lifetime == "" || len(evidence.Capabilities) == 0 {
-		return errOwnerVerificationInvalid
+func (link *Link) hasVerificationCapabilityLocked(capability string) bool {
+	if link.closed || link.ownerVerification == nil || link.ownerVerification.generation != link.generation {
+		return false
 	}
-	return errOwnerVerificationUnavailable
+	for _, granted := range link.ownerVerification.Capabilities {
+		if granted == capability {
+			return true
+		}
+	}
+	return false
 }
 
-func (link *Link) hasOwnerVerificationLocked() bool {
-	return !link.closed && link.ownerVerification != nil && link.ownerVerification.generation == link.generation
+func (link *Link) hasReceiveVerificationLocked() bool {
+	return link.hasVerificationCapabilityLocked(verificationCapabilityReceive)
+}
+
+func (link *Link) hasIndexVerificationLocked() bool {
+	return link.hasVerificationCapabilityLocked(verificationCapabilityIndex)
+}
+
+func (link *Link) hasSendVerificationLocked() bool {
+	return link.hasVerificationCapabilityLocked(verificationCapabilitySend)
+}
+
+func (link *Link) hasTypingOutboundVerificationLocked() bool {
+	return link.hasVerificationCapabilityLocked(verificationCapabilityTyping)
+}
+
+func (link *Link) hasGroupsVerificationLocked() bool {
+	// Groups stay unminted: group chats are not built.
+	return link.hasVerificationCapabilityLocked(verificationCapabilityGroups)
+}
+
+func (link *Link) mintRuntimeVerificationLocked() {
+	if link.closed {
+		link.ownerVerification = nil
+		return
+	}
+	if link.state != stateLinked || !link.running || !link.streamOpen || link.runGeneration != link.generation {
+		return
+	}
+	link.ownerVerification = &ownerVerification{
+		Capabilities: []string{verificationCapabilityReceive, verificationCapabilityIndex, verificationCapabilitySend, verificationCapabilityTyping},
+		generation:   link.generation,
+	}
 }

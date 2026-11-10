@@ -66,6 +66,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeClientInterface
+import uniffi.peppy_mobile_bindings.NativeIngestState
 import uniffi.peppy_mobile_bindings.NativeRawSnapshotRecord
 import uniffi.peppy_mobile_bindings.NativeSnapshotProgress
 import uniffi.peppy_mobile_bindings.NativeSnapshotPurpose
@@ -310,7 +311,7 @@ class GatewaySync(
     private enum class GatewayPhase(val code: Long) {
         RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_PHONE_READS(21), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19), MMS_CLEANUP(BackgroundDiagnostics.MMS_CLEANUP_PHASE), MESSAGING_APP(22),
     }
-    class PassResult(val more: Boolean, val failure: Exception?, val producersReady: Boolean, val accountPaused: Boolean = false)
+    class PassResult(val more: Boolean, val failure: Exception?, val producersReady: Boolean, val accountPaused: Boolean = false, val commandsProgressed: Boolean = false)
 
     private var more = false
     private var failure: Exception? = null
@@ -326,6 +327,7 @@ class GatewaySync(
     private var contactReadiness: BackgroundDiagnostics.GatewayReadiness? = null
     private var retentionAllowsProducers = false
     private var accountPaused = false
+    private var commandsProgressed = false
 
     fun run(): PassResult {
         ensureEffectsPermitted()
@@ -400,7 +402,7 @@ class GatewaySync(
         if (mayEmit()) phase(GatewayPhase.FINAL_UPLOAD) { upload() }
         if (mayEmit()) phase(GatewayPhase.MMS_CLEANUP) { cleanupMmsCiphertext(); false }
         if (diagnosticsEnabled) BackgroundDiagnostics.gateway(received, snapshotReceived, progressed, uploaded, snapshotRemaining, contactReadiness)
-        return PassResult(more, failure, retentionAllowsProducers, accountPaused)
+        return PassResult(more, failure, retentionAllowsProducers, accountPaused, commandsProgressed)
     }
 
     private fun mayEmit() = state.phase == SyncPhase.LIVE && state.outboxRejection == null
@@ -507,7 +509,9 @@ class GatewaySync(
         val events = page.getJSONArray("events")
         for (index in 0 until events.length()) {
             val event = events.getJSONObject(index)
-            client.ingestRaw(event.getJSONObject("envelope").toString().toByteArray(Charsets.UTF_8), event.getString("cursor"))
+            if (client.ingestRaw(event.getJSONObject("envelope").toString().toByteArray(Charsets.UTF_8), event.getString("cursor")).state == NativeIngestState.JOURNALED) {
+                commandsProgressed = true
+            }
         }
         page.optString("high_water_cursor").takeIf { it.isNotBlank() }?.let(client::observeServerHighWater)
         if (diagnosticsEnabled) received += events.length().toLong()
@@ -655,6 +659,7 @@ class GatewaySync(
         repeat(APPLY_BATCHES) {
             val report = client.applyPending(APPLY_BATCH.toULong())
             val progressed = report.applied + report.quarantined + report.drained + report.superseded
+            if (progressed > 0uL) commandsProgressed = true
             if (diagnosticsEnabled) {
                 this.progressed += progressed.toLong()
                 snapshotRemaining = report.snapshotRemaining.toLong()
@@ -891,6 +896,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         } catch (_: GatewayAuthException) {
             return Result.failure()
         }
+        if (result.commandsProgressed) RcsSendWake.notifyCommandsJournaled()
         if (result.accountPaused) AccountAccessState.onPolicyDenial(applicationContext)
         runCatching { AccountAccessState.refreshIfDue(applicationContext) }
         if (result.producersReady && NativeGateway.markProducerReady(applicationContext, session)) {

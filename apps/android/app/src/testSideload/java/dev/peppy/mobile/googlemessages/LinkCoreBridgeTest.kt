@@ -116,6 +116,21 @@ class LinkCoreBridgeTest {
     }
 
     @Test
+    fun `cutover acknowledgement is pruned so a later incident is shown again`() {
+        val alerts = mutableSetOf("conversation")
+        LinkCoreBridgeTestHooks.cutoverAlertIds = { alerts.toSet() }
+
+        assertTrue(LinkCoreBridge.cutoverMayHaveMissedMessages(context))
+        LinkCoreBridge.clearCutoverMayHaveMissedMessages(context)
+        assertFalse(LinkCoreBridge.cutoverMayHaveMissedMessages(context))
+
+        alerts.clear()
+        assertFalse(LinkCoreBridge.cutoverMayHaveMissedMessages(context))
+        alerts += "conversation"
+        assertTrue(LinkCoreBridge.cutoverMayHaveMissedMessages(context))
+    }
+
+    @Test
     fun `explicit completion failure does not retry`() {
         var attempts = 0
         LinkCoreBridge.recorder = { _, _ -> true }

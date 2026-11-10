@@ -16,18 +16,17 @@ internal class AssetThirdPartyNotices private constructor(
     private val assets: AssetManager,
     private val files: List<String>,
 ) : ThirdPartyNotices {
-    override fun notice(): String = read(NOTICE_FILE)
+    /** Restricted-setup header text; empty in builds that package only the Google Messages link notices. */
+    override fun notice(): String = if (NOTICE_FILE in files) read(NOTICE_FILE) else ""
 
-    override fun entries(): List<ThirdPartyNoticeEntry> = files
-        .filterNot { it == NOTICE_FILE }
-        .sortedWith(compareBy({ knownOrder.indexOf(it).takeIf { index -> index >= 0 } ?: Int.MAX_VALUE }, { it }))
-        .map { ThirdPartyNoticeEntry(it, labels[it]) }
+    override fun entries(): List<ThirdPartyNoticeEntry> = listedEntries(files)
 
     override fun read(fileName: String): String = assets.open("$DIRECTORY/$fileName").bufferedReader().use { it.readText() }
 
     companion object {
         const val DIRECTORY = "third_party"
         const val NOTICE_FILE = "NOTICE.txt"
+        const val GOOGLE_MESSAGES_NOTICE_FILE = "NOTICE-google-messages.txt"
 
         private val knownOrder = listOf(
             "AGPL-3.0.txt", "LICENSE-exceptions-google-messages.txt", "NOTICE-google-messages.txt",
@@ -60,9 +59,17 @@ internal class AssetThirdPartyNotices private constructor(
             "MIT-zerolog.txt" to R.string.peppy_about_license_zerolog,
         )
 
+        /** Any packaged notice makes the screen available: restricted-setup (sideload) or the Google Messages link (Play and direct). */
+        internal fun isAvailable(files: Collection<String>): Boolean = NOTICE_FILE in files || GOOGLE_MESSAGES_NOTICE_FILE in files
+
+        internal fun listedEntries(files: Collection<String>): List<ThirdPartyNoticeEntry> = files
+            .filterNot { it == NOTICE_FILE }
+            .sortedWith(compareBy({ knownOrder.indexOf(it).takeIf { index -> index >= 0 } ?: Int.MAX_VALUE }, { it }))
+            .map { ThirdPartyNoticeEntry(it, labels[it]) }
+
         fun openOrNull(assets: AssetManager): ThirdPartyNotices? {
             val files = assets.list(DIRECTORY)?.toList().orEmpty()
-            return if (NOTICE_FILE in files) AssetThirdPartyNotices(assets, files) else null
+            return if (isAvailable(files)) AssetThirdPartyNotices(assets, files) else null
         }
     }
 }

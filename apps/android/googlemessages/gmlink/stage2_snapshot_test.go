@@ -34,7 +34,13 @@ func stage2SeedCompleteIndex(t *testing.T, link *Link, conversations ...*gmproto
 	t.Helper()
 	link.mu.Lock()
 	link.generation, link.runGeneration, link.streamEpoch = 7, 7, 3
-	link.ownerVerification = &ownerVerification{generation: 7}
+	link.ownerVerification = &ownerVerification{generation: 7, Capabilities: []string{
+		verificationCapabilityReceive,
+		verificationCapabilityIndex,
+		verificationCapabilitySend,
+		verificationCapabilityTyping,
+		verificationCapabilityGroups,
+	}}
 	link.mu.Unlock()
 	revision, ok := link.beginConversationIndexRefreshFor(7, 3)
 	if !ok || !link.replaceConversationIndexFor(7, 3, revision, conversations) {
@@ -179,7 +185,13 @@ func TestOldGenerationScanCannotPublishCompleteSnapshot(t *testing.T) {
 	}
 	link.mu.Lock()
 	link.revokeLocked()
-	link.ownerVerification = &ownerVerification{generation: link.generation}
+	link.ownerVerification = &ownerVerification{generation: link.generation, Capabilities: []string{
+		verificationCapabilityReceive,
+		verificationCapabilityIndex,
+		verificationCapabilitySend,
+		verificationCapabilityTyping,
+		verificationCapabilityGroups,
+	}}
 	link.mu.Unlock()
 	if link.replaceConversationIndexFor(generation, streamEpoch, revision, []*gmproto.Conversation{stage2Conversation("stale", stage2Participant("stale-target", true, false))}) {
 		t.Fatal("old generation published a complete snapshot")

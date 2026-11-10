@@ -59,10 +59,11 @@ class TestKeyHolder {
 object SharedVault {
     val vaultId: String = UUID.randomUUID().toString()
     val gatewayDeviceId: String = UUID.randomUUID().toString()
+    val desktopDeviceId: String = UUID.randomUUID().toString()
     val material: NativeVaultMaterial by lazy { createVaultMaterial(vaultId, TEST_PASSPHRASE) }
     val desktop: NativeClient by lazy {
         val dir = Files.createTempDirectory("peppy-desktop").toFile().apply { deleteOnExit() }
-        openNativeClient(NativeOpenConfig(File(dir, "desktop.db").path, vaultId, UUID.randomUUID().toString(), ByteArray(32) { 5 }))
+        openNativeClient(NativeOpenConfig(File(dir, "desktop.db").path, vaultId, desktopDeviceId, ByteArray(32) { 5 }))
             .apply { unlock(material.profileJson, material.headerJson, TEST_PASSPHRASE) }
     }
 }

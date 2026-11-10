@@ -1,5 +1,6 @@
 use crate::rcs_receive::{
-    NativeRcsContextExpectation, NativeRcsObservationProvenance, NativeRcsProviderRowRoute,
+    NativeRcsContextExpectation, NativeRcsObservationProvenance, NativeRcsProviderRoute,
+    NativeRcsProviderRouteReason, NativeRcsProviderRowRoute,
 };
 use crate::{
     MobileBindingsError, NativeClient, NativeOpenConfig, create_vault_material, open_native_client,
@@ -20,24 +21,12 @@ fn go_incoming(status: &str) -> String {
     let mut value: serde_json::Value = serde_json::from_str(GO_RECORD).unwrap();
     value["direction"] = json!("incoming");
     value["status"] = json!(status);
-    value["cursor"] = json!("AAAAAAAAAAFtZXNzYWdlLTE");
     value.to_string()
-}
-
-fn history_token(fixture: &Fixture) -> Option<String> {
-    with_client(&fixture.client.client, |core| {
-        Ok(core
-            .rcs_receive_state(fixture.conversation_id.parse().unwrap())?
-            .unwrap()
-            .history_token)
-    })
-    .unwrap()
 }
 
 #[test]
 fn go_wire_record_ingests_status_replays_and_checkpoints_only_explicitly() {
     let fixture = fixture();
-    let original_token = history_token(&fixture);
     for (expected, expected_status) in [
         ("inserted", "status_applied"),
         ("duplicate", "status_unchanged"),
@@ -52,8 +41,6 @@ fn go_wire_record_ingests_status_replays_and_checkpoints_only_explicitly() {
             .unwrap();
         assert_eq!(result.record_outcome, expected);
         assert_eq!(result.status_outcome.as_deref(), Some(expected_status));
-        assert_eq!(result.cursor.as_deref(), Some("AAAAAAAAAAFtZXNzYWdlLTE"));
-        assert_eq!(history_token(&fixture), original_token);
         let output = format!("{result:?}");
         for identifier in ["message-1", "conversation-1", "tmp-1", "synthetic body"] {
             assert!(!output.contains(identifier));
@@ -71,17 +58,14 @@ fn go_wire_record_ingests_status_replays_and_checkpoints_only_explicitly() {
     assert_eq!(
         fixture
             .client
-            .gateway_checkpoint_rcs_history(
+            .gateway_record_rcs_recovery_progress(
                 fixture.conversation_id.clone(),
                 fixture.generation,
+                1_000,
                 "AAAAAAAAAAFtZXNzYWdlLTE".into()
             )
             .unwrap(),
         "recorded"
-    );
-    assert_eq!(
-        history_token(&fixture).as_deref(),
-        Some("AAAAAAAAAAFtZXNzYWdlLTE")
     );
 }
 
@@ -111,7 +95,6 @@ fn go_wire_record_empty_status_and_original_go_sample_are_accepted() {
         .unwrap();
     assert_eq!(result.record_outcome, "unmatched_outgoing");
     assert_eq!(result.status_outcome.as_deref(), Some("status_applied"));
-    assert_eq!(result.cursor, None);
 }
 
 #[test]
@@ -146,7 +129,7 @@ fn go_exported_receive_record_ingests_through_mobile_boundary() {
 }
 
 #[test]
-fn projected_observation_wrapper_requires_explicit_provenance_and_preserves_cursor_candidate() {
+fn projected_observation_wrapper_requires_explicit_provenance() {
     for provenance in [
         NativeRcsObservationProvenance::Live,
         NativeRcsObservationProvenance::Historical,
@@ -172,8 +155,6 @@ fn projected_observation_wrapper_requires_explicit_provenance_and_preserves_curs
             )
             .unwrap();
         assert_eq!(result.record_outcome, "inserted");
-        assert_eq!(result.cursor.as_deref(), Some("AAAAAAAAAAFtZXNzYWdlLTE"));
-        assert_eq!(history_token(&fixture), Some("cursor".into()));
     }
 }
 
@@ -334,7 +315,6 @@ fn new_receive_wrappers_reject_closed_clients() {
 fn go_wire_invalid_records_and_stale_generation_do_not_mutate() {
     let fixture = fixture();
     let before = reads(&fixture);
-    let token = history_token(&fixture);
     let valid: serde_json::Value = serde_json::from_str(&go_incoming("sent")).unwrap();
     let mut inputs = vec!["{".into(), " ".repeat(65_537)];
     for key in [
@@ -357,8 +337,7 @@ fn go_wire_invalid_records_and_stale_generation_do_not_mutate() {
         ("google_conversation_id", json!("x".repeat(513))),
         ("tmp_id", json!("x".repeat(513))),
         ("body", json!("x".repeat(16_385))),
-        ("cursor", json!("x".repeat(4_097))),
-        ("cursor", json!("not/a/token")),
+        ("cursor", json!("AAAAAAAAAAFtZXNzYWdlLTE")),
         ("direction", json!("sideways")),
         ("status", json!("untrusted")),
     ] {
@@ -376,7 +355,6 @@ fn go_wire_invalid_records_and_stale_generation_do_not_mutate() {
             Err(MobileBindingsError::InvalidRequest)
         ));
         assert_eq!(reads(&fixture), before);
-        assert_eq!(history_token(&fixture), token);
     }
     let result = fixture
         .client
@@ -388,9 +366,7 @@ fn go_wire_invalid_records_and_stale_generation_do_not_mutate() {
         .unwrap();
     assert_eq!(result.record_outcome, "rejected:ownership_stale");
     assert_eq!(result.status_outcome, None);
-    assert_eq!(result.cursor, None);
     assert_eq!(reads(&fixture), before);
-    assert_eq!(history_token(&fixture), token);
     assert_eq!(
         fixture
             .client
@@ -457,7 +433,7 @@ fn fixture() -> Fixture {
             now_ms,
         )?;
         Ok(core
-            .begin_rcs_link_ownership(conversation_id.parse().unwrap(), "cursor", 1)?
+            .begin_rcs_link_ownership(conversation_id.parse().unwrap(), 1)?
             .ownership_generation)
     })
     .unwrap();
@@ -488,65 +464,10 @@ fn outcome(result: Result<String, MobileBindingsError>) -> String {
     result.unwrap()
 }
 
-fn record(
-    google_message_id: &str,
-    google_conversation_id: &str,
-    tmp_id: Option<&str>,
-    reported: bool,
-    encrypted: Option<bool>,
-) -> String {
-    let sent_at_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
-    json!({
-        "googleMessageId": google_message_id,
-        "googleConversationId": google_conversation_id,
-        "direction": "incoming",
-        "body": "body",
-        "sentAtMs": sent_at_ms,
-        "tmpId": tmp_id,
-        "rcsReported": reported,
-        "e2eeReported": encrypted,
-        "historyToken": "cursorfixture0001",
-    })
-    .to_string()
-}
-
 #[test]
-fn gateway_wrappers_reject_invalid_input_without_mutating_reads() {
+fn gateway_status_and_recovery_wrappers_reject_invalid_input_without_mutating_reads() {
     let fixture = fixture();
     let before = reads(&fixture);
-    let invalid_records = [
-        "{".to_owned(),
-        json!({"googleMessageId":"id"}).to_string(),
-        json!({
-            "googleMessageId":"id", "googleConversationId":"conversation", "direction":"incoming",
-            "body":"body", "rcsReported":true, "unexpected":true
-        })
-        .to_string(),
-        record(&"m".repeat(65_537), "conversation", None, true, None),
-        record("id", &"c".repeat(65_537), None, true, None),
-        record("id", "conversation", Some(&"t".repeat(65_537)), true, None),
-    ];
-    for input in invalid_records {
-        invalid(fixture.client.gateway_ingest_rcs_record_json(
-            fixture.conversation_id.clone(),
-            fixture.generation,
-            input,
-        ));
-        assert_eq!(reads(&fixture), before);
-    }
-    assert_eq!(
-        outcome(fixture.client.gateway_ingest_rcs_record_json(
-            fixture.conversation_id.clone(),
-            fixture.generation + 1,
-            record("id", "conversation", None, true, None),
-        )),
-        "rejected:ownership_stale"
-    );
-    assert_eq!(reads(&fixture), before);
-
     let invalid_statuses = [
         "{".to_owned(),
         json!({"googleMessageId":"id"}).to_string(),
@@ -577,180 +498,47 @@ fn gateway_wrappers_reject_invalid_input_without_mutating_reads() {
     assert_eq!(reads(&fixture), before);
 
     assert_eq!(
-        outcome(fixture.client.gateway_checkpoint_rcs_history(
+        outcome(fixture.client.gateway_record_rcs_recovery_progress(
             fixture.conversation_id.clone(),
             fixture.generation,
+            1_000,
             "".into(),
         )),
         "rejected:cursor_invalid"
     );
     assert_eq!(reads(&fixture), before);
-    invalid(fixture.client.gateway_checkpoint_rcs_history(
+    invalid(fixture.client.gateway_record_rcs_recovery_progress(
         fixture.conversation_id.clone(),
         fixture.generation,
+        1_000,
         "x".repeat(4_097),
     ));
     assert_eq!(reads(&fixture), before);
     assert_eq!(
-        outcome(fixture.client.gateway_checkpoint_rcs_history(
+        outcome(fixture.client.gateway_record_rcs_recovery_progress(
             fixture.conversation_id.clone(),
             fixture.generation + 1,
+            1_000,
             "cursor".into(),
         )),
         "rejected:ownership_stale"
     );
+    assert_eq!(
+        outcome(fixture.client.gateway_complete_rcs_recovery(
+            fixture.conversation_id.clone(),
+            fixture.generation + 1,
+            1_000,
+        )),
+        "rejected:ownership_stale"
+    );
+    assert_eq!(
+        outcome(fixture.client.gateway_clear_rcs_recovery_hint(
+            fixture.conversation_id.clone(),
+            fixture.generation + 1,
+        )),
+        "rejected:ownership_stale"
+    );
     assert_eq!(reads(&fixture), before);
-}
-
-#[test]
-fn gateway_wrappers_accept_valid_records_and_closed_outcomes() {
-    let fixture = fixture();
-    assert_eq!(
-        outcome(fixture.client.gateway_ingest_rcs_record_json(
-            fixture.conversation_id.clone(),
-            fixture.generation,
-            record("message", "conversation", Some("tmp"), true, Some(true)),
-        )),
-        "inserted"
-    );
-    assert_eq!(outcome(fixture.client.gateway_apply_rcs_status_json(
-            fixture.conversation_id.clone(),
-            fixture.generation,
-            json!({"googleMessageId":"message", "googleConversationId":"conversation", "tmpId":"tmp", "status":"read"}).to_string(),
-        )), "status_applied");
-    assert_eq!(
-        outcome(fixture.client.gateway_checkpoint_rcs_history(
-            fixture.conversation_id.clone(),
-            fixture.generation,
-            "cursor-next".into(),
-        )),
-        "recorded"
-    );
-}
-
-#[test]
-fn mobile_read_dtos_exclude_rcs_provider_identity_and_cursor() {
-    let fixture = fixture();
-    assert_eq!(
-        outcome(fixture.client.gateway_ingest_rcs_record_json(
-            fixture.conversation_id.clone(),
-            fixture.generation,
-            record(
-                "SENTINELgmsg7f3",
-                "SENTINELgconv7f3",
-                Some("SENTINELtmp7f3"),
-                true,
-                Some(true),
-            ),
-        )),
-        "inserted"
-    );
-    let output = reads(&fixture);
-    for sentinel in [
-        "SENTINELgmsg7f3",
-        "SENTINELgconv7f3",
-        "SENTINELtmp7f3",
-        "cursorfixture0001",
-    ] {
-        assert!(!output.contains(sentinel), "read DTO leaked {sentinel}");
-    }
-}
-
-#[test]
-fn mobile_rcs_status_and_metadata_mapping_is_sanitized() {
-    let status_fixture = fixture();
-    for (index, (status, reported, encrypted)) in [
-        ("sending", true, Some(true)),
-        ("sent", true, Some(false)),
-        ("failed", false, Some(true)),
-        ("delivered", true, None),
-        ("read", true, None),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let message_id = format!("message-{index}");
-        assert_eq!(
-            outcome(status_fixture.client.gateway_ingest_rcs_record_json(
-                status_fixture.conversation_id.clone(),
-                status_fixture.generation,
-                record(&message_id, "conversation", None, reported, encrypted),
-            )),
-            "inserted"
-        );
-        assert_eq!(outcome(status_fixture.client.gateway_apply_rcs_status_json(
-                status_fixture.conversation_id.clone(),
-                status_fixture.generation,
-                json!({"googleMessageId":message_id, "googleConversationId":"conversation", "status":status}).to_string(),
-            )), "status_applied");
-    }
-    let messages = status_fixture
-        .client
-        .messages(status_fixture.conversation_id.clone())
-        .unwrap();
-    assert_eq!(messages.len(), 5);
-    for (message, expected) in
-        messages
-            .iter()
-            .zip(["sending", "sent", "failed", "delivered", "read"])
-    {
-        assert_eq!(message.transport, "rcs");
-        assert_eq!(message.rcs_status.as_deref(), Some(expected));
-        assert!(message.rcs_reported);
-    }
-    for (reported, encrypted, expected) in [
-        (true, Some(true), Some(true)),
-        (true, Some(false), Some(false)),
-        (false, Some(true), None),
-    ] {
-        let fixture = fixture();
-        assert_eq!(
-            outcome(fixture.client.gateway_ingest_rcs_record_json(
-                fixture.conversation_id.clone(),
-                fixture.generation,
-                record("metadata", "conversation", None, reported, encrypted),
-            )),
-            "inserted"
-        );
-        assert_eq!(
-            fixture
-                .client
-                .messages(fixture.conversation_id.clone())
-                .unwrap()
-                .pop()
-                .unwrap()
-                .rcs_reported,
-            reported
-        );
-        let conversation = fixture.client.list_conversations().unwrap().pop().unwrap();
-        assert_eq!(conversation.rcs_encryption, expected);
-        assert!(!conversation.rcs_history_gap);
-    }
-
-    with_client(&status_fixture.client.client, |core| {
-        let conversation_id = status_fixture.conversation_id.parse().unwrap();
-        core.record_rcs_provider_detector(
-            conversation_id,
-            status_fixture.generation,
-            RcsProviderDetector {
-                provider_row_id: 1,
-                provider_thread_id: 1,
-                provider_type: 1,
-                observed_at_ms: 1,
-                observed_generation: status_fixture.generation,
-            },
-        )?;
-        core.begin_rcs_unlink_cutover(conversation_id)?;
-        Ok(())
-    })
-    .unwrap();
-    let conversation = status_fixture
-        .client
-        .list_conversations()
-        .unwrap()
-        .pop()
-        .unwrap();
-    assert!(conversation.rcs_history_gap);
 }
 
 #[test]
@@ -791,7 +579,7 @@ fn owner_unlink_candidates_require_current_completion_and_are_bounded() {
 }
 
 #[test]
-fn provider_row_route_records_only_detector_state_for_the_single_link_lane() {
+fn pre_proof_provider_row_routes_to_provider_for_the_single_link_lane() {
     let fixture = fixture();
     let connection = rusqlite::Connection::open(&fixture.database_path).unwrap();
     connection
@@ -825,14 +613,20 @@ fn provider_row_route_records_only_detector_state_for_the_single_link_lane() {
             .to_string(),
         )
         .unwrap();
-    assert_eq!(outcome, NativeRcsProviderRowRoute::DetectorRecorded);
+    assert_eq!(
+        outcome,
+        NativeRcsProviderRoute {
+            route: NativeRcsProviderRowRoute::Provider,
+            reason: Some(NativeRcsProviderRouteReason::NotRestrictedText),
+        }
+    );
     assert_eq!(reads(&fixture), before);
     let count: i64 = connection
         .query_row("SELECT COUNT(*) FROM rcs_provider_detectors", [], |row| {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(count, 1);
+    assert_eq!(count, 0);
 }
 
 fn detector(provider_row_id: i64, observed_generation: u64) -> String {
@@ -908,4 +702,101 @@ fn gateway_detector_wrapper_accepts_valid_detector_with_closed_outcomes() {
             expected
         );
     }
+}
+
+fn claim_json(conversation_id: &str) -> serde_json::Value {
+    json!({
+        "conversationId": conversation_id,
+        "googleConversationId": "google-claim",
+        "mappingRevision": 1,
+        "providerFloor": 0,
+        "expectedLifecycleGeneration": 1,
+        "expectedLinkGeneration": 4,
+        "expectedSessionGeneration": 7,
+        "expectedContextRevision": 1
+    })
+}
+
+#[test]
+fn gateway_claim_json_rejects_unknown_and_missing_fields() {
+    let fixture = fixture();
+    let mut unknown = claim_json(&fixture.conversation_id);
+    unknown["unexpected"] = json!(true);
+    assert!(matches!(
+        fixture
+            .client
+            .gateway_claim_rcs_link_ownership_json(unknown.to_string()),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+
+    for removed_field in ["historyCursor", "cursorObservedAtMs", "backfillFromMs"] {
+        let mut stale = claim_json(&fixture.conversation_id);
+        stale[removed_field] = json!("cursor");
+        assert!(matches!(
+            fixture
+                .client
+                .gateway_claim_rcs_link_ownership_json(stale.to_string()),
+            Err(MobileBindingsError::InvalidRequest)
+        ));
+    }
+
+    let mut missing = claim_json(&fixture.conversation_id);
+    missing.as_object_mut().unwrap().remove("providerFloor");
+    assert!(matches!(
+        fixture
+            .client
+            .gateway_claim_rcs_link_ownership_json(missing.to_string()),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+
+    let refused = crate::rcs_receive::NativeRcsLinkOwnershipClaim {
+        outcome: crate::rcs_receive::NativeRcsLinkOwnershipClaimOutcome::Refused,
+        ownership_generation: 0,
+        proof_time_ms: 0,
+    };
+    let absent = claim_json(&fixture.conversation_id);
+    assert_eq!(
+        fixture
+            .client
+            .gateway_claim_rcs_link_ownership_json(absent.to_string())
+            .unwrap(),
+        refused
+    );
+}
+
+#[test]
+fn gateway_cutover_alerts_report_ambiguous_windows_as_records() {
+    let fixture = fixture();
+    let empty = crate::rcs_receive::NativeRcsCutoverAlerts {
+        count: 0,
+        conversation_ids: vec![],
+    };
+    assert_eq!(fixture.client.gateway_rcs_cutover_alerts().unwrap(), empty);
+
+    let conversation: peppy_client_core::ConversationId = fixture.conversation_id.parse().unwrap();
+    let generation = fixture.generation;
+    with_client(&fixture.client.client, |core| {
+        core.record_rcs_provider_detector(
+            conversation,
+            generation,
+            RcsProviderDetector {
+                provider_row_id: 11,
+                provider_thread_id: 2,
+                provider_type: 132,
+                observed_at_ms: 101,
+                observed_generation: generation,
+            },
+        )?;
+        core.begin_rcs_unlink_cutover(conversation)?;
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(
+        fixture.client.gateway_rcs_cutover_alerts().unwrap(),
+        crate::rcs_receive::NativeRcsCutoverAlerts {
+            count: 1,
+            conversation_ids: vec![fixture.conversation_id.clone()],
+        }
+    );
 }

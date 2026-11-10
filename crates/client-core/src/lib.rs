@@ -152,9 +152,9 @@ pub use rcs_capability::{
     RcsLinkStatusEvent, RcsLinkStatusPayload, RcsLinkStatusProjection,
 };
 pub use rcs_mapping::{
-    RCS_MAPPING_FRESHNESS_MS, RCS_MAPPING_PROOF_VERSION, RcsConversationType, RcsLinkState,
-    RcsMapping, RcsMappingClass, RcsMappingObservation, RcsMappingOutcome, RcsMappingProof,
-    RcsMappingRefusal, RcsParticipantObservation, RcsSendMode,
+    RCS_MAPPING_FRESHNESS_MS, RCS_MAPPING_PROOF_VERSION, RcsBootstrapResolution,
+    RcsConversationType, RcsLinkState, RcsMapping, RcsMappingClass, RcsMappingObservation,
+    RcsMappingOutcome, RcsMappingProof, RcsMappingRefusal, RcsParticipantObservation, RcsSendMode,
 };
 pub use rcs_native::{
     LocalRcsTargetSnapshot, NativeCarrierRouteBinding, NativeOwnNumberSource,
@@ -165,10 +165,12 @@ pub use rcs_native::{
 };
 pub use rcs_receive::{
     RcsContextExpectation, RcsConversationMetadata, RcsConversationTransport, RcsCutover,
-    RcsIdentityOutcome, RcsMessageStatusProjection, RcsObservationProvenance,
-    RcsOwnerUnlinkCutoverCandidate, RcsOwnership, RcsProjectedRecord, RcsProjectedStatus,
-    RcsProviderDetector, RcsProviderRow, RcsProviderRowRoute, RcsReceiveAlert, RcsReceiveCode,
-    RcsReceiveContext, RcsReceiveOutcome, RcsReceiveOwner, RcsReceiveState, RcsStatusApplication,
+    RcsCutoverAlerts, RcsIdentityOutcome, RcsLinkOwnershipClaim, RcsLinkOwnershipClaimOutcome,
+    RcsMessageStatusProjection, RcsObservationProvenance, RcsOwnerUnlinkCutoverCandidate,
+    RcsOwnership, RcsProjectedRecord, RcsProjectedStatus, RcsProviderDetector,
+    RcsProviderRouteReason, RcsProviderRow, RcsProviderRowRoute, RcsProviderRowRouteResult,
+    RcsReceiveAlert, RcsReceiveCode, RcsReceiveContext, RcsReceiveOutcome, RcsReceiveOwner,
+    RcsReceiveState, RcsRecoveryOutcome, RcsRecoveryState, RcsResumeHint, RcsStatusApplication,
     RcsUnlinkCutoverGenerations,
 };
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
@@ -1306,6 +1308,34 @@ impl Client {
         let outcome = rcs_mapping::verify_and_store(&transaction, observation, now_ms)?;
         transaction.commit()?;
         Ok(outcome)
+    }
+
+    /// Resolves a bootstrap participant using the exact identity lookup used by mapping verification.
+    pub fn resolve_rcs_bootstrap_conversation(
+        &self,
+        participant_identity: &str,
+        google_conversation_id: &str,
+    ) -> Result<RcsBootstrapResolution, Error> {
+        rcs_mapping::resolve_rcs_bootstrap_conversation(
+            &self.lock()?.conn,
+            participant_identity,
+            google_conversation_id,
+        )
+    }
+
+    /// Resolves up to 40 `(participant identity, Google conversation id)` candidates with one
+    /// history scan. Results match the input order and the single-candidate rules.
+    pub fn resolve_rcs_bootstrap_conversations(
+        &self,
+        candidates: &[(&str, &str)],
+    ) -> Result<Vec<RcsBootstrapResolution>, Error> {
+        rcs_mapping::resolve_rcs_bootstrap_conversations(&self.lock()?.conn, candidates)
+    }
+
+    /// Returns the durable lifecycle fence required by link-ownership claims.
+    pub fn rcs_link_lifecycle_generation(&self) -> Result<Option<u64>, Error> {
+        rcs_mapping::recorded_link_lifecycle_metadata(&self.lock()?.conn)
+            .map(|lifecycle| lifecycle.map(|value| value.generation))
     }
 
     /// Records an owner-requested unlink context. Incidental link errors and absent context never

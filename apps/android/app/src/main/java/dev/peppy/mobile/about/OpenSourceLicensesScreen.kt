@@ -43,7 +43,7 @@ internal fun LicensesScreen(notices: ThirdPartyNotices, onBack: () -> Unit, onOp
             TextLoad.Loading -> Loading("licenses-loading")
             TextLoad.Error -> LoadError("licenses-error") { retry++ }
             is TextLoad.Value -> {
-                Section("licenses-notices-section", stringResource(R.string.peppy_about_notices_heading)) { SelectionContainer { Text(state.text, Modifier.testTag("licenses-notice"), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) } }
+                if (state.text.isNotBlank()) Section("licenses-notices-section", stringResource(R.string.peppy_about_notices_heading)) { SelectionContainer { Text(state.text, Modifier.testTag("licenses-notice"), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) } }
                 val entries = remember(notices) { notices.entries() }
                 Section("licenses-texts-section", stringResource(R.string.peppy_about_license_texts_heading)) { entries.forEach { entry -> AccountNavigationRow("license-row-${entry.fileName.substringBeforeLast('.')}", entry.title()) { onOpenLicense(entry) } } }
             }

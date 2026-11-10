@@ -11,12 +11,26 @@ import (
 
 func TestConversationFacadeRequiresVerification(t *testing.T) {
 	link, _ := openSafetyLink(t, nil)
-	if err := link.RefreshConversationIndex(); err == nil || err.Error() != "m2_verification_required" {
-		t.Fatalf("RefreshConversationIndex error = %v", err)
+	if result := link.RefreshConversationIndex(); result != `{"code":"unavailable"}` {
+		t.Fatalf("RefreshConversationIndex result = %s", result)
 	}
 	for _, result := range []string{link.GetConversation("synthetic-conversation"), link.ResolveExistingConversation("synthetic-target")} {
 		if !strings.Contains(result, `"code":"m2_verification_required"`) {
 			t.Fatalf("result = %s", result)
+		}
+	}
+}
+
+func TestRefreshConversationIndexUsesClosedCodes(t *testing.T) {
+	for refusal, want := range map[string]string{
+		"":                            "ok",
+		"pending_conversation_events": "pending",
+		"conversation_lookup_stale":   "stale",
+		"m2_verification_required":    "unavailable",
+		"cancelled":                   "cancelled",
+	} {
+		if got := refreshConversationIndexJSON(refusal); got != `{"code":"`+want+`"}` {
+			t.Fatalf("refusal %q = %s, want %q", refusal, got, want)
 		}
 	}
 }

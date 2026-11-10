@@ -111,7 +111,7 @@ func validNativeText(value string) bool {
 }
 
 func (link *Link) nativePrepareAllowedLocked() bool {
-	return !link.closed && link.state == stateLinked && link.running && link.hasOwnerVerificationLocked() &&
+	return !link.closed && link.state == stateLinked && link.running && link.hasSendVerificationLocked() &&
 		link.runGeneration == link.generation && link.conversationIndexComplete &&
 		link.conversationIndexGeneration == link.generation && link.conversationIndexStreamEpoch == link.streamEpoch &&
 		link.pendingConversationEvents == 0 && link.settings != nil && !link.settingsAt.IsZero() &&
@@ -142,11 +142,18 @@ func (link *Link) nativeTicketCurrentLocked(ticket *nativeRcsTicket, ticketID st
 func (link *Link) nativeFrozenCurrentLocked(ticket *nativeRcsTicket) bool {
 	currentCard := uniqueEnabledRcsCard(link.settings)
 	return ticket != nil && link.nowForTicketLocked().Before(ticket.expiresAt) &&
-		link.nativePrepareAllowedLocked() && link.generation == ticket.generation &&
+		link.nativeBaseAllowedLocked() && link.hasSendVerificationLocked() && link.generation == ticket.generation &&
 		link.streamEpoch == ticket.streamEpoch && link.indexRevision == ticket.indexRevision &&
 		link.settingsVersion == ticket.settingsVersion && link.settingsStreamEpoch == ticket.settingsEpoch &&
 		link.runIncarnationID == ticket.runIncarnation && link.pairingEvidenceID == ticket.pairingEvidence &&
 		proto.Equal(currentCard, ticket.selectedCard)
+}
+
+func (link *Link) nativeBaseAllowedLocked() bool {
+	return !link.closed && link.state == stateLinked && link.running && link.runGeneration == link.generation && link.conversationIndexComplete &&
+		link.conversationIndexGeneration == link.generation && link.conversationIndexStreamEpoch == link.streamEpoch &&
+		link.pendingConversationEvents == 0 && link.settings != nil && !link.settingsAt.IsZero() &&
+		link.settingsStreamEpoch == link.streamEpoch && validNativeUUID(link.runIncarnationID) && validNativeUUID(link.pairingEvidenceID)
 }
 
 func (link *Link) expireNativeTicketLocked(now time.Time) {

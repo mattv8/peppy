@@ -245,6 +245,9 @@ jobs:
       - name: Lint and assemble Android artifacts
         working-directory: apps/android
         run: ./gradlew --console=plain --dependency-verification=strict --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 -PpeppyGoogleMessagesLink=true :app:verifyReleaseManifestSecurity :app:lintDebug :app:lintSideload :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleSideload :app:verifySideloadGoogleMessagesLink
+      - name: Compile release with Google Messages link
+        working-directory: apps/android
+        run: ./gradlew --console=plain --dependency-verification=strict --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:compileReleaseKotlin -PpeppyDistribution=play -PpeppyGoogleMessagesLink=true
       - name: Verify release SMS diagnostics policy
         working-directory: apps/android
         run: ./gradlew --console=plain --dependency-verification=strict :app:testReleaseUnitTest --tests dev.peppy.mobile.SmsCaptureReleasePolicyTest

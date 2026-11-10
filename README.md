@@ -121,11 +121,11 @@ For eligible Peppy Hosted enrollment, Background updates register automatically 
 
 Diagnostics are off by default. On a test phone, enable **Settings → Diagnostics** to record bounded numeric timing and counters locally, then turn it off after collecting a trace. **Share log** creates a bounded private snapshot. Peppy does not collect logcat, message bodies, phone or provider IDs, URLs, credentials, response bodies, or exception text. Emulator tests and APK builds do not establish carrier, FCM, store, physical-network, latency, or battery behavior.
 
-#### Google Messages link (experimental)
+#### Google Messages link
 
-Link Peppy to Google Messages through an optional Android sideload integration using libgm, a Google Messages for Web client library. This gives Peppy a path to RCS through Google Messages without replacing your default messaging app or relying on restricted Android message-provider access. Google credentials stay encrypted on your phone.
+Link Peppy to Google Messages through the Android integration in the GitHub release APK and the Play build, using libgm, a Google Messages for Web client library. This gives Peppy a path to RCS through Google Messages without replacing your default messaging app or relying on restricted Android message-provider access. Google credentials stay encrypted on your phone.
 
-Full RCS support is still in development: production send/receive activation remains disabled, and the current send implementation targets existing one-to-one text conversations. Group and media support are not yet established. Play builds exclude this integration.
+Set up the link from the **Google Messages (RCS)** card at the top of the SMS tab. It is not under Sync details. Once linked, Peppy sends and receives one-to-one RCS text chats that already have a thread in Google Messages on this phone. A new contact with no Google Messages chat stays SMS. RCS messages in chats Peppy has not mapped are captured only with restricted-message access (`READ_RESTRICTED_MESSAGES`). On-phone setup for that access is in the GitHub release APK only; the Play build can be granted it with the copied adb command from a computer. After an outage, Peppy recovers newer messages from where it left off, allowing 15 minutes of timestamp slack; a message whose Google timestamp is more than 15 minutes behind that point can be missed. Edits and deletes made after a message arrives are not reflected. Unlinking switches those chats back to SMS and may show a notice about messages that arrived around the switch. Typing indicators work in one-to-one RCS chats, in both directions. Group chats, photos, media and reactions are not supported yet. The GitHub release APK and the Play build both include this integration; CI development builds exclude it.
 
 ### Desktop
 

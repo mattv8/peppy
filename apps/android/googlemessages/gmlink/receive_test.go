@@ -248,8 +248,12 @@ func TestFetchRcsGapProjectsOnlyMessagesWithOpaquePageToken(t *testing.T) {
 	if got.Code != "ok" || got.NextCursor == "" || len(got.Records) != 1 {
 		t.Fatalf("page projection = %#v", got)
 	}
-	if got.Records[0].Cursor != got.NextCursor {
-		t.Fatalf("record cursor = %q, next cursor = %q", got.Records[0].Cursor, got.NextCursor)
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"cursor"`) {
+		t.Fatalf("record cursor present in %s", encoded)
 	}
 	if !got.HasMore {
 		t.Fatalf("continuing page = %#v", got)
@@ -269,9 +273,6 @@ func TestFetchRcsGapProjectsOnlyMessagesWithOpaquePageToken(t *testing.T) {
 	}, conversation)
 	if withoutResponseCursor.Code != "ok" || !withoutResponseCursor.HasMore || withoutResponseCursor.NextCursor != "AAABlB8pfHttZXNzYWdlLTE" || len(withoutResponseCursor.Records) != 1 {
 		t.Fatalf("cursor-less page = %#v", withoutResponseCursor)
-	}
-	if withoutResponseCursor.Records[0].Cursor != withoutResponseCursor.NextCursor {
-		t.Fatalf("record cursor = %q, next cursor = %q", withoutResponseCursor.Records[0].Cursor, withoutResponseCursor.NextCursor)
 	}
 	malformed := projectRcsPage(&gmproto.ListMessagesResponse{Cursor: &gmproto.Cursor{}}, conversation)
 	if malformed.Code != "ok" || malformed.HasMore || len(malformed.Records) != 0 || malformed.NextCursor != "" {
@@ -391,12 +392,18 @@ func (host *ownedRecordHost) TypingEvent(record string, _, _, streamEpoch int64)
 func receiveWiringLink(host Host) *Link {
 	conversation := typingConversation("conversation-1", true)
 	return &Link{
-		host:                         host,
-		generation:                   7,
-		runGeneration:                7,
-		streamEpoch:                  3,
-		stateRevision:                11,
-		ownerVerification:            &ownerVerification{generation: 7},
+		host:          host,
+		generation:    7,
+		runGeneration: 7,
+		streamEpoch:   3,
+		stateRevision: 11,
+		ownerVerification: &ownerVerification{generation: 7, Capabilities: []string{
+			verificationCapabilityReceive,
+			verificationCapabilityIndex,
+			verificationCapabilitySend,
+			verificationCapabilityTyping,
+			verificationCapabilityGroups,
+		}},
 		changes:                      make(chan any, 8),
 		conversationIndexComplete:    true,
 		conversationIndexGeneration:  7,
@@ -599,14 +606,20 @@ func TestLinkDropsOldReceiveGenerationAndPreservesOrder(t *testing.T) {
 
 func fetchGapTestLink(fetch func(context.Context, string, int64, *gmproto.Cursor) (*gmproto.ListMessagesResponse, error)) *Link {
 	return &Link{
-		client:            &libgm.Client{},
-		state:             stateLinked,
-		running:           true,
-		runCtx:            context.Background(),
-		generation:        7,
-		runGeneration:     7,
-		streamEpoch:       3,
-		ownerVerification: &ownerVerification{generation: 7},
+		client:        &libgm.Client{},
+		state:         stateLinked,
+		running:       true,
+		runCtx:        context.Background(),
+		generation:    7,
+		runGeneration: 7,
+		streamEpoch:   3,
+		ownerVerification: &ownerVerification{generation: 7, Capabilities: []string{
+			verificationCapabilityReceive,
+			verificationCapabilityIndex,
+			verificationCapabilitySend,
+			verificationCapabilityTyping,
+			verificationCapabilityGroups,
+		}},
 		conversationRecords: map[string]*gmproto.Conversation{
 			"conversation-1": typingConversation("conversation-1", true),
 		},
@@ -860,15 +873,12 @@ func TestFetchRcsGapRejectsUnsupportedStage2ConversationBeforeRPC(t *testing.T) 
 
 func TestRcsPageProjectionFailuresUseEmptyArrayEnvelope(t *testing.T) {
 	conversation := typingConversation("conversation-1", true)
-	unsupported := textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE).Message
-	unsupported.MessageInfo = []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MediaContent{MediaContent: &gmproto.MediaContent{}}}}
 	for _, test := range []struct {
 		name string
 		page *gmproto.ListMessagesResponse
 		code string
 	}{
 		{name: "missing page", page: nil, code: "page_missing"},
-		{name: "unsupported message", page: &gmproto.ListMessagesResponse{Messages: []*gmproto.Message{unsupported}, Cursor: &gmproto.Cursor{LastItemID: "cursor", LastItemTimestamp: 1}}, code: "unsupported_message"},
 		{name: "missing cursor", page: &gmproto.ListMessagesResponse{Messages: []*gmproto.Message{{ConversationID: "conversation-1"}}}, code: "cursor_missing"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

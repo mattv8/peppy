@@ -15,7 +15,6 @@ import (
 type rcsReceiveRecord struct {
 	GoogleMessageID      string `json:"google_message_id"`
 	GoogleConversationID string `json:"google_conversation_id"`
-	Cursor               string `json:"cursor,omitempty"`
 	Direction            string `json:"direction"`
 	Body                 string `json:"body"`
 	SentAtMS             int64  `json:"sent_at_ms"`
@@ -37,6 +36,8 @@ type rcsPageProjection struct {
 	Signals    []rcsPageSignal    `json:"signals"`
 	NextCursor string             `json:"next_cursor,omitempty"`
 	HasMore    bool               `json:"has_more"`
+	// Skipped counts history records withheld because they are not supported one-to-one text.
+	Skipped int `json:"skipped"`
 }
 
 type rcsPageSignal struct {
@@ -126,18 +127,19 @@ func projectRcsPage(page *gmproto.ListMessagesResponse, conversation *gmproto.Co
 	}
 	for _, message := range messages {
 		projection := projectRcsMessage(&libgm.WrappedMessage{Message: message}, conversation)
-		if projection.Code == "protocol_switch" {
+		switch projection.Code {
+		case "ok":
+			result.Records = append(result.Records, *projection.Record)
+		case "protocol_switch":
 			result.Signals = append(result.Signals, rcsPageSignal{Code: projection.Code, GoogleConversationID: projection.GoogleConversationID})
-			continue
+		case "informational_tombstone":
+			// Known informational tombstones carry no history text and are not counted.
+		default:
+			// Covers unsupported_message, status_unproven, message_unproven, conversation_unproven,
+			// identity_missing, message_missing and conversation_missing. A record that is not
+			// supported one-to-one text is withheld and counted; it never fails the page.
+			result.Skipped++
 		}
-		if projection.Code == "informational_tombstone" {
-			continue
-		}
-		if projection.Code != "ok" {
-			return rcsPageFailure(projection.Code)
-		}
-		projection.Record.Cursor = cursor
-		result.Records = append(result.Records, *projection.Record)
 	}
 	return result
 }
@@ -306,7 +308,7 @@ func (link *Link) projectRcsEventFor(queued queuedEvent, wrapped *libgm.WrappedM
 	}
 	signal, isControlSignal := projectRcsControlSignal(wrapped.Message)
 	link.mu.Lock()
-	if link.closed || queued.generation != link.generation || queued.streamEpoch != link.streamEpoch || !link.streamSourceMatchesLocked(queued.streamSource) || !link.hasOwnerVerificationLocked() {
+	if link.closed || queued.generation != link.generation || queued.streamEpoch != link.streamEpoch || !link.streamSourceMatchesLocked(queued.streamSource) || !link.hasReceiveVerificationLocked() {
 		link.mu.Unlock()
 		return
 	}
@@ -383,7 +385,7 @@ func (link *Link) FetchRcsGap(googleConversationID, pageToken string) string {
 
 	link.mu.Lock()
 	ok = !link.closed && link.state == stateLinked && link.running && link.client == client && link.runGeneration == generation && link.generation == generation && link.streamEpoch == streamEpoch
-	owned := ok && link.hasOwnerVerificationLocked()
+	owned := ok && link.hasReceiveVerificationLocked()
 	conversation := link.currentSupportedRcsConversationLocked(googleConversationID, generation, streamEpoch)
 	fetch := link.fetchMessages
 	link.mu.Unlock()
@@ -411,7 +413,7 @@ func (link *Link) FetchRcsGap(googleConversationID, pageToken string) string {
 		}
 	}
 	link.mu.Lock()
-	owned = !link.closed && link.generation == generation && link.runGeneration == generation && link.streamEpoch == streamEpoch && link.hasOwnerVerificationLocked()
+	owned = !link.closed && link.generation == generation && link.runGeneration == generation && link.streamEpoch == streamEpoch && link.hasReceiveVerificationLocked()
 	conversation = link.currentSupportedRcsConversationLocked(googleConversationID, generation, streamEpoch)
 	link.mu.Unlock()
 	if !owned {

@@ -105,6 +105,16 @@ class AboutComposeTest {
         compose.waitUntil { compose.onAllNodesWithTag("about-licenses-row").fetchSemanticsNodes().isNotEmpty() }
     }
 
+    @Test fun licensesRowAndListShowLinkOnlyNoticesWithoutHeader() {
+        renderAccount(account(), LinkOnlyNotices())
+        compose.waitUntil { compose.onAllNodesWithTag("account-about-row").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("account-about-row").performScrollTo().performClick()
+        compose.waitUntil { compose.onAllNodesWithTag("about-licenses-row").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("about-licenses-row").performScrollTo().performClick()
+        compose.waitUntil { compose.onAllNodesWithTag("license-row-NOTICE-google-messages").fetchSemanticsNodes().isNotEmpty() }
+        assertTrue(compose.onAllNodesWithTag("licenses-notice").fetchSemanticsNodes().isEmpty())
+    }
+
     @Test fun offlineFailureSurvivesOpeningAndClosingAbout() {
         renderAccount(account = null, notices = null)
         compose.waitUntil { compose.onAllNodesWithTag("devices-loading").fetchSemanticsNodes().isNotEmpty() }
@@ -176,6 +186,13 @@ private class FakeNotices : ThirdPartyNotices {
     private val files = listOf("NOTICE.txt", "LGPL-3.0.txt", "LGPL-2.1.txt", "GPL-3.0.txt", "Apache-2.0.txt", "BSD-3-Clause.txt", "MIT.txt", "BouncyCastle-LICENSE.txt", "Conscrypt-NOTICE.txt", "BoringSSL-LICENSE.txt")
     override fun notice() = "notices"
     override fun entries() = files.filterNot { it == "NOTICE.txt" }.map { ThirdPartyNoticeEntry(it, null) }
+    override fun read(fileName: String) = "text for $fileName"
+}
+
+private class LinkOnlyNotices : ThirdPartyNotices {
+    private val files = listOf("AGPL-3.0.txt", "LICENSE-exceptions-google-messages.txt", "NOTICE-google-messages.txt", "MPL-2.0.txt")
+    override fun notice() = ""
+    override fun entries() = files.map { ThirdPartyNoticeEntry(it, null) }
     override fun read(fileName: String) = "text for $fileName"
 }
 

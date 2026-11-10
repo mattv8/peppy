@@ -59,6 +59,50 @@ class NativeGatewayRetirementTest : GatewayTestBase() {
     }
 
     @Test
+    fun retirementListenerRunsWhenTheGatewaySessionRetires() {
+        enrollAndUnlock()
+        val notifications = AtomicInteger()
+        val unregister = NativeGateway.addRetirementListener { notifications.incrementAndGet() }
+
+        NativeGateway.closeForTest()
+
+        assertEquals(1, notifications.get())
+        unregister()
+    }
+
+    @Test
+    fun retirementListenerRegistrationDoesNotWaitForOwnerLock() {
+        enrollAndUnlock()
+        val decisionEntered = CountDownLatch(1)
+        val releaseDecision = CountDownLatch(1)
+        val firstHook = AtomicBoolean(true)
+        NativeGateway.persistenceDecisionHook = {
+            if (firstHook.getAndSet(false)) {
+                decisionEntered.countDown()
+                check(releaseDecision.await(5, TimeUnit.SECONDS))
+            }
+        }
+        // The decision hook runs while the owner lock is held, like SQLCipher open under that lock.
+        val persistThread = Thread { NativeGateway.persistVerified(context, parsed(), vaultMaterial()) }
+        val registration = AtomicReference<() -> Unit>()
+        val registrar = Thread { registration.set(NativeGateway.addRetirementListener {}) }
+        try {
+            persistThread.start()
+            assertTrue(decisionEntered.await(5, TimeUnit.SECONDS))
+
+            registrar.start()
+            registrar.join(2_000)
+            assertFalse("listener registration must not wait for the owner lock", registrar.isAlive)
+            assertNotNull(registration.get())
+            registration.get().invoke()
+        } finally {
+            releaseDecision.countDown()
+            persistThread.join(5_000)
+            registrar.join(5_000)
+        }
+    }
+
+    @Test
     fun failedRevocationKeepsOwnerUnavailableUntilSameRetirementRetriesSuccessfully() {
         enrollAndUnlock()
         val firstCalls = AtomicInteger()

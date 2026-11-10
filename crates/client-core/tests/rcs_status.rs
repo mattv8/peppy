@@ -198,7 +198,6 @@ fn record(body: &str) -> RcsProjectedRecord {
         tmp_id: None,
         rcs_reported: true,
         e2ee_reported: Some(true),
-        history_token: None,
     }
 }
 
@@ -211,9 +210,7 @@ fn rcs_conversation_metadata_converges_out_of_order_without_provider_identifiers
     let first = unlocked(&first_config, &vault);
     let second = unlocked(&second_config, &vault);
     let conversation = ConversationId::new();
-    let first_owner = first
-        .begin_rcs_link_ownership(conversation, "first", 0)
-        .unwrap();
+    let first_owner = first.begin_rcs_link_ownership(conversation, 0).unwrap();
 
     assert!(first
         .publish_rcs_conversation_metadata(
@@ -266,9 +263,7 @@ fn stale_metadata_generation_is_rejected_without_writing() {
     let config = config(&directory, "client", &vault);
     let client = unlocked(&config, &vault);
     let conversation = ConversationId::new();
-    let owner = client
-        .begin_rcs_link_ownership(conversation, "token", 0)
-        .unwrap();
+    let owner = client.begin_rcs_link_ownership(conversation, 0).unwrap();
 
     assert_eq!(
         client
@@ -296,9 +291,7 @@ fn rcs_conversation_metadata_omits_encryption_until_reported() {
     let config = config(&directory, "client", &vault);
     let client = unlocked(&config, &vault);
     let conversation = ConversationId::new();
-    let owner = client
-        .begin_rcs_link_ownership(conversation, "token", 0)
-        .unwrap();
+    let owner = client.begin_rcs_link_ownership(conversation, 0).unwrap();
 
     client
         .publish_rcs_conversation_metadata(conversation, owner.ownership_generation, None)
@@ -322,9 +315,7 @@ fn reported_rcs_fact_replicates_without_a_delivery_status() {
     let first = unlocked(&first_config, &vault);
     let second = unlocked(&second_config, &vault);
     let conversation = ConversationId::new();
-    let owner = first
-        .begin_rcs_link_ownership(conversation, "token", 0)
-        .unwrap();
+    let owner = first.begin_rcs_link_ownership(conversation, 0).unwrap();
     first
         .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("body"))
         .unwrap();
@@ -344,9 +335,7 @@ fn rcs_read_accessors_expose_google_reported_status_and_metadata_facts() {
     let config = config(&directory, "client", &vault);
     let client = unlocked(&config, &vault);
     let conversation = ConversationId::new();
-    let owner = client
-        .begin_rcs_link_ownership(conversation, "token", 0)
-        .unwrap();
+    let owner = client.begin_rcs_link_ownership(conversation, 0).unwrap();
     client
         .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("body"))
         .unwrap();
@@ -389,9 +378,7 @@ fn rcs_metadata_replicates_a_history_gap_through_cutover_and_relink() {
     let first = unlocked(&first_config, &vault);
     let second = unlocked(&second_config, &vault);
     let conversation = ConversationId::new();
-    let owner = first
-        .begin_rcs_link_ownership(conversation, "first", 0)
-        .unwrap();
+    let owner = first.begin_rcs_link_ownership(conversation, 0).unwrap();
     first
         .publish_rcs_conversation_metadata(conversation, owner.ownership_generation, None)
         .unwrap();
@@ -421,9 +408,7 @@ fn rcs_metadata_replicates_a_history_gap_through_cutover_and_relink() {
             .rcs_history_gap
     );
 
-    let _relink = first
-        .begin_rcs_link_ownership(conversation, "relink", 1)
-        .unwrap();
+    let _relink = first.begin_rcs_link_ownership(conversation, 1).unwrap();
     assert!(
         !first
             .rcs_conversation_metadata(conversation)
@@ -449,9 +434,7 @@ fn compacted_snapshot_restores_rcs_status_and_metadata_without_provider_identifi
     let gateway = unlocked(&config(&directory, "gateway", &vault), &vault);
     let restored = unlocked(&config(&directory, "restored", &vault), &vault);
     let conversation = ConversationId::new();
-    let owner = gateway
-        .begin_rcs_link_ownership(conversation, "token", 0)
-        .unwrap();
+    let owner = gateway.begin_rcs_link_ownership(conversation, 0).unwrap();
     gateway
         .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("body"))
         .unwrap();
@@ -517,9 +500,7 @@ fn compacted_snapshot_restores_fact_only_reported_values() {
         let gateway = unlocked(&config(&directory, "gateway", &vault), &vault);
         let restored = unlocked(&config(&directory, "restored", &vault), &vault);
         let conversation = ConversationId::new();
-        let owner = gateway
-            .begin_rcs_link_ownership(conversation, "token", 0)
-            .unwrap();
+        let owner = gateway.begin_rcs_link_ownership(conversation, 0).unwrap();
         let mut projected = record("body");
         projected.rcs_reported = reported;
         projected.e2ee_reported = None;
@@ -570,9 +551,7 @@ fn failed_snapshot_never_exposes_staged_rcs_status() {
     let gateway = unlocked(&config(&directory, "gateway", &vault), &vault);
     let restored = unlocked(&config(&directory, "restored", &vault), &vault);
     let conversation = ConversationId::new();
-    let owner = gateway
-        .begin_rcs_link_ownership(conversation, "token", 0)
-        .unwrap();
+    let owner = gateway.begin_rcs_link_ownership(conversation, 0).unwrap();
     gateway
         .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("body"))
         .unwrap();
@@ -641,9 +620,7 @@ fn failed_snapshots_keep_snapshot_only_rcs_events_isolated_after_reopen_and_gc()
             }
             let restored = unlocked(&restored_config, &vault);
             let conversation = ConversationId::new();
-            let owner = gateway
-                .begin_rcs_link_ownership(conversation, "token", 0)
-                .unwrap();
+            let owner = gateway.begin_rcs_link_ownership(conversation, 0).unwrap();
             let message_id = match kind {
                 "status" => {
                     gateway
@@ -790,9 +767,7 @@ fn ordinary_identical_replays_release_only_the_matching_snapshot_origin() {
     let restored_config = config(&directory, "restored", &vault);
     let restored = unlocked(&restored_config, &vault);
     let conversation = ConversationId::new();
-    let owner = gateway
-        .begin_rcs_link_ownership(conversation, "token", 0)
-        .unwrap();
+    let owner = gateway.begin_rcs_link_ownership(conversation, 0).unwrap();
     gateway
         .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("body"))
         .unwrap();
@@ -871,9 +846,7 @@ fn snapshot_status_envelope(
     conversation: ConversationId,
     body: &str,
 ) -> (Envelope, MessageId) {
-    let owner = gateway
-        .begin_rcs_link_ownership(conversation, body, 0)
-        .unwrap();
+    let owner = gateway.begin_rcs_link_ownership(conversation, 0).unwrap();
     let mut projected = record(body);
     projected.google_message_id = body.into();
     gateway
@@ -1124,7 +1097,7 @@ fn successful_same_cursor_reimport_releases_compactable_and_header_free_rows_aft
             gateway.set_server_compaction_state(true, true).unwrap();
             let failure_conversation = ConversationId::new();
             let owner = gateway
-                .begin_rcs_link_ownership(failure_conversation, "failure", 0)
+                .begin_rcs_link_ownership(failure_conversation, 0)
                 .unwrap();
             gateway
                 .publish_rcs_conversation_metadata(
@@ -1458,9 +1431,7 @@ fn authoritative_snapshot_keeps_unuploaded_local_rcs_evidence_and_metadata() {
     let restored_config = config(&directory, "restored", &vault);
     let restored = unlocked(&restored_config, &vault);
     let conversation = ConversationId::new();
-    let local_owner = restored
-        .begin_rcs_link_ownership(conversation, "local", 0)
-        .unwrap();
+    let local_owner = restored.begin_rcs_link_ownership(conversation, 0).unwrap();
     restored
         .ingest_rcs_projected_record(
             conversation,
@@ -1491,9 +1462,7 @@ fn authoritative_snapshot_keeps_unuploaded_local_rcs_evidence_and_metadata() {
     assert_eq!(local_metadata.as_ref().unwrap().rcs_encryption, Some(false));
     let outbox_before_snapshot = outbox_count(&restored_config);
 
-    let remote_owner = gateway
-        .begin_rcs_link_ownership(conversation, "remote", 0)
-        .unwrap();
+    let remote_owner = gateway.begin_rcs_link_ownership(conversation, 0).unwrap();
     let mut remote = record("remote");
     remote.google_message_id = "remote-message".into();
     gateway
@@ -1576,9 +1545,7 @@ fn duplicate_report_keeps_compacted_true_fact_and_does_not_republish_unchanged_m
     let gateway = unlocked(&gateway_config, &vault);
     let restored = unlocked(&config(&directory, "restored", &vault), &vault);
     let conversation = ConversationId::new();
-    let owner = gateway
-        .begin_rcs_link_ownership(conversation, "token", 0)
-        .unwrap();
+    let owner = gateway.begin_rcs_link_ownership(conversation, 0).unwrap();
     let mut projected = record("body");
     projected.rcs_reported = false;
     projected.e2ee_reported = Some(true);
@@ -1775,12 +1742,8 @@ fn deterministic_rcs_message_ids_converge_without_exposing_provider_identity() {
     let first = unlocked(&first_config, &vault);
     let second = unlocked(&second_config, &vault);
     let conversation = ConversationId::new();
-    let first_owner = first
-        .begin_rcs_link_ownership(conversation, "first-token", 0)
-        .unwrap();
-    let second_owner = second
-        .begin_rcs_link_ownership(conversation, "second-token", 0)
-        .unwrap();
+    let first_owner = first.begin_rcs_link_ownership(conversation, 0).unwrap();
+    let second_owner = second.begin_rcs_link_ownership(conversation, 0).unwrap();
 
     assert_eq!(
         first
@@ -1814,9 +1777,7 @@ fn deterministic_rcs_message_ids_converge_without_exposing_provider_identity() {
     let other_vault = Vault::new();
     let other_config = config(&directory, "other", &other_vault);
     let other = unlocked(&other_config, &other_vault);
-    let other_owner = other
-        .begin_rcs_link_ownership(conversation, "other-token", 0)
-        .unwrap();
+    let other_owner = other.begin_rcs_link_ownership(conversation, 0).unwrap();
     other
         .ingest_rcs_projected_record(
             conversation,
@@ -1839,12 +1800,8 @@ fn replicated_rcs_messages_are_idempotent() {
     let first = unlocked(&first_config, &vault);
     let second = unlocked(&second_config, &vault);
     let conversation = ConversationId::new();
-    let first_owner = first
-        .begin_rcs_link_ownership(conversation, "first-token", 0)
-        .unwrap();
-    let second_owner = second
-        .begin_rcs_link_ownership(conversation, "second-token", 0)
-        .unwrap();
+    let first_owner = first.begin_rcs_link_ownership(conversation, 0).unwrap();
+    let second_owner = second.begin_rcs_link_ownership(conversation, 0).unwrap();
     first
         .ingest_rcs_projected_record(
             conversation,
@@ -1876,9 +1833,7 @@ fn incoming_rcs_replay_stale_writer_and_page_floor_are_rejected_without_rows() {
     let config = config(&directory, "client", &vault);
     let client = unlocked(&config, &vault);
     let conversation = ConversationId::new();
-    let owner = client
-        .begin_rcs_link_ownership(conversation, "first-token", 10)
-        .unwrap();
+    let owner = client.begin_rcs_link_ownership(conversation, 10).unwrap();
 
     assert_eq!(
         client
@@ -1905,11 +1860,15 @@ fn incoming_rcs_replay_stale_writer_and_page_floor_are_rejected_without_rows() {
     );
     let mut page = record("page");
     page.google_message_id = "page-message".into();
-    page.history_token = Some("page-token".into());
     page.sent_at_ms = Some(10);
     assert_eq!(
         client
-            .ingest_rcs_projected_record(conversation, owner.ownership_generation, page)
+            .ingest_rcs_projected_observation(
+                conversation,
+                owner.ownership_generation,
+                page,
+                RcsObservationProvenance::Historical,
+            )
             .unwrap(),
         RcsReceiveOutcome::Rejected(RcsReceiveCode::ProviderFloor)
     );
@@ -1923,15 +1882,12 @@ fn page_records_are_imported_while_live_records_remain_unseen() {
     let config = config(&directory, "client", &vault);
     let client = unlocked(&config, &vault);
     let conversation = ConversationId::new();
-    let owner = client
-        .begin_rcs_link_ownership(conversation, "token", 0)
-        .unwrap();
+    let owner = client.begin_rcs_link_ownership(conversation, 0).unwrap();
     client
         .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("live"))
         .unwrap();
     let mut page = record("page");
     page.google_message_id = "page-message".into();
-    page.history_token = Some("page-token".into());
     page.sent_at_ms = Some(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1940,7 +1896,12 @@ fn page_records_are_imported_while_live_records_remain_unseen() {
             + 1,
     );
     client
-        .ingest_rcs_projected_record(conversation, owner.ownership_generation, page)
+        .ingest_rcs_projected_observation(
+            conversation,
+            owner.ownership_generation,
+            page,
+            RcsObservationProvenance::Historical,
+        )
         .unwrap();
 
     let messages = client.messages(conversation).unwrap();
@@ -1955,15 +1916,6 @@ fn page_records_are_imported_while_live_records_remain_unseen() {
             .iter()
             .any(|message| message.payload.body == "page" && message.seen)
     );
-    assert_eq!(
-        client
-            .rcs_receive_state(conversation)
-            .unwrap()
-            .unwrap()
-            .history_token
-            .as_deref(),
-        Some("page-token")
-    );
 }
 
 #[test]
@@ -1973,9 +1925,7 @@ fn rcs_status_lattice_is_monotonic() {
     let config = config(&directory, "client", &vault);
     let client = unlocked(&config, &vault);
     let conversation = ConversationId::new();
-    let owner = client
-        .begin_rcs_link_ownership(conversation, "token", 0)
-        .unwrap();
+    let owner = client.begin_rcs_link_ownership(conversation, 0).unwrap();
     client
         .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("live"))
         .unwrap();
@@ -2018,12 +1968,8 @@ fn statuses_converge_and_rejections_leave_no_status_row() {
     let first = unlocked(&first_config, &vault);
     let second = unlocked(&second_config, &vault);
     let conversation = ConversationId::new();
-    let first_owner = first
-        .begin_rcs_link_ownership(conversation, "first", 0)
-        .unwrap();
-    let second_owner = second
-        .begin_rcs_link_ownership(conversation, "second", 0)
-        .unwrap();
+    let first_owner = first.begin_rcs_link_ownership(conversation, 0).unwrap();
+    let second_owner = second.begin_rcs_link_ownership(conversation, 0).unwrap();
     for (client, generation) in [
         (&first, first_owner.ownership_generation),
         (&second, second_owner.ownership_generation),
@@ -2101,9 +2047,7 @@ fn unmatched_foreign_outgoing_is_inserted_once_without_a_command() {
     let config = config(&directory, "client", &vault);
     let client = unlocked(&config, &vault);
     let conversation = ConversationId::new();
-    let owner = client
-        .begin_rcs_link_ownership(conversation, "token", 0)
-        .unwrap();
+    let owner = client.begin_rcs_link_ownership(conversation, 0).unwrap();
     let mut foreign = record("foreign");
     foreign.direction = Direction::Outgoing;
     assert_eq!(
@@ -2147,9 +2091,7 @@ fn outgoing_tmp_echo_binds_existing_message_and_replays_after_reopen() {
     let config = config(&directory, "client", &vault);
     let client = unlocked(&config, &vault);
     let conversation = ConversationId::new();
-    let owner = client
-        .begin_rcs_link_ownership(conversation, "token", 0)
-        .unwrap();
+    let owner = client.begin_rcs_link_ownership(conversation, 0).unwrap();
     let mut existing = record("existing");
     existing.google_message_id = "existing-message".into();
     existing.google_conversation_id = "existing-conversation".into();
@@ -2246,7 +2188,7 @@ fn matched_echo_status_replicates_without_provider_identifiers() {
         .begin_rcs_send_attempt(queued.command_id, &observation, 1_000)
         .unwrap();
     let owner = gateway
-        .begin_rcs_link_ownership(captured.conversation_id, "gateway", 0)
+        .begin_rcs_link_ownership(captured.conversation_id, 0)
         .unwrap();
     let mut echo = record("outgoing body");
     echo.direction = Direction::Outgoing;
@@ -2298,9 +2240,7 @@ fn conflicting_identity_rejects_without_partial_message() {
     let config = config(&directory, "client", &vault);
     let client = unlocked(&config, &vault);
     let conversation = ConversationId::new();
-    let owner = client
-        .begin_rcs_link_ownership(conversation, "token", 0)
-        .unwrap();
+    let owner = client.begin_rcs_link_ownership(conversation, 0).unwrap();
     let connection = Connection::open(&config.database_path).unwrap();
     connection
         .execute_batch(

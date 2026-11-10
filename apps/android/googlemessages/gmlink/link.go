@@ -29,10 +29,8 @@ type Host interface {
 }
 
 var (
-	errPersistFailed                = errors.New("persist_failed")
-	errLinkClosed                   = errors.New("link_closed")
-	errOwnerVerificationInvalid     = errors.New("owner_verification_invalid")
-	errOwnerVerificationUnavailable = errors.New("owner_verification_unavailable")
+	errPersistFailed = errors.New("persist_failed")
+	errLinkClosed    = errors.New("link_closed")
 )
 
 // Link owns one Google Messages link for the process.
@@ -102,6 +100,7 @@ type Link struct {
 	nativeTicket                 *nativeRcsTicket
 	nativeInFlight               *nativeRcsInFlight
 	settingsVersion              uint64
+	staleIndexEpoch              uint64
 	streamEpoch                  uint64
 	streamSource                 libgm.StreamSource
 	streamOpen                   bool
@@ -587,24 +586,26 @@ func (link *Link) CheckHealth() int64 {
 }
 
 // RefreshConversationIndex refreshes the bounded local conversation index.
-// The pinned libgm facts have not been verified offline, so indexing remains
-// unavailable until the host records the required owner-gated evidence.
-func (link *Link) RefreshConversationIndex() error {
+// It requires runtime-minted index verification for the current stream.
+func (link *Link) RefreshConversationIndex() string {
 	if !link.hasM2Verification() {
-		return errors.New("m2_verification_required")
+		return refreshConversationIndexJSON("m2_verification_required")
 	}
 	link.rpcMu.Lock()
 	defer link.rpcMu.Unlock()
 	client, runCtx, generation, streamEpoch, ok := link.activeRuntime()
 	if !ok {
-		return errors.New("link_unavailable")
+		return refreshConversationIndexJSON("link_unavailable")
 	}
 	if !link.hasM2Verification() {
-		return errors.New("m2_verification_required")
+		return refreshConversationIndexJSON("m2_verification_required")
+	}
+	if link.hasPendingConversationEvents() {
+		return refreshConversationIndexJSON("pending_conversation_events")
 	}
 	indexRevision, started := link.beginConversationIndexRefreshFor(generation, streamEpoch)
 	if !started {
-		return errors.New("conversation_lookup_stale")
+		return refreshConversationIndexJSON("conversation_lookup_stale")
 	}
 	ctx, cancel := context.WithTimeout(runCtx, conversationTimeout)
 	defer cancel()
@@ -612,12 +613,40 @@ func (link *Link) RefreshConversationIndex() error {
 		return client.ListConversations(ctx, request)
 	})
 	if code != "" {
-		return errors.New(code)
+		if ctx.Err() == context.Canceled {
+			return refreshConversationIndexJSON("cancelled")
+		}
+		return refreshConversationIndexJSON(code)
 	}
 	if !link.replaceConversationIndexForContext(ctx, generation, streamEpoch, indexRevision, conversations) {
-		return errors.New("conversation_lookup_stale")
+		return refreshConversationIndexJSON("conversation_lookup_stale")
 	}
-	return nil
+	return refreshConversationIndexJSON("ok")
+}
+
+func (link *Link) hasPendingConversationEvents() bool {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	return link.pendingConversationEvents != 0
+}
+
+func refreshConversationIndexJSON(refusal string) string {
+	return conversationJSON(refreshConversationIndexCode(refusal))
+}
+
+func refreshConversationIndexCode(refusal string) string {
+	switch refusal {
+	case "", "ok":
+		return "ok"
+	case "pending_conversation_events":
+		return "pending"
+	case "conversation_lookup_stale", "conversation_lookup_incomplete":
+		return "stale"
+	case "cancelled":
+		return "cancelled"
+	default:
+		return "unavailable"
+	}
 }
 
 // GetConversation returns only fixed-code local lookup status. It never exposes
@@ -659,7 +688,7 @@ func (link *Link) ResolveExistingConversation(target string) string {
 	}
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	if !link.hasOwnerVerificationLocked() {
+	if !link.hasReceiveVerificationLocked() {
 		return conversationJSON("m2_verification_required")
 	}
 	if !link.conversationIndexComplete || link.conversationIndexGeneration != link.generation || link.conversationIndexStreamEpoch != link.streamEpoch || link.runGeneration != link.generation {
@@ -708,7 +737,7 @@ func (link *Link) DrainConversationEvents() string {
 func (link *Link) hasM2Verification() bool {
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	return link.hasOwnerVerificationLocked()
+	return link.hasReceiveVerificationLocked()
 }
 
 // activeRuntime is called only after rpcMu is acquired. It selects the client
@@ -1045,8 +1074,14 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 		}
 		link.streamSource = value.Source
 		link.streamOpen = true
-		link.ownerVerification = nil
 		link.clearConversationIndexLocked()
+		link.mintRuntimeVerificationLocked()
+		if link.staleIndexEpoch != link.streamEpoch {
+			link.staleIndexEpoch = link.streamEpoch
+			link.mu.Unlock()
+			link.emitFor(generation, "index", "stale", 0)
+			return
+		}
 		link.mu.Unlock()
 		return
 	case *libgm.StreamRetired:
@@ -1070,6 +1105,7 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 	}
 	event = cloneQueuedEvent(event)
 	receivedAt := time.Now()
+	emitIndexStale := false
 	link.mu.Lock()
 	if link.closed || generation != link.generation || !link.streamSourceMatchesLocked(source) {
 		link.mu.Unlock()
@@ -1078,7 +1114,6 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 	switch event.(type) {
 	case *libgm.StreamRetired, *libgm.ContinuityLost:
 		link.retirePhysicalSourceLocked()
-		link.ownerVerification = nil
 	default:
 		if invalidatesAtIngress(event) {
 			link.invalidateEvidenceLocked()
@@ -1086,6 +1121,10 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 		if settings, ok := event.(*libgm.WrappedSettings); ok && settings != nil && !settings.IsOld && settings.Settings != nil && settings.Settings.GetSIMCards() != nil {
 			link.invalidateEvidenceLocked()
 			link.settingsVersion++
+			if link.staleIndexEpoch != link.streamEpoch {
+				link.staleIndexEpoch = link.streamEpoch
+				emitIndexStale = true
+			}
 		}
 	}
 	var completion *terminalCompletion
@@ -1101,6 +1140,7 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 	if invalidatesOwnerEvidence(event) {
 		link.ownerVerification = nil
 	}
+	link.mintRuntimeVerificationLocked()
 	if completion != nil {
 		link.mu.Unlock()
 		go link.completeTerminal(completion)
@@ -1124,6 +1164,9 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 	select {
 	case link.changes <- queued:
 		link.mu.Unlock()
+		if emitIndexStale {
+			link.emitFor(generation, "index", "stale", 0)
+		}
 	default:
 		link.retireFatalLocked(generation, "event_overflow", false)
 		link.mu.Unlock()
@@ -1671,7 +1714,7 @@ func (link *Link) outputAdmitted(output hostOutput) bool {
 		admitted = admitted && link.stateRevision == output.revision
 	}
 	if output.requireStream {
-		admitted = admitted && link.streamEpoch == output.streamEpoch && link.hasOwnerVerificationLocked()
+		admitted = admitted && link.streamEpoch == output.streamEpoch && link.hasReceiveVerificationLocked()
 	}
 	if output.requireStreamEpoch {
 		admitted = admitted && link.streamEpoch == output.streamEpoch
@@ -1730,7 +1773,7 @@ func (link *Link) AcceptsStreamOutput(generation, revision, streamEpoch int64) b
 	}
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	return !link.closed && link.generation == uint64(generation) && link.stateRevision == uint64(revision) && link.streamEpoch == uint64(streamEpoch) && link.hasOwnerVerificationLocked()
+	return !link.closed && link.generation == uint64(generation) && link.stateRevision == uint64(revision) && link.streamEpoch == uint64(streamEpoch) && link.hasReceiveVerificationLocked()
 }
 
 func (link *Link) finalizeCloseLocked() {

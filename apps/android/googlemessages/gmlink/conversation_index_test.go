@@ -61,7 +61,7 @@ func TestRefreshConversationIndexRejectsStaleIncrementalUpdate(t *testing.T) {
 	fixture.awaitStreamReady(t)
 	awaitStreamOpen(t, link)
 	setTestOwnerVerification(link)
-	result := make(chan error, 1)
+	result := make(chan string, 1)
 	go func() { result <- link.RefreshConversationIndex() }()
 	select {
 	case folder := <-fixture.firstListFolder:
@@ -82,9 +82,9 @@ func TestRefreshConversationIndexRejectsStaleIncrementalUpdate(t *testing.T) {
 	})
 	close(fixture.listRelease)
 	select {
-	case err := <-result:
-		if err == nil || err.Error() != "conversation_lookup_stale" {
-			t.Fatalf("RefreshConversationIndex error = %v", err)
+	case refreshResult := <-result:
+		if refreshResult != `{"code":"stale"}` {
+			t.Fatalf("RefreshConversationIndex result = %s", refreshResult)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("RefreshConversationIndex did not return")
