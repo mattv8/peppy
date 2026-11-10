@@ -59,6 +59,8 @@ pub enum NativeLiveAction {
         session_token: u64,
         sequence: u64,
         conversation_id: String,
+        /// Canonical E.164 group member; `None` for 1:1 typing.
+        participant: Option<String>,
         state: NativeTypingState,
         deadline_mono: u64,
     },
@@ -67,6 +69,8 @@ pub enum NativeLiveAction {
         session_token: u64,
         sequence: u64,
         conversation_id: String,
+        /// Canonical E.164 group member; `None` for 1:1 typing.
+        participant: Option<String>,
         state: NativeTypingState,
         deadline_mono: u64,
     },
@@ -195,6 +199,7 @@ fn action_view(value: LiveAction) -> NativeLiveAction {
             session_token,
             sequence,
             conversation_id,
+            participant,
             state,
             deadline_mono,
         } => NativeLiveAction::Display {
@@ -202,6 +207,7 @@ fn action_view(value: LiveAction) -> NativeLiveAction {
             session_token,
             sequence,
             conversation_id: conversation_id.to_string(),
+            participant,
             state: state_view(state),
             deadline_mono,
         },
@@ -210,6 +216,7 @@ fn action_view(value: LiveAction) -> NativeLiveAction {
             session_token,
             sequence,
             conversation_id,
+            participant,
             state,
             deadline_mono,
         } => NativeLiveAction::GatewayTypingIntent {
@@ -217,6 +224,7 @@ fn action_view(value: LiveAction) -> NativeLiveAction {
             session_token,
             sequence,
             conversation_id: conversation_id.to_string(),
+            participant,
             state: state_view(state),
             deadline_mono,
         },
@@ -435,6 +443,7 @@ mod tests {
                 fixture.conversation.to_string(),
                 fixture.receiver_id.to_string(),
                 NativeTypingOrigin::VaultDevice,
+                None,
                 NativeTypingState::Started,
                 clock(1_001),
             )
@@ -464,6 +473,7 @@ mod tests {
                 fixture.conversation.to_string(),
                 fixture.receiver_id.to_string(),
                 NativeTypingOrigin::VaultDevice,
+                None,
                 NativeTypingState::Started,
                 clock(4_002),
             )
@@ -481,6 +491,7 @@ mod tests {
                 session_token,
                 sequence,
                 conversation_id,
+                participant,
                 state,
                 deadline_mono,
             } => {
@@ -488,11 +499,53 @@ mod tests {
                 assert!(session_token > 0);
                 assert_eq!(sequence, 3);
                 assert_eq!(conversation_id, fixture.conversation.to_string());
+                assert_eq!(participant, None);
                 assert_eq!(state, NativeTypingState::Started);
                 assert!(deadline_mono > 4_002);
             }
             action => panic!("unexpected action: {action:?}"),
         }
+    }
+
+    #[test]
+    fn participant_seal_fails_closed_until_the_roster_confirms_and_rejects_vault_frames() {
+        let fixture = live_fixture();
+        fixture
+            .receiver
+            .enable_live_typing(
+                NativeLiveEnableContext {
+                    trusted_roster: vec![fixture.receiver_id.to_string()],
+                    local_gateway_device_id: fixture.receiver_id.to_string(),
+                    local_executor: NativeLiveExecutor::CurrentGateway,
+                },
+                clock(1_000),
+            )
+            .unwrap();
+        assert_eq!(
+            fixture
+                .receiver
+                .seal_typing_signal_v2(
+                    fixture.conversation.to_string(),
+                    fixture.receiver_id.to_string(),
+                    NativeTypingOrigin::GoogleContact,
+                    Some("+15551230001".into()),
+                    NativeTypingState::Started,
+                    clock(1_001),
+                )
+                .unwrap(),
+            None
+        );
+        assert!(matches!(
+            fixture.receiver.seal_typing_signal_v2(
+                fixture.conversation.to_string(),
+                fixture.receiver_id.to_string(),
+                NativeTypingOrigin::VaultDevice,
+                Some("+15551230001".into()),
+                NativeTypingState::Started,
+                clock(1_002),
+            ),
+            Err(NativeLiveTypingError::InvalidContext)
+        ));
     }
 
     #[test]
@@ -530,6 +583,7 @@ mod tests {
                 session_token: value,
                 sequence: value,
                 conversation_id: ConversationId::new(),
+                participant: None,
                 state: TypingStateV2::Started,
                 deadline_mono: value,
             }),

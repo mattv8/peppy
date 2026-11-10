@@ -107,6 +107,18 @@ class RcsReceiveCoordinatorTest {
         assertEquals(BASE + 50, core.conversation("core-a").watermarkMs)
     }
 
+    @Test fun `recovery re-reads an unknown group sender once per conversation traversal`() {
+        val google = FakeGoogle(emptyMap()).apply { fetchHook = { googleId, _ -> unknownGroupGapPage(googleId) } }
+        val core = FakeCore(listOf(conv("core-a", "google-a", watermarkMs = BASE)))
+        val rereads = AtomicInteger()
+
+        val result = coordinator(core, reconcileGroups = { rereads.incrementAndGet(); true }).resumeConversation(google, "google-a")
+
+        assertEquals(RcsRecoveryResult.COMPLETE, result)
+        assertEquals(1, rereads.get())
+        assertEquals(2, core.ingestedRecords.size)
+    }
+
     @Test fun `a mixed page ingests only the slack window and nothing older`() {
         val google = FakeGoogle(mapOf("google-a" to listOf(
             Msg("new", BASE + 1), Msg("old1", BASE - 2 * HOUR), Msg("old2", BASE - 3 * HOUR),
@@ -334,6 +346,58 @@ class RcsReceiveCoordinatorTest {
         assertEquals(listOf("google-new", "google-new", "google-other"), requests)
     }
 
+    @Test fun `unknown group sender re-reads the snapshot once and ingests the record unattributed`() {
+        val core = FakeCore(listOf(conv("core-a", "google-a")))
+        val rereads = AtomicInteger()
+
+        coordinator(core, reconcileGroups = { rereads.incrementAndGet(); true }).receive(groupRecord("google-a", senderUnknown = true))
+
+        assertEquals(1, rereads.get())
+        assertEquals(1, core.ingestedRecords.size)
+    }
+
+    @Test fun `attributed group sender and one-to-one records never trigger a snapshot re-read`() {
+        val core = FakeCore(listOf(conv("core-a", "google-a")))
+        val rereads = AtomicInteger()
+        val coordinator = coordinator(core, reconcileGroups = { rereads.incrementAndGet(); true })
+
+        coordinator.receive(groupRecord("google-a", senderAddress = "+12025550102"))
+        coordinator.receive(liveRecord("google-a"))
+
+        assertEquals(0, rereads.get())
+        assertEquals(2, core.ingestedRecords.size)
+    }
+
+    @Test fun `unmapped group record reconciles once, retries the context, and skips the targeted bootstrap`() {
+        val core = FakeCore(emptyList())
+        val requests = mutableListOf<String>()
+        val reconciles = AtomicInteger()
+        val coordinator = coordinator(core, bootstrapRequest = requests::add, reconcileGroups = {
+            reconciles.incrementAndGet()
+            core.addConversation(conv("core-g", "google-g"))
+            true
+        })
+
+        coordinator.receive(groupRecord("google-g", senderAddress = "+12025550102"))
+
+        assertEquals(1, reconciles.get())
+        assertTrue(requests.isEmpty())
+        assertEquals(1, core.ingestedRecords.size)
+    }
+
+    @Test fun `unmapped record still unmapped after the one reconcile falls back to the targeted bootstrap`() {
+        val core = FakeCore(emptyList())
+        val requests = mutableListOf<String>()
+        val reconciles = AtomicInteger()
+
+        coordinator(core, bootstrapRequest = requests::add, reconcileGroups = { reconciles.incrementAndGet(); true })
+            .receive(groupRecord("google-missing", senderAddress = "+12025550102"))
+
+        assertEquals(1, reconciles.get())
+        assertEquals(listOf("google-missing"), requests)
+        assertTrue(core.ingestedRecords.isEmpty())
+    }
+
     @Test fun `live protocol switch invalidates its current context without ingestion`() {
         val core = FakeCore(listOf(conv("core-a", "google-a")))
 
@@ -367,11 +431,13 @@ class RcsReceiveCoordinatorTest {
         core: RcsReceiveCore,
         enabled: Boolean = true,
         bootstrapRequest: (String) -> Unit = {},
+        reconcileGroups: () -> Boolean = { false },
     ) = RcsReceiveCoordinator(
         ApplicationProvider.getApplicationContext(),
         core,
         { enabled },
         bootstrapRequest,
+        reconcileGroups,
     )
 
     private fun thread(block: () -> Unit) = Thread(block).apply { start() }
@@ -428,7 +494,11 @@ private fun conv(
     incomplete: Boolean = false,
 ) = Conv(conversationId, googleId, watermarkMs, hint, incomplete)
 
-private class FakeCore(private val conversations: List<Conv>) : RcsReceiveCore {
+private class FakeCore(initial: List<Conv>) : RcsReceiveCore {
+    private val conversations = initial.toMutableList()
+    /** A snapshot re-read can link or create a group; the fake models that by adding its context. */
+    fun addConversation(conversation: Conv) { conversations += conversation }
+
     var failOnUse = false
     var contextsFailure: Throwable? = null
     val contextsCalls = AtomicInteger()
@@ -578,6 +648,43 @@ private class FakeGoogle(
 }
 
 private fun accepted() = NativeRcsIngestOutcome("inserted", "status_applied")
+
+/** Two group gap records with unresolved senders, in one page that completes the traversal. */
+private fun unknownGroupGapPage(googleId: String) = JSONObject()
+    .put("code", "ok")
+    .put("records", JSONArray((1..2).map { index ->
+        JSONObject()
+            .put("google_message_id", "group-$index")
+            .put("google_conversation_id", googleId)
+            .put("direction", "incoming")
+            .put("body", "synthetic body")
+            .put("sent_at_ms", BASE + index)
+            .put("status", "delivered")
+            .put("tmp_id", "tmp-$index")
+            .put("rcs_reported", true)
+            .put("sender_unknown", true)
+    }))
+    .put("signals", JSONArray())
+    .put("has_more", false)
+    .toString()
+
+/** A group Live record as Go projects it: an attributed sender, or `sender_unknown` with no address. */
+private fun groupRecord(googleId: String, senderAddress: String? = null, senderUnknown: Boolean = false) = JSONObject()
+    .put("code", "ok")
+    .put("record", JSONObject()
+        .put("google_message_id", "group-message-1")
+        .put("google_conversation_id", googleId)
+        .put("direction", "incoming")
+        .put("body", "synthetic body")
+        .put("sent_at_ms", BASE)
+        .put("status", "delivered")
+        .put("tmp_id", "tmp-1")
+        .put("rcs_reported", true)
+        .apply {
+            senderAddress?.let { put("sender_address", it) }
+            if (senderUnknown) put("sender_unknown", true)
+        })
+    .toString()
 
 private fun liveRecord(googleId: String, sentAtMs: Long = BASE, messageId: String = "message-1") = JSONObject()
     .put("code", "ok")

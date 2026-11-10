@@ -26,6 +26,7 @@ fn expiry_restore_retries_after_a_concurrent_attachment_replacement() {
             initial.draft_id,
             initial.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "before expiry".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![old.attachment_id],
@@ -63,6 +64,7 @@ fn expiry_restore_retries_after_a_concurrent_attachment_replacement() {
             saved.draft_id,
             saved.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "newer caption".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![added.attachment_id],

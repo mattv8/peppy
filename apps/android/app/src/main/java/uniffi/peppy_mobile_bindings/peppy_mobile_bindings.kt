@@ -757,7 +757,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_owner_phone_should_rotate(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_begin_rcs_group_create(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_classify_rcs_target(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_commit_rcs_group_create(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_group_create_state(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_ingest_group_candidates(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_context_tuple(
     ): Int
@@ -766,6 +774,10 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_pending_native_rcs_commands(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_prepare_native_rcs_send(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_proved_group_member_digest(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_proved_group_member_revision(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_publish_rcs_eligibility(
     ): Int
@@ -780,6 +792,12 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_transport_ack(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_resolve_rcs_bootstrap_conversations(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_settle_rcs_group_create(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_group_observation(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_group_route(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_mapping(
     ): Int
@@ -1339,6 +1357,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativercssendpreparation_begin(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativercssendpreparation_expected_member_digest(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativercssendpreparation_facts_json(
     ): Int
     external fun ffi_peppy_mobile_bindings_uniffi_contract_version(
@@ -1687,7 +1707,7 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_save_compose_draft(`ptr`: Long,`draftId`: RustBuffer.ByValue,`expectedRevision`: Long,`update`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_seal_typing_signal_v2(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`gatewayDeviceId`: RustBuffer.ByValue,`origin`: RustBuffer.ByValue,`state`: RustBuffer.ByValue,`clock`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_seal_typing_signal_v2(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`gatewayDeviceId`: RustBuffer.ByValue,`origin`: RustBuffer.ByValue,`participant`: RustBuffer.ByValue,`state`: RustBuffer.ByValue,`clock`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_send_compose_draft(`ptr`: Long,`draftId`: RustBuffer.ByValue,`expectedRevision`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1951,6 +1971,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativercssendpreparation_begin(`ptr`: Long,`observationJson`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativercssendpreparation_expected_member_digest(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativercssendpreparation_facts_json(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_create_vault_material(`vaultId`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2035,7 +2057,15 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_func_owner_phone_should_rotate(`stage`: RustBuffer.ByValue,`expiresInSeconds`: Int,`active`: RustBuffer.ByValue,`requested`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_begin_rcs_group_create(`client`: Long,`conversationId`: RustBuffer.ByValue,`commandId`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_classify_rcs_target(`client`: Long,`conversationId`: RustBuffer.ByValue,`recipient`: RustBuffer.ByValue,`snapshotJson`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_commit_rcs_group_create(`client`: Long,`commandId`: RustBuffer.ByValue,`resultJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_group_create_state(`client`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_ingest_group_candidates(`client`: Long,`snapshotJson`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_next_rcs_context_tuple(`client`: Long,`runtimeId`: RustBuffer.ByValue,`runGeneration`: Long,`streamEpoch`: Long,`pairingEvidenceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -2045,13 +2075,17 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_prepare_native_rcs_send(`client`: Long,`commandId`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_proved_group_member_digest(`client`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_proved_group_member_revision(`client`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_publish_rcs_eligibility(`client`: Long,`publications`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_explicit_unlink_completed(`client`: Long,`observedAtMs`: Long,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_outcome_unknown(`client`: Long,`commandId`: RustBuffer.ByValue,`tmpId`: RustBuffer.ByValue,`googleConversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_pre_effect_refusal(`client`: Long,`commandId`: RustBuffer.ByValue,`tmpId`: RustBuffer.ByValue,`googleConversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_pre_effect_refusal(`client`: Long,`commandId`: RustBuffer.ByValue,`tmpId`: RustBuffer.ByValue,`googleConversationId`: RustBuffer.ByValue,`membersChanged`: Byte,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_submitted(`client`: Long,`commandId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -2059,6 +2093,12 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_resolve_rcs_bootstrap_conversations(`client`: Long,`candidatesJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_settle_rcs_group_create(`client`: Long,`commandId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_verify_rcs_group_observation(`client`: Long,`observationJson`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_verify_rcs_group_route(`client`: Long,`observationJson`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_verify_rcs_mapping(`client`: Long,`observationJson`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_rcs_canonicalizer_revision(uniffi_out_err: UniffiRustCallStatus, 
@@ -2305,7 +2345,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_owner_phone_should_rotate() and 0xFFFF) != 43566) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_begin_rcs_group_create() and 0xFFFF) != 20642) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_classify_rcs_target() and 0xFFFF) != 39946) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_commit_rcs_group_create() and 0xFFFF) != 37187) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_group_create_state() and 0xFFFF) != 11446) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_ingest_group_candidates() and 0xFFFF) != 56958) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_context_tuple() and 0xFFFF) != 10501) {
@@ -2320,6 +2372,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_prepare_native_rcs_send() and 0xFFFF) != 22733) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_proved_group_member_digest() and 0xFFFF) != 51768) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_proved_group_member_revision() and 0xFFFF) != 50707) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_publish_rcs_eligibility() and 0xFFFF) != 19264) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2329,7 +2387,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_outcome_unknown() and 0xFFFF) != 45222) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_pre_effect_refusal() and 0xFFFF) != 16858) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_pre_effect_refusal() and 0xFFFF) != 29483) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_submitted() and 0xFFFF) != 28724) {
@@ -2339,6 +2397,15 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_resolve_rcs_bootstrap_conversations() and 0xFFFF) != 33213) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_settle_rcs_group_create() and 0xFFFF) != 28103) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_group_observation() and 0xFFFF) != 3893) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_group_route() and 0xFFFF) != 40226) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_mapping() and 0xFFFF) != 16011) {
@@ -2830,7 +2897,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_save_compose_draft() and 0xFFFF) != 5300) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_seal_typing_signal_v2() and 0xFFFF) != 40376) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_seal_typing_signal_v2() and 0xFFFF) != 65402) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_send_compose_draft() and 0xFFFF) != 23646) {
@@ -3176,6 +3243,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativercssendpreparation_begin() and 0xFFFF) != 16625) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativercssendpreparation_expected_member_digest() and 0xFFFF) != 56105) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativercssendpreparation_facts_json() and 0xFFFF) != 11822) {
@@ -4113,7 +4183,7 @@ public interface NativeClientInterface {
      * Seals a canonical protocol frame for the private live transport. Call this off the UI
      * thread.
      */
-    fun `sealTypingSignalV2`(`conversationId`: kotlin.String, `gatewayDeviceId`: kotlin.String, `origin`: NativeTypingOrigin, `state`: NativeTypingState, `clock`: NativeLiveClock): NativeLiveOutbound?
+    fun `sealTypingSignalV2`(`conversationId`: kotlin.String, `gatewayDeviceId`: kotlin.String, `origin`: NativeTypingOrigin, `participant`: kotlin.String?, `state`: NativeTypingState, `clock`: NativeLiveClock): NativeLiveOutbound?
     
     fun `sendComposeDraft`(`draftId`: kotlin.String, `expectedRevision`: kotlin.ULong): NativeQueuedSend
     
@@ -6943,7 +7013,7 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
      * Seals a canonical protocol frame for the private live transport. Call this off the UI
      * thread.
      */
-    @Throws(NativeLiveTypingException::class)override fun `sealTypingSignalV2`(`conversationId`: kotlin.String, `gatewayDeviceId`: kotlin.String, `origin`: NativeTypingOrigin, `state`: NativeTypingState, `clock`: NativeLiveClock): NativeLiveOutbound? {
+    @Throws(NativeLiveTypingException::class)override fun `sealTypingSignalV2`(`conversationId`: kotlin.String, `gatewayDeviceId`: kotlin.String, `origin`: NativeTypingOrigin, `participant`: kotlin.String?, `state`: NativeTypingState, `clock`: NativeLiveClock): NativeLiveOutbound? {
             return FfiConverterOptionalTypeNativeLiveOutbound.lift(
     callWithHandle {
     uniffiRustCallWithError(NativeLiveTypingException) { _status ->
@@ -6953,6 +7023,7 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         FfiConverterString.lower(`conversationId`),
         FfiConverterString.lower(`gatewayDeviceId`),
         FfiConverterTypeNativeTypingOrigin.lower(`origin`),
+        FfiConverterOptionalString.lower(`participant`),
         FfiConverterTypeNativeTypingState.lower(`state`),
         FfiConverterTypeNativeLiveClock.lower(`clock`),_status)
 }
@@ -10705,6 +10776,11 @@ public interface NativeRcsSendPreparationInterface {
     
     fun `begin`(`observationJson`: kotlin.String, `nowMs`: kotlin.Long): NativeRcsCommittedSend
     
+    /**
+     * The group member digest for the Go prepare request; `None` for a 1:1 target, which must omit it.
+     */
+    fun `expectedMemberDigest`(): kotlin.String?
+    
     fun `factsJson`(): kotlin.String
     
     companion object
@@ -10824,6 +10900,22 @@ open class NativeRcsSendPreparation: Disposable, AutoCloseable, NativeRcsSendPre
         
         FfiConverterString.lower(`observationJson`),
         FfiConverterLong.lower(`nowMs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * The group member digest for the Go prepare request; `None` for a 1:1 target, which must omit it.
+     */override fun `expectedMemberDigest`(): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativercssendpreparation_expected_member_digest(
+        it,
+        _status)
 }
     }
     )
@@ -12136,6 +12228,82 @@ public object FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer<Nati
 
 
 /**
+ * Counts from one group candidate snapshot. Google identifiers never cross this boundary.
+ */
+data class NativeGroupClassification (
+    var `linked`: kotlin.ULong
+    , 
+    var `created`: kotlin.ULong
+    , 
+    var `live`: kotlin.ULong
+    , 
+    var `membersChanged`: kotlin.ULong
+    , 
+    var `paused`: kotlin.ULong
+    , 
+    var `withdrawn`: kotlin.ULong
+    , 
+    var `notProvable`: kotlin.ULong
+    , 
+    var `dormant`: kotlin.ULong
+    , 
+    var `conflicts`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeGroupClassification: FfiConverterRustBuffer<NativeGroupClassification> {
+    override fun read(buf: ByteBuffer): NativeGroupClassification {
+        return NativeGroupClassification(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeGroupClassification) = (
+            FfiConverterULong.allocationSize(value.`linked`) +
+            FfiConverterULong.allocationSize(value.`created`) +
+            FfiConverterULong.allocationSize(value.`live`) +
+            FfiConverterULong.allocationSize(value.`membersChanged`) +
+            FfiConverterULong.allocationSize(value.`paused`) +
+            FfiConverterULong.allocationSize(value.`withdrawn`) +
+            FfiConverterULong.allocationSize(value.`notProvable`) +
+            FfiConverterULong.allocationSize(value.`dormant`) +
+            FfiConverterULong.allocationSize(value.`conflicts`)
+    )
+
+    override fun write(value: NativeGroupClassification, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`linked`, buf)
+            FfiConverterULong.write(value.`created`, buf)
+            FfiConverterULong.write(value.`live`, buf)
+            FfiConverterULong.write(value.`membersChanged`, buf)
+            FfiConverterULong.write(value.`paused`, buf)
+            FfiConverterULong.write(value.`withdrawn`, buf)
+            FfiConverterULong.write(value.`notProvable`, buf)
+            FfiConverterULong.write(value.`dormant`, buf)
+            FfiConverterULong.write(value.`conflicts`, buf)
+    }
+}
+
+
+
+/**
  * Current host conditions used solely to increase text-history capture throughput.
  */
 data class NativeHistoryImportConditions (
@@ -12620,6 +12788,12 @@ data class NativeMessage (
     , 
     var `sendState`: kotlin.String?
     , 
+    /**
+     * The gateway's recorded group refusal for this send (`members_changed`, `update_required`,
+     * `withdrawn`, `create_unconfirmed`, or `create_not_rcs`), when there is one.
+     */
+    var `sendRefusal`: kotlin.String?
+    , 
     var `sentAtMs`: kotlin.Long?
     , 
     var `rcsStatus`: kotlin.String?
@@ -12652,6 +12826,7 @@ public object FfiConverterTypeNativeMessage: FfiConverterRustBuffer<NativeMessag
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
             FfiConverterOptionalLong.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
@@ -12670,6 +12845,7 @@ public object FfiConverterTypeNativeMessage: FfiConverterRustBuffer<NativeMessag
             FfiConverterBoolean.allocationSize(value.`incoming`) +
             FfiConverterBoolean.allocationSize(value.`seen`) +
             FfiConverterOptionalString.allocationSize(value.`sendState`) +
+            FfiConverterOptionalString.allocationSize(value.`sendRefusal`) +
             FfiConverterOptionalLong.allocationSize(value.`sentAtMs`) +
             FfiConverterOptionalString.allocationSize(value.`rcsStatus`) +
             FfiConverterBoolean.allocationSize(value.`rcsReported`)
@@ -12687,6 +12863,7 @@ public object FfiConverterTypeNativeMessage: FfiConverterRustBuffer<NativeMessag
             FfiConverterBoolean.write(value.`incoming`, buf)
             FfiConverterBoolean.write(value.`seen`, buf)
             FfiConverterOptionalString.write(value.`sendState`, buf)
+            FfiConverterOptionalString.write(value.`sendRefusal`, buf)
             FfiConverterOptionalLong.write(value.`sentAtMs`, buf)
             FfiConverterOptionalString.write(value.`rcsStatus`, buf)
             FfiConverterBoolean.write(value.`rcsReported`, buf)
@@ -16200,6 +16377,12 @@ sealed class MobileBindingsException: kotlin.Exception() {
             get() = ""
     }
     
+    class GroupMembersChanged(
+        ) : MobileBindingsException() {
+        override val message
+            get() = ""
+    }
+    
 
     
 
@@ -16241,6 +16424,7 @@ public object FfiConverterTypeMobileBindingsError : FfiConverterRustBuffer<Mobil
             20 -> MobileBindingsException.MmsMediaQuota()
             21 -> MobileBindingsException.SmsCapacity()
             22 -> MobileBindingsException.LockPoisoned()
+            23 -> MobileBindingsException.GroupMembersChanged()
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
@@ -16335,6 +16519,10 @@ public object FfiConverterTypeMobileBindingsError : FfiConverterRustBuffer<Mobil
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
+            is MobileBindingsException.GroupMembersChanged -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
         }
     }
 
@@ -16426,6 +16614,10 @@ public object FfiConverterTypeMobileBindingsError : FfiConverterRustBuffer<Mobil
             }
             is MobileBindingsException.LockPoisoned -> {
                 buf.putInt(22)
+                Unit
+            }
+            is MobileBindingsException.GroupMembersChanged -> {
+                buf.putInt(23)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -17079,6 +17271,290 @@ public object FfiConverterTypeNativeGatewayPlatform: FfiConverterRustBuffer<Nati
 
 
 
+/**
+ * Outcome of asking for the one-use create permit of a group send that waits on its create.
+ */
+sealed class NativeGroupCreateBegin {
+    
+    /**
+     * Run exactly one create with these canonical other members and this name, then commit it.
+     */
+    data class Permit(
+        val `commandId`: kotlin.String, 
+        val `numbers`: List<kotlin.String>, 
+        val `name`: kotlin.String?) : NativeGroupCreateBegin()
+        
+    {
+        
+
+        companion object
+    }
+    
+    /**
+     * No create was issued. `state` is the send's definite refusal.
+     */
+    data class Refused(
+        val `state`: uniffi.peppy_mobile_bindings.NativePermitState) : NativeGroupCreateBegin()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeGroupCreateBegin : FfiConverterRustBuffer<NativeGroupCreateBegin>{
+    override fun read(buf: ByteBuffer): NativeGroupCreateBegin {
+        return when(buf.getInt()) {
+            1 -> NativeGroupCreateBegin.Permit(
+                FfiConverterString.read(buf),
+                FfiConverterSequenceString.read(buf),
+                FfiConverterOptionalString.read(buf),
+                )
+            2 -> NativeGroupCreateBegin.Refused(
+                FfiConverterTypeNativePermitState.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: NativeGroupCreateBegin): ULong = when(value) {
+        is NativeGroupCreateBegin.Permit -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`commandId`)
+                + FfiConverterSequenceString.allocationSize(value.`numbers`)
+                + FfiConverterOptionalString.allocationSize(value.`name`)
+            )
+        }
+        is NativeGroupCreateBegin.Refused -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeNativePermitState.allocationSize(value.`state`)
+            )
+        }
+    }
+
+    override fun write(value: NativeGroupCreateBegin, buf: ByteBuffer) {
+        when(value) {
+            is NativeGroupCreateBegin.Permit -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`commandId`, buf)
+                FfiConverterSequenceString.write(value.`numbers`, buf)
+                FfiConverterOptionalString.write(value.`name`, buf)
+                Unit
+            }
+            is NativeGroupCreateBegin.Refused -> {
+                buf.putInt(2)
+                FfiConverterTypeNativePermitState.write(value.`state`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
+ * Google's create answer, recorded once per permit.
+ */
+
+enum class NativeGroupCreateOutcome {
+    
+    PENDING,
+    NOT_RCS,
+    UNKNOWN;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeGroupCreateOutcome: FfiConverterRustBuffer<NativeGroupCreateOutcome> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeGroupCreateOutcome.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeGroupCreateOutcome) = 4UL
+
+    override fun write(value: NativeGroupCreateOutcome, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * Create state of a conversation's group, for native status.
+ */
+sealed class NativeGroupCreateState {
+    
+    object NotRequested : NativeGroupCreateState()
+    
+    
+    object Begun : NativeGroupCreateState()
+    
+    
+    object Pending : NativeGroupCreateState()
+    
+    
+    object Unknown : NativeGroupCreateState()
+    
+    
+    object NotRcs : NativeGroupCreateState()
+    
+    
+    data class Refused(
+        val `state`: uniffi.peppy_mobile_bindings.NativePermitState) : NativeGroupCreateState()
+        
+    {
+        
+
+        companion object
+    }
+    
+    object Linked : NativeGroupCreateState()
+    
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeGroupCreateState : FfiConverterRustBuffer<NativeGroupCreateState>{
+    override fun read(buf: ByteBuffer): NativeGroupCreateState {
+        return when(buf.getInt()) {
+            1 -> NativeGroupCreateState.NotRequested
+            2 -> NativeGroupCreateState.Begun
+            3 -> NativeGroupCreateState.Pending
+            4 -> NativeGroupCreateState.Unknown
+            5 -> NativeGroupCreateState.NotRcs
+            6 -> NativeGroupCreateState.Refused(
+                FfiConverterTypeNativePermitState.read(buf),
+                )
+            7 -> NativeGroupCreateState.Linked
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: NativeGroupCreateState): ULong = when(value) {
+        is NativeGroupCreateState.NotRequested -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is NativeGroupCreateState.Begun -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is NativeGroupCreateState.Pending -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is NativeGroupCreateState.Unknown -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is NativeGroupCreateState.NotRcs -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is NativeGroupCreateState.Refused -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeNativePermitState.allocationSize(value.`state`)
+            )
+        }
+        is NativeGroupCreateState.Linked -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: NativeGroupCreateState, buf: ByteBuffer) {
+        when(value) {
+            is NativeGroupCreateState.NotRequested -> {
+                buf.putInt(1)
+                Unit
+            }
+            is NativeGroupCreateState.Begun -> {
+                buf.putInt(2)
+                Unit
+            }
+            is NativeGroupCreateState.Pending -> {
+                buf.putInt(3)
+                Unit
+            }
+            is NativeGroupCreateState.Unknown -> {
+                buf.putInt(4)
+                Unit
+            }
+            is NativeGroupCreateState.NotRcs -> {
+                buf.putInt(5)
+                Unit
+            }
+            is NativeGroupCreateState.Refused -> {
+                buf.putInt(6)
+                FfiConverterTypeNativePermitState.write(value.`state`, buf)
+                Unit
+            }
+            is NativeGroupCreateState.Linked -> {
+                buf.putInt(7)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
 
 enum class NativeHostedClientKind {
     
@@ -17157,6 +17633,10 @@ sealed class NativeLiveAction {
         val `sessionToken`: kotlin.ULong, 
         val `sequence`: kotlin.ULong, 
         val `conversationId`: kotlin.String, 
+        /**
+         * Canonical E.164 group member; `None` for 1:1 typing.
+         */
+        val `participant`: kotlin.String?, 
         val `state`: uniffi.peppy_mobile_bindings.NativeTypingState, 
         val `deadlineMono`: kotlin.ULong) : NativeLiveAction()
         
@@ -17171,6 +17651,10 @@ sealed class NativeLiveAction {
         val `sessionToken`: kotlin.ULong, 
         val `sequence`: kotlin.ULong, 
         val `conversationId`: kotlin.String, 
+        /**
+         * Canonical E.164 group member; `None` for 1:1 typing.
+         */
+        val `participant`: kotlin.String?, 
         val `state`: uniffi.peppy_mobile_bindings.NativeTypingState, 
         val `deadlineMono`: kotlin.ULong) : NativeLiveAction()
         
@@ -17201,6 +17685,7 @@ public object FfiConverterTypeNativeLiveAction : FfiConverterRustBuffer<NativeLi
                 FfiConverterULong.read(buf),
                 FfiConverterULong.read(buf),
                 FfiConverterString.read(buf),
+                FfiConverterOptionalString.read(buf),
                 FfiConverterTypeNativeTypingState.read(buf),
                 FfiConverterULong.read(buf),
                 )
@@ -17209,6 +17694,7 @@ public object FfiConverterTypeNativeLiveAction : FfiConverterRustBuffer<NativeLi
                 FfiConverterULong.read(buf),
                 FfiConverterULong.read(buf),
                 FfiConverterString.read(buf),
+                FfiConverterOptionalString.read(buf),
                 FfiConverterTypeNativeTypingState.read(buf),
                 FfiConverterULong.read(buf),
                 )
@@ -17225,6 +17711,7 @@ public object FfiConverterTypeNativeLiveAction : FfiConverterRustBuffer<NativeLi
                 + FfiConverterULong.allocationSize(value.`sessionToken`)
                 + FfiConverterULong.allocationSize(value.`sequence`)
                 + FfiConverterString.allocationSize(value.`conversationId`)
+                + FfiConverterOptionalString.allocationSize(value.`participant`)
                 + FfiConverterTypeNativeTypingState.allocationSize(value.`state`)
                 + FfiConverterULong.allocationSize(value.`deadlineMono`)
             )
@@ -17237,6 +17724,7 @@ public object FfiConverterTypeNativeLiveAction : FfiConverterRustBuffer<NativeLi
                 + FfiConverterULong.allocationSize(value.`sessionToken`)
                 + FfiConverterULong.allocationSize(value.`sequence`)
                 + FfiConverterString.allocationSize(value.`conversationId`)
+                + FfiConverterOptionalString.allocationSize(value.`participant`)
                 + FfiConverterTypeNativeTypingState.allocationSize(value.`state`)
                 + FfiConverterULong.allocationSize(value.`deadlineMono`)
             )
@@ -17251,6 +17739,7 @@ public object FfiConverterTypeNativeLiveAction : FfiConverterRustBuffer<NativeLi
                 FfiConverterULong.write(value.`sessionToken`, buf)
                 FfiConverterULong.write(value.`sequence`, buf)
                 FfiConverterString.write(value.`conversationId`, buf)
+                FfiConverterOptionalString.write(value.`participant`, buf)
                 FfiConverterTypeNativeTypingState.write(value.`state`, buf)
                 FfiConverterULong.write(value.`deadlineMono`, buf)
                 Unit
@@ -17261,6 +17750,7 @@ public object FfiConverterTypeNativeLiveAction : FfiConverterRustBuffer<NativeLi
                 FfiConverterULong.write(value.`sessionToken`, buf)
                 FfiConverterULong.write(value.`sequence`, buf)
                 FfiConverterString.write(value.`conversationId`, buf)
+                FfiConverterOptionalString.write(value.`participant`, buf)
                 FfiConverterTypeNativeTypingState.write(value.`state`, buf)
                 FfiConverterULong.write(value.`deadlineMono`, buf)
                 Unit
@@ -17845,7 +18335,16 @@ enum class NativePermitState {
     ROUTE_UNAVAILABLE,
     UNKNOWN_ROUTE,
     MAPPING_UNPROVEN,
-    CARRIER_ONLY_PROOF_UNAVAILABLE;
+    CARRIER_ONLY_PROOF_UNAVAILABLE,
+    GROUP_MEMBERS_CHANGED,
+    GROUP_UPDATE_REQUIRED,
+    GROUP_WITHDRAWN,
+    GROUP_CREATE_UNCONFIRMED,
+    GROUP_CREATE_NOT_RCS,
+    /**
+     * The group create is needed or in flight, or its proof is pending. Nothing was sent.
+     */
+    GROUP_CREATE_PENDING;
 
     
 
@@ -18105,6 +18604,44 @@ public object FfiConverterTypeNativeRcsEligibility: FfiConverterRustBuffer<Nativ
     override fun allocationSize(value: NativeRcsEligibility) = 4UL
 
     override fun write(value: NativeRcsEligibility, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * Outcome of re-proving a live group against one fresh target observation.
+ */
+
+enum class NativeRcsGroupVerification {
+    
+    PROVEN,
+    MEMBERS_CHANGED,
+    REFUSED;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsGroupVerification: FfiConverterRustBuffer<NativeRcsGroupVerification> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeRcsGroupVerification.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeRcsGroupVerification) = 4UL
+
+    override fun write(value: NativeRcsGroupVerification, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -20970,6 +21507,24 @@ public object FfiConverterSequenceTypeNativeRcsBootstrapResolution: FfiConverter
     }
     
 
+        /**
+         * Issues the one-use create permit for a group send that is waiting on a create.
+         */
+    @Throws(MobileBindingsException::class) fun `gatewayBeginRcsGroupCreate`(`client`: NativeClient, `conversationId`: kotlin.String, `commandId`: kotlin.String, `nowMs`: kotlin.Long): NativeGroupCreateBegin {
+            return FfiConverterTypeNativeGroupCreateBegin.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_begin_rcs_group_create(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`conversationId`),
+        FfiConverterString.lower(`commandId`),
+        FfiConverterLong.lower(`nowMs`),_status)
+}
+    )
+    }
+    
+
     @Throws(MobileBindingsException::class) fun `gatewayClassifyRcsTarget`(`client`: NativeClient, `conversationId`: kotlin.String, `recipient`: kotlin.String, `snapshotJson`: kotlin.String, `nowMs`: kotlin.Long): NativeRcsTargetDecision {
             return FfiConverterTypeNativeRcsTargetDecision.lift(
     uniffiRustCallWithError(MobileBindingsException) { _status ->
@@ -20979,6 +21534,56 @@ public object FfiConverterSequenceTypeNativeRcsBootstrapResolution: FfiConverter
         FfiConverterTypeNativeClient.lower(`client`),
         FfiConverterString.lower(`conversationId`),
         FfiConverterString.lower(`recipient`),
+        FfiConverterString.lower(`snapshotJson`),
+        FfiConverterLong.lower(`nowMs`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Records Google's create answer for a begun permit. Anything unrecognised is `Unknown`.
+         */
+    @Throws(MobileBindingsException::class) fun `gatewayCommitRcsGroupCreate`(`client`: NativeClient, `commandId`: kotlin.String, `resultJson`: kotlin.String): NativeGroupCreateOutcome {
+            return FfiConverterTypeNativeGroupCreateOutcome.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_commit_rcs_group_create(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`commandId`),
+        FfiConverterString.lower(`resultJson`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The create state of a conversation's group.
+         */
+    @Throws(MobileBindingsException::class) fun `gatewayGroupCreateState`(`client`: NativeClient, `conversationId`: kotlin.String): NativeGroupCreateState {
+            return FfiConverterTypeNativeGroupCreateState.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_group_create_state(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`conversationId`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Applies one complete Google group candidate snapshot and reports counts only.
+         */
+    @Throws(MobileBindingsException::class) fun `gatewayIngestGroupCandidates`(`client`: NativeClient, `snapshotJson`: kotlin.String, `nowMs`: kotlin.Long): NativeGroupClassification {
+            return FfiConverterTypeNativeGroupClassification.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_ingest_group_candidates(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
         FfiConverterString.lower(`snapshotJson`),
         FfiConverterLong.lower(`nowMs`),_status)
 }
@@ -21044,6 +21649,40 @@ public object FfiConverterSequenceTypeNativeRcsBootstrapResolution: FfiConverter
     }
     
 
+        /**
+         * The stored member digest of a Live group for the advisory Go prepare request; `None` otherwise.
+         * It carries no freshness and authorizes nothing by itself.
+         */
+    @Throws(MobileBindingsException::class) fun `gatewayProvedGroupMemberDigest`(`client`: NativeClient, `conversationId`: kotlin.String): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_proved_group_member_digest(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`conversationId`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The proved member revision while the group is Live; `None` otherwise. Decimal string, as all
+         * revisions cross the boundary.
+         */
+    @Throws(MobileBindingsException::class) fun `gatewayProvedGroupMemberRevision`(`client`: NativeClient, `conversationId`: kotlin.String): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_proved_group_member_revision(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`conversationId`),_status)
+}
+    )
+    }
+    
+
     @Throws(MobileBindingsException::class) fun `gatewayPublishRcsEligibility`(`client`: NativeClient, `publications`: List<NativeRcsEligibilityPublication>, `nowMs`: kotlin.Long): kotlin.UInt {
             return FfiConverterUInt.lift(
     uniffiRustCallWithError(MobileBindingsException) { _status ->
@@ -21091,7 +21730,7 @@ public object FfiConverterSequenceTypeNativeRcsBootstrapResolution: FfiConverter
     
     
 
-    @Throws(MobileBindingsException::class) fun `gatewayRecordRcsPreEffectRefusal`(`client`: NativeClient, `commandId`: kotlin.String, `tmpId`: kotlin.String, `googleConversationId`: kotlin.String)
+    @Throws(MobileBindingsException::class) fun `gatewayRecordRcsPreEffectRefusal`(`client`: NativeClient, `commandId`: kotlin.String, `tmpId`: kotlin.String, `googleConversationId`: kotlin.String, `membersChanged`: kotlin.Boolean, `nowMs`: kotlin.Long)
         = 
     uniffiRustCallWithError(MobileBindingsException) { _status ->
     UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_pre_effect_refusal(
@@ -21100,7 +21739,9 @@ public object FfiConverterSequenceTypeNativeRcsBootstrapResolution: FfiConverter
         FfiConverterTypeNativeClient.lower(`client`),
         FfiConverterString.lower(`commandId`),
         FfiConverterString.lower(`tmpId`),
-        FfiConverterString.lower(`googleConversationId`),_status)
+        FfiConverterString.lower(`googleConversationId`),
+        FfiConverterBoolean.lower(`membersChanged`),
+        FfiConverterLong.lower(`nowMs`),_status)
 }
     
     
@@ -21142,6 +21783,58 @@ public object FfiConverterSequenceTypeNativeRcsBootstrapResolution: FfiConverter
         
         FfiConverterTypeNativeClient.lower(`client`),
         FfiConverterString.lower(`candidatesJson`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Settles a create whose Google answer could not be committed: persists unknown without calling
+         * Google. Only a command retained by this process is settled.
+         */
+    @Throws(MobileBindingsException::class) fun `gatewaySettleRcsGroupCreate`(`client`: NativeClient, `commandId`: kotlin.String)
+        = 
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_settle_rcs_group_create(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`commandId`),_status)
+}
+    
+    
+
+        /**
+         * Re-proves a live group against the fresh target observation the send will use. Call it where
+         * the 1:1 target verification runs for a group ticket, before preparing the send.
+         */
+    @Throws(MobileBindingsException::class) fun `gatewayVerifyRcsGroupObservation`(`client`: NativeClient, `observationJson`: kotlin.String, `nowMs`: kotlin.Long): NativeRcsGroupVerification {
+            return FfiConverterTypeNativeRcsGroupVerification.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_verify_rcs_group_observation(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`observationJson`),
+        FfiConverterLong.lower(`nowMs`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Advances the link context from a group's route observation, as the 1:1 route step does. `false`
+         * means the context is not current; the group must not be proved or sent on that route.
+         */
+    @Throws(MobileBindingsException::class) fun `gatewayVerifyRcsGroupRoute`(`client`: NativeClient, `observationJson`: kotlin.String, `nowMs`: kotlin.Long): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_verify_rcs_group_route(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`observationJson`),
+        FfiConverterLong.lower(`nowMs`),_status)
 }
     )
     }

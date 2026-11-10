@@ -44,25 +44,33 @@ type conversationResult struct {
 }
 
 type conversationCandidateParticipant struct {
-	ParticipantID        string `json:"participant_id"`
-	IdentifierType       int32  `json:"identifier_type"`
-	RawNumber            string `json:"raw_number"`
-	FormattedNumber      string `json:"formatted_number"`
-	ParticipantIDPresent bool   `json:"participant_id_present"`
-	NumberPresent        bool   `json:"number_present"`
-	Visible              bool   `json:"visible"`
-	Self                 bool   `json:"self"`
+	ParticipantID           string `json:"participant_id"`
+	IdentifierType          int32  `json:"identifier_type"`
+	RawNumber               string `json:"raw_number"`
+	FormattedNumber         string `json:"formatted_number"`
+	ParticipantIDPresent    bool   `json:"participant_id_present"`
+	NumberPresent           bool   `json:"number_present"`
+	Visible                 bool   `json:"visible"`
+	Self                    bool   `json:"self"`
+	CanonicalAddress        string `json:"canonical_address"`
+	CanonicalAddressPresent bool   `json:"canonical_address_present"`
+	DisplayName             string `json:"display_name"`
 }
 
 type conversationCandidateRecord struct {
-	GoogleConversationID string                             `json:"google_conversation_id"`
-	ConversationType     int32                              `json:"conversation_type"`
-	ConversationStatus   int32                              `json:"conversation_status"`
-	Classification       string                             `json:"classification"`
-	Group                bool                               `json:"group"`
-	VisibleNonSelfCount  int                                `json:"visible_non_self_count"`
-	LastMessageMS        int64                              `json:"last_message_ms"`
-	Participants         []conversationCandidateParticipant `json:"participants"`
+	GoogleConversationID      string                             `json:"google_conversation_id"`
+	ConversationType          int32                              `json:"conversation_type"`
+	ConversationStatus        int32                              `json:"conversation_status"`
+	Classification            string                             `json:"classification"`
+	Group                     bool                               `json:"group"`
+	VisibleNonSelfCount       int                                `json:"visible_non_self_count"`
+	LastMessageMS             int64                              `json:"last_message_ms"`
+	Participants              []conversationCandidateParticipant `json:"participants"`
+	Name                      string                             `json:"name"`
+	IsGroupChat               bool                               `json:"is_group_chat"`
+	ReadOnly                  bool                               `json:"read_only"`
+	InvisibleParticipantCount int                                `json:"invisible_participant_count"`
+	MemberDigest              string                             `json:"member_digest"`
 }
 
 type conversationCandidateSnapshot struct {
@@ -173,31 +181,50 @@ func (link *Link) conversationCandidateSnapshotLocked() string {
 	for _, id := range ids {
 		conversation := link.conversationRecords[id]
 		participants := make([]conversationCandidateParticipant, 0, len(conversation.GetParticipants()))
+		invisibleParticipantCount := 0
 		for _, participant := range conversation.GetParticipants() {
+			if participant == nil {
+				continue
+			}
 			identifier := participant.GetID()
 			participantID := identifier.GetParticipantID()
 			rawNumber := identifier.GetNumber()
+			canonicalAddress, canonicalAddressPresent := "", false
+			if participant.GetIsVisible() {
+				canonicalAddress, canonicalAddressPresent = canonicalGoogleNumber(rawNumber, participant.GetFormattedNumber())
+			}
+			if !participant.GetIsVisible() {
+				invisibleParticipantCount++
+			}
 			participants = append(participants, conversationCandidateParticipant{
-				ParticipantID:        participantID,
-				IdentifierType:       int32(identifier.GetType()),
-				RawNumber:            rawNumber,
-				FormattedNumber:      participant.GetFormattedNumber(),
-				ParticipantIDPresent: participantID != "",
-				NumberPresent:        rawNumber != "",
-				Visible:              participant.GetIsVisible(),
-				Self:                 participant.GetIsMe(),
+				ParticipantID:           participantID,
+				IdentifierType:          int32(identifier.GetType()),
+				RawNumber:               rawNumber,
+				FormattedNumber:         participant.GetFormattedNumber(),
+				ParticipantIDPresent:    participantID != "",
+				NumberPresent:           rawNumber != "",
+				Visible:                 participant.GetIsVisible(),
+				Self:                    participant.GetIsMe(),
+				CanonicalAddress:        canonicalAddress,
+				CanonicalAddressPresent: canonicalAddressPresent,
+				DisplayName:             participantDisplayName(participant),
 			})
 		}
 		visibleNonSelfCount := len(visibleOtherParticipants(conversation))
 		records = append(records, conversationCandidateRecord{
-			GoogleConversationID: id,
-			ConversationType:     int32(conversation.GetType()),
-			ConversationStatus:   int32(conversation.GetStatus()),
-			Classification:       classifyConversation(conversation),
-			Group:                visibleNonSelfCount > 1,
-			VisibleNonSelfCount:  visibleNonSelfCount,
-			LastMessageMS:        lastMessageMillis(conversation),
-			Participants:         participants,
+			GoogleConversationID:      id,
+			ConversationType:          int32(conversation.GetType()),
+			ConversationStatus:        int32(conversation.GetStatus()),
+			Classification:            classifyConversation(conversation),
+			Group:                     visibleNonSelfCount > 1,
+			VisibleNonSelfCount:       visibleNonSelfCount,
+			LastMessageMS:             lastMessageMillis(conversation),
+			Participants:              participants,
+			Name:                      conversation.GetName(),
+			IsGroupChat:               conversation.GetIsGroupChat(),
+			ReadOnly:                  conversation.GetReadOnly(),
+			InvisibleParticipantCount: invisibleParticipantCount,
+			MemberDigest:              groupMemberDigest(conversation),
 		})
 	}
 	snapshot := conversationCandidateSnapshot{
@@ -436,6 +463,9 @@ func (link *Link) currentSupportedRcsConversationLocked(id string, generation, s
 		return nil
 	}
 	conversation := link.conversationRecords[id]
+	if conversation != nil && conversation.GetIsGroupChat() && conversation.GetType() == gmproto.ConversationType_RCS && conversation.GetStatus() == gmproto.ConversationStatus_ACTIVE && link.hasGroupsVerificationLocked() {
+		return cloneConversation(conversation)
+	}
 	if classifyConversation(conversation) != conversationClassificationEligible {
 		return nil
 	}

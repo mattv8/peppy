@@ -534,6 +534,7 @@ fn checked_compose_transport_uses_latest_message_and_rejects_a_stale_classificat
             draft.draft_id,
             draft.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "reply".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![],

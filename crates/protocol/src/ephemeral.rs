@@ -274,6 +274,11 @@ fn typing_plaintext_schema(origin: &str, includes_gateway: bool) -> serde_json::
             "gateway_device_id".into(),
             serde_json::json!({"type":"string","pattern":CANONICAL_UUID_PATTERN}),
         );
+    } else {
+        properties.insert(
+            "participant".into(),
+            serde_json::json!({"type":"string","pattern":"^\\+[1-9][0-9]{0,14}$"}),
+        );
     }
     serde_json::json!({"type":"object","additionalProperties":false,"properties":properties,"required":required})
 }
@@ -546,6 +551,8 @@ pub struct TypingPlaintextV2 {
     pub state: TypingStateV2,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gateway_device_id: Option<DeviceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub participant: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -557,24 +564,34 @@ struct TypingPlaintextV2Wire {
     state: TypingStateV2,
     #[serde(default)]
     gateway_device_id: Presence<String>,
+    #[serde(default)]
+    participant: Presence<String>,
 }
 
 impl<'de> Deserialize<'de> for TypingPlaintextV2 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = TypingPlaintextV2Wire::deserialize(deserializer)?;
-        let gateway_device_id = match (wire.origin, wire.gateway_device_id) {
-            (TypingOriginV2::VaultDevice, Presence::Value(value)) => {
-                Some(parse_device_id(&value).map_err(de::Error::custom)?)
-            }
-            (TypingOriginV2::GoogleContact, Presence::Missing) => None,
-            _ => return Err(de::Error::custom("invalid v2 typing gateway_device_id")),
-        };
+        let (gateway_device_id, participant) =
+            match (wire.origin, wire.gateway_device_id, wire.participant) {
+                (TypingOriginV2::VaultDevice, Presence::Value(value), Presence::Missing) => (
+                    Some(parse_device_id(&value).map_err(de::Error::custom)?),
+                    None,
+                ),
+                (TypingOriginV2::GoogleContact, Presence::Missing, Presence::Missing) => {
+                    (None, None)
+                }
+                (TypingOriginV2::GoogleContact, Presence::Missing, Presence::Value(value)) => {
+                    (None, Some(value))
+                }
+                _ => return Err(de::Error::custom("invalid v2 typing gateway_device_id")),
+            };
         let value = Self {
             version: wire.version,
             origin: wire.origin,
             conversation_id: parse_uuid(&wire.conversation_id).map_err(de::Error::custom)?,
             state: wire.state,
             gateway_device_id,
+            participant,
         };
         value.validate().map_err(de::Error::custom)?;
         Ok(value)
@@ -586,11 +603,24 @@ impl TypingPlaintextV2 {
         if self.version != EPHEMERAL_V2_PROTOCOL_VERSION
             || matches!(self.origin, TypingOriginV2::VaultDevice)
                 != self.gateway_device_id.is_some()
+            || self.participant.as_deref().is_some_and(|participant| {
+                !matches!(self.origin, TypingOriginV2::GoogleContact)
+                    || !is_canonical_e164(participant)
+            })
         {
             return Err(EphemeralSignalError::InvalidCanonicalEncoding);
         }
         Ok(())
     }
+}
+
+fn is_canonical_e164(value: &str) -> bool {
+    let Some(digits) = value.strip_prefix('+') else {
+        return false;
+    };
+    (1..=15).contains(&digits.len())
+        && matches!(digits.as_bytes().first(), Some(b'1'..=b'9'))
+        && digits.bytes().all(|digit| digit.is_ascii_digit())
 }
 
 impl JsonSchema for TypingPlaintextV2 {

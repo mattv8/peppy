@@ -25,6 +25,7 @@ fn saved_split_draft(
         .collect();
     let draft = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: text.into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: attachment_ids.clone(),

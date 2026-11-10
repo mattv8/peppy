@@ -56,7 +56,7 @@ func (link *Link) mintRuntimeVerificationLocked() {
 		return
 	}
 	link.ownerVerification = &ownerVerification{
-		Capabilities: []string{verificationCapabilityReceive, verificationCapabilityIndex, verificationCapabilitySend, verificationCapabilityTyping},
+		Capabilities: []string{verificationCapabilityReceive, verificationCapabilityIndex, verificationCapabilitySend, verificationCapabilityTyping, verificationCapabilityGroups},
 		generation:   link.generation,
 	}
 }

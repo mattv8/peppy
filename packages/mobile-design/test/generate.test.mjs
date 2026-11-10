@@ -371,18 +371,18 @@ test("Google Messages link copy avoids protocol and maturity claims", () => {
     assert.doesNotMatch(value, maturityPattern, `${key} must use production-ready copy`);
   }
   assert.match(catalog.google_messages_link_help_body, /one-to-one/);
-  assert.match(catalog.google_messages_link_help_body, /not supported yet/);
+  assert.match(catalog.google_messages_link_help_body, /Photos and other media are not supported yet\./);
 });
 
-test("typing copy describes one-to-one RCS typing and leaves groups unsupported", () => {
+test("typing copy describes one-to-one and group RCS typing", () => {
   const typingKeys = ["typing_share_hint", "google_messages_link_help_body", "google_messages_link_consent_p_scope"];
   const oldClaim = /typing[^.]*(do not work|does not work|not supported yet|changes nothing)/i;
   for (const key of typingKeys) {
     assert.doesNotMatch(catalog[key], oldClaim, `${key} must not say typing is unsupported`);
   }
-  assert.match(catalog.typing_share_hint, /one-to-one RCS chats/);
-  assert.match(catalog.typing_share_hint, /Group chats are not supported yet/);
-  assert.match(catalog.google_messages_link_help_body, /Typing indicators work in one-to-one chats/);
+  assert.match(catalog.typing_share_hint, /one-to-one and group RCS chats through Google Messages/);
+  assert.doesNotMatch(catalog.typing_share_hint, /Group chats are not supported yet/);
+  assert.match(catalog.google_messages_link_help_body, /Typing indicators work in one-to-one chats and groups/);
   assert.match(catalog.google_messages_link_consent_p_scope, /Typing indicators in those chats work too/);
 });
 

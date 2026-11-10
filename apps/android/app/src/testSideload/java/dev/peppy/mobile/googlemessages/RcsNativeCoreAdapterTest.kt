@@ -9,12 +9,15 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeRcsMappingVerification
 import uniffi.peppy_mobile_bindings.NativeRcsTargetDecision
 import uniffi.peppy_mobile_bindings.gatewayNextRcsContextTuple
 import uniffi.peppy_mobile_bindings.gatewayNextRcsMappingRevision
 import uniffi.peppy_mobile_bindings.gatewayPrepareNativeRcsSend
+import uniffi.peppy_mobile_bindings.gatewayProvedGroupMemberDigest
 import uniffi.peppy_mobile_bindings.gatewayRecordRcsOutcomeUnknown
+import uniffi.peppy_mobile_bindings.gatewayVerifyRcsGroupRoute
 
 class RcsNativeCoreAdapterTest {
     @Test fun `forwards opaque input and exact unsigned tuple values`() {
@@ -38,6 +41,39 @@ class RcsNativeCoreAdapterTest {
         assertEquals(RcsNativeTarget.Unknown, nativeRcsTarget(NativeRcsTargetDecision.Unknown))
         assertEquals(RcsNativeTarget.Unsupported, nativeRcsTarget(NativeRcsTargetDecision.Unsupported))
         assertEquals(RcsNativeTarget.Unknown, nativeRcsTarget(NativeRcsTargetDecision.NotFoundComplete))
+    }
+
+    @Test fun `group members changed at begin is a definite refusal, not an unknown outcome`() {
+        val preparation = FakePreparation(beginFailure = MobileBindingsException.GroupMembersChanged())
+        val wrapped = lease(FakePort(preparation = preparation)).prepare("command", 0)
+        assertEquals(RcsNativeBeginResult.MembersChanged, wrapped.begin("observation", 9))
+        assertEquals(RcsNativeBeginResult.DurabilityUnknown, wrapped.begin("again", 10))
+        assertEquals(1, preparation.beginCalls)
+    }
+
+    @Test fun `group route step passes the exact observation and the lease clock to the port`() {
+        val port = FakePort().apply { groupRouteCurrent = false }
+        val lease = lease(port)
+        assertFalse(lease.verifyGroupRoute(" { route } "))
+        assertEquals(" { route } ", port.groupRoute)
+        assertEquals(listOf(101L), port.nowValues)
+    }
+
+    @Test fun `group re-proof and proved revision pass through the lease with the lease clock`() {
+        val port = FakePort().apply { groupVerification = RcsNativeGroupVerification.MembersChanged }
+        val lease = lease(port)
+        assertEquals(42uL, lease.provedGroupMemberRevision("conversation"))
+        assertEquals(RcsNativeGroupVerification.MembersChanged, lease.verifyGroupObservation(" { group } "))
+        assertEquals(" { group } ", port.groupObservation)
+        assertEquals(listOf(101L), port.nowValues)
+    }
+
+    @Test fun `refusal carries the membership flag to the port`() {
+        val port = FakePort()
+        val lease = lease(port)
+        lease.prepare("command", 0).begin("observation", 0) as RcsNativeBeginResult.Committed
+        assertTrue(lease.recordPreEffectRefusal(membersChanged = true))
+        assertEquals(listOf(true), port.refusalMembersChanged)
     }
 
     @Test fun `begin failures are unknown after the one native call`() {
@@ -146,7 +182,26 @@ class RcsNativeCoreAdapterTest {
         override fun prepare(commandId: String, nowMs: Long) = preparation
         override fun recordTransportAcknowledged(commandId: String, ackAtMs: Long) { effects += "ack:$commandId" }
         override fun recordSubmitted(commandId: String) { effects += "submitted:$commandId" }
-        override fun recordPreEffectRefusal(commandId: String, tmpId: String, googleConversationId: String) { effects += "refusal:$commandId:$tmpId:$googleConversationId" }
+        override fun recordPreEffectRefusal(commandId: String, tmpId: String, googleConversationId: String, membersChanged: Boolean) {
+            effects += "refusal:$commandId:$tmpId:$googleConversationId"
+            refusalMembersChanged += membersChanged
+        }
+        val refusalMembersChanged = mutableListOf<Boolean>()
+        var groupVerification = RcsNativeGroupVerification.Proven
+        var groupObservation = ""
+        var groupRouteCurrent = true
+        var groupRoute = ""
+        override fun verifyGroupRoute(observationJson: String, nowMs: Long): Boolean {
+            groupRoute = observationJson
+            nowValues += nowMs
+            return groupRouteCurrent
+        }
+        override fun provedGroupMemberRevision(conversationId: String): ULong? = 42uL
+        override fun verifyGroupObservation(observationJson: String, nowMs: Long): RcsNativeGroupVerification {
+            groupObservation = observationJson
+            nowValues += nowMs
+            return groupVerification
+        }
         override fun recordOutcomeUnknown(commandId: String, tmpId: String, googleConversationId: String) { effects += "unknown:$commandId:$tmpId:$googleConversationId" }
     }
 
@@ -203,6 +258,10 @@ class RcsNativeCoreAdapterGatewaySmokeTest : GatewayTestBase() {
             gatewayNextRcsContextTuple(nativeLease.client, "native-smoke-runtime", 1u, 1u, "native-smoke-pairing").contextRevision,
         )
         assertTrue(runCatching { gatewayPrepareNativeRcsSend(nativeLease.client, "foreign-command", 1L) }.isFailure)
+        // Through the real library: no digest for a conversation that is not a Live group, and an
+        // unparseable route observation is refused rather than advancing the context.
+        assertEquals(null, gatewayProvedGroupMemberDigest(nativeLease.client, "00000000-0000-4000-8000-000000000001"))
+        assertTrue(runCatching { gatewayVerifyRcsGroupRoute(nativeLease.client, "not json", 1L) }.isFailure)
         assertTrue(runCatching { gatewayRecordRcsOutcomeUnknown(nativeLease.client, "foreign-command", "foreign-tmp", "foreign-google") }.isFailure)
         val adapter = RcsNativeCoreAdapter(context, RcsNativeClock { 1L })
         var revocations = 0

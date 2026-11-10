@@ -26,6 +26,17 @@ func (link *Link) BindNativeRcsTarget(ticketID, googleConversationID, token stri
 		link.mu.Unlock()
 		return result
 	}
+	group := conversation.GetIsGroupChat()
+	if group && (!link.hasGroupsVerificationLocked() || ticket.request.ExpectedMemberDigest == "") {
+		result := link.rejectNativeTargetLocked(ticket, ticketID)
+		link.mu.Unlock()
+		return result
+	}
+	if !group && ticket.request.ExpectedMemberDigest != "" {
+		result := link.rejectNativeTargetLocked(ticket, ticketID)
+		link.mu.Unlock()
+		return result
+	}
 	remaining := ticket.expiresAt.Sub(link.nowForTicketLocked())
 	if remaining > rcsSendDeadline {
 		remaining = rcsSendDeadline
@@ -89,6 +100,7 @@ func (link *Link) BindNativeRcsTarget(ticketID, googleConversationID, token stri
 	ticket.targetObservation = &observation
 	ticket.targetObservationJSON = inner
 	ticket.conversation = conversation
+	ticket.group = group
 	return encoded
 }
 

@@ -26,12 +26,14 @@ type nativeRcsTicket struct {
 	targetObservationJSON string
 	conversation          *gmproto.Conversation
 	facts                 *nativeRcsFacts
+	group                 bool
 }
 
 type nativeRcsInFlight struct {
-	ticketID string
-	admitted bool
-	revoked  bool
+	ticketID       string
+	admitted       bool
+	revoked        bool
+	membersChanged bool
 }
 
 type nativeRcsPrepareRequest struct {
@@ -39,6 +41,7 @@ type nativeRcsPrepareRequest struct {
 	CanonicalizerRevision uint32
 	IdentityRegion        string
 	CarrierBinding        nativeRcsPrepareCarrierBinding
+	ExpectedMemberDigest  string
 }
 
 type nativeRcsPrepareCarrierBinding struct {
@@ -50,13 +53,14 @@ type nativeRcsPrepareCarrierBinding struct {
 }
 
 type nativeRcsCommitProjection struct {
-	CommandID       string
-	TmpID           string
-	MappingRevision uint64
-	ProofVersion    uint32
-	ProofDigest     [32]byte
-	MessageBody     string
-	Target          nativeRcsTargetSnapshot
+	CommandID            string
+	TmpID                string
+	MappingRevision      uint64
+	ProofVersion         uint32
+	ProofDigest          [32]byte
+	MessageBody          string
+	Target               nativeRcsTargetSnapshot
+	ExpectedMemberDigest string
 }
 
 type nativeRcsTargetSnapshot struct {

@@ -124,6 +124,31 @@ describe("LiveTypingEngine", () => {
     expect(display).toHaveBeenCalledExactlyOnceWith({ event: "typing", peerDeviceId: "peer", conversationId: "conversation", state: "started", deadlineMono: "9" });
   });
 
+  it("keys group typing by participant and forwards it; a null participant is 1:1", async () => {
+    const display = vi.fn();
+    const action = (sequence: string, participant: string | null) => ({
+      generation: "7",
+      sessionUpdate: sequence === "1" ? { peerDeviceId: "peer", replacedSessionToken: null, currentSessionToken: "1", validationRevision: "1" } : undefined,
+      action: { kind: "display", peerDeviceId: "peer", sessionToken: "1", sequence, conversationId: "group", participant, state: "started", deadlineMono: "9" },
+    });
+    const mutate = vi.fn()
+      .mockResolvedValueOnce({ generation: "7" })
+      .mockResolvedValueOnce(action("1", "+15551230001"))
+      .mockResolvedValueOnce(action("1", "+15551230002"))
+      .mockResolvedValueOnce(action("2", null));
+    const engine = new LiveTypingEngine({ mutate }, { transmit: vi.fn(() => true) }, () => ({ wallMs: 1, monoMs: 1 }), display);
+    await engine.enable({ trustedRoster: ["a"], localGatewayDeviceId: "a", executor: "none" });
+    await engine.receive("first");
+    await engine.receive("second");
+    await engine.receive("third");
+
+    expect(display.mock.calls).toEqual([
+      [{ event: "typing", peerDeviceId: "peer", conversationId: "group", participant: "+15551230001", state: "started", deadlineMono: "9" }],
+      [{ event: "typing", peerDeviceId: "peer", conversationId: "group", participant: "+15551230002", state: "started", deadlineMono: "9" }],
+      [{ event: "typing", peerDeviceId: "peer", conversationId: "group", state: "started", deadlineMono: "9" }],
+    ]);
+  });
+
   it("does not reinstall a delayed enable after disable", async () => {
     const pendingEnable = deferred<unknown>();
     const mutate = vi.fn((command: string) => {

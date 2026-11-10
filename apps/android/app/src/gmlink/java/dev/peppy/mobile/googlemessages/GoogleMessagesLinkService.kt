@@ -112,6 +112,7 @@ class GoogleMessagesLinkService : Service() {
         nativeRcsSendWork = RcsNativeSendWork(
             enabled = ::nativeRcsEnabled,
             candidates = {
+                runPendingGroupCreates()
                 NativeGateway.open(applicationContext)
                     ?.let(::gatewayPendingNativeRcsCommands)
                     .orEmpty()
@@ -267,6 +268,7 @@ class GoogleMessagesLinkService : Service() {
         val generation = lifecycleGeneration
         val bootstrap = currentBootstrap(generation) ?: return
         if (!refreshConversationIndex(bootstrapLease)) return
+        reconcileRcsGroups(bootstrapLease)
         val now = testHooks.currentTimeMillis()
         if (now - lastBootstrapAtMs >= FULL_BOOTSTRAP_INTERVAL_MS && bootstrap.run() == RcsBootstrapResult.COMPLETE) {
             lastBootstrapAtMs = now
@@ -279,6 +281,47 @@ class GoogleMessagesLinkService : Service() {
     private fun offerTargetedBootstrap(googleConversationId: String) {
         targetedBootstrap.offer(googleConversationId)
         requestRcsBootstrap()
+    }
+
+    /**
+     * Ingests the current complete candidate snapshot into core so groups link, pause, withdraw, or create.
+     * Reads only the link handle and the gateway client; no lease is held across the Go call.
+     */
+    private fun reconcileRcsGroups(lease: LinkHandleLease?): Boolean {
+        val handle = lease?.handle ?: return false
+        val client = NativeGateway.open(applicationContext) ?: return false
+        val snapshot = runCatching { handle.conversationCandidateSnapshot() }.getOrNull() ?: return false
+        return RcsGroupReconciler(NativeRcsGroupIngestPort(client), RcsWallClock).reconcile(snapshot)
+    }
+
+    /** Receive-side hook: a fresh group snapshot for an unknown sender or an unmapped group record. */
+    private fun reconcileRcsGroupsFromLease(): Boolean {
+        if (!nativeRcsEnabled()) return false
+        val lease = synchronized(lock) { workerLease } ?: LinkRuntime.handleLease(this)
+        return reconcileRcsGroups(lease)
+    }
+
+    /**
+     * Carrier-pending group texts whose create is needed. Core decides with its own rules; a non-create answer
+     * skips the permit, so this changes no state unless core issues one.
+     */
+    private fun runPendingGroupCreates() {
+        if (!nativeRcsEnabled()) return
+        val client = NativeGateway.open(applicationContext) ?: return
+        val groupTexts = runCatching { client.pendingCommands() }.getOrDefault(emptyList()).filter {
+            it.message.transport == "mms" && it.message.recipients.size >= 2 && it.message.attachmentIds.isEmpty()
+        }
+        // The link handle is opened only when a group text is actually waiting.
+        if (groupTexts.isEmpty()) return
+        val lease = LinkRuntime.handleLease(this) ?: return
+        val creates = RcsGroupCreateCoordinator(
+            core = NativeRcsGroupCreateCore(client),
+            createRcsGroup = { request -> LinkRuntime.withCapturedLinkOperation(lease) { it.createRcsGroup(request) } },
+            // A fresh index, never the snapshot cached before the create, so a just-created group can be seen.
+            reconcile = { refreshConversationIndex(lease) && reconcileRcsGroups(lease) },
+            clock = RcsWallClock,
+        )
+        groupTexts.forEach { creates.create(it.message.conversationId, it.commandId) }
     }
 
     /** Runs one keyed target on the bootstrap executor. Lease or generation loss stops the drain pass. */
@@ -662,6 +705,7 @@ class GoogleMessagesLinkService : Service() {
         internal fun requestTargetedRcsBootstrap(googleConversationId: String) {
             active?.offerTargetedBootstrap(googleConversationId)
         }
+        internal fun requestRcsGroupReconcile(): Boolean = active?.reconcileRcsGroupsFromLease() ?: false
         fun cancelAttention(context: Context) { NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID) }
         internal fun onLinkEvent(kind: String, code: String) {
             active?.let { service ->

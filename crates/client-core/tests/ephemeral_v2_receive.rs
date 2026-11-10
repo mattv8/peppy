@@ -74,6 +74,7 @@ fn seal(
             conversation,
             gateway,
             TypingOriginV2::VaultDevice,
+            None,
             state,
             LiveClock {
                 wall_ms: time as i64,

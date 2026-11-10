@@ -32,6 +32,7 @@ private class GoLinkHandle(private val link: Link) : LinkHandle {
 		"{\"code\":\"unavailable\"}"
 	}
 	override fun conversationCandidateSnapshot(): String = link.conversationCandidateSnapshot()
+	override fun createRcsGroup(requestJson: String): String = link.createRcsGroup(requestJson)
     override fun conversationLastActivity(googleIdsJson: String): String = link.conversationLastActivity(googleIdsJson)
     override fun fetchRcsGap(googleConversationId: String, pageToken: String): String = link.fetchRcsGap(googleConversationId, pageToken)
 }

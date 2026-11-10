@@ -244,6 +244,7 @@ mod tests {
             conversation_id: Uuid::from_u128(6),
             state: TypingStateV2::Started,
             gateway_device_id: Some(local),
+            participant: None,
         };
         let challenge = ChallengePlaintextV2 {
             version: EPHEMERAL_V2_PROTOCOL_VERSION,
@@ -321,6 +322,7 @@ mod tests {
             conversation_id: Uuid::from_u128(14),
             state: TypingStateV2::Started,
             gateway_device_id: Some(local),
+            participant: None,
         })
         .unwrap();
         let frame = seal_frame(
@@ -400,6 +402,7 @@ mod tests {
             conversation_id: Uuid::from_u128(23),
             state: TypingStateV2::Started,
             gateway_device_id: Some(device(24)),
+            participant: None,
         })
         .unwrap();
         let frame = seal_frame(
@@ -542,6 +545,7 @@ mod tests {
             conversation_id: Uuid::from_u128(43),
             state: TypingStateV2::Started,
             gateway_device_id: Some(local),
+            participant: None,
         })
         .unwrap();
         let sent_at_ms = i64::MAX as u64 + 1_000;

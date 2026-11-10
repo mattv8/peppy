@@ -1369,9 +1369,19 @@ fn conversation_for_mms_participants(
     else {
         return Ok(None);
     };
+    // A current synced roster is stronger than inferred history. This deliberately runs after
+    // provider-thread routing: a provider thread remains carrier reality until a roster change
+    // retires that row.
+    let roster_match = conversation_for_group_roster(conn, &expected)?;
+    if let Some(conversation_id) = roster_match {
+        return crate::parse(&conversation_id).map(Some);
+    }
+    // A conversation with a synced roster matches only by that roster: its old message history
+    // must not keep routing a previous member set into it after a membership change.
     let mut statement = conn.prepare(
         "SELECT conversation_id,payload FROM messages
           WHERE json_extract(payload,'$.transport')='mms'
+            AND conversation_id NOT IN (SELECT conversation_id FROM conversation_group_members)
             AND (conversation_id,sort_at_ms,local_order) IN (
               SELECT conversation_id,sort_at_ms,local_order FROM (SELECT conversation_id,sort_at_ms,local_order,ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY sort_at_ms DESC,local_order DESC) AS newest FROM messages WHERE json_extract(payload,'$.transport')='mms') WHERE newest=1
             )
@@ -1404,6 +1414,29 @@ fn conversation_for_mms_participants(
         }
     }
     Ok(None)
+}
+
+/// The conversation whose synced roster is exactly `expected`, if any. Deterministic by id.
+pub(crate) fn conversation_for_group_roster(
+    conn: &rusqlite::Connection,
+    expected: &std::collections::BTreeSet<String>,
+) -> Result<Option<String>, Error> {
+    if expected.is_empty() {
+        return Ok(None);
+    }
+    let placeholders = std::iter::repeat_n("?", expected.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT conversation_id FROM conversation_group_members GROUP BY conversation_id HAVING COUNT(*)=? AND SUM(CASE WHEN canonical_address IN ({placeholders}) THEN 1 ELSE 0 END)=? ORDER BY conversation_id LIMIT 1"
+    );
+    let count = i64::try_from(expected.len()).map_err(|_| Error::Database)?;
+    let mut values = vec![rusqlite::types::Value::Integer(count)];
+    values.extend(expected.iter().cloned().map(rusqlite::types::Value::Text));
+    values.push(rusqlite::types::Value::Integer(count));
+    conn.query_row(&sql, rusqlite::params_from_iter(values), |row| row.get(0))
+        .optional()
+        .map_err(Into::into)
 }
 
 fn next_acquisition_sequence(
@@ -1702,6 +1735,41 @@ fn namespaced_provider_id(input: &MmsAcquisitionInput) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roster_lookup_requires_the_exact_member_set_and_is_deterministic() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE conversation_group_members(conversation_id TEXT NOT NULL, canonical_address TEXT NOT NULL);
+             INSERT INTO conversation_group_members VALUES('b','+15551230001'),('b','+15551230002'),
+               ('a','+15551230001'),('a','+15551230002'),('c','+15551230001'),('c','+15551230002'),('c','+15551230003');",
+        )
+        .unwrap();
+        let pair = std::collections::BTreeSet::from([
+            "+15551230001".to_owned(),
+            "+15551230002".to_owned(),
+        ]);
+        // Identical rosters tie-break by conversation id; a superset (c) never matches.
+        assert_eq!(
+            conversation_for_group_roster(&conn, &pair).unwrap(),
+            Some("a".to_owned())
+        );
+        let trio = std::collections::BTreeSet::from([
+            "+15551230001".to_owned(),
+            "+15551230002".to_owned(),
+            "+15551230003".to_owned(),
+        ]);
+        assert_eq!(
+            conversation_for_group_roster(&conn, &trio).unwrap(),
+            Some("c".to_owned())
+        );
+        let other = std::collections::BTreeSet::from(["+15551230009".to_owned()]);
+        assert_eq!(conversation_for_group_roster(&conn, &other).unwrap(), None);
+        assert_eq!(
+            conversation_for_group_roster(&conn, &std::collections::BTreeSet::new()).unwrap(),
+            None
+        );
+    }
 
     fn seeded_row(conn: &rusqlite::Connection) -> AcquisitionRow {
         conn.execute_batch(

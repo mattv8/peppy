@@ -17,6 +17,7 @@ fn update(
     attachment_ids: Vec<AttachmentId>,
 ) -> ComposeDraftUpdate {
     ComposeDraftUpdate {
+        group_name: None,
         text: text.into(),
         recipients: recipients
             .iter()
@@ -379,6 +380,7 @@ fn two_clients_deliver_a_command_and_canonicalize_a_formatted_sms_reply_to_its_c
             reply.draft_id,
             reply.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "reply".into(),
                 recipients: vec!["(415) 555-2671".into()],
                 route: Some(route(&phone_config)),

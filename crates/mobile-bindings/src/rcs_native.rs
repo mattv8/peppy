@@ -1,8 +1,9 @@
-use crate::{MobileBindingsError, NativeClient, with_client};
+use crate::{MobileBindingsError, NativeClient, NativePermitState, with_client};
 use peppy_client_core::{
-    NativeRcsCommitProjection, NativeRcsPreparation, NativeRcsTargetClass,
+    GroupCreateBegin, GroupCreateOutcome, GroupCreateState, NativeRcsCommitProjection,
+    NativeRcsPreparation, NativeRcsPreparationTarget, NativeRcsTargetClass,
     RCS_CANONICALIZER_REVISION, RcsBootstrapResolution, RcsMappingClass, RcsMappingObservation,
-    RcsMappingOutcome, RcsMappingRefusal, RcsTargetDecision,
+    RcsMappingOutcome, RcsMappingRefusal, RcsTargetDecision, SendRefusalReason,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -21,6 +22,14 @@ pub struct NativeRcsContextTuple {
 pub enum NativeRcsMappingVerification {
     Mapped,
     GoogleConversationAmbiguous,
+    Refused,
+}
+
+/// Outcome of re-proving a live group against one fresh target observation.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeRcsGroupVerification {
+    Proven,
+    MembersChanged,
     Refused,
 }
 
@@ -140,17 +149,14 @@ struct NativeRcsFacts<'a> {
 }
 
 fn facts_json(preparation: &NativeRcsPreparation) -> Result<String, MobileBindingsError> {
-    let mapping = preparation.mapping();
-    let class = match mapping.class {
-        RcsMappingClass::OneToOne => NativeRcsTargetClass::OneToOne,
-        RcsMappingClass::SelfChat => NativeRcsTargetClass::SelfChat,
-    };
-    serde_json::to_string(&NativeRcsFacts {
-        request: preparation.request(),
-        stored_mapping: NativeRcsStoredMapping {
+    let stored_mapping = match preparation.target() {
+        NativeRcsPreparationTarget::OneToOne(mapping) => NativeRcsStoredMapping {
             conversation_id: mapping.conversation_id.to_string(),
             google_conversation_id: &mapping.google_conversation_id,
-            class,
+            class: match mapping.class {
+                RcsMappingClass::OneToOne => NativeRcsTargetClass::OneToOne,
+                RcsMappingClass::SelfChat => NativeRcsTargetClass::SelfChat,
+            },
             proof_version: mapping.proof_version,
             proof: NativeRcsStoredProof {
                 canonical_participant: &mapping.proof.canonical_participant,
@@ -161,6 +167,24 @@ fn facts_json(preparation: &NativeRcsPreparation) -> Result<String, MobileBindin
             mapping_revision: mapping.mapping_revision,
             verified_at_ms: mapping.verified_at_ms,
         },
+        NativeRcsPreparationTarget::Group(authority) => NativeRcsStoredMapping {
+            conversation_id: authority.conversation_id.to_string(),
+            google_conversation_id: &authority.google_conversation_id,
+            class: NativeRcsTargetClass::Group,
+            proof_version: authority.proof_version,
+            proof: NativeRcsStoredProof {
+                canonical_participant: &authority.member_set_digest,
+                identity_region: &authority.identity_region,
+                own_identity: &authority.own_identity,
+                digest: &authority.proof_digest,
+            },
+            mapping_revision: authority.mapping_revision,
+            verified_at_ms: authority.verified_at_ms,
+        },
+    };
+    serde_json::to_string(&NativeRcsFacts {
+        request: preparation.request(),
+        stored_mapping,
     })
     .map_err(|_| MobileBindingsError::InvalidRequest)
 }
@@ -210,6 +234,16 @@ impl NativeRcsSendPreparation {
                 .then_some(facts)
                 .ok_or(MobileBindingsError::InvalidRequest)
         })
+    }
+
+    /// The group member digest for the Go prepare request; `None` for a 1:1 target, which must omit it.
+    pub fn expected_member_digest(&self) -> Option<String> {
+        self.preparation
+            .lock()
+            .ok()?
+            .as_ref()?
+            .expected_member_digest()
+            .map(str::to_owned)
     }
 
     pub fn begin(
@@ -346,6 +380,264 @@ pub fn gateway_verify_rcs_mapping(
     })
 }
 
+#[uniffi::export]
+/// Re-proves a live group against the fresh target observation the send will use. Call it where
+/// the 1:1 target verification runs for a group ticket, before preparing the send.
+pub fn gateway_verify_rcs_group_observation(
+    client: Arc<NativeClient>,
+    observation_json: String,
+    now_ms: i64,
+) -> Result<NativeRcsGroupVerification, MobileBindingsError> {
+    with_client(&client.client, |core| {
+        if observation_json.len() > RCS_NATIVE_JSON_CAP {
+            return Err(peppy_client_core::Error::InvalidRequest(
+                "observation too large",
+            ));
+        }
+        let observation = serde_json::from_str::<RcsMappingObservation>(&observation_json)
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid observation"))?;
+        core.verify_rcs_group_observation(&observation, now_ms)
+    })
+    .map(|outcome| match outcome {
+        peppy_client_core::GroupProofOutcome::Proven => NativeRcsGroupVerification::Proven,
+        peppy_client_core::GroupProofOutcome::MembersChanged => {
+            NativeRcsGroupVerification::MembersChanged
+        }
+        peppy_client_core::GroupProofOutcome::Refused => NativeRcsGroupVerification::Refused,
+    })
+}
+
+#[uniffi::export]
+/// Advances the link context from a group's route observation, as the 1:1 route step does. `false`
+/// means the context is not current; the group must not be proved or sent on that route.
+pub fn gateway_verify_rcs_group_route(
+    client: Arc<NativeClient>,
+    observation_json: String,
+    now_ms: i64,
+) -> Result<bool, MobileBindingsError> {
+    with_client(&client.client, |core| {
+        if observation_json.len() > RCS_NATIVE_JSON_CAP {
+            return Err(peppy_client_core::Error::InvalidRequest(
+                "observation too large",
+            ));
+        }
+        let observation = serde_json::from_str::<RcsMappingObservation>(&observation_json)
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid observation"))?;
+        core.verify_rcs_group_route(&observation, now_ms)
+    })
+}
+
+#[uniffi::export]
+/// The stored member digest of a Live group for the advisory Go prepare request; `None` otherwise.
+/// It carries no freshness and authorizes nothing by itself.
+pub fn gateway_proved_group_member_digest(
+    client: Arc<NativeClient>,
+    conversation_id: String,
+) -> Result<Option<String>, MobileBindingsError> {
+    with_client(&client.client, |core| {
+        let conversation_id = conversation_id
+            .parse()
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid conversation id"))?;
+        core.proved_group_member_digest(conversation_id)
+    })
+}
+
+/// Native permit state for a group refusal. Only `CreateNotRcs` leaves the message sent.
+pub(crate) fn group_refusal_state(reason: SendRefusalReason) -> NativePermitState {
+    match reason {
+        SendRefusalReason::MembersChanged => NativePermitState::GroupMembersChanged,
+        SendRefusalReason::UpdateRequired => NativePermitState::GroupUpdateRequired,
+        SendRefusalReason::Withdrawn => NativePermitState::GroupWithdrawn,
+        SendRefusalReason::CreateUnconfirmed => NativePermitState::GroupCreateUnconfirmed,
+        SendRefusalReason::CreateNotRcs => NativePermitState::GroupCreateNotRcs,
+    }
+}
+
+/// Outcome of asking for the one-use create permit of a group send that waits on its create.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeGroupCreateBegin {
+    /// Run exactly one create with these canonical other members and this name, then commit it.
+    Permit {
+        command_id: String,
+        numbers: Vec<String>,
+        name: Option<String>,
+    },
+    /// No create was issued. `state` is the send's definite refusal.
+    Refused { state: NativePermitState },
+}
+
+/// Google's create answer, recorded once per permit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeGroupCreateOutcome {
+    Pending,
+    NotRcs,
+    Unknown,
+}
+
+/// Create state of a conversation's group, for native status.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeGroupCreateState {
+    NotRequested,
+    Begun,
+    Pending,
+    Unknown,
+    NotRcs,
+    Refused { state: NativePermitState },
+    Linked,
+}
+
+/// Counts from one group candidate snapshot. Google identifiers never cross this boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct NativeGroupClassification {
+    pub linked: u64,
+    pub created: u64,
+    pub live: u64,
+    pub members_changed: u64,
+    pub paused: u64,
+    pub withdrawn: u64,
+    pub not_provable: u64,
+    pub dormant: u64,
+    pub conflicts: u64,
+}
+
+/// Applies one complete Google group candidate snapshot and reports counts only.
+#[uniffi::export]
+pub fn gateway_ingest_group_candidates(
+    client: Arc<NativeClient>,
+    snapshot_json: String,
+    now_ms: i64,
+) -> Result<NativeGroupClassification, MobileBindingsError> {
+    with_client(&client.client, |core| {
+        if snapshot_json.len() > RCS_NATIVE_SNAPSHOT_CAP {
+            return Err(peppy_client_core::Error::InvalidRequest(
+                "group snapshot too large",
+            ));
+        }
+        core.ingest_group_candidates(&snapshot_json, now_ms)
+    })
+    .map(|report| NativeGroupClassification {
+        linked: report.linked as u64,
+        created: report.created as u64,
+        live: report.live as u64,
+        members_changed: report.members_changed as u64,
+        paused: report.paused as u64,
+        withdrawn: report.withdrawn as u64,
+        not_provable: report.not_provable as u64,
+        dormant: report.dormant as u64,
+        conflicts: report.conflicts as u64,
+    })
+}
+
+/// Issues the one-use create permit for a group send that is waiting on a create.
+#[uniffi::export]
+pub fn gateway_begin_rcs_group_create(
+    client: Arc<NativeClient>,
+    conversation_id: String,
+    command_id: String,
+    now_ms: i64,
+) -> Result<NativeGroupCreateBegin, MobileBindingsError> {
+    with_client(&client.client, |core| {
+        let conversation_id = conversation_id
+            .parse()
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid conversation id"))?;
+        let command_id = command_id
+            .parse()
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid command id"))?;
+        core.begin_rcs_group_create(conversation_id, command_id, now_ms)
+    })
+    .map(|begin| match begin {
+        GroupCreateBegin::Permit(permit) => NativeGroupCreateBegin::Permit {
+            command_id: permit.command_id.to_string(),
+            numbers: permit.numbers,
+            name: permit.name,
+        },
+        GroupCreateBegin::Refused(reason) => NativeGroupCreateBegin::Refused {
+            state: group_refusal_state(reason),
+        },
+    })
+}
+
+/// Records Google's create answer for a begun permit. Anything unrecognised is `Unknown`.
+#[uniffi::export]
+pub fn gateway_commit_rcs_group_create(
+    client: Arc<NativeClient>,
+    command_id: String,
+    result_json: String,
+) -> Result<NativeGroupCreateOutcome, MobileBindingsError> {
+    with_client(&client.client, |core| {
+        if result_json.len() > RCS_NATIVE_JSON_CAP {
+            return Err(peppy_client_core::Error::InvalidRequest(
+                "create result too large",
+            ));
+        }
+        let command_id = command_id
+            .parse()
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid command id"))?;
+        core.commit_rcs_group_create(command_id, &result_json)
+    })
+    .map(|outcome| match outcome {
+        GroupCreateOutcome::Pending => NativeGroupCreateOutcome::Pending,
+        GroupCreateOutcome::NotRcs => NativeGroupCreateOutcome::NotRcs,
+        GroupCreateOutcome::Unknown => NativeGroupCreateOutcome::Unknown,
+    })
+}
+
+/// Settles a create whose Google answer could not be committed: persists unknown without calling
+/// Google. Only a command retained by this process is settled.
+#[uniffi::export]
+pub fn gateway_settle_rcs_group_create(
+    client: Arc<NativeClient>,
+    command_id: String,
+) -> Result<(), MobileBindingsError> {
+    with_client(&client.client, |core| {
+        let command_id = command_id
+            .parse()
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid command id"))?;
+        core.settle_rcs_group_create(command_id)
+    })
+}
+
+/// The create state of a conversation's group.
+#[uniffi::export]
+pub fn gateway_group_create_state(
+    client: Arc<NativeClient>,
+    conversation_id: String,
+) -> Result<NativeGroupCreateState, MobileBindingsError> {
+    with_client(&client.client, |core| {
+        let conversation_id = conversation_id
+            .parse()
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid conversation id"))?;
+        core.group_create_state(conversation_id)
+    })
+    .map(|state| match state {
+        GroupCreateState::None => NativeGroupCreateState::NotRequested,
+        GroupCreateState::Begun => NativeGroupCreateState::Begun,
+        GroupCreateState::Pending => NativeGroupCreateState::Pending,
+        GroupCreateState::Unknown => NativeGroupCreateState::Unknown,
+        GroupCreateState::NotRcs => NativeGroupCreateState::NotRcs,
+        GroupCreateState::Refused(reason) => NativeGroupCreateState::Refused {
+            state: group_refusal_state(reason),
+        },
+        GroupCreateState::Linked => NativeGroupCreateState::Linked,
+    })
+}
+
+/// The proved member revision while the group is Live; `None` otherwise. Decimal string, as all
+/// revisions cross the boundary.
+#[uniffi::export]
+pub fn gateway_proved_group_member_revision(
+    client: Arc<NativeClient>,
+    conversation_id: String,
+) -> Result<Option<String>, MobileBindingsError> {
+    with_client(&client.client, |core| {
+        let conversation_id = conversation_id
+            .parse()
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid conversation id"))?;
+        core.proved_group_member_revision(conversation_id)
+    })
+    .map(|revision| revision.map(|revision| revision.to_string()))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BootstrapCandidateJson {
@@ -474,12 +766,20 @@ pub fn gateway_record_rcs_pre_effect_refusal(
     command_id: String,
     tmp_id: String,
     google_conversation_id: String,
+    members_changed: bool,
+    now_ms: i64,
 ) -> Result<(), MobileBindingsError> {
     with_client(&client.client, |core| {
         let command_id = command_id
             .parse()
             .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid command id"))?;
-        core.record_native_rcs_pre_effect_refusal(command_id, &tmp_id, &google_conversation_id)
+        core.record_native_rcs_pre_effect_refusal(
+            command_id,
+            &tmp_id,
+            &google_conversation_id,
+            members_changed,
+            now_ms,
+        )
     })
     .map(|_| ())
 }
@@ -516,3 +816,32 @@ pub fn gateway_record_rcs_explicit_unlink_completed(
 #[cfg(test)]
 #[path = "rcs_native_tests.rs"]
 mod rcs_native_tests;
+
+#[cfg(test)]
+mod group_create_binding_tests {
+    use super::*;
+
+    #[test]
+    fn every_group_refusal_maps_to_its_own_native_state() {
+        assert_eq!(
+            group_refusal_state(SendRefusalReason::MembersChanged),
+            NativePermitState::GroupMembersChanged
+        );
+        assert_eq!(
+            group_refusal_state(SendRefusalReason::UpdateRequired),
+            NativePermitState::GroupUpdateRequired
+        );
+        assert_eq!(
+            group_refusal_state(SendRefusalReason::Withdrawn),
+            NativePermitState::GroupWithdrawn
+        );
+        assert_eq!(
+            group_refusal_state(SendRefusalReason::CreateUnconfirmed),
+            NativePermitState::GroupCreateUnconfirmed
+        );
+        assert_eq!(
+            group_refusal_state(SendRefusalReason::CreateNotRcs),
+            NativePermitState::GroupCreateNotRcs
+        );
+    }
+}

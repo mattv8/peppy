@@ -76,6 +76,7 @@ mod tests {
             seen: true,
             send_state,
             status_at_ms: Some(2),
+            send_refusal: None,
         }
     }
 

@@ -2529,6 +2529,9 @@ fn copy_draft_input(input: &DraftInput) -> DraftInput {
         gateway_id: input.gateway_id.clone(),
         sim_id: input.sim_id.clone(),
         expected_revision: input.expected_revision.clone(),
+        group_name: input.group_name.clone(),
+        expected_member_revision: input.expected_member_revision.clone(),
+        group_create_confirm_duplicate: input.group_create_confirm_duplicate,
     }
 }
 
@@ -2550,9 +2553,10 @@ fn gate_draft_send(session: &Session, input: &DraftInput) -> BridgeResult<DraftS
         known.then_some(gateways.as_slice()),
     )
     .map_err(session::compose_error)?;
+    let group = compose::prepared_draft_send_group(input).map_err(session::compose_error)?;
     Ok(session
         .client
-        .begin_draft_send(draft_id, expected_revision, parts)
+        .begin_draft_send_for_group(draft_id, expected_revision, parts, group)
         .map(|gate| gate.remote))
 }
 

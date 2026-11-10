@@ -552,6 +552,9 @@ pub struct NativeMessage {
     pub incoming: bool,
     pub seen: bool,
     pub send_state: Option<String>,
+    /// The gateway's recorded group refusal for this send (`members_changed`, `update_required`,
+    /// `withdrawn`, `create_unconfirmed`, or `create_not_rcs`), when there is one.
+    pub send_refusal: Option<String>,
     pub sent_at_ms: Option<i64>,
     pub rcs_status: Option<String>,
     pub rcs_reported: bool,
@@ -611,6 +614,13 @@ pub enum NativePermitState {
     UnknownRoute,
     MappingUnproven,
     CarrierOnlyProofUnavailable,
+    GroupMembersChanged,
+    GroupUpdateRequired,
+    GroupWithdrawn,
+    GroupCreateUnconfirmed,
+    GroupCreateNotRcs,
+    /// The group create is needed or in flight, or its proof is pending. Nothing was sent.
+    GroupCreatePending,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -856,6 +866,8 @@ pub enum MobileBindingsError {
     SmsCapacity,
     #[error("internal native state is unavailable")]
     LockPoisoned,
+    #[error("group members changed")]
+    GroupMembersChanged,
 }
 
 impl From<CoreError> for MobileBindingsError {
@@ -890,6 +902,7 @@ impl From<CoreError> for MobileBindingsError {
             CoreError::MmsAcquisitionLimit => Self::MmsAcquisitionLimit,
             CoreError::MmsMediaQuota => Self::MmsMediaQuota,
             CoreError::SmsCapacity => Self::SmsCapacity,
+            CoreError::GroupMembersChanged => Self::GroupMembersChanged,
         }
     }
 }
@@ -1135,6 +1148,7 @@ fn payload_view(payload: peppy_client_core::MessagePayload) -> NativeMessage {
         incoming: matches!(payload.direction, peppy_client_core::Direction::Incoming),
         seen: false,
         send_state: None,
+        send_refusal: None,
         sent_at_ms: payload.sent_at_ms.filter(|time| *time > 0),
         rcs_status: None,
         rcs_reported: false,
@@ -1278,6 +1292,8 @@ fn permit_view(decision: PermitDecision) -> NativePermit {
                 PermitBlock::CarrierOnlyProofUnavailable => {
                     NativePermitState::CarrierOnlyProofUnavailable
                 }
+                PermitBlock::GroupRefused(reason) => rcs_native::group_refusal_state(reason),
+                PermitBlock::GroupCreatePending => NativePermitState::GroupCreatePending,
             },
             command: None,
             existing_send_state: None,
@@ -1338,6 +1354,7 @@ fn draft_update(
     update: NativeComposeDraftUpdate,
 ) -> Result<ComposeDraftUpdate, MobileBindingsError> {
     Ok(ComposeDraftUpdate {
+        group_name: None,
         text: update.text,
         recipients: update.recipients,
         attachment_ids: update
@@ -1966,6 +1983,7 @@ impl NativeClient {
         conversation_id: String,
         gateway_device_id: String,
         origin: typing::NativeTypingOrigin,
+        participant: Option<String>,
         state: typing::NativeTypingState,
         clock: typing::NativeLiveClock,
     ) -> Result<Option<typing::NativeLiveOutbound>, typing::NativeLiveTypingError> {
@@ -1978,6 +1996,7 @@ impl NativeClient {
                     conversation_id,
                     gateway_device_id,
                     typing::origin(origin),
+                    participant,
                     typing::state(state),
                     clock,
                 )
@@ -3956,6 +3975,7 @@ impl NativePlaintextHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use peppy_client_core::SendRefusalReason;
 
     #[test]
     fn permit_view_keeps_new_blocks_non_authorising() {
@@ -3972,6 +3992,14 @@ mod tests {
             (
                 PermitBlock::CarrierOnlyProofUnavailable,
                 NativePermitState::CarrierOnlyProofUnavailable,
+            ),
+            (
+                PermitBlock::GroupRefused(SendRefusalReason::UpdateRequired),
+                NativePermitState::GroupUpdateRequired,
+            ),
+            (
+                PermitBlock::GroupRefused(SendRefusalReason::Withdrawn),
+                NativePermitState::GroupWithdrawn,
             ),
         ];
 

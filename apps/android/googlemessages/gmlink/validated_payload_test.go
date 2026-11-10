@@ -52,13 +52,13 @@ func TestValidatedPayload(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			conversation, settings := validConversation(), validSettings()
 			test.change(conversation, settings)
-			if payload, code := validatedPayload(conversation, settings, request); payload != nil || code != test.code {
+			if payload, code := validatedPayload(conversation, settings, request, false); payload != nil || code != test.code {
 				t.Fatalf("validatedPayload() = (%v, %q), want (nil, %q)", payload, code, test.code)
 			}
 		})
 	}
 
-	payload, code := validatedPayload(validConversation(), validSettings(), request)
+	payload, code := validatedPayload(validConversation(), validSettings(), request, false)
 	if code != "" || payload == nil || payload.GetConversationID() != request.GoogleConversationID || payload.GetTmpID() != request.TmpID {
 		t.Fatalf("validatedPayload() = (%v, %q)", payload, code)
 	}

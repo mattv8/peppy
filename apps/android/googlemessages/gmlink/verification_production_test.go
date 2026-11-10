@@ -25,8 +25,8 @@ func TestProductionMintGrantsReceiveIndexSendAndTyping(t *testing.T) {
 	if !link.hasReceiveVerificationLocked() || !link.hasIndexVerificationLocked() || !link.hasSendVerificationLocked() || !link.hasTypingOutboundVerificationLocked() {
 		t.Fatalf("unexpected capability set: %#v", link.ownerVerification)
 	}
-	if link.hasGroupsVerificationLocked() {
-		t.Fatal("production mint enabled groups, which are not built")
+	if !link.hasGroupsVerificationLocked() {
+		t.Fatal("production mint did not enable groups")
 	}
 }
 

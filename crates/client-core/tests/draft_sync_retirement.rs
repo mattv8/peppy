@@ -7,6 +7,7 @@ fn save_draft(client: &Client, text: &str, route: Option<GatewayRoute>) -> Compo
             draft.draft_id,
             draft.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: text.into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![],
@@ -81,6 +82,7 @@ fn retired_send_survives_discard_ack_late_head_and_terminal_without_a_push() {
             saved.draft_id,
             cleared.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "next".into(),
                 recipients: cleared.recipients,
                 attachment_ids: vec![],
@@ -108,6 +110,7 @@ fn route_only_save_keeps_retired_identity_until_an_authored_save_rotates_it() {
             cleared.draft_id,
             cleared.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: cleared.text.clone(),
                 recipients: cleared.recipients.clone(),
                 attachment_ids: cleared.attachment_ids.clone(),
@@ -126,6 +129,7 @@ fn route_only_save_keeps_retired_identity_until_an_authored_save_rotates_it() {
             route_only.draft_id,
             route_only.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "next".into(),
                 recipients: route_only.recipients,
                 attachment_ids: vec![],
@@ -148,6 +152,7 @@ fn save_new_keeps_a_retired_cleared_draft_until_an_authored_follow_up() {
     let client = unlocked(&config, &vault);
     let sent = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "sent".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![],
@@ -160,6 +165,7 @@ fn save_new_keeps_a_retired_cleared_draft_until_an_authored_follow_up() {
 
     let reopened = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: String::new(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![],
@@ -171,6 +177,7 @@ fn save_new_keeps_a_retired_cleared_draft_until_an_authored_follow_up() {
 
     let replacement = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "next".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![],
@@ -192,6 +199,7 @@ fn save_new_rotates_a_retired_cleared_draft_for_new_content() {
     let client = unlocked(&config, &vault);
     let sent = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "sent".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![],
@@ -204,6 +212,7 @@ fn save_new_rotates_a_retired_cleared_draft_for_new_content() {
 
     let replacement = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "next".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![],
@@ -226,6 +235,7 @@ fn moving_into_a_retired_draft_rotates_the_destination_and_updates_redirects() {
     let destination_address = "+15555550101";
     let destination = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "destination".into(),
             recipients: vec![destination_address.into()],
             attachment_ids: vec![],
@@ -243,6 +253,7 @@ fn moving_into_a_retired_draft_rotates_the_destination_and_updates_redirects() {
         .unwrap();
     let source = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "source".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![],
@@ -255,6 +266,7 @@ fn moving_into_a_retired_draft_rotates_the_destination_and_updates_redirects() {
             source.draft_id,
             source.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "incoming".into(),
                 recipients: vec![destination_address.into()],
                 attachment_ids: vec![attachment.attachment_id],
@@ -278,6 +290,7 @@ fn moving_into_a_retired_draft_rotates_the_destination_and_updates_redirects() {
             destination.draft_id,
             destination.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "stale".into(),
                 recipients: vec![destination_address.into()],
                 attachment_ids: vec![],
@@ -315,6 +328,7 @@ fn accepted_remote_send_retires_locally_without_queuing_a_remote_discard() {
             saved.draft_id,
             cleared.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "next".into(),
                 recipients: cleared.recipients,
                 attachment_ids: vec![],

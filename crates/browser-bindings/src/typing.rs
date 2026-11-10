@@ -74,6 +74,7 @@ impl BrowserCore {
                 conversation_id,
                 gateway_device_id,
                 input.origin,
+                input.participant,
                 input.state,
                 input.clock.into(),
             )
@@ -152,6 +153,7 @@ struct SealInput {
     conversation_id: String,
     gateway_device_id: String,
     origin: TypingOriginV2,
+    participant: Option<String>,
     state: TypingStateV2,
     clock: ClockInput,
 }
@@ -205,47 +207,60 @@ fn session_update_value(update: PeerSessionUpdate) -> Value {
 }
 
 fn action_value(action: LiveAction) -> Value {
-    let (kind, peer_device_id, session_token, sequence, conversation_id, state, deadline_mono) =
-        match action {
-            LiveAction::Display {
-                peer_device_id,
-                session_token,
-                sequence,
-                conversation_id,
-                state,
-                deadline_mono,
-            } => (
-                "display",
-                peer_device_id,
-                session_token,
-                sequence,
-                conversation_id,
-                state,
-                deadline_mono,
-            ),
-            LiveAction::GatewayTypingIntent {
-                peer_device_id,
-                session_token,
-                sequence,
-                conversation_id,
-                state,
-                deadline_mono,
-            } => (
-                "gateway_typing_intent",
-                peer_device_id,
-                session_token,
-                sequence,
-                conversation_id,
-                state,
-                deadline_mono,
-            ),
-        };
+    let (
+        kind,
+        peer_device_id,
+        session_token,
+        sequence,
+        conversation_id,
+        participant,
+        state,
+        deadline_mono,
+    ) = match action {
+        LiveAction::Display {
+            peer_device_id,
+            session_token,
+            sequence,
+            conversation_id,
+            participant,
+            state,
+            deadline_mono,
+        } => (
+            "display",
+            peer_device_id,
+            session_token,
+            sequence,
+            conversation_id,
+            participant,
+            state,
+            deadline_mono,
+        ),
+        LiveAction::GatewayTypingIntent {
+            peer_device_id,
+            session_token,
+            sequence,
+            conversation_id,
+            participant,
+            state,
+            deadline_mono,
+        } => (
+            "gateway_typing_intent",
+            peer_device_id,
+            session_token,
+            sequence,
+            conversation_id,
+            participant,
+            state,
+            deadline_mono,
+        ),
+    };
     json!({
         "kind": kind,
         "peerDeviceId": peer_device_id.to_string(),
         "sessionToken": session_token.to_string(),
         "sequence": sequence.to_string(),
         "conversationId": conversation_id.to_string(),
+        "participant": participant,
         "state": state,
         "deadlineMono": deadline_mono.to_string(),
     })
@@ -588,6 +603,7 @@ mod tests {
                 "sessionToken",
                 "sequence",
                 "conversationId",
+                "participant",
                 "state",
                 "deadlineMono",
             ],
@@ -606,6 +622,7 @@ mod tests {
             session_token: u64::MAX,
             sequence: (1_u64 << 53) + 1,
             conversation_id: ConversationId::new(),
+            participant: None,
             state: TypingStateV2::Started,
             deadline_mono: u64::MAX,
         });

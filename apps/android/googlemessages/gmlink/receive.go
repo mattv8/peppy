@@ -22,6 +22,9 @@ type rcsReceiveRecord struct {
 	TmpID                string `json:"tmp_id,omitempty"`
 	RcsReported          bool   `json:"rcs_reported"`
 	E2EEReported         *bool  `json:"e2ee_reported,omitempty"`
+	SenderAddress        string `json:"sender_address,omitempty"`
+	SenderUnknown        bool   `json:"sender_unknown,omitempty"`
+	SelfSent             bool   `json:"self_sent,omitempty"`
 }
 
 type rcsProjection struct {
@@ -86,7 +89,7 @@ func projectRcsMessage(wrapped *libgm.WrappedMessage, conversation *gmproto.Conv
 	if !ok {
 		return rcsProjection{Code: "unsupported_message"}
 	}
-	return rcsProjection{Code: "ok", Record: &rcsReceiveRecord{
+	record := &rcsReceiveRecord{
 		GoogleMessageID:      message.GetMessageID(),
 		GoogleConversationID: message.GetConversationID(),
 		Direction:            direction,
@@ -95,7 +98,33 @@ func projectRcsMessage(wrapped *libgm.WrappedMessage, conversation *gmproto.Conv
 		Status:               status,
 		TmpID:                message.GetTmpID(),
 		RcsReported:          true,
-	}}
+	}
+	if conversation.GetIsGroupChat() {
+		if direction == "outgoing" {
+			record.SelfSent = true
+		} else if sender, ok := groupMessageSender(message, conversation); ok {
+			record.SenderAddress = sender
+		} else {
+			record.SenderUnknown = true
+		}
+	}
+	return rcsProjection{Code: "ok", Record: record}
+}
+
+func groupMessageSender(message *gmproto.Message, conversation *gmproto.Conversation) (string, bool) {
+	if message.GetSenderParticipant() != nil {
+		participant := message.GetSenderParticipant()
+		if participant.GetIsVisible() && !participant.GetIsMe() {
+			return canonicalGoogleNumber(participant.GetID().GetNumber(), participant.GetFormattedNumber())
+		}
+	}
+	participantID := message.GetParticipantID()
+	for _, participant := range conversation.GetParticipants() {
+		if participant != nil && participant.GetIsVisible() && !participant.GetIsMe() && participant.GetID().GetParticipantID() == participantID {
+			return canonicalGoogleNumber(participant.GetID().GetNumber(), participant.GetFormattedNumber())
+		}
+	}
+	return "", false
 }
 
 func projectRcsPage(page *gmproto.ListMessagesResponse, conversation *gmproto.Conversation) rcsPageProjection {

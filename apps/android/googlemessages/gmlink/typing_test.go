@@ -37,6 +37,15 @@ func TestTypingProjectionMapsPinnedStatesForVisibleParticipant(t *testing.T) {
 	}
 }
 
+func TestTypingProjectionAttributesVisibleGroupMember(t *testing.T) {
+	conversation := typingGroup("synthetic-group")
+	conversation.Participants[1].ID.Number = "+15551230001"
+	result := projectTypingData(&gmproto.TypingData{ConversationID: "synthetic-group", User: &gmproto.User{Number: "+15551230001"}, Type: gmproto.TypingTypes_STARTED_TYPING}, false, []*gmproto.Conversation{conversation})
+	if result.Code != "ok" || result.Record == nil || result.Record.Participant != "+15551230001" {
+		t.Fatalf("projection = %+v", result)
+	}
+}
+
 func TestTypingProjectionRefusesOldUnknownAndInvisibleParticipants(t *testing.T) {
 	data := &gmproto.TypingData{ConversationID: "synthetic-conversation", User: &gmproto.User{Number: "synthetic-participant"}, Type: gmproto.TypingTypes_STARTED_TYPING}
 	for _, test := range []struct {
@@ -68,11 +77,11 @@ func TestTypingArgumentsRefuseInvalidUnknownAndGroup(t *testing.T) {
 	}{
 		{name: "zero validity", intent: gatewayTypingIntent{ConversationID: "synthetic-conversation", State: typingStateStarted}, conversations: []*gmproto.Conversation{typingConversation("synthetic-conversation", true)}, want: "typing_invalid"},
 		{name: "unknown", intent: intent, conversations: []*gmproto.Conversation{typingConversation("other-conversation", true)}, want: "typing_unknown_conversation"},
-		{name: "group", intent: intent, conversations: []*gmproto.Conversation{typingGroup("synthetic-conversation")}, want: "typing_not_one_to_one"},
+		{name: "group", intent: intent, conversations: []*gmproto.Conversation{typingGroup("synthetic-conversation")}, want: "ok"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			arguments, code := typingSetArguments(test.intent, test.conversations, &gmproto.SIMPayload{SIMNumber: 1})
-			if arguments != nil || code != test.want {
+			if (code == "ok") != (arguments != nil) || code != test.want {
 				t.Fatalf("arguments = %+v code = %q", arguments, code)
 			}
 		})
@@ -107,6 +116,7 @@ func typingConversation(id string, visible bool) *gmproto.Conversation {
 
 func typingGroup(id string) *gmproto.Conversation {
 	conversation := typingConversation(id, true)
+	conversation.IsGroupChat = true
 	conversation.Participants = append(conversation.Participants, &gmproto.Participant{IsVisible: true, ID: &gmproto.SmallInfo{Number: "synthetic-other"}})
 	return conversation
 }
@@ -161,7 +171,7 @@ func TestLinkProjectsIncomingTypingForCurrentOwner(t *testing.T) {
 	link.queueEventFor(7, typingData())
 	drainQueuedEvents(link)
 
-	if len(host.typingRecords) != 1 || host.typingRecords[0] != `{"google_conversation_id":"synthetic-conversation","state":"started"}` {
+	if len(host.typingRecords) != 1 || host.typingRecords[0] != `{"google_conversation_id":"synthetic-conversation","state":"started","participant":"synthetic-participant"}` {
 		t.Fatalf("records = %v", host.typingRecords)
 	}
 }
@@ -173,7 +183,6 @@ func TestLinkIgnoresInvisibleGroupAndOldGenerationTyping(t *testing.T) {
 		generation   uint64
 	}{
 		{name: "invisible", conversation: typingConversation("synthetic-conversation", false), generation: 7},
-		{name: "group", conversation: typingGroup("synthetic-conversation"), generation: 7},
 		{name: "old generation", conversation: typingConversation("synthetic-conversation", true), generation: 6},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -510,10 +519,10 @@ func TestProductionTypingRefusesUnsafeIntents(t *testing.T) {
 	}
 }
 
-func TestProductionTypingKeepsGroupsRefused(t *testing.T) {
+func TestProductionTypingMintsGroups(t *testing.T) {
 	link := productionTypingLink(typingGroup("synthetic-conversation"))
-	if link.hasGroupsVerificationLocked() {
-		t.Fatal("groups minted in production")
+	if !link.hasGroupsVerificationLocked() {
+		t.Fatal("groups were not minted in production")
 	}
 	calls := 0
 	link.setTyping = func(context.Context, string, *gmproto.SIMPayload) error { calls++; return nil }

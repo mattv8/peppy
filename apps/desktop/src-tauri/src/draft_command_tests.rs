@@ -662,6 +662,7 @@ async fn draft_event_targets_composer_after_move_and_not_unrelated_composer() {
         gateway_id: moved.gateway_id.clone(),
         sim_id: moved.sim_id.clone(),
         revision: moved.revision.clone(),
+        group_name: moved.group_name.clone(),
         sync: None,
     };
     assert_eq!(

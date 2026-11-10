@@ -44,6 +44,14 @@ mod ephemeral_v2_decode;
 mod ephemeral_v2_policy;
 mod ephemeral_v2_session;
 mod gateway_settings;
+mod group_metadata;
+pub use group_metadata::{GroupNotice, GroupNoticeKind};
+use rcs_group::GroupSendFields;
+pub use rcs_group::{GroupDraftSend, GroupIngestReport, GroupProofOutcome, GroupSendAuthority};
+pub use rcs_group_create::{
+    GroupCreateBegin, GroupCreateOutcome, GroupCreatePermit, GroupCreateState, GroupLinkState,
+    GroupView,
+};
 mod history_import;
 mod initial_replay;
 mod local_search;
@@ -55,6 +63,8 @@ mod message_history_requests;
 mod message_origin;
 mod notification_preferences;
 pub mod one_time_code;
+mod rcs_group;
+mod rcs_group_create;
 mod sender_blocklist;
 #[cfg(feature = "test-support")]
 mod test_support;
@@ -135,7 +145,7 @@ use peppy_crypto::{
 pub use peppy_crypto::{KeyProfile, VaultCheckHeader};
 pub use peppy_domain::{
     AttachmentId, AttachmentReference, CommandId, ConversationId, Cursor, DeviceId, DraftId,
-    EnvelopeId, MessageId, MessageRecord, SendState, SourceSequence, VaultId,
+    EnvelopeId, MessageId, MessageRecord, SendRefusalReason, SendState, SourceSequence, VaultId,
 };
 pub use peppy_protocol::{
     CompactionMetadata, CompactionReference, Envelope, EnvelopePurpose, EphemeralSignalV1,
@@ -159,19 +169,19 @@ pub use rcs_mapping::{
 pub use rcs_native::{
     LocalRcsTargetSnapshot, NativeCarrierRouteBinding, NativeOwnNumberSource,
     NativeRcsCommitProjection, NativeRcsEvidence, NativeRcsLifetime, NativeRcsOutgoing,
-    NativeRcsParticipant, NativeRcsPreparation, NativeRcsPrepareRequest, NativeRcsSimPayload,
-    NativeRcsTargetClass, NativeSettingsCurrentness, NativeSettingsProvenance,
-    PendingNativeRcsCommand, restricted_native_rcs_handoff_schema,
+    NativeRcsParticipant, NativeRcsPreparation, NativeRcsPreparationTarget,
+    NativeRcsPrepareRequest, NativeRcsSimPayload, NativeRcsTargetClass, NativeSettingsCurrentness,
+    NativeSettingsProvenance, PendingNativeRcsCommand, restricted_native_rcs_handoff_schema,
 };
 pub use rcs_receive::{
     RcsContextExpectation, RcsConversationMetadata, RcsConversationTransport, RcsCutover,
-    RcsCutoverAlerts, RcsIdentityOutcome, RcsLinkOwnershipClaim, RcsLinkOwnershipClaimOutcome,
-    RcsMessageStatusProjection, RcsObservationProvenance, RcsOwnerUnlinkCutoverCandidate,
-    RcsOwnership, RcsProjectedRecord, RcsProjectedStatus, RcsProviderDetector,
-    RcsProviderRouteReason, RcsProviderRow, RcsProviderRowRoute, RcsProviderRowRouteResult,
-    RcsReceiveAlert, RcsReceiveCode, RcsReceiveContext, RcsReceiveOutcome, RcsReceiveOwner,
-    RcsReceiveState, RcsRecoveryOutcome, RcsRecoveryState, RcsResumeHint, RcsStatusApplication,
-    RcsUnlinkCutoverGenerations,
+    RcsCutoverAlerts, RcsGroupSender, RcsIdentityOutcome, RcsLinkOwnershipClaim,
+    RcsLinkOwnershipClaimOutcome, RcsMessageStatusProjection, RcsObservationProvenance,
+    RcsOwnerUnlinkCutoverCandidate, RcsOwnership, RcsProjectedRecord, RcsProjectedStatus,
+    RcsProviderDetector, RcsProviderRouteReason, RcsProviderRow, RcsProviderRowRoute,
+    RcsProviderRowRouteResult, RcsReceiveAlert, RcsReceiveCode, RcsReceiveContext,
+    RcsReceiveOutcome, RcsReceiveOwner, RcsReceiveState, RcsRecoveryOutcome, RcsRecoveryState,
+    RcsResumeHint, RcsStatusApplication, RcsUnlinkCutoverGenerations,
 };
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
 pub use rcs_target::{RcsTargetClassification, RcsTargetDecision, ValidatedCarrierRouteContext};
@@ -192,7 +202,7 @@ pub use vault_identity::{
 };
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 52;
+const SCHEMA_VERSION: i64 = 53;
 const PENDING_COMMAND_ELIGIBILITY: &str =
     "a.command_id IS NULL AND l.historical=0 AND l.subscription_id<>'' AND l.key_epoch=?";
 #[cfg(test)]
@@ -315,6 +325,9 @@ pub enum Error {
     Crypto,
     #[error("invalid request: {0}")]
     InvalidRequest(&'static str),
+    /// A native group send was refused because its members changed. The group is paused.
+    #[error("group members changed")]
+    GroupMembersChanged,
     #[error("cursor must be between 1 and 2^63-1")]
     InvalidCursor,
     #[error("a different record is already journaled at this cursor")]
@@ -434,10 +447,21 @@ pub enum RcsMessageStatus {
     Delivered,
     Read,
 }
+/// Create-on-first-send request carried by a group send command. Absent name keeps the group
+/// unnamed on Google's side; `confirm_duplicate` is set only after an unknown create outcome.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GroupCreateRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm_duplicate: bool,
+}
+
 /// Canonical encrypted inner wire. Native code never parses this; it only moves envelopes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PrivatePayload {
+    ConversationGroupMetadata(group_metadata::ConversationGroupMetadata),
     RcsConversationMetadata(RcsConversationMetadata),
     RcsMessageReported {
         message_id: MessageId,
@@ -474,6 +498,12 @@ pub enum PrivatePayload {
     Message(MessagePayload),
     SendCommand {
         message: MessagePayload,
+        /// Group conversations: the member revision the composer showed. Absent for 1:1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_member_revision: Option<u64>,
+        /// First send in a Peppy-created group: create the RCS group before sending.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_create: Option<GroupCreateRequest>,
     },
     /// `media` matches `message.record.attachments` one-to-one, in order.
     MmsMessage {
@@ -492,6 +522,10 @@ pub enum PrivatePayload {
         state: SendState,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at_ms: Option<i64>,
+        /// The gateway's recorded group refusal or information for this command. Absent for
+        /// ordinary status events, so older payloads and events are unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<SendRefusalReason>,
     },
     ReadState {
         message_id: MessageId,
@@ -854,6 +888,8 @@ pub struct Message {
     pub send_state: Option<SendState>,
     /// Gateway-recorded time of the displayed status, when supplied by an updated gateway.
     pub status_at_ms: Option<i64>,
+    /// The gateway's recorded group refusal or information for this send, if any.
+    pub send_refusal: Option<SendRefusalReason>,
 }
 /// A chronological, bounded conversation-history window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1004,6 +1040,12 @@ pub enum PermitBlock {
     MappingUnproven,
     /// Linked gateways need a fresh local carrier-only result before carrier work.
     CarrierOnlyProofUnavailable,
+    /// The conversation is an RCS group whose state refuses this carrier send (update
+    /// required, or withdrawn). Nothing was sent.
+    GroupRefused(SendRefusalReason),
+    /// A group create is needed or in flight, or its proof is pending. The message waits: it is
+    /// neither sent over carrier nor refused.
+    GroupCreatePending,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendResult {
@@ -1199,6 +1241,8 @@ pub struct ComposeDraft {
     pub attachment_ids: Vec<AttachmentId>,
     pub route: Option<GatewayRoute>,
     pub revision: u64,
+    /// Group name for a draft to two or more members. Synced with the draft.
+    pub group_name: Option<String>,
 }
 
 /// The durable grouping for a split MMS draft send.
@@ -1213,6 +1257,8 @@ pub struct ComposeDraftUpdate {
     pub recipients: Vec<String>,
     pub attachment_ids: Vec<AttachmentId>,
     pub route: Option<GatewayRoute>,
+    /// Group name for a draft to two or more members; `None` keeps the group unnamed.
+    pub group_name: Option<String>,
 }
 
 struct LocalIdentitySealCapability {
@@ -1292,6 +1338,49 @@ pub enum ContactBookSelection {
 impl Client {
     pub fn device_id(&self) -> Result<DeviceId, Error> {
         Ok(self.lock()?.config.device_id)
+    }
+
+    /// Re-proves a live group against one fresh target observation, the group analogue of
+    /// `verify_rcs_mapping`. `Proven` stamps the proof time to the observation's time, so the
+    /// prepare that follows captures the time Go's route and target observations carry.
+    /// `MembersChanged` pauses the group. Nothing is stored for `Refused`.
+    pub fn verify_rcs_group_observation(
+        &self,
+        observation: &RcsMappingObservation,
+        now_ms: i64,
+    ) -> Result<GroupProofOutcome, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let outcome = rcs_group::prove_observation(&transaction, &ctx, observation, now_ms)?;
+        transaction.commit()?;
+        Ok(outcome)
+    }
+
+    /// The group route step: advances the link context from a route observation, as the 1:1 route
+    /// step does, including its prior-link and carrier-route records. It never creates a
+    /// conversation mapping. Returns `false` when the context is not current.
+    pub fn verify_rcs_group_route(
+        &self,
+        observation: &RcsMappingObservation,
+        now_ms: i64,
+    ) -> Result<bool, Error> {
+        let mut store = self.lock()?;
+        let transaction = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = rcs_mapping::advance_group_route_context(&transaction, observation, now_ms)?;
+        transaction.commit()?;
+        Ok(current)
+    }
+
+    /// The stored member digest of a Live group, for the advisory Go prepare request. `None` for
+    /// a conversation that is not a Live group. It is not a send authorization.
+    pub fn proved_group_member_digest(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<String>, Error> {
+        rcs_group::stored_member_digest(&self.lock()?.conn, conversation_id)
     }
 
     /// Verifies host facts and atomically stores a local-only exact mapping proof.
@@ -1407,6 +1496,146 @@ impl Client {
         rcs_mapping::get(&self.lock()?.conn, conversation_id)
     }
 
+    /// The member revision a group send must match, present only while the group is `Live`.
+    /// Paused, withdrawn, and unmapped conversations have no proved revision.
+    pub fn proved_group_member_revision(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<u64>, Error> {
+        rcs_group::proved_member_revision(&self.lock()?.conn, conversation_id)
+    }
+
+    /// The synced canonical roster (other members, own addresses excluded) for a group.
+    pub fn group_roster(&self, conversation_id: ConversationId) -> Result<BTreeSet<String>, Error> {
+        rcs_group::roster(&self.lock()?.conn, conversation_id)
+    }
+
+    /// Issues the one-use create permit for a group send that is waiting on a create. A refusal
+    /// is definite and is returned as data, so the caller can show it without a second query.
+    pub fn begin_rcs_group_create(
+        &self,
+        conversation_id: ConversationId,
+        command_id: CommandId,
+        now_ms: i64,
+    ) -> Result<GroupCreateBegin, Error> {
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        // Create pass boundary: a retained settlement left by a failed commit is retried here.
+        // Settlement only; Google is never called, and a truly active create is not touched.
+        rcs_group_create::settle_retained_best_effort(conn);
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let begin = rcs_group_create::begin(&tx, command_id, conversation_id, now_ms)?;
+        group_metadata::sync_all_link_states(&tx, &ctx, now_ms)?;
+        tx.commit()?;
+        Ok(begin)
+    }
+
+    /// Records Google's create answer for a begun permit. Anything unrecognised is `Unknown`.
+    pub fn commit_rcs_group_create(
+        &self,
+        command_id: CommandId,
+        result_json: &str,
+    ) -> Result<GroupCreateOutcome, Error> {
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        // Google has answered by now. Until this commit lands, a failure leaves the begun create
+        // awaiting settlement rather than an orphan.
+        if rcs_group_create::is_begun(conn, command_id)? {
+            rcs_group_create::retain_unsettled(command_id)?;
+        }
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let outcome = rcs_group_create::commit(&tx, command_id, result_json)?;
+        group_metadata::sync_all_link_states(&tx, &ctx, crate::notifications::now_ms())?;
+        tx.commit()?;
+        rcs_group_create::release_unsettled(&[command_id.to_string()])?;
+        Ok(outcome)
+    }
+
+    /// Settles a begun create whose Google answer could not be committed: persists unknown, and the
+    /// message command becomes terminal. Fenced to a command this process retained; Google is never
+    /// called, and an ordinary admission never reaches this path.
+    pub fn settle_rcs_group_create(&self, command_id: CommandId) -> Result<(), Error> {
+        let mut guard = self.lock()?;
+        let (conn, _) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let settled = rcs_group_create::settle_retained_command(&tx, command_id)?;
+        tx.commit()?;
+        rcs_group_create::release_unsettled(&settled)
+    }
+
+    /// The create state of a conversation's group, for native and desktop status.
+    pub fn group_create_state(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<GroupCreateState, Error> {
+        rcs_group_create::state(&self.lock()?.conn, conversation_id)
+    }
+
+    /// Desktop view of a group conversation; `None` when it is not a group.
+    pub fn group_view(&self, conversation_id: ConversationId) -> Result<Option<GroupView>, Error> {
+        let store = self.lock()?;
+        let view = rcs_group_create::group_view(&store.conn, conversation_id)?;
+        group_metadata::with_synced_authority(&store.conn, conversation_id, view)
+    }
+
+    /// The definite reason a group send was refused or informed (for example `create_not_rcs`
+    /// on the message that created a group which is not RCS). `None` when nothing was recorded.
+    pub fn group_send_reason(
+        &self,
+        command_id: CommandId,
+    ) -> Result<Option<SendRefusalReason>, Error> {
+        rcs_group::send_reason(&self.lock()?.conn, command_id)
+    }
+
+    /// Applies one complete Google group candidate snapshot to this gateway's group mappings.
+    /// The JSON is the sensitive local bridge from the Google facade; nothing here is persisted
+    /// except proof state, synced metadata events, and mappings keyed by Peppy conversation.
+    pub fn ingest_group_candidates(
+        &self,
+        snapshot_json: &str,
+        now_ms: i64,
+    ) -> Result<GroupIngestReport, Error> {
+        let snapshot: rcs_target::ConversationCandidateSnapshot =
+            serde_json::from_str(snapshot_json)
+                .map_err(|_| Error::InvalidRequest("group snapshot"))?;
+        let (report, live_changed) = {
+            let mut guard = self.lock()?;
+            let (conn, ctx) = guard.parts();
+            // Reconcile pass boundary: retry retained settlements, as the create pass does.
+            rcs_group_create::settle_retained_best_effort(conn);
+            if ctx
+                .active_epoch
+                .is_none_or(|epoch| !ctx.keys.contains_key(&epoch))
+            {
+                return Err(Error::KeysUnavailable);
+            }
+            let before = rcs_group::live_conversations(conn, ctx.device_id)?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let report = rcs_group::ingest_snapshot(&tx, &ctx, &snapshot, now_ms)?;
+            tx.commit()?;
+            let after = rcs_group::live_conversations(conn, ctx.device_id)?;
+            let changed = before
+                .symmetric_difference(&after)
+                .copied()
+                .collect::<Vec<_>>();
+            (report, changed)
+        };
+        // Eligibility follows Live only, so publish after the reconciliation has committed.
+        for batch in live_changed.chunks(RCS_CAPABILITY_PUBLISH_BATCH) {
+            self.publish_rcs_eligibility_from_lifecycle(batch, now_ms)?;
+        }
+        Ok(report)
+    }
+
+    /// Local, best-effort notices (renamed, added, removed) for a group, oldest first.
+    /// Notices are not synced; a device that skipped intermediate events will not see them.
+    pub fn group_notices(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Vec<GroupNotice>, Error> {
+        group_metadata::notices(&self.lock()?.conn, conversation_id)
+    }
+
     /// Publishes at most one gateway status and 100 content-free conversation projections.
     /// Google identifiers and mapping proof material are deliberately not accepted here.
     pub fn publish_rcs_capability(
@@ -1516,13 +1745,13 @@ impl Client {
             .map_or(0, |status| status.status.feature_bits);
         let mut published = 0;
         for conversation_id in conversation_ids {
-            let mapping = linked
-                .then(|| rcs_mapping::get(&tx, *conversation_id))
-                .transpose()?
-                .flatten();
+            // A 1:1 mapping, or a group mapping that is Live (only Live groups are eligible).
+            let mapped = linked
+                && (rcs_mapping::get(&tx, *conversation_id)?.is_some()
+                    || rcs_group::proved_member_revision(&tx, *conversation_id)?.is_some());
             let eligibility = if !linked {
                 RcsEligibility::Unknown
-            } else if mapping.is_some() {
+            } else if mapped {
                 RcsEligibility::Eligible
             } else {
                 RcsEligibility::NotEligible
@@ -1840,6 +2069,11 @@ impl Client {
             media_cache: media_cache::MediaCacheState::default(),
         };
         initialize(&mut store)?;
+        // Opening a store is the recovery boundary for group creates: only begun rows left by an
+        // earlier process are interrupted. This process's own in-flight create is never touched.
+        rcs_group_create::recover_interrupted(&mut store.conn, rcs_group_create::owner_token())?;
+        // Retained settlements from this process survive a reopen; a failure leaves them retained.
+        rcs_group_create::settle_retained_best_effort(&mut store.conn);
         attachment_retention::configure_protocol(&store.conn, false)?;
         attachment_retention::require_reconciliation(&store.conn)?;
         let store = Arc::new(Mutex::new(store));
@@ -2553,17 +2787,32 @@ impl Client {
         conversation_id: ConversationId,
         gateway_device_id: DeviceId,
         origin: peppy_protocol::TypingOriginV2,
+        participant: Option<String>,
         state: peppy_protocol::TypingStateV2,
         clock: LiveClock,
     ) -> Result<Option<LiveOutbound>, LiveError> {
         let mut store = self.lock().map_err(|_| LiveError::InvalidContext)?;
+        // I7: a participant is attributable only while it is a roster member of a Live group.
+        // Resolved before sealing because the seam cannot borrow the locked store.
+        let participant_confirmed = match participant.as_deref() {
+            Some(address) => rcs_group::live_roster_contains(&store.conn, conversation_id, address)
+                .map_err(|_| LiveError::InvalidContext)?,
+            None => false,
+        };
+        let roster = move |candidate: ConversationId, _: &str| {
+            candidate == conversation_id && participant_confirmed
+        };
         ephemeral_v2::seal(
             &mut store,
-            conversation_id,
-            gateway_device_id,
-            origin,
-            state,
+            ephemeral_v2::TypingSealRequest {
+                conversation_id,
+                gateway_device_id,
+                origin,
+                participant,
+                state,
+            },
             clock,
+            &roster,
         )
     }
 
@@ -3146,6 +3395,7 @@ impl Client {
             Transport::Mms,
             mms.subject,
             None,
+            None,
         )?;
         tx.commit()?;
         Ok(queued)
@@ -3185,6 +3435,7 @@ impl Client {
             attachment_ids: Vec::new(),
             route: None,
             revision: 0,
+            group_name: None,
         };
         s.conn.execute(
             "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,draft_only) VALUES(?,?,'','[]','[]',NULL,0,?)",
@@ -3217,6 +3468,7 @@ impl Client {
             attachment_ids: Vec::new(),
             route: None,
             revision: 0,
+            group_name: None,
         };
         tx.execute(
             "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,draft_only) VALUES(?,?,'','[]','[]',NULL,0,1)",
@@ -3410,13 +3662,14 @@ impl Client {
         }
         let next = current.revision.checked_add(1).ok_or(Error::Database)?;
         tx.execute(
-            "UPDATE compose_drafts SET text=?,recipients=?,attachment_ids=?,route=?,revision=? WHERE draft_id=?",
+            "UPDATE compose_drafts SET text=?,recipients=?,attachment_ids=?,route=?,revision=?,group_name=? WHERE draft_id=?",
             params![
                 update.text,
                 json(&update.recipients)?,
                 json(&update.attachment_ids)?,
                 update.route.as_ref().map(json).transpose()?,
                 to_i64(next)?,
+                update.group_name,
                 draft_id.to_string()
             ],
         )?;
@@ -3428,6 +3681,7 @@ impl Client {
             attachment_ids: update.attachment_ids,
             route: update.route,
             revision: next,
+            group_name: update.group_name,
         };
         if let Some((draft_epoch, draft_key)) = draft_key {
             next_draft = draft_sync::record_local_save(
@@ -3471,7 +3725,7 @@ impl Client {
         draft_id: DraftId,
         expected_revision: u64,
     ) -> Result<QueuedSend, Error> {
-        self.send_compose_draft_impl(draft_id, expected_revision, None, None, None, None)
+        self.send_compose_draft_impl(draft_id, expected_revision, None, None, None, None, None)
     }
 
     /// Sends only if transport classification still matches the caller's preflight decision.
@@ -3489,6 +3743,47 @@ impl Client {
             None,
             None,
             None,
+            None,
+        )
+    }
+
+    /// Sends a stored draft to two or more members with the desktop group fields. The first
+    /// send to a conversation with no roster writes the roster and its metadata event; the send
+    /// command commits in the same transaction.
+    pub fn send_compose_draft_for_group(
+        &self,
+        draft_id: DraftId,
+        expected_revision: u64,
+        group: GroupDraftSend,
+    ) -> Result<QueuedSend, Error> {
+        self.send_compose_draft_impl(
+            draft_id,
+            expected_revision,
+            None,
+            None,
+            None,
+            None,
+            Some(&group),
+        )
+    }
+
+    /// `send_compose_draft_for_group` with the same transport guard as
+    /// `send_compose_draft_checked_transport`: the draft must still route as `expected_transport`.
+    pub fn send_compose_draft_for_group_checked_transport(
+        &self,
+        draft_id: DraftId,
+        expected_revision: u64,
+        expected_transport: Transport,
+        group: GroupDraftSend,
+    ) -> Result<QueuedSend, Error> {
+        self.send_compose_draft_impl(
+            draft_id,
+            expected_revision,
+            Some(expected_transport),
+            None,
+            None,
+            None,
+            Some(&group),
         )
     }
 
@@ -3505,6 +3800,7 @@ impl Client {
             None,
             None,
             Some(&parts),
+            None,
         )
     }
 
@@ -3535,6 +3831,7 @@ impl Client {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn send_compose_draft_impl(
         &self,
         draft_id: DraftId,
@@ -3543,6 +3840,7 @@ impl Client {
         preset_command_id: Option<CommandId>,
         stored_snapshot: Option<ComposeDraft>,
         parts: Option<&DraftSendParts>,
+        group: Option<&GroupDraftSend>,
     ) -> Result<QueuedSend, Error> {
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
@@ -3606,6 +3904,17 @@ impl Client {
         if expected_transport.is_some_and(|expected| expected != transport) {
             return Err(Error::InvalidRequest("compose transport changed"));
         }
+        let group_fields = match (group, parts) {
+            (Some(group), None) => rcs_group::prepare_group_send(
+                &tx,
+                &ctx,
+                draft.conversation_id,
+                &draft.recipients,
+                group,
+                notifications::now_ms(),
+            )?,
+            _ => None,
+        };
         let remote_claim_accepted = preset_command_id.is_some();
         let queued = if let Some(parts) = parts {
             queue_split_draft_messages(&tx, &ctx, &draft, route, preset_command_id, parts)?
@@ -3623,6 +3932,7 @@ impl Client {
                 transport,
                 None,
                 preset_command_id,
+                group_fields,
             )?
         };
         let next = draft.revision.checked_add(1).ok_or(Error::Database)?;
@@ -3644,6 +3954,7 @@ impl Client {
         command_id: CommandId,
         snapshot: ComposeDraft,
         parts: Option<&DraftSendParts>,
+        group: Option<&GroupDraftSend>,
     ) -> Result<QueuedSend, Error> {
         self.send_compose_draft_impl(
             draft_id,
@@ -3652,6 +3963,7 @@ impl Client {
             Some(command_id),
             Some(snapshot),
             parts,
+            group,
         )
     }
 }
@@ -3693,6 +4005,7 @@ fn queue_split_draft_messages(
             Transport::Mms,
             None,
             command_id.take(),
+            None,
         )?;
         Ok::<_, Error>(queued)
     };
@@ -3804,8 +4117,37 @@ fn queue_sms(
         },
         None,
         None,
+        None,
     )
 }
+/// The durable command for a queued message. Group fields ride on the text-only `SendCommand`;
+/// a group send with media keeps the media command, which carries no group fields.
+fn command_payload(
+    message: MessagePayload,
+    transport: Transport,
+    group: Option<GroupSendFields>,
+) -> PrivatePayload {
+    match group {
+        Some(GroupSendFields {
+            expected_member_revision,
+            group_create,
+        }) if message.record.attachments.is_empty() => PrivatePayload::SendCommand {
+            message,
+            expected_member_revision,
+            group_create,
+        },
+        _ if transport == Transport::Sms => PrivatePayload::SendCommand {
+            message,
+            expected_member_revision: None,
+            group_create: None,
+        },
+        _ => PrivatePayload::SendMmsCommand {
+            message,
+            media: Vec::new(),
+        },
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn queue_message(
     tx: &Connection,
@@ -3816,6 +4158,7 @@ fn queue_message(
     transport: Transport,
     subject: Option<String>,
     preset_command_id: Option<CommandId>,
+    group: Option<GroupSendFields>,
 ) -> Result<QueuedSend, Error> {
     let payload = MessagePayload {
         record: MessageRecord {
@@ -3850,14 +4193,7 @@ fn queue_message(
     {
         return Err(Error::Database);
     }
-    let private = if transport == Transport::Sms {
-        PrivatePayload::SendCommand { message: payload }
-    } else {
-        PrivatePayload::SendMmsCommand {
-            message: payload,
-            media: Vec::new(),
-        }
-    };
+    let private = command_payload(payload, transport, group);
     let (envelope_id, _) = enqueue(
         tx,
         ctx,
@@ -4401,9 +4737,8 @@ impl Client {
     ) -> Result<PermitDecision, Error> {
         let mut guard = self.lock()?;
         let active = guard.active_epoch;
-        let tx = guard
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ledger: Option<(u32, String, String, bool)> = tx
             .query_row(
                 "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
@@ -4438,13 +4773,29 @@ impl Client {
         if !media_ready {
             return Ok(PermitDecision::Blocked(PermitBlock::MediaUnavailable));
         }
+        let admitted = rcs_group_create::admit(&tx, command_id, message.record.conversation_id)?;
+        group_metadata::sync_all_link_states(&tx, &ctx, crate::notifications::now_ms())?;
+        match admitted {
+            rcs_group_create::GroupCreateStart::NotHandled => {}
+            rcs_group_create::GroupCreateStart::Waiting => {
+                tx.commit()?;
+                return Ok(PermitDecision::Blocked(PermitBlock::GroupCreatePending));
+            }
+            rcs_group_create::GroupCreateStart::Refused(reason) => {
+                report_group_send_reason(&tx, &ctx, command_id, reason)?;
+                tx.commit()?;
+                return Ok(PermitDecision::Blocked(PermitBlock::GroupRefused(reason)));
+            }
+        }
         let carrier_admission = rcs_send::carrier_admission(
             &tx,
             message.record.conversation_id,
             &message.recipients,
             message.transport,
+            !message.record.attachments.is_empty(),
             &subscription_id,
             now_ms,
+            rcs_group::send_fields(&tx, command_id)?.expected_member_revision,
         )?;
         if matches!(
             carrier_admission,
@@ -4455,6 +4806,11 @@ impl Client {
             return Ok(PermitDecision::Blocked(
                 PermitBlock::CarrierOnlyProofUnavailable,
             ));
+        }
+        if let rcs_send::CarrierAdmission::GroupRefused(reason) = carrier_admission {
+            report_group_send_reason(&tx, &ctx, command_id, reason)?;
+            tx.commit()?;
+            return Ok(PermitDecision::Blocked(PermitBlock::GroupRefused(reason)));
         }
         if !matches!(
             carrier_admission,
@@ -4492,6 +4848,17 @@ impl Client {
         let tx = guard.conn.transaction()?;
         let message = unattempted_rcs_message(&tx, active, command_id)?;
         require_native_rcs_body(&message.body)?;
+        if rcs_group::group_mapping(&tx, message.record.conversation_id)?.is_some() {
+            let authority = rcs_group::native_send_authority(
+                &tx,
+                message.record.conversation_id,
+                command_id,
+                &message.recipients,
+                now_ms,
+            )?;
+            tx.commit()?;
+            return Ok(NativeRcsPreparation::new_group(command_id, authority));
+        }
         let mapping = rcs_mapping::get(&tx, message.record.conversation_id)?
             .ok_or(Error::InvalidRequest("mapping unproven"))?;
         if mapping.proof_version != RCS_MAPPING_PROOF_VERSION
@@ -4515,21 +4882,33 @@ impl Client {
         observation: &RcsMappingObservation,
         now_ms: i64,
     ) -> Result<NativeRcsCommitProjection, Error> {
-        let (command_id, prepared_mapping) = preparation.into_parts();
+        let (command_id, target) = preparation.into_parts();
         let mut guard = self.lock()?;
         let active = guard.active_epoch;
-        let tx = guard
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let permit = admit_rcs_send(
-            tx,
-            active,
-            command_id,
-            Some(&prepared_mapping),
-            observation,
-            now_ms,
-        )?;
-        Ok(permit.native_commit_projection())
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        match target {
+            NativeRcsPreparationTarget::OneToOne(prepared_mapping) => {
+                let permit = admit_rcs_send(
+                    tx,
+                    active,
+                    command_id,
+                    Some(&prepared_mapping),
+                    observation,
+                    now_ms,
+                )?;
+                Ok(permit.native_commit_projection())
+            }
+            NativeRcsPreparationTarget::Group(authority) => admit_group_rcs_send(
+                tx,
+                &ctx,
+                active,
+                command_id,
+                &authority,
+                observation,
+                now_ms,
+            ),
+        }
     }
 
     /// Durably records a linked-transport attempt and returns its local-only permit.
@@ -4633,9 +5012,8 @@ impl Client {
     ) -> Result<AutomaticPermitDecision, Error> {
         let mut guard = self.lock()?;
         let active = guard.active_epoch;
-        let tx = guard
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ledger: Option<(u32, String, String, bool)> = tx
             .query_row(
                 "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
@@ -4738,13 +5116,33 @@ impl Client {
                 PermitBlock::MappingUnproven,
             ));
         }
+        let admitted = rcs_group_create::admit(&tx, command_id, message.record.conversation_id)?;
+        group_metadata::sync_all_link_states(&tx, &ctx, crate::notifications::now_ms())?;
+        match admitted {
+            rcs_group_create::GroupCreateStart::NotHandled => {}
+            rcs_group_create::GroupCreateStart::Waiting => {
+                tx.commit()?;
+                return Ok(AutomaticPermitDecision::Blocked(
+                    PermitBlock::GroupCreatePending,
+                ));
+            }
+            rcs_group_create::GroupCreateStart::Refused(reason) => {
+                report_group_send_reason(&tx, &ctx, command_id, reason)?;
+                tx.commit()?;
+                return Ok(AutomaticPermitDecision::Blocked(PermitBlock::GroupRefused(
+                    reason,
+                )));
+            }
+        }
         let admission = rcs_send::carrier_admission(
             &tx,
             message.record.conversation_id,
             &message.recipients,
             message.transport,
+            !message.record.attachments.is_empty(),
             &subscription_id,
             now_ms,
+            rcs_group::send_fields(&tx, command_id)?.expected_member_revision,
         )?;
         if matches!(admission, rcs_send::CarrierAdmission::InvalidateProof) {
             rcs_send::invalidate_carrier_only_proof(&tx, message.record.conversation_id)?;
@@ -4752,6 +5150,13 @@ impl Client {
             return Ok(AutomaticPermitDecision::Blocked(
                 PermitBlock::CarrierOnlyProofUnavailable,
             ));
+        }
+        if let rcs_send::CarrierAdmission::GroupRefused(reason) = admission {
+            report_group_send_reason(&tx, &ctx, command_id, reason)?;
+            tx.commit()?;
+            return Ok(AutomaticPermitDecision::Blocked(PermitBlock::GroupRefused(
+                reason,
+            )));
         }
         if !matches!(
             admission,
@@ -4803,11 +5208,15 @@ impl Client {
     }
 
     /// Records trusted native proof that the exact RCS attempt had no transport effect.
+    /// `members_changed` is Go's pre-effect refusal for a group whose member digest changed; the
+    /// group is paused for re-proof, and the attempt is a definite non-send.
     pub fn record_native_rcs_pre_effect_refusal(
         &self,
         command_id: CommandId,
         tmp_id: &str,
         google_conversation_id: &str,
+        members_changed: bool,
+        now_ms: i64,
     ) -> Result<SendState, Error> {
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
@@ -4822,6 +5231,14 @@ impl Client {
         if matched.is_none() {
             return Err(Error::NoAttempt);
         }
+        let paused_group = if members_changed {
+            Some(
+                rcs_group::group_conversation_for_google(&tx, google_conversation_id)?
+                    .ok_or(Error::InvalidRequest("not a group attempt"))?,
+            )
+        } else {
+            None
+        };
         let acknowledged: Option<i64> = tx.query_row(
             "SELECT transport_ack_at_ms FROM rcs_send_ledger WHERE command_id=?",
             [command_id.to_string()],
@@ -4847,6 +5264,10 @@ impl Client {
                 command_id.to_string()
             ],
         )?;
+        if let Some(conversation_id) = paused_group {
+            rcs_group::pause_group(&tx, &ctx, conversation_id, now_ms)?;
+            rcs_group::record_send_reason(&tx, command_id, SendRefusalReason::MembersChanged)?;
+        }
         emit_status(&tx, &ctx, command_id, SendState::FailedBeforeSubmission)?;
         tx.commit()?;
         Ok(SendState::FailedBeforeSubmission)
@@ -6776,7 +7197,7 @@ fn waiting_for_keys(
 macro_rules! message_select {
     ($suffix:literal) => {
         concat!(
-            "SELECT m.payload, m.seen, selected_status.state, selected_status.status_at_ms, ",
+            "SELECT m.payload, m.seen, selected_status.state, selected_status.status_at_ms, selected_status.refusal_reason, ",
             "(SELECT o.state FROM commands c JOIN outbox o ON o.command_id=c.command_id WHERE c.message_id=m.id), ",
             "EXISTS(SELECT 1 FROM commands c WHERE c.message_id=m.id) ",
             "FROM messages m LEFT JOIN send_status selected_status ON selected_status.rowid=(SELECT st.rowid FROM commands c JOIN send_status st ON st.command_id=c.command_id AND st.producer_device_id=c.gateway_device_id WHERE c.message_id=m.id ORDER BY c.rowid LIMIT 1) ",
@@ -6805,6 +7226,7 @@ type StoredMessage = (
     Option<String>,
     Option<i64>,
     Option<String>,
+    Option<String>,
     bool,
 );
 
@@ -6816,11 +7238,12 @@ fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
         row.get(3)?,
         row.get(4)?,
         row.get(5)?,
+        row.get(6)?,
     ))
 }
 
 fn message_from_row(conn: &Connection, row: StoredMessage) -> Result<Message, Error> {
-    let (payload, seen, status, status_at_ms, outbox, is_command) = row;
+    let (payload, seen, status, status_at_ms, refusal, outbox, is_command) = row;
     let send_state = if !is_command {
         None
     } else if let Some(status) = status {
@@ -6836,6 +7259,19 @@ fn message_from_row(conn: &Connection, row: StoredMessage) -> Result<Message, Er
         seen,
         send_state,
         status_at_ms,
+        send_refusal: refusal.as_deref().map(refusal_from_code).transpose()?,
+    })
+}
+
+/// Decodes a stored refusal code (`SendRefusalReason::code`).
+fn refusal_from_code(code: &str) -> Result<SendRefusalReason, Error> {
+    Ok(match code {
+        "members_changed" => SendRefusalReason::MembersChanged,
+        "update_required" => SendRefusalReason::UpdateRequired,
+        "withdrawn" => SendRefusalReason::Withdrawn,
+        "create_unconfirmed" => SendRefusalReason::CreateUnconfirmed,
+        "create_not_rcs" => SendRefusalReason::CreateNotRcs,
+        _ => return Err(Error::Database),
     })
 }
 
@@ -7768,6 +8204,81 @@ CREATE TABLE IF NOT EXISTS rcs_conversation_metadata(
   source_sequence INTEGER NOT NULL
 );
 ";
+/// Group-era columns on tables that predate schema 53, as `(table, column definition)`. Applied
+/// idempotently by `apply_group_columns_migration`, so a copy that already has them is left as it is.
+const GROUP_COLUMNS_53: [(&str, &str); 6] = [
+    ("send_status", "refusal_reason TEXT"),
+    ("compose_drafts", "group_name TEXT"),
+    ("conversation_group_meta", "link_logical_revision INTEGER"),
+    ("conversation_group_meta", "link_writer_device_id TEXT"),
+    ("conversation_group_meta", "link_state TEXT"),
+    ("conversation_group_meta", "link_create_state TEXT"),
+];
+const RCS_GROUP_MIGRATION_53: &str = "
+CREATE TABLE IF NOT EXISTS conversation_group_meta(
+  conversation_id TEXT PRIMARY KEY NOT NULL,
+  name TEXT NULL,
+  name_logical_revision INTEGER NOT NULL,
+  name_writer_device_id TEXT NOT NULL,
+  members_logical_revision INTEGER NOT NULL,
+  members_writer_device_id TEXT NOT NULL,
+  member_revision INTEGER NOT NULL,
+  observed_at_ms INTEGER NOT NULL,
+  source TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS conversation_group_members(
+  conversation_id TEXT NOT NULL,
+  canonical_address TEXT NOT NULL,
+  PRIMARY KEY(conversation_id, canonical_address)
+);
+CREATE INDEX IF NOT EXISTS conversation_group_members_address ON conversation_group_members(canonical_address);
+CREATE TABLE IF NOT EXISTS rcs_group_mapping(
+  conversation_id TEXT PRIMARY KEY NOT NULL,
+  google_conversation_id TEXT UNIQUE NOT NULL,
+  gateway_device_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  proved_member_revision INTEGER NOT NULL,
+  member_set_digest TEXT NOT NULL,
+  proof_observed_at_ms INTEGER NOT NULL,
+  snapshot_token TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS rcs_group_mapping_google ON rcs_group_mapping(google_conversation_id);
+CREATE TABLE IF NOT EXISTS rcs_group_participants(
+  google_conversation_id TEXT NOT NULL,
+  google_participant_id TEXT NOT NULL,
+  canonical_address TEXT NOT NULL,
+  PRIMARY KEY(google_conversation_id, google_participant_id)
+);
+CREATE INDEX IF NOT EXISTS rcs_group_participants_address ON rcs_group_participants(google_conversation_id, canonical_address);
+CREATE TABLE IF NOT EXISTS rcs_group_create_ledger(
+  conversation_id TEXT PRIMARY KEY NOT NULL,
+  command_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  attempted_at_ms INTEGER NOT NULL,
+  reconciled_at_ms INTEGER NULL,
+  outcome_code TEXT NULL,
+  google_conversation_id TEXT NULL,
+  owner_token TEXT NULL
+);
+CREATE TABLE IF NOT EXISTS rcs_group_create_permits(
+  command_id TEXT PRIMARY KEY NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rcs_group_create_terminal(
+  command_id TEXT PRIMARY KEY NOT NULL,
+  reason TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS conversation_group_notices(
+  id INTEGER PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('renamed','added','removed')),
+  name TEXT NULL,
+  member TEXT NULL,
+  at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS conversation_group_notices_conversation ON conversation_group_notices(conversation_id,id);
+";
 fn apply_rcs_union_migrations(conn: &Connection) -> Result<(), Error> {
     conn.execute_batch(RCS_MIGRATION_46)?;
     add_column_if_missing(
@@ -7809,6 +8320,14 @@ pub(crate) fn add_column_if_missing(
         .ok_or(Error::Database)?;
     if !column_exists(conn, table, column)? {
         conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {definition}"))?;
+    }
+    Ok(())
+}
+
+/// Adds each schema-53 column that is not yet present.
+fn apply_group_columns_migration(conn: &Connection) -> Result<(), Error> {
+    for (table, definition) in GROUP_COLUMNS_53 {
+        add_column_if_missing(conn, table, definition)?;
     }
     Ok(())
 }
@@ -7965,6 +8484,8 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             apply_draft_push_migration(&tx, false)?;
             tx.execute_batch(MCP_CLEANUP_MIGRATION)?;
             apply_rcs_union_migrations(&tx)?;
+            tx.execute_batch(RCS_GROUP_MIGRATION_53)?;
+            apply_group_columns_migration(&tx)?;
             tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
@@ -7974,7 +8495,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=51)) => {
+        Some(version @ (4..=52)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -8104,6 +8625,10 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             apply_draft_push_migration(&tx, !had_push_attempts)?;
             tx.execute_batch(MCP_CLEANUP_MIGRATION)?;
             apply_rcs_union_migrations(&tx)?;
+            if version <= 52 {
+                tx.execute_batch(RCS_GROUP_MIGRATION_53)?;
+                apply_group_columns_migration(&tx)?;
+            }
             tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
@@ -8833,7 +9358,8 @@ fn open_payload(ctx: &Ctx, envelope: &Envelope) -> Result<Opened, QuarantineReas
 fn is_known_private_payload_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "rcs_conversation_metadata"
+        "conversation_group_metadata"
+            | "rcs_conversation_metadata"
             | "rcs_message_reported"
             | "rcs_message_status"
             | "rcs_link_status"
@@ -8915,12 +9441,23 @@ fn apply_record(
             media,
             media_meta,
         } => (PrivatePayload::Message(message), media, media_meta),
-        PrivatePayload::SendMmsCommand { message, media } => {
-            (PrivatePayload::SendCommand { message }, media, Vec::new())
-        }
+        PrivatePayload::SendMmsCommand { message, media } => (
+            PrivatePayload::SendCommand {
+                message,
+                expected_member_revision: None,
+                group_create: None,
+            },
+            media,
+            Vec::new(),
+        ),
         other => (other, Vec::new(), Vec::new()),
     };
     match (envelope.purpose, payload) {
+        (EnvelopePurpose::Event, PrivatePayload::ConversationGroupMetadata(metadata)) => {
+            if !group_metadata::apply(conn, &metadata, producer, envelope.producer_sequence.0)? {
+                return Ok(Some(Q::InvalidPayload));
+            }
+        }
         (
             EnvelopePurpose::Event,
             PrivatePayload::RcsMessageReported {
@@ -9075,7 +9612,14 @@ fn apply_record(
                 queue_message_banner(conn, &message)?;
             }
         }
-        (EnvelopePurpose::Command, PrivatePayload::SendCommand { message }) => {
+        (
+            EnvelopePurpose::Command,
+            PrivatePayload::SendCommand {
+                message,
+                expected_member_revision,
+                group_create,
+            },
+        ) => {
             let (Some(command_id), Some(route)) = (envelope.command_id, envelope.route.as_ref())
             else {
                 return Ok(Some(Q::MalformedEnvelope));
@@ -9139,6 +9683,14 @@ fn apply_record(
                     "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload,retired,historical) VALUES(?,?,?,?,?,?) ON CONFLICT(command_id) DO NOTHING",
                     params![command_id.to_string(), envelope.key_epoch, subscription_id, encoded, retired, historical],
                 )?;
+                rcs_group::record_send_fields(
+                    conn,
+                    command_id,
+                    &GroupSendFields {
+                        expected_member_revision,
+                        group_create,
+                    },
+                )?;
                 if !historical && !retired {
                     for attachment_id in attachment_ids {
                         if new_attachment_ids.contains(&attachment_id) {
@@ -9174,6 +9726,7 @@ fn apply_record(
                 command_id,
                 state,
                 at_ms,
+                reason,
             },
         ) => {
             if !gateway_reportable(state) {
@@ -9186,6 +9739,7 @@ fn apply_record(
                 envelope.producer_sequence.0,
                 state,
                 valid_status_timestamp(at_ms),
+                reason,
             )?;
         }
         (EnvelopePurpose::Event, PrivatePayload::ReadState { message_id }) => {
@@ -9715,10 +10269,13 @@ fn upsert_status(
     producer_sequence: u64,
     state: SendState,
     status_at_ms: Option<i64>,
+    reason: Option<SendRefusalReason>,
 ) -> Result<(), Error> {
+    // A later status without a reason keeps the recorded one (for example `create_not_rcs`
+    // stays on the carrier outcome that follows it).
     conn.execute(
-        "INSERT INTO send_status(command_id,producer_device_id,producer_sequence,state,status_at_ms) VALUES(?,?,?,?,?)
-         ON CONFLICT(command_id,producer_device_id) DO UPDATE SET producer_sequence=excluded.producer_sequence, state=excluded.state, status_at_ms=excluded.status_at_ms
+        "INSERT INTO send_status(command_id,producer_device_id,producer_sequence,state,status_at_ms,refusal_reason) VALUES(?,?,?,?,?,?)
+         ON CONFLICT(command_id,producer_device_id) DO UPDATE SET producer_sequence=excluded.producer_sequence, state=excluded.state, status_at_ms=excluded.status_at_ms, refusal_reason=COALESCE(excluded.refusal_reason,send_status.refusal_reason)
          WHERE excluded.producer_sequence > send_status.producer_sequence",
         params![
             command_id.to_string(),
@@ -9726,8 +10283,28 @@ fn upsert_status(
             to_i64(producer_sequence)?,
             state_code(state),
             status_at_ms,
+            reason.map(|reason| reason.code()),
         ],
     )?;
+    Ok(())
+}
+
+/// Records a group send's refusal or information on this command and reports it to every device.
+/// A refusal that keeps the message from the carrier also fails the send before submission.
+fn report_group_send_reason(
+    conn: &Connection,
+    ctx: &Ctx,
+    command_id: CommandId,
+    reason: SendRefusalReason,
+) -> Result<(), Error> {
+    // A host that asks again for the same refused command reports nothing new.
+    if rcs_group::send_reason(conn, command_id)? == Some(reason) {
+        return Ok(());
+    }
+    rcs_group::record_send_reason(conn, command_id, reason)?;
+    if reason.message_not_sent() {
+        emit_status(conn, ctx, command_id, SendState::FailedBeforeSubmission)?;
+    }
     Ok(())
 }
 
@@ -9738,6 +10315,7 @@ fn emit_status(
     state: SendState,
 ) -> Result<(), Error> {
     let status_at_ms = valid_status_timestamp(Some(notifications::now_ms()));
+    let reason = rcs_group::send_reason(conn, command_id)?;
     let (_, sequence) = enqueue(
         conn,
         ctx,
@@ -9748,6 +10326,7 @@ fn emit_status(
             command_id,
             state,
             at_ms: status_at_ms,
+            reason,
         },
     )?;
     upsert_status(
@@ -9757,6 +10336,7 @@ fn emit_status(
         sequence,
         state,
         status_at_ms,
+        reason,
     )
 }
 
@@ -10621,6 +11201,11 @@ fn compaction_group(
             vec![metadata.conversation_id.to_string().into_bytes()],
             false,
         ),
+        PrivatePayload::ConversationGroupMetadata(metadata) => (
+            b"conversation-group-metadata",
+            vec![metadata.conversation_id.to_string().into_bytes()],
+            false,
+        ),
         PrivatePayload::RcsLinkStatus(status) => (
             b"rcs-link-status",
             vec![status.status.gateway_device_id.to_string().into_bytes()],
@@ -10764,6 +11349,10 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
         }
         PrivatePayload::RcsConversationMetadata(metadata) => Some(format!(
             "rcs-conversation-metadata:{}",
+            metadata.conversation_id
+        )),
+        PrivatePayload::ConversationGroupMetadata(metadata) => Some(format!(
+            "conversation_group_metadata:{}",
             metadata.conversation_id
         )),
         PrivatePayload::RcsLinkStatus(status) => Some(format!(
@@ -11200,15 +11789,25 @@ fn unattempted_rcs_message(
     let Some((epoch, subscription_id, payload, historical)) = ledger else {
         return Err(Error::NotFound);
     };
-    if !subscription_id.is_empty() {
+    let (message, media_ready) = localize(conn, decode(payload.as_bytes())?)?;
+    // D5: the gateway routes a group text whatever route the draft carried, so only 1:1 commands
+    // need the RCS route. A group text is `Mms` transport; only attachments make it media.
+    let group = rcs_group::is_group_conversation(conn, message.record.conversation_id)?;
+    if !subscription_id.is_empty() && !group {
         return Err(Error::InvalidRequest("RCS route required"));
     }
     if let Some(state) = attempt_state(conn, command_id)? {
         return Err(Error::AlreadyAttempted(state));
     }
+    // A message whose group create went unknown or was refused is terminal, whatever the group
+    // later links to. A new command, not this one, is the only way to send that text again.
+    if rcs_group_create::terminal_refusal(conn, command_id)?.is_some() {
+        return Err(Error::InvalidRequest("group create terminal"));
+    }
     require_received_command_eligible(conn, active_epoch, epoch, historical)?;
-    let (message, media_ready) = localize(conn, decode(payload.as_bytes())?)?;
-    if !media_ready || message.transport != Transport::Sms || !message.record.attachments.is_empty()
+    if !media_ready
+        || (message.transport != Transport::Sms && !group)
+        || !message.record.attachments.is_empty()
     {
         return Err(Error::InvalidRequest("RCS text required"));
     }
@@ -11244,6 +11843,56 @@ fn admit_rcs_send(
     let permit = rcs_permit(command_id, message, tmp_id, &mapping, observation)?;
     tx.commit()?;
     Ok(permit)
+}
+
+/// Admits one native group RCS send against the authority captured at prepare. The group checks
+/// replace the 1:1 participant proof. A roster or digest mismatch pauses the group, then refuses.
+fn admit_group_rcs_send(
+    tx: rusqlite::Transaction<'_>,
+    ctx: &Ctx<'_>,
+    active_epoch: Option<u32>,
+    command_id: CommandId,
+    prepared: &GroupSendAuthority,
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+) -> Result<rcs_native::NativeRcsCommitProjection, Error> {
+    let message = unattempted_rcs_message(&tx, active_epoch, command_id)?;
+    require_native_rcs_body(&message.body)?;
+    let current = rcs_group::native_send_authority(
+        &tx,
+        prepared.conversation_id,
+        command_id,
+        &message.recipients,
+        now_ms,
+    )?;
+    if current != *prepared {
+        return Err(Error::InvalidRequest("mapping changed"));
+    }
+    match rcs_group::check_observation(&tx, &current, observation, now_ms)? {
+        rcs_group::GroupObservationCheck::Exact => {}
+        rcs_group::GroupObservationCheck::MembersChanged => {
+            rcs_group::pause_group(&tx, ctx, current.conversation_id, now_ms)?;
+            tx.commit()?;
+            return Err(Error::GroupMembersChanged);
+        }
+        rcs_group::GroupObservationCheck::Unproven => {
+            commit_mapping_refusal(tx)?;
+            return Err(Error::InvalidRequest("mapping unproven"));
+        }
+    }
+    rcs_send::record_group_target_identity(&tx, command_id, &current, observation)?;
+    let tmp_id = record_rcs_ledger_admission(
+        &tx,
+        command_id,
+        current.mapping_revision,
+        &current.proof_digest,
+        &current.google_conversation_id,
+        now_ms,
+    )?;
+    let projection =
+        rcs_send::group_commit_projection(command_id, tmp_id, &current, observation, message.body)?;
+    tx.commit()?;
+    Ok(projection)
 }
 
 fn require_native_rcs_body(body: &str) -> Result<(), Error> {
@@ -11401,6 +12050,27 @@ fn finalize_rcs_admission(
     observation: &RcsMappingObservation,
     now_ms: i64,
 ) -> Result<String, Error> {
+    rcs_send::record_rcs_target_identity(tx, command_id, mapping, observation)?;
+    record_rcs_ledger_admission(
+        tx,
+        command_id,
+        mapping.mapping_revision,
+        &mapping.proof.digest,
+        &mapping.google_conversation_id,
+        now_ms,
+    )
+}
+
+/// Records the single RCS attempt and its ledger row. A command keeps the tmp id of its first
+/// admission, so a re-admitted command reuses the id Google may already have seen.
+fn record_rcs_ledger_admission(
+    tx: &Connection,
+    command_id: CommandId,
+    mapping_revision: u64,
+    proof_digest: &[u8; 32],
+    google_conversation_id: &str,
+    now_ms: i64,
+) -> Result<String, Error> {
     let existing_tmp_id: Option<String> = tx
         .query_row(
             "SELECT tmp_id FROM rcs_send_ledger WHERE command_id=?",
@@ -11411,17 +12081,16 @@ fn finalize_rcs_admission(
     let tmp_id = existing_tmp_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    rcs_send::record_rcs_target_identity(tx, command_id, mapping, observation)?;
     record_finalized_attempt(tx, command_id, "rcs", now_ms)?;
     if existing_tmp_id.is_some() {
         tx.execute(
             "UPDATE rcs_send_ledger SET mapping_revision=?,proof_digest=?,google_conversation_id=?,attempted_at_ms=? WHERE command_id=?",
-            params![mapping.mapping_revision, mapping.proof.digest.as_slice(), mapping.google_conversation_id, now_ms, command_id.to_string()],
+            params![mapping_revision, proof_digest.as_slice(), google_conversation_id, now_ms, command_id.to_string()],
         )?;
     } else {
         tx.execute(
             "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms) VALUES(?,?,?,?,?,?)",
-            params![command_id.to_string(), tmp_id, mapping.mapping_revision, mapping.proof.digest.as_slice(), mapping.google_conversation_id, now_ms],
+            params![command_id.to_string(), tmp_id, mapping_revision, proof_digest.as_slice(), google_conversation_id, now_ms],
         )?;
     }
     Ok(tmp_id)
@@ -12023,8 +12692,17 @@ fn key_cache_check(cache: &[u8]) -> [u8; 32] {
 }
 
 const COMPOSE_COLUMNS: &str =
-    "draft_id,conversation_id,text,recipients,attachment_ids,route,revision";
-type ComposeRow = (String, String, String, String, String, Option<String>, i64);
+    "draft_id,conversation_id,text,recipients,attachment_ids,route,revision,group_name";
+type ComposeRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    i64,
+    Option<String>,
+);
 fn compose_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ComposeRow> {
     Ok((
         r.get(0)?,
@@ -12034,10 +12712,12 @@ fn compose_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ComposeRow> {
         r.get(4)?,
         r.get(5)?,
         r.get(6)?,
+        r.get(7)?,
     ))
 }
 fn decode_compose_row(row: ComposeRow) -> Result<ComposeDraft, Error> {
-    let (draft_id, conversation_id, text, recipients, attachment_ids, route, revision) = row;
+    let (draft_id, conversation_id, text, recipients, attachment_ids, route, revision, group_name) =
+        row;
     Ok(ComposeDraft {
         draft_id: parse(&draft_id)?,
         conversation_id: parse(&conversation_id)?,
@@ -12046,6 +12726,7 @@ fn decode_compose_row(row: ComposeRow) -> Result<ComposeDraft, Error> {
         attachment_ids: decode(attachment_ids.as_bytes())?,
         route: route.map(|route| decode(route.as_bytes())).transpose()?,
         revision: u64::try_from(revision).map_err(|_| Error::Database)?,
+        group_name,
     })
 }
 /// `column` is one of the two unique keys, never caller input.
@@ -12207,8 +12888,8 @@ fn move_compose_draft(
         let route = update.route.clone().or(destination.route.clone());
         let revision = destination.revision.checked_add(1).ok_or(Error::Database)?;
         conn.execute(
-            "UPDATE compose_drafts SET text=?,recipients=?,attachment_ids=?,route=?,revision=?,draft_only=1 WHERE draft_id=?",
-            params![text, json(&update.recipients)?, json(&attachment_ids)?, route.as_ref().map(json).transpose()?, to_i64(revision)?, destination.draft_id.to_string()],
+            "UPDATE compose_drafts SET text=?,recipients=?,attachment_ids=?,route=?,revision=?,group_name=?,draft_only=1 WHERE draft_id=?",
+            params![text, json(&update.recipients)?, json(&attachment_ids)?, route.as_ref().map(json).transpose()?, to_i64(revision)?, update.group_name.clone(), destination.draft_id.to_string()],
         )?;
         (
             destination.draft_id,
@@ -12222,8 +12903,8 @@ fn move_compose_draft(
         let destination_id = DraftId::new();
         let revision = source.revision.checked_add(1).ok_or(Error::Database)?;
         conn.execute(
-            "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,draft_only) VALUES(?,?,?,?,?,?,?,1)",
-            params![destination_id.to_string(), destination_conversation.to_string(), update.text, json(&update.recipients)?, json(&update.attachment_ids)?, update.route.as_ref().map(json).transpose()?, to_i64(revision)?],
+            "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,group_name,draft_only) VALUES(?,?,?,?,?,?,?,?,1)",
+            params![destination_id.to_string(), destination_conversation.to_string(), update.text, json(&update.recipients)?, json(&update.attachment_ids)?, update.route.as_ref().map(json).transpose()?, to_i64(revision)?, update.group_name.clone()],
         )?;
         let previous = ComposeDraft {
             draft_id: destination_id,
@@ -12233,6 +12914,7 @@ fn move_compose_draft(
             attachment_ids: Vec::new(),
             route: None,
             revision: 0,
+            group_name: None,
         };
         (
             destination_id,
@@ -12273,6 +12955,7 @@ fn move_compose_draft(
             attachment_ids,
             route,
             revision,
+            group_name: update.group_name,
         },
         previous,
     ))
@@ -12598,6 +13281,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn version_52_upgrade_adds_group_tables_without_changing_mms_thread_rows() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("schema-53.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = || DatabaseKey::new(&[53; 32]).unwrap();
+        let client = Client::open(config.clone(), key()).unwrap();
+        let conversation_id = ConversationId::new().to_string();
+        {
+            let store = client.lock().unwrap();
+            store.conn.execute(
+                "INSERT INTO mms_thread_conversations(source_device_id,source_generation,subscription_id,provider_thread_id,conversation_id) VALUES(?,?,?,?,?)",
+                params!["phone", "generation", "subscription", "thread", conversation_id],
+            ).unwrap();
+            store
+                .conn
+                .execute("UPDATE schema_meta SET version=52", [])
+                .unwrap();
+        }
+        drop(client);
+
+        let upgraded = Client::open(config, key()).unwrap();
+        let store = upgraded.lock().unwrap();
+        for table in [
+            "conversation_group_meta",
+            "conversation_group_members",
+            "rcs_group_mapping",
+            "rcs_group_participants",
+            "rcs_group_create_ledger",
+            "rcs_group_create_terminal",
+            "conversation_group_notices",
+        ] {
+            assert!(table_exists(&store.conn, table).unwrap(), "{table}");
+        }
+        let preserved: String = store.conn.query_row(
+            "SELECT conversation_id FROM mms_thread_conversations WHERE source_device_id='phone' AND provider_thread_id='thread'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(preserved, conversation_id);
+    }
+
     type RcsMappingRow = (
         String,
         String,
@@ -12820,6 +13548,82 @@ mod tests {
             ordered_at_ms: None,
             mms_context: None,
         }
+    }
+
+    #[test]
+    fn send_command_group_fields_serialize_only_when_present() {
+        let message = webhook_test_message(1, Direction::Outgoing);
+        let plain = PrivatePayload::SendCommand {
+            message: message.clone(),
+            expected_member_revision: None,
+            group_create: None,
+        };
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("expected_member_revision").is_none());
+        assert!(json.get("group_create").is_none());
+        // The pre-M4 shape parses to the same payload.
+        assert_eq!(
+            serde_json::from_value::<PrivatePayload>(json).unwrap(),
+            plain
+        );
+
+        let group = PrivatePayload::SendCommand {
+            message,
+            expected_member_revision: Some(3),
+            group_create: Some(GroupCreateRequest {
+                name: Some("Weekend".to_owned()),
+                confirm_duplicate: false,
+            }),
+        };
+        let json = serde_json::to_value(&group).unwrap();
+        assert_eq!(json["expected_member_revision"], 3);
+        assert_eq!(json["group_create"]["name"], "Weekend");
+        assert!(json["group_create"].get("confirm_duplicate").is_none());
+        assert_eq!(
+            serde_json::from_value::<PrivatePayload>(json).unwrap(),
+            group
+        );
+    }
+
+    #[test]
+    fn command_payload_carries_group_fields_only_on_text_only_sends() {
+        let fields = GroupSendFields {
+            expected_member_revision: Some(2),
+            group_create: None,
+        };
+        let mut text = webhook_test_message(1, Direction::Outgoing);
+        text.transport = Transport::Mms;
+        assert_eq!(
+            command_payload(text.clone(), Transport::Mms, Some(fields.clone())),
+            PrivatePayload::SendCommand {
+                message: text.clone(),
+                expected_member_revision: Some(2),
+                group_create: None,
+            }
+        );
+        // A group send with media keeps the media command, which has no group fields.
+        let mut media = text.clone();
+        media.record.attachments = vec![AttachmentReference {
+            attachment_id: AttachmentId::new(),
+            pending: false,
+        }];
+        assert_eq!(
+            command_payload(media.clone(), Transport::Mms, Some(fields)),
+            PrivatePayload::SendMmsCommand {
+                message: media,
+                media: Vec::new(),
+            }
+        );
+        // A one-to-one send carries no group fields.
+        let plain = webhook_test_message(2, Direction::Outgoing);
+        assert_eq!(
+            command_payload(plain.clone(), Transport::Sms, None),
+            PrivatePayload::SendCommand {
+                message: plain,
+                expected_member_revision: None,
+                group_create: None,
+            }
+        );
     }
 
     fn insert_webhook_test_message(client: &Client, sequence: u64, direction: Direction) {
@@ -13579,6 +14383,7 @@ mod tests {
             command_id,
             state: SendState::Sent,
             at_ms: Some(1_725_363_180_000),
+            reason: None,
         })
         .unwrap();
         assert_eq!(encoded["at_ms"], 1_725_363_180_000_i64);
@@ -13587,9 +14392,61 @@ mod tests {
             command_id,
             state: SendState::Sent,
             at_ms: None,
+            reason: None,
         })
         .unwrap();
         assert!(encoded.get("at_ms").is_none());
+        assert!(encoded.get("reason").is_none());
+
+        let encoded = serde_json::to_value(PrivatePayload::SendStatus {
+            command_id,
+            state: SendState::FailedBeforeSubmission,
+            at_ms: None,
+            reason: Some(SendRefusalReason::MembersChanged),
+        })
+        .unwrap();
+        assert_eq!(encoded["reason"], "members_changed");
+    }
+
+    #[test]
+    fn a_status_without_a_reason_keeps_the_recorded_refusal() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE send_status(command_id TEXT NOT NULL, producer_device_id TEXT NOT NULL, producer_sequence INTEGER NOT NULL, state TEXT NOT NULL, status_at_ms INTEGER, refusal_reason TEXT, PRIMARY KEY(command_id, producer_device_id));",
+        )
+        .unwrap();
+        let command_id = CommandId::new();
+        let producer = DeviceId::new();
+
+        upsert_status(
+            &conn,
+            command_id,
+            producer,
+            1,
+            SendState::PersistedGateway,
+            None,
+            Some(SendRefusalReason::CreateNotRcs),
+        )
+        .unwrap();
+        upsert_status(&conn, command_id, producer, 2, SendState::Sent, None, None).unwrap();
+        let stored: (String, Option<String>) = conn
+            .query_row(
+                "SELECT state,refusal_reason FROM send_status WHERE command_id=?",
+                [command_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            (
+                state_code(SendState::Sent).into(),
+                Some("create_not_rcs".into())
+            )
+        );
+        assert_eq!(
+            refusal_from_code("create_not_rcs").unwrap(),
+            SendRefusalReason::CreateNotRcs
+        );
     }
 
     #[test]
@@ -13604,14 +14461,32 @@ mod tests {
     fn newer_status_without_time_clears_while_duplicate_and_older_events_preserve_time() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE send_status(command_id TEXT NOT NULL, producer_device_id TEXT NOT NULL, producer_sequence INTEGER NOT NULL, state TEXT NOT NULL, status_at_ms INTEGER, PRIMARY KEY(command_id, producer_device_id));",
+            "CREATE TABLE send_status(command_id TEXT NOT NULL, producer_device_id TEXT NOT NULL, producer_sequence INTEGER NOT NULL, state TEXT NOT NULL, status_at_ms INTEGER, refusal_reason TEXT, PRIMARY KEY(command_id, producer_device_id));",
         )
         .unwrap();
         let command_id = CommandId::new();
         let producer = DeviceId::new();
 
-        upsert_status(&conn, command_id, producer, 2, SendState::Sent, Some(20)).unwrap();
-        upsert_status(&conn, command_id, producer, 2, SendState::Delivered, None).unwrap();
+        upsert_status(
+            &conn,
+            command_id,
+            producer,
+            2,
+            SendState::Sent,
+            Some(20),
+            None,
+        )
+        .unwrap();
+        upsert_status(
+            &conn,
+            command_id,
+            producer,
+            2,
+            SendState::Delivered,
+            None,
+            None,
+        )
+        .unwrap();
         upsert_status(
             &conn,
             command_id,
@@ -13619,6 +14494,7 @@ mod tests {
             1,
             SendState::FailedBeforeSubmission,
             Some(10),
+            None,
         )
         .unwrap();
         let stored: (String, Option<i64>) = conn
@@ -13630,7 +14506,16 @@ mod tests {
             .unwrap();
         assert_eq!(stored, (state_code(SendState::Sent).into(), Some(20)));
 
-        upsert_status(&conn, command_id, producer, 3, SendState::Delivered, None).unwrap();
+        upsert_status(
+            &conn,
+            command_id,
+            producer,
+            3,
+            SendState::Delivered,
+            None,
+            None,
+        )
+        .unwrap();
         let stored: (String, Option<i64>) = conn
             .query_row(
                 "SELECT state,status_at_ms FROM send_status WHERE command_id=? AND producer_device_id=?",
@@ -13647,7 +14532,7 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE messages(local_order INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, conversation_id TEXT NOT NULL, payload TEXT NOT NULL, seen INTEGER NOT NULL, sort_at_ms INTEGER NOT NULL); \
              CREATE TABLE commands(command_id TEXT PRIMARY KEY, message_id TEXT NOT NULL, gateway_device_id TEXT NOT NULL); \
-             CREATE TABLE send_status(command_id TEXT NOT NULL, producer_device_id TEXT NOT NULL, producer_sequence INTEGER NOT NULL, state TEXT NOT NULL, status_at_ms INTEGER, PRIMARY KEY(command_id, producer_device_id)); \
+             CREATE TABLE send_status(command_id TEXT NOT NULL, producer_device_id TEXT NOT NULL, producer_sequence INTEGER NOT NULL, state TEXT NOT NULL, status_at_ms INTEGER, refusal_reason TEXT, PRIMARY KEY(command_id, producer_device_id)); \
              CREATE TABLE outbox(command_id TEXT UNIQUE, state TEXT NOT NULL);",
         )
         .unwrap();
@@ -13684,6 +14569,7 @@ mod tests {
             .unwrap();
         assert_eq!(selected.2.as_deref(), Some(state_code(SendState::Sent)));
         assert_eq!(selected.3, Some(10));
+        assert_eq!(selected.4, None);
     }
 
     #[test]
@@ -14152,6 +15038,7 @@ mod tests {
                 first.draft_id,
                 0,
                 ComposeDraftUpdate {
+                    group_name: None,
                     recipients: vec!["(415) 555-2671".into()],
                     ..Default::default()
                 },
@@ -14216,6 +15103,7 @@ mod tests {
                 source.draft_id,
                 0,
                 ComposeDraftUpdate {
+                    group_name: None,
                     text: "new text".into(),
                     recipients: vec!["(415) 555-2671".into()],
                     ..Default::default()
@@ -14244,6 +15132,7 @@ mod tests {
                 moved.draft_id,
                 moved.revision,
                 ComposeDraftUpdate {
+                    group_name: None,
                     text: "group text".into(),
                     recipients: vec!["(415) 555-2671".into(), "+14155552672".into()],
                     ..Default::default()
@@ -14327,6 +15216,7 @@ mod tests {
                     current.draft_id,
                     current.revision,
                     ComposeDraftUpdate {
+                        group_name: None,
                         recipients: vec![(*address).into()],
                         ..Default::default()
                     },

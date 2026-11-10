@@ -570,6 +570,9 @@ pub(crate) struct TypingDisplayState {
     pub state: TypingStateV2,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<String>,
+    /// Canonical E.164 member of a group conversation; absent for 1:1 typing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub participant: Option<String>,
     #[serde(skip)]
     deadline_mono: u64,
     #[serde(skip)]
@@ -580,11 +583,14 @@ pub(crate) struct TypingDisplayState {
     generation: LiveEnableGeneration,
 }
 
+/// Inbound typing is keyed by conversation and group participant (`None` for 1:1 typing).
+type TypingKey = (ConversationId, Option<String>);
+
 #[derive(Default)]
 struct InboundTyping {
-    displays: HashMap<ConversationId, TypingDisplayState>,
+    displays: HashMap<TypingKey, TypingDisplayState>,
     peers: HashMap<DeviceId, (u64, u64)>,
-    sequences: HashMap<(DeviceId, ConversationId), u64>,
+    sequences: HashMap<(DeviceId, TypingKey), u64>,
     events: Vec<TypingDisplayState>,
     gateway_intent_drops: u64,
 }
@@ -612,12 +618,10 @@ impl InboundTyping {
         let expired = self
             .displays
             .iter()
-            .filter_map(|(conversation_id, display)| {
-                (display.deadline_mono <= mono).then_some(*conversation_id)
-            })
+            .filter_map(|(key, display)| (display.deadline_mono <= mono).then(|| key.clone()))
             .collect::<Vec<_>>();
-        for conversation_id in expired {
-            if let Some(mut display) = self.displays.remove(&conversation_id) {
+        for key in expired {
+            if let Some(mut display) = self.displays.remove(&key) {
                 display.state = TypingStateV2::Stopped;
                 display.expires_at_ms = None;
                 display.deadline_mono = 0;
@@ -653,6 +657,7 @@ impl InboundTyping {
                 session_token,
                 sequence,
                 conversation_id,
+                participant,
                 state,
                 deadline_mono,
             } => {
@@ -663,9 +668,10 @@ impl InboundTyping {
                 {
                     return reply;
                 }
+                let key: TypingKey = (conversation_id, participant.clone());
                 let last = self
                     .sequences
-                    .entry((peer_device_id, conversation_id))
+                    .entry((peer_device_id, key.clone()))
                     .or_insert(0);
                 if sequence <= *last {
                     return reply;
@@ -673,6 +679,7 @@ impl InboundTyping {
                 *last = sequence;
                 let display = TypingDisplayState {
                     conversation_id,
+                    participant,
                     state,
                     expires_at_ms: (state == TypingStateV2::Started).then(|| {
                         u64::try_from(clock.wall_ms)
@@ -686,9 +693,9 @@ impl InboundTyping {
                     generation: outcome.generation,
                 };
                 if state == TypingStateV2::Started {
-                    self.displays.insert(conversation_id, display.clone());
+                    self.displays.insert(key, display.clone());
                 } else {
-                    self.displays.remove(&conversation_id);
+                    self.displays.remove(&key);
                 }
                 self.events.push(display);
             }
@@ -722,14 +729,14 @@ impl InboundTyping {
             let replaced = self
                 .displays
                 .iter()
-                .filter_map(|(conversation_id, display)| {
+                .filter_map(|(key, display)| {
                     (display.peer_device_id == update.peer_device_id
                         && display.session_token == replaced_token)
-                        .then_some(*conversation_id)
+                        .then(|| key.clone())
                 })
                 .collect::<Vec<_>>();
-            for conversation_id in replaced {
-                if let Some(mut display) = self.displays.remove(&conversation_id) {
+            for key in replaced {
+                if let Some(mut display) = self.displays.remove(&key) {
                     display.state = TypingStateV2::Stopped;
                     display.expires_at_ms = None;
                     display.deadline_mono = 0;
@@ -1070,6 +1077,7 @@ impl TypingActor {
             conversation_id,
             gateway,
             TypingOriginV2::VaultDevice,
+            None,
             state,
             clock,
         ) {
@@ -2235,6 +2243,7 @@ mod tests {
                 session_token: token,
                 sequence,
                 conversation_id: conversation,
+                participant: None,
                 state,
                 deadline_mono: deadline,
             }),
@@ -2275,9 +2284,9 @@ mod tests {
             Some(LiveEnableGeneration(2)),
             clock(),
         );
-        assert_eq!(inbound.displays[&conversation].deadline_mono, 10);
+        assert_eq!(inbound.displays[&(conversation, None)].deadline_mono, 10);
         assert_eq!(
-            inbound.displays[&conversation].expires_at_ms.as_deref(),
+            inbound.displays[&(conversation, None)].expires_at_ms.as_deref(),
             Some("10009")
         );
     }
@@ -2365,7 +2374,7 @@ mod tests {
             current_session_token: 2,
             validation_revision: 3,
         }));
-        assert!(!inbound.displays.contains_key(&conversation));
+        assert!(!inbound.displays.contains_key(&(conversation, None)));
         let stopped = inbound.drain_events().next().unwrap();
         assert_eq!(stopped.conversation_id, conversation);
         assert_eq!(stopped.state, TypingStateV2::Stopped);
@@ -2409,7 +2418,7 @@ mod tests {
             clock(),
         );
 
-        assert_eq!(inbound.displays[&conversation].session_token, 2);
+        assert_eq!(inbound.displays[&(conversation, None)].session_token, 2);
         assert_eq!(inbound.sequences.len(), 1);
         assert_eq!(inbound.peers.len(), 1);
     }
@@ -2531,6 +2540,7 @@ mod tests {
                 session_token: 1,
                 sequence: 2,
                 conversation_id: conversation,
+                participant: None,
                 state: TypingStateV2::Started,
                 deadline_mono: 11,
             }),
@@ -2639,6 +2649,7 @@ mod tests {
                 conversation,
                 sender_config.device_id,
                 TypingOriginV2::GoogleContact,
+                None,
                 TypingStateV2::Started,
                 LiveClock {
                     wall_ms: 1_001,
@@ -2690,6 +2701,7 @@ mod tests {
                 conversation,
                 sender_config.device_id,
                 TypingOriginV2::GoogleContact,
+                None,
                 TypingStateV2::Started,
                 LiveClock {
                     wall_ms: 4_001,
@@ -2711,7 +2723,7 @@ mod tests {
             ),
             Ok(None)
         );
-        assert!(inbound.displays.contains_key(&conversation));
+        assert!(inbound.displays.contains_key(&(conversation, None)));
     }
 
     #[test]
@@ -3069,7 +3081,7 @@ mod tests {
             clock(),
         );
         assert!(!first.suspended);
-        assert!(h.actor.inbound.displays.contains_key(&conversation));
+        assert!(h.actor.inbound.displays.contains_key(&(conversation, None)));
 
         suspend.set(LIVE_SUSPEND_TICK + LIVE_SUSPEND_SKEW + Duration::from_secs(2));
         let started = h.actor.publish_inbound(
@@ -3077,7 +3089,7 @@ mod tests {
             clock(),
         );
         assert!(started.suspended);
-        assert!(!h.actor.inbound.displays.contains_key(&conversation));
+        assert!(!h.actor.inbound.displays.contains_key(&(conversation, None)));
         assert_eq!(
             session.client.set_typing_sharing(true),
             Err(LiveError::Disabled)
@@ -3445,6 +3457,7 @@ mod tests {
                 conversation_id,
                 gateway,
                 peppy_protocol::TypingOriginV2::VaultDevice,
+                None,
                 peppy_protocol::TypingStateV2::Started,
                 session.live_typing.clock(),
             )
@@ -3465,6 +3478,7 @@ mod tests {
                 conversation_id,
                 gateway,
                 peppy_protocol::TypingOriginV2::VaultDevice,
+                None,
                 peppy_protocol::TypingStateV2::Started,
                 session.live_typing.clock(),
             )
@@ -3499,6 +3513,7 @@ mod tests {
                 conversation_id,
                 fixture.binding.device_id.parse().unwrap(),
                 peppy_protocol::TypingOriginV2::VaultDevice,
+                None,
                 peppy_protocol::TypingStateV2::Started,
                 session.live_typing.clock(),
             )
@@ -3736,6 +3751,7 @@ mod tests {
                 conversation,
                 peer.device,
                 TypingOriginV2::GoogleContact,
+                None,
                 TypingStateV2::Started,
                 peer_clock(peer),
             )
@@ -3804,8 +3820,8 @@ mod tests {
 
         let frame_b = seal_started(&peer, conv_b);
         assert!(h.inbound(&frame_b).wire.is_none());
-        assert_eq!(h.actor.inbound.displays[&conv_b].generation, first);
-        assert!(!h.actor.inbound.displays.contains_key(&conversation));
+        assert_eq!(h.actor.inbound.displays[&(conv_b, None)].generation, first);
+        assert!(!h.actor.inbound.displays.contains_key(&(conversation, None)));
 
         let extra = DeviceId::new().to_string();
         h.send(Cmd::GatewayRefresh(status_refresh(
@@ -3825,7 +3841,7 @@ mod tests {
         let ack = peer_answer(&peer, &challenge);
         assert!(h.inbound(&ack).wire.is_none());
         assert!(h.inbound(&seal_started(&peer, conv_c)).wire.is_none());
-        assert_eq!(h.actor.inbound.displays[&conv_c].generation, second);
+        assert_eq!(h.actor.inbound.displays[&(conv_c, None)].generation, second);
     }
 
     #[test]
@@ -3849,7 +3865,7 @@ mod tests {
         let first = h.actor.state.generation().unwrap();
         complete_handshake(&mut h, &peer, conv_a);
         assert!(h.inbound(&seal_started(&peer, conv_b)).wire.is_none());
-        assert!(h.actor.inbound.displays.contains_key(&conv_b));
+        assert!(h.actor.inbound.displays.contains_key(&(conv_b, None)));
         assert!(!h.actor.inbound.peers.is_empty());
 
         assert!(h.send_typing(conversation, TypingStateV2::Started));
@@ -4433,6 +4449,7 @@ mod tests {
                 conversation,
                 device,
                 TypingOriginV2::VaultDevice,
+                None,
                 TypingStateV2::Started,
                 session.live_typing.clock(),
             )

@@ -3,7 +3,7 @@ import { errorCode, errorDetail, errorText } from "../bridge/bridgeErrors";
 
 export type DraftContent = Pick<
   Draft,
-  "text" | "recipientIds" | "attachmentIds" | "gatewayId" | "simId"
+  "text" | "recipientIds" | "attachmentIds" | "gatewayId" | "simId" | "groupName"
 >;
 
 /** Local key for a new-recipient draft that has no native draft/conversation ID yet. */
@@ -57,13 +57,14 @@ const contentOf = (draft: Draft): DraftContent => ({
   attachmentIds: draft.attachmentIds,
   gatewayId: draft.gatewayId,
   simId: draft.simId,
+  groupName: draft.groupName,
 });
 export const isDirty = (slot: DraftSlot) => slot.generation > slot.savedGeneration;
 const sameDraftContent = (left: DraftContent, right: DraftContent) =>
-  left.text === right.text && sameStructure(left, right);
-/** Authored text and attachments only; host recipient formatting is not a local edit. */
+  left.text === right.text && left.groupName === right.groupName && sameStructure(left, right);
+/** Authored text, group name and attachments only; host recipient formatting is not a local edit. */
 const sameAuthoredContent = (left: DraftContent, right: DraftContent) =>
-  left.text === right.text && sameAttachments(left, right);
+  left.text === right.text && left.groupName === right.groupName && sameAttachments(left, right);
 const sameAttachments = (left: DraftContent, right: DraftContent) =>
   left.attachmentIds.join("\u0000") === right.attachmentIds.join("\u0000");
 const sameStructure = (left: DraftContent, right: DraftContent) =>

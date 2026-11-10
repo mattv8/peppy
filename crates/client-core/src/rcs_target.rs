@@ -81,36 +81,41 @@ pub type RcsTargetDecision = RcsTargetClassification;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct ConversationCandidateSnapshot {
-    code: String,
-    snapshot_token: String,
-    generation: u64,
-    stream_epoch: u64,
-    revision: u64,
-    run_incarnation: String,
+pub(crate) struct ConversationCandidateSnapshot {
+    pub(crate) code: String,
+    pub(crate) snapshot_token: String,
+    pub(crate) generation: u64,
+    pub(crate) stream_epoch: u64,
+    pub(crate) revision: u64,
+    pub(crate) run_incarnation: String,
     #[serde(rename = "pairing_evidence_id")]
     _pairing_evidence_id: String,
-    complete: bool,
-    conversations: Vec<ConversationCandidateRecord>,
+    pub(crate) complete: bool,
+    pub(crate) conversations: Vec<ConversationCandidateRecord>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct ConversationCandidateRecord {
-    google_conversation_id: String,
-    conversation_type: i32,
-    conversation_status: i32,
-    classification: CandidateClassification,
-    group: bool,
-    visible_non_self_count: usize,
-    #[serde(rename = "last_message_ms")]
-    _last_message_ms: i64,
-    participants: Vec<ConversationCandidateParticipant>,
+pub(crate) struct ConversationCandidateRecord {
+    pub(crate) google_conversation_id: String,
+    pub(crate) conversation_type: i32,
+    pub(crate) conversation_status: i32,
+    pub(crate) classification: CandidateClassification,
+    pub(crate) group: bool,
+    pub(crate) visible_non_self_count: usize,
+    pub(crate) last_message_ms: i64,
+    pub(crate) participants: Vec<ConversationCandidateParticipant>,
+    pub(crate) name: String,
+    pub(crate) is_group_chat: bool,
+    pub(crate) read_only: bool,
+    pub(crate) invisible_participant_count: usize,
+    /// Go's opaque recheck token (A1); stored verbatim, never recomputed by core.
+    pub(crate) member_digest: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum CandidateClassification {
+pub(crate) enum CandidateClassification {
     Eligible,
     Unsupported,
     Unknown,
@@ -118,16 +123,20 @@ enum CandidateClassification {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct ConversationCandidateParticipant {
-    participant_id: String,
-    identifier_type: i32,
-    raw_number: String,
+pub(crate) struct ConversationCandidateParticipant {
+    pub(crate) participant_id: String,
+    pub(crate) identifier_type: i32,
+    pub(crate) raw_number: String,
     formatted_number: String,
     participant_id_present: bool,
     number_present: bool,
-    visible: bool,
+    pub(crate) visible: bool,
     #[serde(rename = "self")]
-    self_: bool,
+    pub(crate) self_: bool,
+    pub(crate) canonical_address: String,
+    pub(crate) canonical_address_present: bool,
+    #[serde(rename = "display_name")]
+    _display_name: String,
 }
 
 /// Classifies one locally supplied Go snapshot without persisting participant facts or parsing
@@ -438,6 +447,7 @@ fn participant_facts_consistent(record: &ConversationCandidateRecord) -> bool {
     record.participants.iter().all(|participant| {
         participant.participant_id_present == !participant.participant_id.is_empty()
             && participant.number_present == !participant.raw_number.is_empty()
+            && participant.canonical_address_present == !participant.canonical_address.is_empty()
             && participant.participant_id_present
             && participant.number_present
             && known_identifier_type(participant.identifier_type)
@@ -523,6 +533,9 @@ mod tests {
             number_present: !number.is_empty(),
             visible: true,
             self_,
+            canonical_address: number.into(),
+            canonical_address_present: !number.is_empty(),
+            _display_name: String::new(),
         }
     }
 
@@ -542,8 +555,13 @@ mod tests {
             classification,
             group: visible_non_self_count > 1,
             visible_non_self_count,
-            _last_message_ms: 0,
+            last_message_ms: 0,
             participants,
+            name: String::new(),
+            is_group_chat: false,
+            read_only: false,
+            invisible_participant_count: 0,
+            member_digest: String::new(),
         }
     }
 
@@ -575,8 +593,16 @@ mod tests {
                         "participant_id_present":true,
                         "number_present":true,
                         "visible":true,
-                        "self":false
-                    }]
+                        "self":false,
+                        "canonical_address":"+12025550123",
+                        "canonical_address_present":true,
+                        "display_name":"Taylor"
+                    }],
+                    "name":"",
+                    "is_group_chat":false,
+                    "read_only":false,
+                    "invisible_participant_count":0,
+                    "member_digest":""
                 }]
             }"#,
         )
@@ -917,8 +943,16 @@ mod tests {
                     "participant_id_present":true,
                     "number_present":true,
                     "visible":true,
-                    "self":false
-                }]
+                    "self":false,
+                    "canonical_address":"+12025550123",
+                    "canonical_address_present":true,
+                    "display_name":""
+                }],
+                "name":"",
+                "is_group_chat":false,
+                "read_only":false,
+                "invisible_participant_count":0,
+                "member_digest":""
             }]
         }"#;
 

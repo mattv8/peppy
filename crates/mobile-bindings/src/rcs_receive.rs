@@ -1,7 +1,7 @@
 use crate::{MobileBindingsError, NativeClient, NativeConversation, NativeMessage, with_client};
 use peppy_client_core::{
     Client, Conversation, ConversationId, Direction, Message, RcsContextExpectation, RcsCutover,
-    RcsIdentityOutcome, RcsLinkOwnershipClaim, RcsLinkOwnershipClaimOutcome,
+    RcsGroupSender, RcsIdentityOutcome, RcsLinkOwnershipClaim, RcsLinkOwnershipClaimOutcome,
     RcsObservationProvenance, RcsOwnerUnlinkCutoverCandidate, RcsProjectedRecord,
     RcsProjectedStatus, RcsProviderDetector, RcsProviderRouteReason, RcsProviderRow,
     RcsProviderRowRoute, RcsProviderRowRouteResult, RcsReceiveCode, RcsReceiveContext,
@@ -62,6 +62,7 @@ pub(crate) fn message_view(
         send_state: message
             .send_state
             .map(|state| crate::send_state_name(state).to_owned()),
+        send_refusal: message.send_refusal.map(|reason| reason.code().to_owned()),
         sent_at_ms: message.payload.sent_at_ms.filter(|value| *value > 0),
         rcs_status: rcs.as_ref().map(|value| {
             match value.status {
@@ -137,11 +138,47 @@ struct GoReceiveRecord {
     tmp_id: Option<String>,
     rcs_reported: bool,
     e2ee_reported: Option<bool>,
+    /// Group incoming messages only: canonical E.164 of the visible sender.
+    #[serde(default)]
+    sender_address: Option<String>,
+    /// Group incoming messages only: the sender could not be resolved.
+    #[serde(default)]
+    sender_unknown: bool,
+    /// Group outgoing messages only: sent from another device of this vault.
+    #[serde(default)]
+    self_sent: bool,
 }
 
 struct GoReceiveParts {
     record: RcsProjectedRecord,
+    group_sender: Option<RcsGroupSender>,
     status: Option<RcsStatusApplication>,
+}
+
+/// Maps Go's group sender fields. Exactly one of `sender_address` or `sender_unknown` may appear
+/// on an incoming message, and `self_sent` is valid only on an outgoing one.
+fn group_sender(
+    direction: Direction,
+    sender_address: Option<String>,
+    sender_unknown: bool,
+    self_sent: bool,
+) -> Result<Option<RcsGroupSender>, MobileBindingsError> {
+    let attributed = match sender_address {
+        Some(address) => {
+            bounded_text(&address, GO_ID_CAP)?;
+            Some(address)
+        }
+        None => None,
+    };
+    match (direction, attributed, sender_unknown, self_sent) {
+        (Direction::Incoming, Some(address), false, false) => {
+            Ok(Some(RcsGroupSender::Address(address)))
+        }
+        (Direction::Incoming, None, true, false) => Ok(Some(RcsGroupSender::UnknownMember)),
+        (Direction::Outgoing, None, false, true) => Ok(Some(RcsGroupSender::SelfSent)),
+        (_, None, false, false) => Ok(None),
+        _ => Err(MobileBindingsError::InvalidRequest),
+    }
 }
 
 fn bounded_text(value: &str, max: usize) -> Result<(), MobileBindingsError> {
@@ -177,6 +214,12 @@ impl GoReceiveRecord {
         };
         let sent_at_ms = Some(self.sent_at_ms);
         let e2ee_reported = self.rcs_reported.then_some(self.e2ee_reported).flatten();
+        let group_sender = group_sender(
+            direction,
+            self.sender_address,
+            self.sender_unknown,
+            self.self_sent,
+        )?;
         Ok(GoReceiveParts {
             record: RcsProjectedRecord {
                 google_message_id: self.google_message_id.clone(),
@@ -188,6 +231,7 @@ impl GoReceiveRecord {
                 rcs_reported: self.rcs_reported,
                 e2ee_reported,
             },
+            group_sender,
             status: status.map(|status| RcsStatusApplication {
                 google_message_id: self.google_message_id,
                 google_conversation_id: self.google_conversation_id,
@@ -445,6 +489,7 @@ fn ingest_go_record(
         ConversationId,
         u64,
         RcsProjectedRecord,
+        Option<RcsGroupSender>,
     ) -> Result<RcsReceiveOutcome, peppy_client_core::Error>,
 ) -> Result<NativeRcsIngestOutcome, MobileBindingsError> {
     if go_record_json.len() > GO_RECORD_JSON_CAP {
@@ -455,9 +500,19 @@ fn ingest_go_record(
         .map_err(|_| MobileBindingsError::InvalidRequest)?;
     let go_record: GoReceiveRecord =
         serde_json::from_str(&go_record_json).map_err(|_| MobileBindingsError::InvalidRequest)?;
-    let GoReceiveParts { record, status } = go_record.into_parts()?;
+    let GoReceiveParts {
+        record,
+        group_sender,
+        status,
+    } = go_record.into_parts()?;
     with_client(&owner.client, |client| {
-        let record_outcome = ingest(client, conversation, ownership_generation, record)?;
+        let record_outcome = ingest(
+            client,
+            conversation,
+            ownership_generation,
+            record,
+            group_sender,
+        )?;
         if matches!(record_outcome, RcsReceiveOutcome::Rejected(_)) {
             return Ok(NativeRcsIngestOutcome {
                 record_outcome: receive_outcome(record_outcome),
@@ -507,8 +562,14 @@ impl NativeClient {
             conversation_id,
             ownership_generation,
             go_record_json,
-            |client, conversation, generation, record| {
-                client.ingest_rcs_projected_record(conversation, generation, record)
+            |client, conversation, generation, record, sender| {
+                client.ingest_rcs_receive_observation(
+                    conversation,
+                    generation,
+                    record,
+                    sender,
+                    RcsObservationProvenance::Live,
+                )
             },
         )
     }
@@ -525,11 +586,12 @@ impl NativeClient {
             conversation_id,
             ownership_generation,
             go_record_json,
-            |client, conversation, generation, record| {
-                client.ingest_rcs_projected_observation(
+            |client, conversation, generation, record, sender| {
+                client.ingest_rcs_receive_observation(
                     conversation,
                     generation,
                     record,
+                    sender,
                     provenance,
                 )
             },

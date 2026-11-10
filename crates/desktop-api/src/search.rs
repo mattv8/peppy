@@ -398,6 +398,7 @@ mod tests {
             seen: true,
             send_state: None,
             status_at_ms: None,
+            send_refusal: None,
         };
         let source = MessageWindow {
             conversation_id: message.payload.record.conversation_id.to_string(),

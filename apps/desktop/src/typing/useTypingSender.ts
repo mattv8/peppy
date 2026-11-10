@@ -15,6 +15,8 @@ type TypingSenderInput = {
   readOnly: boolean;
   visible: boolean;
   sharingEnabled: boolean;
+  /** False for a group that is not live: typing is sent only to one-to-one chats and live groups. Defaults to true. */
+  groupAllowsTyping?: boolean;
 };
 
 export function useTypingSender(input: TypingSenderInput) {
@@ -44,9 +46,9 @@ export function useTypingSender(input: TypingSenderInput) {
   };
 
   const canSend = () => {
-    const { bridge, conversationId, current, existing, sendSupported, readOnly, visible, sharingEnabled } = inputRef.current;
+    const { bridge, conversationId, current, existing, sendSupported, readOnly, visible, sharingEnabled, groupAllowsTyping = true } = inputRef.current;
     // Recheck persisted sharing because another window may have changed it.
-    return Boolean(bridge.send_typing && conversationId && current && existing && sendSupported && !readOnly && visible && sharingEnabled && readShareTyping() && document.visibilityState === "visible");
+    return Boolean(bridge.send_typing && conversationId && current && existing && sendSupported && !readOnly && visible && sharingEnabled && groupAllowsTyping && readShareTyping() && document.visibilityState === "visible");
   };
 
   const start = (conversationId: string) => {

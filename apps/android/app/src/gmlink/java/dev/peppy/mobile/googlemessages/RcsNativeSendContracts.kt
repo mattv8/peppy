@@ -48,8 +48,16 @@ internal sealed interface RcsNativeMappingVerification {
 internal sealed interface RcsNativeCommitResult {
     data object Accepted : RcsNativeCommitResult
     data object Rejected : RcsNativeCommitResult
+    /** Go saw a roster change before SendMessage: nothing was sent. */
+    data object MembersChanged : RcsNativeCommitResult
     data object OutcomeUnknown : RcsNativeCommitResult
 }
+
+/** Group re-proof of one fresh target observation. Proven stores the observation time as the proof time. */
+internal enum class RcsNativeGroupVerification { Proven, MembersChanged, Refused }
+
+/** Core refused a group send because the roster or member revision changed. Nothing was sent. */
+internal class RcsNativeMembersChanged : IllegalStateException("group members changed")
 
 internal sealed interface RcsNativeRevokeResult {
     data object Revoked : RcsNativeRevokeResult
@@ -60,7 +68,8 @@ internal sealed interface RcsNativeRevokeResult {
 internal interface RcsNativeGoOperation {
     fun ownerGeneration(): Long
     fun isCurrent(): Boolean
-    fun prepare(command: RcsNativeCommand, canonicalizerRevision: Int, route: RcsNativeRouteEvidence): RcsNativePrepared
+    /** [expectedMemberDigest] is set only for a Live group target; Go rejects a group prepare without it. */
+    fun prepare(command: RcsNativeCommand, canonicalizerRevision: Int, route: RcsNativeRouteEvidence, expectedMemberDigest: String?): RcsNativePrepared
     fun bindRoute(ticketId: String, tuple: RcsNativeContextTuple, mappingRevision: ULong, observedAtMs: Long): String
     fun bindTarget(ticketId: String, googleConversationId: String, snapshotToken: String): String
     fun bindFacts(ticketId: String, factsJson: String): Boolean
@@ -80,6 +89,8 @@ internal open class RcsNativePreparation(
 internal sealed interface RcsNativeBeginResult {
     data object KnownRefused : RcsNativeBeginResult
     data class Committed(val handle: RcsNativeCommittedHandle) : RcsNativeBeginResult
+    /** Core refused the group begin because the roster changed. Core paused the group; nothing was admitted. */
+    data object MembersChanged : RcsNativeBeginResult
     data object DurabilityUnknown : RcsNativeBeginResult
 }
 
@@ -99,13 +110,28 @@ internal interface RcsNativeCoreLease : AutoCloseable {
     fun prepare(commandId: String, nowMs: Long): RcsNativePreparation
     fun recordTransportAcknowledged(tmpId: String, googleConversationId: String): Boolean
     fun recordSubmitted(tmpId: String, googleConversationId: String): Boolean
-    fun recordPreEffectRefusal(): Boolean
+    /** [membersChanged] records a group roster refusal; core pauses the group in the same transaction. */
+    fun recordPreEffectRefusal(membersChanged: Boolean = false): Boolean
     fun recordOutcomeUnknown(): Boolean = false
+
+    /** The proved member revision of a Live group, or null. */
+    fun provedGroupMemberRevision(conversationId: String): ULong? = null
+    /** Group route step: advances the link context from the route observation. False when not current. */
+    fun verifyGroupRoute(exactObservationJson: String): Boolean = false
+    /** Target for a Live group: the owned Google lane and the candidate snapshot token. */
+    fun classifyGroupTarget(conversationId: String, exactSnapshotJson: String): RcsNativeTarget = RcsNativeTarget.Unknown
+    fun verifyGroupObservation(exactObservationJson: String): RcsNativeGroupVerification = RcsNativeGroupVerification.Refused
 }
 
 /** Atomically captures the native owner and registers [revoker] closed over [ticketId]. */
 internal fun interface RcsNativeCoreLeaseFactory {
     fun acquire(ticketId: String, revoker: () -> Unit): RcsNativeCoreLease?
+
+    /**
+     * The stored member digest of a Live group, read without a lease, as advisory input to the Go prepare.
+     * It is not a proof: the route step, re-proof, and freshness-checked preparation still run. Null for a 1:1 or non-Live target.
+     */
+    fun groupMemberDigest(conversationId: String): String? = null
 }
 
-internal enum class RcsNativeSendOutcome { REFUSED, SUBMITTED, OUTCOME_UNKNOWN }
+internal enum class RcsNativeSendOutcome { REFUSED, SUBMITTED, OUTCOME_UNKNOWN, MEMBERS_CHANGED }

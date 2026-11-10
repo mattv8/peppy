@@ -46,7 +46,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Typing indicators work in one-to-one RCS chats through Google Messages. When this is on, the other person sees when you are typing in those chats. Turn it off to stop that. You still see when they are typing. Group chats are not supported yet."
+            "value": "Typing indicators work in one-to-one and group RCS chats through Google Messages. When this is on, the other people in those chats see when you are typing. Turn it off to stop that. You still see when they are typing."
           }
         }
       }
@@ -4356,7 +4356,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Peppy sends and receives one-to-one RCS chats through Google Messages on this phone. Typing indicators work in one-to-one chats. Group chats, photos and other media are not supported yet. RCS messages in chats the link has not claimed need restricted message access (see MMS → Sync details). Linking replaces any Messages for Web browser session on this account. A new contact with no Google Messages chat stays SMS."
+            "value": "Peppy sends and receives one-to-one and group RCS chats through Google Messages on this phone. Typing indicators work in one-to-one chats and groups. To rename a group or change its members, use Google Messages on this phone. Photos and other media are not supported yet. RCS messages in chats the link has not claimed need restricted message access (see MMS → Sync details). Linking replaces any Messages for Web browser session on this account. A new contact with no Google Messages chat stays SMS."
           }
         }
       }
@@ -4926,7 +4926,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Linking lets Peppy send and receive one-to-one RCS text chats that already have a thread in Google Messages on this phone. Messages in those chats pass through Google as they do in Google Messages, and Peppy syncs them to your other Peppy devices like your other messages. Typing indicators in those chats work too. They go to your other Peppy devices through your configured server, and you can turn off sharing your typing at any time. Peppy does not become your messaging app."
+            "value": "Linking lets Peppy send and receive RCS text chats, one-to-one and group, that already have a thread in Google Messages on this phone, and start new RCS groups. Messages in those chats pass through Google as they do in Google Messages, and Peppy syncs them to your other Peppy devices like your other messages. Typing indicators in those chats work too. They go to your other Peppy devices through your configured server, and you can turn off sharing your typing at any time. Peppy does not become your messaging app."
           }
         }
       }

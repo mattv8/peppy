@@ -274,7 +274,15 @@ fn candidate_snapshot(google_conversation_id: &str, recipient: &str) -> String {
                 "number_present": true,
                 "visible": true,
                 "self": false,
+                "canonical_address": recipient,
+                "canonical_address_present": true,
+                "display_name": "",
             }],
+            "name": "",
+            "is_group_chat": false,
+            "read_only": false,
+            "invisible_participant_count": 0,
+            "member_digest": "",
         }],
     })
     .to_string()
@@ -836,6 +844,8 @@ fn trusted_effectful_wrappers_forward_core_results_without_cross_owner_mutation(
             submitted_commit.command_id(),
             submitted_commit.tmp_id(),
             submitted_commit.google_conversation_id(),
+            false,
+            1_000,
         )
         .is_err()
     );
@@ -849,6 +859,8 @@ fn trusted_effectful_wrappers_forward_core_results_without_cross_owner_mutation(
         committed.command_id(),
         committed.tmp_id(),
         committed.google_conversation_id(),
+        false,
+        1_000,
     )
     .unwrap();
 
@@ -866,6 +878,8 @@ fn trusted_effectful_wrappers_forward_core_results_without_cross_owner_mutation(
             committed.command_id(),
             committed.tmp_id(),
             committed.google_conversation_id(),
+            false,
+            1_000,
         )
         .is_err()
     );
@@ -1088,6 +1102,8 @@ fn all_native_recorders_reject_closed_and_wrong_owners_without_mutating_either_d
                 committed.command_id(),
                 committed.tmp_id(),
                 committed.google_conversation_id(),
+                false,
+                1_000,
             ),
             _ => gateway_record_rcs_outcome_unknown(
                 other.gateway.clone(),
@@ -1111,6 +1127,8 @@ fn all_native_recorders_reject_closed_and_wrong_owners_without_mutating_either_d
                 command_id,
                 committed.tmp_id(),
                 committed.google_conversation_id(),
+                false,
+                1_000,
             ),
             gateway_record_rcs_outcome_unknown(
                 owner.gateway.clone(),
@@ -1189,6 +1207,15 @@ fn explicit_unlink_completion_wrapper_requires_current_unlinked_lifecycle() {
 
 #[path = "rcs_native_tests/rcs_native_live_ticket_tests.rs"]
 mod rcs_native_live_ticket_tests;
+
+#[path = "rcs_native_tests/group_fixture.rs"]
+mod group_fixture;
+
+#[path = "rcs_native_tests/rcs_native_group_binding_tests.rs"]
+mod rcs_native_group_binding_tests;
+
+#[path = "rcs_native_tests/rcs_native_group_receive_tests.rs"]
+mod rcs_native_group_receive_tests;
 
 #[test]
 fn eligibility_publication_is_derived_from_core_mapping_and_revisions() {
@@ -1553,4 +1580,37 @@ fn receive_context_exports_refuse_a_foreign_current_gateway_and_closed_client() 
         fixture.gateway.gateway_rcs_link_owned_conversations(),
         Err(MobileBindingsError::Closed)
     ));
+}
+
+#[test]
+fn one_to_one_preparation_has_no_member_digest_and_keeps_the_three_key_request() {
+    let fixture = fixture();
+    let preparation = native_preparation(&fixture);
+    assert_eq!(preparation.expected_member_digest(), None);
+    let facts: Value = serde_json::from_str(&preparation.facts_json().unwrap()).unwrap();
+    let request = facts["request"].as_object().unwrap();
+    assert_eq!(request.len(), 3);
+    assert!(!request.contains_key("expected_member_digest"));
+    assert_eq!(facts["stored_mapping"]["class"], "OneToOne");
+}
+
+#[test]
+fn group_members_changed_is_its_own_mobile_error() {
+    assert!(matches!(
+        MobileBindingsError::from(peppy_client_core::Error::GroupMembersChanged),
+        MobileBindingsError::GroupMembersChanged
+    ));
+}
+
+#[test]
+fn group_verification_refuses_a_one_to_one_observation_without_touching_the_mapping() {
+    let fixture = fixture();
+    let verification = gateway_verify_rcs_group_observation(
+        fixture.gateway.clone(),
+        observation_json(&fixture),
+        1_000,
+    )
+    .unwrap();
+    assert_eq!(verification, NativeRcsGroupVerification::Refused);
+    assert!(native_preparation(&fixture).facts_json().is_ok());
 }

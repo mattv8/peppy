@@ -2,6 +2,7 @@ package gmlink
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"math"
@@ -32,7 +33,7 @@ func decodeNativeRcsStoredMapping(raw json.RawMessage) (nativeRcsStoredMapping, 
 	values, ok := nativeObject(raw, "conversation_id", "google_conversation_id", "class", "proof_version", "proof", "mapping_revision", "verified_at_ms")
 	proof, proofOK := decodeNativeRcsStoredProof(values["proof"])
 	mapping := nativeRcsStoredMapping{ConversationID: nativeString(values["conversation_id"]), GoogleConversationID: nativeString(values["google_conversation_id"]), Class: nativeString(values["class"]), ProofVersion: nativeUint32(values["proof_version"]), Proof: proof, MappingRevision: nativeUint64(values["mapping_revision"]), VerifiedAtMS: nativeInt64(values["verified_at_ms"])}
-	return mapping, ok && proofOK && nativeKinds(values, []string{"conversation_id", "google_conversation_id", "class"}, nil, []string{"proof_version", "mapping_revision"}, []string{"verified_at_ms"}) && nativeUint32Valid(values["proof_version"]) && validEnum(mapping.Class, "OneToOne", "SelfChat") && mapping.ProofVersion == 2
+	return mapping, ok && proofOK && nativeKinds(values, []string{"conversation_id", "google_conversation_id", "class"}, nil, []string{"proof_version", "mapping_revision"}, []string{"verified_at_ms"}) && nativeUint32Valid(values["proof_version"]) && validEnum(mapping.Class, "OneToOne", "SelfChat", "Group") && mapping.ProofVersion == 2
 }
 
 func decodeNativeRcsStoredProof(raw json.RawMessage) (nativeRcsStoredProof, bool) {
@@ -43,40 +44,63 @@ func decodeNativeRcsStoredProof(raw json.RawMessage) (nativeRcsStoredProof, bool
 }
 
 func decodeNativeRcsPrepare(input string) (nativeRcsPrepareRequest, bool) {
-	values, ok := nativeObject([]byte(input), "command_id", "canonicalizer_revision", "identity_region", "carrier_binding")
+	values, ok := nativeObject([]byte(input), "command_id", "canonicalizer_revision", "identity_region", "carrier_binding", "expected_member_digest")
+	if !ok {
+		values, ok = nativeObject([]byte(input), "command_id", "canonicalizer_revision", "identity_region", "carrier_binding")
+	}
 	if !ok {
 		return nativeRcsPrepareRequest{}, false
 	}
+	_, hasExpectedMemberDigest := values["expected_member_digest"]
 	binding, ok := decodePrepareCarrierBinding(values["carrier_binding"])
 	request := nativeRcsPrepareRequest{
 		CommandID:             nativeString(values["command_id"]),
 		CanonicalizerRevision: nativeUint32(values["canonicalizer_revision"]),
 		IdentityRegion:        nativeString(values["identity_region"]),
 		CarrierBinding:        binding,
+		ExpectedMemberDigest:  nativeString(values["expected_member_digest"]),
 	}
-	return request, ok && nativeKinds(values, []string{"command_id", "identity_region"}, nil, []string{"canonicalizer_revision"}, nil) && nativeUint32Valid(values["canonicalizer_revision"]) && request.CommandID != "" && request.IdentityRegion != ""
+	strings := []string{"command_id", "identity_region"}
+	if request.ExpectedMemberDigest != "" {
+		strings = append(strings, "expected_member_digest")
+	}
+	return request, ok && nativeKinds(values, strings, nil, []string{"canonicalizer_revision"}, nil) && nativeUint32Valid(values["canonicalizer_revision"]) && request.CommandID != "" && request.IdentityRegion != "" && (!hasExpectedMemberDigest || validMemberDigest(request.ExpectedMemberDigest))
 }
 
 func decodeNativeRcsCommit(input string) (nativeRcsCommitProjection, bool) {
 	if len(input) > maxNativeRcsCommitJSONBytes || !utf8.ValidString(input) {
 		return nativeRcsCommitProjection{}, false
 	}
-	values, ok := nativeObject([]byte(input), "command_id", "tmp_id", "mapping_revision", "proof_version", "proof_digest", "message_body", "target")
+	values, ok := nativeObject([]byte(input), "command_id", "tmp_id", "mapping_revision", "proof_version", "proof_digest", "message_body", "target", "expected_member_digest")
+	if !ok {
+		values, ok = nativeObject([]byte(input), "command_id", "tmp_id", "mapping_revision", "proof_version", "proof_digest", "message_body", "target")
+	}
 	if !ok {
 		return nativeRcsCommitProjection{}, false
 	}
+	_, hasExpectedMemberDigest := values["expected_member_digest"]
 	target, targetOK := decodeTarget(values["target"])
 	digest, digestOK := decodeDigest(values["proof_digest"])
 	commit := nativeRcsCommitProjection{
-		CommandID:       nativeString(values["command_id"]),
-		TmpID:           nativeString(values["tmp_id"]),
-		MappingRevision: nativeUint64(values["mapping_revision"]),
-		ProofVersion:    nativeUint32(values["proof_version"]),
-		ProofDigest:     digest,
-		MessageBody:     nativeString(values["message_body"]),
-		Target:          target,
+		CommandID:            nativeString(values["command_id"]),
+		TmpID:                nativeString(values["tmp_id"]),
+		MappingRevision:      nativeUint64(values["mapping_revision"]),
+		ProofVersion:         nativeUint32(values["proof_version"]),
+		ProofDigest:          digest,
+		MessageBody:          nativeString(values["message_body"]),
+		Target:               target,
+		ExpectedMemberDigest: nativeString(values["expected_member_digest"]),
 	}
-	return commit, targetOK && digestOK && nativeKinds(values, []string{"command_id", "tmp_id", "message_body"}, nil, []string{"mapping_revision", "proof_version"}, nil) && commit.CommandID != "" && validNativeTmpID(commit.TmpID) && validNativeBody(commit.MessageBody) && commit.ProofVersion == 2 && commit.Target.ProofVersion == 2
+	strings := []string{"command_id", "tmp_id", "message_body"}
+	if commit.ExpectedMemberDigest != "" {
+		strings = append(strings, "expected_member_digest")
+	}
+	return commit, targetOK && digestOK && nativeKinds(values, strings, nil, []string{"mapping_revision", "proof_version"}, nil) && commit.CommandID != "" && validNativeTmpID(commit.TmpID) && validNativeBody(commit.MessageBody) && commit.ProofVersion == 2 && commit.Target.ProofVersion == 2 && (!hasExpectedMemberDigest || validMemberDigest(commit.ExpectedMemberDigest))
+}
+
+func validMemberDigest(value string) bool {
+	digest, err := base64.StdEncoding.DecodeString(value)
+	return err == nil && len(digest) == 32
 }
 
 func decodePrepareCarrierBinding(raw json.RawMessage) (nativeRcsPrepareCarrierBinding, bool) {
@@ -92,7 +116,7 @@ func decodeTarget(raw json.RawMessage) (nativeRcsTargetSnapshot, bool) {
 	outgoing, outgoingOK := decodeOutgoing(v["outgoing"])
 	evidence, evidenceOK := decodeEvidence(v["evidence"])
 	t := nativeRcsTargetSnapshot{nativeUint32(v["proof_version"]), nativeString(v["peppy_conversation_id"]), nativeString(v["google_conversation_id"]), nativeString(v["conversation_type"]), nativeString(v["status"]), nativeString(v["send_mode"]), nativeBool(v["read_only"]), nativeBool(v["default_outgoing"]), participants, nativeString(v["class"]), nativeString(v["canonical_recipient"]), nativeString(v["canonical_own_identity"]), nativeString(v["identity_region"]), nativeUint32(v["canonicalizer_revision"]), nativeString(v["selected_sim_id"]), binding, outgoing, evidence}
-	return t, ok && participantsOK && bindingOK && outgoingOK && evidenceOK && nativeKinds(v, []string{"peppy_conversation_id", "google_conversation_id", "conversation_type", "status", "send_mode", "class", "canonical_recipient", "canonical_own_identity", "identity_region", "selected_sim_id"}, []string{"read_only", "default_outgoing"}, []string{"proof_version", "canonicalizer_revision"}, nil) && nativeUint32Valid(v["proof_version"]) && nativeUint32Valid(v["canonicalizer_revision"]) && validEnum(t.ConversationType, "Rcs", "Other") && validEnum(t.SendMode, "Automatic", "Other") && validEnum(t.Class, "OneToOne", "SelfChat")
+	return t, ok && participantsOK && bindingOK && outgoingOK && evidenceOK && nativeKinds(v, []string{"peppy_conversation_id", "google_conversation_id", "conversation_type", "status", "send_mode", "class", "canonical_recipient", "canonical_own_identity", "identity_region", "selected_sim_id"}, []string{"read_only", "default_outgoing"}, []string{"proof_version", "canonicalizer_revision"}, nil) && nativeUint32Valid(v["proof_version"]) && nativeUint32Valid(v["canonicalizer_revision"]) && validEnum(t.ConversationType, "Rcs", "Other") && validEnum(t.SendMode, "Automatic", "Other") && validEnum(t.Class, "OneToOne", "SelfChat", "Group")
 }
 
 func decodeParticipants(raw json.RawMessage) ([]nativeRcsParticipant, bool) {

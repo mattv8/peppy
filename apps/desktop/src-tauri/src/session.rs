@@ -1819,6 +1819,11 @@ impl Session {
                 can_unblock: conversation.can_unblock,
                 rcs_encryption,
                 rcs_history_gap,
+                group: peppy_desktop_api::conversation_group_view(
+                    &self.client,
+                    conversation.conversation_id,
+                )
+                .map_err(core_error)?,
             });
         }
         let listed: HashSet<ConversationId> =
@@ -1852,6 +1857,7 @@ impl Session {
                 can_unblock: false,
                 rcs_encryption: None,
                 rcs_history_gap: false,
+                group: None,
             });
         }
         let draft = active

@@ -31,6 +31,13 @@ class GoogleMessagesLinkDiagnosticsTest {
             "live" to "enabled", "live" to "disabled",
             "typing" to "enabled", "typing" to "disabled", "typing" to "inbound_sealed",
             "typing" to "outbound_effect", "typing" to "suppressed", "typing" to "dropped_stale",
+        "create" to "begin_failed", "create" to "commit_failed", "create" to "link_unavailable",
+        "create" to "unknown", "create" to "not_rcs",
+        "reconcile" to "snapshot_unavailable", "reconcile" to "ingest_failed", "reconcile" to "after_create_failed",
+        "group_send" to "submitted", "group_send" to "members_changed", "group_send" to "outcome_unknown",
+        "group_send" to "refused", "group_send" to "route_not_current", "group_send" to "target_refused",
+        "group_send" to "proof_refused", "group_send" to "begin_refused", "group_send" to "commit_rejected",
+        "group_send" to "lease_refused", "create" to "settle_failed",
     )
 
     @Test fun everyPairRecordsOnlyItsStableNumericReason() {
@@ -38,7 +45,7 @@ class GoogleMessagesLinkDiagnosticsTest {
         SyncDiagnostics.withTestConfiguration(true, { 10L }, { error("CPU unused") }, records::add) {
             stablePairs.forEach { (kind, code) -> recordGoogleMessagesLinkEvent(kind, code, Long.MAX_VALUE) }
         }
-		assertEquals(59, records.size)
+		assertEquals(78, records.size)
         records.forEachIndexed { index, record ->
             assertEquals("event=27 session=1 timestamp_ms=10 trace=0 29=${index + 1}", record)
         }

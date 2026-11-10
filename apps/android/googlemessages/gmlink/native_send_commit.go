@@ -24,7 +24,7 @@ func nativeCommitMatchesTicket(commit nativeRcsCommitProjection, ticket *nativeR
 		SelectedSIMID: observation.SelectedSIMID, CarrierBinding: observation.CarrierBinding, Outgoing: observation.Outgoing, Evidence: observation.NativeEvidence,
 	}
 	// Body and tmp ID are supplied only by the captured core-issued native handle.
-	return commit.CommandID == ticket.request.CommandID && commit.MappingRevision == mapping.MappingRevision &&
+	return commit.CommandID == ticket.request.CommandID && commit.MappingRevision == mapping.MappingRevision && commit.ExpectedMemberDigest == ticket.request.ExpectedMemberDigest &&
 		commit.ProofVersion == mapping.ProofVersion && commit.ProofDigest == mapping.Proof.Digest && reflect.DeepEqual(commit.Target, expected)
 }
 
@@ -69,7 +69,13 @@ func (link *Link) CommitNativeRcs(ticketID, commitJSON string) string {
 		return reject()
 	}
 	fetched, code := link.getConversation(operationCtx, client, ticket.targetObservation.GoogleConversationID)
-	if code != "" || !proto.Equal(fetched, ticket.conversation) || operationCtx.Err() != nil {
+	if code != "" || operationCtx.Err() != nil {
+		return reject()
+	}
+	if ticket.group && groupMemberDigest(fetched) != ticket.request.ExpectedMemberDigest {
+		return nativeRcsJSON(nativeRcsPrepareResult{Code: "members_changed"})
+	}
+	if !proto.Equal(fetched, ticket.conversation) {
 		return reject()
 	}
 	link.mu.Lock()
@@ -80,7 +86,7 @@ func (link *Link) CommitNativeRcs(ticketID, commitJSON string) string {
 	}
 	payload, code := validatedPayload(ticket.conversation, ticket.settings, rcsSendRequest{
 		TmpID: commit.TmpID, GoogleConversationID: ticket.targetObservation.GoogleConversationID, Content: commit.MessageBody,
-	})
+	}, ticket.group)
 	if code != "" {
 		return reject()
 	}
@@ -93,7 +99,11 @@ func (link *Link) CommitNativeRcs(ticketID, commitJSON string) string {
 	response, err := effect(ctx, payload)
 	link.mu.Lock()
 	admitted := flight.admitted
+	membersChanged := flight.membersChanged
 	link.mu.Unlock()
+	if membersChanged {
+		return nativeRcsJSON(nativeRcsPrepareResult{Code: "members_changed"})
+	}
 	if errors.Is(err, errSendAdmissionRevoked) && !admitted {
 		return reject()
 	}
@@ -118,6 +128,10 @@ func (link *Link) admitNativeSend(ctx context.Context, ticket *nativeRcsTicket, 
 	}
 	link.mu.Lock()
 	defer link.mu.Unlock()
+	if ticket.group && groupMemberDigest(link.conversationRecords[ticket.targetObservation.GoogleConversationID]) != ticket.request.ExpectedMemberDigest {
+		flight.membersChanged = true
+		return false
+	}
 	if ctx.Err() != nil || !link.nativeFlightCurrentLocked(ticket, flight) {
 		return false
 	}

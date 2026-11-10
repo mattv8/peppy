@@ -18,6 +18,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -69,6 +70,22 @@ class TypingBridgeTest {
 
         assertEquals(listOf("frame"), transport.sent)
         assertEquals(NativeTypingState.STARTED, core.sealedState)
+    }
+
+    @Test fun `group Go typing carries its canonical participant into the seal and one-to-one stays participant-free`() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(calls)
+        val transport = FakeTransport(calls)
+        val bridge = bridge(core, transport, calls)
+        bridge.start(credentials())
+        transport.enable(listOf("gateway"), "gateway")
+
+        bridge.receive("{\"google_conversation_id\":\"group\",\"state\":\"started\",\"participant\":\"+12025550102\"}")
+        assertEquals("+12025550102", core.sealedParticipant)
+        assertEquals(listOf("frame"), transport.sent)
+
+        bridge.receive("{\"google_conversation_id\":\"owned\",\"state\":\"stopped\"}")
+        assertNull(core.sealedParticipant)
     }
 
     @Test fun `stale sequence expired deadline and repeated started never call Google`() {
@@ -338,7 +355,7 @@ class TypingBridgeTest {
 
     private fun credentials(generation: Long = 1) = TypingCredentials("https://example.test", "bearer", "gateway", generation)
     private fun session() = NativeLiveSessionUpdate("peer", null, 1UL, 1UL)
-    private fun intent(sequence: ULong = 1UL, deadline: ULong = 9_999_999UL) = NativeLiveAction.GatewayTypingIntent("peer", 1UL, sequence, "conversation", NativeTypingState.STARTED, deadline)
+    private fun intent(sequence: ULong = 1UL, deadline: ULong = 9_999_999UL) = NativeLiveAction.GatewayTypingIntent("peer", 1UL, sequence, "conversation", null, NativeTypingState.STARTED, deadline)
     private fun outcome(update: NativeLiveSessionUpdate? = null, action: NativeLiveAction? = null, reply: String? = null) = NativeLiveOutcome(1UL, update, action, reply)
 
     private class FakeTransport(private val calls: MutableList<String>) : TypingTransport {
@@ -356,13 +373,18 @@ class TypingBridgeTest {
         var context: TypingReceiveContext? = TypingReceiveContext("conversation", true)
         var sealed: NativeLiveOutbound? = NativeLiveOutbound(1UL, "frame")
         var sealedState: NativeTypingState? = null
+        var sealedParticipant: String? = null
         var nextOpen = NativeLiveOutcome(1UL, null, null, null)
         override fun enable(context: NativeLiveEnableContext, clock: NativeLiveClock): ULong { calls += "core.enable"; enableContext = context; return 1UL }
         override fun setSharing(enabled: Boolean) { calls += "core.share" }
         override fun disable() { calls += "core.disable" }
         override fun receiveContext(googleConversationId: String) = context
         override fun ownedGoogleConversationId(conversationId: String) = "google-conversation"
-        override fun seal(conversationId: String, gatewayDeviceId: String, state: NativeTypingState, clock: NativeLiveClock): NativeLiveOutbound? { sealedState = state; return sealed }
+        override fun seal(conversationId: String, gatewayDeviceId: String, participant: String?, state: NativeTypingState, clock: NativeLiveClock): NativeLiveOutbound? {
+            sealedState = state
+            sealedParticipant = participant
+            return sealed
+        }
         override fun open(frameJson: String, clock: NativeLiveClock): NativeLiveOutcome { calls += "core.open"; return nextOpen }
     }
 

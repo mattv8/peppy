@@ -21,6 +21,6 @@ export type MembershipResponseV1 = { challenge_id: string; connection_id: string
 export type PairingQrRecord = { challenge_token: string; device_binding: string; expires_at_unix_seconds: number; https_origin: string; key_epoch: number; profile_fingerprint: string; protocol_version: number; vault_id: string; };
 export type SessionAckPlaintextV2 = { challenger_device_id: string; challenger_session_id: string; echoed_nonce_b64: string; responder_device_id: string; responder_session_id: string; sequence_floor: string; version: 2; };
 export type SourceSequence = string;
-export type TypingPlaintextV2 = { conversation_id: string; gateway_device_id: string; origin: 'vault_device'; state: 'started' | 'stopped'; version: 2; } | { conversation_id: string; origin: 'google_contact'; state: 'started' | 'stopped'; version: 2; };
+export type TypingPlaintextV2 = { conversation_id: string; gateway_device_id: string; origin: 'vault_device'; state: 'started' | 'stopped'; version: 2; } | { conversation_id: string; origin: 'google_contact'; participant?: string; state: 'started' | 'stopped'; version: 2; };
 export type VaultIdentityRecoveryRecordV1 = string;
 export type VaultIdentityStatusV1 = { protocol_version: 1; state: 'absent'; } | { key_epoch: number; operation_id: string; profile_fingerprint: string; protocol_version: 1; recovery_record: VaultIdentityRecoveryRecordV1; state: 'established'; };

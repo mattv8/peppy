@@ -108,6 +108,7 @@ impl Client {
             transport,
             None,
             None,
+            None,
         )?;
         let response = McpQueuedCommand {
             message_id: result.message_id,

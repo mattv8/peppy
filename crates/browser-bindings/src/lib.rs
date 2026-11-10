@@ -591,6 +591,8 @@ impl BrowserCore {
                 can_unblock: conversation.can_unblock,
                 rcs_encryption: rcs_metadata.as_ref().and_then(|item| item.rcs_encryption),
                 rcs_history_gap: rcs_metadata.is_some_and(|item| item.rcs_history_gap),
+                group: dto::conversation_group_view(client, conversation.conversation_id)
+                    .map_err(core)?,
             });
         }
         for draft in drafts
@@ -624,6 +626,7 @@ impl BrowserCore {
                 can_unblock: false,
                 rcs_encryption: None,
                 rcs_history_gap: false,
+                group: None,
             });
         }
         let keys = client.key_status().map_err(core)?;
@@ -1825,6 +1828,7 @@ mod tests {
                 draft.draft_id,
                 draft.revision,
                 ComposeDraftUpdate {
+                    group_name: None,
                     text: "first pending".into(),
                     recipients: vec!["+15555550100".into()],
                     attachment_ids: vec![],
@@ -1846,6 +1850,7 @@ mod tests {
                 first.draft_id,
                 first.revision,
                 ComposeDraftUpdate {
+                    group_name: None,
                     text: "updated".into(),
                     recipients: vec!["+15555550100".into()],
                     attachment_ids: vec![],
@@ -1968,6 +1973,7 @@ mod tests {
                 source.draft_id,
                 source.revision,
                 ComposeDraftUpdate {
+                    group_name: None,
                     text: "draft".into(),
                     recipients: vec!["+14155552671".into()],
                     ..Default::default()

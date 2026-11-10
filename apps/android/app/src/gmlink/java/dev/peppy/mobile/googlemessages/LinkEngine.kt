@@ -40,6 +40,8 @@ interface LinkHandle {
     fun bootstrapRcsObservation(requestJson: String): String = "{\"code\":\"rejected\"}"
 	fun refreshConversationIndex(): String = "{\"code\":\"unavailable\"}"
     fun conversationCandidateSnapshot(): String = "{\"code\":\"conversation_candidate_snapshot_unavailable\"}"
+    /** One Google group create. Never retried by the caller; an unavailable link reports unknown. */
+    fun createRcsGroup(requestJson: String): String = "{\"code\":\"unknown\"}"
     fun conversationLastActivity(googleIdsJson: String): String = "{\"code\":\"conversation_last_activity_unavailable\",\"complete\":false,\"last_message_ms\":{}}"
     fun fetchRcsGap(googleConversationId: String, pageToken: String): String = "{\"code\":\"gap_unavailable\"}"
 }

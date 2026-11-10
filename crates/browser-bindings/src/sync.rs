@@ -369,14 +369,23 @@ impl BrowserCore {
                         GatewayRoute::RcsLink { .. } => None,
                     },
                     expected_revision: expected_revision.to_string(),
+                    group_name: draft.group_name.clone(),
+                    expected_member_revision: args
+                        .get("expectedMemberRevision")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    group_create_confirm_duplicate: args
+                        .get("groupCreateConfirmDuplicate")
+                        .and_then(Value::as_bool),
                 };
                 let gateways = self
                     .gateways_known
                     .then(|| self.context.gateways.as_deref().unwrap_or(&[]));
                 let parts = compose::prepared_draft_send_parts(client, &input, gateways)
                     .map_err(compose_failure)?;
+                let group = compose::prepared_draft_send_group(&input).map_err(compose_failure)?;
                 let gate = client
-                    .begin_draft_send(draft_id, expected_revision, parts)
+                    .begin_draft_send_for_group(draft_id, expected_revision, parts, group)
                     .map_err(|error| draft_send_failure(error, expected_revision))?;
                 Ok(
                     json!({"remote": gate.remote.map(|value| json!({"draftId": value.draft_id.to_string(), "revisionId": value.revision_id.to_string(), "commandId": value.command_id.to_string()}))}),

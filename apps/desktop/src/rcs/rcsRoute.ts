@@ -25,7 +25,9 @@ function rcsRouteContext({ snapshot, activeConversationId, gatewayId, locked }: 
   if (!snapshot || locked || snapshot.encryption.state !== "unlocked" || (snapshot.mode !== "native" && snapshot.mode !== "browser") || !activeConversationId || !gatewayId) return undefined;
   const conversation = snapshot.conversations.find((item) => item.id === activeConversationId);
   const gateway = snapshot.gateways.find((item) => item.id === gatewayId);
-  if (!conversation || conversation.draftOnly || conversation.recipientlessDraft || (conversation.participants?.length ?? 0) > 1 || !gateway || gateway.simulated) return undefined;
+  const isGroup = (conversation?.participants?.length ?? 0) > 1;
+  const groupState = conversation?.group?.state;
+  if (!conversation || conversation.draftOnly || conversation.recipientlessDraft || (isGroup && groupState !== "live" && groupState !== "paused") || !gateway || gateway.simulated) return undefined;
   const gatewayStatus = snapshot.rcsStatus?.gateways.find((item) => item.gatewayId === gatewayId);
   const eligibility = snapshot.rcsStatus?.eligibilities.find((item) => item.conversationId === activeConversationId && item.gatewayId === gatewayId);
   return { conversation, gatewayStatus, eligibility };

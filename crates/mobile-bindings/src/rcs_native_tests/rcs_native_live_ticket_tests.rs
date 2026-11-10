@@ -1,3 +1,4 @@
+use super::group_fixture::{GROUP_MEMBERS, group_fixture, group_member_digest};
 use super::*;
 use std::io::{self, BufRead, BufReader, ErrorKind, Write};
 use std::net::{TcpListener, TcpStream};
@@ -215,6 +216,113 @@ fn same_live_go_ticket_uses_real_rust_facts_and_commit() {
     assert!(
         output.status.success(),
         "Go contract test failed: {:?}",
+        output
+    );
+}
+
+#[test]
+#[ignore = "launches the tagged Go group live-ticket contract test; invoke explicitly in CI"]
+fn same_live_go_group_ticket_uses_real_rust_facts_and_commit() {
+    run_live_group_ticket("^TestNativeRcsLiveGroupCoreRoundTrip$", "accepted");
+}
+
+#[test]
+#[ignore = "launches the tagged Go group live-ticket contract test; invoke explicitly in CI"]
+fn same_live_go_group_ticket_refuses_a_changed_roster_before_dispatch() {
+    run_live_group_ticket(
+        "^TestNativeRcsLiveGroupRosterChangedRoundTrip$",
+        "members_changed",
+    );
+}
+
+/// Drives one Go-bound group ticket through Rust's group permit. Go owns the phone side and the
+/// dispatch count; Rust owns the verification, facts, begin, and commit projection.
+fn run_live_group_ticket(go_test: &str, expected_summary: &str) {
+    let fixture = group_fixture(&GROUP_MEMBERS);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let go_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/android/googlemessages");
+    let path = std::env::var_os("PATH").unwrap();
+    let home = std::env::var_os("HOME").unwrap();
+    let mut child = ChildGuard::new(
+        Command::new("go")
+            .args([
+                "test",
+                "-race",
+                "-tags",
+                "rcs_native_contract",
+                "./gmlink",
+                "-run",
+                go_test,
+                "-count=1",
+                "-timeout",
+                "60s",
+            ])
+            .current_dir(go_dir)
+            .env_clear()
+            .env("PATH", path)
+            .env("HOME", home)
+            .env("PEPPY_RCS_NATIVE_LIVE_ADDR", address)
+            .spawn()
+            .unwrap(),
+    );
+
+    let stream =
+        accept_with_deadline(&listener, child.child_mut(), Instant::now() + IPC_TIMEOUT).unwrap();
+    stream.set_nonblocking(false).unwrap();
+    stream.set_read_timeout(Some(IPC_TIMEOUT)).unwrap();
+    stream.set_write_timeout(Some(IPC_TIMEOUT)).unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut writer = stream;
+    write_frame(
+        &mut writer,
+        &serde_json::json!({ "command_id": fixture.command_id }),
+    );
+
+    let observations: GoObservations = read_frame(&mut reader, SNAPSHOT_FRAME_CAP).unwrap();
+    assert!(!observations.route.is_empty());
+    assert!(!observations.snapshot.is_empty());
+    let route: RcsMappingObservation = serde_json::from_str(&observations.route).unwrap();
+    let observation: RcsMappingObservation = serde_json::from_str(&observations.target).unwrap();
+    // The production order for a group-only link: Go's route advances the link context, then Go's
+    // snapshot creates the proof. No 1:1 verification runs.
+    assert!(fixture.advance_route(&route, observations.now_ms));
+    let report = fixture.ingest(&observations.snapshot, observations.now_ms);
+    assert_eq!(report.linked, 1);
+    assert_eq!(
+        fixture.verify(&observation, observations.now_ms),
+        NativeRcsGroupVerification::Proven
+    );
+    let preparation = fixture.prepare(observations.now_ms);
+    assert_eq!(
+        preparation.expected_member_digest().as_deref(),
+        Some(group_member_digest(&GROUP_MEMBERS).as_str()),
+        "Rust's member digest must equal the digest Go sent"
+    );
+    write_frame(
+        &mut writer,
+        &serde_json::json!({ "facts": preparation.facts_json().unwrap() }),
+    );
+
+    let begin: GoBeginRequest = read_frame(&mut reader, SNAPSHOT_FRAME_CAP).unwrap();
+    let committed = preparation.begin(begin.observation, begin.now_ms).unwrap();
+    assert!(committed.commit_json().len() <= COMMIT_FRAME_CAP);
+    write_frame(
+        &mut writer,
+        &serde_json::json!({ "commit": committed.commit_json() }),
+    );
+    let summary: GoSummary = read_frame(&mut reader, COMMIT_FRAME_CAP).unwrap();
+    assert_eq!(summary.summary, expected_summary);
+    assert!(matches!(
+        preparation.facts_json(),
+        Err(MobileBindingsError::Conflict)
+    ));
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Go group contract test failed: {:?}",
         output
     );
 }

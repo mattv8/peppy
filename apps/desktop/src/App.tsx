@@ -34,6 +34,7 @@ import {
   LockKeyhole,
   LockOpen,
   Modal,
+  Info,
   MessageSquare,
   MessageSquarePlus,
   Minus,
@@ -144,7 +145,7 @@ import { DETACHED_HISTORY_LIMIT, boundedAroundMessages, mergeDetachedMessages, s
 import { GatewayPicker } from "./setup/GatewayPicker";
 import { installHostedSessionRenewal } from "./bridge/hostedSessionRenewal";
 import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readComposerAttachmentLayout, readGroupSenderAvatars, readShareTyping } from "./shell/layout-persistence";
-import { RcsBadge } from "./rcs/RcsBadge";
+import { MmsGroupBadge, RcsBadge } from "./rcs/RcsBadge";
 import { ConversationRcsNotice } from "./rcs/ConversationRcsNotice";
 import { RcsMessageMeta } from "./rcs/RcsMessageMeta";
 import { rcsSendBlock } from "./rcs/rcsRoute";
@@ -153,6 +154,17 @@ import { TypingAnnouncer, TypingIndicator } from "./typing/TypingIndicator";
 import { useTypingDisplay } from "./typing/useTypingDisplay";
 import { useTypingSender } from "./typing/useTypingSender";
 import { peppyCopy } from "./generated/peppyCopy";
+import { GroupDetailsDialog } from "./group/GroupDetailsDialog";
+import { GroupNameField } from "./group/GroupNameField";
+import { GroupMembersChangedNotice } from "./group/GroupMembersChangedNotice";
+import { GroupCreateNotRcsInfo, GroupCreateProgress, GroupCreateUnconfirmed, GroupUpdateRequiredNotice, GroupWithdrawnNotice } from "./group/GroupComposerNotices";
+import { GroupNotice } from "./group/GroupNotice";
+import { groupNoticeItems } from "./group/groupNotices";
+import { interleaveGroupNotices } from "./group/groupTimeline";
+import { normalizeGroupName } from "./group/groupName";
+import { groupTypingLabel } from "./group/groupCopy";
+import { groupSubtitle, groupTitle } from "./group/groupTitle";
+import { type GroupComposerNotice, groupAllowsTypingSend, groupComposerNotice, groupIsReadOnly, groupMembers, groupNoticeState } from "./group/groupState";
 import { CORAL_ACCENT_INDEX, accentAttribute, accentSwatchColor } from "./shell/accent-color";
 import { useAccentColor } from "./shell/useAccentColor";
 import { senderLabel, senderRunEdges } from "./sender/attribution";
@@ -681,7 +693,10 @@ function HeadRoutePill({ content, gateways, accountReadOnly = false }: { content
 
 type RowRegistry = (id: string, row: HTMLElement | null) => void;
 
-function MessageMeta({ message, hideTime = false }: { message: MessageView; hideTime?: boolean }) {
+/** Per-send options the group refusal actions use. Omitted = the latest group revision, no duplicate confirmation. */
+type GroupSendOptions = { expectedMemberRevision?: string; groupCreateConfirmDuplicate?: boolean };
+
+function MessageMeta({ message, hideTime = false, onEditResend, onCreateAgain }: { message: MessageView; hideTime?: boolean; onEditResend?(): void; onCreateAgain?(): void }) {
   const { displayedTime, deliveryTimeFallback, deliveryTimeUnavailable } = messageTime(message);
   const formattedTime = formatDateTime(displayedTime);
   const isoTime = isoDateTime(displayedTime);
@@ -703,16 +718,16 @@ function MessageMeta({ message, hideTime = false }: { message: MessageView; hide
   const statusIcon = message.status === "sent" ? <Check size={10} aria-hidden /> : message.status === "read" ? <CheckCheck size={10} aria-hidden /> : <Clock size={10} aria-hidden />;
   const showTextStatus = !read && !deliveryConfirmed && Boolean(statusLabel) && (!compactStatus || !validTime);
   const showCompactStatus = !deliveryConfirmed && Boolean(compactStatus && validTime);
-  if (!showTextStatus && !showTime && !showCompactStatus && !deliveryConfirmed && !phoneHistory && !read) return null;
+  if (!showTextStatus && !showTime && !showCompactStatus && !deliveryConfirmed && !phoneHistory && !read && !message.groupHint) return null;
   return <div className="message-meta" data-message-meta={message.id} data-status={message.status} aria-live={rcsMessage ? "off" : undefined}>
     {showTextStatus && <span className="message-meta-status">{["failed-before-submit", "failed-confirmed"].includes(message.status!) ? <X size={10} aria-hidden /> : message.status === "unknown" ? <TriangleAlert size={10} aria-hidden /> : statusIcon}{statusLabel}</span>}
-    {read && <RcsMessageMeta messageId={message.id} status={message.status} statusLabel={STATUS_LABEL[message.status!]} />}
+    {read && <RcsMessageMeta messageId={message.id} status={message.status} statusLabel={STATUS_LABEL[message.status!]} groupHint={message.groupHint} />}
     {(showTextStatus || read) && showTime && <span className="message-meta-separator" aria-hidden>·</span>}
     {showTime && <time dateTime={isoTime}>{formattedTime}</time>}
     {showCompactStatus && <span className="message-meta-status" role="img" aria-label={statusLabel} title={statusLabel}>{statusIcon}</span>}
     {deliveryConfirmed && <span className="message-meta-status" role="img" aria-label={deliveryLabel} title={deliveryLabel}><CheckCheck size={10} aria-hidden /></span>}
     {phoneHistory && <span className="message-meta-status" role="img" aria-label="From phone history" title="From phone history" data-message-phone-icon={message.id}><Smartphone size={10} aria-hidden /></span>}
-    {rcsMessage && !read && <RcsMessageMeta messageId={message.id} status={message.status} rcsReported={message.rcsReported} statusLabel={message.status ? STATUS_LABEL[message.status] : ""} />}
+    {(rcsMessage || message.groupHint) && !read && <RcsMessageMeta messageId={message.id} status={message.status} rcsReported={message.rcsReported} statusLabel={message.status ? STATUS_LABEL[message.status] : ""} groupHint={message.groupHint} onEditResend={onEditResend} onCreateAgain={onCreateAgain} />}
   </div>;
 }
 
@@ -790,8 +805,14 @@ function MessageList({
   captureReactionLayout,
   restoreReactionLayout,
   toneOverrides = {},
+  onEditGroupResend,
+  onCreateGroupAgain,
 }: {
   conversation?: ConversationView;
+  /** Copies a refused group message's body back into the composer. Nothing is sent. */
+  onEditGroupResend?(message: MessageView): void;
+  /** Copies an unconfirmed group create's body back into the composer behind its confirmation. Nothing is sent. */
+  onCreateGroupAgain?(message: MessageView): void;
   loading: boolean;
   registerRow: RowRegistry;
   publicCopies: Record<string, PublicCopy>;
@@ -912,18 +933,20 @@ function MessageList({
     : undefined;
   const isGroup = (conversation.participants?.length ?? 0) > 1;
   const messageGroups = groupMessages(visualMessages);
+  const timeline = interleaveGroupNotices(messageGroups, groupNoticeItems(conversation.group?.notices));
   const senderEdges = isGroup
-    ? senderRunEdges(messageGroups, {
-      key: (group) => group.id,
-      identity: (group) => {
-        const message = group.messages[0];
+    ? senderRunEdges(timeline, {
+      key: (item) => item.id,
+      identity: (item) => {
+        if (item.kind === "notice") return { kind: "boundary" };
+        const message = item.group.messages[0];
         if (message.sender === "self") return { kind: "outgoing" };
         if (reactions.notices.has(message.id)) return { kind: "boundary" };
         return { kind: "incoming", address: message.senderAddress };
       },
-      endsRunAfter: (group) => {
-        if (!compactTimestamps) return false;
-        const message = group.messages.at(-1)!;
+      endsRunAfter: (item) => {
+        if (!compactTimestamps || item.kind === "notice") return false;
+        const message = item.group.messages.at(-1)!;
         return timeIsShown(message) && !hiddenTimes.has(message.id) && (!reactions.notices.has(message.id) || showsReactionNoticeMeta(message));
       },
     })
@@ -937,7 +960,7 @@ function MessageList({
     const openSender = () => message.senderAddress && onOpenSender?.(message.senderAddress);
     const labelNode = edge.start ? actionable ? (
       <button type="button" className="message-sender-label" data-sender-label={message.senderAddress} data-sender-known={label.isName} aria-label={label.contact ? `Open ${label.text} in Contacts` : `Add ${label.text} to contacts`} onClick={openSender}>{label.text}</button>
-    ) : <span className="message-sender-label" data-plain data-sender-label={message.senderAddress} data-sender-known={label.isName} aria-hidden="true" title={label.text}>{label.text}</span> : undefined;
+    ) : <span className="message-sender-label" data-plain data-sender-unknown={message.senderAddress ? undefined : true} data-sender-label={message.senderAddress} data-sender-known={label.isName} aria-hidden="true" title={label.text}>{label.text}</span> : undefined;
     const avatar = edge.end && showSenderAvatars ? <span className="message-sender-avatar" data-sender-avatar={message.senderAddress} data-clickable={actionable || undefined} aria-hidden="true" onClick={actionable ? openSender : undefined}><ContactAvatar size={24} seed={incomingToneSeed(conversationToneSeed, message.senderAddress)} name={label.isName ? label.text : undefined} photoDataUrl={resolution[message.senderAddress ?? ""]?.photoDataUrl} toneOverrides={toneOverrides} /></span> : undefined;
     return { edge, label, labelNode, avatar };
   };
@@ -972,7 +995,9 @@ function MessageList({
         {conversation.messages.filter(message => suppressed.has(message.id)).map(message => <ReactionNotice key={message.id} reaction={message} notice={reactions.notices.get(message.id)!} actorName={actorName} rowRef={row => registerRow(message.id, row)} onOpen={onOpenReactionTarget} suppressedHint />)}
         {historyExhausted && <p id="history-beginning-marker" className="history-load-band" data-history-state="beginning">Beginning of conversation</p>}
         {!conversation.messages.length && <p>Start the conversation.</p>}
-        {messageGroups.map((group) => {
+        {timeline.map((item) => {
+          if (item.kind === "notice") return <GroupNotice key={item.id} notice={item.notice} displayName={(address) => displayAddressName(address, resolution)} />;
+          const group = item.group;
           const message = group.messages[0];
           const reactionNotice = reactions.notices.get(message.id);
           const imageRun = group.messages.every((candidate) => candidate.transport === "mms" && candidate.attachments.length > 0 && candidate.attachments.every((attachment) => attachment.mediaType.startsWith("image/")));
@@ -1095,7 +1120,7 @@ function MessageList({
               {sender?.labelNode}
               {sender ? <div className="message-sender-line" data-sender-line>{sender.avatar ?? (showSenderAvatars && <span className="message-sender-gutter" aria-hidden="true" />)}{bubble}</div> : bubble}
               {badges && <ReactionBadges messageId={message.id} badges={badges} actorName={actorName} chipRef={chipRef} />}
-              <MessageMeta message={message} hideTime={hiddenTimes.has(message.id)} />
+              <MessageMeta message={message} hideTime={hiddenTimes.has(message.id)} onEditResend={onEditGroupResend ? () => onEditGroupResend(message) : undefined} onCreateAgain={onCreateGroupAgain ? () => onCreateGroupAgain(message) : undefined} />
             </div>
           );
         })}
@@ -1999,6 +2024,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [recipientPosition, setRecipientPosition] = useState<RecipientPosition | null>(null);
   const [pendingRecipient, setPendingRecipient] = useState(false);
   const [newComposeKey, setNewComposeKey] = useState<string | null>(null);
+  const [groupDetailsOpen, setGroupDetailsOpen] = useState(false);
+  const [groupNotice, setGroupNotice] = useState<GroupComposerNotice | null>(null);
+  const groupDetailsButtonRef = useRef<HTMLButtonElement>(null);
   const [deleteConfirmationId, setDeleteConfirmationId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [pendingPinId, setPendingPinId] = useState<string | null>(null);
@@ -3608,6 +3636,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     () => active?.messages.reduce<string | undefined>((latest, message) => message.sender === "other" ? message.id : latest, undefined),
     [active?.messages],
   );
+  /** The newest incoming message's sender. A group member's typing state ends when their message arrives. */
+  const latestIncomingSender = useMemo(
+    () => active?.messages.reduce<string | undefined>((latest, message) => message.sender === "other" ? message.senderAddress : latest, undefined),
+    [active?.messages],
+  );
   const typingSender = useTypingSender({
     bridge,
     conversationId: active?.id,
@@ -3617,14 +3650,19 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     readOnly: composerReadOnly,
     visible: conversationSurfaceVisible,
     sharingEnabled: shareTyping,
+    groupAllowsTyping: groupAllowsTypingSend(active),
   });
   const isGroup = (active?.participants?.length ?? 0) > 1;
+  /** A withdrawn group is read-only: it can be read, but not sent to (UX spec §9, Q2). */
+  const groupLeft = groupIsReadOnly(active?.group);
   const typing = useTypingDisplay({
     bridge,
     conversationId: active?.id,
     current: rcsRoute.current && conversationSurfaceVisible,
     localUserTyping: typingSender.state === "active",
     incomingMessageId: latestIncomingMessageId,
+    incomingSender: latestIncomingSender,
+    members: active ? groupMembers(active) : undefined,
     connected: snapshot?.connection.state === "connected",
     direct: !isGroup,
   });
@@ -3662,6 +3700,19 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (previousSlot && isDirty(previousSlot)) await store.flush(previous);
     const { key } = store.createNew(recipient);
     const draftKey = store.resolve(key);
+    setNewComposeKey(draftKey);
+    choose(draftKey);
+    setNotice("");
+  };
+  /** Opens a new conversation draft to the same people, for a withdrawn group that cannot be sent to. */
+  const startGroupMmsDraft = async (recipientIds: string[]) => {
+    notificationNavigationEpoch.current += 1;
+    const previous = selectedRef.current;
+    const previousSlot = previous ? store.get(previous) : undefined;
+    if (previousSlot && isDirty(previousSlot)) await store.flush(previous);
+    const { key } = store.createNew();
+    const draftKey = store.resolve(key);
+    void store.edit(draftKey, { recipientIds });
     setNewComposeKey(draftKey);
     choose(draftKey);
     setNotice("");
@@ -3961,12 +4012,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }
   };
 
-  const send = async () => {
-    if (sendingRef.current || !slotKey) return;
+  const send = async (options: GroupSendOptions = {}) => {
+    if (sendingRef.current || !slotKey || groupLeft) return;
     autoAcknowledgeDraftSyncNotice();
     const session = currentSearchSessionKey();
     sendingRef.current = true;
     setSending(true);
+    setGroupNotice(null);
     setComposerNotice(slotKey, "");
     setDraftNotice((notice) => notice?.key === slotKey && notice.event === "stale-send" ? undefined : notice);
     draftNoticesRef.current.delete(slotKey);
@@ -4014,6 +4066,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         return setComposerNotice(current.key, `Not sent: ${reason}.`);
       }
       const sendContent = { ...current.content, recipientIds: [...current.content.recipientIds], attachmentIds: [...current.content.attachmentIds] };
+      const groupSend = sendContent.recipientIds.length > 1 || (latestConversation?.participants?.length ?? 0) > 1;
+      // The composer's revision: the caller's (a resend after a refusal), else the latest snapshot's.
+      const expectedMemberRevision = groupSend ? options.expectedMemberRevision ?? latestConversation?.group?.memberRevision : undefined;
       const restoreUnsent = async () => {
         const next = store.get(current.key)?.content ?? blankContent();
         await store.edit(current.key, {
@@ -4021,11 +4076,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             ? next.text
             : [sendContent.text, next.text].filter(Boolean).join("\n"),
           attachmentIds: [...new Set([...sendContent.attachmentIds, ...next.attachmentIds])],
+          groupName: next.groupName ?? sendContent.groupName,
         });
         store.release(current.key);
       };
       store.hold(current.key);
-      await store.edit(current.key, { text: "", attachmentIds: [] });
+      await store.edit(current.key, { text: "", attachmentIds: [], groupName: undefined });
       const sentSlot = store.get(current.key);
       if (!sentSlot || !mountedRef.current || session !== currentSearchSessionKey()) return;
       const sentGeneration = sentSlot.generation;
@@ -4034,13 +4090,18 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           id: current.id,
           conversationId: current.conversationId,
           ...sendContent,
+          groupName: groupSend ? normalizeGroupName(sendContent.groupName) : undefined,
           expectedRevision: current.revision,
           gatewayId: chosen.gateway.id,
           simId: chosen.gateway.simId,
+          ...(expectedMemberRevision === undefined ? {} : { expectedMemberRevision }),
+          ...(options.groupCreateConfirmDuplicate ? { groupCreateConfirmDuplicate: true } : {}),
         });
         if (!mountedRef.current || session !== currentSearchSessionKey() || !store.get(current.key)) return;
         if (!result.accepted) {
           await restoreUnsent();
+          const refusal = groupComposerNotice(result, current.key);
+          if (refusal) return setGroupNotice(refusal);
           return setComposerNotice(current.key,
             result.reason ?? `${STATUS_LABEL[result.status]}. The draft was preserved.`,
           );
@@ -4048,6 +4109,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         const postSendContent = store.get(current.key)?.content;
         store.markSent(current.key, sentGeneration, result.revision, postSendContent);
         setNewComposeKey(null);
+        if (result.reason === "create_not_rcs") setGroupNotice({ kind: "create-not-rcs", key: store.resolve(current.key) });
         if (detachedHistoryRef.current?.conversationId === current.conversationId) clearDetached();
       } catch (error) {
         if (!mountedRef.current || session !== currentSearchSessionKey() || !store.get(current.key)) return;
@@ -4732,11 +4794,44 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       if (reactionNavigationGeneration.current === requestGeneration) setPendingReactionId(undefined);
     }
   };
-  const title =
-    activeDisplay?.name ??
-    (isLocalDraftKey(slotKey)
-      ? content.recipientIds.map((id) => displayAddressName(id, resolution)).join(", ") || "New message"
-      : undefined);
+  const title = active?.group
+    ? groupTitle({ name: active.group.name, memberNames: groupMembers(active).map((part) => displayAddressName(part, resolution)) })
+    : activeDisplay?.name ??
+      (isLocalDraftKey(slotKey)
+        ? content.recipientIds.map((id) => displayAddressName(id, resolution)).join(", ") || "New message"
+        : undefined);
+  const groupBarState = groupNoticeState(active?.group);
+  const groupRcsLinked = Boolean(content.gatewayId && snapshot?.rcsStatus?.gateways.some((gateway) => gateway.gatewayId === content.gatewayId && gateway.state === "linked" && gateway.current && gateway.healthy));
+  const typingLabel = groupTypingLabel(typing.participants, (address) => displayAddressName(address, resolution));
+  /** A refused group message: its body goes back to the composer, and the user sends it again. */
+  const editGroupResend = (message: MessageView) => {
+    if (!slotKey || groupLeft || !active) return;
+    edit({ text: [message.body, content.text].filter(Boolean).join("\n") });
+    setGroupNotice({ kind: "members-changed", key: slotKey, members: undefined });
+  };
+  // The unconfirmed create's body goes back into the composer; the user confirms with "Create it again" there.
+  const createGroupAgainFromMessage = (message: MessageView) => {
+    if (!slotKey || groupLeft || !active) return;
+    edit({ text: [message.body, content.text].filter(Boolean).join("\n") });
+    setGroupNotice({ kind: "create-unconfirmed", key: slotKey });
+  };
+  const composerGroupNotice = groupNotice && groupNotice.key === slotKey ? groupNotice : null;
+  const groupStatusNotices = <>
+    {sending && isNewConversation && content.recipientIds.length > 1 && <GroupCreateProgress />}
+    {composerGroupNotice?.kind === "members-changed" && <GroupMembersChangedNotice
+      memberRevision={composerGroupNotice.memberRevision ?? active?.group?.memberRevision ?? ""}
+      members={composerGroupNotice.members}
+      displayName={(address) => displayAddressName(address, resolution)}
+      canResend={active?.group?.state === "live" || active?.group?.state === "paused"}
+      checking={active?.group?.state === "paused"}
+      onResend={() => void send({ expectedMemberRevision: composerGroupNotice.memberRevision })}
+      onReview={() => setGroupDetailsOpen(true)}
+    />}
+    {composerGroupNotice?.kind === "create-unconfirmed" && <GroupCreateUnconfirmed onCreateAgain={() => void send({ groupCreateConfirmDuplicate: true })} />}
+    {composerGroupNotice?.kind === "create-not-rcs" && <GroupCreateNotRcsInfo />}
+    {composerGroupNotice?.kind === "update-required" && <GroupUpdateRequiredNotice />}
+    {(groupLeft || composerGroupNotice?.kind === "withdrawn") && <GroupWithdrawnNotice onStartNewMms={() => void startGroupMmsDraft(active ? groupMembers(active) : [])} />}
+  </>;
   const maxAutoGrowHeight = paneHeight
     ? Math.max(
         TEXTAREA_LINE_HEIGHT,
@@ -4756,7 +4851,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         ? { text: fileSize(estimateBytes), tone: "default" as const }
         : mmsHeaderSize(estimateBytes, mmsLimitBytes)
     : undefined;
-  const unavailableReason = effectivePendingRecipient ? pendingRecipientReason : draftSendBlock ?? problem ?? rcsBlockReason;
+  const unavailableReason = effectivePendingRecipient ? pendingRecipientReason : groupLeft ? peppyCopy.group_composer_reason_left : draftSendBlock ?? problem ?? rcsBlockReason;
   const mainWindowRouteRecovery = headPanel && !effectivePendingRecipient && (
     (route.kind === "none" && gateways.length > 0) || route.kind === "stale"
   );
@@ -4949,10 +5044,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         attachments={attachments}
         sendSupported={Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending && !resolvingDraftConflict}
         hideSmsCounter={rcsRoute.current || rcsBlock.kind !== "none"}
-        typingSlot={<><TypingIndicator visible={typing.visible} scope={isGroup ? "group" : "direct"} label={isGroup ? peppyCopy.typing_indicator_group : peppyCopy.typing_indicator_direct} /><TypingAnnouncer text={typing.announcement ? isGroup ? peppyCopy.typing_indicator_group : peppyCopy.typing_announce_direct : ""} /></>}
+        typingSlot={<><TypingIndicator visible={typing.visible} scope={isGroup ? "group" : "direct"} label={isGroup ? typingLabel : peppyCopy.typing_indicator_direct} /><TypingAnnouncer text={typing.announcement ? isGroup ? typingLabel : peppyCopy.typing_announce_direct : ""} /></>}
         typingSendState={typingSender.state}
         unavailableReason={resolvingDraftConflict ? "resolving draft conflict…" : sending ? "sending…" : draftSubscriptionError ? "draft updates unavailable; retry setup" : composerReadOnly ? "draft is loading" : composerUnavailableReason}
-        readOnly={composerReadOnly || resolvingDraftConflict}
+        readOnly={composerReadOnly || resolvingDraftConflict || groupLeft}
         placeholder={composerReadOnly ? "Loading draft…" : undefined}
         onDraftChange={(text) => { typingSender.noteInput(text); edit({ text }); }}
         onSend={() => { typingSender.noteSend(); void send(); }}
@@ -4999,6 +5094,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             <div id="composer-route-notice" role="status" data-route-block={rcsBlock.kind === "link" ? `link-${rcsBlock.help}` : rcsBlock.kind}>
               {rcsBlock.kind !== "none" && <p id="composer-route-help">{rcsBlock.kind === "unproven" ? peppyCopy.rcs_composer_help_unproven : rcsBlock.help === "relink" ? peppyCopy.rcs_composer_help_relink : peppyCopy.rcs_composer_help_phone} {peppyCopy.rcs_composer_draft_kept}</p>}
             </div>
+            {groupStatusNotices}
             {mmsLimitShown && route.kind === "route" && (
               <span className="mms-limit" data-mms-limit-source={route.gateway.mmsLimitSource ?? "fallback"}>
                 {fileSize(estimateBytes)} used · {fileSize(route.gateway.mmsMaxBytes ?? 300 * 1024)} limit ({route.gateway.mmsLimitSource === "carrier" ? "carrier" : "fallback"}) · up to {Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)} recipients
@@ -5055,6 +5151,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       onPendingChange={setPendingRecipient}
       bottomOffset={8}
       hint="Separate numbers with commas. SMS goes to one recipient; group messages need an MMS-capable route."
+      nameField={<GroupNameField value={content.groupName ?? ""} onChange={(groupName) => edit({ groupName })} recipientCount={content.recipientIds.length} rcsLinked={groupRcsLinked} />}
     />
   ) : null;
   const recipientRail = recipientPanel ? (
@@ -5149,6 +5246,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         markReadMessages(ids);
       } }}
       toneOverrides={toneOverrides}
+      onEditGroupResend={editGroupResend}
+      onCreateGroupAgain={createGroupAgainFromMessage}
     />
       </div>
       {conversationTab === "media" && <div id="tabpanel-media" role="tabpanel" aria-labelledby="tab-media">
@@ -5495,13 +5594,28 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 <h1 data-header-title>Contacts</h1>
               ) : (
                 <div className="header-copy-details">
-                  <div data-header-title-row><b data-header-title>{revoked ? "Set up Peppy" : title ?? (showSetup ? "Set up Peppy" : "Peppy")}</b>{!revoked && !headPanel && rcsRoute.current && <RcsBadge encryptionReported={active?.rcsEncryption === true} />}</div>
-                  {active?.participants && <small data-conversation-participants>{active.participants.map((part) => displayAddressName(part, resolution)).join(", ")}</small>}
+                  <div data-header-title-row><b data-header-title title={title}>{revoked ? "Set up Peppy" : title ?? (showSetup ? "Set up Peppy" : "Peppy")}</b>{!revoked && !headPanel && rcsRoute.current && <RcsBadge encryptionReported={active?.rcsEncryption === true} paused={active?.group?.state === "paused"} />}{!revoked && !headPanel && active?.group && !rcsRoute.current && active.group.state !== "withdrawn" && <MmsGroupBadge />}</div>
+                  {active?.group
+                    ? <small data-conversation-participants>{groupSubtitle({ name: active.group.name, memberNames: groupMembers(active).map((part) => displayAddressName(part, resolution)) })}</small>
+                    : active?.participants && <small data-conversation-participants>{active.participants.map((part) => displayAddressName(part, resolution)).join(", ")}</small>}
                 </div>
               )}
             </div>
             {contactsOpen && <div id="contacts-header-slot" className="header-actions" ref={setContactsHeaderHost} />}
             <div className="header-actions" hidden={revoked || settingsOpen || notificationsOpen || contactsOpen}>
+              {isGroup && active?.group && !headPanel && <button
+                id="header-group-details"
+                ref={groupDetailsButtonRef}
+                type="button"
+                aria-label={peppyCopy.group_details_open_label}
+                title={peppyCopy.group_details_open_label}
+                aria-haspopup="dialog"
+                aria-expanded={groupDetailsOpen}
+                disabled={Boolean(appLock?.locked)}
+                onClick={() => setGroupDetailsOpen(true)}
+              >
+                <Info size={16} aria-hidden />
+              </button>}
               {conversationLoaded && <ConversationViewTabs value={conversationTab} onChange={setConversationTab} />}
               {addConversationContactAddress && <button
                 id="add-conversation-contact"
@@ -5563,7 +5677,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             </button>}
           </header>
           {!settingsOpen && !notificationsOpen && !contactsOpen && active && <ConversationSpamNotice folder={active.folder} folderReason={active.folderReason} unblock={active.unblock} />}
-          {!settingsOpen && !notificationsOpen && !contactsOpen && active && <ConversationRcsNotice historyGap={active.rcsHistoryGap} />}
+          {!settingsOpen && !notificationsOpen && !contactsOpen && active && <ConversationRcsNotice historyGap={active.rcsHistoryGap} group={groupBarState ? { state: groupBarState } : undefined} />}
+          {groupDetailsOpen && active?.group && activeDisplay && <GroupDetailsDialog
+            group={{ name: active.group.name, members: groupMembers(active), state: active.group.state }}
+            contactName={(address) => resolution[address]?.displayName}
+            toneSeed={activeDisplay.avatar.seed}
+            onOpenContact={(address) => openSender(address)}
+            onDismiss={() => setGroupDetailsOpen(false)}
+            opener={groupDetailsButtonRef}
+          />}
           {senderUnblockConfirmation && <SenderUnblockConfirmation
             name={senderUnblockConfirmation.name}
             canUnblock={senderUnblockConfirmation.canUnblock}

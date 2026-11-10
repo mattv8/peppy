@@ -28,6 +28,7 @@ fn private_media_holds_only_its_envelope_until_upload_across_reopen() {
             draft.draft_id,
             draft.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "private media".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![attachment.attachment_id],

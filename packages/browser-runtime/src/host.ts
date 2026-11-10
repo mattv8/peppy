@@ -1822,13 +1822,20 @@ export async function sendBrowserDraft(options: {
   const expectedRevision = requiredString(prepared.expectedRevision);
   const revisionChanged = expectedRevision !== requiredString(input.expectedRevision);
   if (revisionChanged) await synchronizeDraft();
+  // The group expectations are persisted with the intent, so the accepted send carries them.
+  const beginArgs = {
+    draftId,
+    expectedRevision,
+    expectedMemberRevision: input.expectedMemberRevision,
+    groupCreateConfirmDuplicate: input.groupCreateConfirmDuplicate,
+  };
   let gate: Record<string, unknown>;
   try {
-    gate = object(await session.mutate("_worker_draft_begin_send", { draftId, expectedRevision }));
+    gate = object(await session.mutate("_worker_draft_begin_send", beginArgs));
   } catch (error) {
     if (!(error instanceof CoreRejectedError && error.code === "draft-not-synced")) throw error;
     await synchronizeDraft();
-    gate = object(await session.mutate("_worker_draft_begin_send", { draftId, expectedRevision }));
+    gate = object(await session.mutate("_worker_draft_begin_send", beginArgs));
   }
   if (gate.remote === null) return session.mutate("send_draft", prepared);
   const remote = object(gate.remote);
