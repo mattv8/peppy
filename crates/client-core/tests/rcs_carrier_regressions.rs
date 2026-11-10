@@ -135,6 +135,7 @@ fn conversation(
         "classification": classification,
         "group": visible_non_self > 1,
         "visible_non_self_count": visible_non_self,
+        "last_message_ms": 0,
         "participants": participants,
     })
 }
@@ -157,6 +158,7 @@ fn snapshot(conversations: Vec<Value>, revision: u64) -> String {
         "stream_epoch": 1,
         "revision": revision,
         "run_incarnation": "runtime",
+        "pairing_evidence_id": "verified-handset",
         "complete": true,
         "conversations": conversations,
     })

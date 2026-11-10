@@ -255,6 +255,7 @@ fn candidate_snapshot(google_conversation_id: &str, recipient: &str) -> String {
         "stream_epoch": 1,
         "revision": 1,
         "run_incarnation": "runtime",
+        "pairing_evidence_id": "pairing",
         "complete": true,
         "conversations": [{
             "google_conversation_id": google_conversation_id,
@@ -263,6 +264,7 @@ fn candidate_snapshot(google_conversation_id: &str, recipient: &str) -> String {
             "classification": "eligible",
             "group": false,
             "visible_non_self_count": 1,
+            "last_message_ms": 0,
             "participants": [{
                 "participant_id": "google-peer",
                 "identifier_type": 1,
