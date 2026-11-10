@@ -5,17 +5,22 @@ import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.WebView
 import android.widget.Button
+import android.widget.TextView
+import dev.peppy.mobile.R
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
+import org.robolectric.android.controller.ActivityController
 import org.robolectric.annotation.Config
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
@@ -129,6 +134,129 @@ class LinkSignInActivityTest {
     }
 
     @Test
+    fun `finished config page with sign-in cookies starts pairing without a confirmation screen`() {
+        val pairing = QueueExecutor()
+        val pairCalls = AtomicInteger()
+        val controller = startSignInWithPairableLink(pairing, onPair = { pairCalls.incrementAndGet() })
+        val activity = controller.get()
+        seedSignInCookies()
+
+        finishConfigPage(activity)
+
+        assertFinishedWith(activity, "pairing_started")
+        assertEquals(activity.getString(R.string.peppy_google_messages_link_signin_finishing), loadingText(activity))
+        assertEquals(1, pairing.size)
+        assertEquals(0, pairCalls.get())
+        pairing.runAll()
+        assertEquals(1, pairCalls.get())
+        assertNull(pendingCookiesOf(activity))
+        assertNextLeaseAvailable()
+        controller.destroy()
+    }
+
+    @Test
+    fun `second config page finish does not queue a second pairing`() {
+        val pairing = QueueExecutor()
+        val controller = startSignInWithPairableLink(pairing)
+        val activity = controller.get()
+        seedSignInCookies()
+        val webView = webViewOf(activity)
+
+        firePageFinished(webView)
+        firePageFinished(webView)
+
+        assertEquals(1, pairing.size)
+        controller.destroy()
+    }
+
+    @Test
+    fun `back after cookie capture does not start a second pairing or change the outcome`() {
+        val pairing = QueueExecutor()
+        val pairCalls = AtomicInteger()
+        val controller = startSignInWithPairableLink(pairing, onPair = { pairCalls.incrementAndGet() })
+        val activity = controller.get()
+        seedSignInCookies()
+        finishConfigPage(activity)
+
+        activity.onBackPressedDispatcher.onBackPressed()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertFinishedWith(activity, "pairing_started")
+        assertEquals(1, pairing.size)
+        pairing.runAll()
+        assertEquals(1, pairCalls.get())
+        controller.destroy()
+    }
+
+    @Test
+    fun `back during a pending pairing handoff cancels without queueing pairing`() {
+        val pairing = QueueExecutor()
+        val controller = startSignInWithPairableLink(pairing)
+        val activity = controller.get()
+        seedSignInCookies()
+        LinkSignInActivity::class.java.getDeclaredField("pendingCookies").apply {
+            isAccessible = true
+            set(activity, FilteredCookies(emptyMap()))
+        }
+
+        activity.onBackPressedDispatcher.onBackPressed()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertFinishedWith(activity, "cancelled")
+        assertEquals(0, pairing.size)
+        assertTrue(CookieManager.getInstance().getCookie(CONFIG_URL).isNullOrEmpty())
+        assertNextLeaseAvailable()
+        controller.destroy()
+    }
+
+    @Test
+    fun `sign-in cookies are wiped before pairing is queued`() {
+        var cookiesAtQueue: String? = null
+        val pairing = QueueExecutor(onExecute = { cookiesAtQueue = CookieManager.getInstance().getCookie(CONFIG_URL) })
+        val controller = startSignInWithPairableLink(pairing)
+        val activity = controller.get()
+        seedSignInCookies()
+
+        finishConfigPage(activity)
+
+        assertEquals(1, pairing.size)
+        assertTrue(cookiesAtQueue.isNullOrEmpty())
+        controller.destroy()
+    }
+
+    @Test
+    fun `finished config page without sign-in cookies finishes cookies_missing without pairing`() {
+        val pairing = QueueExecutor()
+        val controller = startSignInWithPairableLink(pairing)
+        val activity = controller.get()
+
+        finishConfigPage(activity)
+
+        assertFinishedWith(activity, "cookies_missing")
+        assertEquals(0, pairing.size)
+        controller.destroy()
+    }
+
+    @Test
+    fun `cancel during sign-in wipes cookies and finishes cancelled without pairing`() {
+        val pairing = QueueExecutor()
+        val controller = startSignInWithPairableLink(pairing)
+        val activity = controller.get()
+        seedSignInCookies()
+
+        descendantViews(activity.window.decorView)
+            .filterIsInstance<Button>()
+            .single { it.text.toString() == "Cancel" }
+            .performClick()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertFinishedWith(activity, "cancelled")
+        assertTrue(CookieManager.getInstance().getCookie(CONFIG_URL).isNullOrEmpty())
+        assertEquals(0, pairing.size)
+        controller.destroy()
+    }
+
+    @Test
     fun `queued retired pairing cannot publish prestart or open a replacement handle`() {
         val startup = ControlledStartup()
         val pairing = QueueExecutor()
@@ -213,6 +341,56 @@ class LinkSignInActivityTest {
         controller.destroy()
     }
 
+    private fun startSignInWithPairableLink(
+        pairing: QueueExecutor,
+        onPair: () -> Unit = {},
+    ): ActivityController<LinkSignInActivity> {
+        val startup = ControlledStartup()
+        LinkSignInActivityTestHooks.startupExecutor = startup::capture
+        LinkSignInActivityTestHooks.awaitSignInReady = { true }
+        LinkSignInRuntimeTestHooks.pairingExecutor = pairing
+        LinkCoreBridge.recorder = { _, _ -> true }
+        LinkRuntimeTestHooks.engine = availableEngine(object : LinkedHandle() {
+            override fun status() = """{"state":"unlinked"}"""
+            override fun pair(cookiesJson: ByteArray) = onPair()
+        })
+        LinkRuntimeTestHooks.storeFactory = { EmptyLinkStateStorage }
+
+        val controller = Robolectric.buildActivity(LinkSignInActivity::class.java).setup()
+        startup.run()
+        shadowOf(Looper.getMainLooper()).idle()
+        return controller
+    }
+
+    // Robolectric's CookieManager keeps only the first "name=value" pair of each setCookie call.
+    private fun seedSignInCookies() {
+        CookieManager.getInstance().apply {
+            SIGN_IN_COOKIES.forEach { setCookie(CONFIG_URL, "$it; Secure") }
+        }
+    }
+
+    private fun finishConfigPage(activity: LinkSignInActivity) = firePageFinished(webViewOf(activity))
+
+    private fun firePageFinished(webView: WebView) {
+        shadowOf(webView).webViewClient.onPageFinished(webView, CONFIG_URL)
+        shadowOf(Looper.getMainLooper()).idle()
+    }
+
+    private fun webViewOf(activity: LinkSignInActivity): WebView =
+        descendantViews(activity.window.decorView).filterIsInstance<WebView>().single()
+
+    private fun loadingText(activity: LinkSignInActivity): String =
+        descendantViews(activity.window.decorView)
+            .filterIsInstance<TextView>()
+            .single { it.id == R.id.google_messages_link_signin_loading }
+            .text.toString()
+
+    private fun pendingCookiesOf(activity: LinkSignInActivity): Any? =
+        LinkSignInActivity::class.java.getDeclaredField("pendingCookies").run {
+            isAccessible = true
+            get(activity)
+        }
+
     private fun queuePairing(activity: LinkSignInActivity) {
         LinkSignInActivity::class.java.getDeclaredField("pendingCookies").apply {
             isAccessible = true
@@ -255,9 +433,13 @@ class LinkSignInActivityTest {
         override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle
     }
 
-    private class QueueExecutor : Executor {
+    private class QueueExecutor(private val onExecute: () -> Unit = {}) : Executor {
         private val tasks = ArrayDeque<Runnable>()
-        override fun execute(command: Runnable) { tasks.addLast(command) }
+        val size: Int get() = tasks.size
+        override fun execute(command: Runnable) {
+            onExecute()
+            tasks.addLast(command)
+        }
         fun runAll() { while (tasks.isNotEmpty()) tasks.removeFirst().run() }
     }
 
@@ -300,5 +482,10 @@ class LinkSignInActivityTest {
         override fun read(): ByteArray = ByteArray(0)
         override fun write(state: ByteArray) = Unit
         override fun wipe() = Unit
+    }
+
+    private companion object {
+        const val CONFIG_URL = "https://messages.google.com/web/config"
+        val SIGN_IN_COOKIES = listOf("OSID=o", "SID=s", "HSID=h", "SSID=ss", "APISID=a", "SAPISID=sa")
     }
 }

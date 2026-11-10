@@ -41,16 +41,6 @@
         }
       }
     },
-    "peppy.typing_share_hint": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Typing indicators work in one-to-one and group RCS chats through Google Messages. When this is on, the other people in those chats see when you are typing. Turn it off to stop that. You still see when they are typing."
-          }
-        }
-      }
-    },
     "peppy.toggle_android_account_loading": {
       "localizations": {
         "en": {
@@ -4241,62 +4231,22 @@
         }
       }
     },
+    "peppy.google_messages_link_signin_finishing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Signed in. Starting the link…"
+          }
+        }
+      }
+    },
     "peppy.google_messages_link_signin_load_error": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "Could not load Google's sign-in page. Check your connection and try again."
-          }
-        }
-      }
-    },
-    "peppy.google_messages_link_confirm_title": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Finish linking"
-          }
-        }
-      }
-    },
-    "peppy.google_messages_link_confirm_body": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "You are signed in. Nothing is saved if you cancel."
-          }
-        }
-      }
-    },
-    "peppy.google_messages_link_confirm_check_only_phone": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Only this phone has Google Messages on this account"
-          }
-        }
-      }
-    },
-    "peppy.google_messages_link_confirm_action": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Link this phone"
-          }
-        }
-      }
-    },
-    "peppy.google_messages_link_confirm_not_ready": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Peppy cannot start linking right now. Close this screen and check Google Messages on the SMS tab."
           }
         }
       }
@@ -4431,16 +4381,6 @@
         }
       }
     },
-    "peppy.google_messages_link_status_label": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Status"
-          }
-        }
-      }
-    },
     "peppy.google_messages_link_status_unlinked": {
       "localizations": {
         "en": {
@@ -4551,16 +4491,6 @@
         }
       }
     },
-    "peppy.google_messages_link_connection_label": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Connection"
-          }
-        }
-      }
-    },
     "peppy.google_messages_link_connection_connected": {
       "localizations": {
         "en": {
@@ -4666,7 +4596,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Last answer from Google Messages"
+            "value": "Last answer"
           }
         }
       }
@@ -5136,7 +5066,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "More than one phone uses Google Messages with this account, so Peppy did not link. Stop using it on the other phone, then try again."
+            "value": "Google Messages is set up on more than one phone with this account, so Peppy did not link. Stop using Google Messages on the other phone, then try again."
           }
         }
       }

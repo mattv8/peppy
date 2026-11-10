@@ -12,7 +12,6 @@ import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
-import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -26,6 +25,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class LinkSignInActivity : AppCompatActivity() {
     private val cookiesCaptured = AtomicBoolean(false)
     private val teardownStarted = AtomicBoolean(false)
+    private val handoffCancelled = AtomicBoolean(false)
     private lateinit var webView: WebView
     private var pendingCookies: FilteredCookies? = null
     private var signInLease: LinkSignInRuntime.Lease? = null
@@ -36,10 +36,14 @@ class LinkSignInActivity : AppCompatActivity() {
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
-        setContentView(loadingView())
+        setContentView(loadingView(R.string.peppy_google_messages_link_signin_loading))
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (!ownsReadyLease()) finishWith(OUTCOME_CANCELLED)
+                if (isFinishing) return
+                if (pendingCookies != null) {
+                    handoffCancelled.set(true)
+                    wipe { finishWith(OUTCOME_CANCELLED) }
+                } else if (!ownsReadyLease()) finishWith(OUTCOME_CANCELLED)
                 else if (::webView.isInitialized && webView.canGoBack()) webView.goBack()
                 else wipe { finishWith(OUTCOME_CANCELLED) }
             }
@@ -137,7 +141,7 @@ class LinkSignInActivity : AppCompatActivity() {
 
         override fun onPageFinished(view: WebView, url: String) {
             if (NavigationAllowlist.isConfig(url) && cookiesCaptured.compareAndSet(false, true)) {
-                readCookiesAndConfirm(cookies.getCookie(CONFIG_URL).orEmpty())
+                readCookiesAndPair(cookies.getCookie(CONFIG_URL).orEmpty())
             }
         }
 
@@ -150,13 +154,14 @@ class LinkSignInActivity : AppCompatActivity() {
         }
     }
 
-    private fun readCookiesAndConfirm(header: String) {
+    private fun readCookiesAndPair(header: String) {
         val cookies = runCatching { CookieFilter.required(header) }.getOrElse {
             wipe { finishWith(OUTCOME_COOKIES_MISSING) }
             return
         }
         pendingCookies = cookies
-        wipe { showPairConfirmation() }
+        setContentView(loadingView(R.string.peppy_google_messages_link_signin_finishing))
+        wipe { startPairing() }
     }
 
     private fun showLoadError() {
@@ -178,38 +183,12 @@ class LinkSignInActivity : AppCompatActivity() {
         })
     }
 
-    private fun showPairConfirmation() {
-        val onlyPhone = CheckBox(this).apply {
-            text = getString(R.string.peppy_google_messages_link_confirm_check_only_phone)
-            minimumHeight = (48 * resources.displayMetrics.density).toInt()
-        }
-        val link = Button(this).apply {
-            text = getString(R.string.peppy_google_messages_link_confirm_action)
-            isEnabled = false
-            setOnClickListener { isEnabled = false; startPairing() }
-        }
-        onlyPhone.setOnCheckedChangeListener { _, checked -> link.isEnabled = checked }
-        setContentView(android.widget.ScrollView(this).padForSystemBars().apply {
-            id = R.id.google_messages_link_confirm_screen
-            addView(LinearLayout(this@LinkSignInActivity).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(TextView(this@LinkSignInActivity).apply {
-                text = getString(R.string.peppy_google_messages_link_confirm_title)
-                accessibilityHeading()
-            })
-            addView(TextView(this@LinkSignInActivity).apply { text = getString(R.string.peppy_google_messages_link_confirm_body) })
-            addView(onlyPhone)
-            addView(TextView(this@LinkSignInActivity).apply { text = getString(R.string.peppy_google_messages_link_replaces_browser) })
-            addView(link)
-            addView(Button(this@LinkSignInActivity).apply {
-                text = getString(R.string.peppy_cancel)
-                setOnClickListener { pendingCookies = null; releaseLease(); finishWith(OUTCOME_DECLINED) }
-            })
-            })
-        })
-    }
-
     private fun startPairing() {
+        if (handoffCancelled.get()) {
+            pendingCookies = null
+            releaseLease()
+            return finishWith(OUTCOME_CANCELLED)
+        }
         val cookies = pendingCookies ?: return finishWith(OUTCOME_ERROR)
         val attempt = LinkSignInRuntime.beginPairing() ?: run {
             pendingCookies = null
@@ -283,9 +262,9 @@ class LinkSignInActivity : AppCompatActivity() {
 
     private fun ownsReadyLease(): Boolean = synchronized(lifecycleLock) { !destroyed && startupReady && LinkSignInRuntime.ownsLease(signInLease) }
 
-    private fun loadingView() = TextView(this).apply {
+    private fun loadingView(textRes: Int) = TextView(this).apply {
         id = R.id.google_messages_link_signin_loading
-        text = getString(R.string.peppy_google_messages_link_signin_loading)
+        text = getString(textRes)
         accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
     }
 
@@ -311,7 +290,6 @@ class LinkSignInActivity : AppCompatActivity() {
     private companion object {
         const val EXTRA_OUTCOME = "dev.peppy.mobile.googlemessages.outcome"
         const val OUTCOME_CANCELLED = "cancelled"
-        const val OUTCOME_DECLINED = "declined"
         const val OUTCOME_BLOCKED = "blocked"
         const val OUTCOME_COOKIES_MISSING = "cookies_missing"
         const val OUTCOME_ERROR = "error"

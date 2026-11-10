@@ -8,6 +8,7 @@ class WebViewUsageTest {
     @Test fun `sign in activity is the only WebView user`() {
         val sourceRoot = File("src").absoluteFile
         val users = sourceRoot.walkTopDown()
+            .onEnter { it.parentFile != sourceRoot || !it.name.startsWith("test") && !it.name.startsWith("androidTest") }
             .filter { it.extension == "kt" && it.readText().contains("android.webkit." + "WebView") }
             .map { it.relativeTo(sourceRoot).invariantSeparatorsPath }
             .toList()

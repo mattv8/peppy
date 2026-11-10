@@ -421,6 +421,16 @@ func TestPhonePingIngressRecordsCurrentHealthOnly(t *testing.T) {
 	link.mu.Lock()
 	link.responding, link.healthy, link.lastOKMS = false, false, 0
 	link.mu.Unlock()
+	// A bare ping has no physical-source evidence and must not restore health.
+	link.queueEventFor(7, &events.PhonePingSucceeded{})
+	link.consumeQueuedEvent(<-link.changes)
+	link.mu.Lock()
+	responding, healthy, lastOKMS = link.responding, link.healthy, link.lastOKMS
+	link.mu.Unlock()
+	if responding || healthy || lastOKMS != 0 {
+		t.Fatalf("bare ping mutated health = responding:%t healthy:%t lastOKMS:%d", responding, healthy, lastOKMS)
+	}
+
 	link.queueEventFor(6, &libgm.StreamEvent{Source: current, Event: &events.PhonePingSucceeded{}})
 	link.queueEventFor(7, &libgm.StreamEvent{Source: libgm.StreamSource{ListenID: 6, PollAttempt: 2}, Event: &events.PhonePingSucceeded{}})
 	if len(link.changes) != 0 {

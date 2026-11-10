@@ -309,7 +309,7 @@ test("desktop override keys are catalog keys or explicit desktop-only additions"
 });
 
 test("RCS badge and typing sharing copy remain scoped to their supported clients", () => {
-  const shared = ["typing_share_label", "typing_share_hint"];
+  const shared = ["typing_share_label"];
   const desktopOnly = ["rcs_badge_label", "rcs_badge_description"];
 
   for (const key of shared) {
@@ -375,13 +375,11 @@ test("Google Messages link copy avoids protocol and maturity claims", () => {
 });
 
 test("typing copy describes one-to-one and group RCS typing", () => {
-  const typingKeys = ["typing_share_hint", "google_messages_link_help_body", "google_messages_link_consent_p_scope"];
+  const typingKeys = ["google_messages_link_help_body", "google_messages_link_consent_p_scope"];
   const oldClaim = /typing[^.]*(do not work|does not work|not supported yet|changes nothing)/i;
   for (const key of typingKeys) {
     assert.doesNotMatch(catalog[key], oldClaim, `${key} must not say typing is unsupported`);
   }
-  assert.match(catalog.typing_share_hint, /one-to-one and group RCS chats through Google Messages/);
-  assert.doesNotMatch(catalog.typing_share_hint, /Group chats are not supported yet/);
   assert.match(catalog.google_messages_link_help_body, /Typing indicators work in one-to-one chats and groups/);
   assert.match(catalog.google_messages_link_consent_p_scope, /Typing indicators in those chats work too/);
 });
