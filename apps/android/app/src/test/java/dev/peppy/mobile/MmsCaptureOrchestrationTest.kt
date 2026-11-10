@@ -30,6 +30,7 @@ import dev.peppy.mobile.mms.MmsProviderException
 import dev.peppy.mobile.mms.MmsProviderPage
 import dev.peppy.mobile.mms.MmsProviderPart
 import dev.peppy.mobile.mms.MmsProviderRecord
+import dev.peppy.mobile.sms.RcsProviderRowRouter
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileNotFoundException
@@ -55,6 +56,8 @@ import uniffi.peppy_mobile_bindings.NativeMmsBeginOutcome
 import uniffi.peppy_mobile_bindings.NativeMmsPreviewState
 import uniffi.peppy_mobile_bindings.NativeMmsProviderIdentityQuarantine
 import uniffi.peppy_mobile_bindings.NativeMmsSource
+import uniffi.peppy_mobile_bindings.NativeRcsProviderRowRoute
+import uniffi.peppy_mobile_bindings.NativeRcsProviderRoute
 import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.MobileBindingsException
 
@@ -64,6 +67,15 @@ import uniffi.peppy_mobile_bindings.MobileBindingsException
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class MmsCaptureOrchestrationTest {
+    @Test fun mirroredOutgoingRowSkipsMmsAcquisitionWhenDetectorRecorded() {
+        val core = FakeCore(providerRouter = RcsProviderRowRouter { NativeRcsProviderRoute(NativeRcsProviderRowRoute.DETECTOR_RECORDED, null) })
+
+        val result = MmsCapture.run(plan(), core, FakeProvider(listOf(record(1).copy(messageBox = 2, messageType = 128))), temp())
+
+        assertEquals(0, core.inputs.size)
+        assertEquals(listOf(MmsBackfillPhase.HISTORY to "1"), core.advanced)
+        assertEquals(0, result.captured)
+    }
     @Test fun recheckCompletesExistingPartUnavailableSentSmilAcquisition() {
         val smil = MmsProviderPart(10, -1, "application/smil", null, null, "<smil/>", Uri.parse("content://mms/part/10"))
         val text = MmsProviderPart(11, 0, "text/plain", null, 106, "sent body", Uri.parse("content://mms/part/11"))
@@ -1163,6 +1175,7 @@ class MmsCaptureOrchestrationTest {
         private val initialReason: String = "settling",
         private val initialState: NativeMmsAcquisitionState = NativeMmsAcquisitionState.PENDING,
         private val completeError: Exception? = null,
+        override val providerRouter: RcsProviderRowRouter = RcsProviderRowRouter.acquireAll(),
     ) : MmsCaptureCore {
         var migrations = 0
         val reasons = mutableListOf<String?>()

@@ -58,6 +58,8 @@ import dev.peppy.mobile.mms.RestrictedMessageAccess
 import dev.peppy.mobile.mms.mmsReceiveGranted
 import dev.peppy.mobile.mms.restrictedMessageAccess
 import dev.peppy.mobile.sms.MmsCaptureLifecycle
+import dev.peppy.mobile.sms.ProviderAcquisitionRoute
+import dev.peppy.mobile.sms.RcsProviderRowRouter
 import dev.peppy.mobile.telephony.OwnNumberDetector
 import dev.peppy.mobile.telephony.SimRoute
 import dev.peppy.mobile.telephony.SimRoutes
@@ -271,6 +273,7 @@ internal interface MmsCaptureProvider {
 }
 
 internal interface MmsCaptureCore : MmsBackfillCore {
+    val providerRouter: RcsProviderRowRouter get() = RcsProviderRowRouter.acquireAll()
     fun begin(input: NativeMmsAcquisitionInput): NativeMmsBeginOutcome
     fun requestManualRecheck(generation: String, scope: String, limit: Int): Int
     fun setState(id: String, state: NativeMmsAcquisitionState, reason: String?)
@@ -659,6 +662,11 @@ internal object MmsCapture {
             existing?.let { core.setState(it.acquisitionId, NativeMmsAcquisitionState.UNAVAILABLE, "provider_non_message_type") }
             return ProcessResult(true, unavailable = if (existing == null) 0 else 1)
         }
+        // MMS uses msg_box as providerType; only visible sender/recipient evidence is routed.
+        val addresses = record.sender + record.toRecipients + record.ccRecipients
+        if (core.providerRouter.route(record.id, record.threadId, record.messageBox ?: 0, record.dateMs, addresses, record.restricted, record.textOnly) == ProviderAcquisitionRoute.SKIP) {
+            return ProcessResult(durable = true)
+        }
         val placeholder = input(generation, routeId, record, imported, body = inlineText(record))
         val acquisition = existing ?: when (val outcome = try { core.begin(placeholder) } catch (_: Exception) { return ProcessResult(false) }) {
             is NativeMmsBeginOutcome.Acquired -> outcome.acquisition
@@ -730,6 +738,10 @@ internal object MmsCapture {
         record: MmsProviderRecord,
         imported: Boolean,
     ): ProcessResult {
+        val addresses = record.sender + record.toRecipients + record.ccRecipients
+        if (core.providerRouter.route(record.id, record.threadId, record.messageBox ?: 0, record.dateMs, addresses, record.restricted, record.textOnly) == ProviderAcquisitionRoute.SKIP) {
+            return ProcessResult(durable = true)
+        }
         val acquisition = when (val outcome = core.begin(input(generation, UNKNOWN_SUBSCRIPTION, record, imported, inlineText(record)))) {
             is NativeMmsBeginOutcome.Acquired -> outcome.acquisition
             is NativeMmsBeginOutcome.Quarantined -> return ProcessResult(durable = true)
@@ -1029,6 +1041,7 @@ internal class PreviewDecodeAttempts(private val directory: File) {
 }
 
 private class NativeCore(internal val client: NativeClientInterface) : MmsCaptureCore {
+    override val providerRouter = RcsProviderRowRouter(client::gatewayRouteRcsProviderRowJson)
     override fun begin(input: NativeMmsAcquisitionInput) = client.beginMmsAcquisitionOutcome(input)
     override fun requestManualRecheck(generation: String, scope: String, limit: Int) =
         client.requestMmsRecheck(generation, scope, limit.toULong()).toInt()

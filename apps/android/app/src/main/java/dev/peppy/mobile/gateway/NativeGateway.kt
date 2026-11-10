@@ -23,6 +23,7 @@ import java.security.GeneralSecurityException
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
+import java.util.concurrent.CopyOnWriteArraySet
 import org.json.JSONException
 import org.json.JSONObject
 import uniffi.peppy_mobile_bindings.MobileBindingsException
@@ -153,6 +154,8 @@ object NativeGateway {
     private var producerReadyGeneration = -1L
     private var nextLeaseId = 0L
     private val sendRevokers = mutableMapOf<Long, MutableMap<Long, () -> Unit>>()
+    /** Lock-free so listeners can register from main-thread lifecycle callbacks while the owner lock is held. */
+    private val retirementListeners = CopyOnWriteArraySet<() -> Unit>()
     private var retirement: Retirement? = null
     @VisibleForTesting internal var persistenceDecisionHook: (() -> Unit)? = null
 
@@ -208,7 +211,16 @@ object NativeGateway {
             pending.state = RetirementState.REVOKING
             return pending
         }
-        Retirement(generation, client, sendRevokers.remove(generation)?.values?.toList().orEmpty()).also { retirement = it }
+        Retirement(generation, client, sendRevokers.remove(generation)?.values?.toList().orEmpty()).also {
+            retirement = it
+            retirementListeners.forEach { listener -> runCatching(listener) }
+        }
+    }
+
+    /** Retires ephemeral host authority before this gateway session is replaced or torn down. */
+    internal fun addRetirementListener(listener: () -> Unit): () -> Unit {
+        retirementListeners += listener
+        return { retirementListeners -= listener }
     }
 
     /** Calls Go-only revokers without the owner lock; every registered ticket gets a chance. */

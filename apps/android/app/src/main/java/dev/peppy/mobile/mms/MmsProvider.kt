@@ -2,6 +2,7 @@ package dev.peppy.mobile.mms
 
 import android.content.ContentResolver
 import android.content.Context
+import android.database.sqlite.SQLiteException
 import android.net.Uri
 import java.io.File
 import java.io.FileOutputStream
@@ -10,12 +11,43 @@ import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
 
 data class MmsProviderPart(val providerPartId: Long, val sequence: Int?, val mediaType: String?, val name: String?, val charset: Int?, val text: String?, val contentUri: Uri)
-data class MmsProviderRecord(val id: Long, val threadId: Long?, val subscriptionId: Int?, val messageBox: Int?, val dateMs: Long?, val transactionId: String?, val subject: String?, val sender: List<String>, val toRecipients: List<String>, val ccRecipients: List<String>, val bccRecipients: List<String>, val messageType: Int?, val expiry: Long?, val parts: List<MmsProviderPart>, val ready: Boolean, val error: String?)
+data class MmsProviderRecord(val id: Long, val threadId: Long?, val subscriptionId: Int?, val messageBox: Int?, val dateMs: Long?, val transactionId: String?, val subject: String?, val sender: List<String>, val toRecipients: List<String>, val ccRecipients: List<String>, val bccRecipients: List<String>, val messageType: Int?, val expiry: Long?, val parts: List<MmsProviderPart>, val ready: Boolean, val error: String?, val restricted: Boolean = false, val textOnly: Boolean = false)
 data class MmsProviderPage(val records: List<MmsProviderRecord>, val scannedThroughId: Long)
 class MmsProviderException(message: String) : IllegalStateException(message)
 
 /** Bounded public-provider reader. A caller checkpoints only [scannedThroughId]. */
-class MmsProviderReader(context: Context) {
+/**
+ * Process-wide discovery of the optional `restricted` and `text_only` message columns, which some
+ * providers (Android 14 AOSP) lack. Probed at most once; an inconclusive probe is not cached.
+ */
+class MmsOptionalColumns {
+    private val lock = Any()
+    @Volatile private var supported: Boolean? = null
+
+    fun messageProjection(resolver: ContentResolver): Array<String> =
+        if (supports(resolver)) MmsProviderReader.MESSAGE_BASE + MmsProviderReader.OPTIONAL_MESSAGE else MmsProviderReader.MESSAGE_BASE
+
+    private fun supports(resolver: ContentResolver): Boolean {
+        supported?.let { return it }
+        synchronized(lock) {
+            supported?.let { return it }
+            val result = probe(resolver) ?: return false
+            supported = result
+            return result
+        }
+    }
+
+    /** Null when the provider returned no cursor, which says nothing about column support. */
+    private fun probe(resolver: ContentResolver): Boolean? = try {
+        resolver.query(MmsProviderReader.MMS, arrayOf("_id") + MmsProviderReader.OPTIONAL_MESSAGE, "1=0", null, null)?.use { true }
+    } catch (e: IllegalArgumentException) {
+        false
+    } catch (e: SQLiteException) {
+        false
+    }
+}
+
+class MmsProviderReader(context: Context, private val optionalColumns: MmsOptionalColumns = processColumns) {
     private val resolver: ContentResolver = context.contentResolver
     fun page(afterId: Long, limit: Int): MmsProviderPage {
         require(afterId >= 0); val capped = limit.coerceIn(1, MAX_PAGE); val records = mutableListOf<MmsProviderRecord>(); var through = afterId
@@ -42,7 +74,7 @@ class MmsProviderReader(context: Context) {
     }
     fun read(id: Long): MmsProviderRecord? {
         valid(id)
-        (resolver.query(Uri.withAppendedPath(MMS, "$id"), MESSAGE, null, null, null)
+        (resolver.query(Uri.withAppendedPath(MMS, "$id"), optionalColumns.messageProjection(resolver), null, null, null)
             ?: throw MmsProviderException("MMS provider returned no message cursor")).use { c ->
             if (!c.moveToFirst()) return null
             val type = c.long("m_type")?.toInt(); val addresses = addresses(id)
@@ -59,7 +91,7 @@ class MmsProviderReader(context: Context) {
             if (parts.error != null) error = parts.error
             if (error == null && parts.value.isEmpty()) error = "provider_content_pending"
             val sub = c.long("sub_id")?.toInt()?.takeIf { it >= 0 }
-            return MmsProviderRecord(id, c.long("thread_id"), sub, c.long("msg_box")?.toInt(), c.long("date")?.times(SECONDS_TO_MILLIS), bounded(c.string("tr_id")), bounded(c.string("sub")), addresses.from, addresses.to, addresses.cc, addresses.bcc, type, expiryMs, parts.value, error == null, error)
+            return MmsProviderRecord(id, c.long("thread_id"), sub, c.long("msg_box")?.toInt(), c.long("date")?.times(SECONDS_TO_MILLIS), bounded(c.string("tr_id")), bounded(c.string("sub")), addresses.from, addresses.to, addresses.cc, addresses.bcc, type, expiryMs, parts.value, error == null, error, c.long("restricted") == 1L, c.long("text_only") == 1L)
         }; return null
     }
     fun readPartText(part: MmsProviderPart, byteLimit: Int = MAX_TEXT): String? {
@@ -103,5 +135,5 @@ class MmsProviderReader(context: Context) {
     private fun valid(id: Long) { require(id > 0) }; private fun partUri(id: Long)=Uri.withAppendedPath(PART,"$id")
     private fun android.database.Cursor.string(n:String)=getColumnIndex(n).takeIf{it>=0}?.let{getString(it)}; private fun android.database.Cursor.long(n:String)=getColumnIndex(n).takeIf{it>=0&&!isNull(it)}?.let{getLong(it)}
     private data class AddressResult(val from:List<String>,val to:List<String>,val cc:List<String>,val bcc:List<String>,val error:String?); private data class PartResult(val value:List<MmsProviderPart>,val error:String?)
-    companion object { private const val SECONDS_TO_MILLIS = 1_000L; private val MMS=Uri.parse("content://mms"); private val PART=Uri.parse("content://mms/part"); private val MESSAGE=arrayOf("_id","thread_id","sub_id","msg_box","date","tr_id","sub","m_type","exp"); private val PART_COLUMNS=arrayOf("_id","seq","ct","name","fn","chset","text"); const val MAX_PAGE=50; const val MAX_PARTS=10; const val MAX_TEXT=256*1024; const val MAX_PART=32L*1024*1024; const val MAX_STRING=4096; const val MAX_ADDRESSES=100; const val MAX_ADDRESS_ROWS=MAX_ADDRESSES * 2 }
+    companion object { private const val SECONDS_TO_MILLIS = 1_000L; internal val MMS=Uri.parse("content://mms"); private val PART=Uri.parse("content://mms/part"); internal val MESSAGE_BASE=arrayOf("_id","thread_id","sub_id","msg_box","date","tr_id","sub","m_type","exp"); internal val OPTIONAL_MESSAGE=arrayOf("restricted","text_only"); private val processColumns = MmsOptionalColumns(); private val PART_COLUMNS=arrayOf("_id","seq","ct","name","fn","chset","text"); const val MAX_PAGE=50; const val MAX_PARTS=10; const val MAX_TEXT=256*1024; const val MAX_PART=32L*1024*1024; const val MAX_STRING=4096; const val MAX_ADDRESSES=100; const val MAX_ADDRESS_ROWS=MAX_ADDRESSES * 2 }
 }

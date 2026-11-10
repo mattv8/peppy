@@ -6,6 +6,7 @@ import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Before
 import org.junit.Assert.assertEquals
@@ -15,7 +16,15 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.android.controller.ServiceController
 import org.robolectric.annotation.Config
+import dev.peppy.mobile.googlemessages.live.LiveTypingCredentials
+import dev.peppy.mobile.googlemessages.live.LiveTypingListener
+import uniffi.peppy_mobile_bindings.NativeLiveClock
+import uniffi.peppy_mobile_bindings.NativeLiveEnableContext
+import uniffi.peppy_mobile_bindings.NativeLiveOutbound
+import uniffi.peppy_mobile_bindings.NativeLiveOutcome
+import uniffi.peppy_mobile_bindings.NativeTypingState
 import uniffi.peppy_mobile_bindings.NativeRcsContextExpectation
 import uniffi.peppy_mobile_bindings.NativeRcsIngestOutcome
 import uniffi.peppy_mobile_bindings.NativeRcsObservationProvenance
@@ -63,7 +72,15 @@ class GoogleMessagesLinkServiceTest {
         handle.allowRunReturn.countDown()
     }
 
-    @Test fun `restart sweep fetches and checkpoints once when the owned run reports ready`() {
+    @Test fun `native RCS gate defaults on and honors the test override`() {
+        GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = null
+        assertTrue(GoogleMessagesLinkService.nativeRcsEnabled())
+
+        GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = false
+        assertFalse(GoogleMessagesLinkService.nativeRcsEnabled())
+    }
+
+    @Test fun `restart sweep fetches once and closes an empty gap without a completion write`() {
         val handle = ReadyGapHandle()
         val core = ReadySweepCore()
         val coordinator = RcsReceiveCoordinator(
@@ -74,6 +91,8 @@ class GoogleMessagesLinkServiceTest {
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
         GoogleMessagesLinkService.testHooks = ServiceTestHooks(
             receiveSweepExecutor = Executor(Runnable::run),
+            bootstrapExecutor = Executor(Runnable::run),
+            bootstrapFactory = { _, _, _ -> emptyBootstrap() },
             receiveSweep = { lease, cancelled -> coordinator.resume(lease.handle, cancelled) },
         )
         installEngine(handle)
@@ -81,12 +100,12 @@ class GoogleMessagesLinkServiceTest {
         val controller = startService()
         assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
         assertEquals(0, handle.gapRequests.get())
-        assertEquals(0, core.checkpoints.get())
+        assertEquals(0, core.completions.get())
 
         GoogleMessagesLinkService.onLinkEvent("conn", "ready")
 
         assertEquals(1, handle.gapRequests.get())
-        assertEquals(1, core.checkpoints.get())
+        assertEquals(0, core.completions.get())
         controller.destroy()
         handle.allowRunReturn.countDown()
     }
@@ -99,6 +118,8 @@ class GoogleMessagesLinkServiceTest {
         GoogleMessagesLinkService.testHooks = ServiceTestHooks(
             sleeper = {},
             receiveSweepExecutor = executor,
+            bootstrapExecutor = Executor(Runnable::run),
+            bootstrapFactory = { _, _, _ -> emptyBootstrap() },
             receiveSweep = { _, _ -> sweeps.incrementAndGet() },
         )
         installEngine(handle)
@@ -125,6 +146,8 @@ class GoogleMessagesLinkServiceTest {
         GoogleMessagesLinkService.testHooks = ServiceTestHooks(
             sleeper = {},
             receiveSweepExecutor = executor,
+            bootstrapExecutor = Executor(Runnable::run),
+            bootstrapFactory = { _, _, _ -> emptyBootstrap() },
             receiveSweep = { _, _ -> sweeps.incrementAndGet() },
         )
         installEngine(handle)
@@ -152,6 +175,8 @@ class GoogleMessagesLinkServiceTest {
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
         GoogleMessagesLinkService.testHooks = ServiceTestHooks(
             receiveSweepExecutor = Executor(Runnable::run),
+            bootstrapExecutor = Executor(Runnable::run),
+            bootstrapFactory = { _, _, _ -> emptyBootstrap() },
             receiveSweep = { _, _ ->
                 val nowActive = active.incrementAndGet()
                 maximumActive.updateAndGet { maxOf(it, nowActive) }
@@ -386,6 +411,96 @@ class GoogleMessagesLinkServiceTest {
         handle.allowRunReturn.countDown()
     }
 
+    @Test fun `ready records lifecycle before proactive eligibility enumeration`() {
+        val handle = MutableStatusRunHandle()
+        val recorded = mutableListOf<LinkStatus>()
+        val lifecycleWasRecorded = AtomicBoolean(false)
+        LinkCoreBridge.recorder = { _, status -> synchronized(recorded) { recorded += status }; true }
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            notificationExecutor = Executor(Runnable::run),
+            beforeEligibilityEnumeration = {
+                lifecycleWasRecorded.set(synchronized(recorded) { READY_STATUS_PARSED in recorded })
+            },
+        )
+        installEngine(handle)
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+
+        handle.status = READY_STATUS
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+
+        assertTrue(lifecycleWasRecorded.get())
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `ready publishes eligibility for linked mapped conversations`() {
+        val handle = MutableStatusRunHandle()
+        val enumerations = AtomicInteger()
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            notificationExecutor = Executor(Runnable::run),
+            beforeEligibilityEnumeration = { enumerations.incrementAndGet() },
+        )
+        installEngine(handle)
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+
+        handle.status = READY_STATUS
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+
+        assertEquals(1, enumerations.get())
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `conversation updates and recovered streams refresh the index inside the full bootstrap interval`() {
+        val handle = RefreshTrackingHandle(listOf("ok", "ok"))
+        val executor = QueueExecutor()
+        GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            bootstrapExecutor = executor,
+            bootstrapFactory = { _, _, _ -> emptyBootstrap() },
+        )
+        installEngine(handle)
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+
+        GoogleMessagesLinkService.onLinkEvent("conversation", "updated")
+        executor.runAll()
+        GoogleMessagesLinkService.onLinkEvent("conn", "recovered")
+        executor.runAll()
+
+        assertEquals(2, handle.refreshes.get())
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `readiness retries after an incomplete index and recovers owned conversations after refresh`() {
+        val events = mutableListOf<String>()
+        val handle = RefreshTrackingHandle(listOf("stale", "ok"), events)
+        val executor = QueueExecutor()
+        GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            bootstrapExecutor = executor,
+            bootstrapFactory = { _, _, _ -> emptyBootstrap(events) },
+            receiveSweepExecutor = Executor(Runnable::run),
+            receiveSweep = { _, _ -> events += "sweep-owned" },
+        )
+        installEngine(handle)
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+        assertEquals(1, executor.size)
+        executor.runAll()
+        GoogleMessagesLinkService.onLinkEvent("conn", "recovered")
+        executor.runAll()
+
+        assertEquals(listOf("refresh:stale", "refresh:ok", "snapshot", "sweep-owned"), events)
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
     @Test
     fun `Run event overflow records the fixed diagnostic code`() {
         val events = mutableListOf<Pair<String, String>>()
@@ -569,6 +684,207 @@ class GoogleMessagesLinkServiceTest {
         releaseOpen.countDown()
     }
 
+    @Test fun `conn ready starts one typing host and a repeated ready does not start a second`() {
+        val handle = MutableStatusRunHandle()
+        val typing = TypingFixture()
+        val controller = startTypingService(handle, typing)
+        assertEquals(0, typing.transport.starts.get())
+
+        goLinkedAndRunning(handle)
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+
+        assertEquals(1, typing.transport.starts.get())
+        assertTrue(typing.transport.running)
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `unlink stops the typing host and disables the bridge`() {
+        val handle = MutableStatusRunHandle()
+        val typing = TypingFixture()
+        startTypingService(handle, typing)
+        goLinkedAndRunning(handle)
+        assertTrue(typing.transport.running)
+
+        LinkRuntime.resetLocalState(ApplicationProvider.getApplicationContext())
+
+        assertFalse(typing.transport.running)
+        assertTrue(typing.core.disables.get() > 0)
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `link loss stops the typing host and disables the bridge`() {
+        val handle = MutableStatusRunHandle()
+        val typing = TypingFixture()
+        val controller = startTypingService(handle, typing)
+        goLinkedAndRunning(handle)
+        assertTrue(typing.transport.running)
+
+        handle.status = LINKED_STATUS
+        GoogleMessagesLinkService.onLinkEvent("conn", "temporary_error")
+
+        assertFalse(typing.transport.running)
+        assertTrue(typing.core.disables.get() > 0)
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `vault lock or credential loss stops the typing host and disables the bridge`() {
+        val handle = MutableStatusRunHandle()
+        val typing = TypingFixture()
+        val controller = startTypingService(handle, typing)
+        goLinkedAndRunning(handle)
+        assertTrue(typing.transport.running)
+
+        typing.session = null
+        GoogleMessagesLinkService.onLinkEvent("conn", "temporary_error")
+
+        assertFalse(typing.transport.running)
+        assertTrue(typing.core.disables.get() > 0)
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `service destroy stops the typing host and disables the bridge`() {
+        val handle = MutableStatusRunHandle()
+        val typing = TypingFixture()
+        val controller = startTypingService(handle, typing)
+        goLinkedAndRunning(handle)
+        assertTrue(typing.transport.running)
+
+        controller.destroy()
+
+        assertFalse(typing.transport.running)
+        assertTrue(typing.core.disables.get() > 0)
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `destroyed service cannot start a queued typing update`() {
+        val handle = MutableStatusRunHandle()
+        val typing = TypingFixture()
+        val executor = QueuedExecutor()
+        installTypingHooks(typing, typingExecutor = executor)
+        installEngine(handle)
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+
+        goLinkedAndRunning(handle)
+        controller.destroy()
+        executor.runAll()
+
+        assertEquals(0, typing.transport.starts.get())
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `typing host never starts while the native RCS gate is off`() {
+        val handle = MutableStatusRunHandle()
+        val typing = TypingFixture()
+        installTypingHooks(typing, nativeRcs = false)
+        installEngine(handle)
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+
+        goLinkedAndRunning(handle)
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+
+        assertEquals(0, typing.transport.starts.get())
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `conn recovered restarts the typing host after a stop caused by link loss`() {
+        val handle = MutableStatusRunHandle()
+        val typing = TypingFixture()
+        val controller = startTypingService(handle, typing)
+        goLinkedAndRunning(handle)
+        handle.status = LINKED_STATUS
+        GoogleMessagesLinkService.onLinkEvent("conn", "temporary_error")
+        assertFalse(typing.transport.running)
+
+        goLinkedAndRunning(handle)
+        GoogleMessagesLinkService.onLinkEvent("conn", "recovered")
+
+        assertEquals(2, typing.transport.starts.get())
+        assertTrue(typing.transport.running)
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    private fun startTypingService(handle: MutableStatusRunHandle, typing: TypingFixture): ServiceController<GoogleMessagesLinkService> {
+        installTypingHooks(typing)
+        installEngine(handle)
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+        return controller
+    }
+
+    /** Typing starts only from a running linked status; the service run is entered in the linked, not running state. */
+    private fun goLinkedAndRunning(handle: MutableStatusRunHandle) {
+        handle.status = READY_STATUS
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+    }
+
+    private fun installTypingHooks(
+        typing: TypingFixture,
+        nativeRcs: Boolean = true,
+        typingExecutor: Executor = Executor(Runnable::run),
+    ) {
+        GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = nativeRcs
+        val direct = Executor(Runnable::run)
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            notificationExecutor = direct,
+            eligibilityExecutor = direct,
+            bootstrapExecutor = direct,
+            bootstrapFactory = { _, _, _ -> emptyBootstrap() },
+            receiveSweepExecutor = direct,
+            receiveSweep = { _, _ -> },
+            typingBridgeFactory = { context ->
+                TypingBridge(context = context, host = typing.transport, executor = direct, client = { typing.core })
+            },
+            typingSession = { typing.session },
+            typingExecutor = typingExecutor,
+        )
+    }
+
+    private class TypingFixture {
+        val transport = FakeLiveTypingHost()
+        val core = FakeTypingCore()
+        @Volatile var session: TypingCredentials? = TypingCredentials("https://example.test", "bearer", "gateway", 1)
+    }
+
+    private class FakeLiveTypingHost : TypingTransport {
+        val starts = AtomicInteger()
+        @Volatile var running = false
+        override fun start(credentials: LiveTypingCredentials, listener: LiveTypingListener) {
+            starts.incrementAndGet()
+            running = true
+        }
+        override fun stop() { running = false }
+        override fun send(frameJson: String) = true
+    }
+
+    private class FakeTypingCore : TypingCore {
+        val disables = AtomicInteger()
+        override fun enable(context: NativeLiveEnableContext, clock: NativeLiveClock): ULong = 1UL
+        override fun setSharing(enabled: Boolean) = Unit
+        override fun disable() { disables.incrementAndGet() }
+        override fun receiveContext(googleConversationId: String): TypingReceiveContext? = null
+        override fun ownedGoogleConversationId(conversationId: String): String? = null
+        override fun seal(
+            conversationId: String,
+            gatewayDeviceId: String,
+            state: NativeTypingState,
+            clock: NativeLiveClock,
+        ): NativeLiveOutbound? = null
+        override fun open(frameJson: String, clock: NativeLiveClock): NativeLiveOutcome = NativeLiveOutcome(1UL, null, null, null)
+    }
+
+    private class QueuedExecutor : Executor {
+        private val tasks = ArrayDeque<Runnable>()
+        override fun execute(command: Runnable) { tasks += command }
+        fun runAll() { while (tasks.isNotEmpty()) tasks.removeFirst().run() }
+    }
+
     private fun startService() = Robolectric.buildService(GoogleMessagesLinkService::class.java)
         .create()
         .startCommand(0, 1)
@@ -598,6 +914,7 @@ class GoogleMessagesLinkServiceTest {
         override fun stop() = Unit
         open override fun close() { closed = true }
         override fun status(): String = currentStatus
+        override fun refreshConversationIndex(): String = "{\"code\":\"ok\"}"
     }
 
     private class FenceHandle : StatusHandle(LINKED_STATUS) {
@@ -648,14 +965,16 @@ class GoogleMessagesLinkServiceTest {
     }
 
     private class ReadySweepCore : RcsReceiveCore {
-        val checkpoints = AtomicInteger()
+        val completions = AtomicInteger()
         private val context = NativeRcsReceiveContext(
             "core-conversation",
             "google-conversation",
             7u,
             11u,
             NativeRcsReceiveOwner.LINK,
-            "initial",
+            1_000L,
+            null,
+            false,
             NativeRcsContextExpectation(7u, 13u, 17u, 19u),
         )
 
@@ -665,11 +984,13 @@ class GoogleMessagesLinkServiceTest {
             context: NativeRcsReceiveContext,
             record: String,
             provenance: NativeRcsObservationProvenance,
-        ) = NativeRcsIngestOutcome("inserted", null, null)
-        override fun checkpoint(context: NativeRcsReceiveContext, token: String): String {
-            checkpoints.incrementAndGet()
+        ) = NativeRcsIngestOutcome("inserted", null)
+        override fun recordProgress(context: NativeRcsReceiveContext, targetMs: Long, cursor: String) = "recorded"
+        override fun complete(context: NativeRcsReceiveContext, targetMs: Long): String {
+            completions.incrementAndGet()
             return "recorded"
         }
+        override fun clearHint(context: NativeRcsReceiveContext) = "recorded"
         override fun invalidate(context: NativeRcsReceiveContext, googleId: String) = Unit
     }
 
@@ -712,7 +1033,7 @@ class GoogleMessagesLinkServiceTest {
         override fun run() = Unit
     }
 
-    private class MutableStatusRunHandle : StatusHandle(LINKED_STATUS) {
+    private open class MutableStatusRunHandle : StatusHandle(LINKED_STATUS) {
         @Volatile var status = LINKED_STATUS
         val runEntered = CountDownLatch(1)
         val allowRunReturn = CountDownLatch(1)
@@ -720,6 +1041,19 @@ class GoogleMessagesLinkServiceTest {
         override fun run() {
             runEntered.countDown()
             allowRunReturn.await()
+        }
+    }
+
+    private class RefreshTrackingHandle(
+        private val refreshCodes: List<String>,
+        private val events: MutableList<String>? = null,
+    ) : MutableStatusRunHandle() {
+        val refreshes = AtomicInteger()
+
+        override fun refreshConversationIndex(): String {
+            val code = refreshCodes[refreshes.getAndIncrement()]
+            events?.add("refresh:$code")
+            return "{\"code\":\"$code\"}"
         }
     }
 
@@ -754,6 +1088,26 @@ class GoogleMessagesLinkServiceTest {
         override fun execute(command: Runnable) { tasks += command }
         fun runAll() { while (tasks.isNotEmpty()) tasks.removeFirst().run() }
     }
+
+    private fun emptyBootstrap(events: MutableList<String>? = null) = RcsLinkBootstrap(
+        core = object : RcsBootstrapCorePort {
+            override fun ownedGoogleIds() = setOf("owned")
+            override fun resolve(candidates: List<Pair<String, String>>) = emptyList<uniffi.peppy_mobile_bindings.NativeRcsBootstrapResolution>()
+            override fun tuple(snapshot: JSONObject) = RcsNativeContextTuple(1u, 1u, 1u)
+            override fun revision(conversationId: String) = 1uL
+            override fun lifecycleGeneration() = 1uL
+            override fun verify(observation: String, nowMs: Long) = uniffi.peppy_mobile_bindings.NativeRcsMappingVerification.MAPPED
+            override fun claim(json: String) = uniffi.peppy_mobile_bindings.NativeRcsLinkOwnershipClaimOutcome.CLAIMED
+        },
+        link = object : RcsBootstrapLinkPort {
+            override fun candidateSnapshot(): String {
+                events?.add("snapshot")
+                return "{\"code\":\"conversation_candidate_snapshot\",\"complete\":true,\"conversations\":[]}"
+            }
+            override fun observe(request: String) = "{\"code\":\"ok\",\"observation\":\"proof\"}"
+        },
+        routeReader = { error("no candidates") },
+    )
 
     private companion object {
         const val LINKED_STATUS = """{"seq":1,"state":"linked","running":false,"healthy":false,"phone_responding":false,"last_ok_ms":0,"stop_code":""}"""

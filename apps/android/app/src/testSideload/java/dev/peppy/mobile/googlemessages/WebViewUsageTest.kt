@@ -12,6 +12,6 @@ class WebViewUsageTest {
             .map { it.relativeTo(sourceRoot).invariantSeparatorsPath }
             .toList()
 
-        assertEquals(listOf("sideload/java/dev/peppy/mobile/googlemessages/LinkSignInActivity.kt"), users)
+        assertEquals(listOf("gmlink/java/dev/peppy/mobile/googlemessages/LinkSignInActivity.kt"), users)
     }
 }

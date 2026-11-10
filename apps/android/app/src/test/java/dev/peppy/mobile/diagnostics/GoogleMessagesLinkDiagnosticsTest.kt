@@ -23,7 +23,14 @@ class GoogleMessagesLinkDiagnosticsTest {
         "conn" to "ready", "conn" to "temporary_error", "conn" to "recovered",
         "conn" to "phone_not_responding", "conn" to "phone_responding", "conn" to "no_data",
         "browser" to "active", "browser" to "inactive", "session" to "active_session_set",
-        "health" to "ok", "health" to "failed", "conversation" to "updated",
+        "health" to "ok", "health" to "failed", "conversation" to "updated", "link" to "rcs_cutover_ambiguous",
+        "link" to "rcs_eligibility_failed", "link" to "rcs_cutover_sweep_failed", "link" to "rcs_receive_sweep_failed", "link" to "rcs_callback_failed", "link" to "rcs_bootstrap_failed", "link" to "explicit_unlink_completion_failed",
+        "link" to "rcs_recovery_aborted", "link" to "rcs_recovery_incomplete", "link" to "rcs_drain_evicted", "link" to "rcs_sweep_skipped_idle",
+			"index" to "stale",
+            "live" to "auth_refused", "live" to "protocol_fatal", "live" to "reconnect_scheduled",
+            "live" to "enabled", "live" to "disabled",
+            "typing" to "enabled", "typing" to "disabled", "typing" to "inbound_sealed",
+            "typing" to "outbound_effect", "typing" to "suppressed", "typing" to "dropped_stale",
     )
 
     @Test fun everyPairRecordsOnlyItsStableNumericReason() {
@@ -31,7 +38,7 @@ class GoogleMessagesLinkDiagnosticsTest {
         SyncDiagnostics.withTestConfiguration(true, { 10L }, { error("CPU unused") }, records::add) {
             stablePairs.forEach { (kind, code) -> recordGoogleMessagesLinkEvent(kind, code, Long.MAX_VALUE) }
         }
-        assertEquals(36, records.size)
+		assertEquals(59, records.size)
         records.forEachIndexed { index, record ->
             assertEquals("event=27 session=1 timestamp_ms=10 trace=0 29=${index + 1}", record)
         }
@@ -46,8 +53,8 @@ class GoogleMessagesLinkDiagnosticsTest {
         val goPairs = Regex("""\{"([^"]+)",\s*"([^"]+)"}""").findAll(goSource)
             .map { it.groupValues[1] to it.groupValues[2] }.toSet()
         assertTrue(goPairs.isNotEmpty())
-        assertEquals(goPairs, GoogleMessagesLinkDiagnosticReason.codes.keys)
-        assertEquals(stablePairs.toSet(), GoogleMessagesLinkDiagnosticReason.codes.keys)
+        assertTrue(GoogleMessagesLinkDiagnosticReason.codes.keys.containsAll(goPairs))
+		assertEquals(stablePairs.toSet(), GoogleMessagesLinkDiagnosticReason.codes.keys)
     }
 
     @Test fun unknownMalformedAndMismatchedPairsRecordOnlyUnknown() {

@@ -20,6 +20,14 @@ class RcsEligibilityPublisherTest {
         assertEquals(emptyList<Pair<List<NativeRcsEligibilityPublication>, Long>>(), port.published)
     }
 
+    @Test fun `publishes more than one hundred conversations in bounded batches`() {
+        val port = FakePort()
+        RcsEligibilityPublisher(port, current = { true }, nowMs = { 42 })
+            .publish((1..101).map { "conversation-$it" })
+
+        assertEquals(listOf(100, 1), port.published.map { it.first.size })
+    }
+
     private class FakePort : RcsEligibilityPublisherPort {
         val published = mutableListOf<Pair<List<NativeRcsEligibilityPublication>, Long>>()
         override fun publish(publications: List<NativeRcsEligibilityPublication>, nowMs: Long): UInt {

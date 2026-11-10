@@ -6,8 +6,6 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
-import dev.peppy.mobile.googlemessages.live.LiveCore
-import dev.peppy.mobile.googlemessages.live.LiveMembershipSnapshot
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import uniffi.peppy_mobile_bindings.NativeLiveTypingException
@@ -26,13 +24,7 @@ class TypingSharingPreferencesTest {
 
         assertTrue(preferences.update(false, apply))
         enabled = true
-        val delegate = object : LiveCore {
-            override fun enable(snapshot: LiveMembershipSnapshot) = Unit
-            override fun disable() = Unit
-        }
-        TypingSharingLiveCore(delegate, preferences, apply).enable(
-            LiveMembershipSnapshot("synthetic-connection", 1, emptyList()),
-        )
+        assertTrue(preferences.reapplyAfterEnable(apply))
 
         val localFrame = if (sharingEnabled) "sealed-local-frame" else null
         val contactDisplay = "google-contact-typing"

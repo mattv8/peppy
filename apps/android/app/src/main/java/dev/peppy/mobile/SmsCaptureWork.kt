@@ -23,6 +23,8 @@ import dev.peppy.mobile.sms.SmsProviderException
 import dev.peppy.mobile.sms.SmsProviderPage
 import dev.peppy.mobile.sms.SmsProviderRecord
 import dev.peppy.mobile.telephony.SimRoutes
+import dev.peppy.mobile.sms.ProviderAcquisitionRoute
+import dev.peppy.mobile.sms.RcsProviderRowRouter
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -102,6 +104,7 @@ internal enum class SmsCompletion {
 internal class SmsCaptureCapacityException : IllegalStateException("SMS acquisition capacity reached")
 
 internal interface SmsCaptureCore {
+    val providerRouter: RcsProviderRowRouter get() = RcsProviderRowRouter.acquireAll()
     /** Rust returns a durable, rotated page of pending rows after [afterId]. */
     fun acquisitions(afterId: String?, limit: Int): List<SmsAcquisition>
     /**
@@ -650,6 +653,10 @@ internal object SmsCapture {
             ) {
                 return unavailable(core, existing, "provider_source_changed")
             }
+        }
+        // Router identity is provider evidence: SMS type, row/thread IDs, date, and address.
+        if (core.providerRouter.route(row.id, row.threadId, row.type ?: 0, row.dateMs, listOfNotNull(row.address)) == ProviderAcquisitionRoute.SKIP) {
+            return Outcome(providerDurable = true)
         }
         val acquisition = try {
             // Re-beginning refreshes mutable fields of the same immutable evidence; changed

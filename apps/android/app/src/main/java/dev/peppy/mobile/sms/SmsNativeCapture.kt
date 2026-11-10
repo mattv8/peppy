@@ -245,6 +245,7 @@ private const val RECONCILIATION_LOOP_BUDGET_NANOS = 5_000_000_000L
 internal fun shouldScheduleGatewayUpload(summary: SmsCaptureSummary): Boolean = summary.captured > 0
 
 internal class NativeSmsCaptureCore(private val client: NativeClientInterface) : SmsCaptureCore {
+    override val providerRouter = RcsProviderRowRouter(client::gatewayRouteRcsProviderRowJson)
     override fun acquisitions(afterId: String?, limit: Int): List<SmsAcquisition> =
         client.smsAcquisitionsAfter(afterId, limit.toULong()).map { acquisition ->
             SmsAcquisition(
