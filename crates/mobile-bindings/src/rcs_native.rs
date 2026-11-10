@@ -1,10 +1,10 @@
 use crate::{MobileBindingsError, NativeClient, with_client};
 use peppy_client_core::{
     NativeRcsCommitProjection, NativeRcsPreparation, NativeRcsTargetClass,
-    RCS_CANONICALIZER_REVISION, RcsMappingClass, RcsMappingObservation, RcsMappingOutcome,
-    RcsMappingRefusal, RcsTargetDecision,
+    RCS_CANONICALIZER_REVISION, RcsBootstrapResolution, RcsMappingClass, RcsMappingObservation,
+    RcsMappingOutcome, RcsMappingRefusal, RcsTargetDecision,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 const RCS_NATIVE_JSON_CAP: usize = 65_536;
@@ -22,6 +22,16 @@ pub enum NativeRcsMappingVerification {
     Mapped,
     GoogleConversationAmbiguous,
     Refused,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeRcsBootstrapResolution {
+    Resolved { conversation_id: String },
+    Missing,
+    Ambiguous,
+    Uncertain,
+    InvalidIdentity,
+    AlreadyMappedElsewhere,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -334,6 +344,66 @@ pub fn gateway_verify_rcs_mapping(
         }
         RcsMappingOutcome::Refused(_) => NativeRcsMappingVerification::Refused,
     })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BootstrapCandidateJson {
+    participant_identity: String,
+    google_conversation_id: String,
+}
+
+/// Resolves a JSON array of `{participantIdentity, googleConversationId}` candidates in input
+/// order. The core rejects more than 40 candidates.
+#[uniffi::export]
+pub fn gateway_resolve_rcs_bootstrap_conversations(
+    client: Arc<NativeClient>,
+    candidates_json: String,
+) -> Result<Vec<NativeRcsBootstrapResolution>, MobileBindingsError> {
+    with_client(&client.client, |core| {
+        if candidates_json.len() > RCS_NATIVE_JSON_CAP {
+            return Err(peppy_client_core::Error::InvalidRequest(
+                "bootstrap candidates too large",
+            ));
+        }
+        let candidates = serde_json::from_str::<Vec<BootstrapCandidateJson>>(&candidates_json)
+            .map_err(|_| {
+                peppy_client_core::Error::InvalidRequest("invalid bootstrap candidates")
+            })?;
+        let pairs = candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.participant_identity.as_str(),
+                    candidate.google_conversation_id.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        core.resolve_rcs_bootstrap_conversations(&pairs)
+    })
+    .map(|resolutions| {
+        resolutions
+            .into_iter()
+            .map(native_bootstrap_resolution)
+            .collect()
+    })
+}
+
+fn native_bootstrap_resolution(resolution: RcsBootstrapResolution) -> NativeRcsBootstrapResolution {
+    match resolution {
+        RcsBootstrapResolution::Resolved { conversation_id } => {
+            NativeRcsBootstrapResolution::Resolved {
+                conversation_id: conversation_id.to_string(),
+            }
+        }
+        RcsBootstrapResolution::Missing => NativeRcsBootstrapResolution::Missing,
+        RcsBootstrapResolution::Ambiguous => NativeRcsBootstrapResolution::Ambiguous,
+        RcsBootstrapResolution::Uncertain => NativeRcsBootstrapResolution::Uncertain,
+        RcsBootstrapResolution::InvalidIdentity => NativeRcsBootstrapResolution::InvalidIdentity,
+        RcsBootstrapResolution::AlreadyMappedElsewhere => {
+            NativeRcsBootstrapResolution::AlreadyMappedElsewhere
+        }
+    }
 }
 
 #[uniffi::export]

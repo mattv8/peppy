@@ -1,10 +1,12 @@
 use crate::{MobileBindingsError, NativeClient, NativeConversation, NativeMessage, with_client};
 use peppy_client_core::{
     Client, Conversation, ConversationId, Direction, Message, RcsContextExpectation, RcsCutover,
-    RcsIdentityOutcome, RcsObservationProvenance, RcsOwnerUnlinkCutoverCandidate,
-    RcsProjectedRecord, RcsProjectedStatus, RcsProviderDetector, RcsProviderRow,
-    RcsProviderRowRoute, RcsReceiveCode, RcsReceiveContext, RcsReceiveOutcome, RcsReceiveOwner,
-    RcsStatusApplication, RcsUnlinkCutoverGenerations, Transport,
+    RcsIdentityOutcome, RcsLinkOwnershipClaim, RcsLinkOwnershipClaimOutcome,
+    RcsObservationProvenance, RcsOwnerUnlinkCutoverCandidate, RcsProjectedRecord,
+    RcsProjectedStatus, RcsProviderDetector, RcsProviderRouteReason, RcsProviderRow,
+    RcsProviderRowRoute, RcsProviderRowRouteResult, RcsReceiveCode, RcsReceiveContext,
+    RcsReceiveOutcome, RcsReceiveOwner, RcsRecoveryOutcome, RcsStatusApplication,
+    RcsUnlinkCutoverGenerations, Transport,
 };
 use serde::Deserialize;
 
@@ -77,19 +79,6 @@ pub(crate) fn message_view(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ProjectedRecord {
-    google_message_id: String,
-    google_conversation_id: String,
-    direction: String,
-    body: String,
-    sent_at_ms: Option<i64>,
-    tmp_id: Option<String>,
-    rcs_reported: bool,
-    e2ee_reported: Option<bool>,
-    history_token: Option<String>,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StatusRecord {
     google_message_id: String,
     google_conversation_id: String,
@@ -134,13 +123,13 @@ const GO_BODY_CAP: usize = 16_384;
 const GO_CURSOR_CAP: usize = 4_096;
 
 /// Exact shape of Go's `rcsReceiveRecord` (`apps/android/googlemessages/gmlink/receive.go`).
-/// `cursor`, `tmp_id`, and `e2ee_reported` are `omitempty` on the Go side; all other keys are always emitted.
+/// `tmp_id` and `e2ee_reported` are `omitempty` on the Go side; all other keys are always emitted.
+/// Unknown keys (including a per-record `cursor`) are rejected.
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 struct GoReceiveRecord {
     google_message_id: String,
     google_conversation_id: String,
-    cursor: Option<String>,
     direction: String,
     body: String,
     sent_at_ms: i64,
@@ -153,22 +142,10 @@ struct GoReceiveRecord {
 struct GoReceiveParts {
     record: RcsProjectedRecord,
     status: Option<RcsStatusApplication>,
-    cursor: Option<String>,
 }
 
 fn bounded_text(value: &str, max: usize) -> Result<(), MobileBindingsError> {
     if value.is_empty() || value.len() > max {
-        return Err(MobileBindingsError::InvalidRequest);
-    }
-    Ok(())
-}
-
-fn valid_go_cursor(value: &str) -> Result<(), MobileBindingsError> {
-    bounded_text(value, GO_CURSOR_CAP)?;
-    if !value
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
         return Err(MobileBindingsError::InvalidRequest);
     }
     Ok(())
@@ -183,9 +160,6 @@ impl GoReceiveRecord {
         }
         if let Some(tmp_id) = self.tmp_id.as_deref() {
             bounded_text(tmp_id, GO_ID_CAP)?;
-        }
-        if let Some(cursor) = self.cursor.as_deref() {
-            valid_go_cursor(cursor)?;
         }
         let direction = match self.direction.as_str() {
             "incoming" => Direction::Incoming,
@@ -213,8 +187,6 @@ impl GoReceiveRecord {
                 tmp_id: self.tmp_id.clone(),
                 rcs_reported: self.rcs_reported,
                 e2ee_reported,
-                // The cursor is never checkpointed inside ingest; the caller persists it after success.
-                history_token: None,
             },
             status: status.map(|status| RcsStatusApplication {
                 google_message_id: self.google_message_id,
@@ -222,19 +194,16 @@ impl GoReceiveRecord {
                 tmp_id: self.tmp_id,
                 status,
             }),
-            cursor: self.cursor,
         })
     }
 }
 
-/// Closed outcomes plus the opaque Google page cursor. The cursor is present only when the
-/// record was accepted (not rejected) and carried one; the caller hands it back to
-/// `gateway_checkpoint_rcs_history` only after this call has succeeded.
+/// Closed record and status outcomes. Recovery progress is recorded only with
+/// `gateway_record_rcs_recovery_progress`.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeRcsIngestOutcome {
     pub record_outcome: String,
     pub status_outcome: Option<String>,
-    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -278,6 +247,20 @@ pub enum NativeRcsProviderRowRoute {
     Alert,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeRcsProviderRouteReason {
+    NotRestrictedText,
+    NotLinkOwned,
+    PreProof,
+    GuardBand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeRcsProviderRoute {
+    pub route: NativeRcsProviderRowRoute,
+    pub reason: Option<NativeRcsProviderRouteReason>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProviderRowJson {
@@ -286,6 +269,42 @@ struct ProviderRowJson {
     provider_type: i64,
     observed_at_ms: i64,
     addresses: Vec<String>,
+    #[serde(default)]
+    restricted: bool,
+    #[serde(default)]
+    text_only: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LinkOwnershipClaimJson {
+    conversation_id: String,
+    google_conversation_id: String,
+    mapping_revision: u64,
+    provider_floor: i64,
+    expected_lifecycle_generation: u64,
+    expected_link_generation: u64,
+    expected_session_generation: u64,
+    expected_context_revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeRcsLinkOwnershipClaimOutcome {
+    Claimed,
+    Refused,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeRcsLinkOwnershipClaim {
+    pub outcome: NativeRcsLinkOwnershipClaimOutcome,
+    pub ownership_generation: u64,
+    pub proof_time_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeRcsCutoverAlerts {
+    pub count: u64,
+    pub conversation_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -295,13 +314,24 @@ pub enum NativeRcsReceiveOwner {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeRcsResumeHint {
+    pub target_ms: i64,
+    pub cursor: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeRcsReceiveContext {
     pub conversation_id: String,
     pub google_conversation_id: String,
     pub ownership_generation: u64,
     pub lifecycle_generation: u64,
     pub owner: NativeRcsReceiveOwner,
-    pub history_token: Option<String>,
+    /// Newest sort time fully traversed by historical catch-up (ms).
+    pub watermark_ms: i64,
+    /// Advisory resume point for an interrupted traversal; correctness never depends on it.
+    pub resume_hint: Option<NativeRcsResumeHint>,
+    /// True while a catch-up gap is open (a later trigger retries).
+    pub incomplete: bool,
     pub expectation: NativeRcsContextExpectation,
 }
 
@@ -347,6 +377,39 @@ fn provider_row_route(value: RcsProviderRowRoute) -> NativeRcsProviderRowRoute {
     }
 }
 
+fn provider_route_reason(value: RcsProviderRouteReason) -> NativeRcsProviderRouteReason {
+    match value {
+        RcsProviderRouteReason::NotRestrictedText => {
+            NativeRcsProviderRouteReason::NotRestrictedText
+        }
+        RcsProviderRouteReason::NotLinkOwned => NativeRcsProviderRouteReason::NotLinkOwned,
+        RcsProviderRouteReason::PreProof => NativeRcsProviderRouteReason::PreProof,
+        RcsProviderRouteReason::GuardBand => NativeRcsProviderRouteReason::GuardBand,
+    }
+}
+
+fn provider_route_view(value: RcsProviderRowRouteResult) -> NativeRcsProviderRoute {
+    NativeRcsProviderRoute {
+        route: provider_row_route(value.route),
+        reason: value.reason.map(provider_route_reason),
+    }
+}
+
+fn ownership_claim_view(value: RcsLinkOwnershipClaimOutcome) -> NativeRcsLinkOwnershipClaim {
+    match value {
+        RcsLinkOwnershipClaimOutcome::Claimed(ownership) => NativeRcsLinkOwnershipClaim {
+            outcome: NativeRcsLinkOwnershipClaimOutcome::Claimed,
+            ownership_generation: ownership.ownership_generation,
+            proof_time_ms: ownership.proof_time_ms,
+        },
+        RcsLinkOwnershipClaimOutcome::Refused => NativeRcsLinkOwnershipClaim {
+            outcome: NativeRcsLinkOwnershipClaimOutcome::Refused,
+            ownership_generation: 0,
+            proof_time_ms: 0,
+        },
+    }
+}
+
 fn receive_context_view(value: RcsReceiveContext) -> NativeRcsReceiveContext {
     NativeRcsReceiveContext {
         conversation_id: value.conversation_id.to_string(),
@@ -357,7 +420,12 @@ fn receive_context_view(value: RcsReceiveContext) -> NativeRcsReceiveContext {
             RcsReceiveOwner::Link => NativeRcsReceiveOwner::Link,
             RcsReceiveOwner::Provider => NativeRcsReceiveOwner::Provider,
         },
-        history_token: value.history_token,
+        watermark_ms: value.recovery.watermark_ms,
+        resume_hint: value.recovery.resume_hint.map(|hint| NativeRcsResumeHint {
+            target_ms: hint.target_ms,
+            cursor: hint.cursor,
+        }),
+        incomplete: value.recovery.incomplete,
         expectation: NativeRcsContextExpectation {
             ownership_generation: value.expectation.ownership_generation,
             link_generation: value.expectation.link_generation,
@@ -387,18 +455,13 @@ fn ingest_go_record(
         .map_err(|_| MobileBindingsError::InvalidRequest)?;
     let go_record: GoReceiveRecord =
         serde_json::from_str(&go_record_json).map_err(|_| MobileBindingsError::InvalidRequest)?;
-    let GoReceiveParts {
-        record,
-        status,
-        cursor,
-    } = go_record.into_parts()?;
+    let GoReceiveParts { record, status } = go_record.into_parts()?;
     with_client(&owner.client, |client| {
         let record_outcome = ingest(client, conversation, ownership_generation, record)?;
         if matches!(record_outcome, RcsReceiveOutcome::Rejected(_)) {
             return Ok(NativeRcsIngestOutcome {
                 record_outcome: receive_outcome(record_outcome),
                 status_outcome: None,
-                cursor: None,
             });
         }
         let status_outcome = status
@@ -406,17 +469,9 @@ fn ingest_go_record(
                 client.apply_rcs_projected_status(conversation, ownership_generation, status)
             })
             .transpose()?;
-        let cursor = if status_outcome
-            .is_some_and(|outcome| matches!(outcome, RcsReceiveOutcome::Rejected(_)))
-        {
-            None
-        } else {
-            cursor
-        };
         Ok(NativeRcsIngestOutcome {
             record_outcome: receive_outcome(record_outcome),
             status_outcome: status_outcome.map(receive_outcome),
-            cursor,
         })
     })
 }
@@ -426,6 +481,13 @@ fn identity_outcome(value: RcsIdentityOutcome) -> String {
         RcsIdentityOutcome::Recorded => "recorded".into(),
         RcsIdentityOutcome::Duplicate => "duplicate".into(),
         RcsIdentityOutcome::Rejected(code) => format!("rejected:{}", receive_code(code)),
+    }
+}
+
+fn recovery_outcome(value: RcsRecoveryOutcome) -> String {
+    match value {
+        RcsRecoveryOutcome::Recorded => "recorded".into(),
+        RcsRecoveryOutcome::Rejected(code) => format!("rejected:{}", receive_code(code)),
     }
 }
 
@@ -473,46 +535,6 @@ impl NativeClient {
             },
         )
     }
-    pub fn gateway_ingest_rcs_record_json(
-        &self,
-        conversation_id: String,
-        ownership_generation: u64,
-        record_json: String,
-    ) -> Result<String, MobileBindingsError> {
-        if record_json.len() > 65_536 {
-            return Err(MobileBindingsError::InvalidRequest);
-        }
-        let record: ProjectedRecord =
-            serde_json::from_str(&record_json).map_err(|_| MobileBindingsError::InvalidRequest)?;
-        let direction = match record.direction.as_str() {
-            "incoming" => Direction::Incoming,
-            "outgoing" => Direction::Outgoing,
-            _ => return Err(MobileBindingsError::InvalidRequest),
-        };
-        with_client(&self.client, |client| {
-            client.ingest_rcs_projected_record(
-                conversation_id.parse().map_err(|_| {
-                    peppy_client_core::Error::InvalidRequest("invalid conversation")
-                })?,
-                ownership_generation,
-                RcsProjectedRecord {
-                    google_message_id: record.google_message_id,
-                    google_conversation_id: record.google_conversation_id,
-                    direction,
-                    body: record.body,
-                    sent_at_ms: record.sent_at_ms,
-                    tmp_id: record.tmp_id,
-                    rcs_reported: record.rcs_reported,
-                    e2ee_reported: record
-                        .rcs_reported
-                        .then_some(record.e2ee_reported)
-                        .flatten(),
-                    history_token: record.history_token,
-                },
-            )
-        })
-        .map(receive_outcome)
-    }
     pub fn gateway_apply_rcs_status_json(
         &self,
         conversation_id: String,
@@ -548,25 +570,59 @@ impl NativeClient {
         })
         .map(receive_outcome)
     }
-    pub fn gateway_checkpoint_rcs_history(
+    pub fn gateway_record_rcs_recovery_progress(
         &self,
         conversation_id: String,
         ownership_generation: u64,
-        history_token: String,
+        target_ms: i64,
+        cursor: String,
     ) -> Result<String, MobileBindingsError> {
-        if history_token.len() > 4_096 {
+        if cursor.len() > GO_CURSOR_CAP {
             return Err(MobileBindingsError::InvalidRequest);
         }
         with_client(&self.client, |client| {
-            client.checkpoint_rcs_history(
+            client.record_rcs_recovery_progress(
                 conversation_id.parse().map_err(|_| {
                     peppy_client_core::Error::InvalidRequest("invalid conversation")
                 })?,
                 ownership_generation,
-                &history_token,
+                target_ms,
+                &cursor,
             )
         })
-        .map(identity_outcome)
+        .map(recovery_outcome)
+    }
+    pub fn gateway_complete_rcs_recovery(
+        &self,
+        conversation_id: String,
+        ownership_generation: u64,
+        target_ms: i64,
+    ) -> Result<String, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.complete_rcs_recovery(
+                conversation_id.parse().map_err(|_| {
+                    peppy_client_core::Error::InvalidRequest("invalid conversation")
+                })?,
+                ownership_generation,
+                target_ms,
+            )
+        })
+        .map(recovery_outcome)
+    }
+    pub fn gateway_clear_rcs_recovery_hint(
+        &self,
+        conversation_id: String,
+        ownership_generation: u64,
+    ) -> Result<String, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.clear_rcs_recovery_hint(
+                conversation_id.parse().map_err(|_| {
+                    peppy_client_core::Error::InvalidRequest("invalid conversation")
+                })?,
+                ownership_generation,
+            )
+        })
+        .map(recovery_outcome)
     }
     pub fn gateway_rcs_owner_unlink_cutover_candidates(
         &self,
@@ -580,22 +636,71 @@ impl NativeClient {
     pub fn gateway_route_rcs_provider_row_json(
         &self,
         provider_row_json: String,
-    ) -> Result<NativeRcsProviderRowRoute, MobileBindingsError> {
+    ) -> Result<NativeRcsProviderRoute, MobileBindingsError> {
         if provider_row_json.len() > GO_RECORD_JSON_CAP {
             return Err(MobileBindingsError::InvalidRequest);
         }
         let row: ProviderRowJson = serde_json::from_str(&provider_row_json)
             .map_err(|_| MobileBindingsError::InvalidRequest)?;
         with_client(&self.client, |client| {
-            client.route_rcs_provider_row(RcsProviderRow {
+            client.route_rcs_provider_row_result(RcsProviderRow {
                 provider_row_id: row.provider_row_id,
                 provider_thread_id: row.provider_thread_id,
                 provider_type: row.provider_type,
                 observed_at_ms: row.observed_at_ms,
                 addresses: row.addresses,
+                restricted: row.restricted,
+                text_only: row.text_only,
             })
         })
-        .map(provider_row_route)
+        .map(provider_route_view)
+    }
+
+    pub fn gateway_claim_rcs_link_ownership_json(
+        &self,
+        claim_json: String,
+    ) -> Result<NativeRcsLinkOwnershipClaim, MobileBindingsError> {
+        if claim_json.len() > GO_RECORD_JSON_CAP {
+            return Err(MobileBindingsError::InvalidRequest);
+        }
+        let claim: LinkOwnershipClaimJson =
+            serde_json::from_str(&claim_json).map_err(|_| MobileBindingsError::InvalidRequest)?;
+        if claim.conversation_id.len() > GO_ID_CAP || claim.google_conversation_id.len() > GO_ID_CAP
+        {
+            return Err(MobileBindingsError::InvalidRequest);
+        }
+        let conversation_id = claim
+            .conversation_id
+            .parse()
+            .map_err(|_| MobileBindingsError::InvalidRequest)?;
+        with_client(&self.client, |client| {
+            client.claim_rcs_link_ownership(RcsLinkOwnershipClaim {
+                conversation_id,
+                google_conversation_id: claim.google_conversation_id,
+                mapping_revision: claim.mapping_revision,
+                provider_floor: claim.provider_floor,
+                expected_lifecycle_generation: claim.expected_lifecycle_generation,
+                expected_link_generation: claim.expected_link_generation,
+                expected_session_generation: claim.expected_session_generation,
+                expected_context_revision: claim.expected_context_revision,
+            })
+        })
+        .map(ownership_claim_view)
+    }
+
+    pub fn gateway_rcs_cutover_alerts(
+        &self,
+    ) -> Result<NativeRcsCutoverAlerts, MobileBindingsError> {
+        with_client(&self.client, |client| client.rcs_cutover_alerts()).map(|alerts| {
+            NativeRcsCutoverAlerts {
+                count: alerts.count,
+                conversation_ids: alerts
+                    .conversation_ids
+                    .into_iter()
+                    .map(|conversation_id| conversation_id.to_string())
+                    .collect(),
+            }
+        })
     }
 
     pub fn gateway_record_rcs_provider_detector_json(
@@ -706,5 +811,13 @@ impl NativeClient {
     ) -> Result<Vec<NativeRcsReceiveContext>, MobileBindingsError> {
         with_client(&self.client, |client| client.rcs_link_owned_conversations())
             .map(|contexts| contexts.into_iter().map(receive_context_view).collect())
+    }
+
+    pub fn gateway_rcs_link_lifecycle_generation(
+        &self,
+    ) -> Result<Option<u64>, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.rcs_link_lifecycle_generation()
+        })
     }
 }

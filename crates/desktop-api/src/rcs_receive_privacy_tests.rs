@@ -71,7 +71,7 @@ fn seeded_client() -> Fixture {
         .unwrap();
     let conversation_id = ConversationId::new();
     let ownership = client
-        .begin_rcs_link_ownership(conversation_id, HISTORY_CURSOR_SENTINEL, now - 1)
+        .begin_rcs_link_ownership(conversation_id, now - 1)
         .unwrap();
     let generation = ownership.ownership_generation;
     client
@@ -87,7 +87,6 @@ fn seeded_client() -> Fixture {
                 tmp_id: Some(TMP_ID_SENTINEL.into()),
                 rcs_reported: true,
                 e2ee_reported: Some(true),
-                history_token: Some(HISTORY_CURSOR_SENTINEL.into()),
             },
         )
         .unwrap();
@@ -117,7 +116,6 @@ fn seeded_client() -> Fixture {
                 tmp_id: None,
                 rcs_reported: true,
                 e2ee_reported: None,
-                history_token: None,
             },
         )
         .unwrap();

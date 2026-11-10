@@ -63,9 +63,7 @@ fn fixture() -> (
     let client = unlocked(&config, &vault);
     publish_gateway(&client, &config);
     let conversation = ConversationId::new();
-    let ownership = client
-        .begin_rcs_link_ownership(conversation, "initial", 0)
-        .unwrap();
+    let ownership = client.begin_rcs_link_ownership(conversation, 0).unwrap();
     (directory, vault, config, client, conversation, ownership)
 }
 
@@ -79,7 +77,6 @@ fn record(id: &str) -> RcsProjectedRecord {
         tmp_id: None,
         rcs_reported: false,
         e2ee_reported: None,
-        history_token: None,
     }
 }
 
@@ -100,6 +97,18 @@ fn receive_snapshot(
         "SELECT (SELECT COUNT(*) FROM messages), (SELECT COUNT(*) FROM rcs_message_identities), (SELECT COUNT(*) FROM outbox), history_token, observed_detector_high_water FROM rcs_lane_ownership WHERE conversation_id=?",
         [conversation.to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
     ).unwrap()
+}
+
+/// The stored local recovery record (`metadata` key `rcs_recovery:<conversation>`), parsed.
+fn recovery_state(connection: &Connection, conversation: ConversationId) -> serde_json::Value {
+    let json: String = connection
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [format!("rcs_recovery:{conversation}")],
+            |row| row.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&json).unwrap()
 }
 
 fn lifecycle_generation(config: &ClientConfig) -> u64 {
@@ -131,7 +140,7 @@ fn record_terminal_unlink(client: &Client, config: &ClientConfig) -> u64 {
 }
 
 #[test]
-fn deferred_observations_require_explicit_provenance_and_never_checkpoint() {
+fn historical_observation_never_moves_recovery_state() {
     let (_dir, _vault, config, client, conversation, owner) = fixture();
     let connection = sql(&config);
     let proof_time: i64 = connection
@@ -141,20 +150,7 @@ fn deferred_observations_require_explicit_provenance_and_never_checkpoint() {
             |row| row.get(0),
         )
         .unwrap();
-    let before = receive_snapshot(&connection, conversation);
-    let mut checkpointed = record("checkpointed");
-    checkpointed.history_token = Some("page".into());
-    assert!(matches!(
-        client.ingest_rcs_projected_observation(
-            conversation,
-            owner.ownership_generation,
-            checkpointed,
-            RcsObservationProvenance::Live,
-        ),
-        Err(Error::InvalidRequest(_))
-    ));
-    assert_eq!(receive_snapshot(&connection, conversation), before);
-
+    let before = recovery_state(&connection, conversation);
     let mut historical = record("historical");
     historical.sent_at_ms = Some(proof_time + 1);
     assert_eq!(
@@ -168,14 +164,7 @@ fn deferred_observations_require_explicit_provenance_and_never_checkpoint() {
             .unwrap(),
         RcsReceiveOutcome::Inserted
     );
-    assert_eq!(
-        client
-            .rcs_receive_state(conversation)
-            .unwrap()
-            .unwrap()
-            .history_token,
-        Some("initial".into())
-    );
+    assert_eq!(recovery_state(&connection, conversation), before);
 }
 
 #[test]
@@ -326,7 +315,7 @@ fn install_echo_ledger(connection: &Connection, message_id: MessageId) {
 }
 
 #[test]
-fn matched_duplicate_page_advances_token_and_publication_failure_is_atomic() {
+fn matched_duplicate_page_never_moves_recovery_and_publication_failure_is_atomic() {
     let (_dir, vault, config, client, conversation, owner) = fixture();
     client
         .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("seed"))
@@ -337,10 +326,10 @@ fn matched_duplicate_page_advances_token_and_publication_failure_is_atomic() {
         .message_id;
     let connection = sql(&config);
     install_echo_ledger(&connection, message_id);
+    let recovery_before = recovery_state(&connection, conversation);
     let mut echo = record("echo");
     echo.direction = Direction::Outgoing;
     echo.tmp_id = Some("tmp".into());
-    echo.history_token = Some("A".into());
     echo.sent_at_ms = Some(now());
     assert_eq!(
         client
@@ -348,7 +337,6 @@ fn matched_duplicate_page_advances_token_and_publication_failure_is_atomic() {
             .unwrap(),
         RcsReceiveOutcome::OutgoingMatched
     );
-    echo.history_token = Some("B".into());
     echo.rcs_reported = true;
     assert_eq!(
         client
@@ -356,33 +344,15 @@ fn matched_duplicate_page_advances_token_and_publication_failure_is_atomic() {
             .unwrap(),
         RcsReceiveOutcome::Duplicate
     );
-    assert_eq!(
-        client
-            .rcs_receive_state(conversation)
-            .unwrap()
-            .unwrap()
-            .history_token
-            .as_deref(),
-        Some("B")
-    );
+    assert_eq!(recovery_state(&connection, conversation), recovery_before);
     drop(client);
     let reopened = unlocked(&config, &vault);
-    assert_eq!(
-        reopened
-            .rcs_receive_state(conversation)
-            .unwrap()
-            .unwrap()
-            .history_token
-            .as_deref(),
-        Some("B")
-    );
     let before_unchanged_duplicate: i64 = connection
         .query_row("SELECT COUNT(*) FROM outbox", [], |row| row.get(0))
         .unwrap();
     let mut unchanged = record("echo");
     unchanged.direction = Direction::Outgoing;
     unchanged.tmp_id = Some("tmp".into());
-    unchanged.history_token = Some("C".into());
     unchanged.sent_at_ms = Some(now());
     unchanged.rcs_reported = true;
     assert_eq!(
@@ -398,22 +368,13 @@ fn matched_duplicate_page_advances_token_and_publication_failure_is_atomic() {
             .unwrap(),
         before_unchanged_duplicate
     );
-    assert_eq!(
-        reopened
-            .rcs_receive_state(conversation)
-            .unwrap()
-            .unwrap()
-            .history_token
-            .as_deref(),
-        Some("C")
-    );
+    assert_eq!(recovery_state(&connection, conversation), recovery_before);
 
     connection.execute_batch("CREATE TRIGGER reject_rcs_fact BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT, 'reject'); END;").unwrap();
     let before = receive_snapshot(&connection, conversation);
     let mut failed = record("failed");
     failed.direction = Direction::Outgoing;
     failed.tmp_id = Some("tmp".into());
-    failed.history_token = Some("D".into());
     failed.sent_at_ms = Some(now());
     failed.e2ee_reported = Some(true);
     assert!(
@@ -422,7 +383,6 @@ fn matched_duplicate_page_advances_token_and_publication_failure_is_atomic() {
             .is_err()
     );
     assert_eq!(receive_snapshot(&connection, conversation), before);
-    // Reverting the duplicate checkpoint or no-op fact publication fences fails token C or the count.
 }
 
 #[test]
@@ -519,22 +479,30 @@ fn page_proof_time_rejects_equal_and_undated_pages_without_touching_live_records
     for (id, sent_at_ms) in [("equal", Some(proof_time)), ("undated", None)] {
         let before = receive_snapshot(&connection, conversation);
         let mut page = record(id);
-        page.history_token = Some("page".into());
         page.sent_at_ms = sent_at_ms;
         assert_eq!(
             client
-                .ingest_rcs_projected_record(conversation, owner.ownership_generation, page)
+                .ingest_rcs_projected_observation(
+                    conversation,
+                    owner.ownership_generation,
+                    page,
+                    RcsObservationProvenance::Historical,
+                )
                 .unwrap(),
             RcsReceiveOutcome::Rejected(RcsReceiveCode::ProviderFloor)
         );
         assert_eq!(receive_snapshot(&connection, conversation), before);
     }
     let mut newer = record("newer");
-    newer.history_token = Some("newer".into());
     newer.sent_at_ms = Some(proof_time + 1);
     assert_eq!(
         client
-            .ingest_rcs_projected_record(conversation, owner.ownership_generation, newer)
+            .ingest_rcs_projected_observation(
+                conversation,
+                owner.ownership_generation,
+                newer,
+                RcsObservationProvenance::Historical,
+            )
             .unwrap(),
         RcsReceiveOutcome::Inserted
     );
@@ -566,7 +534,6 @@ fn null_reservation_materializes_once_replays_and_resolves_immutable_status() {
                 owner.ownership_generation,
                 reserved,
                 "google-conversation",
-                None
             )
             .unwrap(),
         RcsIdentityOutcome::Recorded
@@ -1145,9 +1112,7 @@ fn denied_scene(denial: Denial) -> Scene {
                 .unwrap();
         }
         Denial::StaleGeneration => {
-            client
-                .begin_rcs_link_ownership(conversation, "newer", 0)
-                .unwrap();
+            client.begin_rcs_link_ownership(conversation, 0).unwrap();
         }
         Denial::ProviderOwned => {
             client.begin_rcs_unlink_cutover(conversation).unwrap();
@@ -1173,7 +1138,7 @@ struct FencedSnapshot {
     outbox: i64,
     detectors: i64,
     high_water: Option<i64>,
-    history_token: Option<String>,
+    recovery: Option<String>,
     alert: Option<String>,
     statuses: Vec<(String, i64, i64)>,
     send_states: Vec<Option<SendState>>,
@@ -1186,7 +1151,7 @@ fn fenced_snapshot(
     conversation: ConversationId,
 ) -> FencedSnapshot {
     let key = conversation.to_string();
-    let (messages, identities, outbox, detectors, high_water, history_token, alert): (
+    let (messages, identities, outbox, detectors, high_water, recovery, alert): (
         i64,
         i64,
         i64,
@@ -1196,7 +1161,7 @@ fn fenced_snapshot(
         Option<String>,
     ) = connection
         .query_row(
-            "SELECT (SELECT COUNT(*) FROM messages), (SELECT COUNT(*) FROM rcs_message_identities), (SELECT COUNT(*) FROM outbox), (SELECT COUNT(*) FROM rcs_provider_detectors WHERE conversation_id=?1), (SELECT observed_detector_high_water FROM rcs_lane_ownership WHERE conversation_id=?1), (SELECT history_token FROM rcs_lane_ownership WHERE conversation_id=?1), (SELECT alert_code FROM rcs_lane_ownership WHERE conversation_id=?1)",
+            "SELECT (SELECT COUNT(*) FROM messages), (SELECT COUNT(*) FROM rcs_message_identities), (SELECT COUNT(*) FROM outbox), (SELECT COUNT(*) FROM rcs_provider_detectors WHERE conversation_id=?1), (SELECT observed_detector_high_water FROM rcs_lane_ownership WHERE conversation_id=?1), (SELECT v FROM metadata WHERE k='rcs_recovery:' || ?1), (SELECT alert_code FROM rcs_lane_ownership WHERE conversation_id=?1)",
             [key.as_str()],
             |row| {
                 Ok((
@@ -1231,7 +1196,7 @@ fn fenced_snapshot(
         outbox,
         detectors,
         high_water,
-        history_token,
+        recovery,
         alert,
         statuses,
         send_states,
@@ -1436,7 +1401,7 @@ fn fenced_status_rejects_gateway_and_ownership_denials_without_writes() {
 }
 
 #[test]
-fn fenced_checkpoint_rejects_gateway_and_ownership_denials_without_writes() {
+fn fenced_recovery_progress_rejects_gateway_and_ownership_denials_without_writes() {
     for denial in DENIALS {
         let scene = denied_scene(denial);
         let connection = sql(&scene.config);
@@ -1444,9 +1409,14 @@ fn fenced_checkpoint_rejects_gateway_and_ownership_denials_without_writes() {
         assert_eq!(
             scene
                 .client
-                .checkpoint_rcs_history(scene.conversation, scene.generation, "fenced-token")
+                .record_rcs_recovery_progress(
+                    scene.conversation,
+                    scene.generation,
+                    10,
+                    "fenced-token"
+                )
                 .unwrap(),
-            RcsIdentityOutcome::Rejected(denial.expected()),
+            RcsRecoveryOutcome::Rejected(denial.expected()),
             "{denial:?}"
         );
         assert_eq!(
@@ -1455,18 +1425,29 @@ fn fenced_checkpoint_rejects_gateway_and_ownership_denials_without_writes() {
             "{denial:?}"
         );
     }
-    // Positive control: the unique current gateway records the checkpoint (guard: unique_current_gateway in checkpoint_rcs_history, 94109b0f).
+    // Positive control: the unique current gateway records progress (guard: unique_current_gateway in update_rcs_recovery).
     let (_directory, _vault, config, client, conversation, owner) = fixture();
     assert_eq!(
         client
-            .checkpoint_rcs_history(conversation, owner.ownership_generation, "fenced-token")
+            .record_rcs_recovery_progress(
+                conversation,
+                owner.ownership_generation,
+                10,
+                "fenced-token"
+            )
             .unwrap(),
-        RcsIdentityOutcome::Recorded
+        RcsRecoveryOutcome::Recorded
     );
     let connection = sql(&config);
+    let proof = proof_time(&connection, conversation);
     assert_eq!(
-        fenced_snapshot(&client, &connection, conversation).history_token,
-        Some("fenced-token".into())
+        recovery_state(&connection, conversation),
+        serde_json::json!({
+            "v": 1,
+            "watermark_ms": proof,
+            "resume_hint": {"target_ms": 10, "cursor": "fenced-token"},
+            "incomplete": true
+        })
     );
 }
 
@@ -1521,9 +1502,7 @@ fn gateway_withdrawal_publishes_history_gap_to_peer_and_relink_clears_it() {
     assert_eq!(metadata_flags(&peer, conversation), (Some(true), true));
 
     publish_gateway_state(&client, &client_config, RcsCapabilityState::Linked, true, 3);
-    let relinked = client
-        .begin_rcs_link_ownership(conversation, "relink", 0)
-        .unwrap();
+    let relinked = client.begin_rcs_link_ownership(conversation, 0).unwrap();
     assert_eq!(metadata_flags(&client, conversation), (Some(true), false));
     assert_eq!(
         client
@@ -1830,9 +1809,7 @@ fn google_event_invalidation_rejects_stale_ownership_mapping_and_cutover_without
         let connection = sql(&config);
         match scenario {
             "ownership" => {
-                client
-                    .begin_rcs_link_ownership(conversation, "new-owner", 0)
-                    .unwrap();
+                client.begin_rcs_link_ownership(conversation, 0).unwrap();
             }
             "mapping" => {
                 connection
@@ -1927,16 +1904,11 @@ fn google_event_invalidation_rolls_back_context_when_mapping_update_aborts() {
     );
 }
 
-fn assert_initial_checkpoint(client: &Client, conversation: ConversationId) {
-    assert_eq!(
-        client
-            .rcs_receive_state(conversation)
-            .unwrap()
-            .unwrap()
-            .history_token
-            .as_deref(),
-        Some("initial")
-    );
+/// Ingest never touches recovery: no resume hint and no open gap.
+fn assert_untouched_recovery(config: &ClientConfig, conversation: ConversationId) {
+    let state = recovery_state(&sql(config), conversation);
+    assert!(state["resume_hint"].is_null(), "{state}");
+    assert_eq!(state["incomplete"], false, "{state}");
 }
 
 fn proof_time(connection: &Connection, conversation: ConversationId) -> i64 {
@@ -1999,15 +1971,7 @@ fn explicit_historical_provenance_enforces_strict_floor_and_imported_semantics()
         RcsReceiveOutcome::Inserted
     );
     assert!(only_message(&client, conversation).seen);
-    assert_eq!(
-        client
-            .rcs_receive_state(conversation)
-            .unwrap()
-            .unwrap()
-            .history_token
-            .as_deref(),
-        Some("initial")
-    );
+    assert_untouched_recovery(&config, conversation);
 
     let (_directory, _vault, config, client, conversation, owner) = fixture();
     let floor = proof_time(&sql(&config), conversation);
@@ -2059,7 +2023,7 @@ fn live_then_historical_duplicate_preserves_first_created_payload() {
     let after = only_message(&client, conversation);
     assert_eq!(after.payload.body, before.payload.body);
     assert!(!after.seen);
-    assert_initial_checkpoint(&client, conversation);
+    assert_untouched_recovery(&config, conversation);
 }
 
 #[test]
@@ -2095,7 +2059,7 @@ fn historical_then_live_duplicate_preserves_first_created_payload() {
     let after = only_message(&client, conversation);
     assert_eq!(after.payload.body, before.payload.body);
     assert!(after.seen);
-    assert_initial_checkpoint(&client, conversation);
+    assert_untouched_recovery(&config, conversation);
 }
 
 #[test]
@@ -2130,15 +2094,7 @@ fn historical_outgoing_match_preserves_outgoing_message_payload_and_checkpoint()
         only_message(&client, conversation).payload.body,
         original_body
     );
-    assert_eq!(
-        client
-            .rcs_receive_state(conversation)
-            .unwrap()
-            .unwrap()
-            .history_token
-            .as_deref(),
-        Some("initial")
-    );
+    assert_untouched_recovery(&config, conversation);
 }
 
 #[derive(Debug, PartialEq)]
