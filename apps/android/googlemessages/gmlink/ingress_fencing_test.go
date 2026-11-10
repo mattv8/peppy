@@ -564,7 +564,7 @@ func TestOldRunCleanupDoesNotRetireNewPair(t *testing.T) {
 
 func TestPhoneNotRespondingFencesQueuedSettingsBeforeConsumerDrain(t *testing.T) {
 	link, host := openSafetyLink(t, nil)
-	link.recordSettings(&libgm.WrappedSettings{Settings: settingsWithSIM("replacement-authoritative")})
+	link.recordSettingsForTest(&libgm.WrappedSettings{Settings: settingsWithSIM("replacement-authoritative")})
 	recoveredReached, releaseRecovered := host.holdNextEvent("recovered")
 	t.Cleanup(func() { closeRound2Signal(releaseRecovered) })
 	link.queueEvent(&events.ListenRecovered{})
@@ -729,7 +729,7 @@ func TestSuccessfulPairPublishesIndependentAuthSnapshot(t *testing.T) {
 
 func TestValidSettingsIngressWithdrawsPreviousAuthorityBeforeConsumerDrain(t *testing.T) {
 	link, host := openSafetyLink(t, nil)
-	link.recordSettings(&libgm.WrappedSettings{Settings: settingsWithSIM("previous-authoritative")})
+	link.recordSettingsForTest(&libgm.WrappedSettings{Settings: settingsWithSIM("previous-authoritative")})
 	link.mu.Lock()
 	previousVersion := link.settingsVersion
 	link.mu.Unlock()

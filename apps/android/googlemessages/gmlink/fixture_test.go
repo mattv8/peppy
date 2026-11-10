@@ -45,7 +45,13 @@ const (
 func setTestOwnerVerification(link *Link) {
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	link.ownerVerification = &ownerVerification{generation: link.generation}
+	link.ownerVerification = &ownerVerification{generation: link.generation, Capabilities: []string{
+		verificationCapabilityReceive,
+		verificationCapabilityIndex,
+		verificationCapabilitySend,
+		verificationCapabilityTyping,
+		verificationCapabilityGroups,
+	}}
 }
 
 // fixtureKnobs select how the fake Google server answers. Tests change them

@@ -32,7 +32,7 @@ if LICENSE_INVENTORY="$temporary_inventory" GOOGLE_MESSAGES_AAR="$temporary_aar"
 fi
 
 temporary_notice=$(mktemp)
-python3 - "$root/../app/src/sideloadGmlinkOn/assets/third_party/NOTICE-google-messages.txt" "$temporary_notice" <<'PY'
+python3 - "$root/../app/src/gmlinkOn/assets/third_party/NOTICE-google-messages.txt" "$temporary_notice" <<'PY'
 import pathlib
 import sys
 
@@ -46,7 +46,7 @@ if GOOGLE_MESSAGES_NOTICE="$temporary_notice" GOOGLE_MESSAGES_AAR="$temporary_aa
     exit 1
 fi
 
-python3 - "$root/../app/src/sideloadGmlinkOn/assets/third_party/NOTICE-google-messages.txt" "$temporary_notice" <<'PY'
+python3 - "$root/../app/src/gmlinkOn/assets/third_party/NOTICE-google-messages.txt" "$temporary_notice" <<'PY'
 import pathlib
 import sys
 
@@ -90,7 +90,7 @@ entry["distributed"] = False
 json.dump(inventory, open(sys.argv[2], "w"), indent=2)
 PY
 
-python3 - "$root/../app/src/sideloadGmlinkOn/assets/third_party/NOTICE-google-messages.txt" "$temporary_notice" <<'PY'
+python3 - "$root/../app/src/gmlinkOn/assets/third_party/NOTICE-google-messages.txt" "$temporary_notice" <<'PY'
 import pathlib
 import sys
 

@@ -56,7 +56,7 @@ type groupSnapshot struct {
 func (link *Link) captureGroupSnapshot() groupSnapshot {
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	if !link.hasOwnerVerificationLocked() || !link.conversationIndexComplete || link.conversationIndexGeneration != link.generation || link.conversationIndexStreamEpoch != link.streamEpoch || link.runGeneration != link.generation || link.pendingConversationEvents != 0 {
+	if !link.hasGroupsVerificationLocked() || !link.conversationIndexComplete || link.conversationIndexGeneration != link.generation || link.conversationIndexStreamEpoch != link.streamEpoch || link.runGeneration != link.generation || link.pendingConversationEvents != 0 {
 		return groupSnapshot{}
 	}
 	view := groupSnapshot{

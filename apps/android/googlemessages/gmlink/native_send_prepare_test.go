@@ -348,7 +348,7 @@ func TestNativeSendPrepareSnapshotInnerLimit(t *testing.T) {
 func TestNativeSendPrepareRejectsOldSettingsEvent(t *testing.T) {
 	link, cleanup, request := nativePrepareFixture(t)
 	defer cleanup()
-	link.recordSettings(&libgm.WrappedSettings{IsOld: true})
+	link.recordSettingsForTest(&libgm.WrappedSettings{IsOld: true})
 	if got := stage2Code(t, link.PrepareNativeRcs(request)); got != "rejected" {
 		t.Fatalf("old settings event code=%q", got)
 	}
@@ -435,7 +435,7 @@ func TestNativeSendCurrentnessRejectsRealSettingsIndexAndLifecycleEvents(t *test
 	}{
 		{"settings_event", func(link *Link) {
 			settings := proto.Clone(link.settings).(*gmproto.Settings)
-			link.recordSettings(&libgm.WrappedSettings{Settings: settings})
+			link.recordSettingsForTest(&libgm.WrappedSettings{Settings: settings})
 		}},
 		{"index_event", func(link *Link) {
 			link.mu.Lock()

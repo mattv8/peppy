@@ -78,8 +78,8 @@ func TestNativeRcsExportObservationFixture(t *testing.T) {
 	link.pairingEvidenceID = uuid.NewString()
 	link.settings.SIMCards[0].SIMData.InternationalPhoneNumber = "+12025550101"
 	link.mu.Unlock()
-	if err := link.RefreshConversationIndex(); err != nil {
-		t.Fatal(err)
+	if result := link.RefreshConversationIndex(); result != `{"code":"ok"}` {
+		t.Fatal(result)
 	}
 	now := time.Now().UnixMilli()
 	request, _ := json.Marshal(map[string]any{

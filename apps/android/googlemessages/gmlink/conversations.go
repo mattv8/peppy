@@ -61,18 +61,26 @@ type conversationCandidateRecord struct {
 	Classification       string                             `json:"classification"`
 	Group                bool                               `json:"group"`
 	VisibleNonSelfCount  int                                `json:"visible_non_self_count"`
+	LastMessageMS        int64                              `json:"last_message_ms"`
 	Participants         []conversationCandidateParticipant `json:"participants"`
 }
 
 type conversationCandidateSnapshot struct {
-	Code           string                        `json:"code"`
-	SnapshotToken  string                        `json:"snapshot_token"`
-	Generation     uint64                        `json:"generation"`
-	StreamEpoch    uint64                        `json:"stream_epoch"`
-	Revision       uint64                        `json:"revision"`
-	RunIncarnation string                        `json:"run_incarnation,omitempty"`
-	Complete       bool                          `json:"complete"`
-	Conversations  []conversationCandidateRecord `json:"conversations"`
+	Code              string                        `json:"code"`
+	SnapshotToken     string                        `json:"snapshot_token"`
+	Generation        uint64                        `json:"generation"`
+	StreamEpoch       uint64                        `json:"stream_epoch"`
+	Revision          uint64                        `json:"revision"`
+	RunIncarnation    string                        `json:"run_incarnation,omitempty"`
+	PairingEvidenceID string                        `json:"pairing_evidence_id,omitempty"`
+	Complete          bool                          `json:"complete"`
+	Conversations     []conversationCandidateRecord `json:"conversations"`
+}
+
+type conversationLastActivityResult struct {
+	Code          string           `json:"code"`
+	Complete      bool             `json:"complete"`
+	LastMessageMS map[string]int64 `json:"last_message_ms"`
 }
 
 type conversationPageLoader func(context.Context, *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error)
@@ -100,10 +108,59 @@ func unavailableConversationCandidateSnapshotJSON() string {
 func (link *Link) ConversationCandidateSnapshot() string {
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	if !link.hasOwnerVerificationLocked() || !link.conversationIndexComplete || link.conversationIndexGeneration != link.generation || link.conversationIndexStreamEpoch != link.streamEpoch || link.runGeneration != link.generation || link.pendingConversationEvents != 0 {
+	if !link.conversationIndexCurrentLocked() {
 		return unavailableConversationCandidateSnapshotJSON()
 	}
 	return link.conversationCandidateSnapshotLocked()
+}
+
+// conversationIndexCurrentLocked reports whether the index is complete for the current owner generation and stream.
+func (link *Link) conversationIndexCurrentLocked() bool {
+	return link.hasIndexVerificationLocked() && link.conversationIndexComplete && link.conversationIndexGeneration == link.generation &&
+		link.conversationIndexStreamEpoch == link.streamEpoch && link.runGeneration == link.generation && link.pendingConversationEvents == 0
+}
+
+// maxLastActivityIDs bounds one ConversationLastActivity request.
+const maxLastActivityIDs = 500
+
+// ConversationLastActivity reports last_message_ms for the requested Google conversation IDs
+// from the current complete index. It makes no provider call. Unindexed IDs are omitted, and an
+// absent provider timestamp reports 0. Conversation IDs are local-only and must not be logged.
+func (link *Link) ConversationLastActivity(googleIdsJson string) string {
+	var ids []string
+	if json.Unmarshal([]byte(googleIdsJson), &ids) != nil || len(ids) > maxLastActivityIDs {
+		return lastActivityJSON("invalid_request", false, nil)
+	}
+	for _, id := range ids {
+		if id == "" {
+			return lastActivityJSON("invalid_request", false, nil)
+		}
+	}
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	if !link.conversationIndexCurrentLocked() {
+		return lastActivityJSON("conversation_last_activity_unavailable", false, nil)
+	}
+	values := make(map[string]int64, len(ids))
+	for _, id := range ids {
+		if conversation := link.conversationRecords[id]; conversation != nil {
+			values[id] = lastMessageMillis(conversation)
+		}
+	}
+	return lastActivityJSON("ok", true, values)
+}
+
+func lastActivityJSON(code string, complete bool, values map[string]int64) string {
+	if values == nil {
+		values = map[string]int64{}
+	}
+	encoded, _ := json.Marshal(conversationLastActivityResult{Code: code, Complete: complete, LastMessageMS: values})
+	return string(encoded)
+}
+
+// lastMessageMillis converts Google's microsecond LastMessageTimestamp; an absent timestamp is 0.
+func lastMessageMillis(conversation *gmproto.Conversation) int64 {
+	return time.UnixMicro(conversation.GetLastMessageTimestamp()).UnixMilli()
 }
 
 func (link *Link) conversationCandidateSnapshotLocked() string {
@@ -139,18 +196,20 @@ func (link *Link) conversationCandidateSnapshotLocked() string {
 			Classification:       classifyConversation(conversation),
 			Group:                visibleNonSelfCount > 1,
 			VisibleNonSelfCount:  visibleNonSelfCount,
+			LastMessageMS:        lastMessageMillis(conversation),
 			Participants:         participants,
 		})
 	}
 	snapshot := conversationCandidateSnapshot{
-		Code:           "conversation_candidate_snapshot",
-		SnapshotToken:  fmt.Sprintf("%d:%d:%d", link.generation, link.streamEpoch, link.indexRevision),
-		Generation:     link.generation,
-		StreamEpoch:    link.streamEpoch,
-		Revision:       link.indexRevision,
-		RunIncarnation: link.runIncarnationID,
-		Complete:       true,
-		Conversations:  records,
+		Code:              "conversation_candidate_snapshot",
+		SnapshotToken:     fmt.Sprintf("%d:%d:%d", link.generation, link.streamEpoch, link.indexRevision),
+		Generation:        link.generation,
+		StreamEpoch:       link.streamEpoch,
+		Revision:          link.indexRevision,
+		RunIncarnation:    link.runIncarnationID,
+		PairingEvidenceID: link.pairingEvidenceID,
+		Complete:          true,
+		Conversations:     records,
 	}
 	encoded, _ := json.Marshal(snapshot)
 	return string(encoded)
@@ -246,7 +305,7 @@ func cloneConversation(conversation *gmproto.Conversation) *gmproto.Conversation
 func (link *Link) beginConversationIndexRefreshFor(generation, streamEpoch uint64) (uint64, bool) {
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	if link.closed || generation != link.generation || link.runGeneration != generation || streamEpoch != link.streamEpoch || !link.hasOwnerVerificationLocked() {
+	if link.closed || generation != link.generation || link.runGeneration != generation || streamEpoch != link.streamEpoch || !link.hasIndexVerificationLocked() {
 		return 0, false
 	}
 	link.invalidateConversationCompletenessLocked()
@@ -331,7 +390,7 @@ func (link *Link) replaceConversationIndexFor(generation, streamEpoch, revision 
 func (link *Link) replaceConversationIndexForContext(ctx context.Context, generation, streamEpoch, revision uint64, conversations []*gmproto.Conversation) bool {
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	if ctx.Err() != nil || link.closed || generation != link.generation || link.runGeneration != generation || streamEpoch != link.streamEpoch || revision != link.indexRevision || link.pendingConversationEvents != 0 || !link.hasOwnerVerificationLocked() {
+	if ctx.Err() != nil || link.closed || generation != link.generation || link.runGeneration != generation || streamEpoch != link.streamEpoch || revision != link.indexRevision || link.pendingConversationEvents != 0 || !link.hasIndexVerificationLocked() {
 		return false
 	}
 	link.conversationCandidates = make(map[string][]conversationSummary)
@@ -381,6 +440,33 @@ func (link *Link) currentSupportedRcsConversationLocked(id string, generation, s
 		return nil
 	}
 	return cloneConversation(conversation)
+}
+
+func (link *Link) eligibleIndexedGoogleConversationCountLocked(id string, generation, streamEpoch uint64) int {
+	if link.currentSupportedRcsConversationLocked(id, generation, streamEpoch) == nil {
+		return 0
+	}
+	for _, target := range link.conversationTargets[id] {
+		candidates := link.conversationCandidates[target]
+		isTarget := false
+		for _, candidate := range candidates {
+			if candidate.id == id && candidate.eligible {
+				isTarget = true
+				break
+			}
+		}
+		if !isTarget {
+			continue
+		}
+		count := 0
+		for _, candidate := range candidates {
+			if candidate.eligible {
+				count++
+			}
+		}
+		return count
+	}
+	return 0
 }
 
 func classifyConversation(conversation *gmproto.Conversation) string {
@@ -443,7 +529,7 @@ func (link *Link) recordQueuedConversationEventFor(generation uint64, source lib
 		link.pendingConversationEvents--
 	}
 	link.applyConversationsLocked([]*gmproto.Conversation{conversation})
-	if !link.hasOwnerVerificationLocked() {
+	if !link.hasIndexVerificationLocked() {
 		return
 	}
 	link.recordConversationEventLocked(conversation.GetConversationID())
@@ -456,7 +542,7 @@ func (link *Link) recordConversationEvent(conversation *gmproto.Conversation) {
 	link.indexConversations([]*gmproto.Conversation{conversation})
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	if link.closed || !link.hasOwnerVerificationLocked() {
+	if link.closed || !link.hasIndexVerificationLocked() {
 		return
 	}
 	link.recordConversationEventLocked(conversation.GetConversationID())
@@ -503,7 +589,9 @@ func (link *Link) recordSettingsFor(generation uint64, source libgm.StreamSource
 	link.settingsVersion++
 }
 
-func (link *Link) recordSettings(event *libgm.WrappedSettings) {
+// recordSettingsForTest bypasses stream provenance only for package tests.
+// Bare *gmproto.Settings events are invalidation-only and never establish send readiness.
+func (link *Link) recordSettingsForTest(event *libgm.WrappedSettings) {
 	link.mu.Lock()
 	generation, streamEpoch := link.generation, link.streamEpoch
 	link.mu.Unlock()
