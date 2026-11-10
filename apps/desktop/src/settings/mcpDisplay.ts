@@ -31,6 +31,7 @@ const MCP_ERROR_MESSAGES: Record<string, string> = {
   mcp_worker_unavailable: "Peppy MCP isn't reachable right now. Try again in a moment.",
   mcp_worker_invalid: "Peppy MCP isn't reachable right now. Try again in a moment.",
   owner_required: "Only an owner can enable Peppy MCP.",
+  "hosted-session-required": "Your Peppy Hosted sign-in has expired. Sign in again, then select Enable.",
   "session-changed": "Your session changed. Close this and try again.",
   offline: "Couldn't reach the server. Check the connection and try again.",
 };

@@ -497,6 +497,7 @@ async fn renew_session(
     store: &dyn SecretStore,
     hosted: &HostedState,
     origin: &str,
+    force: bool,
 ) -> BridgeResult<()> {
     let _renewal = hosted.renewal.lock().await;
     let generation = hosted.sign_in_generation.load(Ordering::SeqCst);
@@ -515,16 +516,18 @@ async fn renew_session(
         ));
     };
     let now = now_unix();
-    if session.expires_at_unix.saturating_sub(now)
-        > u64::from(SESSION_LIFETIME_SECONDS).saturating_sub(RENEWAL_SUCCESS_INTERVAL_SECONDS)
+    if !force
+        && session.expires_at_unix.saturating_sub(now)
+            > u64::from(SESSION_LIFETIME_SECONDS).saturating_sub(RENEWAL_SUCCESS_INTERVAL_SECONDS)
     {
         return Ok(());
     }
-    if hosted
-        .last_renewal_failure_at
-        .lock()
-        .await
-        .is_some_and(|failed_at| now.saturating_sub(failed_at) < RENEWAL_FAILURE_RETRY_SECONDS)
+    if !force
+        && hosted
+            .last_renewal_failure_at
+            .lock()
+            .await
+            .is_some_and(|failed_at| now.saturating_sub(failed_at) < RENEWAL_FAILURE_RETRY_SECONDS)
     {
         return Ok(());
     }
@@ -592,6 +595,14 @@ async fn renew_session(
     Ok(())
 }
 
+pub(crate) async fn force_renew_mcp_account_session(
+    state: &AppState,
+    hosted: &HostedState,
+    origin: &str,
+) -> BridgeResult<()> {
+    renew_session(&*state.store, hosted, origin, true).await
+}
+
 #[tauri::command]
 pub async fn hosted_account(
     window: tauri::WebviewWindow,
@@ -611,7 +622,7 @@ pub async fn hosted_session_renew(
 ) -> BridgeResult<()> {
     let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
-    renew_session(&*state.store, &hosted, &hosted_origin()?).await
+    renew_session(&*state.store, &hosted, &hosted_origin()?, false).await
 }
 
 /// Returns the native-validated Peppy Hosted public origin without accepting renderer input.
