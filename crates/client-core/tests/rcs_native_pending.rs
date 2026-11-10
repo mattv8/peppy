@@ -364,6 +364,49 @@ fn native_carrier_candidates_are_one_per_conversation_and_capped_at_eight() {
     assert_eq!(next.len(), 8);
     assert_eq!(next[0], candidates[8]);
     assert_eq!(next[1], candidates[0]);
+
+    let Fixture {
+        _directory,
+        vault,
+        gateway_config,
+        sender,
+        gateway,
+        ..
+    } = fixture;
+    drop(gateway);
+    drop(sender);
+    let reopened = unlocked(&gateway_config, &vault);
+    let resumed = pending_ids(&reopened);
+    assert_eq!(resumed.len(), 8);
+    assert_eq!(resumed[0], candidates[7]);
+    assert_eq!(resumed[1], candidates[8]);
+}
+
+#[test]
+fn native_candidates_prioritize_explicit_commands_within_the_combined_page_cap() {
+    let mut fixture = Fixture::new();
+    let mut carrier = Vec::new();
+    for index in 0..8 {
+        let peer = format!("+120255502{index:02}");
+        let conversation = fixture
+            .gateway
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: peer.clone(),
+                body: String::new(),
+                provider_message_id: Some(format!("provider-native-mixed-{index}")),
+                imported: true,
+            })
+            .unwrap()
+            .conversation_id;
+        carrier.push(fixture.queue_carrier_for(conversation, &peer));
+    }
+    let explicit = (0..96).map(|_| fixture.queue()).collect::<Vec<_>>();
+
+    let pending = pending_ids(&fixture.gateway);
+    assert_eq!(pending.len(), 100);
+    assert_eq!(&pending[..96], explicit.as_slice());
+    assert_eq!(&pending[96..], &carrier[..4]);
 }
 
 #[test]
