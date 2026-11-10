@@ -102,6 +102,7 @@ internal class RcsNativeSendCoordinator(
             if (refreshed == null || !route.sameIdentity(refreshed) || !fresh(clock.wallTimeMs(), refreshed.observedAtMs) || !go.isCurrent()) {
                 return recordRefusal(lease)
             }
+            if (!lease.beforeEffect()) return recordOutcomeUnknown(lease)
             return when (go.commit(prepared.ticketId, commitHandle.exactCommitJson)) {
                 RcsNativeCommitResult.Accepted -> if (
                     lease.recordTransportAcknowledged(commitHandle.tmpId, commitHandle.googleConversationId) &&

@@ -38,6 +38,8 @@ private class GoLinkHandle(private val link: Link) : LinkHandle {
 	override fun createRcsGroup(requestJson: String): String = link.createRcsGroup(requestJson)
     override fun conversationLastActivity(googleIdsJson: String): String = link.conversationLastActivity(googleIdsJson)
     override fun fetchRcsGap(googleConversationId: String, pageToken: String): String = link.fetchRcsGap(googleConversationId, pageToken)
+    override fun uploadRcsMedia(requestJson: String): String = link.uploadRcsMedia(requestJson)
+    override fun downloadRcsMedia(requestJson: String): String = link.downloadRcsMedia(requestJson)
 }
 
 private object GoLinkEngine : LinkEngine {

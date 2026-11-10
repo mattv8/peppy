@@ -8,6 +8,8 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+@org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
+@org.robolectric.annotation.Config(sdk = [35])
 class RcsNativeSendCoordinatorTest {
     @Test fun `durable refusal schedules its status once while early refusals remain quiet`() {
         var uploads = 0
@@ -162,6 +164,14 @@ class RcsNativeSendCoordinatorTest {
         assertEquals(1, commitFailure.go.revokes)
     }
 
+    @Test fun `before effect persistence failure is unknown without a go effect`() {
+        val harness = Harness(beforeEffectRecorded = false)
+        assertEquals(RcsNativeSendOutcome.OUTCOME_UNKNOWN, harness.execute())
+        assertEquals(1, harness.lease.beforeEffectCalls)
+        assertEquals(0, harness.go.commitCalls)
+        assertEquals(1, harness.lease.outcomeUnknownRecords)
+    }
+
     @Test fun `owned invalid prepared ticket is revoked even when its metadata is refused`() {
         val harness = Harness(invalidPrepared = true)
         assertEquals(RcsNativeSendOutcome.REFUSED, harness.execute())
@@ -292,6 +302,30 @@ class RcsNativeSendCoordinatorTest {
         }
     }
 
+    @Test fun `media wrapper settles group changes detected during prepare or verification`() {
+        listOf(
+            Harness(groupDigest = "digest", prepareMembersChanged = true),
+            Harness(groupDigest = "digest", groupVerification = RcsNativeGroupVerification.MembersChanged),
+        ).forEach { harness ->
+            val outcomes = mutableListOf<String>()
+            val core = object : RcsMediaSendCore {
+                override fun decrypt(attachmentId: String, destinationDir: String): String = error("reference already uploaded")
+                override fun markUploading(attachment: RcsMediaAttachment) = error("reference already uploaded")
+                override fun markReferenceReady(attachment: RcsMediaAttachment, mediaRef: String, uploadedAtMs: Long) = error("reference already uploaded")
+                override fun recordOutcome(attachment: RcsMediaAttachment, outcome: String, atMs: Long) { outcomes += outcome }
+            }
+            val media = RcsMediaSendCoordinator(
+                RcsMediaPrivateFiles(androidx.test.core.app.ApplicationProvider.getApplicationContext()),
+                RcsMediaTransferQueue(java.util.concurrent.Executor(Runnable::run)), core,
+                object : RcsMediaSendGo { override fun upload(path: java.io.File, attachment: RcsMediaAttachment): RcsMediaUploadResult = error("reference already uploaded") },
+                { command, _ -> harness.coordinator.execute(command) }, { 100L },
+            )
+            media.submit(RcsMediaAttachment(COMMAND.commandId, COMMAND.conversationId, COMMAND.recipient, 0u, "attachment", "image/jpeg", "photo.jpg", 1u, uploadRequired = false))
+            assertEquals(listOf("members_changed"), outcomes)
+            assertEquals(0, harness.go.commitCalls)
+        }
+    }
+
     @Test fun `go members changed at commit is a definite refusal that records the membership flag`() {
         val harness = Harness(groupDigest = "digest", commitResult = RcsNativeCommitResult.MembersChanged)
         assertEquals(RcsNativeSendOutcome.MEMBERS_CHANGED, harness.execute())
@@ -346,12 +380,13 @@ class RcsNativeSendCoordinatorTest {
         private val proved: Boolean = true,
         private val groupRouteCurrent: Boolean = true,
         private val guardTarget: RcsNativeTarget? = target,
+        private val beforeEffectRecorded: Boolean = true,
         onRefusalRecorded: () -> Unit = {},
         acquire: ((String, () -> Unit) -> RcsNativeCoreLease?)? = null,
         onPrepare: (() -> Unit)? = null,
     ) {
         val go = FakeGo(bindTargetFailure, bindFacts, commitFailure, commitResult, invalidPrepared, currentAfterBegin, onPrepare, prepareMembersChanged) { guardTarget }
-        val lease = FakeLease(routeVerification, target, bindFacts, prepareFailure, beginFailure, refusalRecorded, acknowledged, groupVerification, beginMembersChanged, proved, groupRouteCurrent)
+        val lease = FakeLease(routeVerification, target, bindFacts, prepareFailure, beginFailure, refusalRecorded, acknowledged, groupVerification, beginMembersChanged, proved, groupRouteCurrent, beforeEffectRecorded)
         private var reads = 0
         private var clockCalls = 0
         val coordinator = RcsNativeSendCoordinator(
@@ -428,8 +463,9 @@ class RcsNativeSendCoordinatorTest {
         private val beginMembersChanged: Boolean = false,
         private val proved: Boolean = true,
         private val groupRouteCurrent: Boolean = true,
+        private val beforeEffectRecorded: Boolean = true,
     ) : RcsNativeCoreLease {
-        var classifiedSnapshot = ""; val verified = mutableListOf<String>(); val groupRouteVerified = mutableListOf<String>(); val groupVerified = mutableListOf<String>(); var begun = ""; var coreCalls = 0; var closes = 0; var preparationCloses = 0; var committedCloses = 0; var refusalRecords = 0; var outcomeUnknownRecords = 0; var beginCalls = 0; var acknowledgements = 0
+        var classifiedSnapshot = ""; val verified = mutableListOf<String>(); val groupRouteVerified = mutableListOf<String>(); val groupVerified = mutableListOf<String>(); var begun = ""; var coreCalls = 0; var closes = 0; var preparationCloses = 0; var committedCloses = 0; var refusalRecords = 0; var outcomeUnknownRecords = 0; var beginCalls = 0; var acknowledgements = 0; var beforeEffectCalls = 0
         val refusalMembersChangedLog = mutableListOf<Boolean>()
         override fun provedGroupMemberRevision(conversationId: String): ULong? = if (proved) PROVED_REVISION else null
         override fun verifyGroupRoute(exactObservationJson: String): Boolean { groupRouteVerified += exactObservationJson; coreCalls++; return groupRouteCurrent }
@@ -456,6 +492,7 @@ class RcsNativeSendCoordinatorTest {
             refusalMembersChangedLog += membersChanged
         }
         override fun recordOutcomeUnknown() = true.also { outcomeUnknownRecords++ }
+        override fun beforeEffect() = beforeEffectRecorded.also { beforeEffectCalls++ }
         override fun close() { closes++ }
     }
 

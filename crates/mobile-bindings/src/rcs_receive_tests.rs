@@ -1,6 +1,6 @@
 use crate::rcs_receive::{
-    NativeRcsContextExpectation, NativeRcsObservationProvenance, NativeRcsProviderRoute,
-    NativeRcsProviderRouteReason, NativeRcsProviderRowRoute,
+    NativeRcsContextExpectation, NativeRcsMediaDownloadAdmission, NativeRcsObservationProvenance,
+    NativeRcsProviderRoute, NativeRcsProviderRouteReason, NativeRcsProviderRowRoute,
 };
 use crate::{
     MobileBindingsError, NativeClient, NativeOpenConfig, create_vault_material, open_native_client,
@@ -126,6 +126,126 @@ fn go_exported_receive_record_ingests_through_mobile_boundary() {
         .unwrap();
     assert_eq!(result.record_outcome, "unmatched_outgoing");
     assert_eq!(result.status_outcome.as_deref(), Some("status_applied"));
+}
+
+#[test]
+fn go_exported_media_receive_records_ingest_through_mobile_boundary() {
+    let Ok(path) = std::env::var("PEPPY_RCS_GO_MEDIA_RECEIVE_RECORDS_PATH") else {
+        return;
+    };
+    let records: Vec<serde_json::Value> = serde_json::from_slice(
+        &std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("read Go media receive fixture {path:?}: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("decode Go media receive fixture: {error}"));
+    assert!(
+        !records.is_empty(),
+        "Go media fixture must exercise at least one record"
+    );
+    let fixture = fixture();
+    for projection in records {
+        let record = projection.get("record").unwrap_or(&projection);
+        let result = fixture
+            .client
+            .gateway_ingest_rcs_projected_observation(
+                fixture.conversation_id.clone(),
+                fixture.generation,
+                record.to_string(),
+                NativeRcsObservationProvenance::Live,
+            )
+            .unwrap();
+        assert!(matches!(
+            result.record_outcome.as_str(),
+            "inserted" | "duplicate" | "unmatched_outgoing"
+        ));
+    }
+}
+
+#[test]
+fn admitted_receive_imports_once_then_finalizes_only_after_hosted_upload() {
+    let fixture = fixture();
+    let record = json!({
+        "google_message_id": "media-download-1",
+        "google_conversation_id": "conversation-1",
+        "direction": "incoming",
+        "body": "caption",
+        "sent_at_ms": 1_730_000_000_000_i64,
+        "status": "",
+        "rcs_reported": true,
+        "attachments": [{"index": 0, "mime": "image/jpeg", "size": 4, "name": "photo.jpg", "media_ref": "private-go-ref", "too_large": false}]
+    });
+    assert_eq!(
+        fixture
+            .client
+            .gateway_ingest_go_rcs_record_json(
+                fixture.conversation_id.clone(),
+                fixture.generation,
+                record.to_string(),
+            )
+            .unwrap()
+            .record_outcome,
+        "inserted"
+    );
+    let task = fixture
+        .client
+        .gateway_pending_rcs_media_receive_tasks()
+        .unwrap()
+        .pop()
+        .unwrap();
+    let unavailable = fixture
+        .client
+        .gateway_admit_rcs_media_download(task.message_id.clone(), task.attachment_index, None)
+        .unwrap();
+    assert!(matches!(
+        unavailable,
+        NativeRcsMediaDownloadAdmission::CapacityUnavailable
+    ));
+    let admission = fixture
+        .client
+        .gateway_admit_rcs_media_download(
+            task.message_id.clone(),
+            task.attachment_index,
+            Some(128 * 1024 * 1024),
+        )
+        .unwrap();
+    let token = match admission {
+        NativeRcsMediaDownloadAdmission::Held { token } => token,
+        other => panic!("unexpected admission: {other:?}"),
+    };
+    let plaintext = std::env::temp_dir().join(format!("peppy-rcs-media-{}.jpg", Uuid::new_v4()));
+    std::fs::write(&plaintext, b"jpeg").unwrap();
+    let attachment = fixture
+        .client
+        .gateway_import_rcs_media_download(
+            task.message_id.clone(),
+            task.attachment_index,
+            token,
+            plaintext.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+    assert!(
+        fixture
+            .client
+            .pending_uploads()
+            .unwrap()
+            .iter()
+            .any(|item| item.attachment_id == attachment.attachment_id)
+    );
+    assert!(matches!(
+        fixture
+            .client
+            .gateway_finalize_rcs_media_download(task.message_id.clone(), task.attachment_index),
+        Err(MobileBindingsError::InvalidRequest)
+    ));
+    fixture
+        .client
+        .mark_attachment_uploaded(attachment.attachment_id.clone(), Uuid::new_v4().to_string())
+        .unwrap();
+    fixture
+        .client
+        .gateway_finalize_rcs_media_download(task.message_id, task.attachment_index)
+        .unwrap();
+    let _ = std::fs::remove_file(plaintext);
 }
 
 /// Group receive records exactly as `contracts.md` §1 freezes them. The record object is the

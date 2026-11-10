@@ -14,6 +14,9 @@ import uniffi.peppy_mobile_bindings.NativeRcsTargetDecision
 import uniffi.peppy_mobile_bindings.gatewayClassifyRcsTarget
 import uniffi.peppy_mobile_bindings.gatewayNextRcsContextTuple
 import uniffi.peppy_mobile_bindings.gatewayNextRcsMappingRevision
+import uniffi.peppy_mobile_bindings.gatewayIssueRcsMediaPermit
+import uniffi.peppy_mobile_bindings.gatewayRecordRcsMediaCommit
+import uniffi.peppy_mobile_bindings.gatewayRecordRcsMediaOutcome
 import uniffi.peppy_mobile_bindings.gatewayPrepareNativeRcsSend
 import uniffi.peppy_mobile_bindings.gatewayProvedGroupMemberDigest
 import uniffi.peppy_mobile_bindings.gatewayProvedGroupMemberRevision
@@ -29,10 +32,13 @@ import uniffi.peppy_mobile_bindings.gatewayVerifyRcsMapping
 internal class RcsNativeCoreAdapter(
     private val context: Context,
     private val clock: RcsNativeClock,
+    private val mediaAttachmentIndex: UInt? = null,
 ) : RcsNativeCoreLeaseFactory {
     override fun acquire(ticketId: String, revoker: () -> Unit): RcsNativeCoreLease? {
         val gatewayLease = NativeGateway.acquireRcsSendLease(context, ticketId, revoker) ?: return null
-        return NativeRcsCoreLease(GeneratedNativeRcsCorePort(gatewayLease.client), clock, gatewayLease::close)
+        val ordinary = GeneratedNativeRcsCorePort(gatewayLease.client)
+        val port = mediaAttachmentIndex?.let { GeneratedNativeRcsMediaPort(gatewayLease.client, ordinary, it) } ?: ordinary
+        return NativeRcsCoreLease(port, clock, gatewayLease::close)
     }
 
     /**
@@ -56,6 +62,7 @@ internal interface NativeRcsCorePort {
     fun recordSubmitted(commandId: String)
     fun recordPreEffectRefusal(commandId: String, tmpId: String, googleConversationId: String, membersChanged: Boolean)
     fun recordOutcomeUnknown(commandId: String, tmpId: String, googleConversationId: String)
+    fun beforeEffect(commandId: String) = Unit
     fun provedGroupMemberRevision(conversationId: String): ULong? = null
     fun verifyGroupRoute(observationJson: String, nowMs: Long): Boolean = false
     fun classifyGroupTarget(conversationId: String, snapshotJson: String): RcsNativeTarget = RcsNativeTarget.Unknown
@@ -165,6 +172,18 @@ internal class NativeRcsCoreLease(
         val committed = admitted ?: return false
         return recordForAdmitted(committed.tmpId, committed.googleConversationId) {
             port.recordOutcomeUnknown(it.commandId, it.tmpId, it.googleConversationId)
+        }
+    }
+
+    override fun beforeEffect(): Boolean {
+        requireOpen()
+        val committed = admitted ?: return false
+        return try {
+            port.beforeEffect(committed.commandId)
+            true
+        } catch (failure: Throwable) {
+            preserveCoreInterruption(failure)
+            false
         }
     }
 
@@ -311,6 +330,25 @@ private class GeneratedNativeRcsCorePort(private val client: NativeClient) : Nat
 
     override fun verifyGroupObservation(observationJson: String, nowMs: Long) =
         nativeRcsGroupVerification(gatewayVerifyRcsGroupObservation(client, observationJson, nowMs))
+}
+
+/** Uses the normal route proof port while replacing only the per-attachment ledger operations. */
+private class GeneratedNativeRcsMediaPort(
+    private val client: NativeClient,
+    private val ordinary: NativeRcsCorePort,
+    private val attachmentIndex: UInt,
+) : NativeRcsCorePort by ordinary {
+    override fun prepare(commandId: String, nowMs: Long) =
+        GeneratedNativeRcsPreparationPort(gatewayIssueRcsMediaPermit(client, commandId, attachmentIndex, nowMs))
+
+    override fun recordTransportAcknowledged(commandId: String, ackAtMs: Long) = Unit
+    override fun recordSubmitted(commandId: String) =
+        gatewayRecordRcsMediaOutcome(client, commandId, attachmentIndex, "ok", System.currentTimeMillis())
+    override fun recordPreEffectRefusal(commandId: String, tmpId: String, googleConversationId: String, membersChanged: Boolean) =
+        gatewayRecordRcsMediaOutcome(client, commandId, attachmentIndex, if (membersChanged) "members_changed" else "rejected", System.currentTimeMillis())
+    override fun recordOutcomeUnknown(commandId: String, tmpId: String, googleConversationId: String) =
+        gatewayRecordRcsMediaOutcome(client, commandId, attachmentIndex, "outcome_unknown", System.currentTimeMillis())
+    override fun beforeEffect(commandId: String) = gatewayRecordRcsMediaCommit(client, commandId, attachmentIndex)
 }
 
 internal fun nativeRcsGroupVerification(value: NativeRcsGroupVerification) = when (value) {

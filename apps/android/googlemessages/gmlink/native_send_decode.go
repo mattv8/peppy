@@ -71,16 +71,14 @@ func decodeNativeRcsCommit(input string) (nativeRcsCommitProjection, bool) {
 	if len(input) > maxNativeRcsCommitJSONBytes || !utf8.ValidString(input) {
 		return nativeRcsCommitProjection{}, false
 	}
-	values, ok := nativeObject([]byte(input), "command_id", "tmp_id", "mapping_revision", "proof_version", "proof_digest", "message_body", "target", "expected_member_digest")
-	if !ok {
-		values, ok = nativeObject([]byte(input), "command_id", "tmp_id", "mapping_revision", "proof_version", "proof_digest", "message_body", "target")
-	}
+	values, ok := nativeCommitObject([]byte(input))
 	if !ok {
 		return nativeRcsCommitProjection{}, false
 	}
 	_, hasExpectedMemberDigest := values["expected_member_digest"]
 	target, targetOK := decodeTarget(values["target"])
 	digest, digestOK := decodeDigest(values["proof_digest"])
+	media, mediaOK := decodeNativeMedia(values["media"])
 	commit := nativeRcsCommitProjection{
 		CommandID:            nativeString(values["command_id"]),
 		TmpID:                nativeString(values["tmp_id"]),
@@ -90,12 +88,33 @@ func decodeNativeRcsCommit(input string) (nativeRcsCommitProjection, bool) {
 		MessageBody:          nativeString(values["message_body"]),
 		Target:               target,
 		ExpectedMemberDigest: nativeString(values["expected_member_digest"]),
+		Media:                media,
 	}
 	strings := []string{"command_id", "tmp_id", "message_body"}
 	if commit.ExpectedMemberDigest != "" {
 		strings = append(strings, "expected_member_digest")
 	}
-	return commit, targetOK && digestOK && nativeKinds(values, strings, nil, []string{"mapping_revision", "proof_version"}, nil) && commit.CommandID != "" && validNativeTmpID(commit.TmpID) && validNativeBody(commit.MessageBody) && commit.ProofVersion == 2 && commit.Target.ProofVersion == 2 && (!hasExpectedMemberDigest || validMemberDigest(commit.ExpectedMemberDigest))
+	return commit, targetOK && digestOK && mediaOK && nativeKinds(values, strings, nil, []string{"mapping_revision", "proof_version"}, nil) && commit.CommandID != "" && validNativeTmpID(commit.TmpID) && validCommitContent(commit.MessageBody, commit.Media) && commit.ProofVersion == 2 && commit.Target.ProofVersion == 2 && (!hasExpectedMemberDigest || validMemberDigest(commit.ExpectedMemberDigest))
+}
+
+func nativeCommitObject(raw []byte) (map[string]json.RawMessage, bool) {
+	base := []string{"command_id", "tmp_id", "mapping_revision", "proof_version", "proof_digest", "message_body", "target"}
+	for _, optional := range [][]string{nil, {"expected_member_digest"}, {"media"}, {"expected_member_digest", "media"}} {
+		if values, ok := nativeObject(raw, append(base, optional...)...); ok {
+			return values, true
+		}
+	}
+	return nil, false
+}
+
+func decodeNativeMedia(raw json.RawMessage) (*rcsMediaReference, bool) {
+	if raw == nil {
+		return nil, true
+	}
+	values, ok := nativeObject(raw, "media_id", "key", "mime", "size", "name")
+	key, keyOK := decodeDigest(values["key"])
+	media := &rcsMediaReference{MediaID: nativeString(values["media_id"]), Key: key[:], MIME: nativeString(values["mime"]), Size: int64(nativeUint64(values["size"])), Name: nativeString(values["name"])}
+	return media, ok && keyOK && nativeKinds(values, []string{"media_id", "mime", "name"}, nil, []string{"size"}, nil) && validOutboundRcsMedia(media)
 }
 
 func validMemberDigest(value string) bool {

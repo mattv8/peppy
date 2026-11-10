@@ -27,6 +27,12 @@ import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import uniffi.peppy_mobile_bindings.gatewayPendingNativeRcsCommands
+import uniffi.peppy_mobile_bindings.gatewayPendingRcsMediaCommands
+import uniffi.peppy_mobile_bindings.gatewayNextRcsMediaAttachment
+import uniffi.peppy_mobile_bindings.gatewayDecryptRcsAttachmentToFile
+import uniffi.peppy_mobile_bindings.gatewayMarkRcsMediaUploading
+import uniffi.peppy_mobile_bindings.gatewayMarkRcsMediaReferenceReady
+import uniffi.peppy_mobile_bindings.gatewayRecordRcsMediaOutcome
 import uniffi.peppy_mobile_bindings.rcsCanonicalizerRevision
 
 internal data class ServiceTestHooks(
@@ -82,6 +88,10 @@ class GoogleMessagesLinkService : Service() {
     private var lastNotification: String? = null
     private lateinit var nativeRcsSendWork: RcsNativeSendWork
     private val carrierProofWakes = CarrierProofWakeTracker()
+    private lateinit var mediaRcsSendWork: RcsNativeSendWork
+    private lateinit var mediaRcsReceiveWork: RcsNativeSendWork
+    private lateinit var mediaFiles: RcsMediaPrivateFiles
+    private lateinit var mediaQueue: RcsMediaTransferQueue
     private lateinit var typingBridge: TypingBridge
     private var typingRetirementListener: (() -> Unit)? = null
     private var eligibilityPublisher: RcsEligibilityPublisher? = null
@@ -127,6 +137,31 @@ class GoogleMessagesLinkService : Service() {
             current = { isCurrent(lifecycleGeneration) },
             executor = NATIVE_RCS_SEND_EXECUTOR,
         )
+        mediaFiles = RcsMediaPrivateFiles(applicationContext).also { it.sweep() }
+        mediaQueue = RcsMediaTransferQueue(NATIVE_RCS_MEDIA_EXECUTOR)
+        mediaRcsSendWork = RcsNativeSendWork(
+            enabled = ::nativeRcsEnabled,
+            candidates = {
+                runPendingGroupCreates()
+                NativeGateway.open(applicationContext)
+                    ?.let { gatewayPendingRcsMediaCommands(it, testHooks.currentTimeMillis()) }
+                    .orEmpty()
+                    .map { RcsNativeCommand(it.commandId, it.conversationId, it.recipient) }
+            },
+            execute = ::runMediaRcsSend,
+            current = { isCurrent(lifecycleGeneration) },
+            executor = NATIVE_RCS_SEND_EXECUTOR,
+        )
+        mediaRcsReceiveWork = RcsNativeSendWork(
+            enabled = ::nativeRcsEnabled,
+            candidates = {
+                NativeGateway.open(applicationContext)?.gatewayPendingRcsMediaReceiveTasks().orEmpty()
+                    .map { RcsNativeCommand(it.messageId, "", it.attachmentIndex.toString()) }
+            },
+            execute = { command -> runMediaRcsReceive(command.commandId, command.recipient.toUInt()) },
+            current = { isCurrent(lifecycleGeneration) },
+            executor = NATIVE_RCS_SEND_EXECUTOR,
+        )
         typingBridge = testHooks.typingBridgeFactory(applicationContext)
         TypingReceiveSinkRegistry.sink = typingBridge
         lifecycleGeneration = replaceActive(this)
@@ -143,6 +178,8 @@ class GoogleMessagesLinkService : Service() {
             if (worker == null || worker?.isAlive != true) startWorkerLocked(requestedGeneration)
         }
         nativeRcsSendWork.start()
+        mediaRcsSendWork.start()
+        mediaRcsReceiveWork.start()
         return START_NOT_STICKY
     }
 
@@ -152,6 +189,11 @@ class GoogleMessagesLinkService : Service() {
         typingBridge.stop()
         if (TypingReceiveSinkRegistry.sink === typingBridge) TypingReceiveSinkRegistry.sink = null
         nativeRcsSendWork.stop()
+        mediaRcsSendWork.stop()
+        mediaRcsReceiveWork.stop()
+        mediaQueue.stop()
+        RcsMediaReceiveCoordinator.clearCapacityCache()
+        mediaFiles.sweep()
         cancelWorker()
         clearActive(this)
         super.onDestroy()
@@ -182,6 +224,54 @@ class GoogleMessagesLinkService : Service() {
             }
         }
         publishNativeRcsEligibility(command.conversationId)
+    }
+
+    private fun runMediaRcsSend(command: RcsNativeCommand) {
+        val lease = LinkRuntime.handleLease(this) ?: return
+        val now = testHooks.currentTimeMillis
+        val client = NativeGateway.open(applicationContext) ?: return
+        val native = gatewayNextRcsMediaAttachment(client, command.commandId, now()) ?: return
+        val attachment = RcsMediaAttachment(
+            command.commandId, command.conversationId, command.recipient, native.attachmentIndex,
+            native.attachmentId, native.mime, native.name, native.size, native.uploadRequired,
+        )
+        val core = object : RcsMediaSendCore {
+            override fun decrypt(attachmentId: String, destinationDir: String) = gatewayDecryptRcsAttachmentToFile(client, attachmentId, destinationDir)
+            override fun markUploading(attachment: RcsMediaAttachment) = gatewayMarkRcsMediaUploading(client, attachment.commandId, attachment.attachmentIndex)
+            override fun markReferenceReady(attachment: RcsMediaAttachment, mediaRef: String, uploadedAtMs: Long) =
+                gatewayMarkRcsMediaReferenceReady(client, attachment.commandId, attachment.attachmentIndex, mediaRef, uploadedAtMs)
+            override fun recordOutcome(attachment: RcsMediaAttachment, outcome: String, atMs: Long) =
+                gatewayRecordRcsMediaOutcome(client, attachment.commandId, attachment.attachmentIndex, outcome, atMs)
+        }
+        RcsMediaSendCoordinator(mediaFiles, mediaQueue, core, RcsMediaSendGoAdapter(lease), { mediaCommand, index ->
+            runNativeRcsSend(mediaCommand, index)
+        }, now) {
+            GatewayWork.enqueueAfterCapture(applicationContext)
+            // Continue only after the coordinator has durably settled this index.
+            mediaRcsSendWork.start()
+        }.submit(attachment)
+    }
+
+    private fun runMediaRcsReceive(messageId: String, attachmentIndex: UInt) {
+        val lease = LinkRuntime.handleLease(this) ?: return
+        val client = NativeGateway.open(applicationContext) ?: return
+        val task = client.gatewayPendingRcsMediaReceiveTasks()
+            .firstOrNull { it.messageId == messageId && it.attachmentIndex == attachmentIndex } ?: return
+        RcsMediaReceiveCoordinator(applicationContext, mediaFiles, mediaQueue, client, lease) {
+            isCurrent(lifecycleGeneration)
+        }.submit(task)
+    }
+
+    private fun runNativeRcsSend(command: RcsNativeCommand, attachmentIndex: UInt): RcsNativeSendOutcome {
+        val lease = LinkRuntime.handleLease(this) ?: return RcsNativeSendOutcome.REFUSED
+        val clock = RcsNativeClock(testHooks.currentTimeMillis)
+        val outcome = RcsNativeSendCoordinator(
+            RcsNativeGoAdapter(lease), RcsNativeCoreAdapter(applicationContext, clock, attachmentIndex),
+            RcsNativeAndroidRouteReader(applicationContext, clock), clock, rcsCanonicalizerRevision().toInt(),
+            RcsNativeAndroidRouteChangeRevoker(applicationContext),
+        ).execute(command)
+        publishNativeRcsEligibility(command.conversationId)
+        return outcome
     }
 
     private fun publishNativeRcsEligibility(conversationId: String) {
@@ -324,11 +414,11 @@ class GoogleMessagesLinkService : Service() {
     private fun runPendingGroupCreates() {
         if (!nativeRcsEnabled()) return
         val client = NativeGateway.open(applicationContext) ?: return
-        val groupTexts = runCatching { client.pendingCommands() }.getOrDefault(emptyList()).filter {
-            it.message.transport == "mms" && it.message.recipients.size >= 2 && it.message.attachmentIds.isEmpty()
+        val groupCommands = runCatching { client.pendingCommands() }.getOrDefault(emptyList()).filter {
+            it.message.transport == "mms" && it.message.recipients.size >= 2
         }
         // The link handle is opened only when a group text is actually waiting.
-        if (groupTexts.isEmpty()) return
+        if (groupCommands.isEmpty()) return
         val lease = LinkRuntime.handleLease(this) ?: return
         val creates = RcsGroupCreateCoordinator(
             core = NativeRcsGroupCreateCore(client),
@@ -337,7 +427,7 @@ class GoogleMessagesLinkService : Service() {
             reconcile = { refreshConversationIndex(lease) && reconcileRcsGroups(lease) },
             clock = RcsWallClock,
         )
-        groupTexts.forEach { creates.create(it.message.conversationId, it.commandId) }
+        groupCommands.forEach { creates.create(it.message.conversationId, it.commandId) }
     }
 
     /** Runs one keyed target on the bootstrap executor. Lease or generation loss stops the drain pass. */
@@ -745,9 +835,17 @@ class GoogleMessagesLinkService : Service() {
         }
         internal fun registerSendWake() {
             RcsSendWake.listener = {
-                runCatching { active?.nativeRcsSendWork?.start() }
+                runCatching {
+                    active?.nativeRcsSendWork?.start()
+                    active?.mediaRcsSendWork?.start()
+                    active?.mediaRcsReceiveWork?.start()
+                }
                     .onFailure { recordGoogleMessagesLinkEvent("link", "rcs_callback_failed", 0) }
             }
+        }
+        internal fun requestRcsMediaReceive() {
+            runCatching { active?.mediaRcsReceiveWork?.start() }
+                .onFailure { recordGoogleMessagesLinkEvent("link", "rcs_callback_failed", 0) }
         }
         private fun replaceActive(service: GoogleMessagesLinkService): Long = synchronized(activeLock) {
             active?.cancelWorker()
@@ -764,5 +862,7 @@ class GoogleMessagesLinkService : Service() {
         private const val SERVICE_STOP_JOIN_MS = 2_000L
         private const val NATIVE_RCS_ENABLED = true
         private val NATIVE_RCS_SEND_EXECUTOR = Executors.newSingleThreadExecutor()
+        /** Never run Go media I/O on a gmlink callback thread. Shared with future receive transfers. */
+        private val NATIVE_RCS_MEDIA_EXECUTOR = Executors.newSingleThreadExecutor()
     }
 }

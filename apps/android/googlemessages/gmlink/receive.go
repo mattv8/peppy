@@ -13,18 +13,28 @@ import (
 )
 
 type rcsReceiveRecord struct {
-	GoogleMessageID      string `json:"google_message_id"`
-	GoogleConversationID string `json:"google_conversation_id"`
-	Direction            string `json:"direction"`
-	Body                 string `json:"body"`
-	SentAtMS             int64  `json:"sent_at_ms"`
-	Status               string `json:"status"`
-	TmpID                string `json:"tmp_id,omitempty"`
-	RcsReported          bool   `json:"rcs_reported"`
-	E2EEReported         *bool  `json:"e2ee_reported,omitempty"`
-	SenderAddress        string `json:"sender_address,omitempty"`
-	SenderUnknown        bool   `json:"sender_unknown,omitempty"`
-	SelfSent             bool   `json:"self_sent,omitempty"`
+	GoogleMessageID      string                `json:"google_message_id"`
+	GoogleConversationID string                `json:"google_conversation_id"`
+	Direction            string                `json:"direction"`
+	Body                 string                `json:"body"`
+	SentAtMS             int64                 `json:"sent_at_ms"`
+	Status               string                `json:"status"`
+	TmpID                string                `json:"tmp_id,omitempty"`
+	RcsReported          bool                  `json:"rcs_reported"`
+	E2EEReported         *bool                 `json:"e2ee_reported,omitempty"`
+	SenderAddress        string                `json:"sender_address,omitempty"`
+	SenderUnknown        bool                  `json:"sender_unknown,omitempty"`
+	SelfSent             bool                  `json:"self_sent,omitempty"`
+	Attachments          *[]rcsMediaAttachment `json:"attachments,omitempty"`
+}
+
+type rcsMediaAttachment struct {
+	Index    int    `json:"index"`
+	MIME     string `json:"mime"`
+	Size     int64  `json:"size"`
+	Name     string `json:"name"`
+	MediaRef string `json:"media_ref"`
+	TooLarge bool   `json:"too_large"`
 }
 
 type rcsProjection struct {
@@ -85,7 +95,7 @@ func projectRcsMessage(wrapped *libgm.WrappedMessage, conversation *gmproto.Conv
 	if !ok {
 		return rcsProjection{Code: "status_unproven"}
 	}
-	body, ok := textBody(message.GetMessageInfo())
+	body, attachments, ok := projectRcsParts(message.GetMessageInfo())
 	if !ok {
 		return rcsProjection{Code: "unsupported_message"}
 	}
@@ -98,6 +108,9 @@ func projectRcsMessage(wrapped *libgm.WrappedMessage, conversation *gmproto.Conv
 		Status:               status,
 		TmpID:                message.GetTmpID(),
 		RcsReported:          true,
+	}
+	if len(attachments) != 0 {
+		record.Attachments = &attachments
 	}
 	if conversation.GetIsGroupChat() {
 		if direction == "outgoing" {
@@ -173,11 +186,35 @@ func projectRcsPage(page *gmproto.ListMessagesResponse, conversation *gmproto.Co
 	return result
 }
 
-func textBody(infos []*gmproto.MessageInfo) (string, bool) {
-	if len(infos) != 1 || infos[0] == nil || infos[0].GetMessageContent() == nil {
-		return "", false
+func projectRcsParts(infos []*gmproto.MessageInfo) (string, []rcsMediaAttachment, bool) {
+	var body string
+	attachments := make([]rcsMediaAttachment, 0)
+	for _, info := range infos {
+		if info == nil {
+			return "", nil, false
+		}
+		if content := info.GetMessageContent(); content != nil {
+			if body != "" {
+				return "", nil, false
+			}
+			body = content.GetContent()
+			continue
+		}
+		media := info.GetMediaContent()
+		if media == nil || media.GetMimeType() == "" || media.GetSize() <= 0 || media.GetMediaName() == "" {
+			return "", nil, false
+		}
+		attachment := rcsMediaAttachment{Index: len(attachments), MIME: media.GetMimeType(), Size: media.GetSize(), Name: media.GetMediaName(), TooLarge: media.GetSize() > rcsMediaMaxBytes}
+		if !attachment.TooLarge {
+			encoded, err := json.Marshal(rcsMediaReference{MediaID: media.GetMediaID(), Key: media.GetDecryptionKey(), MIME: media.GetMimeType(), Size: media.GetSize(), Name: media.GetMediaName()})
+			if err != nil || !validNativeMedia(&rcsMediaReference{MediaID: media.GetMediaID(), Key: media.GetDecryptionKey(), MIME: media.GetMimeType(), Size: media.GetSize(), Name: media.GetMediaName()}) {
+				return "", nil, false
+			}
+			attachment.MediaRef = string(encoded)
+		}
+		attachments = append(attachments, attachment)
 	}
-	return infos[0].GetMessageContent().GetContent(), true
+	return body, attachments, body != "" || len(attachments) != 0
 }
 
 func projectRcsStatus(status gmproto.MessageStatusType) (direction, projection string, ok bool) {

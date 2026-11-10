@@ -50,6 +50,8 @@ internal class RcsNativeSendWork(
                         recordGoogleMessagesLinkEvent("link", "rcs_callback_failed", 0)
                     }
                 }
+                // A candidate may legitimately remain pending (for example an upload retry or an
+                // unknown carrier outcome). Only a fresh wake earns another enumeration.
                 val repeat = synchronized(lock) {
                     if (wakePending && !stopped.get() && enabled() && current()) {
                         wakePending = false

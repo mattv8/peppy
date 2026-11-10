@@ -46,6 +46,8 @@ interface LinkHandle {
     fun createRcsGroup(requestJson: String): String = "{\"code\":\"unknown\"}"
     fun conversationLastActivity(googleIdsJson: String): String = "{\"code\":\"conversation_last_activity_unavailable\",\"complete\":false,\"last_message_ms\":{}}"
     fun fetchRcsGap(googleConversationId: String, pageToken: String): String = "{\"code\":\"gap_unavailable\"}"
+    fun uploadRcsMedia(requestJson: String): String = "{\"code\":\"rejected\"}"
+    fun downloadRcsMedia(requestJson: String): String = "{\"code\":\"rejected\"}"
 }
 
 fun interface NativeRcsTargetClassifier { fun classify(candidateSnapshot: String): Boolean }

@@ -1,14 +1,79 @@
-use crate::{MobileBindingsError, NativeClient, NativeConversation, NativeMessage, with_client};
+use crate::{
+    MobileBindingsError, NativeClient, NativeConversation, NativeMessage, attachment_view,
+    with_client,
+};
 use peppy_client_core::{
     Client, Conversation, ConversationId, Direction, Message, RcsContextExpectation, RcsCutover,
-    RcsGroupSender, RcsIdentityOutcome, RcsLinkOwnershipClaim, RcsLinkOwnershipClaimOutcome,
-    RcsObservationProvenance, RcsOwnerUnlinkCutoverCandidate, RcsProjectedRecord,
-    RcsProjectedStatus, RcsProviderDetector, RcsProviderRouteReason, RcsProviderRow,
-    RcsProviderRowRoute, RcsProviderRowRouteResult, RcsReceiveCode, RcsReceiveContext,
-    RcsReceiveOutcome, RcsReceiveOwner, RcsRecoveryOutcome, RcsStatusApplication,
-    RcsUnlinkCutoverGenerations, Transport,
+    RcsGroupSender, RcsIdentityOutcome, RcsIncomingAttachment, RcsLinkOwnershipClaim,
+    RcsLinkOwnershipClaimOutcome, RcsObservationProvenance, RcsOwnerUnlinkCutoverCandidate,
+    RcsProjectedRecord, RcsProjectedStatus, RcsProviderDetector, RcsProviderRouteReason,
+    RcsProviderRow, RcsProviderRowRoute, RcsProviderRowRouteResult, RcsReceiveCode,
+    RcsReceiveContext, RcsReceiveOutcome, RcsReceiveOwner, RcsRecoveryOutcome,
+    RcsStatusApplication, RcsUnlinkCutoverGenerations, Transport,
 };
 use serde::Deserialize;
+
+/// Native-host-only receive work. `media_ref` is an opaque Google credential and must never be
+/// forwarded to UI code or serialized into app diagnostics.
+#[derive(Clone, uniffi::Record)]
+pub struct NativePendingRcsMediaReceive {
+    pub message_id: String,
+    pub attachment_index: u32,
+    pub media_ref: String,
+    pub media_type: String,
+    pub display_name: String,
+    pub plaintext_bytes: u64,
+    pub state: String,
+}
+
+/// Result of a trusted host's local pre-download capacity check. A held token is opaque and can
+/// only import the exact message/index it was issued for.
+#[derive(Clone, Debug, uniffi::Enum)]
+pub enum NativeRcsMediaDownloadAdmission {
+    Held { token: String },
+    ExistingPrepared { attachment_id: String },
+    TooLarge,
+    QuotaFull,
+    CapacityUnavailable,
+}
+
+fn receive_admission_view(
+    admission: peppy_client_core::ReceiveDownloadAdmission,
+) -> NativeRcsMediaDownloadAdmission {
+    match admission {
+        peppy_client_core::ReceiveDownloadAdmission::Held { token } => {
+            NativeRcsMediaDownloadAdmission::Held { token }
+        }
+        peppy_client_core::ReceiveDownloadAdmission::ExistingPrepared { attachment_id } => {
+            NativeRcsMediaDownloadAdmission::ExistingPrepared {
+                attachment_id: attachment_id.to_string(),
+            }
+        }
+        peppy_client_core::ReceiveDownloadAdmission::TooLarge => {
+            NativeRcsMediaDownloadAdmission::TooLarge
+        }
+        peppy_client_core::ReceiveDownloadAdmission::QuotaFull => {
+            NativeRcsMediaDownloadAdmission::QuotaFull
+        }
+        peppy_client_core::ReceiveDownloadAdmission::CapacityUnavailable => {
+            NativeRcsMediaDownloadAdmission::CapacityUnavailable
+        }
+    }
+}
+
+fn pending_receive_view(
+    task: peppy_client_core::PendingReceiveTask,
+) -> NativePendingRcsMediaReceive {
+    NativePendingRcsMediaReceive {
+        message_id: task.message_id.to_string(),
+        attachment_index: task.attachment_index,
+        media_ref: task.media_ref,
+        media_type: task.media_type,
+        display_name: task.display_name,
+        plaintext_bytes: task.plaintext_bytes,
+        state: task.state.code().into(),
+    }
+}
 
 pub(crate) fn conversation_view(
     client: &Client,
@@ -147,6 +212,19 @@ struct GoReceiveRecord {
     /// Group outgoing messages only: sent from another device of this vault.
     #[serde(default)]
     self_sent: bool,
+    #[serde(default)]
+    attachments: Vec<GoReceiveAttachment>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct GoReceiveAttachment {
+    index: u32,
+    mime: String,
+    size: u64,
+    name: String,
+    media_ref: String,
+    too_large: bool,
 }
 
 struct GoReceiveParts {
@@ -220,6 +298,35 @@ impl GoReceiveRecord {
             self.sender_unknown,
             self.self_sent,
         )?;
+        if self.attachments.len() > 10 {
+            return Err(MobileBindingsError::InvalidRequest);
+        }
+        let attachments = self
+            .attachments
+            .into_iter()
+            .enumerate()
+            .map(|(position, attachment)| {
+                if attachment.index != position as u32
+                    || attachment.mime.is_empty()
+                    || attachment.mime.len() > 255
+                    || attachment.name.is_empty()
+                    || attachment.name.len() > 1024
+                    || (!attachment.too_large && attachment.media_ref.is_empty())
+                    || attachment.media_ref.len() > 16 * 1024
+                    || (!attachment.too_large && attachment.size > 32 * 1024 * 1024)
+                {
+                    return Err(MobileBindingsError::InvalidRequest);
+                }
+                Ok(RcsIncomingAttachment {
+                    original_index: attachment.index,
+                    media_type: attachment.mime,
+                    display_name: attachment.name,
+                    plaintext_bytes: attachment.size,
+                    too_large: attachment.too_large || attachment.size > 32 * 1024 * 1024,
+                    media_ref: attachment.media_ref,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(GoReceiveParts {
             record: RcsProjectedRecord {
                 google_message_id: self.google_message_id.clone(),
@@ -230,6 +337,7 @@ impl GoReceiveRecord {
                 tmp_id: self.tmp_id.clone(),
                 rcs_reported: self.rcs_reported,
                 e2ee_reported,
+                attachments,
             },
             group_sender,
             status: status.map(|status| RcsStatusApplication {
@@ -548,6 +656,107 @@ fn recovery_outcome(value: RcsRecoveryOutcome) -> String {
 
 #[uniffi::export]
 impl NativeClient {
+    /// Trusted Android gateway work only. The returned opaque reference must be supplied solely to
+    /// Go's private download API and never to a renderer.
+    pub fn gateway_pending_rcs_media_receive_tasks(
+        &self,
+    ) -> Result<Vec<NativePendingRcsMediaReceive>, MobileBindingsError> {
+        with_client(&self.client, Client::pending_rcs_media_receive_tasks)
+            .map(|tasks| tasks.into_iter().map(pending_receive_view).collect())
+    }
+
+    /// Performs only durable local accounting. `available_bytes` must be an authenticated host
+    /// capacity observation; absent capacity is intentionally retryable rather than quota-full.
+    pub fn gateway_admit_rcs_media_download(
+        &self,
+        message_id: String,
+        attachment_index: u32,
+        available_bytes: Option<u64>,
+    ) -> Result<NativeRcsMediaDownloadAdmission, MobileBindingsError> {
+        let message_id = message_id
+            .parse()
+            .map_err(|_| MobileBindingsError::InvalidRequest)?;
+        with_client(&self.client, |client| {
+            client.admit_rcs_media_download(message_id, attachment_index, available_bytes)
+        })
+        .map(receive_admission_view)
+    }
+
+    /// Encrypts a trusted private download after a held admission. The source must have exactly
+    /// the manifest's declared length; the token cannot be reused for another attachment.
+    pub fn gateway_import_rcs_media_download(
+        &self,
+        message_id: String,
+        attachment_index: u32,
+        admission_token: String,
+        plaintext_path: String,
+    ) -> Result<crate::NativeAttachmentInfo, MobileBindingsError> {
+        let message_id = message_id
+            .parse()
+            .map_err(|_| MobileBindingsError::InvalidRequest)?;
+        with_client(&self.client, |client| {
+            client.import_rcs_media_download(
+                message_id,
+                attachment_index,
+                &admission_token,
+                std::path::Path::new(&plaintext_path),
+            )
+        })
+        .map(attachment_view)
+    }
+
+    /// Emits `Stored` only after the normal hosted upload path set a real remote descriptor.
+    pub fn gateway_finalize_rcs_media_download(
+        &self,
+        message_id: String,
+        attachment_index: u32,
+    ) -> Result<(), MobileBindingsError> {
+        let message_id = message_id
+            .parse()
+            .map_err(|_| MobileBindingsError::InvalidRequest)?;
+        with_client(&self.client, |client| {
+            client.finalize_rcs_media_download(message_id, attachment_index)
+        })
+    }
+
+    /// Marks a trusted host download as retryable/terminal without allowing a caller to fabricate
+    /// `Stored`; stored requires a real hosted descriptor through `gateway_finalize_rcs_media_download`.
+    pub fn gateway_mark_rcs_media_download_state(
+        &self,
+        message_id: String,
+        attachment_index: u32,
+        state: String,
+    ) -> Result<(), MobileBindingsError> {
+        let message_id = message_id
+            .parse()
+            .map_err(|_| MobileBindingsError::InvalidRequest)?;
+        let state = match state.as_str() {
+            "downloading" => peppy_client_core::RcsMediaSyncState::Downloading,
+            "failed" => peppy_client_core::RcsMediaSyncState::Failed,
+            "quota_full" => peppy_client_core::RcsMediaSyncState::QuotaFull,
+            "expired" => peppy_client_core::RcsMediaSyncState::Expired,
+            _ => return Err(MobileBindingsError::InvalidRequest),
+        };
+        with_client(&self.client, |client| {
+            client.mark_rcs_media_download_state(message_id, attachment_index, state)
+        })
+    }
+
+    /// Desktop and UI callers address an original attachment index; core derives the authenticated
+    /// source gateway and rejects states that cannot be retried.
+    pub fn demand_rcs_media_retry_for_attachment(
+        &self,
+        message_id: String,
+        attachment_index: u32,
+    ) -> Result<(), MobileBindingsError> {
+        let message_id = message_id
+            .parse()
+            .map_err(|_| MobileBindingsError::InvalidRequest)?;
+        with_client(&self.client, |client| {
+            client.demand_rcs_media_retry_for_attachment(message_id, attachment_index)
+        })
+    }
+
     /// Accepts exactly the record object Go emits (`rcsReceiveRecord`). Ingest runs without a
     /// checkpoint; an inline status is applied only after an accepted ingest. Retries are
     /// replay-safe: ingest reports `duplicate` and the status is idempotent.

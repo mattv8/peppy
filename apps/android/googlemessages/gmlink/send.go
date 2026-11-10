@@ -29,12 +29,13 @@ const (
 )
 
 type rcsSendRequest struct {
-	CommandID            string `json:"command_id"`
-	TmpID                string `json:"tmp_id"`
-	GoogleConversationID string `json:"google_conversation_id"`
-	MappingRevision      uint64 `json:"mapping_revision"`
-	ProofDigest          string `json:"proof_digest"`
-	Content              string `json:"content"`
+	CommandID            string             `json:"command_id"`
+	TmpID                string             `json:"tmp_id"`
+	GoogleConversationID string             `json:"google_conversation_id"`
+	MappingRevision      uint64             `json:"mapping_revision"`
+	ProofDigest          string             `json:"proof_digest"`
+	Content              string             `json:"content"`
+	Media                *rcsMediaReference `json:"media,omitempty"`
 }
 
 type rcsSendResult struct {
@@ -49,16 +50,26 @@ type prepareRcsRequest struct {
 	GoogleConversationID string `json:"google_conversation_id"`
 	SnapshotToken        string `json:"snapshot_token"`
 	Content              string `json:"content"`
+	Media                bool   `json:"media,omitempty"`
 }
 
 type commitRcsPermit struct {
-	CommandID            string `json:"command_id"`
-	TmpID                string `json:"tmp_id"`
-	GoogleConversationID string `json:"google_conversation_id"`
-	SnapshotToken        string `json:"snapshot_token"`
-	MappingRevision      uint64 `json:"mapping_revision"`
-	ProofDigest          string `json:"proof_digest"`
-	Content              string `json:"content"`
+	CommandID            string             `json:"command_id"`
+	TmpID                string             `json:"tmp_id"`
+	GoogleConversationID string             `json:"google_conversation_id"`
+	SnapshotToken        string             `json:"snapshot_token"`
+	MappingRevision      uint64             `json:"mapping_revision"`
+	ProofDigest          string             `json:"proof_digest"`
+	Content              string             `json:"content"`
+	Media                *rcsMediaReference `json:"media,omitempty"`
+}
+
+type rcsMediaReference struct {
+	MediaID string `json:"media_id"`
+	Key     []byte `json:"key"`
+	MIME    string `json:"mime"`
+	Size    int64  `json:"size"`
+	Name    string `json:"name"`
 }
 
 type preparedRcsTicket struct {
@@ -181,7 +192,7 @@ func (link *Link) CommitPreparedRcs(ticketID, permitJSON string) string {
 		link.mu.Unlock()
 		return sendJSON(rcsSendResult{Code: "rejected"})
 	}
-	payload, code := validatedPayload(current, link.settings, rcsSendRequest{TmpID: permit.TmpID, GoogleConversationID: permit.GoogleConversationID, Content: permit.Content}, false)
+	payload, code := validatedPayload(current, link.settings, rcsSendRequest{TmpID: permit.TmpID, GoogleConversationID: permit.GoogleConversationID, Content: permit.Content, Media: permit.Media}, false)
 	effect := link.sendMessage
 	link.mu.Unlock()
 	if code != "" || !proto.Equal(payload, ticket.payload) {
@@ -340,7 +351,7 @@ func validCommitRcsPermit(permit commitRcsPermit) bool {
 		return false
 	}
 	digest, err := base64.StdEncoding.DecodeString(permit.ProofDigest)
-	return err == nil && len(digest) == 32 && permit.MappingRevision != 0 && validPrepareRcsRequest(prepareRcsRequest{TmpID: permit.TmpID, GoogleConversationID: permit.GoogleConversationID, SnapshotToken: permit.SnapshotToken, Content: permit.Content})
+	return err == nil && len(digest) == 32 && permit.MappingRevision != 0 && validCommitContent(permit.Content, permit.Media) && validNativeMedia(permit.Media)
 }
 
 func permitMatchesTicket(permit commitRcsPermit, ticket *preparedRcsTicket) bool {
@@ -361,6 +372,9 @@ func (link *Link) currentSettings() (*gmproto.Settings, string) {
 }
 
 func validatedPayload(conversation *gmproto.Conversation, settings *gmproto.Settings, request rcsSendRequest, allowGroup bool) (*gmproto.SendMessageRequest, string) {
+	if !validCommitContent(request.Content, request.Media) || !validOutboundRcsMedia(request.Media) {
+		return nil, "invalid_media"
+	}
 	if conversation.GetConversationID() != request.GoogleConversationID || conversation.GetType() != gmproto.ConversationType_RCS || conversation.GetStatus() != gmproto.ConversationStatus_ACTIVE {
 		return nil, "conversation_changed"
 	}
@@ -387,11 +401,29 @@ func validatedPayload(conversation *gmproto.Conversation, settings *gmproto.Sett
 	if simPayload == nil {
 		return nil, "sim_unavailable"
 	}
+	infos := make([]*gmproto.MessageInfo, 0, 2)
+	if request.Content != "" {
+		infos = append(infos, &gmproto.MessageInfo{Data: &gmproto.MessageInfo_MessageContent{MessageContent: &gmproto.MessageContent{Content: request.Content}}})
+	}
+	if request.Media != nil {
+		infos = append(infos, &gmproto.MessageInfo{Data: &gmproto.MessageInfo_MediaContent{MediaContent: &gmproto.MediaContent{MediaID: request.Media.MediaID, DecryptionKey: request.Media.Key, MimeType: request.Media.MIME, Size: request.Media.Size, MediaName: request.Media.Name}}})
+	}
 	return &gmproto.SendMessageRequest{
-		ConversationID: conversation.GetConversationID(), SIMPayload: simPayload, TmpID: request.TmpID, ForceRCS: false,
-		MessagePayload: &gmproto.MessagePayload{TmpID: request.TmpID, TmpID2: request.TmpID, ConversationID: conversation.GetConversationID(), ParticipantID: outgoingID,
-			MessageInfo: []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MessageContent{MessageContent: &gmproto.MessageContent{Content: request.Content}}}}},
+		ConversationID: conversation.GetConversationID(), SIMPayload: simPayload, TmpID: request.TmpID, ForceRCS: request.Media != nil,
+		MessagePayload: &gmproto.MessagePayload{TmpID: request.TmpID, TmpID2: request.TmpID, ConversationID: conversation.GetConversationID(), ParticipantID: outgoingID, MessageInfo: infos},
 	}, ""
+}
+
+func validCommitContent(content string, media *rcsMediaReference) bool {
+	return len(content) <= maxRcsBodyBytes && (content != "" || media != nil)
+}
+
+func validNativeMedia(media *rcsMediaReference) bool {
+	return media == nil || (media.MediaID != "" && len(media.MediaID) <= maxOpaqueIDBytes && len(media.Key) != 0 && media.MIME != "" && media.Size > 0 && media.Size <= rcsMediaMaxBytes && media.Name != "")
+}
+
+func validOutboundRcsMedia(media *rcsMediaReference) bool {
+	return validNativeMedia(media) && (media == nil || allowedRcsMIME(media.MIME))
 }
 
 func sendJSON(result rcsSendResult) string {

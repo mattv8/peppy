@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"maps"
 	"net/http"
 	"strings"
@@ -109,6 +110,9 @@ type Link struct {
 	beforeSendAdmission          func()
 	ticketNow                    func() time.Time
 	sendMessage                  func(context.Context, *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error)
+	uploadMedia                  func(context.Context, []byte, string, string) (*gmproto.MediaContent, error)
+	downloadMedia                func(context.Context, string, []byte) (io.ReadCloser, error)
+	transferMu                   sync.Mutex
 
 	ownerVerification *ownerVerification
 }

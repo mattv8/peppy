@@ -115,6 +115,8 @@ internal interface RcsNativeCoreLease : AutoCloseable {
     /** [membersChanged] records a group roster refusal; core pauses the group in the same transaction. */
     fun recordPreEffectRefusal(membersChanged: Boolean = false): Boolean
     fun recordOutcomeUnknown(): Boolean = false
+    /** Persists the admitted effect immediately before the single Go carrier effect. */
+    fun beforeEffect(): Boolean = true
 
     /** The proved member revision of a Live group, or null. */
     fun provedGroupMemberRevision(conversationId: String): ULong? = null

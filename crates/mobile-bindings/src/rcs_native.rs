@@ -104,6 +104,28 @@ pub fn gateway_pending_native_rcs_commands(
     })
 }
 
+/// Sanitized received RCS media commands eligible for the gateway upload coordinator. The command
+/// ID is opaque; media references and plaintext paths remain core-local.
+#[uniffi::export]
+pub fn gateway_pending_rcs_media_commands(
+    client: Arc<NativeClient>,
+    now_ms: i64,
+) -> Result<Vec<NativePendingRcsCommand>, MobileBindingsError> {
+    with_client(&client.client, |core| {
+        core.pending_rcs_media_commands(now_ms)
+    })
+    .map(|commands| {
+        commands
+            .into_iter()
+            .map(|command| NativePendingRcsCommand {
+                command_id: command.command_id.to_string(),
+                conversation_id: command.conversation_id.to_string(),
+                recipient: command.recipient,
+            })
+            .collect()
+    })
+}
+
 #[derive(uniffi::Object)]
 /// A native-only, single-use preparation. It is not a transport permit.
 pub struct NativeRcsSendPreparation {
@@ -121,6 +143,19 @@ pub struct NativeRcsCommittedSend {
     command_id: String,
     tmp_id: String,
     google_conversation_id: String,
+}
+
+#[derive(uniffi::Record)]
+/// Advisory attachment metadata for the native upload coordinator. No plaintext path or Google
+/// reference crosses this boundary.
+pub struct NativeRcsMediaAttachment {
+    pub command_id: String,
+    pub attachment_index: u32,
+    pub attachment_id: String,
+    pub mime: String,
+    pub name: String,
+    pub size: u64,
+    pub upload_required: bool,
 }
 
 #[derive(Serialize)]
@@ -214,6 +249,123 @@ pub fn gateway_prepare_native_rcs_send(
         owner: client,
         preparation: Mutex::new(Some(preparation)),
     }))
+}
+
+#[uniffi::export]
+pub fn gateway_next_rcs_media_attachment(
+    client: Arc<NativeClient>,
+    command_id: String,
+    now_ms: i64,
+) -> Result<Option<NativeRcsMediaAttachment>, MobileBindingsError> {
+    with_client(&client.client, |core| {
+        let command_id = command_id
+            .parse()
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid command id"))?;
+        core.next_rcs_media_attachment(command_id, now_ms)
+    })
+    .map(|attachment| {
+        attachment.map(|attachment| NativeRcsMediaAttachment {
+            command_id: attachment.command_id.to_string(),
+            attachment_index: attachment.attachment_index,
+            attachment_id: attachment.attachment_id.to_string(),
+            mime: attachment.mime,
+            name: attachment.name,
+            size: attachment.size,
+            upload_required: attachment.upload_required,
+        })
+    })
+}
+
+#[uniffi::export]
+pub fn gateway_mark_rcs_media_uploading(
+    client: Arc<NativeClient>,
+    command_id: String,
+    attachment_index: u32,
+) -> Result<(), MobileBindingsError> {
+    with_client(&client.client, |core| {
+        core.mark_rcs_media_uploading(
+            command_id
+                .parse()
+                .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid command id"))?,
+            attachment_index,
+        )
+    })
+}
+
+#[uniffi::export]
+pub fn gateway_mark_rcs_media_reference_ready(
+    client: Arc<NativeClient>,
+    command_id: String,
+    attachment_index: u32,
+    media_ref: String,
+    uploaded_at_ms: i64,
+) -> Result<(), MobileBindingsError> {
+    with_client(&client.client, |core| {
+        core.mark_rcs_media_reference_ready(
+            command_id
+                .parse()
+                .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid command id"))?,
+            attachment_index,
+            &media_ref,
+            uploaded_at_ms,
+        )
+    })
+}
+
+#[uniffi::export]
+pub fn gateway_issue_rcs_media_permit(
+    client: Arc<NativeClient>,
+    command_id: String,
+    attachment_index: u32,
+    now_ms: i64,
+) -> Result<Arc<NativeRcsSendPreparation>, MobileBindingsError> {
+    let preparation = with_client(&client.client, |core| {
+        core.prepare_native_rcs_media_send(
+            command_id
+                .parse()
+                .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid command id"))?,
+            attachment_index,
+            now_ms,
+        )
+    })?;
+    bounded_facts_json(&preparation)?;
+    Ok(Arc::new(NativeRcsSendPreparation {
+        owner: client,
+        preparation: Mutex::new(Some(preparation)),
+    }))
+}
+
+#[uniffi::export]
+pub fn gateway_record_rcs_media_commit(
+    client: Arc<NativeClient>,
+    command_id: String,
+    attachment_index: u32,
+) -> Result<(), MobileBindingsError> {
+    with_client(&client.client, |core| {
+        let command_id = command_id
+            .parse()
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid command id"))?;
+        core.record_rcs_media_commit(command_id, attachment_index)
+    })
+}
+
+#[uniffi::export]
+pub fn gateway_record_rcs_media_outcome(
+    client: Arc<NativeClient>,
+    command_id: String,
+    attachment_index: u32,
+    code: String,
+    _at_ms: i64,
+) -> Result<(), MobileBindingsError> {
+    with_client(&client.client, |core| {
+        core.record_rcs_media_outcome(
+            command_id
+                .parse()
+                .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid command id"))?,
+            attachment_index,
+            &code,
+        )
+    })
 }
 
 #[uniffi::export]

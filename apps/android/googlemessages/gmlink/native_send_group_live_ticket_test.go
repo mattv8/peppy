@@ -4,6 +4,7 @@ package gmlink
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"net"
 	"os"
@@ -149,6 +150,54 @@ func TestNativeRcsLiveGroupCoreRoundTrip(t *testing.T) {
 	}
 	if stage2Code(t, link.CommitNativeRcs(prepared.TicketID, commitFrame.Commit)) != "rejected" || phone.countAction("SEND_MESSAGE") != 1 {
 		t.Fatal("live group ticket replay dispatched")
+	}
+	writeNativeLiveTicketFrame(t, encoder, nativeLiveTicketFrame{Summary: "accepted"})
+}
+
+func TestNativeRcsLiveGroupMediaCoreRoundTrip(t *testing.T) {
+	scanner, encoder, closeConnection := dialNativeGroupLiveTicket(t)
+	defer closeConnection()
+	command := readNativeLiveTicketFrame(t, scanner, nativeLiveTicketFrameCap)
+	if !validNativeUUID(command.CommandID) {
+		t.Fatal("Rust did not provide a command id")
+	}
+	link, phone, cleanup, prepared, route, target := nativeGroupLiveTicket(t, command.CommandID)
+	defer cleanup()
+	writeNativeLiveTicketFrame(t, encoder, nativeLiveTicketFrame{Route: route.Observation, Target: target.Observation, Snapshot: prepared.CandidateSnapshot, NowMS: time.Now().UnixMilli()})
+
+	facts := readNativeLiveTicketFrame(t, scanner, maxNativeRcsFactsJSONBytes+1024)
+	if facts.Facts == "" || stage2Code(t, link.BindNativeRcsFacts(prepared.TicketID, facts.Facts)) != "facts_bound" {
+		t.Fatal("Rust group facts were not bound to the live ticket")
+	}
+	link.mu.Lock()
+	observation := link.nativeTicket.targetObservationJSON
+	link.mu.Unlock()
+	writeNativeLiveTicketFrame(t, encoder, nativeLiveTicketFrame{Observation: observation, NowMS: time.Now().UnixMilli()})
+
+	commitFrame := readNativeLiveTicketFrame(t, scanner, maxNativeRcsCommitJSONBytes+1024)
+	commit, valid := decodeNativeRcsCommit(commitFrame.Commit)
+	if !valid || commit.Target.Class != "Group" || commit.Media == nil || commit.MessageBody == "" {
+		t.Fatal("Rust group media commit was rejected before dispatch")
+	}
+	if stage2Code(t, link.CommitNativeRcs(prepared.TicketID, commitFrame.Commit)) != "accepted" {
+		t.Fatal("live Rust group media commit was not accepted")
+	}
+	phone.mu.Lock()
+	requests := append([]*gmproto.SendMessageRequest(nil), phone.sendRequests...)
+	phone.mu.Unlock()
+	if len(requests) != 1 || !requests[0].GetForceRCS() {
+		t.Fatalf("group media commit dispatched %#v", requests)
+	}
+	infos := requests[0].GetMessagePayload().GetMessageInfo()
+	if len(infos) != 2 || infos[0].GetMessageContent().GetContent() != commit.MessageBody {
+		t.Fatalf("group media message infos=%#v", infos)
+	}
+	media := infos[1].GetMediaContent()
+	if media == nil || media.GetMediaID() != commit.Media.MediaID || !bytes.Equal(media.GetDecryptionKey(), commit.Media.Key) || media.GetMimeType() != commit.Media.MIME || media.GetSize() != commit.Media.Size || media.GetMediaName() != commit.Media.Name {
+		t.Fatalf("group media request did not preserve Rust media: %#v", requests[0])
+	}
+	if stage2Code(t, link.CommitNativeRcs(prepared.TicketID, commitFrame.Commit)) != "rejected" || phone.countAction("SEND_MESSAGE") != 1 {
+		t.Fatal("live group media ticket replay dispatched")
 	}
 	writeNativeLiveTicketFrame(t, encoder, nativeLiveTicketFrame{Summary: "accepted"})
 }

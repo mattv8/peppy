@@ -1,11 +1,11 @@
 use super::*;
-use crate::{NativeOpenConfig, create_vault_material, open_native_client};
+use crate::{NativeAttachmentState, NativeOpenConfig, create_vault_material, open_native_client};
 use peppy_client_core::{
     Cursor, GatewayRoute, IncomingSms, NativeCarrierRouteBinding, NativeOwnNumberSource,
     NativeRcsEvidence, NativeRcsLifetime, NativeRcsOutgoing, NativeRcsSimPayload,
-    NativeSettingsCurrentness, NativeSettingsProvenance, OutgoingSms, RcsCapabilityState,
-    RcsConversationType, RcsEligibility, RcsLinkState, RcsMappingObservation,
-    RcsParticipantObservation, RcsSendMode,
+    NativeSettingsCurrentness, NativeSettingsProvenance, OutgoingMms, OutgoingSms, PermitBlock,
+    PermitDecision, RcsCapabilityState, RcsConversationType, RcsEligibility, RcsLinkState,
+    RcsMappingObservation, RcsParticipantObservation, RcsSendMode,
 };
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -42,6 +42,7 @@ struct Fixture {
     next_cursor: u64,
     command_id: String,
     conversation_id: String,
+    gateway_device_id: String,
     database_path: PathBuf,
     observation: RcsMappingObservation,
     _temp_dir: TempDir,
@@ -96,10 +97,11 @@ fn fixture_with_route(
     let vault_id = Uuid::new_v4().to_string();
     let sender = native_client(&temp_dir, &vault_id, Uuid::new_v4().to_string());
     let gateway_device_id = Uuid::new_v4();
+    let gateway_device_id_text = gateway_device_id.to_string();
     let database_path = temp_dir.path().join(format!(
         "peppy-mobile-rcs-native-{gateway_device_id}.sqlite"
     ));
-    let gateway = native_client(&temp_dir, &vault_id, gateway_device_id.to_string());
+    let gateway = native_client(&temp_dir, &vault_id, gateway_device_id_text.clone());
     let material = create_vault_material(vault_id, PASSPHRASE.into()).unwrap();
     for client in [&sender, &gateway] {
         client
@@ -164,6 +166,7 @@ fn fixture_with_route(
         next_cursor,
         command_id: command_id.to_string(),
         conversation_id: conversation_id.to_string(),
+        gateway_device_id: gateway_device_id_text,
         database_path,
         observation,
         _temp_dir: temp_dir,
@@ -206,6 +209,50 @@ fn deliver_from(sender: &NativeClient, gateway: &NativeClient, first_cursor: u64
     })
     .unwrap();
     first_cursor + envelopes.len() as u64 - 1
+}
+
+fn record_linked_gateway(gateway: &NativeClient, gateway_device_id: &str, now_ms: i64) {
+    gateway
+        .record_rcs_link_lifecycle(
+            crate::rcs_status::NativeRcsLinkState::Linked,
+            true,
+            true,
+            true,
+            now_ms,
+            now_ms,
+        )
+        .unwrap();
+    let status = gateway
+        .rcs_link_status(gateway_device_id.into(), now_ms)
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.state, crate::rcs_status::NativeRcsLinkState::Linked);
+    assert!(status.current);
+    assert!(status.availability);
+    assert!(status.health);
+    assert!(status.phone_responsive);
+}
+
+fn install_sender_ciphertext_on_gateway(
+    sender: &NativeClient,
+    gateway: &NativeClient,
+    attachment_id: String,
+    downloaded_path: &Path,
+) {
+    let source = sender
+        .native_cipher_file_for_upload(attachment_id.clone())
+        .unwrap();
+    std::fs::copy(source, downloaded_path).unwrap();
+    gateway
+        .install_downloaded_attachment(
+            attachment_id.clone(),
+            downloaded_path.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+    assert_eq!(
+        gateway.attachment_info(attachment_id).unwrap().state,
+        NativeAttachmentState::Available
+    );
 }
 
 fn observation() -> RcsMappingObservation {
