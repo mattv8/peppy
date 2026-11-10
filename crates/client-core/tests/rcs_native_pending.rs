@@ -144,13 +144,13 @@ impl Fixture {
         command_id
     }
 
-    fn queue_carrier(&mut self) -> CommandId {
+    fn queue_carrier_for(&mut self, conversation_id: ConversationId, peer: &str) -> CommandId {
         let command_id = self
             .sender
             .queue_send(
                 OutgoingSms {
-                    conversation_id: self.conversation_id,
-                    recipients: vec![PEER.into()],
+                    conversation_id,
+                    recipients: vec![peer.into()],
                     body: "carrier pending".into(),
                 },
                 GatewayRoute::Carrier {
@@ -286,12 +286,22 @@ fn native_candidates_require_linked_lifecycle_and_a_live_exact_mapping() {
 }
 
 #[test]
-fn native_candidates_exclude_carrier_routes_and_invalidated_mappings() {
+fn native_candidates_include_carrier_texts_without_a_mapping() {
     let mut fixture = Fixture::new();
     let rcs = fixture.queue();
-    let carrier = fixture.queue_carrier();
-    assert_eq!(pending_ids(&fixture.gateway), vec![rcs]);
-    assert!(!pending_ids(&fixture.gateway).contains(&carrier));
+    let unmapped_conversation = fixture
+        .gateway
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "+12025550124".into(),
+            body: String::new(),
+            provider_message_id: Some("provider-native-carrier".into()),
+            imported: true,
+        })
+        .unwrap()
+        .conversation_id;
+    let carrier = fixture.queue_carrier_for(unmapped_conversation, "+12025550124");
+    assert_eq!(pending_ids(&fixture.gateway), vec![rcs, carrier]);
 
     fixture
         .gateway
@@ -308,7 +318,52 @@ fn native_candidates_exclude_carrier_routes_and_invalidated_mappings() {
         .gateway
         .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 3_000, 3_000)
         .unwrap();
-    assert!(pending_ids(&fixture.gateway).is_empty());
+    assert_eq!(pending_ids(&fixture.gateway), vec![carrier]);
+}
+
+#[test]
+fn native_carrier_candidates_are_one_per_conversation_and_capped_at_eight() {
+    let mut fixture = Fixture::new();
+    let first_conversation = fixture
+        .gateway
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "+12025550130".into(),
+            body: String::new(),
+            provider_message_id: Some("provider-native-cap-first".into()),
+            imported: true,
+        })
+        .unwrap()
+        .conversation_id;
+    let first = fixture.queue_carrier_for(first_conversation, "+12025550130");
+    let duplicate = fixture.queue_carrier_for(first_conversation, "+12025550130");
+    let mut candidates = vec![first];
+    for index in 1..9 {
+        let peer = format!("+120255501{index:02}");
+        let conversation = fixture
+            .gateway
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: peer.clone(),
+                body: String::new(),
+                provider_message_id: Some(format!("provider-native-cap-{index}")),
+                imported: true,
+            })
+            .unwrap()
+            .conversation_id;
+        candidates.push(fixture.queue_carrier_for(conversation, &peer));
+    }
+
+    let pending = pending_ids(&fixture.gateway);
+    assert_eq!(pending.len(), 8);
+    assert_eq!(pending[0], first);
+    assert!(!pending.contains(&duplicate));
+    assert_eq!(pending, candidates[..8]);
+
+    let next = pending_ids(&fixture.gateway);
+    assert_eq!(next.len(), 8);
+    assert_eq!(next[0], candidates[8]);
+    assert_eq!(next[1], candidates[0]);
 }
 
 #[test]

@@ -86,6 +86,148 @@ fn actual_go_observations_verify_classify_and_begin() {
 use rusqlite::OptionalExtension;
 
 #[test]
+fn native_carrier_begin_refuses_wrong_sim_without_an_attempt() {
+    let (_directory, _vault, config, gateway, command_id) = carrier_command();
+    let observation = observation("peer-local", 1);
+    gateway.verify_rcs_mapping(&observation, 1_000).unwrap();
+    let preparation = gateway.prepare_native_rcs_send(command_id, 1_000).unwrap();
+    let mut wrong_sim = observation.clone();
+    wrong_sim.selected_sim_id = "android-subscription-8".into();
+
+    assert!(matches!(
+        gateway.begin_native_rcs_send(preparation, &wrong_sim, 1_000),
+        Err(Error::InvalidRequest("mapping unproven"))
+    ));
+    assert_eq!(attempt_count(&config, command_id), 0);
+    assert_eq!(rcs_ledger_count(&config, command_id), 0);
+}
+
+#[test]
+fn native_carrier_begin_refusal_commits_proof_deletion_across_reopen() {
+    for wrong_sim in [true, false] {
+        let (_directory, vault, config, gateway, command_id) = carrier_command();
+        capture_us_region(&gateway, &config);
+        let current = observation("peer-local", 1);
+        let mut unknown = current.clone();
+        unknown.google_candidate_count = 0;
+        gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
+        let command = gateway.pending_commands().unwrap().pop().unwrap();
+        gateway
+            .record_carrier_only_proof(&carrier_proof(&command), 1_000)
+            .unwrap();
+        let (key, proof): (String, String) = encrypted_connection(&config)
+            .query_row(
+                "SELECT k,v FROM metadata WHERE k LIKE 'rcs_carrier_only_proof_v1/%'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        gateway.verify_rcs_mapping(&current, 1_000).unwrap();
+        let preparation = gateway.prepare_native_rcs_send(command_id, 1_000).unwrap();
+        // Retain prior carrier evidence so refusal must durably remove it, not merely block once.
+        encrypted_connection(&config)
+            .execute(
+                "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                rusqlite::params![key, proof],
+            )
+            .unwrap();
+        let contradictory = if wrong_sim {
+            let mut value = current;
+            value.selected_sim_id = "android-subscription-8".into();
+            value
+        } else {
+            observation("different-peer-local", 1)
+        };
+        assert!(matches!(
+            gateway.begin_native_rcs_send(preparation, &contradictory, 1_000),
+            Err(Error::InvalidRequest(_))
+        ));
+        assert_eq!(attempt_count(&config, command_id), 0);
+        assert_eq!(rcs_ledger_count(&config, command_id), 0);
+        drop(gateway);
+        let reopened = unlocked(&config, &vault);
+        let retained: bool = encrypted_connection(&config)
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM metadata WHERE k=?)",
+                [&key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !retained,
+            "refusal retained carrier proof; wrong_sim={wrong_sim}"
+        );
+        assert_eq!(attempt_count(&config, command_id), 0);
+        assert!(
+            reopened
+                .pending_commands()
+                .unwrap()
+                .iter()
+                .any(|command| command.command_id == command_id)
+        );
+    }
+}
+
+#[test]
+fn native_carrier_prepare_refusal_does_not_consume_a_carrier_proof() {
+    let (_directory, vault, config, gateway, command_id) = carrier_command();
+    capture_us_region(&gateway, &config);
+    let mut unknown = observation("peer-local", 1);
+    unknown.google_candidate_count = 0;
+    gateway.verify_rcs_mapping(&unknown, 1_000).unwrap();
+    let command = gateway.pending_commands().unwrap().pop().unwrap();
+    gateway
+        .record_carrier_only_proof(&carrier_proof(&command), 1_000)
+        .unwrap();
+
+    assert!(matches!(
+        gateway.prepare_native_rcs_send(command_id, 1_000),
+        Err(Error::InvalidRequest("mapping unproven"))
+    ));
+    assert_eq!(attempt_count(&config, command_id), 0);
+    drop(gateway);
+    let reopened = unlocked(&config, &vault);
+    assert!(matches!(
+        reopened.begin_send_attempt_at(command_id, 1_000).unwrap(),
+        PermitDecision::Permit(_)
+    ));
+}
+
+#[test]
+fn native_carrier_admission_matches_automatic_and_strict_entry_stays_refused() {
+    let (_directory, _vault, native_config, native, native_command) = carrier_command();
+    let (_directory, _vault, automatic_config, automatic, automatic_command) = carrier_command();
+    let observation = observation("peer-local", 1);
+    native.verify_rcs_mapping(&observation, 1_000).unwrap();
+    automatic.verify_rcs_mapping(&observation, 1_000).unwrap();
+
+    let preparation = native
+        .prepare_native_rcs_send(native_command, 1_000)
+        .unwrap();
+    assert!(
+        native
+            .begin_native_rcs_send(preparation, &observation, 1_000)
+            .is_ok()
+    );
+    assert!(matches!(
+        automatic
+            .begin_automatic_send_attempt(automatic_command, Some(&observation), 1_000)
+            .unwrap(),
+        AutomaticPermitDecision::Rcs(_)
+    ));
+    assert_eq!(attempt_count(&native_config, native_command), 1);
+    assert_eq!(attempt_count(&automatic_config, automatic_command), 1);
+
+    let (_directory, _vault, strict_config, strict, strict_command) = carrier_command();
+    strict.verify_rcs_mapping(&observation, 1_000).unwrap();
+    assert!(matches!(
+        strict.begin_rcs_send_attempt(strict_command, &observation, 1_000),
+        Err(Error::InvalidRequest("RCS route required"))
+    ));
+    assert_eq!(attempt_count(&strict_config, strict_command), 0);
+}
+
+#[test]
 fn native_preparation_does_not_admit_an_attempt_and_begin_uses_the_stored_command() {
     let (_directory, _vault, config, gateway, command_id, observation) = rcs_command("peer-local");
     let preparation = gateway.prepare_native_rcs_send(command_id, 1_000).unwrap();
@@ -799,7 +941,7 @@ fn legacy_context_requires_a_genuine_refresh_before_classification() {
 }
 
 #[test]
-fn native_preparation_refuses_missing_historical_attempted_carrier_and_wrong_recipient_commands() {
+fn native_preparation_refuses_missing_historical_attempted_and_wrong_recipient_commands() {
     let (_directory, _vault, config, gateway, command_id, _observation) = rcs_command("peer-local");
     encrypted_connection(&config)
         .execute(
@@ -831,7 +973,7 @@ fn native_preparation_refuses_missing_historical_attempted_carrier_and_wrong_rec
     let (_directory, _vault, config, gateway, command_id) = carrier_command();
     assert!(matches!(
         gateway.prepare_native_rcs_send(command_id, 1_000),
-        Err(Error::InvalidRequest("RCS route required"))
+        Err(Error::InvalidRequest("mapping unproven"))
     ));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);

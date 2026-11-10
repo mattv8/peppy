@@ -4846,20 +4846,20 @@ impl Client {
         let mut guard = self.lock()?;
         let active = guard.active_epoch;
         let tx = guard.conn.transaction()?;
-        let message = unattempted_rcs_message(&tx, active, command_id)?;
-        require_native_rcs_body(&message.body)?;
-        if rcs_group::group_mapping(&tx, message.record.conversation_id)?.is_some() {
+        let message = unattempted_rcs_message(&tx, active, command_id, true)?;
+        require_native_rcs_body(&message.message.body)?;
+        if rcs_group::group_mapping(&tx, message.message.record.conversation_id)?.is_some() {
             let authority = rcs_group::native_send_authority(
                 &tx,
-                message.record.conversation_id,
+                message.message.record.conversation_id,
                 command_id,
-                &message.recipients,
+                &message.message.recipients,
                 now_ms,
             )?;
             tx.commit()?;
             return Ok(NativeRcsPreparation::new_group(command_id, authority));
         }
-        let mapping = rcs_mapping::get(&tx, message.record.conversation_id)?
+        let mapping = rcs_mapping::get(&tx, message.message.record.conversation_id)?
             .ok_or(Error::InvalidRequest("mapping unproven"))?;
         if mapping.proof_version != RCS_MAPPING_PROOF_VERSION
             || mapping.class != RcsMappingClass::OneToOne
@@ -4869,7 +4869,7 @@ impl Client {
         {
             return Err(Error::InvalidRequest("mapping unproven"));
         }
-        require_exact_rcs_recipient(&message, &mapping)?;
+        require_exact_rcs_recipient(&message.message, &mapping)?;
         tx.commit()?;
         Ok(NativeRcsPreparation::new(command_id, mapping))
     }
@@ -5091,22 +5091,17 @@ impl Client {
             return Ok(decision);
         }
         if let Some(observation) = observation {
-            let conversation_id = message.record.conversation_id;
-            if subscription_id != observation.selected_sim_id {
-                rcs_send::invalidate_carrier_only_proof(&tx, conversation_id)?;
-                tx.commit()?;
-                return Ok(AutomaticPermitDecision::Blocked(
-                    PermitBlock::MappingUnproven,
-                ));
-            }
-            let decision = match automatic_rcs_permit(&tx, command_id, message, observation, now_ms)
-            {
-                Ok(permit) => AutomaticPermitDecision::Rcs(permit),
-                Err(Error::InvalidRequest(_)) => {
-                    rcs_send::invalidate_carrier_only_proof(&tx, conversation_id)?;
-                    AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
-                }
-                Err(error) => return Err(error),
+            let decision = match carrier_intent_rcs_permit(
+                &tx,
+                command_id,
+                message,
+                &subscription_id,
+                None,
+                observation,
+                now_ms,
+            )? {
+                Some(permit) => AutomaticPermitDecision::Rcs(permit),
+                None => AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven),
             };
             tx.commit()?;
             return Ok(decision);
@@ -11778,7 +11773,8 @@ fn unattempted_rcs_message(
     conn: &Connection,
     active_epoch: Option<u32>,
     command_id: CommandId,
-) -> Result<MessagePayload, Error> {
+    allow_carrier_intent: bool,
+) -> Result<UnattemptedRcsMessage, Error> {
     let ledger: Option<(u32, String, String, bool)> = conn
         .query_row(
             "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
@@ -11793,7 +11789,7 @@ fn unattempted_rcs_message(
     // D5: the gateway routes a group text whatever route the draft carried, so only 1:1 commands
     // need the RCS route. A group text is `Mms` transport; only attachments make it media.
     let group = rcs_group::is_group_conversation(conn, message.record.conversation_id)?;
-    if !subscription_id.is_empty() && !group {
+    if !subscription_id.is_empty() && !group && !allow_carrier_intent {
         return Err(Error::InvalidRequest("RCS route required"));
     }
     if let Some(state) = attempt_state(conn, command_id)? {
@@ -11814,7 +11810,15 @@ fn unattempted_rcs_message(
     if send_retention_blocked(conn, command_id)? {
         return Err(Error::InvalidRequest("RCS media unavailable"));
     }
-    Ok(message)
+    Ok(UnattemptedRcsMessage {
+        message,
+        subscription_id,
+    })
+}
+
+struct UnattemptedRcsMessage {
+    message: MessagePayload,
+    subscription_id: String,
 }
 
 fn admit_rcs_send(
@@ -11825,22 +11829,41 @@ fn admit_rcs_send(
     observation: &RcsMappingObservation,
     now_ms: i64,
 ) -> Result<RcsPermit, Error> {
-    let message = unattempted_rcs_message(&tx, active_epoch, command_id)?;
-    require_native_rcs_body(&message.body)?;
+    let message =
+        unattempted_rcs_message(&tx, active_epoch, command_id, prepared_mapping.is_some())?;
+    require_native_rcs_body(&message.message.body)?;
+    if !message.subscription_id.is_empty() {
+        let permit = carrier_intent_rcs_permit(
+            &tx,
+            command_id,
+            message.message,
+            &message.subscription_id,
+            prepared_mapping,
+            observation,
+            now_ms,
+        )?;
+        tx.commit()?;
+        return permit.ok_or(Error::InvalidRequest("mapping unproven"));
+    }
     if let Some(prepared_mapping) = prepared_mapping
-        && rcs_mapping::get(&tx, message.record.conversation_id)?.as_ref() != Some(prepared_mapping)
+        && rcs_mapping::get(&tx, message.message.record.conversation_id)?.as_ref()
+            != Some(prepared_mapping)
     {
         return Err(Error::InvalidRequest("mapping changed"));
     }
-    let Some(mapping) =
-        exact_rcs_mapping(&tx, message.record.conversation_id, observation, now_ms)?
+    let Some(mapping) = exact_rcs_mapping(
+        &tx,
+        message.message.record.conversation_id,
+        observation,
+        now_ms,
+    )?
     else {
         commit_mapping_refusal(tx)?;
         return Err(Error::InvalidRequest("mapping unproven"));
     };
-    require_exact_rcs_recipient(&message, &mapping)?;
+    require_exact_rcs_recipient(&message.message, &mapping)?;
     let tmp_id = finalize_rcs_admission(&tx, command_id, &mapping, observation, now_ms)?;
-    let permit = rcs_permit(command_id, message, tmp_id, &mapping, observation)?;
+    let permit = rcs_permit(command_id, message.message, tmp_id, &mapping, observation)?;
     tx.commit()?;
     Ok(permit)
 }
@@ -11856,13 +11879,13 @@ fn admit_group_rcs_send(
     observation: &RcsMappingObservation,
     now_ms: i64,
 ) -> Result<rcs_native::NativeRcsCommitProjection, Error> {
-    let message = unattempted_rcs_message(&tx, active_epoch, command_id)?;
-    require_native_rcs_body(&message.body)?;
+    let message = unattempted_rcs_message(&tx, active_epoch, command_id, false)?;
+    require_native_rcs_body(&message.message.body)?;
     let current = rcs_group::native_send_authority(
         &tx,
         prepared.conversation_id,
         command_id,
-        &message.recipients,
+        &message.message.recipients,
         now_ms,
     )?;
     if current != *prepared {
@@ -11889,8 +11912,13 @@ fn admit_group_rcs_send(
         &current.google_conversation_id,
         now_ms,
     )?;
-    let projection =
-        rcs_send::group_commit_projection(command_id, tmp_id, &current, observation, message.body)?;
+    let projection = rcs_send::group_commit_projection(
+        command_id,
+        tmp_id,
+        &current,
+        observation,
+        message.message.body,
+    )?;
     tx.commit()?;
     Ok(projection)
 }
@@ -12041,6 +12069,36 @@ fn automatic_rcs_permit(
     require_exact_rcs_recipient(&message, &mapping)?;
     let tmp_id = finalize_rcs_admission(tx, command_id, &mapping, observation, now_ms)?;
     rcs_permit(command_id, message, tmp_id, &mapping, observation)
+}
+
+/// The carrier intent may become RCS only when the native observation proves the exact route.
+/// Refusal invalidates any stale carrier-only proof in the caller's transaction.
+fn carrier_intent_rcs_permit(
+    tx: &Connection,
+    command_id: CommandId,
+    message: MessagePayload,
+    subscription_id: &str,
+    prepared_mapping: Option<&RcsMapping>,
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+) -> Result<Option<RcsPermit>, Error> {
+    let conversation_id = message.record.conversation_id;
+    let prepared_is_current = match prepared_mapping {
+        Some(mapping) => rcs_mapping::get(tx, conversation_id)?.as_ref() == Some(mapping),
+        None => true,
+    };
+    if subscription_id != observation.selected_sim_id || !prepared_is_current {
+        rcs_send::invalidate_carrier_only_proof(tx, conversation_id)?;
+        return Ok(None);
+    }
+    match automatic_rcs_permit(tx, command_id, message, observation, now_ms) {
+        Ok(permit) => Ok(Some(permit)),
+        Err(Error::InvalidRequest(_)) => {
+            rcs_send::invalidate_carrier_only_proof(tx, conversation_id)?;
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn finalize_rcs_admission(

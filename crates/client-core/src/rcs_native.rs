@@ -10,8 +10,11 @@ use crate::{
 use rusqlite::{Connection, params};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 pub const NATIVE_RCS_COMMAND_PAGE_SIZE: usize = 100;
+pub const NATIVE_CARRIER_INTENT_CANDIDATES: usize = 8;
+const CARRIER_CURSOR_META: &str = "native_rcs_carrier_candidate_cursor_v1";
 
 /// A received RCS-link command that may be observed by the trusted native coordinator.
 /// This is only a candidate; prepare and begin remain the transport-admission boundary.
@@ -38,8 +41,10 @@ pub(crate) fn pending_commands(
     // The client store mutex prevents ledger growth during this scan. Each batch advances the
     // keyset cursor, so one call examines at most the qualifying raw rows present on entry.
     let mut cursor = (i64::MIN, String::new());
-    let mut candidates = Vec::new();
-    while candidates.len() < NATIVE_RCS_COMMAND_PAGE_SIZE {
+    let mut rcs_candidates = Vec::new();
+    let mut carrier_candidates = Vec::new();
+    let mut rcs_conversations = HashSet::new();
+    loop {
         let rows = query
             .query_map(
                 params![
@@ -58,10 +63,19 @@ pub(crate) fn pending_commands(
         cursor = last.clone();
         let exhausted = rows.len() < NATIVE_RCS_COMMAND_PAGE_SIZE;
         for (_, command_id) in rows {
-            if let Some(candidate) = candidate(conn, active_epoch, command_id)? {
-                candidates.push(candidate);
-                if candidates.len() == NATIVE_RCS_COMMAND_PAGE_SIZE {
-                    break;
+            if let Some((candidate, carrier_intent)) = candidate(conn, active_epoch, command_id)? {
+                if carrier_intent {
+                    if !carrier_candidates
+                        .iter()
+                        .any(|existing: &PendingNativeRcsCommand| {
+                            existing.conversation_id == candidate.conversation_id
+                        })
+                    {
+                        carrier_candidates.push(candidate);
+                    }
+                } else if rcs_candidates.len() < NATIVE_RCS_COMMAND_PAGE_SIZE {
+                    rcs_conversations.insert(candidate.conversation_id);
+                    rcs_candidates.push(candidate);
                 }
             }
         }
@@ -69,36 +83,101 @@ pub(crate) fn pending_commands(
             break;
         }
     }
-    Ok(candidates)
+    let mut seen_conversations = rcs_conversations;
+    carrier_candidates.retain(|candidate| seen_conversations.insert(candidate.conversation_id));
+    let carrier_limit = NATIVE_CARRIER_INTENT_CANDIDATES
+        .min(NATIVE_RCS_COMMAND_PAGE_SIZE.saturating_sub(rcs_candidates.len()));
+    if carrier_limit > 0 && !carrier_candidates.is_empty() {
+        let cursor = crate::get_meta(conn, CARRIER_CURSOR_META)?;
+        let start = cursor
+            .as_deref()
+            .and_then(|command_id| {
+                carrier_candidates
+                    .iter()
+                    .position(|candidate| candidate.command_id.to_string() == command_id)
+            })
+            .map_or(0, |index| (index + 1) % carrier_candidates.len());
+        let selected = carrier_candidates
+            .iter()
+            .cycle()
+            .skip(start)
+            .take(carrier_limit.min(carrier_candidates.len()))
+            .cloned()
+            .collect::<Vec<_>>();
+        crate::set_meta(
+            conn,
+            CARRIER_CURSOR_META,
+            &selected.last().unwrap().command_id.to_string(),
+        )?;
+        rcs_candidates.extend(selected);
+    }
+    Ok(rcs_candidates)
 }
 
 fn candidate(
     conn: &Connection,
     active_epoch: u32,
     command_id: String,
-) -> Result<Option<PendingNativeRcsCommand>, Error> {
+) -> Result<Option<(PendingNativeRcsCommand, bool)>, Error> {
     let command_id = command_id
         .parse()
         .map_err(|_| Error::InvalidRequest("invalid command id"))?;
-    let message = match crate::unattempted_rcs_message(conn, Some(active_epoch), command_id) {
+    let message = match crate::unattempted_rcs_message(conn, Some(active_epoch), command_id, true) {
         Ok(message) => message,
         Err(Error::AlreadyAttempted(_) | Error::InvalidRequest(_)) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let Some(mapping) = rcs_mapping::get(conn, message.record.conversation_id)? else {
-        return group_candidate(conn, command_id, &message);
+    if !message.subscription_id.is_empty()
+        && !rcs_group::is_group_conversation(conn, message.message.record.conversation_id)?
+    {
+        let [recipient] = message.message.recipients.as_slice() else {
+            return Ok(None);
+        };
+        let carrier_admission = crate::rcs_send::carrier_admission(
+            conn,
+            message.message.record.conversation_id,
+            &message.message.recipients,
+            message.message.transport,
+            !message.message.record.attachments.is_empty(),
+            &message.subscription_id,
+            crate::notifications::now_ms(),
+            None,
+        )?;
+        if matches!(
+            carrier_admission,
+            crate::rcs_send::CarrierAdmission::Permitted
+                | crate::rcs_send::CarrierAdmission::ShortCodeSms
+                | crate::rcs_send::CarrierAdmission::GroupMmsPreM4
+        ) {
+            return Ok(None);
+        }
+        return Ok(Some((
+            PendingNativeRcsCommand {
+                command_id,
+                conversation_id: message.message.record.conversation_id,
+                recipient: recipient.clone(),
+            },
+            true,
+        )));
+    }
+    let Some(mapping) = rcs_mapping::get(conn, message.message.record.conversation_id)? else {
+        return group_candidate(conn, command_id, &message.message)
+            .map(|candidate| candidate.map(|candidate| (candidate, false)));
     };
-    if crate::require_exact_rcs_recipient(&message, &mapping).is_err() {
+    if crate::require_exact_rcs_recipient(&message.message, &mapping).is_err() {
         return Ok(None);
     }
-    let [recipient] = message.recipients.as_slice() else {
+    let [recipient] = message.message.recipients.as_slice() else {
         return Ok(None);
     };
-    Ok(Some(PendingNativeRcsCommand {
-        command_id,
-        conversation_id: message.record.conversation_id,
-        recipient: recipient.clone(),
-    }))
+    Ok(Some((
+        PendingNativeRcsCommand {
+            command_id,
+            conversation_id: message.message.record.conversation_id,
+            recipient: recipient.clone(),
+        },
+        false,
+    )))
 }
 
 /// A queued text to a proved group is a native candidate; its recipient is the member digest.
