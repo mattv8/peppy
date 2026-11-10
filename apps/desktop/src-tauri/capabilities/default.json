@@ -25,6 +25,7 @@
     "allow-cancel-history-search",
     "allow-load-message-window",
     "allow-open-external-url",
+    "allow-open-mcp-oauth-redirect",
     "allow-configure-server",
     "allow-unlock-sync",
     "allow-get-app-lock-status",

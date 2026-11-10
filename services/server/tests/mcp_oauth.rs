@@ -290,9 +290,31 @@ async fn approve_with_scopes(
 }
 
 async fn exchange(app: Router, client_id: &str, code: &str, verifier: &str) -> Value {
-    let body = format!(
-        "grant_type=authorization_code&client_id={client_id}&code={code}&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&resource=http%3A%2F%2Flocalhost%3A3000%2Fmcp&code_verifier={verifier}"
-    );
+    exchange_with_redirect(
+        app,
+        client_id,
+        code,
+        verifier,
+        "https://client.example/callback",
+    )
+    .await
+}
+
+async fn exchange_with_redirect(
+    app: Router,
+    client_id: &str,
+    code: &str,
+    verifier: &str,
+    redirect_uri: &str,
+) -> Value {
+    let mut body = url::form_urlencoded::Serializer::new(String::new());
+    body.append_pair("grant_type", "authorization_code");
+    body.append_pair("client_id", client_id);
+    body.append_pair("code", code);
+    body.append_pair("redirect_uri", redirect_uri);
+    body.append_pair("resource", "http://localhost:3000/mcp");
+    body.append_pair("code_verifier", verifier);
+    let body = body.finish();
     let response = request(
         app,
         Method::POST,
@@ -561,6 +583,74 @@ async fn oauth_http_lifecycle_enforces_pkce_owner_scope_rotation_and_revocation(
     )
     .await;
     assert_eq!(revoked_device.status(), StatusCode::UNAUTHORIZED);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn oauth_native_redirects_preserve_query_state_and_pkce_binding() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app().await;
+    let verifier = "a-valid-pkce-verifier-that-is-long-enough-to-satisfy-rfc7636";
+    let redirect_uri = "cursor://anysphere.cursor-retrieval/oauth/callback?existing=value";
+    let client_id = register_with_redirect(app.clone(), redirect_uri).await;
+    let authorization_id =
+        authorize_with_redirect(app.clone(), &client_id, verifier, redirect_uri).await;
+
+    let view = request(
+        app.clone(),
+        Method::GET,
+        &format!("/v1/mcp/authorizations/{authorization_id}"),
+        Body::empty(),
+        &[("authorization", &format!("Bearer {}", fixture.owner_token))],
+    )
+    .await;
+    let view = json(view).await;
+    assert_eq!(
+        view["redirectOrigin"],
+        "cursor://anysphere.cursor-retrieval"
+    );
+    assert_eq!(view["redirectIsLoopback"], false);
+
+    let approval = request(
+        app.clone(),
+        Method::POST,
+        &format!("/v1/mcp/authorizations/{authorization_id}/approve"),
+        Body::from(json!({"scopes":["conversations:read"]}).to_string()),
+        &[
+            ("content-type", "application/json"),
+            ("authorization", &format!("Bearer {}", fixture.owner_token)),
+        ],
+    )
+    .await;
+    let approval = Url::parse(json(approval).await["redirectUri"].as_str().unwrap()).unwrap();
+    let pairs = approval.query_pairs().collect::<Vec<_>>();
+    assert!(pairs.contains(&("existing".into(), "value".into())));
+    assert!(pairs.contains(&("state".into(), "opaque-state".into())));
+    let code = pairs
+        .iter()
+        .find(|(key, _)| key == "code")
+        .unwrap()
+        .1
+        .to_string();
+    assert_eq!(
+        exchange_with_redirect(app.clone(), &client_id, &code, verifier, redirect_uri).await["scope"],
+        "conversations:read"
+    );
+
+    let denial_id = authorize_with_redirect(app.clone(), &client_id, verifier, redirect_uri).await;
+    let denial = request(
+        app,
+        Method::POST,
+        &format!("/v1/mcp/authorizations/{denial_id}/deny"),
+        Body::empty(),
+        &[("authorization", &format!("Bearer {}", fixture.owner_token))],
+    )
+    .await;
+    let denial = Url::parse(json(denial).await["redirectUri"].as_str().unwrap()).unwrap();
+    let pairs = denial.query_pairs().collect::<Vec<_>>();
+    assert!(pairs.contains(&("existing".into(), "value".into())));
+    assert!(pairs.contains(&("error".into(), "access_denied".into())));
+    assert!(pairs.contains(&("state".into(), "opaque-state".into())));
     fixture.cleanup().await;
 }
 

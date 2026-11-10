@@ -21,7 +21,6 @@ import {
   OmniSearch,
   Check,
   CheckCheck,
-  CheckCircle,
   Clock,
   Composer,
   ConnectionDot,
@@ -108,9 +107,11 @@ import { ContactsView, type ContactNavigationGuard, type ContactTarget } from ".
 import { findContactTarget } from "./contacts/contact-target";
 import { useHistorySearch } from "./search/useHistorySearch";
 import { DevicesSettings } from "./settings/DevicesSettings";
+import { McpConnectHelp } from "./settings/McpConnectHelp";
 import { McpAuthorizationConsent } from "./settings/McpAuthorizationConsent";
 import { AttachmentStorageSettingsHost, HostedAccountSettings } from "./settings/HostedAccountSettings";
 import { PrivacySettings } from "./settings/PrivacySettings";
+import { RcsFeaturesSettings } from "./settings/RcsFeaturesSettings";
 import { AdvancedSettings } from "./settings/AdvancedSettings";
 import { searchRecipientSuggestions } from "./contacts/recipientSearch";
 export { searchRecipientSuggestions } from "./contacts/recipientSearch";
@@ -1374,6 +1375,7 @@ function SettingsView({
     ...(nativeUpdateHost ? [{ id: "updates", label: "Updates" }] : []),
     ...(browserHost ? [] : [{ id: "app-lock", label: "App lock" }]),
     ...(hasAccount ? [{ id: "account-billing", label: "Account" }] : []),
+    ...(typingShare !== undefined ? [{ id: "rcs-features", label: "RCS Features" }] : []),
     { id: "advanced", label: "Advanced" },
   ];
   const sectionElementId = (id: string) => {
@@ -1465,6 +1467,7 @@ function SettingsView({
       <section id="settings-server" className="settings-card" data-settings-section="server">
         <h2>Server</h2>
         <p id="settings-connection-summary" className="settings-connection-summary"><strong>{connectionLabel}</strong><span> · </span><span>{configuredOrigin || "No server configured"}</span></p>
+        <McpConnectHelp sessionKey={sessionScopeId ?? "unavailable"} browserHost={browserHost} />
         {browserHost ? <p className="settings-note">This browser host uses its fixed server.</p> : mode === "self-hosted" ? <details className="settings-disclosure" id="settings-server-editor">
           <summary>Change server</summary>
           <div className="settings-control-row">
@@ -1658,8 +1661,9 @@ function SettingsView({
         {browserHost && accountUrl && <a id="settings-account-portal-link" className="secondary-button" href={accountUrl} target="_blank" rel="noopener noreferrer">{peppyCopy.account_portal_cta}<span className="visually-hidden"> (opens in a new tab)</span></a>}
         {browserHost ? <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} manageStorageUrl={accountUrl} /> : <HostedAccountSettings sessionScopeId={sessionScopeId} onAccountDeleted={onAccountDeleted} />}
       </section>}
+      {typingShare !== undefined && <RcsFeaturesSettings typingShare={{ enabled: typingShare, onChange: onTypingShare, error: typingShareError }} />}
       <AdvancedSettings sessionKey={sessionScopeId ?? "unavailable"} unlocked={encryption === "unlocked"} serverOffline={serverOffline} onOpenDevices={() => { selectSection("devices"); window.setTimeout(() => document.getElementById("mcp-custody-review")?.focus(), 0); }} />
-      <PrivacySettings browserHost={browserHost} typingShare={typingShare === undefined ? undefined : { enabled: typingShare, onChange: onTypingShare, error: typingShareError }} />
+      <PrivacySettings browserHost={browserHost} />
       </div>
       </div>
     </section>
@@ -5188,7 +5192,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             {groupStatusNotices}
             {mmsLimitShown && route.kind === "route" && (
               <span className="mms-limit" data-mms-limit-source={route.gateway.mmsLimitSource ?? "fallback"}>
-                {fileSize(estimateBytes)} used · {fileSize(route.gateway.mmsMaxBytes ?? 300 * 1024)} limit ({route.gateway.mmsLimitSource === "carrier" ? "carrier" : "fallback"}) · up to {Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)} recipients
+                {fileSize(estimateBytes)} used · {fileSize(route.gateway.mmsMaxBytes ?? DEFAULT_MMS_LIMIT_BYTES)} limit ({route.gateway.mmsLimitSource === "carrier" ? "carrier" : "fallback"}) · up to {Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)} recipients
               </span>
             )}
             <DraftNotice notice={visibleDraftNotice} noticeKey={slotKey} onAction={onDraftNoticeAction} busy={sending || noticeActionBusy} />

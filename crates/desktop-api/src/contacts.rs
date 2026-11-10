@@ -1026,18 +1026,39 @@ pub fn requester_ledger_view(
     book_id: Option<&str>,
     now: i64,
 ) -> ContactResult<Vec<Value>> {
-    Ok(raw.get("requests").and_then(Value::as_array).ok_or_else(|| ContactError::ui("host-state", "Native state is unavailable."))?
-        .iter().filter(|request| book_id.is_none_or(|book| str_field(request, "book_id") == Some(book)))
+    Ok(raw
+        .get("requests")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ContactError::ui("host-state", "Native state is unavailable."))?
+        .iter()
+        .filter(|request| book_id.is_none_or(|book| str_field(request, "book_id") == Some(book)))
         .filter_map(|request| {
             let expires_at = request.get("expires_at").and_then(Value::as_i64)?;
             let state = edit_state(str_field(request, "state")?, expires_at, now)?;
-            let mut out = json!({"requestId": str_field(request, "request_id")?, "bookId": str_field(request, "book_id")?, "state": state, "expiresAt": expires_at, "summary": edit_summary(request)});
-            if let Some(reason) = request.get("observed").and_then(safe_reason) { out["reason"] = json!(reason); }
-            if let Some(kind) = str_field(request, "kind").filter(|k| matches!(*k, "create" | "update" | "delete")) { out["kind"] = json!(kind); }
-            if let Some(contact) = str_field(request, "contact_id").filter(|id| valid_id(id)) { out["contactId"] = json!(contact); }
-            if let Some(name) = str_field(request, "display_name").filter(|n| !n.is_empty()) { out["displayName"] = json!(name.chars().take(MAX_TEXT).collect::<String>()); }
+            let mut out = json!({
+                "requestId": str_field(request, "request_id")?,
+                "bookId": str_field(request, "book_id")?,
+                "state": state,
+                "expiresAt": expires_at,
+                "summary": edit_summary(request)
+            });
+            if let Some(reason) = request.get("observed").and_then(safe_reason) {
+                out["reason"] = json!(reason);
+            }
+            if let Some(kind) =
+                str_field(request, "kind").filter(|k| matches!(*k, "create" | "update" | "delete"))
+            {
+                out["kind"] = json!(kind);
+            }
+            if let Some(contact) = str_field(request, "contact_id").filter(|id| valid_id(id)) {
+                out["contactId"] = json!(contact);
+            }
+            if let Some(name) = str_field(request, "display_name").filter(|n| !n.is_empty()) {
+                out["displayName"] = json!(name.chars().take(MAX_TEXT).collect::<String>());
+            }
             Some(out)
-        }).collect())
+        })
+        .collect())
 }
 
 /// Sanitized retained-tombstone projection. A host may inject only an already verified avatar URL.
@@ -1047,7 +1068,14 @@ pub fn restorable_view(
     avatar: &mut dyn FnMut(AttachmentId) -> Option<String>,
 ) -> Option<Value> {
     let id = str_field(contact, "id").filter(|id| valid_id(id))?;
-    let mut out = json!({"id": id, "bookId": book_id, "displayName": str_field(contact, "display_name").filter(|n| !n.is_empty()).unwrap_or("Contact"), "deletedAt": utc_date(contact.get("deleted_at").and_then(Value::as_i64)?)});
+    let mut out = json!({
+        "id": id,
+        "bookId": book_id,
+        "displayName": str_field(contact, "display_name")
+            .filter(|n| !n.is_empty())
+            .unwrap_or("Contact"),
+        "deletedAt": utc_date(contact.get("deleted_at").and_then(Value::as_i64)?)
+    });
     if let Some((photo, true)) = photo_reference(contact)
         && let Some(url) = avatar(photo)
     {
@@ -1062,7 +1090,17 @@ pub fn recipient_view(
     avatar: &mut dyn FnMut(AttachmentId) -> Option<String>,
 ) -> Option<Value> {
     let address = str_field(row, "address")?;
-    let mut out = json!({"address": address, "bookId": str_field(row, "book_id")?, "displayName": str_field(row, "display_name").filter(|n| !n.is_empty()).unwrap_or(address), "number": str_field(row, "value").unwrap_or(address), "normalized": row.get("normalized").and_then(Value::as_bool) == Some(true), "contactId": str_field(row, "contact_id")?, "phoneId": str_field(row, "phone_id")?});
+    let mut out = json!({
+        "address": address,
+        "bookId": str_field(row, "book_id")?,
+        "displayName": str_field(row, "display_name")
+            .filter(|n| !n.is_empty())
+            .unwrap_or(address),
+        "number": str_field(row, "value").unwrap_or(address),
+        "normalized": row.get("normalized").and_then(Value::as_bool) == Some(true),
+        "contactId": str_field(row, "contact_id")?,
+        "phoneId": str_field(row, "phone_id")?
+    });
     if let Some(label) = str_field(row, "label") {
         out["label"] = json!(display_label(label));
     }

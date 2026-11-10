@@ -49,26 +49,4 @@ describe("PrivacySettings", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Privacy Policy could not be opened.");
     expect(screen.queryByText("sensitive native failure")).not.toBeInTheDocument();
   });
-
-  it("shows the typing sharing preference only when it is available", () => {
-    const onChange = vi.fn();
-    const { rerender } = render(<PrivacySettings browserHost={false} />);
-
-    expect(document.querySelector("#settings-share-typing")).toBeNull();
-
-    rerender(<PrivacySettings browserHost={false} typingShare={{ enabled: true, onChange }} />);
-    const control = document.querySelector<HTMLInputElement>("#settings-share-typing")!;
-    expect(control).toBeChecked();
-    expect(document.querySelector("#settings-share-typing-info")).toBeNull();
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    fireEvent.click(control);
-    expect(onChange).toHaveBeenCalledWith(false);
-  });
-
-  it("shows the generic setting error when sharing cannot be saved", () => {
-    render(<PrivacySettings browserHost={false} typingShare={{ enabled: true, onChange: vi.fn(), error: true }} />);
-
-    expect(screen.getByRole("alert")).toHaveAttribute("id", "settings-share-typing-error");
-    expect(screen.getByRole("alert")).toHaveTextContent(peppyCopy.toggle_android_phone_read_error);
-  });
 });

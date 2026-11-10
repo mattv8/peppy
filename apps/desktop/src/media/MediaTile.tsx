@@ -117,7 +117,6 @@ export function MediaTile({ attachment, message, variant, onOpen, label, prefetc
   const [menuAnchor, setMenuAnchor] = useState<{ left: number; top: number }>();
   const [heldSyncState, setHeldSyncState] = useState<SyncState>("idle");
   const [slideFullyVisible, setSlideFullyVisible] = useState(true);
-  const previousState = useRef(state);
   const previousPendingOriginal = useRef(pendingOriginal);
   const heldControlFocused = useRef(false);
   const replacementFocus = useRcsReplacementFocus(rootRef, attachment.rcsState);
@@ -154,7 +153,6 @@ export function MediaTile({ attachment, message, variant, onOpen, label, prefetc
   const noteId = `media-hold-note-${attachment.id}`;
   useLayoutEffect(() => {
     if (previousPendingOriginal.current && !pendingOriginal && heldControlFocused.current) (bodyElementRef.current ?? rootRef.current)?.focus();
-    previousState.current = state;
     previousPendingOriginal.current = pendingOriginal;
     heldControlFocused.current = false;
   }, [pendingOriginal, rcsPlaceholder, state]);

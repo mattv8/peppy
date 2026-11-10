@@ -64,6 +64,7 @@ export { SyncProgress, type SyncProgressProps } from "./SyncProgress";
 export { AttachmentStorageSettings, attachmentStorageRemovalText, type AttachmentStorageCopy, type AttachmentStorageSettingsProps, type StoragePurchaseProps, type StoragePurchaseState } from "./AttachmentStorageSettings";
 export { BillingElsewhereNotice, type BillingElsewhereCopy, type BillingElsewhereNoticeProps, type BillingElsewhereVariant } from "./BillingElsewhereNotice";
 export { StorePlanOptions, type StorePlanOptionsCopy, type StorePlanOptionsProps, type StorePlanState } from "./StorePlanOptions";
+export { AgentBrandIcon, type AgentBrandIconProps, type AgentBrandId } from "./AgentBrandIcon";
 export { Modal, type ModalProps } from "./Modal";
 export { installOverlayScrollbars, OVERLAY_SCROLL_HIDE_DELAY } from "./overlayScroll";
 export {

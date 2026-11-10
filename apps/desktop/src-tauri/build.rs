@@ -16,6 +16,7 @@ const COMMANDS: &[&str] = &[
     "cancel_history_search",
     "load_message_window",
     "open_external_url",
+    "open_mcp_oauth_redirect",
     "configure_server",
     "unlock_sync",
     "get_app_lock_status",

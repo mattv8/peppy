@@ -596,23 +596,184 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
       : items[activeIndex]?.kind === "candidate" ? `${componentId}-candidate-${addressId(items[activeIndex].address)}`
         : items[activeIndex]?.kind === "action" ? `${componentId}-${actionId(items[activeIndex].action)}` : undefined;
 
-  return <section ref={rootRef} id="titlebar-search" className="omni-search" aria-label="Search Peppy" onPointerDownCapture={() => { if (document.activeElement !== inputRef.current) openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; }} onBlur={(event) => { if (!(event.relatedTarget instanceof Node && rootRef.current?.contains(event.relatedTarget))) close(); }}>
-    <input ref={inputRef} role="combobox" aria-label="Search Peppy" aria-autocomplete="list" aria-expanded={open} aria-controls={listId} aria-activedescendant={selectedId} autoComplete="off" autoCorrect="off" spellCheck={false} disabled={disabled} value={query} placeholder="Search messages, conversations, contacts" onChange={change} onFocus={(event) => { if (event.relatedTarget instanceof HTMLElement && !rootRef.current?.contains(event.relatedTarget)) openerRef.current = event.relatedTarget; setOpen(true); }} onCompositionStart={() => { compositionRef.current = true; setComposing(true); }} onCompositionEnd={() => { compositionRef.current = false; setComposing(false); }} onKeyDown={onKeyDown} />
-    {query.length > 0 && <button id="omni-search-clear" type="button" aria-label="Clear search" title="Clear search" disabled={disabled} onMouseDown={(event) => event.preventDefault()} onClick={clearQuery}><X size={12} strokeWidth={1.75} aria-hidden /></button>}
-    {open && <div className="omni-search-results" data-omni-search-results style={popoverStyle} onMouseDown={(event) => event.preventDefault()}>
+  return <section
+    ref={rootRef}
+    id="titlebar-search"
+    className="omni-search"
+    aria-label="Search Peppy"
+    onPointerDownCapture={() => {
+      if (document.activeElement !== inputRef.current) openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    }}
+    onBlur={(event) => {
+      if (!(event.relatedTarget instanceof Node && rootRef.current?.contains(event.relatedTarget))) close();
+    }}
+  >
+    <input
+      ref={inputRef}
+      role="combobox"
+      aria-label="Search Peppy"
+      aria-autocomplete="list"
+      aria-expanded={open}
+      aria-controls={listId}
+      aria-activedescendant={selectedId}
+      autoComplete="off"
+      autoCorrect="off"
+      spellCheck={false}
+      disabled={disabled}
+      value={query}
+      placeholder="Search messages, conversations, contacts"
+      onChange={change}
+      onFocus={(event) => {
+        if (event.relatedTarget instanceof HTMLElement && !rootRef.current?.contains(event.relatedTarget)) openerRef.current = event.relatedTarget;
+        setOpen(true);
+      }}
+      onCompositionStart={() => {
+        compositionRef.current = true;
+        setComposing(true);
+      }}
+      onCompositionEnd={() => {
+        compositionRef.current = false;
+        setComposing(false);
+      }}
+      onKeyDown={onKeyDown}
+    />
+    {query.length > 0 && <button
+      id="omni-search-clear"
+      type="button"
+      aria-label="Clear search"
+      title="Clear search"
+      disabled={disabled}
+      onMouseDown={(event) => event.preventDefault()}
+      onClick={clearQuery}
+    ><X size={12} strokeWidth={1.75} aria-hidden /></button>}
+    {open && <div
+      className="omni-search-results"
+      data-omni-search-results
+      style={popoverStyle}
+      onMouseDown={(event) => event.preventDefault()}
+    >
       {!trimmedQuery && <p className="omni-search-hint">Search locally synced conversations, messages, and contacts.</p>}
-       {loading && <p>Searching…</p>}{recipientPending && <p role="status">Starting conversation…</p>}{recipientError && <p role="alert">{recipientError}</p>}{!historyEnabled && page?.indexState === "indexing" && <p>Search index is updating; results may be incomplete.</p>}{error && <p>Search could not be completed. Choose Retry search.</p>}{!historyEnabled && !loading && !error && (!candidate || category) && trimmedQuery && page && !page.items.length && <p>No matches.</p>}
-       <div id={listId} role="listbox" aria-label={chooserContact ? `Choose a number for ${chooserContact.title}` : "Search results"} aria-busy={recipientPending}>
-        {chooser ? <div role="group" aria-label={`Choose a number for ${chooserContact?.title ?? "contact"}`} data-omni-number-chooser><div role="presentation" className="omni-search-group-label">Choose a number for {chooserContact?.title}</div>{chooser.map((number) => <div key={number.address} id={`${componentId}-candidate-${addressId(number.address)}`} role="option" aria-label={number.label ? `${number.display}, ${number.label}` : number.display} aria-selected={selectedId === `${componentId}-candidate-${addressId(number.address)}`} data-omni-number-choice onClick={() => startConversation(number.address)}><b>{number.display}</b>{number.label && <span>{number.label}</span>}</div>)}{items.filter((item) => item.kind === "action").map((item) => item.kind === "action" && <div key={actionId(item.action)} id={`${componentId}-${actionId(item.action)}`} role="option" aria-selected={selectedId === `${componentId}-${actionId(item.action)}`} data-search-action={item.action.kind} onClick={() => activate(item)}>{item.action.kind === "return-chooser" ? "Return to search results" : "Retry starting conversation"}</div>)}</div> : <>
-        {!category && candidate && <div id={`${componentId}-candidate-${addressId(candidate)}`} role="option" aria-selected={selectedId === `${componentId}-candidate-${addressId(candidate)}`} data-omni-number-candidate title={`Start conversation with ${formatPhoneNumber(candidate)}`} onClick={() => startConversation(candidate)}><span><b>Start conversation with {formatPhoneNumber(candidate)}</b><small>{candidate}</small></span><MessageSquarePlus size={16} aria-hidden /></div>}
-       {categories.map((kind) => { const group = page?.items.filter((hit) => hit.kind === kind) ?? []; const more = items.find((item): item is { kind: "action"; action: Extract<SearchAction, { kind: "more" }> } => item.kind === "action" && item.action.kind === "more" && item.action.category === kind); if ((!category && !group.length) || (category && category !== kind)) return null; return <div key={kind} role="group" aria-label={categoryLabel(kind)} data-search-group={kind}><div role="presentation" className="omni-search-group-label">{categoryLabel(kind)}</div>{group.map((hit) => <div key={hitKey(hit)} className="omni-search-hit-row"><div id={`${componentId}-${hitKey(hit)}`} role="option" aria-selected={selectedId === `${componentId}-${hitKey(hit)}`} data-search-hit={hitKey(hit)} onClick={() => activate({ kind: "hit", hit })} title={`${hit.title} — ${subtitle(hit)}`}><b>{hit.title}</b><span>{subtitle(hit)}</span></div>{hit.kind === "contact" && resolveContactNumbers && onStartConversation && <div id={`${componentId}-start-${hitKey(hit)}`} role="option" aria-label={`Start conversation with ${hit.title}`} aria-selected={selectedId === `${componentId}-start-${hitKey(hit)}`} data-omni-contact-action title={`Start conversation with ${hit.title}`} onClick={() => startContactConversation(hit)}><MessageSquarePlus size={16} aria-hidden /></div>}</div>)}{more && <div id={`${componentId}-${actionId(more.action)}`} role="option" aria-selected={selectedId === `${componentId}-${actionId(more.action)}`} data-search-action="more" onClick={() => activate(more)}>Show all {categoryLabel(kind).toLowerCase()}</div>}</div>; })}
-       {items.filter((item) => item.kind === "action" && item.action.kind === "return").map((item) => item.kind === "action" && <div key={actionId(item.action)} id={`${componentId}-${actionId(item.action)}`} role="option" aria-selected={selectedId === `${componentId}-${actionId(item.action)}`} data-search-action={item.action.kind} onClick={() => activate(item)}>Return to all results</div>)}
-       {history && <div id="omni-search-history" role="group" aria-labelledby="omni-search-history-status" className="omni-search-history" data-omni-history data-history-state={history.state}>
-         <div id="omni-search-history-status" role="presentation" className="omni-search-history-status">{history.status}</div>
-         {history.intent && <div id={`${componentId}-history`} role="option" aria-label={historyActionCopy[history.intent].ariaLabel} aria-selected={selectedId === `${componentId}-history`} aria-disabled={historyActionPending || undefined} className="omni-search-history-action" data-search-action="history" data-history-intent={history.intent} onClick={() => activate({ kind: "action", action: { kind: "history", intent: history.intent! } })}>{historyActionCopy[history.intent].label}</div>}
-       </div>}
-       {items.filter((item) => item.kind === "action" && item.action.kind !== "more" && item.action.kind !== "return" && item.action.kind !== "history").map((item) => item.kind === "action" && <div key={actionId(item.action)} id={`${componentId}-${actionId(item.action)}`} role="option" aria-selected={selectedId === `${componentId}-${actionId(item.action)}`} data-search-action={item.action.kind} onClick={() => activate(item)}>{item.action.kind === "retry" ? "Retry search" : item.action.kind === "retry-start" ? "Retry starting conversation" : item.action.kind === "retry-contact" ? "Retry contact phone lookup" : "Return to all results"}</div>)}
-       </>}
+      {loading && <p>Searching…</p>}
+      {recipientPending && <p role="status">Starting conversation…</p>}
+      {recipientError && <p role="alert">{recipientError}</p>}
+      {!historyEnabled && page?.indexState === "indexing" && <p>Search index is updating; results may be incomplete.</p>}
+      {error && <p>Search could not be completed. Choose Retry search.</p>}
+      {!historyEnabled && !loading && !error && (!candidate || category) && trimmedQuery && page && !page.items.length && <p>No matches.</p>}
+      <div
+        id={listId}
+        role="listbox"
+        aria-label={chooserContact ? `Choose a number for ${chooserContact.title}` : "Search results"}
+        aria-busy={recipientPending}
+      >
+        {chooser ? <div
+          role="group"
+          aria-label={`Choose a number for ${chooserContact?.title ?? "contact"}`}
+          data-omni-number-chooser
+        >
+          <div role="presentation" className="omni-search-group-label">Choose a number for {chooserContact?.title}</div>
+          {chooser.map((number) => <div
+            key={number.address}
+            id={`${componentId}-candidate-${addressId(number.address)}`}
+            role="option"
+            aria-label={number.label ? `${number.display}, ${number.label}` : number.display}
+            aria-selected={selectedId === `${componentId}-candidate-${addressId(number.address)}`}
+            data-omni-number-choice
+            onClick={() => startConversation(number.address)}
+          ><b>{number.display}</b>{number.label && <span>{number.label}</span>}</div>)}
+          {items.filter((item) => item.kind === "action").map((item) => item.kind === "action" && <div
+            key={actionId(item.action)}
+            id={`${componentId}-${actionId(item.action)}`}
+            role="option"
+            aria-selected={selectedId === `${componentId}-${actionId(item.action)}`}
+            data-search-action={item.action.kind}
+            onClick={() => activate(item)}
+          >{item.action.kind === "return-chooser" ? "Return to search results" : "Retry starting conversation"}</div>)}
+        </div> : <>
+          {!category && candidate && <div
+            id={`${componentId}-candidate-${addressId(candidate)}`}
+            role="option"
+            aria-selected={selectedId === `${componentId}-candidate-${addressId(candidate)}`}
+            data-omni-number-candidate
+            title={`Start conversation with ${formatPhoneNumber(candidate)}`}
+            onClick={() => startConversation(candidate)}
+          ><span><b>Start conversation with {formatPhoneNumber(candidate)}</b><small>{candidate}</small></span><MessageSquarePlus size={16} aria-hidden /></div>}
+          {categories.map((kind) => {
+            const group = page?.items.filter((hit) => hit.kind === kind) ?? [];
+            const more = items.find((item): item is { kind: "action"; action: Extract<SearchAction, { kind: "more" }> } => item.kind === "action" && item.action.kind === "more" && item.action.category === kind);
+            if ((!category && !group.length) || (category && category !== kind)) return null;
+            return <div
+              key={kind}
+              role="group"
+              aria-label={categoryLabel(kind)}
+              data-search-group={kind}
+            >
+              <div role="presentation" className="omni-search-group-label">{categoryLabel(kind)}</div>
+              {group.map((hit) => <div key={hitKey(hit)} className="omni-search-hit-row">
+                <div
+                  id={`${componentId}-${hitKey(hit)}`}
+                  role="option"
+                  aria-selected={selectedId === `${componentId}-${hitKey(hit)}`}
+                  data-search-hit={hitKey(hit)}
+                  onClick={() => activate({ kind: "hit", hit })}
+                  title={`${hit.title} — ${subtitle(hit)}`}
+                ><b>{hit.title}</b><span>{subtitle(hit)}</span></div>
+                {hit.kind === "contact" && resolveContactNumbers && onStartConversation && <div
+                  id={`${componentId}-start-${hitKey(hit)}`}
+                  role="option"
+                  aria-label={`Start conversation with ${hit.title}`}
+                  aria-selected={selectedId === `${componentId}-start-${hitKey(hit)}`}
+                  data-omni-contact-action
+                  title={`Start conversation with ${hit.title}`}
+                  onClick={() => startContactConversation(hit)}
+                ><MessageSquarePlus size={16} aria-hidden /></div>}
+              </div>)}
+              {more && <div
+                id={`${componentId}-${actionId(more.action)}`}
+                role="option"
+                aria-selected={selectedId === `${componentId}-${actionId(more.action)}`}
+                data-search-action="more"
+                onClick={() => activate(more)}
+              >Show all {categoryLabel(kind).toLowerCase()}</div>}
+            </div>;
+          })}
+          {items.filter((item) => item.kind === "action" && item.action.kind === "return").map((item) => item.kind === "action" && <div
+            key={actionId(item.action)}
+            id={`${componentId}-${actionId(item.action)}`}
+            role="option"
+            aria-selected={selectedId === `${componentId}-${actionId(item.action)}`}
+            data-search-action={item.action.kind}
+            onClick={() => activate(item)}
+          >Return to all results</div>)}
+          {history && <div
+            id="omni-search-history"
+            role="group"
+            aria-labelledby="omni-search-history-status"
+            className="omni-search-history"
+            data-omni-history
+            data-history-state={history.state}
+          >
+            <div id="omni-search-history-status" role="presentation" className="omni-search-history-status">{history.status}</div>
+            {history.intent && <div
+              id={`${componentId}-history`}
+              role="option"
+              aria-label={historyActionCopy[history.intent].ariaLabel}
+              aria-selected={selectedId === `${componentId}-history`}
+              aria-disabled={historyActionPending || undefined}
+              className="omni-search-history-action"
+              data-search-action="history"
+              data-history-intent={history.intent}
+              onClick={() => activate({ kind: "action", action: { kind: "history", intent: history.intent! } })}
+            >{historyActionCopy[history.intent].label}</div>}
+          </div>}
+          {items.filter((item) => item.kind === "action" && item.action.kind !== "more" && item.action.kind !== "return" && item.action.kind !== "history").map((item) => item.kind === "action" && <div
+            key={actionId(item.action)}
+            id={`${componentId}-${actionId(item.action)}`}
+            role="option"
+            aria-selected={selectedId === `${componentId}-${actionId(item.action)}`}
+            data-search-action={item.action.kind}
+            onClick={() => activate(item)}
+          >{item.action.kind === "retry" ? "Retry search" : item.action.kind === "retry-start" ? "Retry starting conversation" : item.action.kind === "retry-contact" ? "Retry contact phone lookup" : "Return to all results"}</div>)}
+        </>}
       </div>
     </div>}
     <span className="sr-only" role="status" aria-live="polite">{!loading && trimmedQuery && page ? `${page.items.length} search results` : ""}</span>

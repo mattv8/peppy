@@ -50,7 +50,7 @@ export function McpAuthorizationConsent({ authorizationId, browserHost, sessionK
 
   const redirect = async (url: string) => {
     if (browserHost) window.location.assign(url);
-    else if (bridge.open_external_url) await bridge.open_external_url(url);
+    else if (bridge.open_mcp_oauth_redirect) await bridge.open_mcp_oauth_redirect(url);
     else throw new Error("Opening the validated redirect is unavailable.");
   };
   const decide = async (approve: boolean) => {

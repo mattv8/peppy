@@ -695,8 +695,8 @@ export class BrowserBridge implements DesktopBridge {
       await this.releaseMediaUrl(url);
       return;
     }
-    else [...this.mediaBlobUrls.entries()].filter(([, media]) => media.attachmentId === id).forEach(([ownedUrl]) => this.revokeMediaUrl(ownedUrl));
-    await this.call("close_media", { id, ...(url ? { url } : {}) });
+    [...this.mediaBlobUrls.entries()].filter(([, media]) => media.attachmentId === id).forEach(([ownedUrl]) => this.revokeMediaUrl(ownedUrl));
+    await this.call("close_media", { id });
   }
   public async save_attachment(id: string): Promise<boolean> { const file = await this.call<{ bytes: ArrayBuffer; displayName: string; mediaType: string }>("save_attachment", { id }); const url = URL.createObjectURL(new Blob([file.bytes], { type: file.mediaType })); this.blobUrls.add(url); const link = document.createElement("a"); link.href = url; link.download = safeSuggestedFilename(file.displayName); link.click(); window.setTimeout(() => { URL.revokeObjectURL(url); this.blobUrls.delete(url); }, 0); return true; }
   public async publish_attachment(id: string): Promise<PublicCopy | null> { if (!window.confirm("Create a public plaintext copy of this attachment? Anyone with the link may access it.")) return null; return this.call("publish_attachment", { id, confirmed: true }); }

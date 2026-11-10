@@ -219,6 +219,7 @@ export interface DesktopBridge {
   cancel_history_search(input: HistorySearchAttemptInput): Promise<HistorySearchSnapshot>;
   load_message_window(input: MessageWindowRequest): Promise<MessageWindow>;
   open_external_url?(url: string): Promise<void>;
+  open_mcp_oauth_redirect?(url: string): Promise<void>;
   load_history(conversationId: string, beforeMessageId: string): Promise<HistoryPage>;
   configure_server(origin: string): Promise<void>;
   unlock_sync(): Promise<void>;

@@ -383,7 +383,7 @@ async fn authorization_view(
         requested_scopes: scopes_from_strings(row.get("requested_scopes"))?,
         server_origin: origin(&state)?.origin().ascii_serialization(),
         resource: row.get("resource"),
-        redirect_origin: redirect.origin().ascii_serialization(),
+        redirect_origin: redirect_origin(&redirect),
         redirect_is_loopback: is_loopback_redirect(&redirect),
     }))
 }
@@ -457,10 +457,8 @@ async fn approve(
         .map_err(|error| database_unavailable(&error, "mcp_oauth_approve_commit"))?;
     let mut redirect = url::Url::parse(&row.get::<String, _>("redirect_uri"))
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "mcp_redirect_invalid"))?;
-    redirect
-        .query_pairs_mut()
-        .append_pair("code", &code)
-        .append_pair("state", &row.get::<String, _>("state"));
+    let state: String = row.get("state");
+    append_redirect_query_pairs(&mut redirect, &[("code", &code), ("state", &state)]);
     Ok(Json(McpAuthorizationDecision {
         redirect_uri: redirect.to_string(),
     }))
@@ -491,10 +489,11 @@ async fn deny(
         .map_err(|error| database_unavailable(&error, "mcp_oauth_deny_commit"))?;
     let mut redirect = url::Url::parse(&row.get::<String, _>("redirect_uri"))
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "mcp_redirect_invalid"))?;
-    redirect
-        .query_pairs_mut()
-        .append_pair("error", "access_denied")
-        .append_pair("state", &row.get::<String, _>("state"));
+    let state: String = row.get("state");
+    append_redirect_query_pairs(
+        &mut redirect,
+        &[("error", "access_denied"), ("state", &state)],
+    );
     Ok(Json(McpAuthorizationDecision {
         redirect_uri: redirect.to_string(),
     }))
@@ -851,15 +850,41 @@ fn validate_redirect(value: &str) -> ApiResult<url::Url> {
     let url = url::Url::parse(value)
         .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_redirect_uri"))?;
     let loopback = url.scheme() == "http" && is_loopback_redirect(&url);
+    let native_app = NATIVE_REDIRECT_SCHEMES.contains(&url.scheme()) && url.host_str().is_some();
     if url.fragment().is_some()
         || url.username() != ""
         || url.password().is_some()
-        || !(url.scheme() == "https" || loopback)
+        || (native_app && value.contains('\\'))
+        || !(url.scheme() == "https" || loopback || native_app)
     {
         return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_redirect_uri"));
     }
     Ok(url)
 }
+
+const NATIVE_REDIRECT_SCHEMES: &[&str] = &[
+    "vscode",
+    "vscode-insiders",
+    "cursor",
+    "windsurf",
+    "jetbrains",
+];
+
+fn redirect_origin(url: &url::Url) -> String {
+    if NATIVE_REDIRECT_SCHEMES.contains(&url.scheme()) {
+        format!("{}://{}", url.scheme(), url.host_str().unwrap_or_default())
+    } else {
+        url.origin().ascii_serialization()
+    }
+}
+
+fn append_redirect_query_pairs(url: &mut url::Url, pairs: &[(&str, &str)]) {
+    let mut query = url.query_pairs_mut();
+    for (key, value) in pairs {
+        query.append_pair(key, value);
+    }
+}
+
 fn is_loopback_redirect(url: &url::Url) -> bool {
     matches!(
         url.host_str(),
@@ -966,4 +991,74 @@ fn bearer_database_error(
 ) -> Response {
     let unavailable = database_unavailable(error, operation);
     bearer_error(state, unavailable.0, "temporarily_unavailable")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_native_redirect_schemes_with_an_authority() {
+        for scheme in NATIVE_REDIRECT_SCHEMES {
+            let value = format!("{scheme}://callback.example/oauth/callback");
+            assert!(validate_redirect(&value).is_ok(), "{value}");
+        }
+        assert!(validate_redirect("VSCODE://callback.example/oauth/callback").is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_native_redirects() {
+        for value in [
+            "vscode://callback.example/oauth/callback#fragment",
+            "vscode://user@callback.example/oauth/callback",
+            "vscode://user:password@callback.example/oauth/callback",
+            "vscode://callback.example/path\\other",
+            "vscodex://callback.example/oauth/callback",
+            "myapp://callback.example/oauth/callback",
+            "vscode:callback",
+        ] {
+            assert!(validate_redirect(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn native_redirects_preserve_existing_query_pairs_and_disclose_the_callback() {
+        let mut redirect =
+            validate_redirect("cursor://anysphere.cursor-retrieval/oauth/callback?existing=value")
+                .unwrap();
+        append_redirect_query_pairs(
+            &mut redirect,
+            &[("code", "issued-code"), ("state", "opaque-state")],
+        );
+        assert_eq!(
+            redirect_origin(&redirect),
+            "cursor://anysphere.cursor-retrieval"
+        );
+        assert!(!is_loopback_redirect(&redirect));
+        assert_eq!(
+            redirect.query_pairs().collect::<Vec<_>>(),
+            [
+                ("existing".into(), "value".into()),
+                ("code".into(), "issued-code".into()),
+                ("state".into(), "opaque-state".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn native_denial_redirects_include_error_and_state() {
+        let mut redirect =
+            validate_redirect("cursor://anysphere.cursor-retrieval/oauth/callback").unwrap();
+        append_redirect_query_pairs(
+            &mut redirect,
+            &[("error", "access_denied"), ("state", "opaque-state")],
+        );
+        assert_eq!(
+            redirect.query_pairs().collect::<Vec<_>>(),
+            [
+                ("error".into(), "access_denied".into()),
+                ("state".into(), "opaque-state".into()),
+            ]
+        );
+    }
 }
