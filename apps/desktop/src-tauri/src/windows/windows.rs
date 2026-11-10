@@ -40,13 +40,14 @@ use windows::{
     },
 };
 
+use crate::heads::MAX_HEADS;
+
 use super::{HeadCallback, HeadEvent, HeadFrame, HeadGlyph, HeadPosition, HeadSpec};
 
 const LOGICAL_SIZE: f64 = 56.0;
 const CIRCLE_DIAMETER: f64 = 48.0;
 const BADGE_HEIGHT: f64 = 18.0;
 const BADGE_RING: f64 = 2.0;
-const MAX_HEADS: usize = 8;
 const DRAG_THRESHOLD: i32 = 4;
 const DISMISS_MENU_ID: usize = 1;
 const OPEN_MENU_ID: usize = 2;

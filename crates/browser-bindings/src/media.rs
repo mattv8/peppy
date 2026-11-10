@@ -12,8 +12,7 @@ use std::{
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_MEDIA_SYNC_ATTACHMENTS: usize = 32;
 
-fn media_cursor(args: &Value) -> Result<peppy_client_core::MediaCursor, Failure> {
-    let cursor = args.get("cursor").ok_or_else(invalid)?;
+fn decode_media_cursor(cursor: &Value) -> Result<peppy_client_core::MediaCursor, Failure> {
     Ok(peppy_client_core::MediaCursor {
         sort_at_ms: cursor
             .get("sortAtMs")
@@ -231,38 +230,8 @@ impl BrowserCore {
             .map_err(|_| invalid())?;
         let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50);
         let limit = usize::try_from(limit).map_err(|_| invalid())?;
-        let cursor: Option<peppy_client_core::MediaCursor> = args
-            .get("cursor")
-            .map(|cursor| {
-                Ok::<_, Failure>(peppy_client_core::MediaCursor {
-                    sort_at_ms: cursor
-                        .get("sortAtMs")
-                        .and_then(Value::as_str)
-                        .ok_or_else(invalid)?
-                        .parse()
-                        .map_err(|_| invalid())?,
-                    local_order: cursor
-                        .get("localOrder")
-                        .and_then(Value::as_str)
-                        .ok_or_else(invalid)?
-                        .parse()
-                        .map_err(|_| invalid())?,
-                    message_id: cursor
-                        .get("messageId")
-                        .and_then(Value::as_str)
-                        .ok_or_else(invalid)?
-                        .parse()
-                        .map_err(|_| invalid())?,
-                    attachment_position: u32::try_from(
-                        cursor
-                            .get("attachmentPosition")
-                            .and_then(Value::as_u64)
-                            .ok_or_else(invalid)?,
-                    )
-                    .map_err(|_| invalid())?,
-                })
-            })
-            .transpose()?;
+        let cursor: Option<peppy_client_core::MediaCursor> =
+            args.get("cursor").map(decode_media_cursor).transpose()?;
         let client = self.client()?;
         let page = client
             .media_page(conversation_id, cursor.as_ref(), limit)
@@ -306,7 +275,7 @@ impl BrowserCore {
             .ok_or_else(invalid)?
             .parse()
             .map_err(|_| invalid())?;
-        let cursor = media_cursor(&args)?;
+        let cursor = decode_media_cursor(args.get("cursor").ok_or_else(invalid)?)?;
         let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50);
         let limit = usize::try_from(limit).map_err(|_| invalid())?;
         let page = self
@@ -671,6 +640,121 @@ mod tests {
             json!({"profile": profile, "header": header, "passphrase": "passphrase"}),
         );
         core
+    }
+
+    #[test]
+    fn media_cursor_command_input_contract() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = BrowserCore::new(directory.path().to_owned());
+        let id = "00000000-0000-0000-0000-000000000001";
+        let base = serde_json::json!({
+            "sortAtMs": "0", "localOrder": "1",
+            "messageId": id, "attachmentPosition": 0
+        });
+        let invalid = serde_json::json!({
+            "code": "invalid-request", "message": "The request is invalid."
+        });
+        let unopened = serde_json::json!({
+            "code": "credentials-required", "message": "Open a local vault first."
+        });
+        let mut cases = vec![(None, true), (Some(base.clone()), true)];
+        for cursor in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!([]),
+            serde_json::json!(true),
+            serde_json::json!("cursor"),
+            serde_json::json!(1),
+        ] {
+            cases.push((Some(cursor), false));
+        }
+        for field in ["sortAtMs", "localOrder"] {
+            for text in [
+                "-1",
+                "+1",
+                "01",
+                "-0",
+                "-9223372036854775808",
+                "9223372036854775807",
+            ] {
+                let mut cursor = base.clone();
+                cursor[field] = serde_json::json!(text);
+                cases.push((Some(cursor), true));
+            }
+            for value in [
+                serde_json::json!(""),
+                serde_json::json!(" 1"),
+                serde_json::json!("1 "),
+                serde_json::json!("1.0"),
+                serde_json::json!("1e2"),
+                serde_json::json!("NaN"),
+                serde_json::json!("inf"),
+                serde_json::json!("9223372036854775808"),
+                serde_json::json!("-9223372036854775809"),
+                serde_json::Value::Null,
+                serde_json::json!(true),
+                serde_json::json!(1),
+                serde_json::json!(1.5),
+            ] {
+                let mut cursor = base.clone();
+                cursor[field] = value;
+                cases.push((Some(cursor), false));
+            }
+        }
+        for value in [
+            serde_json::json!(0),
+            serde_json::json!(1),
+            serde_json::json!(u32::MAX),
+        ] {
+            let mut cursor = base.clone();
+            cursor["attachmentPosition"] = value;
+            cases.push((Some(cursor), true));
+        }
+        for value in [
+            serde_json::json!(u64::from(u32::MAX) + 1),
+            serde_json::json!(u64::MAX),
+            serde_json::json!(-1),
+            serde_json::json!(0.0),
+            serde_json::json!("0"),
+            serde_json::json!(false),
+            serde_json::Value::Null,
+        ] {
+            let mut cursor = base.clone();
+            cursor["attachmentPosition"] = value;
+            cases.push((Some(cursor), false));
+        }
+        for field in ["sortAtMs", "localOrder", "messageId", "attachmentPosition"] {
+            let mut cursor = base.clone();
+            cursor.as_object_mut().unwrap().remove(field);
+            cases.push((Some(cursor), false));
+        }
+        let mut unknown_field = base.clone();
+        unknown_field["futureField"] = serde_json::json!(true);
+        cases.push((Some(unknown_field), true));
+        for message_id in ["", "not-a-uuid", " 00000000-0000-0000-0000-000000000001"] {
+            let mut cursor = base.clone();
+            cursor["messageId"] = serde_json::json!(message_id);
+            cases.push((Some(cursor), false));
+        }
+        for command in ["media_page", "media_page_newer"] {
+            for (cursor, parses) in &cases {
+                let mut args = serde_json::json!({"conversationId": id});
+                if let Some(cursor) = cursor {
+                    args["cursor"] = cursor.clone();
+                }
+                let expected = if *parses && (cursor.is_some() || command == "media_page") {
+                    &unopened
+                } else {
+                    &invalid
+                };
+                let error = core.media_command(command, args.clone()).unwrap_err();
+                assert_eq!(
+                    serde_json::to_value(error).unwrap(),
+                    *expected,
+                    "{command}: {args}"
+                );
+            }
+        }
     }
 
     #[test]

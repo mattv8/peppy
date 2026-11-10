@@ -26,13 +26,14 @@ use objc::{
 };
 use tauri::{AppHandle, Monitor};
 
+use crate::heads::MAX_HEADS;
+
 use super::{HeadCallback, HeadEvent, HeadFrame, HeadGlyph, HeadPosition, HeadSpec};
 
 const HEAD_SIZE: f64 = 56.0;
 const CIRCLE_SIZE: f64 = 48.0;
 const BADGE_HEIGHT: f64 = 18.0;
 const FLOATING_WINDOW_LEVEL: i64 = 3; // NSFloatingWindowLevel
-const MAX_HEADS: usize = 8;
 const DRAG_THRESHOLD: f64 = 4.0;
 const NS_NONACTIVATING_PANEL_MASK: u64 = 1 << 7;
 const MONITOR_GEOMETRY_TOLERANCE: f64 = 0.5;
