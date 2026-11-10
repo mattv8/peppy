@@ -92,6 +92,9 @@ mod notifications;
 mod phone_read;
 mod rcs_capability;
 mod rcs_mapping;
+mod rcs_media;
+pub use rcs_media::PendingReceiveTask;
+pub use rcs_media::{RcsMediaReceiveView, ReceiveDownloadAdmission};
 mod rcs_native;
 mod rcs_receive;
 mod rcs_send;
@@ -143,9 +146,11 @@ use peppy_crypto::{
     profile_fingerprint_bytes, verify_vault_check_header,
 };
 pub use peppy_crypto::{KeyProfile, VaultCheckHeader};
+use peppy_domain::RcsMediaNotSentReason;
 pub use peppy_domain::{
     AttachmentId, AttachmentReference, CommandId, ConversationId, Cursor, DeviceId, DraftId,
-    EnvelopeId, MessageId, MessageRecord, SendRefusalReason, SendState, SourceSequence, VaultId,
+    EnvelopeId, MessageId, MessageRecord, RcsMediaSyncState, SendRefusalReason, SendState,
+    SourceSequence, VaultId,
 };
 pub use peppy_protocol::{
     CompactionMetadata, CompactionReference, Envelope, EnvelopePurpose, EphemeralSignalV1,
@@ -175,13 +180,13 @@ pub use rcs_native::{
 };
 pub use rcs_receive::{
     RcsContextExpectation, RcsConversationMetadata, RcsConversationTransport, RcsCutover,
-    RcsCutoverAlerts, RcsGroupSender, RcsIdentityOutcome, RcsLinkOwnershipClaim,
-    RcsLinkOwnershipClaimOutcome, RcsMessageStatusProjection, RcsObservationProvenance,
-    RcsOwnerUnlinkCutoverCandidate, RcsOwnership, RcsProjectedRecord, RcsProjectedStatus,
-    RcsProviderDetector, RcsProviderRouteReason, RcsProviderRow, RcsProviderRowRoute,
-    RcsProviderRowRouteResult, RcsReceiveAlert, RcsReceiveCode, RcsReceiveContext,
-    RcsReceiveOutcome, RcsReceiveOwner, RcsReceiveState, RcsRecoveryOutcome, RcsRecoveryState,
-    RcsResumeHint, RcsStatusApplication, RcsUnlinkCutoverGenerations,
+    RcsCutoverAlerts, RcsGroupSender, RcsIdentityOutcome, RcsIncomingAttachment,
+    RcsLinkOwnershipClaim, RcsLinkOwnershipClaimOutcome, RcsMessageStatusProjection,
+    RcsObservationProvenance, RcsOwnerUnlinkCutoverCandidate, RcsOwnership, RcsProjectedRecord,
+    RcsProjectedStatus, RcsProviderDetector, RcsProviderRouteReason, RcsProviderRow,
+    RcsProviderRowRoute, RcsProviderRowRouteResult, RcsReceiveAlert, RcsReceiveCode,
+    RcsReceiveContext, RcsReceiveOutcome, RcsReceiveOwner, RcsReceiveState, RcsRecoveryOutcome,
+    RcsRecoveryState, RcsResumeHint, RcsStatusApplication, RcsUnlinkCutoverGenerations,
 };
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
 pub use rcs_target::{RcsTargetClassification, RcsTargetDecision, ValidatedCarrierRouteContext};
@@ -202,9 +207,8 @@ pub use vault_identity::{
 };
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 53;
-const PENDING_COMMAND_ELIGIBILITY: &str =
-    "a.command_id IS NULL AND l.historical=0 AND l.subscription_id<>'' AND l.key_epoch=?";
+const SCHEMA_VERSION: i64 = 57;
+const PENDING_COMMAND_ELIGIBILITY: &str = "a.command_id IS NULL AND l.historical=0 AND l.retired=0 AND l.subscription_id<>'' AND l.key_epoch=? AND NOT EXISTS(SELECT 1 FROM rcs_media_send_ledger m WHERE m.command_id=l.command_id)";
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -379,6 +383,28 @@ pub enum Error {
     #[error("SMS acquisition capacity reached")]
     SmsCapacity,
 }
+
+/// Advisory metadata for the next ordered RCS media upload. It contains no plaintext path or
+/// Google reference; native hosts obtain a private temporary file by attachment ID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RcsMediaAttachment {
+    pub command_id: CommandId,
+    pub attachment_index: u32,
+    pub attachment_id: AttachmentId,
+    pub mime: String,
+    pub name: String,
+    pub size: u64,
+    pub upload_required: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RcsMediaOutgoingStatus {
+    pub message_id: MessageId,
+    pub attachment_index: u32,
+    pub attachment_id: AttachmentId,
+    pub state: RcsMediaSyncState,
+    pub reason: Option<RcsMediaNotSentReason>,
+}
 impl From<rusqlite::Error> for Error {
     fn from(_: rusqlite::Error) -> Self {
         Self::Database
@@ -495,6 +521,25 @@ pub enum PrivatePayload {
         attachment_id: AttachmentId,
         reason: String,
     },
+    /// Sanitized per-attachment state for an RCS media message. `attachment` is present only for
+    /// `Stored` (the hosted descriptor, as MMS media sync carries it). Never Google IDs or refs.
+    RcsMediaState {
+        message_id: MessageId,
+        attachment_index: u32,
+        state: RcsMediaSyncState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<RcsMediaNotSentReason>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attachment: Option<MediaDescriptor>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<rcs_media::RcsMediaSlotMetadata>,
+    },
+    /// Asks only `source_gateway_id` to download its held RCS media for these indexes again.
+    RcsMediaDemand {
+        message_id: MessageId,
+        source_gateway_id: DeviceId,
+        attachment_indexes: Vec<u32>,
+    },
     Message(MessagePayload),
     SendCommand {
         message: MessagePayload,
@@ -516,6 +561,10 @@ pub enum PrivatePayload {
     SendMmsCommand {
         message: MessagePayload,
         media: Vec<MediaDescriptor>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_member_revision: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_create: Option<GroupCreateRequest>,
     },
     SendStatus {
         command_id: CommandId,
@@ -2074,6 +2123,24 @@ impl Client {
         rcs_group_create::recover_interrupted(&mut store.conn, rcs_group_create::owner_token())?;
         // Retained settlements from this process survive a reopen; a failure leaves them retained.
         rcs_group_create::settle_retained_best_effort(&mut store.conn);
+        {
+            let (conn, ctx) = store.parts();
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let interrupted = tx.prepare("SELECT command_id,attachment_index,state FROM rcs_media_send_ledger WHERE state IN ('uploading','reference_ready','permit_issued','committed')")?
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, String>(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rcs_media::recover_interrupted(&tx)?;
+            tx.execute("UPDATE rcs_media_receive_local SET admission_bytes=0,admission_token=NULL WHERE prepared_attachment_id IS NULL", [])?;
+            for (command, index, state) in interrupted {
+                let state = if matches!(state.as_str(), "permit_issued" | "committed") {
+                    RcsMediaSyncState::OutcomeUnknown
+                } else {
+                    RcsMediaSyncState::Sending
+                };
+                emit_rcs_media_state(&tx, &ctx, parse(&command)?, index, state, None)?;
+            }
+            tx.commit()?;
+        }
         attachment_retention::configure_protocol(&store.conn, false)?;
         attachment_retention::require_reconciliation(&store.conn)?;
         let store = Arc::new(Mutex::new(store));
@@ -2725,7 +2792,7 @@ impl Client {
         let retired: Vec<String> = {
             let mut query = tx.prepare(
                 "SELECT l.command_id FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id
-                 WHERE a.command_id IS NULL AND l.retired=0 AND l.historical=0 AND l.key_epoch<? ORDER BY l.local_order",
+                 WHERE a.command_id IS NULL AND l.retired=0 AND l.historical=0 AND l.key_epoch<? AND NOT EXISTS(SELECT 1 FROM rcs_media_send_ledger m WHERE m.command_id=l.command_id) ORDER BY l.local_order",
             )?;
             query
                 .query_map(params![epoch], |r| r.get(0))?
@@ -2737,6 +2804,32 @@ impl Client {
                 params![id],
             )?;
             emit_status(&tx, &ctx, parse(&id)?, SendState::FailedBeforeSubmission)?;
+        }
+        let media = tx.prepare("SELECT m.command_id,m.attachment_index,m.state FROM rcs_media_send_ledger m JOIN command_ledger l USING(command_id) WHERE l.key_epoch<? AND l.retired=0")?
+            .query_map([epoch], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, String>(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (id, index, state) in media {
+            tx.execute(
+                "UPDATE command_ledger SET retired=1 WHERE command_id=?",
+                [&id],
+            )?;
+            let (local, sync, reason) = match state.as_str() {
+                "pending" | "uploading" | "reference_ready" => (
+                    "refused",
+                    RcsMediaSyncState::NotSent,
+                    Some(RcsMediaNotSentReason::Failed),
+                ),
+                "permit_issued" | "committed" => {
+                    ("outcome_unknown", RcsMediaSyncState::OutcomeUnknown, None)
+                }
+                _ => continue,
+            };
+            tx.execute("UPDATE rcs_media_send_ledger SET state=? WHERE command_id=? AND attachment_index=?", params![local, id, index])?;
+            tx.execute(
+                "DELETE FROM rcs_google_media_refs WHERE command_id=? AND attachment_index=?",
+                params![id, index],
+            )?;
+            emit_rcs_media_state(&tx, &ctx, parse(&id)?, index, sync, reason)?;
         }
         seal_pending(&tx, &ctx, MAX_SEAL_BATCH)?;
         tx.commit()?;
@@ -4144,6 +4237,10 @@ fn command_payload(
         _ => PrivatePayload::SendMmsCommand {
             message,
             media: Vec::new(),
+            expected_member_revision: group
+                .as_ref()
+                .and_then(|fields| fields.expected_member_revision),
+            group_create: group.and_then(|fields| fields.group_create),
         },
     }
 }
@@ -4193,7 +4290,10 @@ fn queue_message(
     {
         return Err(Error::Database);
     }
+    rcs_media::reconcile_staged_states(tx, message_id)?;
     let private = command_payload(payload, transport, group);
+    // Persist the route-selected executor locally as well as in the command envelope, so
+    // every device can later authenticate that gateway's sanitized media status.
     let (envelope_id, _) = enqueue(
         tx,
         ctx,
@@ -4207,6 +4307,38 @@ fn queue_message(
         command_id,
         envelope_id,
     })
+}
+
+/// Records and distributes one sanitized outgoing media state in the transaction that changed its
+/// gateway-local ledger. The Google reference remains local and never enters the event.
+fn emit_rcs_media_state(
+    tx: &Connection,
+    ctx: &Ctx,
+    command_id: CommandId,
+    attachment_index: u32,
+    state: RcsMediaSyncState,
+    reason: Option<RcsMediaNotSentReason>,
+) -> Result<(), Error> {
+    let message_id: String = tx.query_row(
+        "SELECT message_id FROM commands WHERE command_id=?",
+        [command_id.to_string()],
+        |row| row.get(0),
+    )?;
+    let message_id = parse(&message_id)?;
+    if rcs_media::apply_state(
+        tx,
+        ctx.device_id,
+        message_id,
+        attachment_index,
+        state,
+        reason,
+        None,
+    )?
+    .is_some()
+    {
+        return Err(Error::Database);
+    }
+    rcs_media::enqueue_state_checkpoint(tx, ctx, message_id, attachment_index)
 }
 
 impl Client {
@@ -4693,6 +4825,47 @@ impl Client {
         rcs_native::pending_commands(&store.conn, store.active_epoch)
     }
 
+    /// Media-only native candidates. The coordinator uses these command IDs to fetch its next
+    /// attachment; text commands remain on the existing native command listing.
+    pub fn pending_rcs_media_commands(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<PendingNativeRcsCommand>, Error> {
+        // Materialization belongs to gateway admission, not to the host. It must not call the
+        // carrier permit API: discovery is advisory and consuming that permit would strand a
+        // legitimate MMS/SMS command without ever performing its carrier effect.
+        let mut store = self.lock()?;
+        let active_epoch = store.active_epoch;
+        let Some(epoch) = active_epoch else {
+            return Ok(Vec::new());
+        };
+        let (conn, ctx) = store.parts();
+        if restore_guarded(conn)? {
+            return Ok(Vec::new());
+        }
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let rows = tx.prepare("SELECT command_id,payload FROM command_ledger WHERE historical=0 AND retired=0 AND key_epoch=? ORDER BY local_order")?
+            .query_map([epoch], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut command_ids = Vec::new();
+        for (id, payload) in rows {
+            if !decode::<MessagePayload>(payload.as_bytes())?
+                .record
+                .attachments
+                .is_empty()
+            {
+                command_ids.push(parse::<CommandId>(&id)?);
+            }
+        }
+        for command_id in command_ids {
+            let _ = admit_rcs_media_materialization(&tx, &ctx, active_epoch, command_id)?;
+        }
+        let candidates = rcs_native::pending_media_commands(&tx, active_epoch)?;
+        tx.commit()?;
+        let _ = now_ms;
+        Ok(candidates)
+    }
+
     /// Lists unattempted received commands for automatic routing without granting a transport
     /// permit. Callers must use `begin_automatic_send_attempt` before any host effect.
     pub fn pending_automatic_commands(&self) -> Result<Vec<PendingAutomaticCommand>, Error> {
@@ -4701,7 +4874,7 @@ impl Client {
             return Ok(Vec::new());
         };
         let mut query = s.conn.prepare(
-            "SELECT l.command_id,l.subscription_id,l.payload FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE a.command_id IS NULL AND l.historical=0 AND l.key_epoch=? ORDER BY l.local_order",
+            "SELECT l.command_id,l.subscription_id,l.payload FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE a.command_id IS NULL AND l.historical=0 AND l.retired=0 AND l.key_epoch=? AND NOT EXISTS(SELECT 1 FROM rcs_media_send_ledger m WHERE m.command_id=l.command_id) ORDER BY l.local_order",
         )?;
         let rows = query
             .query_map(params![active], |row| {
@@ -4749,12 +4922,14 @@ impl Client {
         let Some((epoch, subscription_id, payload, historical)) = ledger else {
             return Ok(PermitDecision::Blocked(PermitBlock::NotReceived));
         };
-        if subscription_id.is_empty() {
-            return Ok(PermitDecision::Blocked(PermitBlock::RouteUnavailable));
-        }
         // Known attempts keep reporting their recorded (or unknown) outcome.
         if let Some(state) = attempt_state(&tx, command_id)? {
             return Ok(PermitDecision::AlreadyAttempted(state));
+        }
+        if !rcs_media::ledger_rows(&tx, command_id)?.is_empty() {
+            return Ok(PermitDecision::Blocked(
+                PermitBlock::CarrierOnlyProofUnavailable,
+            ));
         }
         if restore_guarded(&tx)? {
             return Ok(PermitDecision::Blocked(PermitBlock::RestoreGuarded));
@@ -4770,6 +4945,20 @@ impl Client {
             _ => return Ok(PermitDecision::Blocked(PermitBlock::EpochNotActive)),
         }
         let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
+        // RCS-link media intentionally has no carrier subscription identity. It can materialize
+        // only through the media-specific proof path; ordinary carrier work remains fail-closed.
+        if subscription_id.is_empty() {
+            if media_ready
+                && !message.record.attachments.is_empty()
+                && admit_rcs_media_materialization(&tx, &ctx, active, command_id)?
+            {
+                tx.commit()?;
+                return Ok(PermitDecision::Blocked(
+                    PermitBlock::CarrierOnlyProofUnavailable,
+                ));
+            }
+            return Ok(PermitDecision::Blocked(PermitBlock::RouteUnavailable));
+        }
         if !media_ready {
             return Ok(PermitDecision::Blocked(PermitBlock::MediaUnavailable));
         }
@@ -4797,6 +4986,17 @@ impl Client {
             now_ms,
             rcs_group::send_fields(&tx, command_id)?.expected_member_revision,
         )?;
+        // RCS media is expanded by the gateway, not by the composing client. Once rows exist the
+        // command is permanently excluded from both carrier and text-native admission.
+        if !message.record.attachments.is_empty()
+            && matches!(carrier_admission, rcs_send::CarrierAdmission::Blocked)
+            && admit_rcs_media_materialization(&tx, &ctx, active, command_id)?
+        {
+            tx.commit()?;
+            return Ok(PermitDecision::Blocked(
+                PermitBlock::CarrierOnlyProofUnavailable,
+            ));
+        }
         if matches!(
             carrier_admission,
             rcs_send::CarrierAdmission::InvalidateProof
@@ -4882,33 +5082,405 @@ impl Client {
         observation: &RcsMappingObservation,
         now_ms: i64,
     ) -> Result<NativeRcsCommitProjection, Error> {
-        let (command_id, target) = preparation.into_parts();
+        let (command_id, target, media) = preparation.into_parts();
         let mut guard = self.lock()?;
         let active = guard.active_epoch;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        match target {
-            NativeRcsPreparationTarget::OneToOne(prepared_mapping) => {
-                let permit = admit_rcs_send(
-                    tx,
-                    active,
-                    command_id,
-                    Some(&prepared_mapping),
-                    observation,
-                    now_ms,
-                )?;
-                Ok(permit.native_commit_projection())
-            }
-            NativeRcsPreparationTarget::Group(authority) => admit_group_rcs_send(
+        let request = NativeRcsAdmissionRequest {
+            active_epoch: active,
+            command_id,
+            observation,
+            now_ms,
+        };
+        if let Some((attachment_index, prepared_media)) = media {
+            return admit_native_rcs_media_send(
                 tx,
                 &ctx,
+                request,
+                target,
+                attachment_index,
+                prepared_media,
+            );
+        }
+        match target {
+            NativeRcsPreparationTarget::OneToOne(prepared_mapping) => admit_rcs_send(
+                tx,
                 active,
                 command_id,
-                &authority,
+                Some(&prepared_mapping),
                 observation,
                 now_ms,
-            ),
+            )
+            .map(|permit| permit.native_commit_projection()),
+            NativeRcsPreparationTarget::Group(authority) => {
+                admit_group_rcs_send(tx, &ctx, request, &authority)
+            }
         }
+    }
+
+    /// Captures one eligible attachment after its upload reference is persisted. The ledger is
+    /// deliberately separate from text attempts: each attachment gets one native permit.
+    pub fn prepare_native_rcs_media_send(
+        &self,
+        command_id: CommandId,
+        attachment_index: u32,
+        now_ms: i64,
+    ) -> Result<NativeRcsPreparation, Error> {
+        let mut guard = self.lock()?;
+        let active = guard.active_epoch;
+        let (conn, _) = guard.parts();
+        let tx = conn.transaction()?;
+        let message = unattempted_rcs_media_message(&tx, active, command_id)?;
+        let media = rcs_media::prepared_media(&tx, command_id, attachment_index)?;
+        let preparation =
+            if rcs_group::group_mapping(&tx, message.record.conversation_id)?.is_some() {
+                NativeRcsPreparation::new_group(
+                    command_id,
+                    rcs_group::native_send_authority(
+                        &tx,
+                        message.record.conversation_id,
+                        command_id,
+                        &message.recipients,
+                        now_ms,
+                    )?,
+                )
+            } else {
+                let mapping = rcs_mapping::get(&tx, message.record.conversation_id)?
+                    .ok_or(Error::InvalidRequest("mapping unproven"))?;
+                require_exact_rcs_recipient(&message, &mapping)?;
+                NativeRcsPreparation::new(command_id, mapping)
+            };
+        tx.commit()?;
+        Ok(preparation.with_media(attachment_index, media))
+    }
+
+    pub fn next_rcs_media_attachment(
+        &self,
+        command_id: CommandId,
+        now_ms: i64,
+    ) -> Result<Option<RcsMediaAttachment>, Error> {
+        let mut store = self.lock()?;
+        let tx = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(row) = rcs_media::next_attachment(&tx, command_id)? else {
+            return Ok(None);
+        };
+        let upload_required = rcs_media::upload_required(&tx, &row, command_id, now_ms)?;
+        let attachment = attachment_row(&tx, row.attachment_id)?.ok_or(Error::NotFound)?;
+        let info = attachment.info(row.attachment_id);
+        tx.commit()?;
+        Ok(Some(RcsMediaAttachment {
+            command_id,
+            attachment_index: row.attachment_index,
+            attachment_id: row.attachment_id,
+            mime: info.media_type,
+            name: info.display_name,
+            size: info.plaintext_bytes,
+            upload_required,
+        }))
+    }
+
+    pub fn mark_rcs_media_uploading(
+        &self,
+        command_id: CommandId,
+        attachment_index: u32,
+    ) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction()?;
+        rcs_media::mark_uploading(&tx, command_id, attachment_index)?;
+        emit_rcs_media_state(
+            &tx,
+            &ctx,
+            command_id,
+            attachment_index,
+            RcsMediaSyncState::Sending,
+            None,
+        )?;
+        Ok(tx.commit()?)
+    }
+
+    pub fn mark_rcs_media_reference_ready(
+        &self,
+        command_id: CommandId,
+        attachment_index: u32,
+        media_ref: &str,
+        uploaded_at_ms: i64,
+    ) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction()?;
+        rcs_media::mark_reference_ready(
+            &tx,
+            command_id,
+            attachment_index,
+            media_ref,
+            uploaded_at_ms,
+        )?;
+        emit_rcs_media_state(
+            &tx,
+            &ctx,
+            command_id,
+            attachment_index,
+            RcsMediaSyncState::Sending,
+            None,
+        )?;
+        Ok(tx.commit()?)
+    }
+
+    pub fn record_rcs_media_outcome(
+        &self,
+        command_id: CommandId,
+        attachment_index: u32,
+        code: &str,
+    ) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction()?;
+        let report = rcs_media::record_outcome(&tx, command_id, attachment_index, code)?;
+        emit_rcs_media_state(
+            &tx,
+            &ctx,
+            command_id,
+            attachment_index,
+            report.sync,
+            report.reason,
+        )?;
+        for index in report.refused_indexes {
+            emit_rcs_media_state(
+                &tx,
+                &ctx,
+                command_id,
+                index,
+                RcsMediaSyncState::MembersChanged,
+                None,
+            )?;
+        }
+        Ok(tx.commit()?)
+    }
+
+    pub fn record_rcs_media_commit(
+        &self,
+        command_id: CommandId,
+        attachment_index: u32,
+    ) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction()?;
+        rcs_media::record_commit(&tx, command_id, attachment_index)?;
+        emit_rcs_media_state(
+            &tx,
+            &ctx,
+            command_id,
+            attachment_index,
+            RcsMediaSyncState::Sending,
+            None,
+        )?;
+        Ok(tx.commit()?)
+    }
+
+    /// Sanitized outgoing status for one rendered attachment. Google references never leave the
+    /// gateway-local ledger.
+    pub fn rcs_media_outgoing_status(
+        &self,
+        message_id: MessageId,
+        attachment_index: u32,
+    ) -> Result<Option<RcsMediaOutgoingStatus>, Error> {
+        let store = self.lock()?;
+        let Some((state, reason)) = store.conn.query_row(
+            "SELECT state,reason FROM rcs_media_send_status WHERE message_id=? AND attachment_index=?",
+            params![message_id.to_string(), i64::from(attachment_index)],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        ).optional()? else { return Ok(None); };
+        let message = rcs_media::load_message(&store.conn, message_id)?.ok_or(Error::NotFound)?;
+        let attachment_id = message
+            .record
+            .attachments
+            .get(attachment_index as usize)
+            .ok_or(Error::NotFound)?
+            .attachment_id;
+        Ok(Some(RcsMediaOutgoingStatus {
+            message_id,
+            attachment_index,
+            attachment_id,
+            state: RcsMediaSyncState::from_code(&state).ok_or(Error::Database)?,
+            reason: reason
+                .map(|value| RcsMediaNotSentReason::from_code(&value).ok_or(Error::Database))
+                .transpose()?,
+        }))
+    }
+
+    /// Enqueues a retry demand addressed to the gateway that holds the local Google reference.
+    pub fn demand_rcs_media_retry(
+        &self,
+        message_id: MessageId,
+        attachment_index: u32,
+        source_gateway_id: DeviceId,
+    ) -> Result<(), Error> {
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction()?;
+        enqueue(
+            &tx,
+            &ctx,
+            EnvelopePurpose::Event,
+            None,
+            None,
+            &PrivatePayload::RcsMediaDemand {
+                message_id,
+                source_gateway_id,
+                attachment_indexes: vec![attachment_index],
+            },
+        )?;
+        Ok(tx.commit()?)
+    }
+
+    /// Enqueues a retry only for the authenticated source gateway of this incoming RCS message.
+    /// Callers cannot redirect a Google-reference download to another endpoint.
+    pub fn demand_rcs_media_retry_for_attachment(
+        &self,
+        message_id: MessageId,
+        attachment_index: u32,
+    ) -> Result<(), Error> {
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction()?;
+        let message = rcs_media::load_message(&tx, message_id)?.ok_or(Error::NotFound)?;
+        if message.direction != Direction::Incoming || message.transport != Transport::Rcs {
+            return Err(Error::InvalidRequest("RCS media retry parent"));
+        }
+        let retryable: bool = tx.query_row(
+            "SELECT state IN ('failed','quota_full') FROM rcs_media_receive WHERE message_id=? AND attachment_index=?",
+            params![message_id.to_string(), i64::from(attachment_index)],
+            |row| row.get(0),
+        )?;
+        if !retryable {
+            return Err(Error::InvalidRequest(
+                "RCS media receive state is not retryable",
+            ));
+        }
+        let source_gateway_id = message.source_device_id;
+        let payload = PrivatePayload::RcsMediaDemand {
+            message_id,
+            source_gateway_id,
+            attachment_indexes: vec![attachment_index],
+        };
+        let pending: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM compaction_frontier f JOIN outbox o ON o.seq=f.source_sequence WHERE f.identity=? AND f.producer_device_id=? AND o.state IN ('unsealed','queued'))",
+            params![compaction_identity(&payload), ctx.device_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if pending {
+            return Ok(());
+        }
+        enqueue(&tx, &ctx, EnvelopePurpose::Event, None, None, &payload)?;
+        Ok(tx.commit()?)
+    }
+
+    /// Returns pending trusted-native receive work for this gateway. Opaque Google references are
+    /// deliberately not exposed by any renderer-facing API.
+    pub fn pending_rcs_media_receive_tasks(
+        &self,
+    ) -> Result<Vec<rcs_media::PendingReceiveTask>, Error> {
+        let store = self.lock()?;
+        rcs_media::pending_receive_tasks(&store.conn, store.config.device_id)
+    }
+
+    pub fn rcs_media_receive_view(
+        &self,
+        message_id: MessageId,
+        attachment_index: u32,
+    ) -> Result<Option<RcsMediaReceiveView>, Error> {
+        let store = self.lock()?;
+        rcs_media::receive_view(&store.conn, message_id, attachment_index)
+    }
+
+    pub fn admit_rcs_media_download(
+        &self,
+        message_id: MessageId,
+        attachment_index: u32,
+        available_bytes: Option<u64>,
+    ) -> Result<rcs_media::ReceiveDownloadAdmission, Error> {
+        let mut store = self.lock()?;
+        let device_id = store.config.device_id;
+        let tx = store.conn.transaction()?;
+        let admission = rcs_media::admit_receive_download(
+            &tx,
+            device_id,
+            message_id,
+            attachment_index,
+            available_bytes,
+        )?;
+        tx.commit()?;
+        Ok(admission)
+    }
+
+    pub fn import_rcs_media_download(
+        &self,
+        message_id: MessageId,
+        attachment_index: u32,
+        admission_token: &str,
+        source: &Path,
+    ) -> Result<AttachmentInfo, Error> {
+        let details = {
+            let store = self.lock()?;
+            rcs_media::receive_import_details(
+                &store.conn,
+                message_id,
+                attachment_index,
+                admission_token,
+            )?
+            .ok_or(Error::InvalidRequest("RCS receive admission is not held"))?
+        };
+        let actual = std::fs::metadata(source)
+            .map_err(|_| Error::InvalidRequest("RCS receive plaintext"))?;
+        if !actual.is_file() || actual.len() != details.2 {
+            return Err(Error::InvalidRequest("RCS receive plaintext size"));
+        }
+        let attachment = self.prepare_attachment(source, &details.0, &details.1)?;
+        let mut store = self.lock()?;
+        let tx = store.conn.transaction()?;
+        if !rcs_media::bind_prepared_receive_attachment(
+            &tx,
+            message_id,
+            attachment_index,
+            admission_token,
+            attachment.attachment_id,
+        )? {
+            return Err(Error::Conflict);
+        }
+        tx.commit()?;
+        Ok(attachment)
+    }
+
+    pub fn finalize_rcs_media_download(
+        &self,
+        message_id: MessageId,
+        attachment_index: u32,
+    ) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction()?;
+        rcs_media::finalize_prepared_receive_attachment(&tx, &ctx, message_id, attachment_index)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn mark_rcs_media_download_state(
+        &self,
+        message_id: MessageId,
+        attachment_index: u32,
+        state: RcsMediaSyncState,
+    ) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let device_id = store.config.device_id;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction()?;
+        rcs_media::mark_receive_state(&tx, &ctx, device_id, message_id, attachment_index, state)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Durably records a linked-transport attempt and returns its local-only permit.
@@ -5026,6 +5598,11 @@ impl Client {
         };
         if let Some(state) = attempt_state(&tx, command_id)? {
             return Ok(AutomaticPermitDecision::AlreadyAttempted(state));
+        }
+        if !rcs_media::ledger_rows(&tx, command_id)?.is_empty() {
+            return Ok(AutomaticPermitDecision::Blocked(
+                PermitBlock::CarrierOnlyProofUnavailable,
+            ));
         }
         if restore_guarded(&tx)? {
             return Ok(AutomaticPermitDecision::Blocked(
@@ -6185,7 +6762,7 @@ impl Client {
     /// (see `contact_photo_transfer_state_json`).
     pub fn pending_uploads(&self) -> Result<Vec<CipherObject>, Error> {
         let sql = format!(
-            "WITH candidate(attachment_id,payload) AS (SELECT ma.attachment_id,m.payload FROM message_attachments ma JOIN messages m ON m.id=ma.message_id UNION ALL SELECT mm.thumbnail_attachment_id,m.payload FROM message_media_meta mm JOIN messages m ON m.id=mm.message_id UNION ALL SELECT attachment_id,NULL FROM ({}) contact_uploads) SELECT a.attachment_id FROM attachments a JOIN candidate c ON c.attachment_id=a.attachment_id WHERE a.state='pending_upload' AND NOT EXISTS(SELECT 1 FROM attachment_remote_state rs WHERE rs.attachment_id=a.attachment_id AND rs.removed_by_storage_policy=1) GROUP BY a.attachment_id ORDER BY MIN(CASE WHEN c.payload IS NULL THEN 1 WHEN COALESCE(json_extract(c.payload,'$.imported'),0)=0 THEN 0 ELSE 2 END),MIN(a.rowid)",
+            "WITH candidate(attachment_id,payload) AS (SELECT ma.attachment_id,m.payload FROM message_attachments ma JOIN messages m ON m.id=ma.message_id UNION ALL SELECT mm.thumbnail_attachment_id,m.payload FROM message_media_meta mm JOIN messages m ON m.id=mm.message_id UNION ALL SELECT prepared_attachment_id,NULL FROM rcs_media_receive_local WHERE prepared_attachment_id IS NOT NULL UNION ALL SELECT attachment_id,NULL FROM ({}) contact_uploads) SELECT a.attachment_id FROM attachments a JOIN candidate c ON c.attachment_id=a.attachment_id WHERE a.state='pending_upload' AND NOT EXISTS(SELECT 1 FROM attachment_remote_state rs WHERE rs.attachment_id=a.attachment_id AND rs.removed_by_storage_policy=1) GROUP BY a.attachment_id ORDER BY MIN(CASE WHEN c.payload IS NULL THEN 1 WHEN COALESCE(json_extract(c.payload,'$.imported'),0)=0 THEN 0 ELSE 2 END),MIN(a.rowid)",
             contact_media::UPLOAD_IDS_SQL
         );
         self.cipher_objects(&sql)
@@ -6525,6 +7102,43 @@ impl Client {
             Ok(file) => {
                 released?;
                 Ok(file)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Writes a fresh plaintext file into a host-owned private directory. The caller owns cleanup.
+    pub fn decrypt_attachment_to_private_file(
+        &self,
+        attachment_id: AttachmentId,
+        destination_dir: &std::path::Path,
+    ) -> Result<std::path::PathBuf, Error> {
+        self.retain_attachment_ciphertext(attachment_id)?;
+        let result = (|| {
+            let (root, vault_id, row, evicted) = {
+                let store = self.lock()?;
+                let row = attachment_row(&store.conn, attachment_id)?.ok_or(Error::NotFound)?;
+                let evicted =
+                    media_cache::gateway_mms_ciphertext_evicted(&store.conn, attachment_id)?;
+                (store.media_dir.clone(), store.config.vault_id, row, evicted)
+            };
+            if !row.state.is_local() || evicted {
+                return Err(Error::InvalidMedia);
+            }
+            media::decrypt_to_private_file(
+                &root,
+                attachment_id,
+                &row.file_key()?,
+                &media::media_aad(vault_id, attachment_id),
+                row.plaintext_bytes,
+                destination_dir,
+            )
+        })();
+        let released = self.release_attachment_ciphertext(attachment_id);
+        match result {
+            Ok(path) => {
+                released?;
+                Ok(path)
             }
             Err(error) => Err(error),
         }
@@ -8274,6 +8888,61 @@ CREATE TABLE IF NOT EXISTS conversation_group_notices(
 );
 CREATE INDEX IF NOT EXISTS conversation_group_notices_conversation ON conversation_group_notices(conversation_id,id);
 ";
+/// Schema 54: gateway-local RCS media ledgers and projections. Only the sanitized
+/// `RcsMediaState`/`RcsMediaDemand` payloads ever leave the device. Every statement is idempotent
+/// so fresh, upgraded, and branch-repaired databases converge on one shape.
+const RCS_MEDIA_MIGRATION_54: &str = "
+CREATE TABLE IF NOT EXISTS rcs_media_send_ledger(command_id TEXT NOT NULL, attachment_index INTEGER NOT NULL, attachment_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','uploading','reference_ready','permit_issued','committed','accepted','outcome_unknown','refused')), uploaded_at_ms INTEGER, permit_at_ms INTEGER, tmp_id TEXT, upload_failures INTEGER NOT NULL DEFAULT 0 CHECK(upload_failures BETWEEN 0 AND 3), PRIMARY KEY(command_id,attachment_index));
+CREATE TABLE IF NOT EXISTS rcs_google_media_refs(command_id TEXT NOT NULL, attachment_index INTEGER NOT NULL, media_ref BLOB NOT NULL, PRIMARY KEY(command_id,attachment_index));
+CREATE TABLE IF NOT EXISTS rcs_media_receive(message_id TEXT NOT NULL, attachment_index INTEGER NOT NULL, attachment_id TEXT, state TEXT NOT NULL CHECK(state IN ('downloading','stored','too_large','quota_full','failed','expired')), reservation_id TEXT, PRIMARY KEY(message_id,attachment_index));
+CREATE TABLE IF NOT EXISTS rcs_media_retry_demand(message_id TEXT NOT NULL, attachment_index INTEGER NOT NULL, source_gateway_id TEXT NOT NULL, PRIMARY KEY(message_id,attachment_index,source_gateway_id));
+CREATE TABLE IF NOT EXISTS rcs_media_tmp_dedup(google_tmp_id TEXT PRIMARY KEY, command_id TEXT NOT NULL, attachment_index INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS rcs_media_send_status(message_id TEXT NOT NULL, attachment_index INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('sending','sent','not_sent','outcome_unknown','members_changed')), reason TEXT CHECK(reason IS NULL OR reason IN ('not_allowed_mime','too_large','rejected','failed')), CHECK((state='not_sent') = (reason IS NOT NULL)), PRIMARY KEY(message_id,attachment_index));
+";
+/// Schema 55: native-only incoming RCS media task data. The opaque Google reference is kept
+/// solely in SQLCipher and is intentionally absent from all private payloads and views.
+const RCS_MEDIA_RECEIVE_LOCAL_MIGRATION_55: &str = "
+CREATE TABLE IF NOT EXISTS rcs_media_receive_local(message_id TEXT NOT NULL, attachment_index INTEGER NOT NULL, source_gateway_id TEXT NOT NULL, media_ref BLOB NOT NULL, media_type TEXT NOT NULL, display_name TEXT NOT NULL, plaintext_bytes INTEGER NOT NULL, admission_bytes INTEGER NOT NULL DEFAULT 0, admission_token TEXT, prepared_attachment_id TEXT, PRIMARY KEY(message_id,attachment_index));
+";
+const RCS_MEDIA_RECEIVE_METADATA_BACKFILL_56: &str = "
+UPDATE rcs_media_receive SET media_type=(SELECT media_type FROM rcs_media_receive_local l WHERE l.message_id=rcs_media_receive.message_id AND l.attachment_index=rcs_media_receive.attachment_index), display_name=(SELECT display_name FROM rcs_media_receive_local l WHERE l.message_id=rcs_media_receive.message_id AND l.attachment_index=rcs_media_receive.attachment_index), plaintext_bytes=(SELECT plaintext_bytes FROM rcs_media_receive_local l WHERE l.message_id=rcs_media_receive.message_id AND l.attachment_index=rcs_media_receive.attachment_index) WHERE media_type IS NULL;
+";
+fn apply_rcs_media_receive_metadata_migration(conn: &Connection) -> Result<(), Error> {
+    add_column_if_missing(conn, "rcs_media_receive", "media_type TEXT")?;
+    add_column_if_missing(conn, "rcs_media_receive", "display_name TEXT")?;
+    add_column_if_missing(conn, "rcs_media_receive", "plaintext_bytes INTEGER")?;
+    conn.execute_batch(RCS_MEDIA_RECEIVE_METADATA_BACKFILL_56)?;
+    Ok(())
+}
+const RCS_MEDIA_DEFERRED_STATE_MIGRATION_57: &str = "
+CREATE TABLE IF NOT EXISTS pending_rcs_media_states(
+ producer_device_id TEXT NOT NULL,
+ message_id TEXT NOT NULL,
+ attachment_index INTEGER NOT NULL,
+ metadata TEXT,
+ nonterminal_sequence INTEGER,
+ nonterminal_state TEXT,
+ nonterminal_reason TEXT,
+ stored_sequence INTEGER,
+ stored_state TEXT,
+ stored_reason TEXT,
+ stored_attachment TEXT,
+ terminal_sequence INTEGER,
+ terminal_state TEXT,
+ terminal_reason TEXT,
+ PRIMARY KEY(producer_device_id,message_id,attachment_index)
+);
+CREATE INDEX IF NOT EXISTS pending_rcs_media_states_message ON pending_rcs_media_states(message_id);
+CREATE TABLE IF NOT EXISTS rcs_media_state_clocks(
+ producer_device_id TEXT NOT NULL,
+ message_id TEXT NOT NULL,
+ attachment_index INTEGER NOT NULL,
+ nonterminal_sequence INTEGER,
+ stored_sequence INTEGER,
+ terminal_sequence INTEGER,
+ PRIMARY KEY(producer_device_id,message_id,attachment_index)
+);
+";
 fn apply_rcs_union_migrations(conn: &Connection) -> Result<(), Error> {
     conn.execute_batch(RCS_MIGRATION_46)?;
     add_column_if_missing(
@@ -8481,6 +9150,10 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             apply_rcs_union_migrations(&tx)?;
             tx.execute_batch(RCS_GROUP_MIGRATION_53)?;
             apply_group_columns_migration(&tx)?;
+            tx.execute_batch(RCS_MEDIA_MIGRATION_54)?;
+            tx.execute_batch(RCS_MEDIA_RECEIVE_LOCAL_MIGRATION_55)?;
+            apply_rcs_media_receive_metadata_migration(&tx)?;
+            tx.execute_batch(RCS_MEDIA_DEFERRED_STATE_MIGRATION_57)?;
             tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
@@ -8490,7 +9163,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=52)) => {
+        Some(version @ (4..=56)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -8624,6 +9297,12 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
                 tx.execute_batch(RCS_GROUP_MIGRATION_53)?;
                 apply_group_columns_migration(&tx)?;
             }
+            tx.execute_batch(RCS_MEDIA_MIGRATION_54)?;
+            tx.execute_batch(RCS_MEDIA_RECEIVE_LOCAL_MIGRATION_55)?;
+            if version <= 55 {
+                apply_rcs_media_receive_metadata_migration(&tx)?;
+            }
+            tx.execute_batch(RCS_MEDIA_DEFERRED_STATE_MIGRATION_57)?;
             tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
@@ -9366,6 +10045,8 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
             | "mms_media_binding"
             | "mms_media_demand"
             | "mms_media_failure"
+            | "rcs_media_state"
+            | "rcs_media_demand"
             | "send_mms_command"
             | "send_status"
             | "read_state"
@@ -9436,11 +10117,16 @@ fn apply_record(
             media,
             media_meta,
         } => (PrivatePayload::Message(message), media, media_meta),
-        PrivatePayload::SendMmsCommand { message, media } => (
+        PrivatePayload::SendMmsCommand {
+            message,
+            media,
+            expected_member_revision,
+            group_create,
+        } => (
             PrivatePayload::SendCommand {
                 message,
-                expected_member_revision: None,
-                group_create: None,
+                expected_member_revision,
+                group_create,
             },
             media,
             Vec::new(),
@@ -9579,6 +10265,52 @@ fn apply_record(
                 return Ok(Some(reason));
             }
         }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::RcsMediaState {
+                message_id,
+                attachment_index,
+                state,
+                reason,
+                attachment,
+                metadata,
+            },
+        ) => {
+            if let Some(reason) = rcs_media::apply_authenticated_state(
+                conn,
+                producer,
+                envelope.producer_sequence.0,
+                message_id,
+                attachment_index,
+                state,
+                reason,
+                rcs_media::StateContent {
+                    attachment: attachment.as_ref(),
+                    metadata: metadata.as_ref(),
+                },
+            )? {
+                return Ok(Some(reason));
+            }
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::RcsMediaDemand {
+                message_id,
+                source_gateway_id,
+                attachment_indexes,
+            },
+        ) => {
+            if let Some(reason) = rcs_media::apply_demand(
+                conn,
+                ctx.device_id,
+                message_id,
+                source_gateway_id,
+                &attachment_indexes,
+                historical,
+            )? {
+                return Ok(Some(reason));
+            }
+        }
         (EnvelopePurpose::Event, PrivatePayload::Message(message)) => {
             if !valid_message(&message, producer)
                 || !media_matches(&message, &media)
@@ -9599,6 +10331,7 @@ fn apply_record(
             if !store_message_media_meta(conn, message.record.message_id, &media_meta)? {
                 return Ok(Some(Q::PayloadConflict));
             }
+            rcs_media::reconcile_staged_states(conn, message.record.message_id)?;
             if inserted == Inserted::New
                 && !historical
                 && !message.imported
@@ -9651,6 +10384,7 @@ fn apply_record(
             {
                 return Ok(Some(Q::PayloadConflict));
             }
+            rcs_media::reconcile_staged_states(conn, message.record.message_id)?;
             if gateway_device_id == ctx.device_id {
                 let attachment_ids = media
                     .iter()
@@ -10599,9 +11333,12 @@ fn record_attachment_retention_effects(
     let media_kind = match payload {
         PrivatePayload::SendMmsCommand { .. } => Some(AttachmentUseKind::PendingSend),
         PrivatePayload::MmsMessage { .. } => Some(AttachmentUseKind::MessageHistory),
-        PrivatePayload::MmsDeferredPreview { .. } | PrivatePayload::MmsMediaBinding { .. } => {
-            Some(AttachmentUseKind::MessageHistory)
-        }
+        PrivatePayload::MmsDeferredPreview { .. }
+        | PrivatePayload::MmsMediaBinding { .. }
+        | PrivatePayload::RcsMediaState {
+            attachment: Some(_),
+            ..
+        } => Some(AttachmentUseKind::MessageHistory),
         _ => None,
     };
     if let Some(kind) = media_kind {
@@ -10643,6 +11380,13 @@ fn payload_attachment_ids(payload: &PrivatePayload) -> Vec<AttachmentId> {
             .collect();
     }
     if let PrivatePayload::MmsMediaBinding { attachment, .. } = payload {
+        return vec![attachment.attachment_id];
+    }
+    if let PrivatePayload::RcsMediaState {
+        attachment: Some(attachment),
+        ..
+    } = payload
+    {
         return vec![attachment.attachment_id];
     }
     let (message, thumbnails) = match payload {
@@ -11123,6 +11867,18 @@ fn compaction_group(
         ]
     };
     Ok(Some(match payload {
+        PrivatePayload::RcsMediaState {
+            message_id,
+            attachment_index,
+            ..
+        } => (
+            b"rcs-media-state" as &[u8],
+            vec![
+                message_id.to_string().into_bytes(),
+                attachment_index.to_be_bytes().to_vec(),
+            ],
+            false,
+        ),
         PrivatePayload::RcsMessageStatus { message_id, .. } => (
             b"rcs-message-status",
             vec![message_id.to_string().into_bytes()],
@@ -11339,6 +12095,19 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
             Some(format!("sender-unblock:{request_id}"))
         }
         PrivatePayload::ConversationTone { seed, .. } => Some(format!("conversation-tone:{seed}")),
+        PrivatePayload::RcsMediaState {
+            message_id,
+            attachment_index,
+            ..
+        } => Some(format!("rcs-media-state:{message_id}:{attachment_index}")),
+        PrivatePayload::RcsMediaDemand {
+            message_id,
+            source_gateway_id,
+            attachment_indexes,
+        } => Some(format!(
+            "rcs-media-demand:{message_id}:{source_gateway_id}:{}",
+            rcs_media::index_key(attachment_indexes)
+        )),
         PrivatePayload::NotificationPreferences { .. } => {
             Some(notification_preferences::IDENTITY.to_owned())
         }
@@ -11534,14 +12303,20 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
                         None => continue,
                     }
                 }
-                PrivatePayload::SendMmsCommand { message, .. } => {
-                    match resolve_media(conn, &message)? {
-                        Some((media, _)) => {
-                            serde_json::to_vec(&PrivatePayload::SendMmsCommand { message, media })
-                        }
-                        None => continue,
-                    }
-                }
+                PrivatePayload::SendMmsCommand {
+                    message,
+                    expected_member_revision,
+                    group_create,
+                    ..
+                } => match resolve_media(conn, &message)? {
+                    Some((media, _)) => serde_json::to_vec(&PrivatePayload::SendMmsCommand {
+                        message,
+                        media,
+                        expected_member_revision,
+                        group_create,
+                    }),
+                    None => continue,
+                },
                 payload @ (PrivatePayload::ContactUpserted { .. }
                 | PrivatePayload::ContactRemoved { .. }
                 | PrivatePayload::ContactEditRequest { .. }) => {
@@ -11821,6 +12596,42 @@ struct UnattemptedRcsMessage {
     subscription_id: String,
 }
 
+/// The media executor has its own permit ledger, so it must not use the text-only candidate
+/// path. It keeps the same received-command, epoch, route, retention, and group gates.
+pub(crate) fn unattempted_rcs_media_message(
+    conn: &Connection,
+    active_epoch: Option<u32>,
+    command_id: CommandId,
+) -> Result<MessagePayload, Error> {
+    let ledger: Option<(u32, String, String, bool)> = conn
+        .query_row(
+            "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
+            [command_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((epoch, _subscription_id, payload, historical)) = ledger else {
+        return Err(Error::NotFound);
+    };
+    let (message, media_ready) = localize(conn, decode(payload.as_bytes())?)?;
+    if !rcs_media::ledger_rows(conn, command_id)?.is_empty() {
+        if let Some(state) = attempt_state(conn, command_id)? {
+            return Err(Error::AlreadyAttempted(state));
+        }
+        if rcs_group_create::terminal_refusal(conn, command_id)?.is_some() {
+            return Err(Error::InvalidRequest("group create terminal"));
+        }
+        require_received_command_eligible(conn, active_epoch, epoch, historical)?;
+        if media_ready
+            && !message.record.attachments.is_empty()
+            && !send_retention_blocked(conn, command_id)?
+        {
+            return Ok(message);
+        }
+    }
+    Err(Error::InvalidRequest("RCS media required"))
+}
+
 fn admit_rcs_send(
     tx: rusqlite::Transaction<'_>,
     active_epoch: Option<u32>,
@@ -11868,33 +12679,38 @@ fn admit_rcs_send(
     Ok(permit)
 }
 
-/// Admits one native group RCS send against the authority captured at prepare. The group checks
-/// replace the 1:1 participant proof. A roster or digest mismatch pauses the group, then refuses.
+#[derive(Clone, Copy)]
+struct NativeRcsAdmissionRequest<'a> {
+    active_epoch: Option<u32>,
+    command_id: CommandId,
+    observation: &'a RcsMappingObservation,
+    now_ms: i64,
+}
+
+/// Admits one native group RCS text send against the authority captured at prepare. The group
+/// checks replace the 1:1 participant proof. Media uses its separate per-attachment ledger.
 fn admit_group_rcs_send(
     tx: rusqlite::Transaction<'_>,
     ctx: &Ctx<'_>,
-    active_epoch: Option<u32>,
-    command_id: CommandId,
+    request: NativeRcsAdmissionRequest<'_>,
     prepared: &GroupSendAuthority,
-    observation: &RcsMappingObservation,
-    now_ms: i64,
 ) -> Result<rcs_native::NativeRcsCommitProjection, Error> {
-    let message = unattempted_rcs_message(&tx, active_epoch, command_id, false)?;
+    let message = unattempted_rcs_message(&tx, request.active_epoch, request.command_id, false)?;
     require_native_rcs_body(&message.message.body)?;
     let current = rcs_group::native_send_authority(
         &tx,
         prepared.conversation_id,
-        command_id,
+        request.command_id,
         &message.message.recipients,
-        now_ms,
+        request.now_ms,
     )?;
     if current != *prepared {
         return Err(Error::InvalidRequest("mapping changed"));
     }
-    match rcs_group::check_observation(&tx, &current, observation, now_ms)? {
+    match rcs_group::check_observation(&tx, &current, request.observation, request.now_ms)? {
         rcs_group::GroupObservationCheck::Exact => {}
         rcs_group::GroupObservationCheck::MembersChanged => {
-            rcs_group::pause_group(&tx, ctx, current.conversation_id, now_ms)?;
+            rcs_group::pause_group(&tx, ctx, current.conversation_id, request.now_ms)?;
             tx.commit()?;
             return Err(Error::GroupMembersChanged);
         }
@@ -11903,24 +12719,186 @@ fn admit_group_rcs_send(
             return Err(Error::InvalidRequest("mapping unproven"));
         }
     }
-    rcs_send::record_group_target_identity(&tx, command_id, &current, observation)?;
+    rcs_send::record_group_target_identity(&tx, request.command_id, &current, request.observation)?;
     let tmp_id = record_rcs_ledger_admission(
         &tx,
-        command_id,
+        request.command_id,
         current.mapping_revision,
         &current.proof_digest,
         &current.google_conversation_id,
-        now_ms,
+        request.now_ms,
     )?;
     let projection = rcs_send::group_commit_projection(
-        command_id,
+        request.command_id,
         tmp_id,
         &current,
-        observation,
+        request.observation,
         message.message.body,
     )?;
     tx.commit()?;
     Ok(projection)
+}
+
+fn admit_native_rcs_media_send(
+    tx: rusqlite::Transaction<'_>,
+    ctx: &Ctx<'_>,
+    request: NativeRcsAdmissionRequest<'_>,
+    target: NativeRcsPreparationTarget,
+    attachment_index: u32,
+    prepared_media: rcs_native::NativeRcsMedia,
+) -> Result<rcs_native::NativeRcsCommitProjection, Error> {
+    let message = unattempted_rcs_media_message(&tx, request.active_epoch, request.command_id)?;
+    let attachment = message
+        .record
+        .attachments
+        .get(attachment_index as usize)
+        .ok_or(Error::InvalidRequest("RCS media attachment index"))?;
+    rcs_media::require_prepared_attachment(
+        &tx,
+        request.command_id,
+        attachment_index,
+        attachment.attachment_id,
+    )?;
+    require_original_media_route(&tx, request.command_id, request.observation)?;
+
+    match target {
+        NativeRcsPreparationTarget::OneToOne(prepared_mapping) => {
+            if rcs_mapping::get(&tx, message.record.conversation_id)?.as_ref()
+                != Some(&prepared_mapping)
+            {
+                return Err(Error::InvalidRequest("mapping changed"));
+            }
+            let Some(mapping) = exact_rcs_mapping(
+                &tx,
+                message.record.conversation_id,
+                request.observation,
+                request.now_ms,
+            )?
+            else {
+                commit_mapping_refusal(tx)?;
+                return Err(Error::InvalidRequest("mapping unproven"));
+            };
+            require_exact_rcs_recipient(&message, &mapping)?;
+            let (media, tmp_id) = rcs_media::issue_prepared_media(
+                &tx,
+                request.command_id,
+                attachment_index,
+                &prepared_media,
+                request.now_ms,
+            )?;
+            let mut projection = rcs_permit(
+                request.command_id,
+                message,
+                tmp_id,
+                &mapping,
+                request.observation,
+            )?
+            .native_commit_projection();
+            projection.message_body =
+                rcs_media::planned_content(&tx, request.command_id, attachment_index)?;
+            projection.media = Some(media);
+            rcs_media::bind_echo_target(
+                &tx,
+                request.command_id,
+                attachment_index,
+                &mapping.google_conversation_id,
+            )?;
+            tx.commit()?;
+            Ok(projection)
+        }
+        NativeRcsPreparationTarget::Group(prepared) => {
+            let current = rcs_group::native_send_authority(
+                &tx,
+                prepared.conversation_id,
+                request.command_id,
+                &message.recipients,
+                request.now_ms,
+            )?;
+            if current != prepared {
+                return Err(Error::InvalidRequest("mapping changed"));
+            }
+            match rcs_group::check_observation(&tx, &current, request.observation, request.now_ms)?
+            {
+                rcs_group::GroupObservationCheck::Exact => {}
+                rcs_group::GroupObservationCheck::MembersChanged => {
+                    rcs_group::pause_group(&tx, ctx, current.conversation_id, request.now_ms)?;
+                    let report = rcs_media::record_outcome(
+                        &tx,
+                        request.command_id,
+                        attachment_index,
+                        "members_changed",
+                    )?;
+                    emit_rcs_media_state(
+                        &tx,
+                        ctx,
+                        request.command_id,
+                        attachment_index,
+                        report.sync,
+                        report.reason,
+                    )?;
+                    for index in report.refused_indexes {
+                        emit_rcs_media_state(
+                            &tx,
+                            ctx,
+                            request.command_id,
+                            index,
+                            RcsMediaSyncState::MembersChanged,
+                            None,
+                        )?;
+                    }
+                    tx.commit()?;
+                    return Err(Error::GroupMembersChanged);
+                }
+                rcs_group::GroupObservationCheck::Unproven => {
+                    commit_mapping_refusal(tx)?;
+                    return Err(Error::InvalidRequest("mapping unproven"));
+                }
+            }
+            let (media, tmp_id) = rcs_media::issue_prepared_media(
+                &tx,
+                request.command_id,
+                attachment_index,
+                &prepared_media,
+                request.now_ms,
+            )?;
+            let mut projection = rcs_send::group_commit_projection(
+                request.command_id,
+                tmp_id,
+                &current,
+                request.observation,
+                rcs_media::planned_content(&tx, request.command_id, attachment_index)?,
+            )?;
+            projection.media = Some(media);
+            rcs_media::bind_echo_target(
+                &tx,
+                request.command_id,
+                attachment_index,
+                &current.google_conversation_id,
+            )?;
+            tx.commit()?;
+            Ok(projection)
+        }
+    }
+}
+
+fn require_original_media_route(
+    conn: &Connection,
+    command_id: CommandId,
+    observation: &RcsMappingObservation,
+) -> Result<(), Error> {
+    let subscription_id: String = conn.query_row(
+        "SELECT subscription_id FROM command_ledger WHERE command_id=?",
+        [command_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if !subscription_id.is_empty()
+        && (observation.selected_sim_id != subscription_id
+            || observation.carrier_binding.carrier_route_id != subscription_id
+            || !observation.carrier_binding.is_current_default_sms)
+    {
+        return Err(Error::InvalidRequest("RCS carrier route changed"));
+    }
+    Ok(())
 }
 
 fn require_native_rcs_body(body: &str) -> Result<(), Error> {
@@ -11928,6 +12906,115 @@ fn require_native_rcs_body(body: &str) -> Result<(), Error> {
         .contains(&body.len())
         .then_some(())
         .ok_or(Error::InvalidRequest("RCS body out of bounds"))
+}
+
+fn rcs_media_route_eligible(
+    conn: &Connection,
+    command_id: CommandId,
+    message: &MessagePayload,
+    expected_member_revision: Option<u64>,
+) -> Result<bool, Error> {
+    if rcs_mapping::has_live_mapping(conn, message.record.conversation_id)? {
+        return require_exact_rcs_recipient(
+            message,
+            &rcs_mapping::get(conn, message.record.conversation_id)?.ok_or(Error::Database)?,
+        )
+        .is_ok()
+        .then_some(true)
+        .ok_or(Error::InvalidRequest("RCS recipient is not proven"));
+    }
+    let Some(group) = rcs_group::group_mapping(conn, message.record.conversation_id)? else {
+        return Ok(false);
+    };
+    Ok(group.state == rcs_group::GroupMappingState::Live
+        && expected_member_revision == Some(group.proved_member_revision)
+        && rcs_group::native_candidate_digest(
+            conn,
+            message.record.conversation_id,
+            command_id,
+            &message.recipients,
+        )?
+        .is_some())
+}
+
+/// Materializes only the gateway's separate RCS-media ledger. This intentionally does not write
+/// `attempts`, issue carrier authority, or require a SIM subscription: it is safe for advisory
+/// discovery and is shared by the carrier admission path.
+fn admit_rcs_media_materialization(
+    conn: &rusqlite::Transaction<'_>,
+    ctx: &Ctx<'_>,
+    active_epoch: Option<u32>,
+    command_id: CommandId,
+) -> Result<bool, Error> {
+    let ledger: Option<(u32, String, String, bool)> = conn
+        .query_row(
+            "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
+            [command_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((epoch, _subscription_id, payload, historical)) = ledger else {
+        return Ok(false);
+    };
+    if attempt_state(conn, command_id)?.is_some()
+        || rcs_group_create::terminal_refusal(conn, command_id)?.is_some()
+    {
+        return Ok(false);
+    }
+    require_received_command_eligible(conn, active_epoch, epoch, historical)?;
+    if !rcs_media::ledger_rows(conn, command_id)?.is_empty() {
+        return Ok(true);
+    }
+    let (message, media_ready) = localize(conn, decode(payload.as_bytes())?)?;
+    if !media_ready
+        || message.record.attachments.is_empty()
+        || send_retention_blocked(conn, command_id)?
+        || !rcs_media_route_eligible(
+            conn,
+            command_id,
+            &message,
+            rcs_group::send_fields(conn, command_id)?.expected_member_revision,
+        )?
+    {
+        return Ok(false);
+    }
+    let plan = rcs_media::plan_expansion(
+        &message.body,
+        &message
+            .record
+            .attachments
+            .iter()
+            .map(|item| item.attachment_id)
+            .collect::<Vec<_>>(),
+    )?;
+    let materialized = rcs_media::materialize(conn, command_id, &plan)?;
+    for attachment in &message.record.attachments {
+        let media_type = attachment_row(conn, attachment.attachment_id)
+            .ok()
+            .flatten()
+            .map(|row| row.info(attachment.attachment_id).media_type)
+            .unwrap_or_default();
+        if matches!(media_type.as_str(), "image/heic" | "image/heif") {
+            for item in plan {
+                let report = rcs_media::record_outcome(
+                    conn,
+                    command_id,
+                    item.attachment_index,
+                    "not_allowed_mime",
+                )?;
+                emit_rcs_media_state(
+                    conn,
+                    ctx,
+                    command_id,
+                    item.attachment_index,
+                    report.sync,
+                    report.reason,
+                )?;
+            }
+            return Ok(true);
+        }
+    }
+    Ok(materialized || !rcs_media::ledger_rows(conn, command_id)?.is_empty())
 }
 
 fn require_received_command_eligible(
@@ -12575,7 +13662,7 @@ fn compose_references(
         .collect())
 }
 /// Private descriptors for a message, or `None` while any object still lacks a remote ID.
-fn descriptor_for_attachment(
+pub(crate) fn descriptor_for_attachment(
     conn: &Connection,
     attachment_id: AttachmentId,
 ) -> Result<Option<MediaDescriptor>, Error> {
@@ -13384,6 +14471,97 @@ mod tests {
         assert_eq!(preserved, conversation_id);
     }
 
+    const RCS_MEDIA_TABLES: [&str; 8] = [
+        "rcs_media_send_ledger",
+        "rcs_google_media_refs",
+        "rcs_media_receive",
+        "rcs_media_retry_demand",
+        "rcs_media_tmp_dedup",
+        "rcs_media_send_status",
+        "pending_rcs_media_states",
+        "rcs_media_state_clocks",
+    ];
+
+    #[test]
+    fn version_53_upgrade_adds_rcs_media_tables_without_changing_existing_rows() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("schema-54.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = || DatabaseKey::new(&[54; 32]).unwrap();
+        let client = Client::open(config.clone(), key()).unwrap();
+        let conversation_id = ConversationId::new().to_string();
+        {
+            let store = client.lock().unwrap();
+            store.conn.execute(
+                "INSERT INTO mms_thread_conversations(source_device_id,source_generation,subscription_id,provider_thread_id,conversation_id) VALUES(?,?,?,?,?)",
+                params!["phone", "generation", "subscription", "thread", conversation_id],
+            ).unwrap();
+            // A schema-53 file has none of the media tables; reproduce that exactly.
+            for table in RCS_MEDIA_TABLES {
+                store
+                    .conn
+                    .execute_batch(&format!("DROP TABLE IF EXISTS {table};"))
+                    .unwrap();
+            }
+            store
+                .conn
+                .execute("UPDATE schema_meta SET version=53", [])
+                .unwrap();
+        }
+        drop(client);
+
+        let upgraded = Client::open(config, key()).unwrap();
+        let store = upgraded.lock().unwrap();
+        let version: i64 = store
+            .conn
+            .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        for table in RCS_MEDIA_TABLES {
+            assert!(table_exists(&store.conn, table).unwrap(), "{table}");
+        }
+        let preserved: String = store.conn.query_row(
+            "SELECT conversation_id FROM mms_thread_conversations WHERE source_device_id='phone' AND provider_thread_id='thread'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(preserved, conversation_id);
+    }
+
+    #[test]
+    fn fresh_schema_creates_the_rcs_media_ledgers_with_their_state_constraints() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("fresh-54.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[55; 32]).unwrap(),
+        )
+        .unwrap();
+        let store = client.lock().unwrap();
+        for table in RCS_MEDIA_TABLES {
+            assert!(table_exists(&store.conn, table).unwrap(), "{table}");
+        }
+        let rejected = store.conn.execute(
+            "INSERT INTO rcs_media_send_status(message_id,attachment_index,state,reason) VALUES('m',0,'not_sent',NULL)",
+            [],
+        );
+        assert!(rejected.is_err(), "not_sent requires a reason");
+        let rejected = store.conn.execute(
+            "INSERT INTO rcs_media_receive(message_id,attachment_index,attachment_id,state) VALUES('m',0,NULL,'sent')",
+            [],
+        );
+        assert!(
+            rejected.is_err(),
+            "receive states exclude outgoing vocabulary"
+        );
+    }
+
     type RcsMappingRow = (
         String,
         String,
@@ -13659,7 +14837,7 @@ mod tests {
                 group_create: None,
             }
         );
-        // A group send with media keeps the media command, which has no group fields.
+        // A group send with media preserves the composer-proved group fields.
         let mut media = text.clone();
         media.record.attachments = vec![AttachmentReference {
             attachment_id: AttachmentId::new(),
@@ -13670,6 +14848,8 @@ mod tests {
             PrivatePayload::SendMmsCommand {
                 message: media,
                 media: Vec::new(),
+                expected_member_revision: Some(2),
+                group_create: None,
             }
         );
         // A one-to-one send carries no group fields.

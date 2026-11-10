@@ -1509,6 +1509,20 @@ fn claim_initial_floor_and_router_guard_band() {
             121_000,
             true,
             false,
+            RcsProviderRowRoute::DetectorRecorded,
+            None,
+        ),
+        (
+            60_000,
+            true,
+            false,
+            RcsProviderRowRoute::Provider,
+            Some(RcsProviderRouteReason::GuardBand),
+        ),
+        (
+            121_000,
+            false,
+            false,
             RcsProviderRowRoute::Provider,
             Some(RcsProviderRouteReason::NotRestrictedText),
         ),
@@ -1575,6 +1589,7 @@ fn historical_record(google_message_id: &str, sent_at_ms: i64) -> RcsProjectedRe
         tmp_id: None,
         rcs_reported: false,
         e2ee_reported: None,
+        attachments: Vec::new(),
     }
 }
 

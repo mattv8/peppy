@@ -29,6 +29,29 @@ pub(crate) fn pending_commands(
     conn: &Connection,
     active_epoch: Option<u32>,
 ) -> Result<Vec<PendingNativeRcsCommand>, Error> {
+    pending_commands_for(conn, active_epoch, CandidateKind::Text)
+}
+
+/// The upload coordinator must not infer media work from the text candidate list. Only commands
+/// with a materialized, nonterminal media ledger row are returned.
+pub(crate) fn pending_media_commands(
+    conn: &Connection,
+    active_epoch: Option<u32>,
+) -> Result<Vec<PendingNativeRcsCommand>, Error> {
+    pending_commands_for(conn, active_epoch, CandidateKind::Media)
+}
+
+#[derive(Clone, Copy)]
+enum CandidateKind {
+    Text,
+    Media,
+}
+
+fn pending_commands_for(
+    conn: &Connection,
+    active_epoch: Option<u32>,
+    kind: CandidateKind,
+) -> Result<Vec<PendingNativeRcsCommand>, Error> {
     if rcs_mapping::recorded_link_lifecycle(conn)? != Some(RcsCapabilityState::Linked) {
         return Ok(Vec::new());
     }
@@ -63,7 +86,9 @@ pub(crate) fn pending_commands(
         cursor = last.clone();
         let exhausted = rows.len() < NATIVE_RCS_COMMAND_PAGE_SIZE;
         for (_, command_id) in rows {
-            if let Some((candidate, carrier_intent)) = candidate(conn, active_epoch, command_id)? {
+            if let Some((candidate, carrier_intent)) =
+                candidate(conn, active_epoch, command_id, kind)?
+            {
                 if carrier_intent {
                     if !carrier_candidates
                         .iter()
@@ -79,7 +104,10 @@ pub(crate) fn pending_commands(
                 }
             }
         }
-        if exhausted {
+        if exhausted
+            || (matches!(kind, CandidateKind::Media)
+                && rcs_candidates.len() == NATIVE_RCS_COMMAND_PAGE_SIZE)
+        {
             break;
         }
     }
@@ -118,28 +146,42 @@ fn candidate(
     conn: &Connection,
     active_epoch: u32,
     command_id: String,
+    kind: CandidateKind,
 ) -> Result<Option<(PendingNativeRcsCommand, bool)>, Error> {
     let command_id = command_id
         .parse()
         .map_err(|_| Error::InvalidRequest("invalid command id"))?;
-    let message = match crate::unattempted_rcs_message(conn, Some(active_epoch), command_id, true) {
-        Ok(message) => message,
+    let result = match kind {
+        CandidateKind::Text => {
+            crate::unattempted_rcs_message(conn, Some(active_epoch), command_id, true)
+                .map(|pending| (pending.message, Some(pending.subscription_id)))
+        }
+        CandidateKind::Media => {
+            if crate::rcs_media::next_attachment(conn, command_id)?.is_none() {
+                return Ok(None);
+            }
+            crate::unattempted_rcs_media_message(conn, Some(active_epoch), command_id)
+                .map(|message| (message, None))
+        }
+    };
+    let (message, subscription_id) = match result {
+        Ok(pending) => pending,
         Err(Error::AlreadyAttempted(_) | Error::InvalidRequest(_)) => return Ok(None),
         Err(error) => return Err(error),
     };
-    if !message.subscription_id.is_empty()
-        && !rcs_group::is_group_conversation(conn, message.message.record.conversation_id)?
+    if let Some(subscription_id) = subscription_id.filter(|id| !id.is_empty())
+        && !rcs_group::is_group_conversation(conn, message.record.conversation_id)?
     {
-        let [recipient] = message.message.recipients.as_slice() else {
+        let [recipient] = message.recipients.as_slice() else {
             return Ok(None);
         };
         let carrier_admission = crate::rcs_send::carrier_admission(
             conn,
-            message.message.record.conversation_id,
-            &message.message.recipients,
-            message.message.transport,
-            !message.message.record.attachments.is_empty(),
-            &message.subscription_id,
+            message.record.conversation_id,
+            &message.recipients,
+            message.transport,
+            !message.record.attachments.is_empty(),
+            &subscription_id,
             crate::notifications::now_ms(),
             None,
         )?;
@@ -154,26 +196,26 @@ fn candidate(
         return Ok(Some((
             PendingNativeRcsCommand {
                 command_id,
-                conversation_id: message.message.record.conversation_id,
+                conversation_id: message.record.conversation_id,
                 recipient: recipient.clone(),
             },
             true,
         )));
     }
-    let Some(mapping) = rcs_mapping::get(conn, message.message.record.conversation_id)? else {
-        return group_candidate(conn, command_id, &message.message)
+    let Some(mapping) = rcs_mapping::get(conn, message.record.conversation_id)? else {
+        return group_candidate(conn, command_id, &message)
             .map(|candidate| candidate.map(|candidate| (candidate, false)));
     };
-    if crate::require_exact_rcs_recipient(&message.message, &mapping).is_err() {
+    if crate::require_exact_rcs_recipient(&message, &mapping).is_err() {
         return Ok(None);
     }
-    let [recipient] = message.message.recipients.as_slice() else {
+    let [recipient] = message.recipients.as_slice() else {
         return Ok(None);
     };
     Ok(Some((
         PendingNativeRcsCommand {
             command_id,
-            conversation_id: message.message.record.conversation_id,
+            conversation_id: message.record.conversation_id,
             recipient: recipient.clone(),
         },
         false,
@@ -324,10 +366,25 @@ pub struct NativeRcsCommitProjection {
     pub proof_version: u32,
     pub proof_digest: Vec<u8>,
     pub message_body: String,
+    /// Gateway-local Google media reference. This is only emitted to the trusted native host,
+    /// never in a synced payload or renderer DTO.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<NativeRcsMedia>,
     pub target: LocalRcsTargetSnapshot,
     /// Group targets only: the stored member digest Go rechecks immediately before sending.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_member_digest: Option<String>,
+}
+
+/// The exact media part Go derives into its `SendMessageRequest`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NativeRcsMedia {
+    pub media_id: String,
+    pub key: Vec<u8>,
+    pub mime: String,
+    pub size: u64,
+    pub name: String,
 }
 
 /// Core-owned input for asking the native host to observe one exact local RCS target.
@@ -351,6 +408,8 @@ pub struct NativeRcsPreparation {
     command_id: CommandId,
     request: NativeRcsPrepareRequest,
     target: NativeRcsPreparationTarget,
+    media: Option<NativeRcsMedia>,
+    attachment_index: Option<u32>,
 }
 
 impl NativeRcsPreparation {
@@ -364,6 +423,8 @@ impl NativeRcsPreparation {
             command_id,
             request,
             target: NativeRcsPreparationTarget::OneToOne(mapping),
+            media: None,
+            attachment_index: None,
         }
     }
 
@@ -378,7 +439,15 @@ impl NativeRcsPreparation {
             command_id,
             request,
             target: NativeRcsPreparationTarget::Group(authority),
+            media: None,
+            attachment_index: None,
         }
+    }
+
+    pub(crate) fn with_media(mut self, attachment_index: u32, media: NativeRcsMedia) -> Self {
+        self.media = Some(media);
+        self.attachment_index = Some(attachment_index);
+        self
     }
 
     pub fn request(&self) -> &NativeRcsPrepareRequest {
@@ -406,8 +475,18 @@ impl NativeRcsPreparation {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (CommandId, NativeRcsPreparationTarget) {
-        (self.command_id, self.target)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        CommandId,
+        NativeRcsPreparationTarget,
+        Option<(u32, NativeRcsMedia)>,
+    ) {
+        (
+            self.command_id,
+            self.target,
+            self.attachment_index.zip(self.media),
+        )
     }
 }
 

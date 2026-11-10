@@ -152,6 +152,7 @@ fn incoming(google_message_id: &str, body: &str) -> RcsProjectedRecord {
         tmp_id: None,
         rcs_reported: true,
         e2ee_reported: None,
+        attachments: Vec::new(),
     }
 }
 

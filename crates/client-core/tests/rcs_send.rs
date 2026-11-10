@@ -390,8 +390,9 @@ fn rcs_link_command_gets_one_durable_exact_mapping_permit() {
     );
     assert_eq!(
         gateway.begin_send_attempt(command_id).unwrap(),
-        PermitDecision::Blocked(PermitBlock::RouteUnavailable)
+        PermitDecision::AlreadyAttempted(SendState::AttemptRecorded)
     );
+    assert_eq!(attempt_count(&gateway_config, command_id), 1);
     drop(gateway);
     let reopened = unlocked(&gateway_config, &vault);
     assert_eq!(
@@ -1570,6 +1571,165 @@ fn lifecycle_only_explicit_unlink_completion_restores_both_carrier_entry_points_
                 PermitDecision::Permit(_)
             ));
         }
+    }
+}
+
+#[test]
+fn media_ledger_permanently_excludes_both_carrier_paths_after_unlink() {
+    for state in ["pending", "accepted", "outcome_unknown"] {
+        let (_directory, _vault, config, sender, gateway, command, attachment, _) =
+            carrier_mms_command(false);
+        gateway
+            .install_downloaded_attachment(
+                attachment.attachment_id,
+                &sender.native_cipher_file(attachment.attachment_id).unwrap(),
+            )
+            .unwrap();
+        gateway
+            .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+            .unwrap();
+        let db = rusqlite::Connection::open(&config.database_path).unwrap();
+        db.execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+        db.execute("INSERT INTO rcs_media_send_ledger(command_id,attachment_index,attachment_id,state,tmp_id) VALUES(?,0,?,?,'media-tmp')",
+            rusqlite::params![command.to_string(), attachment.attachment_id.to_string(), state]).unwrap();
+        gateway
+            .record_rcs_link_lifecycle(
+                RcsCapabilityState::Unlinked,
+                false,
+                false,
+                false,
+                1_001,
+                1_001,
+            )
+            .unwrap();
+        gateway
+            .record_rcs_explicit_unlink_completed(1_001, 1_001)
+            .unwrap();
+        assert_eq!(
+            gateway.begin_send_attempt_at(command, 1_001).unwrap(),
+            PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable),
+            "{state}"
+        );
+        assert_eq!(
+            gateway
+                .begin_automatic_send_attempt(command, None, 1_001)
+                .unwrap(),
+            AutomaticPermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable),
+            "{state}"
+        );
+        assert!(
+            gateway
+                .pending_commands()
+                .unwrap()
+                .iter()
+                .all(|item| item.command_id != command)
+        );
+        assert!(
+            gateway
+                .pending_automatic_commands()
+                .unwrap()
+                .iter()
+                .all(|item| item.command_id != command)
+        );
+        assert_eq!(attempt_count(&config, command), 0);
+    }
+}
+
+#[test]
+fn media_store_reopen_recovers_every_interrupted_phase_once() {
+    for (state, expected) in [
+        ("uploading", "pending"),
+        ("reference_ready", "pending"),
+        ("permit_issued", "outcome_unknown"),
+        ("committed", "outcome_unknown"),
+    ] {
+        let (_directory, vault, config, _sender, gateway, command, attachment, _) =
+            carrier_mms_command(false);
+        let db = rusqlite::Connection::open(&config.database_path).unwrap();
+        db.execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+        db.execute("INSERT INTO rcs_media_send_ledger(command_id,attachment_index,attachment_id,state,tmp_id) VALUES(?,0,?,?,'interrupted-media')", rusqlite::params![command.to_string(), attachment.attachment_id.to_string(), state]).unwrap();
+        drop(gateway);
+        let reopened = unlocked(&config, &vault);
+        let stored: String = db
+            .query_row(
+                "SELECT state FROM rcs_media_send_ledger WHERE command_id=?",
+                [command.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, expected, "{state}");
+        let id: String = db
+            .query_row(
+                "SELECT message_id FROM commands WHERE command_id=?",
+                [command.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let projected = reopened
+            .rcs_media_outgoing_status(id.parse().unwrap(), 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            projected.state,
+            if expected == "pending" {
+                RcsMediaSyncState::Sending
+            } else {
+                RcsMediaSyncState::OutcomeUnknown
+            }
+        );
+        let count = reopened.pending_outbox_count().unwrap();
+        let shared = unlocked(&config, &vault);
+        assert_eq!(
+            shared.pending_outbox_count().unwrap(),
+            count,
+            "second handle must not recover a live store"
+        );
+    }
+}
+
+#[test]
+fn old_epoch_media_does_not_poison_discovery_or_erase_per_index_outcome() {
+    for (initial, expected) in [
+        ("accepted", "accepted"),
+        ("outcome_unknown", "outcome_unknown"),
+        ("committed", "outcome_unknown"),
+        ("reference_ready", "refused"),
+    ] {
+        let (_directory, vault, config, _sender, gateway, command, attachment, conversation) =
+            carrier_mms_command(false);
+        let db = rusqlite::Connection::open(&config.database_path).unwrap();
+        db.execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+        db.execute("INSERT INTO rcs_media_send_ledger(command_id,attachment_index,attachment_id,state,tmp_id) VALUES(?,0,?,?,'epoch-media')", rusqlite::params![command.to_string(), attachment.attachment_id.to_string(), initial]).unwrap();
+        let next = Vault::epoch(vault.id, 2);
+        gateway
+            .unlock(&next.profile, &next.header, PASSPHRASE)
+            .unwrap();
+        gateway.activate_epoch(2).unwrap();
+        assert!(gateway.pending_rcs_media_commands(1_000).is_ok());
+        let message = gateway
+            .messages(conversation)
+            .unwrap()
+            .into_iter()
+            .find(|message| message.payload.direction == Direction::Outgoing)
+            .unwrap();
+        assert_ne!(message.send_state, Some(SendState::FailedBeforeSubmission));
+        let state: String = db
+            .query_row(
+                "SELECT state FROM rcs_media_send_ledger WHERE command_id=?",
+                [command.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, expected);
     }
 }
 
