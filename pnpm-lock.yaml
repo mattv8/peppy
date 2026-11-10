@@ -234,7 +234,7 @@ importers:
         version: 2.12.4
       '@testing-library/jest-dom':
         specifier: 'catalog:'
-        version: 7.0.1(@testing-library/dom@10.4.2)(vitest@5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.5(@types/node@26.6.4)))
+        version: 7.0.1(@testing-library/dom@10.4.2)(vitest@5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.6(@types/node@26.6.4)))
       '@testing-library/react':
         specifier: 'catalog:'
         version: 16.3.3(@testing-library/dom@10.4.2)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
@@ -248,8 +248,8 @@ importers:
         specifier: 'catalog:'
         version: 19.3.0(@types/react@19.3.0)
       '@vitejs/plugin-react':
-        specifier: ^6.1.2
-        version: 6.1.2(vite@8.3.5(@types/node@26.6.4))
+        specifier: ^6.2.1
+        version: 6.2.1(vite@8.3.6(@types/node@26.6.4))
       jsdom:
         specifier: 'catalog:'
         version: 26.1.0
@@ -257,11 +257,11 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
       vite:
-        specifier: ^8.3.5
-        version: 8.3.5(@types/node@26.6.4)
+        specifier: ^8.3.6
+        version: 8.3.6(@types/node@26.6.4)
       vitest:
         specifier: 'catalog:'
-        version: 5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.5(@types/node@26.6.4))
+        version: 5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.6(@types/node@26.6.4))
 
   apps/web:
     dependencies:
@@ -283,7 +283,7 @@ importers:
     devDependencies:
       '@testing-library/jest-dom':
         specifier: 'catalog:'
-        version: 7.0.1(@testing-library/dom@10.4.2)(vitest@5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.5(@types/node@26.6.4)))
+        version: 7.0.1(@testing-library/dom@10.4.2)(vitest@5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.6(@types/node@26.6.4)))
       '@testing-library/react':
         specifier: 'catalog:'
         version: 16.3.3(@testing-library/dom@10.4.2)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
@@ -294,8 +294,8 @@ importers:
         specifier: 'catalog:'
         version: 19.3.0(@types/react@19.3.0)
       '@vitejs/plugin-react':
-        specifier: ^6.1.2
-        version: 6.1.2(vite@8.3.5(@types/node@26.6.4))
+        specifier: ^6.2.1
+        version: 6.2.1(vite@8.3.6(@types/node@26.6.4))
       jsdom:
         specifier: 'catalog:'
         version: 26.1.0
@@ -303,11 +303,11 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
       vite:
-        specifier: ^8.3.5
-        version: 8.3.5(@types/node@26.6.4)
+        specifier: ^8.3.6
+        version: 8.3.6(@types/node@26.6.4)
       vitest:
         specifier: 'catalog:'
-        version: 5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.5(@types/node@26.6.4))
+        version: 5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.6(@types/node@26.6.4))
 
   packages/browser-runtime:
     dependencies:
@@ -323,7 +323,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: 'catalog:'
-        version: 5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.5(@types/node@26.6.4))
+        version: 5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.6(@types/node@26.6.4))
 
   packages/contracts: {}
 
@@ -350,7 +350,7 @@ importers:
     devDependencies:
       '@testing-library/jest-dom':
         specifier: 'catalog:'
-        version: 7.0.1(@testing-library/dom@10.4.2)(vitest@5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.5(@types/node@26.6.4)))
+        version: 7.0.1(@testing-library/dom@10.4.2)(vitest@5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.6(@types/node@26.6.4)))
       '@testing-library/react':
         specifier: 'catalog:'
         version: 16.3.3(@testing-library/dom@10.4.2)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
@@ -371,7 +371,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: 'catalog:'
-        version: 5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.5(@types/node@26.6.4))
+        version: 5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.6(@types/node@26.6.4))
 
   packages/generated: {}
 
@@ -674,13 +674,13 @@ packages:
   '@types/react@19.3.0':
     resolution: {integrity: sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==}
 
-  '@vitejs/plugin-react@6.1.2':
-    resolution: {integrity: sha512-fhJNGUdscQa4HkI0xFxwonWyhnVReCPDbXI7FH7jmzpnVCrFQI7PRrhWecO263610vOrs9tr2Y4xcf8uAdFxbw==}
+  '@vitejs/plugin-react@6.2.1':
+    resolution: {integrity: sha512-9KyWCij3r0+qLG3Q62vBmv0VyevmYibAtxaCIVK9o0k6CXgaajZRIe8tpfchQcdZArJ5b/7OrIz4W3b2uxVRDA==}
     engines: {node: ^20.19.0 || >=22.12.0}
     peerDependencies:
-      '@rolldown/plugin-babel': ^0.1.7 || ^0.2.0
+      '@rolldown/plugin-babel': ^0.1.7 || ^0.2.0 || ^0.3.0
       babel-plugin-react-compiler: ^1.0.0
-      oxc-transform-react: ^0.152.0
+      oxc-transform-react: '>=0.152.0 <0.157.0'
       vite: ^8.0.0
     peerDependenciesMeta:
       '@rolldown/plugin-babel':
@@ -1141,8 +1141,8 @@ packages:
   undici-types@8.9.0:
     resolution: {integrity: sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==}
 
-  vite@8.3.5:
-    resolution: {integrity: sha512-z1YpjieJ9g0ebTmQpLBv/oq9E3F9EIlOe+7LahW8SrE3LTiG3udBRUXQOlYXP9b+IC2q2phHeVxj9xGlw34OEQ==}
+  vite@8.3.6:
+    resolution: {integrity: sha512-UI7dK29NnS54Fk+mmo7o+jI6U8Fp7hDl+X5Q1k45WH+d4dSlbLVUETGQ+hfkNgvLQGyoElPj837nZyv4MBc0VA==}
     engines: {node: ^20.19.0 || >=22.12.0}
     hasBin: true
     peerDependencies:
@@ -1452,7 +1452,7 @@ snapshots:
       picocolors: 1.1.1
       pretty-format: 27.5.1
 
-  '@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.2)(vitest@5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.5(@types/node@26.6.4)))':
+  '@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.2)(vitest@5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.6(@types/node@26.6.4)))':
     dependencies:
       '@adobe/css-tools': 4.5.0
       '@testing-library/dom': 10.4.2
@@ -1462,7 +1462,7 @@ snapshots:
       picocolors: 1.1.1
       redent: 3.0.0
     optionalDependencies:
-      vitest: 5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.5(@types/node@26.6.4))
+      vitest: 5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.6(@types/node@26.6.4))
 
   '@testing-library/react@16.3.3(@testing-library/dom@10.4.2)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)':
     dependencies:
@@ -1501,19 +1501,19 @@ snapshots:
     dependencies:
       csstype: 3.2.3
 
-  '@vitejs/plugin-react@6.1.2(vite@8.3.5(@types/node@26.6.4))':
+  '@vitejs/plugin-react@6.2.1(vite@8.3.6(@types/node@26.6.4))':
     dependencies:
       '@rolldown/pluginutils': 1.0.1
-      vite: 8.3.5(@types/node@26.6.4)
+      vite: 8.3.6(@types/node@26.6.4)
 
-  '@vitest/mocker@5.0.5(vite@8.3.5(@types/node@26.6.4))':
+  '@vitest/mocker@5.0.5(vite@8.3.6(@types/node@26.6.4))':
     dependencies:
       '@jridgewell/trace-mapping': 0.3.31
       '@vitest/spy': 5.0.5
       estree-walker: 3.0.3
       magic-string: 1.4.5
     optionalDependencies:
-      vite: 8.3.5(@types/node@26.6.4)
+      vite: 8.3.6(@types/node@26.6.4)
 
   '@vitest/spy@5.0.5': {}
 
@@ -1885,7 +1885,7 @@ snapshots:
 
   undici-types@8.9.0: {}
 
-  vite@8.3.5(@types/node@26.6.4):
+  vite@8.3.6(@types/node@26.6.4):
     dependencies:
       lightningcss: 1.33.0
       picomatch: 4.0.7
@@ -1896,10 +1896,10 @@ snapshots:
       '@types/node': 26.6.4
       fsevents: 2.3.3
 
-  vitest@5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.5(@types/node@26.6.4)):
+  vitest@5.0.5(@types/node@26.6.4)(jsdom@26.1.0)(vite@8.3.6(@types/node@26.6.4)):
     dependencies:
       '@types/chai': 5.2.3
-      '@vitest/mocker': 5.0.5(vite@8.3.5(@types/node@26.6.4))
+      '@vitest/mocker': 5.0.5(vite@8.3.6(@types/node@26.6.4))
       chai: 6.3.0
       es-module-lexer: 2.3.2
       expect-type: 1.4.0
@@ -1910,7 +1910,7 @@ snapshots:
       tinybench: 6.2.2
       tinyexec: 1.3.1
       tinyglobby: 0.2.17
-      vite: 8.3.5(@types/node@26.6.4)
+      vite: 8.3.6(@types/node@26.6.4)
       why-is-node-running: 3.2.1
     optionalDependencies:
       '@types/node': 26.6.4
