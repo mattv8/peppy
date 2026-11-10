@@ -64,20 +64,32 @@ jobs:
           PEPPY_RCS_GO_OBSERVATION_PATH: ${{ runner.temp }}/rcs-go-observations.json
           PEPPY_RCS_GO_RECEIVE_RECORD_PATH: ${{ runner.temp }}/rcs-go-receive-record.json
           PEPPY_RCS_GO_GROUP_RECEIVE_RECORDS_PATH: ${{ runner.temp }}/rcs-go-group-receive-records.json
+          PEPPY_RCS_GO_MEDIA_RECEIVE_RECORDS_PATH: ${{ runner.temp }}/rcs-go-media-receive-records.json
           PEPPY_RCS_NATIVE_FIXTURE_PATH: ${{ runner.temp }}/rcs-rust-commit.json
         run: |
-          rm -f "$PEPPY_RCS_GO_OBSERVATION_PATH" "$PEPPY_RCS_GO_RECEIVE_RECORD_PATH" "$PEPPY_RCS_GO_GROUP_RECEIVE_RECORDS_PATH" "$PEPPY_RCS_NATIVE_FIXTURE_PATH"
+          rm -f "$PEPPY_RCS_GO_OBSERVATION_PATH" "$PEPPY_RCS_GO_RECEIVE_RECORD_PATH" "$PEPPY_RCS_GO_GROUP_RECEIVE_RECORDS_PATH" "$PEPPY_RCS_GO_MEDIA_RECEIVE_RECORDS_PATH" "$PEPPY_RCS_NATIVE_FIXTURE_PATH"
           (cd apps/android/googlemessages && go test -race -tags rcs_native_contract ./gmlink -run '^TestNativeRcsExport(ObservationFixture|ReceiveRecord)$' -count=1)
           test -s "$PEPPY_RCS_GO_OBSERVATION_PATH"
           test -s "$PEPPY_RCS_GO_RECEIVE_RECORD_PATH"
           test -s "$PEPPY_RCS_GO_GROUP_RECEIVE_RECORDS_PATH"
+          test -s "$PEPPY_RCS_GO_MEDIA_RECEIVE_RECORDS_PATH"
           cargo test --locked -p peppy-mobile-bindings --lib rcs_receive_tests::go_exported_receive_record_ingests_through_mobile_boundary -- --exact
           cargo test --locked -p peppy-mobile-bindings --lib rcs_native::rcs_native_tests::rcs_native_group_receive_tests::go_exported_group_receive_records_ingest_into_a_live_group -- --exact
+          cargo test --locked -p peppy-mobile-bindings --lib rcs_receive_tests::go_exported_media_receive_records_ingest_through_mobile_boundary -- --exact --list | grep -Fx 'rcs_receive_tests::go_exported_media_receive_records_ingest_through_mobile_boundary: test'
+          cargo test --locked -p peppy-mobile-bindings --lib rcs_receive_tests::go_exported_media_receive_records_ingest_through_mobile_boundary -- --exact
           cargo test --locked -p peppy-client-core --test integration rcs_send::native_handoff::actual_go_observations_verify_classify_and_begin -- --exact --ignored
           test -s "$PEPPY_RCS_NATIVE_FIXTURE_PATH"
           (cd apps/android/googlemessages && go test -race -tags rcs_native_contract ./gmlink -run '^TestNativeRcsContractRustFixture$' -count=1)
           cargo test --locked -p peppy-mobile-bindings --lib rcs_native::rcs_native_tests::rcs_native_live_ticket_tests::same_live_go_ticket_uses_real_rust_facts_and_commit -- --exact --ignored
           cargo test --locked -p peppy-mobile-bindings --lib rcs_native::rcs_native_tests::rcs_native_live_ticket_tests::same_live_go_group_ticket_uses_real_rust_facts_and_commit -- --exact --ignored
+          cargo test --locked -p peppy-mobile-bindings --lib rcs_native::rcs_native_tests::rcs_native_live_ticket_tests::same_live_go_ticket_uses_real_rust_media_commit -- --exact --list | grep -Fx 'rcs_native::rcs_native_tests::rcs_native_live_ticket_tests::same_live_go_ticket_uses_real_rust_media_commit: test'
+          cargo test --locked -p peppy-mobile-bindings --lib rcs_native::rcs_native_tests::rcs_native_live_ticket_tests::same_live_go_ticket_uses_real_rust_media_commit -- --exact --ignored
+          cargo test --locked -p peppy-mobile-bindings --lib rcs_native::rcs_native_tests::rcs_native_live_ticket_tests::same_live_go_group_ticket_uses_real_rust_media_commit -- --exact --list | grep -Fx 'rcs_native::rcs_native_tests::rcs_native_live_ticket_tests::same_live_go_group_ticket_uses_real_rust_media_commit: test'
+          cargo test --locked -p peppy-mobile-bindings --lib rcs_native::rcs_native_tests::rcs_native_live_ticket_tests::same_live_go_group_ticket_uses_real_rust_media_commit -- --exact --ignored
+          cargo test --locked -p peppy-mobile-bindings --lib rcs_native::rcs_native_tests::rcs_native_live_ticket_tests::same_live_go_ticket_accepts_media_without_a_caption -- --exact --list | grep -Fx 'rcs_native::rcs_native_tests::rcs_native_live_ticket_tests::same_live_go_ticket_accepts_media_without_a_caption: test'
+          cargo test --locked -p peppy-mobile-bindings --lib rcs_native::rcs_native_tests::rcs_native_live_ticket_tests::same_live_go_ticket_accepts_media_without_a_caption -- --exact --ignored
+          cargo test --locked -p peppy-mobile-bindings --lib rcs_native::rcs_native_tests::rcs_native_live_ticket_tests::same_live_go_group_media_change_refuses_every_remaining_index -- --exact --list | grep -Fx 'rcs_native::rcs_native_tests::rcs_native_live_ticket_tests::same_live_go_group_media_change_refuses_every_remaining_index: test'
+          cargo test --locked -p peppy-mobile-bindings --lib rcs_native::rcs_native_tests::rcs_native_live_ticket_tests::same_live_go_group_media_change_refuses_every_remaining_index -- --exact --ignored
           cargo test --locked -p peppy-mobile-bindings --lib rcs_native::rcs_native_tests::rcs_native_live_ticket_tests::same_live_go_group_ticket_refuses_a_changed_roster_before_dispatch -- --exact --ignored
       - name: Run JVM binding smoke test
         working-directory: apps/android

@@ -677,6 +677,8 @@ internal object IntegrityCheckingUniffiLib {
     internal fun ensureInitialized() = Unit
     external fun uniffi_peppy_mobile_bindings_checksum_func_create_vault_material(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_decrypt_rcs_attachment_to_file(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_open_native_client(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_account_access_from_response(
@@ -767,11 +769,21 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_ingest_group_candidates(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_issue_rcs_media_permit(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_mark_rcs_media_reference_ready(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_mark_rcs_media_uploading(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_context_tuple(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_mapping_revision(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_media_attachment(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_pending_native_rcs_commands(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_pending_rcs_media_commands(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_prepare_native_rcs_send(
     ): Int
@@ -782,6 +794,10 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_publish_rcs_eligibility(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_explicit_unlink_completed(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_media_commit(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_media_outcome(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_outcome_unknown(
     ): Int
@@ -1183,6 +1199,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_unlock(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_demand_rcs_media_retry_for_attachment(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_admit_rcs_media_download(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_apply_rcs_status_json(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_begin_rcs_owner_unlink_cutover(
@@ -1195,11 +1215,19 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_complete_rcs_recovery(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_finalize_rcs_media_download(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_import_rcs_media_download(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_go_rcs_record_json(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_rcs_projected_observation(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_invalidate_rcs_context_for_google_event(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_mark_rcs_media_download_state(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_pending_rcs_media_receive_tasks(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_rcs_cutover_alerts(
     ): Int
@@ -1765,6 +1793,10 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_unlock(`ptr`: Long,`profileJson`: RustBuffer.ByValue,`headerJson`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_demand_rcs_media_retry_for_attachment(`ptr`: Long,`messageId`: RustBuffer.ByValue,`attachmentIndex`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_admit_rcs_media_download(`ptr`: Long,`messageId`: RustBuffer.ByValue,`attachmentIndex`: Int,`availableBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_apply_rcs_status_json(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`ownershipGeneration`: Long,`statusJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_begin_rcs_owner_unlink_cutover(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`expectedOwnershipGeneration`: Long,`expectedLifecycleGeneration`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1777,12 +1809,20 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_complete_rcs_recovery(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`ownershipGeneration`: Long,`targetMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_finalize_rcs_media_download(`ptr`: Long,`messageId`: RustBuffer.ByValue,`attachmentIndex`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_import_rcs_media_download(`ptr`: Long,`messageId`: RustBuffer.ByValue,`attachmentIndex`: Int,`admissionToken`: RustBuffer.ByValue,`plaintextPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_ingest_go_rcs_record_json(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`ownershipGeneration`: Long,`goRecordJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_ingest_rcs_projected_observation(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`ownershipGeneration`: Long,`goRecordJson`: RustBuffer.ByValue,`provenance`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_invalidate_rcs_context_for_google_event(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`googleConversationId`: RustBuffer.ByValue,`expected`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_mark_rcs_media_download_state(`ptr`: Long,`messageId`: RustBuffer.ByValue,`attachmentIndex`: Int,`state`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_pending_rcs_media_receive_tasks(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_rcs_cutover_alerts(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_rcs_link_lifecycle_generation(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1977,6 +2017,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_create_vault_material(`vaultId`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_decrypt_rcs_attachment_to_file(`client`: Long,`attachmentId`: RustBuffer.ByValue,`destinationDir`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_open_native_client(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_func_account_access_from_response(`status`: Short,`body`: RustBuffer.ByValue,`nowUnix`: Long,`trustedOrigins`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2067,11 +2109,21 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_ingest_group_candidates(`client`: Long,`snapshotJson`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_issue_rcs_media_permit(`client`: Long,`commandId`: RustBuffer.ByValue,`attachmentIndex`: Int,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_mark_rcs_media_reference_ready(`client`: Long,`commandId`: RustBuffer.ByValue,`attachmentIndex`: Int,`mediaRef`: RustBuffer.ByValue,`uploadedAtMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_mark_rcs_media_uploading(`client`: Long,`commandId`: RustBuffer.ByValue,`attachmentIndex`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_next_rcs_context_tuple(`client`: Long,`runtimeId`: RustBuffer.ByValue,`runGeneration`: Long,`streamEpoch`: Long,`pairingEvidenceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_next_rcs_mapping_revision(`client`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_next_rcs_media_attachment(`client`: Long,`commandId`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_pending_native_rcs_commands(`client`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_pending_rcs_media_commands(`client`: Long,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_prepare_native_rcs_send(`client`: Long,`commandId`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -2082,6 +2134,10 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_publish_rcs_eligibility(`client`: Long,`publications`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_explicit_unlink_completed(`client`: Long,`observedAtMs`: Long,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_media_commit(`client`: Long,`commandId`: RustBuffer.ByValue,`attachmentIndex`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_media_outcome(`client`: Long,`commandId`: RustBuffer.ByValue,`attachmentIndex`: Int,`code`: RustBuffer.ByValue,`atMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_outcome_unknown(`client`: Long,`commandId`: RustBuffer.ByValue,`tmpId`: RustBuffer.ByValue,`googleConversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -2225,6 +2281,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_create_vault_material() and 0xFFFF) != 14347) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_decrypt_rcs_attachment_to_file() and 0xFFFF) != 62292) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_open_native_client() and 0xFFFF) != 13839) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2360,13 +2419,28 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_ingest_group_candidates() and 0xFFFF) != 56958) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_issue_rcs_media_permit() and 0xFFFF) != 1389) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_mark_rcs_media_reference_ready() and 0xFFFF) != 36987) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_mark_rcs_media_uploading() and 0xFFFF) != 2782) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_context_tuple() and 0xFFFF) != 10501) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_mapping_revision() and 0xFFFF) != 61152) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_media_attachment() and 0xFFFF) != 39010) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_pending_native_rcs_commands() and 0xFFFF) != 31102) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_pending_rcs_media_commands() and 0xFFFF) != 24507) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_prepare_native_rcs_send() and 0xFFFF) != 22733) {
@@ -2382,6 +2456,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_explicit_unlink_completed() and 0xFFFF) != 33636) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_media_commit() and 0xFFFF) != 27038) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_media_outcome() and 0xFFFF) != 57891) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_outcome_unknown() and 0xFFFF) != 45222) {
@@ -2984,6 +3064,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_unlock() and 0xFFFF) != 27497) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_demand_rcs_media_retry_for_attachment() and 0xFFFF) != 46694) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_admit_rcs_media_download() and 0xFFFF) != 56149) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_apply_rcs_status_json() and 0xFFFF) != 28431) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -3002,6 +3088,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_complete_rcs_recovery() and 0xFFFF) != 6287) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_finalize_rcs_media_download() and 0xFFFF) != 13217) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_import_rcs_media_download() and 0xFFFF) != 62960) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_go_rcs_record_json() and 0xFFFF) != 18128) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -3009,6 +3101,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_invalidate_rcs_context_for_google_event() and 0xFFFF) != 56850) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_mark_rcs_media_download_state() and 0xFFFF) != 37355) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_pending_rcs_media_receive_tasks() and 0xFFFF) != 38493) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_rcs_cutover_alerts() and 0xFFFF) != 37806) {
@@ -4249,6 +4347,18 @@ public interface NativeClientInterface {
     
     fun `unlock`(`profileJson`: kotlin.String, `headerJson`: kotlin.String, `passphrase`: kotlin.String)
     
+    /**
+     * Desktop and UI callers address an original attachment index; core derives the authenticated
+     * source gateway and rejects states that cannot be retried.
+     */
+    fun `demandRcsMediaRetryForAttachment`(`messageId`: kotlin.String, `attachmentIndex`: kotlin.UInt)
+    
+    /**
+     * Performs only durable local accounting. `available_bytes` must be an authenticated host
+     * capacity observation; absent capacity is intentionally retryable rather than quota-full.
+     */
+    fun `gatewayAdmitRcsMediaDownload`(`messageId`: kotlin.String, `attachmentIndex`: kotlin.UInt, `availableBytes`: kotlin.ULong?): NativeRcsMediaDownloadAdmission
+    
     fun `gatewayApplyRcsStatusJson`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `statusJson`: kotlin.String): kotlin.String
     
     fun `gatewayBeginRcsOwnerUnlinkCutover`(`conversationId`: kotlin.String, `expectedOwnershipGeneration`: kotlin.ULong, `expectedLifecycleGeneration`: kotlin.ULong): NativeRcsCutover
@@ -4262,6 +4372,17 @@ public interface NativeClientInterface {
     fun `gatewayCompleteRcsRecovery`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `targetMs`: kotlin.Long): kotlin.String
     
     /**
+     * Emits `Stored` only after the normal hosted upload path set a real remote descriptor.
+     */
+    fun `gatewayFinalizeRcsMediaDownload`(`messageId`: kotlin.String, `attachmentIndex`: kotlin.UInt)
+    
+    /**
+     * Encrypts a trusted private download after a held admission. The source must have exactly
+     * the manifest's declared length; the token cannot be reused for another attachment.
+     */
+    fun `gatewayImportRcsMediaDownload`(`messageId`: kotlin.String, `attachmentIndex`: kotlin.UInt, `admissionToken`: kotlin.String, `plaintextPath`: kotlin.String): NativeAttachmentInfo
+    
+    /**
      * Accepts exactly the record object Go emits (`rcsReceiveRecord`). Ingest runs without a
      * checkpoint; an inline status is applied only after an accepted ingest. Retries are
      * replay-safe: ingest reports `duplicate` and the status is idempotent.
@@ -4271,6 +4392,18 @@ public interface NativeClientInterface {
     fun `gatewayIngestRcsProjectedObservation`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `goRecordJson`: kotlin.String, `provenance`: NativeRcsObservationProvenance): NativeRcsIngestOutcome
     
     fun `gatewayInvalidateRcsContextForGoogleEvent`(`conversationId`: kotlin.String, `googleConversationId`: kotlin.String, `expected`: NativeRcsContextExpectation): kotlin.ULong
+    
+    /**
+     * Marks a trusted host download as retryable/terminal without allowing a caller to fabricate
+     * `Stored`; stored requires a real hosted descriptor through `gateway_finalize_rcs_media_download`.
+     */
+    fun `gatewayMarkRcsMediaDownloadState`(`messageId`: kotlin.String, `attachmentIndex`: kotlin.UInt, `state`: kotlin.String)
+    
+    /**
+     * Trusted Android gateway work only. The returned opaque reference must be supplied solely to
+     * Go's private download API and never to a renderer.
+     */
+    fun `gatewayPendingRcsMediaReceiveTasks`(): List<NativePendingRcsMediaReceive>
     
     fun `gatewayRcsCutoverAlerts`(): NativeRcsCutoverAlerts
     
@@ -7480,6 +7613,46 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    /**
+     * Desktop and UI callers address an original attachment index; core derives the authenticated
+     * source gateway and rejects states that cannot be retried.
+     */
+    @Throws(MobileBindingsException::class)override fun `demandRcsMediaRetryForAttachment`(`messageId`: kotlin.String, `attachmentIndex`: kotlin.UInt)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_demand_rcs_media_retry_for_attachment(
+        it,
+        
+        FfiConverterString.lower(`messageId`),
+        FfiConverterUInt.lower(`attachmentIndex`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Performs only durable local accounting. `available_bytes` must be an authenticated host
+     * capacity observation; absent capacity is intentionally retryable rather than quota-full.
+     */
+    @Throws(MobileBindingsException::class)override fun `gatewayAdmitRcsMediaDownload`(`messageId`: kotlin.String, `attachmentIndex`: kotlin.UInt, `availableBytes`: kotlin.ULong?): NativeRcsMediaDownloadAdmission {
+            return FfiConverterTypeNativeRcsMediaDownloadAdmission.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_admit_rcs_media_download(
+        it,
+        
+        FfiConverterString.lower(`messageId`),
+        FfiConverterUInt.lower(`attachmentIndex`),
+        FfiConverterOptionalULong.lower(`availableBytes`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `gatewayApplyRcsStatusJson`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `statusJson`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
@@ -7579,6 +7752,46 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
 
     
     /**
+     * Emits `Stored` only after the normal hosted upload path set a real remote descriptor.
+     */
+    @Throws(MobileBindingsException::class)override fun `gatewayFinalizeRcsMediaDownload`(`messageId`: kotlin.String, `attachmentIndex`: kotlin.UInt)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_finalize_rcs_media_download(
+        it,
+        
+        FfiConverterString.lower(`messageId`),
+        FfiConverterUInt.lower(`attachmentIndex`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Encrypts a trusted private download after a held admission. The source must have exactly
+     * the manifest's declared length; the token cannot be reused for another attachment.
+     */
+    @Throws(MobileBindingsException::class)override fun `gatewayImportRcsMediaDownload`(`messageId`: kotlin.String, `attachmentIndex`: kotlin.UInt, `admissionToken`: kotlin.String, `plaintextPath`: kotlin.String): NativeAttachmentInfo {
+            return FfiConverterTypeNativeAttachmentInfo.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_import_rcs_media_download(
+        it,
+        
+        FfiConverterString.lower(`messageId`),
+        FfiConverterUInt.lower(`attachmentIndex`),
+        FfiConverterString.lower(`admissionToken`),
+        FfiConverterString.lower(`plaintextPath`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Accepts exactly the record object Go emits (`rcsReceiveRecord`). Ingest runs without a
      * checkpoint; an inline status is applied only after an accepted ingest. Retries are
      * replay-safe: ingest reports `duplicate` and the status is idempotent.
@@ -7628,6 +7841,44 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         FfiConverterString.lower(`conversationId`),
         FfiConverterString.lower(`googleConversationId`),
         FfiConverterTypeNativeRcsContextExpectation.lower(`expected`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Marks a trusted host download as retryable/terminal without allowing a caller to fabricate
+     * `Stored`; stored requires a real hosted descriptor through `gateway_finalize_rcs_media_download`.
+     */
+    @Throws(MobileBindingsException::class)override fun `gatewayMarkRcsMediaDownloadState`(`messageId`: kotlin.String, `attachmentIndex`: kotlin.UInt, `state`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_mark_rcs_media_download_state(
+        it,
+        
+        FfiConverterString.lower(`messageId`),
+        FfiConverterUInt.lower(`attachmentIndex`),
+        FfiConverterString.lower(`state`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Trusted Android gateway work only. The returned opaque reference must be supplied solely to
+     * Go's private download API and never to a renderer.
+     */
+    @Throws(MobileBindingsException::class)override fun `gatewayPendingRcsMediaReceiveTasks`(): List<NativePendingRcsMediaReceive> {
+            return FfiConverterSequenceTypeNativePendingRcsMediaReceive.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_pending_rcs_media_receive_tasks(
+        it,
+        _status)
 }
     }
     )
@@ -14207,6 +14458,73 @@ public object FfiConverterTypeNativePendingRcsCommand: FfiConverterRustBuffer<Na
 
 
 
+/**
+ * Native-host-only receive work. `media_ref` is an opaque Google credential and must never be
+ * forwarded to UI code or serialized into app diagnostics.
+ */
+data class NativePendingRcsMediaReceive (
+    var `messageId`: kotlin.String
+    , 
+    var `attachmentIndex`: kotlin.UInt
+    , 
+    var `mediaRef`: kotlin.String
+    , 
+    var `mediaType`: kotlin.String
+    , 
+    var `displayName`: kotlin.String
+    , 
+    var `plaintextBytes`: kotlin.ULong
+    , 
+    var `state`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativePendingRcsMediaReceive: FfiConverterRustBuffer<NativePendingRcsMediaReceive> {
+    override fun read(buf: ByteBuffer): NativePendingRcsMediaReceive {
+        return NativePendingRcsMediaReceive(
+            FfiConverterString.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativePendingRcsMediaReceive) = (
+            FfiConverterString.allocationSize(value.`messageId`) +
+            FfiConverterUInt.allocationSize(value.`attachmentIndex`) +
+            FfiConverterString.allocationSize(value.`mediaRef`) +
+            FfiConverterString.allocationSize(value.`mediaType`) +
+            FfiConverterString.allocationSize(value.`displayName`) +
+            FfiConverterULong.allocationSize(value.`plaintextBytes`) +
+            FfiConverterString.allocationSize(value.`state`)
+    )
+
+    override fun write(value: NativePendingRcsMediaReceive, buf: ByteBuffer) {
+            FfiConverterString.write(value.`messageId`, buf)
+            FfiConverterUInt.write(value.`attachmentIndex`, buf)
+            FfiConverterString.write(value.`mediaRef`, buf)
+            FfiConverterString.write(value.`mediaType`, buf)
+            FfiConverterString.write(value.`displayName`, buf)
+            FfiConverterULong.write(value.`plaintextBytes`, buf)
+            FfiConverterString.write(value.`state`, buf)
+    }
+}
+
+
+
 data class NativePendingVaultRequest (
     var `origin`: kotlin.String
     , 
@@ -15066,6 +15384,73 @@ public object FfiConverterTypeNativeRcsLinkStatus: FfiConverterRustBuffer<Native
             FfiConverterULong.write(value.`capabilityRevision`, buf)
             FfiConverterUInt.write(value.`featureBits`, buf)
             FfiConverterOptionalLong.write(value.`expiresAtMs`, buf)
+    }
+}
+
+
+
+/**
+ * Advisory attachment metadata for the native upload coordinator. No plaintext path or Google
+ * reference crosses this boundary.
+ */
+data class NativeRcsMediaAttachment (
+    var `commandId`: kotlin.String
+    , 
+    var `attachmentIndex`: kotlin.UInt
+    , 
+    var `attachmentId`: kotlin.String
+    , 
+    var `mime`: kotlin.String
+    , 
+    var `name`: kotlin.String
+    , 
+    var `size`: kotlin.ULong
+    , 
+    var `uploadRequired`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsMediaAttachment: FfiConverterRustBuffer<NativeRcsMediaAttachment> {
+    override fun read(buf: ByteBuffer): NativeRcsMediaAttachment {
+        return NativeRcsMediaAttachment(
+            FfiConverterString.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeRcsMediaAttachment) = (
+            FfiConverterString.allocationSize(value.`commandId`) +
+            FfiConverterUInt.allocationSize(value.`attachmentIndex`) +
+            FfiConverterString.allocationSize(value.`attachmentId`) +
+            FfiConverterString.allocationSize(value.`mime`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterULong.allocationSize(value.`size`) +
+            FfiConverterBoolean.allocationSize(value.`uploadRequired`)
+    )
+
+    override fun write(value: NativeRcsMediaAttachment, buf: ByteBuffer) {
+            FfiConverterString.write(value.`commandId`, buf)
+            FfiConverterUInt.write(value.`attachmentIndex`, buf)
+            FfiConverterString.write(value.`attachmentId`, buf)
+            FfiConverterString.write(value.`mime`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterULong.write(value.`size`, buf)
+            FfiConverterBoolean.write(value.`uploadRequired`, buf)
     }
 }
 
@@ -18756,6 +19141,135 @@ public object FfiConverterTypeNativeRcsMappingVerification: FfiConverterRustBuff
 
 
 
+/**
+ * Result of a trusted host's local pre-download capacity check. A held token is opaque and can
+ * only import the exact message/index it was issued for.
+ */
+sealed class NativeRcsMediaDownloadAdmission {
+    
+    data class Held(
+        val `token`: kotlin.String) : NativeRcsMediaDownloadAdmission()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class ExistingPrepared(
+        val `attachmentId`: kotlin.String) : NativeRcsMediaDownloadAdmission()
+        
+    {
+        
+
+        companion object
+    }
+    
+    object TooLarge : NativeRcsMediaDownloadAdmission()
+    
+    
+    object QuotaFull : NativeRcsMediaDownloadAdmission()
+    
+    
+    object CapacityUnavailable : NativeRcsMediaDownloadAdmission()
+    
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsMediaDownloadAdmission : FfiConverterRustBuffer<NativeRcsMediaDownloadAdmission>{
+    override fun read(buf: ByteBuffer): NativeRcsMediaDownloadAdmission {
+        return when(buf.getInt()) {
+            1 -> NativeRcsMediaDownloadAdmission.Held(
+                FfiConverterString.read(buf),
+                )
+            2 -> NativeRcsMediaDownloadAdmission.ExistingPrepared(
+                FfiConverterString.read(buf),
+                )
+            3 -> NativeRcsMediaDownloadAdmission.TooLarge
+            4 -> NativeRcsMediaDownloadAdmission.QuotaFull
+            5 -> NativeRcsMediaDownloadAdmission.CapacityUnavailable
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: NativeRcsMediaDownloadAdmission): ULong = when(value) {
+        is NativeRcsMediaDownloadAdmission.Held -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`token`)
+            )
+        }
+        is NativeRcsMediaDownloadAdmission.ExistingPrepared -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`attachmentId`)
+            )
+        }
+        is NativeRcsMediaDownloadAdmission.TooLarge -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is NativeRcsMediaDownloadAdmission.QuotaFull -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is NativeRcsMediaDownloadAdmission.CapacityUnavailable -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: NativeRcsMediaDownloadAdmission, buf: ByteBuffer) {
+        when(value) {
+            is NativeRcsMediaDownloadAdmission.Held -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`token`, buf)
+                Unit
+            }
+            is NativeRcsMediaDownloadAdmission.ExistingPrepared -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`attachmentId`, buf)
+                Unit
+            }
+            is NativeRcsMediaDownloadAdmission.TooLarge -> {
+                buf.putInt(3)
+                Unit
+            }
+            is NativeRcsMediaDownloadAdmission.QuotaFull -> {
+                buf.putInt(4)
+                Unit
+            }
+            is NativeRcsMediaDownloadAdmission.CapacityUnavailable -> {
+                buf.putInt(5)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
 
 enum class NativeRcsObservationProvenance {
     
@@ -19830,6 +20344,38 @@ public object FfiConverterOptionalTypeNativeRcsLinkStatus: FfiConverterRustBuffe
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeNativeRcsMediaAttachment: FfiConverterRustBuffer<NativeRcsMediaAttachment?> {
+    override fun read(buf: ByteBuffer): NativeRcsMediaAttachment? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNativeRcsMediaAttachment.read(buf)
+    }
+
+    override fun allocationSize(value: NativeRcsMediaAttachment?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNativeRcsMediaAttachment.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NativeRcsMediaAttachment?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNativeRcsMediaAttachment.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeNativeRcsReceiveContext: FfiConverterRustBuffer<NativeRcsReceiveContext?> {
     override fun read(buf: ByteBuffer): NativeRcsReceiveContext? {
         if (buf.get().toInt() == 0) {
@@ -20690,6 +21236,34 @@ public object FfiConverterSequenceTypeNativePendingRcsCommand: FfiConverterRustB
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeNativePendingRcsMediaReceive: FfiConverterRustBuffer<List<NativePendingRcsMediaReceive>> {
+    override fun read(buf: ByteBuffer): List<NativePendingRcsMediaReceive> {
+        val len = buf.getInt()
+        return List<NativePendingRcsMediaReceive>(len) {
+            FfiConverterTypeNativePendingRcsMediaReceive.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativePendingRcsMediaReceive>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativePendingRcsMediaReceive.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativePendingRcsMediaReceive>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativePendingRcsMediaReceive.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeNativePhoneReadCandidate: FfiConverterRustBuffer<List<NativePhoneReadCandidate>> {
     override fun read(buf: ByteBuffer): List<NativePhoneReadCandidate> {
         val len = buf.getInt()
@@ -21003,6 +21577,20 @@ public object FfiConverterSequenceTypeNativeRcsBootstrapResolution: FfiConverter
         
         FfiConverterString.lower(`vaultId`),
         FfiConverterString.lower(`passphrase`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `gatewayDecryptRcsAttachmentToFile`(`client`: NativeClient, `attachmentId`: kotlin.String, `destinationDir`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_decrypt_rcs_attachment_to_file(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`attachmentId`),
+        FfiConverterString.lower(`destinationDir`),_status)
 }
     )
     }
@@ -21591,6 +22179,49 @@ public object FfiConverterSequenceTypeNativeRcsBootstrapResolution: FfiConverter
     }
     
 
+    @Throws(MobileBindingsException::class) fun `gatewayIssueRcsMediaPermit`(`client`: NativeClient, `commandId`: kotlin.String, `attachmentIndex`: kotlin.UInt, `nowMs`: kotlin.Long): NativeRcsSendPreparation {
+            return FfiConverterTypeNativeRcsSendPreparation.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_issue_rcs_media_permit(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`commandId`),
+        FfiConverterUInt.lower(`attachmentIndex`),
+        FfiConverterLong.lower(`nowMs`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `gatewayMarkRcsMediaReferenceReady`(`client`: NativeClient, `commandId`: kotlin.String, `attachmentIndex`: kotlin.UInt, `mediaRef`: kotlin.String, `uploadedAtMs`: kotlin.Long)
+        = 
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_mark_rcs_media_reference_ready(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`commandId`),
+        FfiConverterUInt.lower(`attachmentIndex`),
+        FfiConverterString.lower(`mediaRef`),
+        FfiConverterLong.lower(`uploadedAtMs`),_status)
+}
+    
+    
+
+    @Throws(MobileBindingsException::class) fun `gatewayMarkRcsMediaUploading`(`client`: NativeClient, `commandId`: kotlin.String, `attachmentIndex`: kotlin.UInt)
+        = 
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_mark_rcs_media_uploading(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`commandId`),
+        FfiConverterUInt.lower(`attachmentIndex`),_status)
+}
+    
+    
+
     @Throws(MobileBindingsException::class) fun `gatewayNextRcsContextTuple`(`client`: NativeClient, `runtimeId`: kotlin.String, `runGeneration`: kotlin.ULong, `streamEpoch`: kotlin.ULong, `pairingEvidenceId`: kotlin.String): NativeRcsContextTuple {
             return FfiConverterTypeNativeRcsContextTuple.lift(
     uniffiRustCallWithError(MobileBindingsException) { _status ->
@@ -21620,6 +22251,20 @@ public object FfiConverterSequenceTypeNativeRcsBootstrapResolution: FfiConverter
     }
     
 
+    @Throws(MobileBindingsException::class) fun `gatewayNextRcsMediaAttachment`(`client`: NativeClient, `commandId`: kotlin.String, `nowMs`: kotlin.Long): NativeRcsMediaAttachment? {
+            return FfiConverterOptionalTypeNativeRcsMediaAttachment.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_next_rcs_media_attachment(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`commandId`),
+        FfiConverterLong.lower(`nowMs`),_status)
+}
+    )
+    }
+    
+
     @Throws(MobileBindingsException::class) fun `gatewayPendingNativeRcsCommands`(`client`: NativeClient): List<NativePendingRcsCommand> {
             return FfiConverterSequenceTypeNativePendingRcsCommand.lift(
     uniffiRustCallWithError(MobileBindingsException) { _status ->
@@ -21627,6 +22272,23 @@ public object FfiConverterSequenceTypeNativeRcsBootstrapResolution: FfiConverter
     
         
         FfiConverterTypeNativeClient.lower(`client`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Sanitized received RCS media commands eligible for the gateway upload coordinator. The command
+         * ID is opaque; media references and plaintext paths remain core-local.
+         */
+    @Throws(MobileBindingsException::class) fun `gatewayPendingRcsMediaCommands`(`client`: NativeClient, `nowMs`: kotlin.Long): List<NativePendingRcsCommand> {
+            return FfiConverterSequenceTypeNativePendingRcsCommand.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_pending_rcs_media_commands(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterLong.lower(`nowMs`),_status)
 }
     )
     }
@@ -21709,6 +22371,34 @@ public object FfiConverterSequenceTypeNativeRcsBootstrapResolution: FfiConverter
         FfiConverterTypeNativeClient.lower(`client`),
         FfiConverterLong.lower(`observedAtMs`),
         FfiConverterLong.lower(`nowMs`),_status)
+}
+    
+    
+
+    @Throws(MobileBindingsException::class) fun `gatewayRecordRcsMediaCommit`(`client`: NativeClient, `commandId`: kotlin.String, `attachmentIndex`: kotlin.UInt)
+        = 
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_media_commit(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`commandId`),
+        FfiConverterUInt.lower(`attachmentIndex`),_status)
+}
+    
+    
+
+    @Throws(MobileBindingsException::class) fun `gatewayRecordRcsMediaOutcome`(`client`: NativeClient, `commandId`: kotlin.String, `attachmentIndex`: kotlin.UInt, `code`: kotlin.String, `atMs`: kotlin.Long)
+        = 
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_media_outcome(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`commandId`),
+        FfiConverterUInt.lower(`attachmentIndex`),
+        FfiConverterString.lower(`code`),
+        FfiConverterLong.lower(`atMs`),_status)
 }
     
     

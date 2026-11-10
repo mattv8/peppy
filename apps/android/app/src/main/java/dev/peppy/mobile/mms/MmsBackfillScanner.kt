@@ -7,6 +7,7 @@ import dev.peppy.mobile.diagnostics.SyncTraceField
 import dev.peppy.mobile.diagnostics.captureMmsStage
 import dev.peppy.mobile.gateway.MessageHistoryRequestCoordinator
 import dev.peppy.mobile.gateway.MmsHistoryCaptureAdmission
+import kotlinx.coroutines.CancellationException
 
 
 internal enum class MmsBackfillPhase { LIVE, PROVIDER_RESCAN, HISTORY, RECHECK }
@@ -84,6 +85,7 @@ internal class MmsBackfillScanner(private val core: MmsBackfillCore) {
         recheckConditions: MmsBackfillRecheckConditions,
         scanPage: (MmsBackfillScanPlan) -> MmsBackfillPageResult,
         recheck: (MmsBackfillRecheckRequest) -> MmsBackfillRecheckOutcome?,
+        onRecheckFeedbackFailure: () -> Unit = {},
         historyAdmission: MmsHistoryCaptureAdmission? = null,
         canRunPlan: (MmsBackfillScanPlan) -> Boolean = { true },
         canCommitProviderRescan: () -> Boolean = { true },
@@ -121,7 +123,14 @@ internal class MmsBackfillScanner(private val core: MmsBackfillCore) {
                     requests.requests.forEach { request ->
                         val outcome = recheck(request) ?: return@forEach
                         actuallyAttempted++
-                        core.recordRecheckOutcome(request.acquisitionId, nowMs, outcome, recheckConditions)
+                        try {
+                            core.recordRecheckOutcome(request.acquisitionId, nowMs, outcome, recheckConditions)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (_: Exception) {
+                            onRecheckFeedbackFailure()
+                            return@forEach
+                        }
                         completedSelected = completedSelected || request.state == MmsBackfillRecheckState.COMPLETE
                         recheckMore = recheckMore || outcome == MmsBackfillRecheckOutcome.PROGRESS
                     }

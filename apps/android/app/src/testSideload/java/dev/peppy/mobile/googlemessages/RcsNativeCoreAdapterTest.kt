@@ -32,7 +32,7 @@ class RcsNativeCoreAdapterTest {
         assertEquals(listOf(101L, 102L), port.nowValues)
     }
 
-    @Test fun `not found complete maps conservatively to unknown`() {
+    @Test fun `not found complete maps to carrier only`() {
         assertEquals(RcsNativeMappingVerification.Mapped, nativeRcsMappingVerification(NativeRcsMappingVerification.MAPPED))
         assertEquals(RcsNativeMappingVerification.GoogleConversationAmbiguous, nativeRcsMappingVerification(NativeRcsMappingVerification.GOOGLE_CONVERSATION_AMBIGUOUS))
         assertEquals(RcsNativeMappingVerification.Refused, nativeRcsMappingVerification(NativeRcsMappingVerification.REFUSED))
@@ -40,7 +40,7 @@ class RcsNativeCoreAdapterTest {
         assertEquals(RcsNativeTarget.Ambiguous, nativeRcsTarget(NativeRcsTargetDecision.Ambiguous))
         assertEquals(RcsNativeTarget.Unknown, nativeRcsTarget(NativeRcsTargetDecision.Unknown))
         assertEquals(RcsNativeTarget.Unsupported, nativeRcsTarget(NativeRcsTargetDecision.Unsupported))
-        assertEquals(RcsNativeTarget.Unknown, nativeRcsTarget(NativeRcsTargetDecision.NotFoundComplete))
+        assertEquals(RcsNativeTarget.CarrierOnly, nativeRcsTarget(NativeRcsTargetDecision.NotFoundComplete))
     }
 
     @Test fun `group members changed at begin is a definite refusal, not an unknown outcome`() {

@@ -314,6 +314,15 @@ pub struct AttachmentView {
     /// Draft-transfer state, present only for attachments displayed in a draft.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft_state: Option<&'static str>,
+    /// Original position in an RCS message; used to address a retry demand safely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<u32>,
+    /// Sanitized incoming RCS media state for a known receive placeholder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rcs_state: Option<&'static str>,
+    /// Sanitized outgoing RCS media state, never an internal ledger state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rcs_send_status: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -470,6 +479,8 @@ pub struct SendResultView {
     /// Current members and revision, only for a `members_changed` group refusal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<GroupRefusalView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refused_attachment_ids: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -531,6 +542,9 @@ pub fn attachment_view(
         remote_state: None,
         local_available: None,
         draft_state: None,
+        index: None,
+        rcs_state: None,
+        rcs_send_status: None,
     }
 }
 

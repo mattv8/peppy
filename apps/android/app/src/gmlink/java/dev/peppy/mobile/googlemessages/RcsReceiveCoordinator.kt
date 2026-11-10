@@ -55,6 +55,7 @@ internal class RcsReceiveCoordinator(
             when (event) {
                 is LiveEvent.Record -> runCatching {
                     core.ingest(context, event.record, NativeRcsObservationProvenance.LIVE)
+                    GoogleMessagesLinkService.requestRcsMediaReceive()
                 }
                 is LiveEvent.ProtocolSwitch -> runCatching { core.invalidate(context, googleId) }
             }
@@ -192,7 +193,11 @@ internal class RcsReceiveCoordinator(
 
     /** True when the ingest must abort the run. A duplicate or a provider-floor refusal is a skip. */
     private fun ingestAborts(context: NativeRcsReceiveContext, record: String): Boolean {
-        val outcome = runCatching { core.ingest(context, record, NativeRcsObservationProvenance.HISTORICAL) }.getOrNull() ?: return true
+        val outcome = runCatching {
+            core.ingest(context, record, NativeRcsObservationProvenance.HISTORICAL).also {
+                GoogleMessagesLinkService.requestRcsMediaReceive()
+            }
+        }.getOrNull() ?: return true
         val refusal = listOfNotNull(outcome.recordOutcome, outcome.statusOutcome).firstOrNull { it.startsWith(REJECTED_PREFIX) } ?: return false
         return refusal != PROVIDER_FLOOR_REFUSAL
     }

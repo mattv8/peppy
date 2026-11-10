@@ -499,6 +499,7 @@ impl RcsPermit {
             proof_version: self.target.proof_version,
             proof_digest: self.proof_digest.to_vec(),
             message_body: self.message.body.clone(),
+            media: None,
             target: self.target.clone(),
             expected_member_digest: None,
         }
@@ -733,6 +734,7 @@ pub(crate) fn group_commit_projection(
         proof_version: authority.proof_version,
         proof_digest: authority.proof_digest.to_vec(),
         message_body,
+        media: None,
         target: LocalRcsTargetSnapshot {
             proof_version: authority.proof_version,
             peppy_conversation_id: authority.conversation_id.to_string(),

@@ -1,16 +1,110 @@
 use crate::{AttachmentView, MessageView, message_view as base_message_view};
-use peppy_client_core::{Client, Error, Message, RcsMessageStatus, Transport};
+use peppy_client_core::{Client, Direction, Error, Message, RcsMessageStatus, Transport};
+
+const MAX_RCS_MEDIA_ATTACHMENTS: u32 = 10;
+
+fn incoming_attachments(
+    client: &Client,
+    message: &Message,
+    mut attachments: Vec<AttachmentView>,
+) -> Result<Vec<AttachmentView>, Error> {
+    let mut projected = Vec::new();
+    for index in 0..=MAX_RCS_MEDIA_ATTACHMENTS {
+        let Some(receive) =
+            client.rcs_media_receive_view(message.payload.record.message_id, index)?
+        else {
+            continue;
+        };
+        let stored = receive.attachment_id.as_ref().and_then(|attachment_id| {
+            attachments
+                .iter()
+                .position(|attachment| attachment.id == attachment_id.to_string())
+                .map(|position| attachments.remove(position))
+        });
+        let mut attachment = stored.unwrap_or(AttachmentView {
+            id: receive.placeholder_id.clone(),
+            name: receive.display_name.clone(),
+            media_type: receive.media_type.clone(),
+            byte_size: receive.plaintext_bytes,
+            state: "pending",
+            error: None,
+            preview_url: None,
+            transfer: None,
+            retryable: None,
+            media_hold: None,
+            media_meta: None,
+            remote_state: None,
+            local_available: None,
+            draft_state: None,
+            index: None,
+            rcs_state: None,
+            rcs_send_status: None,
+        });
+        attachment.name = receive.display_name;
+        attachment.media_type = receive.media_type;
+        attachment.byte_size = receive.plaintext_bytes;
+        attachment.index = Some(receive.attachment_index);
+        attachment.rcs_state = Some(receive.state.code());
+        projected.push(attachment);
+    }
+    projected.extend(attachments);
+    Ok(projected)
+}
 
 pub fn message_view(
     client: &Client,
     message: &Message,
-    attachments: Vec<AttachmentView>,
+    mut attachments: Vec<AttachmentView>,
 ) -> Result<MessageView, Error> {
+    let is_rcs = message.payload.transport == Transport::Rcs;
+    let mut has_outgoing_rcs_media = false;
+    if is_rcs || message.payload.direction == Direction::Outgoing {
+        if message.payload.direction == Direction::Incoming {
+            attachments = incoming_attachments(client, message, attachments)?;
+        }
+        for attachment in &mut attachments {
+            if message.payload.direction == Direction::Incoming && attachment.rcs_state.is_some() {
+                continue;
+            }
+            let index = message
+                .payload
+                .record
+                .attachments
+                .iter()
+                .position(|reference| reference.attachment_id.to_string() == attachment.id)
+                .and_then(|position| u32::try_from(position).ok())
+                .ok_or(Error::Database)?;
+            if message.payload.direction == Direction::Outgoing {
+                let Some(status) =
+                    client.rcs_media_outgoing_status(message.payload.record.message_id, index)?
+                else {
+                    if is_rcs {
+                        attachment.index = Some(index);
+                    }
+                    continue;
+                };
+                if status.attachment_id.to_string() != attachment.id {
+                    return Err(Error::Database);
+                }
+                has_outgoing_rcs_media = true;
+                attachment.index = Some(index);
+                attachment.rcs_send_status = Some(status.state.code());
+                if let Some(reason) = status.reason {
+                    attachment.error = Some(reason.code().to_owned());
+                }
+            } else {
+                attachment.index = Some(index);
+            }
+        }
+    }
     let mut view = base_message_view(message, attachments);
-    if message.payload.transport != Transport::Rcs {
+    if !is_rcs && !has_outgoing_rcs_media {
         return Ok(view);
     }
     view.transport = Some("rcs");
+    if !is_rcs {
+        return Ok(view);
+    }
     view.rcs_reported = client
         .rcs_message_reported(message.payload.record.message_id)?
         .unwrap_or(false);
@@ -80,6 +174,12 @@ mod tests {
         }
     }
 
+    fn mms_message() -> Message {
+        let mut message = rcs_message(None);
+        message.payload.transport = Transport::Mms;
+        message
+    }
+
     #[test]
     fn rcs_without_a_status_row_preserves_m2_send_state() {
         let client = client();
@@ -97,5 +197,13 @@ mod tests {
             assert_eq!(view.status_at.as_deref(), Some("2"));
             assert!(!view.rcs_reported);
         }
+    }
+
+    #[test]
+    fn outgoing_mms_without_rcs_media_status_stays_mms() {
+        let view = message_view(&client(), &mms_message(), vec![]).unwrap();
+
+        assert_eq!(view.transport, Some("mms"));
+        assert!(!view.rcs_reported);
     }
 }

@@ -328,6 +328,7 @@ impl BrowserCore {
             "search_local" => self.search_local(args_value(raw_args)?),
             "advance_search_index" => self.advance_search_index(args_value(raw_args)?),
             "load_message_window" => self.load_message_window(args_value(raw_args)?),
+            "retry_rcs_media_download" => self.retry_rcs_media_download(args_value(raw_args)?),
             "save_draft" => self.save_draft(args_value(raw_args)?),
             "discard_draft" => self.discard_draft(args_value(raw_args)?),
             "send_draft" => self.send_draft(args_value(raw_args)?),
@@ -792,6 +793,9 @@ impl BrowserCore {
                                 remote_state: None,
                                 local_available: Some(false),
                                 draft_state: Some("saving"),
+                                index: None,
+                                rcs_state: None,
+                                rcs_send_status: None,
                             }
                         }
                         Err(_) => dto::AttachmentView {
@@ -809,6 +813,9 @@ impl BrowserCore {
                             remote_state: None,
                             local_available: Some(false),
                             draft_state: Some("unavailable"),
+                            index: None,
+                            rcs_state: None,
+                            rcs_send_status: None,
                         },
                     }
                 })
@@ -870,6 +877,20 @@ impl BrowserCore {
             rcs_receive::message_view(client, &message)
         })?)
         .map_err(|_| core(CoreError::Database))
+    }
+    fn retry_rcs_media_download(&self, args: Value) -> Result<Value, Failure> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RetryRcsMediaDownload {
+            message_id: String,
+            attachment_index: u32,
+        }
+        let request: RetryRcsMediaDownload = serde_json::from_value(args).map_err(|_| invalid())?;
+        let message_id = MessageId::from_str(&request.message_id).map_err(|_| invalid())?;
+        self.client()?
+            .demand_rcs_media_retry_for_attachment(message_id, request.attachment_index)
+            .map_err(core)?;
+        Ok(json!({}))
     }
     fn save_draft(&self, args: Value) -> Result<Value, Failure> {
         let input: DraftInput = serde_json::from_value(args).map_err(|_| invalid())?;

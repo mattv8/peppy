@@ -1167,6 +1167,18 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func unlock(profileJson: String, headerJson: String, passphrase: String) throws 
     
+    /**
+     * Desktop and UI callers address an original attachment index; core derives the authenticated
+     * source gateway and rejects states that cannot be retried.
+     */
+    func demandRcsMediaRetryForAttachment(messageId: String, attachmentIndex: UInt32) throws 
+    
+    /**
+     * Performs only durable local accounting. `available_bytes` must be an authenticated host
+     * capacity observation; absent capacity is intentionally retryable rather than quota-full.
+     */
+    func gatewayAdmitRcsMediaDownload(messageId: String, attachmentIndex: UInt32, availableBytes: UInt64?) throws  -> NativeRcsMediaDownloadAdmission
+    
     func gatewayApplyRcsStatusJson(conversationId: String, ownershipGeneration: UInt64, statusJson: String) throws  -> String
     
     func gatewayBeginRcsOwnerUnlinkCutover(conversationId: String, expectedOwnershipGeneration: UInt64, expectedLifecycleGeneration: UInt64) throws  -> NativeRcsCutover
@@ -1180,6 +1192,17 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func gatewayCompleteRcsRecovery(conversationId: String, ownershipGeneration: UInt64, targetMs: Int64) throws  -> String
     
     /**
+     * Emits `Stored` only after the normal hosted upload path set a real remote descriptor.
+     */
+    func gatewayFinalizeRcsMediaDownload(messageId: String, attachmentIndex: UInt32) throws 
+    
+    /**
+     * Encrypts a trusted private download after a held admission. The source must have exactly
+     * the manifest's declared length; the token cannot be reused for another attachment.
+     */
+    func gatewayImportRcsMediaDownload(messageId: String, attachmentIndex: UInt32, admissionToken: String, plaintextPath: String) throws  -> NativeAttachmentInfo
+    
+    /**
      * Accepts exactly the record object Go emits (`rcsReceiveRecord`). Ingest runs without a
      * checkpoint; an inline status is applied only after an accepted ingest. Retries are
      * replay-safe: ingest reports `duplicate` and the status is idempotent.
@@ -1189,6 +1212,18 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func gatewayIngestRcsProjectedObservation(conversationId: String, ownershipGeneration: UInt64, goRecordJson: String, provenance: NativeRcsObservationProvenance) throws  -> NativeRcsIngestOutcome
     
     func gatewayInvalidateRcsContextForGoogleEvent(conversationId: String, googleConversationId: String, expected: NativeRcsContextExpectation) throws  -> UInt64
+    
+    /**
+     * Marks a trusted host download as retryable/terminal without allowing a caller to fabricate
+     * `Stored`; stored requires a real hosted descriptor through `gateway_finalize_rcs_media_download`.
+     */
+    func gatewayMarkRcsMediaDownloadState(messageId: String, attachmentIndex: UInt32, state: String) throws 
+    
+    /**
+     * Trusted Android gateway work only. The returned opaque reference must be supplied solely to
+     * Go's private download API and never to a renderer.
+     */
+    func gatewayPendingRcsMediaReceiveTasks() throws  -> [NativePendingRcsMediaReceive]
     
     func gatewayRcsCutoverAlerts() throws  -> NativeRcsCutoverAlerts
     
@@ -3398,6 +3433,36 @@ open func unlock(profileJson: String, headerJson: String, passphrase: String)thr
 }
 }
     
+    /**
+     * Desktop and UI callers address an original attachment index; core derives the authenticated
+     * source gateway and rejects states that cannot be retried.
+     */
+open func demandRcsMediaRetryForAttachment(messageId: String, attachmentIndex: UInt32)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_demand_rcs_media_retry_for_attachment(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),
+        FfiConverterUInt32.lower(attachmentIndex),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Performs only durable local accounting. `available_bytes` must be an authenticated host
+     * capacity observation; absent capacity is intentionally retryable rather than quota-full.
+     */
+open func gatewayAdmitRcsMediaDownload(messageId: String, attachmentIndex: UInt32, availableBytes: UInt64?)throws  -> NativeRcsMediaDownloadAdmission  {
+    return try  FfiConverterTypeNativeRcsMediaDownloadAdmission_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_admit_rcs_media_download(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),
+        FfiConverterUInt32.lower(attachmentIndex),
+        FfiConverterOptionUInt64.lower(availableBytes),uniffiCallStatus
+    )
+})
+}
+    
 open func gatewayApplyRcsStatusJson(conversationId: String, ownershipGeneration: UInt64, statusJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -3467,6 +3532,36 @@ open func gatewayCompleteRcsRecovery(conversationId: String, ownershipGeneration
 }
     
     /**
+     * Emits `Stored` only after the normal hosted upload path set a real remote descriptor.
+     */
+open func gatewayFinalizeRcsMediaDownload(messageId: String, attachmentIndex: UInt32)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_finalize_rcs_media_download(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),
+        FfiConverterUInt32.lower(attachmentIndex),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Encrypts a trusted private download after a held admission. The source must have exactly
+     * the manifest's declared length; the token cannot be reused for another attachment.
+     */
+open func gatewayImportRcsMediaDownload(messageId: String, attachmentIndex: UInt32, admissionToken: String, plaintextPath: String)throws  -> NativeAttachmentInfo  {
+    return try  FfiConverterTypeNativeAttachmentInfo_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_import_rcs_media_download(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),
+        FfiConverterUInt32.lower(attachmentIndex),
+        FfiConverterString.lower(admissionToken),
+        FfiConverterString.lower(plaintextPath),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Accepts exactly the record object Go emits (`rcsReceiveRecord`). Ingest runs without a
      * checkpoint; an inline status is applied only after an accepted ingest. Retries are
      * replay-safe: ingest reports `duplicate` and the status is idempotent.
@@ -3504,6 +3599,34 @@ open func gatewayInvalidateRcsContextForGoogleEvent(conversationId: String, goog
         FfiConverterString.lower(conversationId),
         FfiConverterString.lower(googleConversationId),
         FfiConverterTypeNativeRcsContextExpectation_lower(expected),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Marks a trusted host download as retryable/terminal without allowing a caller to fabricate
+     * `Stored`; stored requires a real hosted descriptor through `gateway_finalize_rcs_media_download`.
+     */
+open func gatewayMarkRcsMediaDownloadState(messageId: String, attachmentIndex: UInt32, state: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_mark_rcs_media_download_state(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),
+        FfiConverterUInt32.lower(attachmentIndex),
+        FfiConverterString.lower(state),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Trusted Android gateway work only. The returned opaque reference must be supplied solely to
+     * Go's private download API and never to a renderer.
+     */
+open func gatewayPendingRcsMediaReceiveTasks()throws  -> [NativePendingRcsMediaReceive]  {
+    return try  FfiConverterSequenceTypeNativePendingRcsMediaReceive.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_pending_rcs_media_receive_tasks(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -9453,6 +9576,84 @@ public func FfiConverterTypeNativePendingRcsCommand_lower(_ value: NativePending
 }
 
 
+/**
+ * Native-host-only receive work. `media_ref` is an opaque Google credential and must never be
+ * forwarded to UI code or serialized into app diagnostics.
+ */
+public struct NativePendingRcsMediaReceive: Equatable, Hashable {
+    public var messageId: String
+    public var attachmentIndex: UInt32
+    public var mediaRef: String
+    public var mediaType: String
+    public var displayName: String
+    public var plaintextBytes: UInt64
+    public var state: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(messageId: String, attachmentIndex: UInt32, mediaRef: String, mediaType: String, displayName: String, plaintextBytes: UInt64, state: String) {
+        self.messageId = messageId
+        self.attachmentIndex = attachmentIndex
+        self.mediaRef = mediaRef
+        self.mediaType = mediaType
+        self.displayName = displayName
+        self.plaintextBytes = plaintextBytes
+        self.state = state
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativePendingRcsMediaReceive: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativePendingRcsMediaReceive: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePendingRcsMediaReceive {
+        return
+            try NativePendingRcsMediaReceive(
+                messageId: FfiConverterString.read(from: &buf), 
+                attachmentIndex: FfiConverterUInt32.read(from: &buf), 
+                mediaRef: FfiConverterString.read(from: &buf), 
+                mediaType: FfiConverterString.read(from: &buf), 
+                displayName: FfiConverterString.read(from: &buf), 
+                plaintextBytes: FfiConverterUInt64.read(from: &buf), 
+                state: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativePendingRcsMediaReceive, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterUInt32.write(value.attachmentIndex, into: &buf)
+        FfiConverterString.write(value.mediaRef, into: &buf)
+        FfiConverterString.write(value.mediaType, into: &buf)
+        FfiConverterString.write(value.displayName, into: &buf)
+        FfiConverterUInt64.write(value.plaintextBytes, into: &buf)
+        FfiConverterString.write(value.state, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePendingRcsMediaReceive_lift(_ buf: RustBuffer) throws -> NativePendingRcsMediaReceive {
+    return try FfiConverterTypeNativePendingRcsMediaReceive.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePendingRcsMediaReceive_lower(_ value: NativePendingRcsMediaReceive) -> RustBuffer {
+    return FfiConverterTypeNativePendingRcsMediaReceive.lower(value)
+}
+
+
 public struct NativePendingVaultRequest: Equatable, Hashable {
     public var origin: String
     public var requestId: String
@@ -10590,6 +10791,84 @@ public func FfiConverterTypeNativeRcsLinkStatus_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeNativeRcsLinkStatus_lower(_ value: NativeRcsLinkStatus) -> RustBuffer {
     return FfiConverterTypeNativeRcsLinkStatus.lower(value)
+}
+
+
+/**
+ * Advisory attachment metadata for the native upload coordinator. No plaintext path or Google
+ * reference crosses this boundary.
+ */
+public struct NativeRcsMediaAttachment: Equatable, Hashable {
+    public var commandId: String
+    public var attachmentIndex: UInt32
+    public var attachmentId: String
+    public var mime: String
+    public var name: String
+    public var size: UInt64
+    public var uploadRequired: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(commandId: String, attachmentIndex: UInt32, attachmentId: String, mime: String, name: String, size: UInt64, uploadRequired: Bool) {
+        self.commandId = commandId
+        self.attachmentIndex = attachmentIndex
+        self.attachmentId = attachmentId
+        self.mime = mime
+        self.name = name
+        self.size = size
+        self.uploadRequired = uploadRequired
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeRcsMediaAttachment: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRcsMediaAttachment: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsMediaAttachment {
+        return
+            try NativeRcsMediaAttachment(
+                commandId: FfiConverterString.read(from: &buf), 
+                attachmentIndex: FfiConverterUInt32.read(from: &buf), 
+                attachmentId: FfiConverterString.read(from: &buf), 
+                mime: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                size: FfiConverterUInt64.read(from: &buf), 
+                uploadRequired: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeRcsMediaAttachment, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.commandId, into: &buf)
+        FfiConverterUInt32.write(value.attachmentIndex, into: &buf)
+        FfiConverterString.write(value.attachmentId, into: &buf)
+        FfiConverterString.write(value.mime, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterUInt64.write(value.size, into: &buf)
+        FfiConverterBool.write(value.uploadRequired, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsMediaAttachment_lift(_ buf: RustBuffer) throws -> NativeRcsMediaAttachment {
+    return try FfiConverterTypeNativeRcsMediaAttachment.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsMediaAttachment_lower(_ value: NativeRcsMediaAttachment) -> RustBuffer {
+    return FfiConverterTypeNativeRcsMediaAttachment.lower(value)
 }
 
 
@@ -15676,6 +15955,103 @@ public func FfiConverterTypeNativeRcsMappingVerification_lower(_ value: NativeRc
 
 
 
+/**
+ * Result of a trusted host's local pre-download capacity check. A held token is opaque and can
+ * only import the exact message/index it was issued for.
+ */
+
+public enum NativeRcsMediaDownloadAdmission: Equatable, Hashable {
+    
+    case held(token: String
+    )
+    case existingPrepared(attachmentId: String
+    )
+    case tooLarge
+    case quotaFull
+    case capacityUnavailable
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeRcsMediaDownloadAdmission: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRcsMediaDownloadAdmission: FfiConverterRustBuffer {
+    typealias SwiftType = NativeRcsMediaDownloadAdmission
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsMediaDownloadAdmission {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .held(token: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 2: return .existingPrepared(attachmentId: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 3: return .tooLarge
+        
+        case 4: return .quotaFull
+        
+        case 5: return .capacityUnavailable
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeRcsMediaDownloadAdmission, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .held(token):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(token, into: &buf)
+            
+        
+        case let .existingPrepared(attachmentId):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(attachmentId, into: &buf)
+            
+        
+        case .tooLarge:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .quotaFull:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .capacityUnavailable:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsMediaDownloadAdmission_lift(_ buf: RustBuffer) throws -> NativeRcsMediaDownloadAdmission {
+    return try FfiConverterTypeNativeRcsMediaDownloadAdmission.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsMediaDownloadAdmission_lower(_ value: NativeRcsMediaDownloadAdmission) -> RustBuffer {
+    return FfiConverterTypeNativeRcsMediaDownloadAdmission.lower(value)
+}
+
+
+
 
 public enum NativeRcsObservationProvenance: Equatable, Hashable {
     
@@ -17210,6 +17586,30 @@ fileprivate struct FfiConverterOptionTypeNativeRcsLinkStatus: FfiConverterRustBu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeNativeRcsMediaAttachment: FfiConverterRustBuffer {
+    typealias SwiftType = NativeRcsMediaAttachment?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNativeRcsMediaAttachment.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNativeRcsMediaAttachment.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeNativeRcsReceiveContext: FfiConverterRustBuffer {
     typealias SwiftType = NativeRcsReceiveContext?
 
@@ -17923,6 +18323,31 @@ fileprivate struct FfiConverterSequenceTypeNativePendingRcsCommand: FfiConverter
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeNativePendingRcsMediaReceive: FfiConverterRustBuffer {
+    typealias SwiftType = [NativePendingRcsMediaReceive]
+
+    public static func write(_ value: [NativePendingRcsMediaReceive], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeNativePendingRcsMediaReceive.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [NativePendingRcsMediaReceive] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [NativePendingRcsMediaReceive]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeNativePendingRcsMediaReceive.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeNativePhoneReadCandidate: FfiConverterRustBuffer {
     typealias SwiftType = [NativePhoneReadCandidate]
 
@@ -18204,6 +18629,16 @@ public func createVaultMaterial(vaultId: String, passphrase: String)throws  -> N
     uniffi_peppy_mobile_bindings_fn_func_create_vault_material(
         FfiConverterString.lower(vaultId),
         FfiConverterString.lower(passphrase),uniffiCallStatus
+    )
+})
+}
+public func gatewayDecryptRcsAttachmentToFile(client: NativeClient, attachmentId: String, destinationDir: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_decrypt_rcs_attachment_to_file(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(attachmentId),
+        FfiConverterString.lower(destinationDir),uniffiCallStatus
     )
 })
 }
@@ -18626,6 +19061,37 @@ public func gatewayIngestGroupCandidates(client: NativeClient, snapshotJson: Str
     )
 })
 }
+public func gatewayIssueRcsMediaPermit(client: NativeClient, commandId: String, attachmentIndex: UInt32, nowMs: Int64)throws  -> NativeRcsSendPreparation  {
+    return try  FfiConverterTypeNativeRcsSendPreparation_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_issue_rcs_media_permit(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(commandId),
+        FfiConverterUInt32.lower(attachmentIndex),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+public func gatewayMarkRcsMediaReferenceReady(client: NativeClient, commandId: String, attachmentIndex: UInt32, mediaRef: String, uploadedAtMs: Int64)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_mark_rcs_media_reference_ready(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(commandId),
+        FfiConverterUInt32.lower(attachmentIndex),
+        FfiConverterString.lower(mediaRef),
+        FfiConverterInt64.lower(uploadedAtMs),uniffiCallStatus
+    )
+}
+}
+public func gatewayMarkRcsMediaUploading(client: NativeClient, commandId: String, attachmentIndex: UInt32)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_mark_rcs_media_uploading(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(commandId),
+        FfiConverterUInt32.lower(attachmentIndex),uniffiCallStatus
+    )
+}
+}
 public func gatewayNextRcsContextTuple(client: NativeClient, runtimeId: String, runGeneration: UInt64, streamEpoch: UInt64, pairingEvidenceId: String)throws  -> NativeRcsContextTuple  {
     return try  FfiConverterTypeNativeRcsContextTuple_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -18647,11 +19113,34 @@ public func gatewayNextRcsMappingRevision(client: NativeClient, conversationId: 
     )
 })
 }
+public func gatewayNextRcsMediaAttachment(client: NativeClient, commandId: String, nowMs: Int64)throws  -> NativeRcsMediaAttachment?  {
+    return try  FfiConverterOptionTypeNativeRcsMediaAttachment.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_next_rcs_media_attachment(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(commandId),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
 public func gatewayPendingNativeRcsCommands(client: NativeClient)throws  -> [NativePendingRcsCommand]  {
     return try  FfiConverterSequenceTypeNativePendingRcsCommand.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_func_gateway_pending_native_rcs_commands(
         FfiConverterTypeNativeClient_lower(client),uniffiCallStatus
+    )
+})
+}
+/**
+ * Sanitized received RCS media commands eligible for the gateway upload coordinator. The command
+ * ID is opaque; media references and plaintext paths remain core-local.
+ */
+public func gatewayPendingRcsMediaCommands(client: NativeClient, nowMs: Int64)throws  -> [NativePendingRcsCommand]  {
+    return try  FfiConverterSequenceTypeNativePendingRcsCommand.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_pending_rcs_media_commands(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
     )
 })
 }
@@ -18713,6 +19202,26 @@ public func gatewayRecordRcsExplicitUnlinkCompleted(client: NativeClient, observ
         FfiConverterTypeNativeClient_lower(client),
         FfiConverterInt64.lower(observedAtMs),
         FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+}
+}
+public func gatewayRecordRcsMediaCommit(client: NativeClient, commandId: String, attachmentIndex: UInt32)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_media_commit(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(commandId),
+        FfiConverterUInt32.lower(attachmentIndex),uniffiCallStatus
+    )
+}
+}
+public func gatewayRecordRcsMediaOutcome(client: NativeClient, commandId: String, attachmentIndex: UInt32, code: String, atMs: Int64)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_media_outcome(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(commandId),
+        FfiConverterUInt32.lower(attachmentIndex),
+        FfiConverterString.lower(code),
+        FfiConverterInt64.lower(atMs),uniffiCallStatus
     )
 }
 }
@@ -18845,6 +19354,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.contractVersionMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_create_vault_material() != 14347) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_decrypt_rcs_attachment_to_file() != 62292) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_open_native_client() != 13839) {
@@ -18982,13 +19494,28 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_ingest_group_candidates() != 56958) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_issue_rcs_media_permit() != 1389) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_mark_rcs_media_reference_ready() != 36987) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_mark_rcs_media_uploading() != 2782) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_context_tuple() != 10501) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_mapping_revision() != 61152) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_media_attachment() != 39010) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_pending_native_rcs_commands() != 31102) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_pending_rcs_media_commands() != 24507) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_prepare_native_rcs_send() != 22733) {
@@ -19004,6 +19531,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_explicit_unlink_completed() != 33636) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_media_commit() != 27038) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_media_outcome() != 57891) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_outcome_unknown() != 45222) {
@@ -19606,6 +20139,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_unlock() != 27497) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_demand_rcs_media_retry_for_attachment() != 46694) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_admit_rcs_media_download() != 56149) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_apply_rcs_status_json() != 28431) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19624,6 +20163,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_complete_rcs_recovery() != 6287) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_finalize_rcs_media_download() != 13217) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_import_rcs_media_download() != 62960) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_go_rcs_record_json() != 18128) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19631,6 +20176,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_invalidate_rcs_context_for_google_event() != 56850) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_mark_rcs_media_download_state() != 37355) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_pending_rcs_media_receive_tasks() != 38493) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_rcs_cutover_alerts() != 37806) {

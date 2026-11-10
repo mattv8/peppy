@@ -11,6 +11,7 @@ internal class RcsNativeSendCoordinator(
     private val clock: RcsNativeClock,
     private val canonicalizerRevision: Int,
     private val routeChangeRevoker: RcsNativeRouteChangeRevoker,
+    private val onRefusalRecorded: () -> Unit = {},
 ) {
     private val executing = AtomicBoolean(false)
 
@@ -19,7 +20,7 @@ internal class RcsNativeSendCoordinator(
         val trace = GroupSendTrace()
         try {
             val outcome = attempt(command, trace)
-            if (trace.group) recordGroupSend(outcome, trace.reason)
+            if (trace.group) recordGroupSend(outcome, trace.reason) else recordDirectSend(outcome, trace.reason)
             return outcome
         } finally {
             executing.set(false)
@@ -62,7 +63,10 @@ internal class RcsNativeSendCoordinator(
                 else lease.verifyMapping(routeObservation) == RcsNativeMappingVerification.GoogleConversationAmbiguous
             if (!routeCurrent) return trace.refused("route_not_current")
             val target = if (group) lease.classifyGroupTarget(command.conversationId, prepared.candidateSnapshotJson)
-                else lease.classifyTarget(command.conversationId, command.recipient, prepared.candidateSnapshotJson)
+                else go.classifyTarget(prepared.ticketId) { snapshot ->
+                    lease.classifyTarget(command.conversationId, command.recipient, snapshot)
+                } ?: return trace.refused("target_refused")
+            if (target is RcsNativeTarget.CarrierOnly && !group) return RcsNativeSendOutcome.CARRIER_ONLY
             if (target !is RcsNativeTarget.Found) return trace.refused("target_refused")
             val observation = go.bindTarget(prepared.ticketId, target.googleConversationId, target.snapshotToken)
             if (group) {
@@ -98,6 +102,7 @@ internal class RcsNativeSendCoordinator(
             if (refreshed == null || !route.sameIdentity(refreshed) || !fresh(clock.wallTimeMs(), refreshed.observedAtMs) || !go.isCurrent()) {
                 return recordRefusal(lease)
             }
+            if (!lease.beforeEffect()) return recordOutcomeUnknown(lease)
             return when (go.commit(prepared.ticketId, commitHandle.exactCommitJson)) {
                 RcsNativeCommitResult.Accepted -> if (
                     lease.recordTransportAcknowledged(commitHandle.tmpId, commitHandle.googleConversationId) &&
@@ -131,6 +136,7 @@ internal class RcsNativeSendCoordinator(
     private fun recordGroupSend(outcome: RcsNativeSendOutcome, reason: String?) {
         val code = when (outcome) {
             RcsNativeSendOutcome.SUBMITTED -> "submitted"
+            RcsNativeSendOutcome.CARRIER_ONLY -> "refused"
             RcsNativeSendOutcome.MEMBERS_CHANGED -> "members_changed"
             RcsNativeSendOutcome.OUTCOME_UNKNOWN -> "outcome_unknown"
             RcsNativeSendOutcome.REFUSED -> reason ?: "refused"
@@ -138,12 +144,27 @@ internal class RcsNativeSendCoordinator(
         recordGoogleMessagesLinkEvent(GROUP_SEND_KIND, code, 0L)
     }
 
-    private fun recordRefusal(lease: RcsNativeCoreLease) =
-        if (lease.recordPreEffectRefusal()) RcsNativeSendOutcome.REFUSED else recordOutcomeUnknown(lease)
+    private fun recordDirectSend(outcome: RcsNativeSendOutcome, reason: String?) {
+        val code = when (outcome) {
+            RcsNativeSendOutcome.SUBMITTED -> "submitted"
+            RcsNativeSendOutcome.CARRIER_ONLY -> "carrier_only"
+            RcsNativeSendOutcome.OUTCOME_UNKNOWN -> "outcome_unknown"
+            RcsNativeSendOutcome.MEMBERS_CHANGED -> "refused"
+            RcsNativeSendOutcome.REFUSED -> reason ?: "refused"
+        }
+        recordGoogleMessagesLinkEvent(DIRECT_SEND_KIND, code, 0L)
+    }
+
+    private fun recordRefusal(lease: RcsNativeCoreLease, membersChanged: Boolean = false): RcsNativeSendOutcome {
+        if (!lease.recordPreEffectRefusal(membersChanged)) return recordOutcomeUnknown(lease)
+        runCatching(onRefusalRecorded)
+            .onFailure { recordGoogleMessagesLinkEvent("link", "rcs_callback_failed", 0L) }
+        return if (membersChanged) RcsNativeSendOutcome.MEMBERS_CHANGED else RcsNativeSendOutcome.REFUSED
+    }
 
     /** Go's `members_changed` at commit is a definite not-sent: core fails the attempt and pauses the group. */
     private fun recordMembersChanged(lease: RcsNativeCoreLease) =
-        if (lease.recordPreEffectRefusal(membersChanged = true)) RcsNativeSendOutcome.MEMBERS_CHANGED else recordOutcomeUnknown(lease)
+        recordRefusal(lease, membersChanged = true)
 
     private fun recordOutcomeUnknown(lease: RcsNativeCoreLease?): RcsNativeSendOutcome {
         lease?.recordOutcomeUnknown()
@@ -161,6 +182,7 @@ internal class RcsNativeSendCoordinator(
     private companion object {
         const val MAX_ROUTE_AGE_MS = 30_000L
         const val GROUP_SEND_KIND = "group_send"
+        const val DIRECT_SEND_KIND = "direct_send"
     }
 }
 

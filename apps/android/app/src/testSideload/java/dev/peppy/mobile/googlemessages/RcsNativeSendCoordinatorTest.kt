@@ -8,7 +8,37 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+@org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
+@org.robolectric.annotation.Config(sdk = [35])
 class RcsNativeSendCoordinatorTest {
+    @Test fun `durable refusal schedules its status once while early refusals remain quiet`() {
+        var uploads = 0
+        val rejected = Harness(commitResult = RcsNativeCommitResult.Rejected, onRefusalRecorded = { uploads++ })
+        assertEquals(RcsNativeSendOutcome.REFUSED, rejected.execute())
+        assertEquals(1, rejected.lease.refusalRecords)
+        assertEquals(1, uploads)
+
+        val early = Harness(target = RcsNativeTarget.Unknown, onRefusalRecorded = { uploads++ })
+        assertEquals(RcsNativeSendOutcome.REFUSED, early.execute())
+        assertEquals(0, early.lease.refusalRecords)
+        assertEquals(1, uploads)
+
+        val failedWrite = Harness(commitResult = RcsNativeCommitResult.Rejected, refusalRecorded = false, onRefusalRecorded = { uploads++ })
+        assertEquals(RcsNativeSendOutcome.OUTCOME_UNKNOWN, failedWrite.execute())
+        assertEquals(1, uploads)
+    }
+
+    @Test fun `group commit refusal schedules status and scheduling failure cannot change recorded outcome`() {
+        var uploads = 0
+        val changed = Harness(groupDigest = "digest", commitResult = RcsNativeCommitResult.MembersChanged, onRefusalRecorded = { uploads++ })
+        assertEquals(RcsNativeSendOutcome.MEMBERS_CHANGED, changed.execute())
+        assertEquals(1, uploads)
+
+        val failedWake = Harness(commitResult = RcsNativeCommitResult.Rejected, onRefusalRecorded = { error("scheduler unavailable") })
+        assertEquals(RcsNativeSendOutcome.REFUSED, failedWake.execute())
+        assertEquals(0, failedWake.lease.outcomeUnknownRecords)
+    }
+
     @Test fun `forwards opaque bytes in the required order before a single commit`() {
         val harness = Harness()
         assertEquals(RcsNativeSendOutcome.SUBMITTED, harness.execute())
@@ -52,6 +82,25 @@ class RcsNativeSendCoordinatorTest {
             assertEquals(0, harness.go.commitCalls)
             assertEquals(1, harness.lease.closes)
         }
+    }
+
+    @Test fun `carrier only target revokes the ticket without binding or beginning`() {
+        val harness = Harness(target = RcsNativeTarget.CarrierOnly)
+
+        assertEquals(RcsNativeSendOutcome.CARRIER_ONLY, harness.execute())
+        assertEquals(0, harness.go.bindTargetCalls)
+        assertEquals(0, harness.lease.beginCalls)
+        assertEquals(0, harness.go.commitCalls)
+        assertEquals(1, harness.go.revokes)
+    }
+
+    @Test fun `guard rejection does not classify core facts begin or commit`() {
+        val harness = Harness(guardTarget = null)
+
+        assertEquals(RcsNativeSendOutcome.REFUSED, harness.execute())
+        assertEquals("", harness.lease.classifiedSnapshot)
+        assertEquals(0, harness.lease.beginCalls)
+        assertEquals(0, harness.go.commitCalls)
     }
 
     @Test fun `prebegin failure refuses but begin failure is durability unknown`() {
@@ -113,6 +162,14 @@ class RcsNativeSendCoordinatorTest {
         assertEquals(RcsNativeSendOutcome.OUTCOME_UNKNOWN, commitFailure.execute())
         assertEquals(1, commitFailure.go.commitCalls)
         assertEquals(1, commitFailure.go.revokes)
+    }
+
+    @Test fun `before effect persistence failure is unknown without a go effect`() {
+        val harness = Harness(beforeEffectRecorded = false)
+        assertEquals(RcsNativeSendOutcome.OUTCOME_UNKNOWN, harness.execute())
+        assertEquals(1, harness.lease.beforeEffectCalls)
+        assertEquals(0, harness.go.commitCalls)
+        assertEquals(1, harness.lease.outcomeUnknownRecords)
     }
 
     @Test fun `owned invalid prepared ticket is revoked even when its metadata is refused`() {
@@ -216,8 +273,21 @@ class RcsNativeSendCoordinatorTest {
             Harness(groupDigest = "digest", commitResult = RcsNativeCommitResult.Rejected).execute()
             Harness().execute()
         }
-        // submitted, route_not_current, members_changed, outcome_unknown, target_refused, proof_refused, commit_rejected
-        assertEquals(listOf(68L, 72L, 69L, 70L, 73L, 74L, 76L), records.map { it.substringAfterLast("29=").toLong() })
+        // submitted, route_not_current, members_changed, outcome_unknown, target_refused, proof_refused, commit_rejected, direct submitted
+        assertEquals(listOf(68L, 72L, 69L, 70L, 73L, 74L, 76L, 79L), records.map { it.substringAfterLast("29=").toLong() })
+    }
+
+    @Test fun `one to one diagnostics use only fixed direct send codes`() {
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            Harness().execute()
+            Harness(target = RcsNativeTarget.CarrierOnly).execute()
+            Harness(routeVerification = RcsNativeMappingVerification.Refused).execute()
+            Harness(target = RcsNativeTarget.Unknown).execute()
+            Harness(beginFailure = true).execute()
+        }
+
+        assertEquals(listOf(79L, 80L, 81L, 82L, 86L), records.map { it.substringAfterLast("29=").toLong() })
     }
 
     @Test fun `group members changed before any admission refuses with no commit and no ledger row`() {
@@ -229,6 +299,30 @@ class RcsNativeSendCoordinatorTest {
             assertEquals(RcsNativeSendOutcome.MEMBERS_CHANGED, harness.execute())
             assertEquals(0, harness.go.commitCalls)
             assertEquals(0, harness.lease.refusalRecords)
+        }
+    }
+
+    @Test fun `media wrapper settles group changes detected during prepare or verification`() {
+        listOf(
+            Harness(groupDigest = "digest", prepareMembersChanged = true),
+            Harness(groupDigest = "digest", groupVerification = RcsNativeGroupVerification.MembersChanged),
+        ).forEach { harness ->
+            val outcomes = mutableListOf<String>()
+            val core = object : RcsMediaSendCore {
+                override fun decrypt(attachmentId: String, destinationDir: String): String = error("reference already uploaded")
+                override fun markUploading(attachment: RcsMediaAttachment) = error("reference already uploaded")
+                override fun markReferenceReady(attachment: RcsMediaAttachment, mediaRef: String, uploadedAtMs: Long) = error("reference already uploaded")
+                override fun recordOutcome(attachment: RcsMediaAttachment, outcome: String, atMs: Long) { outcomes += outcome }
+            }
+            val media = RcsMediaSendCoordinator(
+                RcsMediaPrivateFiles(androidx.test.core.app.ApplicationProvider.getApplicationContext()),
+                RcsMediaTransferQueue(java.util.concurrent.Executor(Runnable::run)), core,
+                object : RcsMediaSendGo { override fun upload(path: java.io.File, attachment: RcsMediaAttachment): RcsMediaUploadResult = error("reference already uploaded") },
+                { command, _ -> harness.coordinator.execute(command) }, { 100L },
+            )
+            media.submit(RcsMediaAttachment(COMMAND.commandId, COMMAND.conversationId, COMMAND.recipient, 0u, "attachment", "image/jpeg", "photo.jpg", 1u, uploadRequired = false))
+            assertEquals(listOf("members_changed"), outcomes)
+            assertEquals(0, harness.go.commitCalls)
         }
     }
 
@@ -247,15 +341,15 @@ class RcsNativeSendCoordinatorTest {
         assertEquals(0, harness.go.commitCalls)
     }
 
-    @Test fun `group prepare-time members changed and lease refusals record their group codes, one to one records nothing`() {
+    @Test fun `group prepare-time members changed and lease refusals record their group codes, one to one records direct-send refusal`() {
         val records = mutableListOf<String>()
         SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
             Harness(groupDigest = "digest", prepareMembersChanged = true).execute()
             Harness(groupDigest = "digest", factoryReturnsNull = true).execute()
             Harness(factoryReturnsNull = true).execute()
         }
-        // members_changed (group, prepare), lease_refused (group); the 1:1 lease refusal is not a group send.
-        assertEquals(listOf(69L, 77L), records.map { it.substringAfterLast("29=").toLong() })
+        // members_changed (group, prepare), lease_refused (group), direct_send_refused (1:1 lease refusal).
+        assertEquals(listOf(69L, 77L, 0L), records.map { it.substringAfterLast("29=").toLong() })
     }
 
     private fun retiredLease() = FakeLease()
@@ -285,11 +379,14 @@ class RcsNativeSendCoordinatorTest {
         private val prepareMembersChanged: Boolean = false,
         private val proved: Boolean = true,
         private val groupRouteCurrent: Boolean = true,
+        private val guardTarget: RcsNativeTarget? = target,
+        private val beforeEffectRecorded: Boolean = true,
+        onRefusalRecorded: () -> Unit = {},
         acquire: ((String, () -> Unit) -> RcsNativeCoreLease?)? = null,
         onPrepare: (() -> Unit)? = null,
     ) {
-        val go = FakeGo(bindTargetFailure, bindFacts, commitFailure, commitResult, invalidPrepared, currentAfterBegin, onPrepare, prepareMembersChanged)
-        val lease = FakeLease(routeVerification, target, bindFacts, prepareFailure, beginFailure, refusalRecorded, acknowledged, groupVerification, beginMembersChanged, proved, groupRouteCurrent)
+        val go = FakeGo(bindTargetFailure, bindFacts, commitFailure, commitResult, invalidPrepared, currentAfterBegin, onPrepare, prepareMembersChanged) { guardTarget }
+        val lease = FakeLease(routeVerification, target, bindFacts, prepareFailure, beginFailure, refusalRecorded, acknowledged, groupVerification, beginMembersChanged, proved, groupRouteCurrent, beforeEffectRecorded)
         private var reads = 0
         private var clockCalls = 0
         val coordinator = RcsNativeSendCoordinator(
@@ -307,6 +404,7 @@ class RcsNativeSendCoordinatorTest {
             RcsNativeClock { if (++clockCalls == clockThrowsAt) throw IllegalStateException("clock") else nowMs },
             1,
             routeChanges,
+            onRefusalRecorded,
         )
         fun execute() = coordinator.execute(COMMAND)
     }
@@ -320,8 +418,9 @@ class RcsNativeSendCoordinatorTest {
         private val currentAfterBegin: Boolean,
         private val onPrepare: (() -> Unit)?,
         private val prepareMembersChanged: Boolean,
+        private val classification: () -> RcsNativeTarget?,
     ) : RcsNativeGoOperation {
-        var prepares = 0; var revokes = 0; var commitCalls = 0; var dispatches = 0; var boundFacts = ""; var committedJson = ""
+        var prepares = 0; var revokes = 0; var commitCalls = 0; var dispatches = 0; var bindTargetCalls = 0; var boundFacts = ""; var committedJson = ""
         var lastRevoke: RcsNativeRevokeResult = RcsNativeRevokeResult.None
         var lastDigest: String? = null; var routeRevision: ULong? = null; var bound = 0
         private var currentCalls = 0
@@ -338,7 +437,10 @@ class RcsNativeSendCoordinatorTest {
             routeRevision = mappingRevision
             return ROUTE_OBSERVATION
         }
+        override fun classifyTarget(ticketId: String, classify: (String) -> RcsNativeTarget): RcsNativeTarget? =
+            classification()?.let { expected -> classify(CANDIDATE).takeIf { expected == it } }
         override fun bindTarget(ticketId: String, googleConversationId: String, snapshotToken: String): String {
+            bindTargetCalls++
             if (bindTargetFailure) throw IllegalStateException("bind")
             return FULL_OBSERVATION
         }
@@ -361,8 +463,9 @@ class RcsNativeSendCoordinatorTest {
         private val beginMembersChanged: Boolean = false,
         private val proved: Boolean = true,
         private val groupRouteCurrent: Boolean = true,
+        private val beforeEffectRecorded: Boolean = true,
     ) : RcsNativeCoreLease {
-        var classifiedSnapshot = ""; val verified = mutableListOf<String>(); val groupRouteVerified = mutableListOf<String>(); val groupVerified = mutableListOf<String>(); var begun = ""; var coreCalls = 0; var closes = 0; var preparationCloses = 0; var committedCloses = 0; var refusalRecords = 0; var outcomeUnknownRecords = 0; var beginCalls = 0; var acknowledgements = 0
+        var classifiedSnapshot = ""; val verified = mutableListOf<String>(); val groupRouteVerified = mutableListOf<String>(); val groupVerified = mutableListOf<String>(); var begun = ""; var coreCalls = 0; var closes = 0; var preparationCloses = 0; var committedCloses = 0; var refusalRecords = 0; var outcomeUnknownRecords = 0; var beginCalls = 0; var acknowledgements = 0; var beforeEffectCalls = 0
         val refusalMembersChangedLog = mutableListOf<Boolean>()
         override fun provedGroupMemberRevision(conversationId: String): ULong? = if (proved) PROVED_REVISION else null
         override fun verifyGroupRoute(exactObservationJson: String): Boolean { groupRouteVerified += exactObservationJson; coreCalls++; return groupRouteCurrent }
@@ -389,6 +492,7 @@ class RcsNativeSendCoordinatorTest {
             refusalMembersChangedLog += membersChanged
         }
         override fun recordOutcomeUnknown() = true.also { outcomeUnknownRecords++ }
+        override fun beforeEffect() = beforeEffectRecorded.also { beforeEffectCalls++ }
         override fun close() { closes++ }
     }
 

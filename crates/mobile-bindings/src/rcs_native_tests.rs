@@ -1,11 +1,11 @@
 use super::*;
-use crate::{NativeOpenConfig, create_vault_material, open_native_client};
+use crate::{NativeAttachmentState, NativeOpenConfig, create_vault_material, open_native_client};
 use peppy_client_core::{
     Cursor, GatewayRoute, IncomingSms, NativeCarrierRouteBinding, NativeOwnNumberSource,
     NativeRcsEvidence, NativeRcsLifetime, NativeRcsOutgoing, NativeRcsSimPayload,
-    NativeSettingsCurrentness, NativeSettingsProvenance, OutgoingSms, RcsCapabilityState,
-    RcsConversationType, RcsEligibility, RcsLinkState, RcsMappingObservation,
-    RcsParticipantObservation, RcsSendMode,
+    NativeSettingsCurrentness, NativeSettingsProvenance, OutgoingMms, OutgoingSms, PermitBlock,
+    PermitDecision, RcsCapabilityState, RcsConversationType, RcsEligibility, RcsLinkState,
+    RcsMappingObservation, RcsParticipantObservation, RcsSendMode,
 };
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -42,6 +42,7 @@ struct Fixture {
     next_cursor: u64,
     command_id: String,
     conversation_id: String,
+    gateway_device_id: String,
     database_path: PathBuf,
     observation: RcsMappingObservation,
     _temp_dir: TempDir,
@@ -59,14 +60,48 @@ fn fixture_with_google_conversation_id_and_peer(
     google_conversation_id: &str,
     peer: &str,
 ) -> Fixture {
+    fixture_with_route(google_conversation_id, peer, None)
+}
+
+fn carrier_fixture_with_google_conversation_id_and_peer(
+    google_conversation_id: &str,
+    peer: &str,
+) -> Fixture {
+    carrier_fixture_with_google_conversation_id_and_peer_on_sim(
+        google_conversation_id,
+        peer,
+        "android-subscription-7",
+        7,
+    )
+}
+
+fn carrier_fixture_with_google_conversation_id_and_peer_on_sim(
+    google_conversation_id: &str,
+    peer: &str,
+    carrier_subscription_id: &str,
+    sim_number: i32,
+) -> Fixture {
+    fixture_with_route(
+        google_conversation_id,
+        peer,
+        Some((carrier_subscription_id, sim_number)),
+    )
+}
+
+fn fixture_with_route(
+    google_conversation_id: &str,
+    peer: &str,
+    carrier_route: Option<(&str, i32)>,
+) -> Fixture {
     let temp_dir = TempDir::new();
     let vault_id = Uuid::new_v4().to_string();
     let sender = native_client(&temp_dir, &vault_id, Uuid::new_v4().to_string());
     let gateway_device_id = Uuid::new_v4();
+    let gateway_device_id_text = gateway_device_id.to_string();
     let database_path = temp_dir.path().join(format!(
         "peppy-mobile-rcs-native-{gateway_device_id}.sqlite"
     ));
-    let gateway = native_client(&temp_dir, &vault_id, gateway_device_id.to_string());
+    let gateway = native_client(&temp_dir, &vault_id, gateway_device_id_text.clone());
     let material = create_vault_material(vault_id, PASSPHRASE.into()).unwrap();
     for client in [&sender, &gateway] {
         client
@@ -81,6 +116,15 @@ fn fixture_with_google_conversation_id_and_peer(
     let mut observation = observation();
     observation.google_conversation_id = google_conversation_id.into();
     observation.participants[0].identity = peer.into();
+    if let Some((subscription_id, sim_number)) = carrier_route {
+        observation.selected_sim_id = subscription_id.into();
+        observation.carrier_binding.carrier_route_id = subscription_id.into();
+        observation.carrier_binding.android_subscription_id = sim_number;
+        observation.outgoing.sim_payload.sim_number = sim_number;
+        observation.native_evidence.current_settings_sims[0]
+            .sim_payload
+            .sim_number = sim_number;
+    }
     let conversation_id = with_client(&gateway.client, |core| {
         let captured = core.capture_incoming(IncomingSms {
             conversation_id: None,
@@ -101,8 +145,14 @@ fn fixture_with_google_conversation_id_and_peer(
                     recipients: vec![peer.into()],
                     body: String::from('\0'),
                 },
-                GatewayRoute::RcsLink {
-                    gateway_device_id: gateway_device_id.to_string().parse().unwrap(),
+                match carrier_route {
+                    Some((subscription_id, _)) => GatewayRoute::Carrier {
+                        gateway_device_id: gateway_device_id.to_string().parse().unwrap(),
+                        subscription_id: subscription_id.into(),
+                    },
+                    None => GatewayRoute::RcsLink {
+                        gateway_device_id: gateway_device_id.to_string().parse().unwrap(),
+                    },
                 },
             )?
             .command_id)
@@ -116,6 +166,7 @@ fn fixture_with_google_conversation_id_and_peer(
         next_cursor,
         command_id: command_id.to_string(),
         conversation_id: conversation_id.to_string(),
+        gateway_device_id: gateway_device_id_text,
         database_path,
         observation,
         _temp_dir: temp_dir,
@@ -158,6 +209,50 @@ fn deliver_from(sender: &NativeClient, gateway: &NativeClient, first_cursor: u64
     })
     .unwrap();
     first_cursor + envelopes.len() as u64 - 1
+}
+
+fn record_linked_gateway(gateway: &NativeClient, gateway_device_id: &str, now_ms: i64) {
+    gateway
+        .record_rcs_link_lifecycle(
+            crate::rcs_status::NativeRcsLinkState::Linked,
+            true,
+            true,
+            true,
+            now_ms,
+            now_ms,
+        )
+        .unwrap();
+    let status = gateway
+        .rcs_link_status(gateway_device_id.into(), now_ms)
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.state, crate::rcs_status::NativeRcsLinkState::Linked);
+    assert!(status.current);
+    assert!(status.availability);
+    assert!(status.health);
+    assert!(status.phone_responsive);
+}
+
+fn install_sender_ciphertext_on_gateway(
+    sender: &NativeClient,
+    gateway: &NativeClient,
+    attachment_id: String,
+    downloaded_path: &Path,
+) {
+    let source = sender
+        .native_cipher_file_for_upload(attachment_id.clone())
+        .unwrap();
+    std::fs::copy(source, downloaded_path).unwrap();
+    gateway
+        .install_downloaded_attachment(
+            attachment_id.clone(),
+            downloaded_path.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+    assert_eq!(
+        gateway.attachment_info(attachment_id).unwrap().state,
+        NativeAttachmentState::Available
+    );
 }
 
 fn observation() -> RcsMappingObservation {
@@ -482,6 +577,35 @@ fn stale_observation_consumes_the_preparation_without_an_attempt() {
     ));
     let fresh = native_preparation(&fixture);
     assert!(fresh.begin(observation_json(&fixture), 1_000).is_ok());
+}
+
+#[test]
+fn carrier_begin_refusals_are_binding_invalid_requests_without_attempts() {
+    for wrong_sim in [true, false] {
+        let fixture = carrier_fixture_with_google_conversation_id_and_peer(
+            "conversation-carrier-refusal",
+            "+12025550123",
+        );
+        let preparation = native_preparation(&fixture);
+        let mut observation = fixture.observation.clone();
+        if wrong_sim {
+            observation.selected_sim_id = "android-subscription-8".into();
+        } else {
+            observation.participants[0].identity = "+12025550124".into();
+        }
+        assert!(matches!(
+            preparation.begin(serde_json::to_string(&observation).unwrap(), 1_000),
+            Err(MobileBindingsError::InvalidRequest)
+        ));
+        let db = persisted::Connection::open(&fixture.database_path);
+        assert!(
+            db.query(&format!(
+                "SELECT state FROM attempts WHERE command_id='{}'",
+                fixture.command_id
+            ))
+            .is_empty()
+        );
+    }
 }
 
 #[test]

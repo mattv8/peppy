@@ -4,6 +4,7 @@ package gmlink
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"net"
 	"os"
@@ -140,6 +141,114 @@ func TestNativeRcsLiveCoreRoundTrip(t *testing.T) {
 	}
 	if stage2Code(t, committer(t, link).CommitNativeRcs(prepared.TicketID, commitFrame.Commit)) != "rejected" || phone.countAction("SEND_MESSAGE") != 1 {
 		t.Fatal("live ticket replay dispatched")
+	}
+	writeNativeLiveTicketFrame(t, encoder, nativeLiveTicketFrame{Summary: "accepted"})
+}
+
+// TestNativeRcsLiveMediaCoreRoundTrip proves a Rust-issued media commit remains
+// intact through Go's ticket binding and exactly one Google transport effect.
+func TestNativeRcsLiveMediaCoreRoundTrip(t *testing.T) {
+	address := os.Getenv("PEPPY_RCS_NATIVE_LIVE_ADDR")
+	if address == "" {
+		t.Fatal("PEPPY_RCS_NATIVE_LIVE_ADDR is required for rcs_native_contract")
+	}
+	connection, err := net.DialTimeout("tcp", address, 15*time.Second)
+	if err != nil {
+		t.Fatalf("connect Rust live ticket server: %v", err)
+	}
+	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	scanner := bufio.NewScanner(connection)
+	scanner.Buffer(make([]byte, 0, 64*1024), nativeLiveTicketFrameCap)
+	encoder := json.NewEncoder(connection)
+	command := readNativeLiveTicketFrame(t, scanner, nativeLiveTicketFrameCap)
+	if !validNativeUUID(command.CommandID) {
+		t.Fatal("Rust did not provide a command id")
+	}
+
+	link, phone, cleanup, _, _ := preparedRcsFixtureWithPhone(t)
+	defer cleanup()
+	phone.mu.Lock()
+	conversation := proto.Clone(phone.conversations[0]).(*gmproto.Conversation)
+	conversation.Participants[0].ID.Number = "+12025550101"
+	conversation.Participants[0].ID.Type = 1
+	conversation.Participants[1].ID.Number = "+12025550123"
+	conversation.Participants[1].ID.Type = 1
+	conversation.Participants[1].ID.ParticipantID = "synthetic-peer"
+	phone.conversations[0] = conversation
+	phone.mu.Unlock()
+	link.mu.Lock()
+	link.pairingEvidenceID = uuid.NewString()
+	link.settings.SIMCards[0].SIMData.InternationalPhoneNumber = "+12025550101"
+	link.mu.Unlock()
+	if result := link.RefreshConversationIndex(); result != `{"code":"ok"}` {
+		t.Fatal(result)
+	}
+	now := time.Now().UnixMilli()
+	request, err := json.Marshal(map[string]any{
+		"command_id": command.CommandID, "canonicalizer_revision": 1, "identity_region": "US",
+		"carrier_binding": map[string]any{"carrier_route_id": "android-subscription-1", "android_subscription_id": 1,
+			"own_number_raw": "+12025550101", "own_number_source": "SubscriptionManagerPhoneNumber", "route_observed_at_ms": now},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prepared nativeRcsPrepareResult
+	if err := json.Unmarshal([]byte(link.PrepareNativeRcs(string(request))), &prepared); err != nil || prepared.Code != "prepared" {
+		t.Fatalf("prepare failed: %v", err)
+	}
+	var route, target nativeRcsObservationResult
+	if err := json.Unmarshal([]byte(link.BindNativeRcsRoute(prepared.TicketID, 11, 17, 23, 29, now)), &route); err != nil || route.Code != "route_bound" {
+		t.Fatalf("route bind failed: %v", err)
+	}
+	if err := json.Unmarshal([]byte(link.BindNativeRcsTarget(prepared.TicketID, "synthetic-conversation", preparedSnapshotToken(t, prepared))), &target); err != nil || target.Code != "target_bound" {
+		t.Fatalf("target bind failed: %v", err)
+	}
+	writeNativeLiveTicketFrame(t, encoder, nativeLiveTicketFrame{Route: route.Observation, Target: target.Observation, Snapshot: prepared.CandidateSnapshot, NowMS: time.Now().UnixMilli()})
+
+	facts := readNativeLiveTicketFrame(t, scanner, maxNativeRcsFactsJSONBytes+1024)
+	if facts.Facts == "" || stage2Code(t, link.BindNativeRcsFacts(prepared.TicketID, facts.Facts)) != "facts_bound" {
+		t.Fatal("Rust facts were not bound to the live ticket")
+	}
+	link.mu.Lock()
+	observation := link.nativeTicket.targetObservationJSON
+	link.mu.Unlock()
+	writeNativeLiveTicketFrame(t, encoder, nativeLiveTicketFrame{Observation: observation, NowMS: time.Now().UnixMilli()})
+
+	commitFrame := readNativeLiveTicketFrame(t, scanner, maxNativeRcsCommitJSONBytes+1024)
+	commit, valid := decodeNativeRcsCommit(commitFrame.Commit)
+	if !valid || commit.Media == nil {
+		t.Fatal("Rust media commit was rejected before dispatch")
+	}
+	if stage2Code(t, committer(t, link).CommitNativeRcs(prepared.TicketID, commitFrame.Commit)) != "accepted" {
+		t.Fatal("live Rust media commit was not accepted")
+	}
+	phone.mu.Lock()
+	requests := append([]*gmproto.SendMessageRequest(nil), phone.sendRequests...)
+	phone.mu.Unlock()
+	if phone.countAction("SEND_MESSAGE") != 1 || len(requests) != 1 {
+		t.Fatalf("media commit dispatched %d requests", len(requests))
+	}
+	sent := requests[0]
+	infos := sent.GetMessagePayload().GetMessageInfo()
+	expectedInfos := 1
+	if commit.MessageBody != "" {
+		expectedInfos = 2
+	}
+	if !sent.GetForceRCS() || len(infos) != expectedInfos {
+		t.Fatalf("media send request has unexpected shape: %#v", sent)
+	}
+	if commit.MessageBody != "" && infos[0].GetMessageContent().GetContent() != commit.MessageBody {
+		t.Fatalf("media send request did not preserve Rust caption: %#v", sent)
+	}
+	media := infos[len(infos)-1].GetMediaContent()
+	if media == nil || media.GetMediaID() != commit.Media.MediaID || !bytes.Equal(media.GetDecryptionKey(), commit.Media.Key) || media.GetMimeType() != commit.Media.MIME || media.GetSize() != commit.Media.Size || media.GetMediaName() != commit.Media.Name {
+		t.Fatalf("media send request did not preserve Rust media: %#v", sent)
+	}
+	if stage2Code(t, committer(t, link).CommitNativeRcs(prepared.TicketID, commitFrame.Commit)) != "rejected" || phone.countAction("SEND_MESSAGE") != 1 {
+		t.Fatal("live media ticket replay dispatched")
 	}
 	writeNativeLiveTicketFrame(t, encoder, nativeLiveTicketFrame{Summary: "accepted"})
 }

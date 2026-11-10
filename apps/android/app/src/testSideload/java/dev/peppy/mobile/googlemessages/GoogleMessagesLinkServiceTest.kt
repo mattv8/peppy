@@ -34,6 +34,21 @@ import uniffi.peppy_mobile_bindings.NativeRcsReceiveOwner
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class GoogleMessagesLinkServiceTest {
+    @Test fun `journaled command wake starts media discovery without service restart`() {
+        installEngine(StatusHandle(UNLINKED_STATUS))
+        val controller = Robolectric.buildService(GoogleMessagesLinkService::class.java).create()
+        var sent = 0
+        val work = RcsNativeSendWork(
+            enabled = { true }, candidates = { listOf(RcsNativeCommand("media-command", "conversation", "peer")) },
+            execute = { sent++ }, current = { true }, executor = Executor(Runnable::run),
+        )
+        GoogleMessagesLinkService::class.java.getDeclaredField("mediaRcsSendWork").apply { isAccessible = true }.set(controller.get(), work)
+        try {
+            GoogleMessagesLinkService.registerSendWake()
+            dev.peppy.mobile.RcsSendWake.notifyCommandsJournaled()
+            assertEquals(1, sent)
+        } finally { controller.destroy() }
+    }
     @Before
     fun setUp() {
         LinkCoreBridge.recorder = { _, _ -> true }

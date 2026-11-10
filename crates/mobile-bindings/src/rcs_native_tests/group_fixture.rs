@@ -6,7 +6,6 @@ use super::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use peppy_client_core::{
     ComposeDraftUpdate, ConversationId, GatewayRoute, GroupDraftSend, GroupIngestReport,
-    RcsCapabilityState,
 };
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,7 +24,40 @@ pub(crate) struct GroupFixture {
 /// Sender drafts a group text to `members`; the gateway receives the roster and command.
 /// The gateway's region is set; its own identity and proof come later, from the observation.
 pub(crate) fn group_fixture(members: &[&str]) -> GroupFixture {
+    group_fixture_with_attachments(members, Vec::new())
+}
+
+pub(crate) fn group_media_fixture(members: &[&str]) -> GroupFixture {
+    group_media_fixture_with_count(members, 1)
+}
+
+pub(crate) fn group_media_fixture_with_count(
+    members: &[&str],
+    attachment_count: usize,
+) -> GroupFixture {
     let temp_dir = TempDir::new();
+    let sources = (0..attachment_count)
+        .map(|index| {
+            let source = temp_dir.path().join(format!("group-media-{index}.jpg"));
+            std::fs::write(&source, format!("group media fixture {index}")).unwrap();
+            source
+        })
+        .collect();
+    group_fixture_with_temp_dir(members, temp_dir, sources)
+}
+
+fn group_fixture_with_attachments(
+    members: &[&str],
+    sources: Vec<std::path::PathBuf>,
+) -> GroupFixture {
+    group_fixture_with_temp_dir(members, TempDir::new(), sources)
+}
+
+fn group_fixture_with_temp_dir(
+    members: &[&str],
+    temp_dir: TempDir,
+    sources: Vec<std::path::PathBuf>,
+) -> GroupFixture {
     let vault_id = Uuid::new_v4().to_string();
     let sender = native_client(&temp_dir, &vault_id, Uuid::new_v4().to_string());
     let gateway_device_id = Uuid::new_v4();
@@ -45,15 +77,8 @@ pub(crate) fn group_fixture(members: &[&str]) -> GroupFixture {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
+    record_linked_gateway(&gateway, &gateway_device_id.to_string(), now_ms);
     with_client(&gateway.client, |core| {
-        core.record_rcs_link_lifecycle(
-            RcsCapabilityState::Linked,
-            true,
-            true,
-            true,
-            now_ms,
-            now_ms,
-        )?;
         let book = json!({
             "schema_version": 1,
             "book": {
@@ -70,12 +95,27 @@ pub(crate) fn group_fixture(members: &[&str]) -> GroupFixture {
     })
     .unwrap();
 
+    let attachment_ids = with_client(&sender.client, |core| {
+        sources
+            .iter()
+            .map(|source| {
+                let attachment =
+                    core.prepare_attachment(source, "image/jpeg", "group-media.jpg")?;
+                core.mark_attachment_uploaded(
+                    attachment.attachment_id,
+                    &Uuid::new_v4().to_string(),
+                )?;
+                Ok(attachment.attachment_id)
+            })
+            .collect::<Result<Vec<_>, peppy_client_core::Error>>()
+    })
+    .unwrap();
     let draft = with_client(&sender.client, |core| {
         core.save_new_compose_draft(ComposeDraftUpdate {
             group_name: None,
             text: "hello group".into(),
             recipients: members.iter().map(|m| (*m).to_owned()).collect(),
-            attachment_ids: Vec::new(),
+            attachment_ids: attachment_ids.clone(),
             // Drafts carry the carrier route; the gateway's RCS permit decides the transport.
             route: Some(GatewayRoute::Carrier {
                 gateway_device_id: gateway_device_id.to_string().parse().unwrap(),
@@ -97,6 +137,17 @@ pub(crate) fn group_fixture(members: &[&str]) -> GroupFixture {
     })
     .unwrap();
     deliver(&sender, &gateway);
+    for attachment_id in attachment_ids {
+        let downloaded = temp_dir
+            .path()
+            .join(format!("downloaded-{attachment_id}.cipher"));
+        install_sender_ciphertext_on_gateway(
+            &sender,
+            &gateway,
+            attachment_id.to_string(),
+            &downloaded,
+        );
+    }
 
     GroupFixture {
         gateway,

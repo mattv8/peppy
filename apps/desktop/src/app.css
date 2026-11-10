@@ -794,6 +794,22 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   flex: 1 1 0;
   overflow-wrap: anywhere;
 }
+/* Incoming RCS placeholder: status and actions take their own line under the file name. */
+.rcs-media-placeholder > p {
+  flex: 1 0 100%;
+  margin: 0;
+  color: var(--peppy-text-secondary);
+  overflow-wrap: anywhere;
+}
+.rcs-media-placeholder[data-rcs-media-state="quota_full"] > p,
+.rcs-media-placeholder[data-rcs-media-state="failed"] > p,
+.rcs-media-placeholder[data-rcs-media-state="quota_full"] > p span,
+.rcs-media-placeholder[data-rcs-media-state="failed"] > p span {
+  color: var(--peppy-warning-text);
+}
+.rcs-media-placeholder > small {
+  color: var(--peppy-text-secondary);
+}
 .public-copy {
   display: grid;
   gap: 4px;
@@ -1475,3 +1491,5 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
 .recipient-group-name input:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: -2px; }
 @media (pointer: coarse) { .recipient-group-name input { min-height: 44px; } }
 @media (forced-colors: active) { .recipient-group-name input { border-color: CanvasText; } }
+[data-rcs-attachment-slot] { min-width: 0; max-width: 100%; }
+[data-rcs-attachment-slot]:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: -2px; }

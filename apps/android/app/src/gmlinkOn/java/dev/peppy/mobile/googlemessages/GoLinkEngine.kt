@@ -3,6 +3,7 @@ package dev.peppy.mobile.googlemessages
 import dev.peppy.gmlink.gmlink.Gmlink
 import dev.peppy.gmlink.gmlink.Host
 import dev.peppy.gmlink.gmlink.Link
+import dev.peppy.gmlink.gmlink.NativeRcsTargetClassifier as GoNativeRcsTargetClassifier
 
 private class GoLinkHandle(private val link: Link) : LinkHandle {
     override fun pair(cookiesJson: ByteArray) = link.pair(cookiesJson)
@@ -21,6 +22,8 @@ private class GoLinkHandle(private val link: Link) : LinkHandle {
     override fun prepareNativeRcs(requestJson: String): String = link.prepareNativeRcs(requestJson)
     override fun bindNativeRcsRoute(ticketId: String, linkGeneration: Long, sessionGeneration: Long, contextRevision: Long, mappingRevision: Long, observedAtMs: Long): String =
         link.bindNativeRcsRoute(ticketId, linkGeneration, sessionGeneration, contextRevision, mappingRevision, observedAtMs)
+    override fun withNativeRcsTargetClassification(ticketId: String, classifier: NativeRcsTargetClassifier): Boolean =
+        link.withNativeRcsTargetClassification(ticketId, GoNativeRcsTargetClassifier { candidateSnapshot -> classifier.classify(candidateSnapshot) })
     override fun bindNativeRcsTarget(ticketId: String, googleConversationId: String, snapshotToken: String): String = link.bindNativeRcsTarget(ticketId, googleConversationId, snapshotToken)
     override fun bindNativeRcsFacts(ticketId: String, factsJson: String): String = link.bindNativeRcsFacts(ticketId, factsJson)
     override fun commitNativeRcs(ticketId: String, commitJson: String): String = link.commitNativeRcs(ticketId, commitJson)
@@ -35,6 +38,8 @@ private class GoLinkHandle(private val link: Link) : LinkHandle {
 	override fun createRcsGroup(requestJson: String): String = link.createRcsGroup(requestJson)
     override fun conversationLastActivity(googleIdsJson: String): String = link.conversationLastActivity(googleIdsJson)
     override fun fetchRcsGap(googleConversationId: String, pageToken: String): String = link.fetchRcsGap(googleConversationId, pageToken)
+    override fun uploadRcsMedia(requestJson: String): String = link.uploadRcsMedia(requestJson)
+    override fun downloadRcsMedia(requestJson: String): String = link.downloadRcsMedia(requestJson)
 }
 
 private object GoLinkEngine : LinkEngine {

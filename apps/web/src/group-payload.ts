@@ -1,4 +1,4 @@
-import type { ConversationView, DesktopSnapshot, GroupNoticeView, GroupView, MessageStatus, SendDraftInput, SendResultView, TypingSignal } from "@peppy/desktop-ui/bridge-contracts";
+import type { AttachmentView, ConversationView, DesktopSnapshot, GroupNoticeView, GroupView, MessageStatus, MessageView, MessageWindow, SendDraftInput, SendResultView, TypingSignal } from "@peppy/desktop-ui/bridge-contracts";
 
 /**
  * Boundary checks for the group fields the browser worker sends back. Each parser returns a value
@@ -66,10 +66,52 @@ function parseGroupNotice(value: unknown): GroupNoticeView[] {
   } as GroupNoticeView];
 }
 
-/** Keeps every conversation; drops only a malformed `group` so one bad projection cannot blank the list. */
+const RCS_STATES: readonly NonNullable<AttachmentView["rcsState"]>[] = ["downloading", "stored", "too_large", "quota_full", "failed", "expired"];
+const RCS_SEND_STATUSES: readonly NonNullable<AttachmentView["rcsSendStatus"]>[] = ["sending", "sent", "not_sent", "outcome_unknown", "members_changed"];
+
+/** Keeps only the RCS fields the UI understands. A malformed field is dropped alone, the attachment stays. */
+export function parseRcsAttachmentFields(value: Record<string, unknown>): Pick<AttachmentView, "rcsState" | "rcsSendStatus" | "index"> {
+  const rcsState = RCS_STATES.find((state) => state === value.rcsState);
+  const rcsSendStatus = RCS_SEND_STATUSES.find((status) => status === value.rcsSendStatus);
+  const index = typeof value.index === "number" && Number.isSafeInteger(value.index) && value.index >= 0 ? value.index : undefined;
+  return {
+    ...(rcsState === undefined ? {} : { rcsState }),
+    ...(rcsSendStatus === undefined ? {} : { rcsSendStatus }),
+    ...(index === undefined ? {} : { index }),
+  };
+}
+
+function normalizeAttachment(value: AttachmentView): AttachmentView {
+  const { rcsState: _state, rcsSendStatus: _status, index: _index, ...rest } = value;
+  return { ...rest, ...parseRcsAttachmentFields(value) };
+}
+
+function normalizeRcsMessage(message: MessageView): MessageView {
+  return Array.isArray(message.attachments)
+    ? { ...message, attachments: message.attachments.map(normalizeAttachment) }
+    : message;
+}
+
+function normalizeRcsMessages(snapshot: DesktopSnapshot): DesktopSnapshot {
+  if (!Array.isArray(snapshot.conversations) || !snapshot.conversations.some((conversation) => Array.isArray(conversation.messages) && conversation.messages.some((message) => Array.isArray(message.attachments) && message.attachments.length > 0))) return snapshot;
+  return {
+    ...snapshot,
+    conversations: snapshot.conversations.map((conversation) => Array.isArray(conversation.messages)
+      ? { ...conversation, messages: conversation.messages.map(normalizeRcsMessage) }
+      : conversation),
+  };
+}
+
+/** Normalizes RCS attachment fields from a paged message response as well as snapshots. */
+export function normalizeMessageWindow(window: MessageWindow): MessageWindow {
+  return { ...window, messages: window.messages.map(normalizeRcsMessage) };
+}
+
+/** Keeps every conversation; drops only a malformed `group` so one bad projection cannot blank the list. Also checks RCS attachment fields. */
 export function normalizeGroupSnapshot(snapshot: DesktopSnapshot): DesktopSnapshot {
-  if (!Array.isArray(snapshot.conversations) || !snapshot.conversations.some((conversation) => "group" in conversation)) return snapshot;
-  return { ...snapshot, conversations: snapshot.conversations.map(normalizeConversationGroup) };
+  const checked = normalizeRcsMessages(snapshot);
+  if (!Array.isArray(checked.conversations) || !checked.conversations.some((conversation) => "group" in conversation)) return checked;
+  return { ...checked, conversations: checked.conversations.map(normalizeConversationGroup) };
 }
 
 function normalizeConversationGroup(conversation: ConversationView): ConversationView {
@@ -87,10 +129,12 @@ export function parseSendResult(value: unknown): SendResultView {
   if (!isRecord(value) || typeof value.accepted !== "boolean" || !isSendStatus(value.status)) throw new Error("Invalid send result.");
   const reason = isSendReason(value.reason) ? value.reason : undefined;
   const group = parseRefusedGroup(value.group);
+  const refusedAttachmentIds = Array.isArray(value.refusedAttachmentIds) && value.refusedAttachmentIds.every((id) => typeof id === "string") ? [...value.refusedAttachmentIds] : undefined;
   return {
     accepted: value.accepted,
     status: value.status,
     ...(reason === undefined ? {} : { reason }),
+    ...(refusedAttachmentIds === undefined ? {} : { refusedAttachmentIds }),
     ...(typeof value.revision === "string" ? { revision: value.revision } : {}),
     ...(typeof value.parts === "number" && Number.isSafeInteger(value.parts) ? { parts: value.parts } : {}),
     ...(group === undefined ? {} : { group }),

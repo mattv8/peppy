@@ -49,6 +49,10 @@ name = "rcs_receive_regressions"
 path = "tests/rcs_receive_regressions.rs"
 
 [[test]]
+name = "rcs_media_replication"
+path = "tests/rcs_media_replication.rs"
+
+[[test]]
 name = "rcs_target"
 path = "tests/rcs_target.rs"
 

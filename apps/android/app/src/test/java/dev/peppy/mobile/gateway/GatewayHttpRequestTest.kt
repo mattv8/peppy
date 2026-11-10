@@ -1,6 +1,9 @@
 package dev.peppy.mobile.gateway
 
 import dev.peppy.mobile.LoopbackHttpServer
+import java.io.IOException
+import java.nio.file.Files
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -17,6 +20,68 @@ import uniffi.peppy_mobile_bindings.NativeAttachmentRetentionRequest
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class GatewayHttpRequestTest {
+    @Test fun beforeRequestDenialBlocksJsonMethodsWithoutCallingResponseObserver() {
+        val requests = AtomicInteger()
+        var observed = 0
+        val denial = IOException("retired scope")
+        LoopbackHttpServer { requests.incrementAndGet(); LoopbackHttpServer.Response(200, "{}") }.use { server ->
+            // Preserve the existing trailing-lambda observer constructor contract.
+            val http = GatewayHttp(server.origin, "token") { _ -> observed++ }
+            http.setBeforeRequest { throw denial }
+            val operations: List<() -> Unit> = listOf(
+                { http.get("/v1/events") },
+                { http.postJson("/v1/events", "{}") },
+                { http.deleteJson("/v1/events/test", "{}") },
+            )
+            operations.forEach { operation -> assertSame(denial, assertThrows(IOException::class.java) { operation() }) }
+        }
+        assertEquals(0, requests.get())
+        assertEquals(0, observed)
+    }
+
+    @Test fun beforeRequestDenialBlocksAllGeneratedRetentionMethods() {
+        val requests = AtomicInteger()
+        val denial = IllegalStateException("retired scope")
+        LoopbackHttpServer { requests.incrementAndGet(); LoopbackHttpServer.Response(200, "{}") }.use { server ->
+            val http = GatewayHttp(server.origin, "token")
+            http.setBeforeRequest { throw denial }
+            for (method in listOf("GET", "POST", "PUT", "DELETE")) {
+                val request = NativeAttachmentRetentionRequest(method, "/v1/attachments/storage", if (method == "GET") null else "{}", null, 200u)
+                assertSame(denial, assertThrows(IllegalStateException::class.java) { http.retentionRequest(request, 128u) })
+            }
+        }
+        assertEquals(0, requests.get())
+    }
+
+    @Test fun beforeRequestIOExceptionCannotStartAnUploadThroughResponseRecovery() {
+        val requests = AtomicInteger()
+        val denial = IOException("retired scope")
+        val source = Files.createTempFile("fenced-cipher", ".bin").toFile().apply { writeText("cipher") }
+        try {
+            LoopbackHttpServer { requests.incrementAndGet(); LoopbackHttpServer.Response(413, """{"code":"vault_quota_exceeded"}""") }.use { server ->
+                val http = GatewayHttp(server.origin, "token")
+                http.setBeforeRequest { throw denial }
+                assertSame(denial, assertThrows(IOException::class.java) { http.putFile("/v1/attachments/test/upload", source, 6) })
+            }
+            assertEquals(0, requests.get())
+        } finally { source.delete() }
+    }
+
+    @Test fun beforeRequestIOExceptionCannotStartADownloadThroughResponseRecovery() {
+        val requests = AtomicInteger()
+        val denial = IOException("retired scope")
+        val destination = Files.createTempFile("fenced-download", ".part").toFile()
+        try {
+            LoopbackHttpServer { requests.incrementAndGet(); LoopbackHttpServer.Response(200, "cipher") }.use { server ->
+                val http = GatewayHttp(server.origin, "token")
+                http.setBeforeRequest { throw denial }
+                assertSame(denial, assertThrows(IOException::class.java) { http.getToFile("/v1/attachments/test", destination, 6) })
+            }
+            assertEquals(0, requests.get())
+            assertFalse(destination.exists())
+        } finally { destination.delete() }
+    }
+
     @Test fun jsonRequestsSendExpectedMethodsPathsHeadersBodiesAndStatuses() {
         val requests = mutableListOf<LoopbackHttpServer.Request>()
         LoopbackHttpServer { request ->

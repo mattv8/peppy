@@ -58,6 +58,35 @@ func TestNativeRcsExportReceiveRecord(t *testing.T) {
 	if groupPath := os.Getenv("PEPPY_RCS_GO_GROUP_RECEIVE_RECORDS_PATH"); groupPath != "" {
 		exportGroupReceiveRecords(t, groupPath)
 	}
+	if mediaPath := os.Getenv("PEPPY_RCS_GO_MEDIA_RECEIVE_RECORDS_PATH"); mediaPath != "" {
+		exportMediaReceiveRecords(t, mediaPath)
+	}
+}
+
+func exportMediaReceiveRecords(t *testing.T, path string) {
+	t.Helper()
+	key := make([]byte, 32)
+	key[0] = 1
+	projection := projectRcsMessage(&libgm.WrappedMessage{Message: &gmproto.Message{
+		MessageID: "synthetic-media-message", ConversationID: "synthetic-conversation", TmpID: "synthetic-media-tmp",
+		Timestamp: 1_700_000_000_000_000, Type: rcsMessageType,
+		MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType_INCOMING_COMPLETE},
+		MessageInfo: []*gmproto.MessageInfo{
+			{Data: &gmproto.MessageInfo_MessageContent{MessageContent: &gmproto.MessageContent{Content: "caption"}}},
+			{Data: &gmproto.MessageInfo_MediaContent{MediaContent: &gmproto.MediaContent{MediaID: "synthetic-media-a", DecryptionKey: key, MimeType: "image/jpeg", Size: 42, MediaName: "a.jpg"}}},
+			{Data: &gmproto.MessageInfo_MediaContent{MediaContent: &gmproto.MediaContent{MediaID: "synthetic-media-b", DecryptionKey: key, MimeType: "application/x-unknown", Size: rcsMediaMaxBytes + 1, MediaName: "b.bin"}}},
+		},
+	}}, &gmproto.Conversation{ConversationID: "synthetic-conversation", Type: gmproto.ConversationType_RCS})
+	if projection.Code != "ok" || projection.Record == nil || projection.Record.Attachments == nil || len(*projection.Record.Attachments) != 2 {
+		t.Fatalf("media receive projection = %#v", projection)
+	}
+	fixture, err := json.Marshal([]rcsProjection{projection})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, fixture, 0600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // exportGroupReceiveRecords writes a JSON array of real group receive projections, one per sender shape:

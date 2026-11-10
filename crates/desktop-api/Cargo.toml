@@ -19,3 +19,4 @@ ts-rs = "10.1.0"
 [dev-dependencies]
 peppy-crypto = { path = "../crypto", version = "0.1.0" }
 tempfile.workspace = true
+rusqlite = { version = "=0.32.1", features = ["bundled-sqlcipher"] }

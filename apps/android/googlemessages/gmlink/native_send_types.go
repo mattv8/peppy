@@ -59,6 +59,7 @@ type nativeRcsCommitProjection struct {
 	ProofVersion         uint32
 	ProofDigest          [32]byte
 	MessageBody          string
+	Media                *rcsMediaReference
 	Target               nativeRcsTargetSnapshot
 	ExpectedMemberDigest string
 }

@@ -36,6 +36,7 @@ const COMMANDS: &[&str] = &[
     "pick_attachments",
     "prepare_pasted_attachment",
     "retry_attachment",
+    "retry_rcs_media_download",
     "save_attachment",
     "request_attachment_download",
     "media_sync_request",

@@ -15,22 +15,33 @@ export type RcsSendBlock =
   | { kind: "unproven" }
   | { kind: "link"; help: "relink" | "phone" };
 
+export type RcsDownloadRetryBlock = { kind: "none" } | { kind: "offline" } | { kind: "link" };
+
 function expiry(value: string | undefined): number | undefined {
   if (!value || !/^\d+$/.test(value)) return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
-function rcsRouteContext({ snapshot, activeConversationId, gatewayId, locked }: Omit<RcsRouteInput, "nowMs">) {
+function rcsGatewayContext({ snapshot, activeConversationId, gatewayId, locked }: Omit<RcsRouteInput, "nowMs">) {
   if (!snapshot || locked || snapshot.encryption.state !== "unlocked" || (snapshot.mode !== "native" && snapshot.mode !== "browser") || !activeConversationId || !gatewayId) return undefined;
   const conversation = snapshot.conversations.find((item) => item.id === activeConversationId);
   const gateway = snapshot.gateways.find((item) => item.id === gatewayId);
-  const isGroup = (conversation?.participants?.length ?? 0) > 1;
-  const groupState = conversation?.group?.state;
-  if (!conversation || conversation.draftOnly || conversation.recipientlessDraft || (isGroup && groupState !== "live" && groupState !== "paused") || !gateway || gateway.simulated) return undefined;
+  if (!conversation || !gateway || gateway.simulated) return undefined;
   const gatewayStatus = snapshot.rcsStatus?.gateways.find((item) => item.gatewayId === gatewayId);
   const eligibility = snapshot.rcsStatus?.eligibilities.find((item) => item.conversationId === activeConversationId && item.gatewayId === gatewayId);
   return { conversation, gatewayStatus, eligibility };
+}
+
+function rcsRouteContext(input: Omit<RcsRouteInput, "nowMs">) {
+  const context = rcsGatewayContext(input);
+  if (!context) return undefined;
+  const { conversation } = context;
+  const isGroup = (conversation?.participants?.length ?? 0) > 1;
+  const groupState = conversation?.group?.state;
+  return conversation.draftOnly || conversation.recipientlessDraft || (isGroup && groupState !== "live" && groupState !== "paused")
+    ? undefined
+    : context;
 }
 
 export function knownRcsChat(conversation: ConversationView): boolean {
@@ -65,6 +76,18 @@ export function rcsSendBlock(input: RcsRouteInput): RcsSendBlock {
   return eligibility?.eligibility === "not_eligible" && eligibilityExpiresAtMs !== undefined && nowMs < eligibilityExpiresAtMs
     ? { kind: "none" }
     : { kind: "unproven" };
+}
+
+/** Download retries need a healthy linked phone, but do not require sending eligibility. */
+export function rcsDownloadRetryBlock(input: RcsRouteInput): RcsDownloadRetryBlock {
+  const context = rcsGatewayContext(input);
+  if (!context) return { kind: "offline" };
+  const gateway = context.gatewayStatus;
+  if (gateway?.state === "needs_relink" || gateway?.state === "signed_out") return { kind: "link" };
+  const expiresAtMs = expiry(gateway?.expiresAtMs);
+  return gateway?.state === "linked" && gateway.current && gateway.available && gateway.healthy && gateway.phoneResponsive && expiresAtMs !== undefined && input.nowMs < expiresAtMs
+    ? { kind: "none" }
+    : { kind: "offline" };
 }
 
 export function rcsBlockExpiry(input: RcsRouteInput): number | undefined {

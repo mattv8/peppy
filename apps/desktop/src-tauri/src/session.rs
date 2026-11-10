@@ -451,6 +451,9 @@ pub(crate) fn missing_draft_attachment_view(
         remote_state: None,
         local_available: None,
         draft_state: state.map(draft_attachment_state_label),
+        index: None,
+        rcs_state: None,
+        rcs_send_status: None,
     }
 }
 
@@ -1458,6 +1461,9 @@ impl Session {
                         remote_state: None,
                         local_available: None,
                         draft_state: None,
+                        index: None,
+                        rcs_state: None,
+                        rcs_send_status: None,
                     };
                 };
                 let media_metadata = self

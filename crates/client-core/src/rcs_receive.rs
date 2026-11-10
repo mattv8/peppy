@@ -1,7 +1,8 @@
+use crate::rcs_media;
 use crate::{
     Client, ConversationId, Ctx, DeviceId, Direction, EnvelopePurpose, Error, Inserted, MessageId,
-    MessagePayload, MessageRecord, PrivatePayload, RcsMessageStatus, Transport, enqueue,
-    insert_message, next_source_sequence,
+    MessagePayload, MessageRecord, PrivatePayload, RcsMessageStatus, Transport, enqueue, get_meta,
+    insert_message, next_source_sequence, set_meta,
 };
 use peppy_crypto::compaction_hmac;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -157,6 +158,35 @@ pub struct RcsProjectedRecord {
     pub tmp_id: Option<String>,
     pub rcs_reported: bool,
     pub e2ee_reported: Option<bool>,
+    /// Gateway-local media references never enter this record. The bounded, sanitized manifest
+    /// establishes receive placeholders before the native downloader performs I/O.
+    pub attachments: Vec<RcsIncomingAttachment>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct RcsIncomingAttachment {
+    pub original_index: u32,
+    pub media_type: String,
+    pub display_name: String,
+    pub plaintext_bytes: u64,
+    pub too_large: bool,
+    /// Opaque Google reference. This is persisted only in the gateway-local SQLCipher task row;
+    /// it must never be copied into a message payload or a sync event.
+    pub media_ref: String,
+}
+
+impl std::fmt::Debug for RcsIncomingAttachment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RcsIncomingAttachment")
+            .field("original_index", &self.original_index)
+            .field("media_type", &self.media_type)
+            .field("display_name", &self.display_name)
+            .field("plaintext_bytes", &self.plaintext_bytes)
+            .field("too_large", &self.too_large)
+            .field("media_ref", &"[redacted]")
+            .finish()
+    }
 }
 
 /// Who sent a group observation, as Google reported it. Only group conversations carry this;
@@ -681,6 +711,65 @@ impl Client {
         }
         if record.direction == Direction::Outgoing
             && let Some(tmp_id) = record.tmp_id.as_deref()
+            && rcs_media::attachment_for_tmp_id(&tx, tmp_id)?.is_some()
+        {
+            let Some((command, index, message_id)) = rcs_media::echo_slot(
+                &tx,
+                ctx.device_id,
+                conversation_id,
+                &record.google_conversation_id,
+                tmp_id,
+            )?
+            else {
+                return Ok(RcsReceiveOutcome::Rejected(
+                    RcsReceiveCode::IdentityConflict,
+                ));
+            };
+            let identity = record_identity(
+                &tx,
+                conversation_id,
+                ownership_generation,
+                &record.google_message_id,
+                &record.google_conversation_id,
+                Some(message_id),
+                true,
+            )?;
+            if let RcsIdentityOutcome::Rejected(code) = identity {
+                return Ok(RcsReceiveOutcome::Rejected(code));
+            }
+            set_meta(
+                &tx,
+                &rcs_media::echo_identity_key(
+                    &record.google_conversation_id,
+                    &record.google_message_id,
+                )?,
+                tmp_id,
+            )?;
+            rcs_media::apply_echo_receipt(
+                &tx,
+                &ctx,
+                command,
+                index,
+                message_id,
+                RcsProjectedStatus::Sent,
+            )?;
+            apply_reported_facts(
+                &tx,
+                &ctx,
+                conversation_id,
+                message_id,
+                record.rcs_reported,
+                record.e2ee_reported,
+            )?;
+            tx.commit()?;
+            return Ok(if identity == RcsIdentityOutcome::Duplicate {
+                RcsReceiveOutcome::Duplicate
+            } else {
+                RcsReceiveOutcome::OutgoingMatched
+            });
+        }
+        if record.direction == Direction::Outgoing
+            && let Some(tmp_id) = record.tmp_id.as_deref()
             && let Some(message_id) = tx
                     .query_row(
                         "SELECT c.message_id FROM rcs_send_ledger l JOIN commands c ON c.command_id=l.command_id WHERE l.tmp_id=? AND l.google_conversation_id=?",
@@ -766,6 +855,7 @@ impl Client {
                 if insert_message(&tx, &payload)? != Inserted::New {
                     return Err(Error::Database);
                 }
+                rcs_media::reconcile_staged_states(&tx, message_id)?;
                 enqueue(
                     &tx,
                     &ctx,
@@ -773,6 +863,14 @@ impl Client {
                     None,
                     None,
                     &PrivatePayload::Message(payload),
+                )?;
+                rcs_media::record_receive_manifest(
+                    &tx,
+                    message_id,
+                    ctx.device_id,
+                    &record.attachments,
+                    historical,
+                    &ctx,
                 )?;
                 if unmatched_outgoing {
                     let count: i64 = tx.query_row(
@@ -844,6 +942,67 @@ impl Client {
             return Ok(RcsReceiveOutcome::Rejected(
                 RcsReceiveCode::ConversationUnproven,
             ));
+        }
+        let media_tmp = application.tmp_id.clone().or(get_meta(
+            &tx,
+            &rcs_media::echo_identity_key(
+                &application.google_conversation_id,
+                &application.google_message_id,
+            )?,
+        )?);
+        if let Some(tmp_id) = media_tmp
+            && rcs_media::attachment_for_tmp_id(&tx, &tmp_id)?.is_some()
+        {
+            let Some((command, index, id)) = rcs_media::echo_slot(
+                &tx,
+                ctx.device_id,
+                conversation_id,
+                &application.google_conversation_id,
+                &tmp_id,
+            )?
+            else {
+                return Ok(RcsReceiveOutcome::Rejected(
+                    RcsReceiveCode::IdentityConflict,
+                ));
+            };
+            if let RcsIdentityOutcome::Rejected(code) = record_identity(
+                &tx,
+                conversation_id,
+                ownership_generation,
+                &application.google_message_id,
+                &application.google_conversation_id,
+                Some(id),
+                true,
+            )? {
+                return Ok(RcsReceiveOutcome::Rejected(code));
+            }
+            set_meta(
+                &tx,
+                &rcs_media::echo_identity_key(
+                    &application.google_conversation_id,
+                    &application.google_message_id,
+                )?,
+                &tmp_id,
+            )?;
+            if let Some(status) =
+                rcs_media::apply_echo_receipt(&tx, &ctx, command, index, id, application.status)?
+                && apply_status(&tx, id, status, true)?
+            {
+                enqueue(
+                    &tx,
+                    &ctx,
+                    EnvelopePurpose::Event,
+                    None,
+                    None,
+                    &PrivatePayload::RcsMessageStatus {
+                        message_id: id,
+                        status,
+                        rcs_reported: true,
+                    },
+                )?;
+            }
+            tx.commit()?;
+            return Ok(RcsReceiveOutcome::StatusApplied);
         }
         let mut message_id: Option<String> = tx.query_row(
             "SELECT message_id FROM rcs_message_identities WHERE google_message_id=? AND google_conversation_id=? AND conversation_id=?",
@@ -1161,7 +1320,7 @@ impl Client {
         if !local_gateway(&tx, ctx.device_id)? {
             return Err(Error::InvalidRequest("local RCS gateway is unavailable"));
         }
-        if !(row.restricted && row.text_only) {
+        if !row.restricted {
             tx.commit()?;
             return Ok(provider_route(RcsProviderRouteReason::NotRestrictedText));
         }

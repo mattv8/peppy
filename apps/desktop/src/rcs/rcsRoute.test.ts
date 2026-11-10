@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DesktopSnapshot } from "../bridge/bridge";
-import { currentRcsRoute, knownRcsChat, rcsSendBlock } from "./rcsRoute";
+import { currentRcsRoute, knownRcsChat, rcsDownloadRetryBlock, rcsSendBlock } from "./rcsRoute";
 
 function snapshot(): DesktopSnapshot {
   return {
@@ -116,5 +116,39 @@ describe("rcsSendBlock", () => {
     const value = snapshot();
     change(value);
     expect(rcsSendBlock(input(value))).toEqual(expected);
+  });
+});
+
+describe("rcsDownloadRetryBlock", () => {
+  const retryInput = (value: DesktopSnapshot) => ({ snapshot: value, activeConversationId: "conversation-a", gatewayId: "gateway-a", nowMs: 149, locked: false });
+  it("permits a healthy linked phone without conversation eligibility", () => {
+    const value = snapshot();
+    value.rcsStatus!.eligibilities = [];
+    expect(rcsDownloadRetryBlock(retryInput(value))).toEqual({ kind: "none" });
+  });
+
+  it.each(["paused", "withdrawn"] as const)("permits a healthy linked phone for a %s group", (state) => {
+    const value = snapshot();
+    value.conversations[0].participants = ["one", "two"];
+    value.conversations[0].group = { members: ["one", "two"], state, memberRevision: "1", canCreate: false, createNeedsConfirmation: false };
+
+    expect(rcsDownloadRetryBlock(retryInput(value))).toEqual({ kind: "none" });
+  });
+
+  it("reports relink and offline states", () => {
+    const relink = snapshot();
+    relink.rcsStatus!.gateways[0].state = "needs_relink";
+    expect(rcsDownloadRetryBlock(retryInput(relink))).toEqual({ kind: "link" });
+    const offline = snapshot();
+    offline.rcsStatus!.gateways[0].phoneResponsive = false;
+    expect(rcsDownloadRetryBlock(retryInput(offline))).toEqual({ kind: "offline" });
+  });
+});
+
+describe("rcsDownloadRetryBlock blocks", () => {
+  const retryInput = (value: DesktopSnapshot, overrides: Partial<{ locked: boolean; gatewayId: string }> = {}) => ({ snapshot: value, activeConversationId: "conversation-a", gatewayId: overrides.gatewayId ?? "gateway-a", nowMs: 149, locked: overrides.locked ?? false });
+  it("reports offline while the vault is locked, and when no gateway is chosen", () => {
+    expect(rcsDownloadRetryBlock(retryInput(snapshot(), { locked: true }))).toEqual({ kind: "offline" });
+    expect(rcsDownloadRetryBlock(retryInput(snapshot(), { gatewayId: "" }))).toEqual({ kind: "offline" });
   });
 });

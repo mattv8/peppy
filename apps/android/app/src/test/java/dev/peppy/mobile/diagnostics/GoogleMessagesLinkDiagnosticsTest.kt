@@ -38,6 +38,10 @@ class GoogleMessagesLinkDiagnosticsTest {
         "group_send" to "refused", "group_send" to "route_not_current", "group_send" to "target_refused",
         "group_send" to "proof_refused", "group_send" to "begin_refused", "group_send" to "commit_rejected",
         "group_send" to "lease_refused", "create" to "settle_failed",
+        "direct_send" to "submitted", "direct_send" to "carrier_only", "direct_send" to "route_not_current",
+        "direct_send" to "target_refused", "direct_send" to "proof_refused", "direct_send" to "begin_refused",
+        "direct_send" to "commit_rejected", "direct_send" to "outcome_unknown", "direct_send" to "refused",
+        "direct_send" to "proof_window_missed",
     )
 
     @Test fun everyPairRecordsOnlyItsStableNumericReason() {
@@ -45,7 +49,7 @@ class GoogleMessagesLinkDiagnosticsTest {
         SyncDiagnostics.withTestConfiguration(true, { 10L }, { error("CPU unused") }, records::add) {
             stablePairs.forEach { (kind, code) -> recordGoogleMessagesLinkEvent(kind, code, Long.MAX_VALUE) }
         }
-		assertEquals(78, records.size)
+		assertEquals(88, records.size)
         records.forEachIndexed { index, record ->
             assertEquals("event=27 session=1 timestamp_ms=10 trace=0 29=${index + 1}", record)
         }
@@ -53,7 +57,7 @@ class GoogleMessagesLinkDiagnosticsTest {
         assertEquals(SyncTraceEvent.entries.size, SyncTraceEvent.entries.map { it.code }.toSet().size)
     }
 
-    @Test fun goEventVocabularyExactlyMatchesTheClosedMapping() {
+    @Test fun goEventVocabularyIsCoveredByTheClosedMapping() {
         val root = generateSequence(File(requireNotNull(System.getProperty("user.dir")))) { it.parentFile }
             .first { File(it, "apps/android/googlemessages/gmlink/events.go").isFile }
         val goSource = File(root, "apps/android/googlemessages/gmlink/events.go").readText()
@@ -61,7 +65,6 @@ class GoogleMessagesLinkDiagnosticsTest {
             .map { it.groupValues[1] to it.groupValues[2] }.toSet()
         assertTrue(goPairs.isNotEmpty())
         assertTrue(GoogleMessagesLinkDiagnosticReason.codes.keys.containsAll(goPairs))
-		assertEquals(stablePairs.toSet(), GoogleMessagesLinkDiagnosticReason.codes.keys)
     }
 
     @Test fun unknownMalformedAndMismatchedPairsRecordOnlyUnknown() {

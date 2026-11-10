@@ -168,7 +168,7 @@ fn version_39_upgrade_adds_phone_read_defaults_and_reinstalls_history_backpressu
     let version: i64 = connection
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 53);
+    assert_eq!(version, 57);
     let outbox_index: String = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",
@@ -277,7 +277,7 @@ fn version_36_reinstalls_history_backpressure_indexes_on_reopen() {
     let version: i64 = connection
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 53);
+    assert_eq!(version, 57);
     let outbox_index: String = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='outbox_pending_events_history'",

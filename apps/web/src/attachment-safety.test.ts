@@ -21,4 +21,13 @@ describe("browser attachment safety", () => {
     expect(safeSuggestedFilename(`${"a".repeat(200)}.pdf`)).toBe(`${"a".repeat(124)}.pdf`);
     expect(safeSuggestedFilename("📎 report.txt")).toBe("📎 report.txt");
   });
+
+  it("plays RCS voice notes and audio inline only for the allowlisted audio types", () => {
+    ["audio/ogg", "audio/opus", "audio/aac", "audio/mp4", "audio/x-m4a", "audio/wav"].forEach(mediaType => {
+      expect(canInlineMedia(mediaType)).toBe(true);
+    });
+    expect(canInlineMedia("audio/flac")).toBe(false);
+    expect(canInlineMedia("audio/x-ms-wma")).toBe(false);
+    expect(canInlineMedia("application/ogg")).toBe(false);
+  });
 });

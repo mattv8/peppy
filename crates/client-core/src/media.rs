@@ -14,6 +14,8 @@ use peppy_crypto::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     any::Any,
     fmt,
@@ -555,6 +557,38 @@ pub(crate) fn open_plaintext(
         return Err(Error::InvalidMedia); // dropping `file` removes the plaintext
     }
     Ok(file)
+}
+
+/// Decrypts into a caller-owned private directory. The directory itself must be an existing,
+/// non-symlink owner-only directory; the returned fresh 0600 file is intentionally persistent so
+/// the native host can delete it in its `finally` block.
+pub(crate) fn decrypt_to_private_file(
+    root: &Path,
+    attachment_id: AttachmentId,
+    key: &FileKey,
+    aad: &[u8],
+    plaintext_bytes: u64,
+    destination_dir: &Path,
+) -> Result<PathBuf, Error> {
+    let metadata = fs::symlink_metadata(destination_dir)
+        .map_err(|_| Error::InvalidRequest("private destination"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(Error::InvalidRequest("private destination"));
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(Error::InvalidRequest("private destination"));
+    }
+    let directory = fs::canonicalize(destination_dir)
+        .map_err(|_| Error::InvalidRequest("private destination"))?;
+    let path = directory.join(format!("{}.bin", uuid::Uuid::new_v4()));
+    let input = File::open(cipher_path(root, attachment_id)).map_err(|_| Error::InvalidMedia)?;
+    decrypt_stream_to_path(input, &path, key, aad).map_err(|_| Error::InvalidMedia)?;
+    if fs::metadata(&path).map(|entry| entry.len()).ok() != Some(plaintext_bytes) {
+        let _ = fs::remove_file(&path);
+        return Err(Error::InvalidMedia);
+    }
+    Ok(path)
 }
 
 /// Decrypts verified local ciphertext into memory (bounded by `plaintext_bytes`). The transient

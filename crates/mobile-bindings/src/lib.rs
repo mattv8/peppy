@@ -1328,6 +1328,20 @@ impl NativeClient {
     }
 }
 
+#[uniffi::export]
+pub fn gateway_decrypt_rcs_attachment_to_file(
+    client: Arc<NativeClient>,
+    attachment_id: String,
+    destination_dir: String,
+) -> Result<String, MobileBindingsError> {
+    let attachment_id = parse_id(&attachment_id)?;
+    let destination_dir = std::path::PathBuf::from(destination_dir);
+    with_client(&client.client, |core| {
+        core.decrypt_attachment_to_private_file(attachment_id, &destination_dir)
+    })
+    .map(|path| path.to_string_lossy().into_owned())
+}
+
 fn draft_view(
     draft: peppy_client_core::ComposeDraft,
 ) -> Result<NativeComposeDraft, MobileBindingsError> {

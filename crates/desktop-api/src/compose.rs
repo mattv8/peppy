@@ -170,7 +170,19 @@ fn conversation_context(
     else {
         return Ok((Vec::new(), None));
     };
-    let transport = latest.payload.transport;
+    let mut transport = latest.payload.transport;
+    if transport == Transport::Mms && latest.payload.direction == Direction::Outgoing {
+        for index in 0..latest.payload.record.attachments.len() {
+            if client
+                .rcs_media_outgoing_status(latest.payload.record.message_id, index as u32)
+                .map_err(ComposeError::Core)?
+                .is_some()
+            {
+                transport = Transport::Rcs;
+                break;
+            }
+        }
+    }
     if transport == Transport::Mms {
         let context = client
             .mms_reply_context(conversation)
@@ -375,6 +387,7 @@ pub fn send_draft_accepted(
         revision: Some((revision + 1).to_string()),
         parts,
         group: None,
+        refused_attachment_ids: None,
     })
 }
 
@@ -477,9 +490,20 @@ pub fn prepare_draft_send(
         })
         .collect::<Result<Vec<_>, _>>()?;
     check_attachments(client, &attachment_ids)?;
-    let requires_mms = !attachment_info.is_empty()
-        || recipients.len() > 1
-        || latest_transport == Some(Transport::Mms);
+    let rcs_media_route = !attachment_info.is_empty()
+        && (latest_transport == Some(Transport::Rcs)
+            || group_route_live(client, stored.conversation_id)?
+            || group_creation_media_route(
+                client,
+                stored.conversation_id,
+                gateway_id,
+                recipients.len(),
+                input.group_create_confirm_duplicate.unwrap_or(false),
+            )?);
+    let requires_mms = !rcs_media_route
+        && (!attachment_info.is_empty()
+            || recipients.len() > 1
+            || latest_transport == Some(Transport::Mms));
     if requires_mms {
         if !gateway.supports_mms || gateway.mms_content_version.unwrap_or(0) < 2 {
             return Err(ui(
@@ -582,16 +606,6 @@ fn queue_prepared_draft_send(
         .resolve_compose_draft_for_send(draft_id, revision)
         .map_err(ComposeError::Core)?;
     let (_, latest_transport) = conversation_context(client, stored.conversation_id)?;
-    if command_id.is_none()
-        && stored.recipients.len() > 1
-        && !stored.attachment_ids.is_empty()
-        && group_route_live(client, stored.conversation_id)?
-    {
-        return Err(ui(
-            "group-media-unsupported",
-            "Photos can't be sent to this RCS group yet. Remove them, or send to the group as text.",
-        ));
-    }
     let parts = command_id
         .is_none()
         .then(|| prepared_draft_send_parts(client, input, gateways))
@@ -651,6 +665,7 @@ fn queue_prepared_draft_send(
             .flatten()
             .map(|parts| (parts.image_groups.len() + usize::from(parts.caption)) as u32),
         group: None,
+        refused_attachment_ids: None,
     })
 }
 
@@ -668,6 +683,37 @@ fn group_route_live(
                 peppy_client_core::GroupLinkState::Live | peppy_client_core::GroupLinkState::Paused
             )
         }))
+}
+
+/// Advisory compose policy only. The gateway still owns the one-use create and send permits.
+fn group_creation_media_route(
+    client: &Client,
+    conversation: ConversationId,
+    gateway_id: &str,
+    recipient_count: usize,
+    confirm_duplicate: bool,
+) -> Result<bool, ComposeError> {
+    if recipient_count < 2 {
+        return Ok(false);
+    }
+    if client
+        .group_view(conversation)
+        .map_err(ComposeError::Core)?
+        .is_some_and(|view| {
+            !view.can_create && !(confirm_duplicate && view.create_needs_confirmation)
+        })
+    {
+        return Ok(false);
+    }
+    let gateway = DeviceId::from_str(gateway_id)
+        .map_err(|_| ui("invalid-route", "The phone ID is invalid."))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    client
+        .rcs_gateway_supported(gateway, now)
+        .map_err(ComposeError::Core)
 }
 
 /// Group fields of a draft send. The revision is the composer's expectation; core refuses a mismatch.
@@ -697,6 +743,7 @@ fn members_changed_refusal(
         revision: Some(revision.to_string()),
         parts: None,
         group: group_refusal_view(client, conversation_id).map_err(ComposeError::Core)?,
+        refused_attachment_ids: None,
     })
 }
 
@@ -720,6 +767,12 @@ pub fn prepared_draft_send_parts(
     if input.attachment_ids.is_empty() {
         return Ok(None);
     }
+    if let Ok(conversation) = ConversationId::from_str(&input.conversation_id) {
+        let (_, transport) = conversation_context(client, conversation)?;
+        if transport == Some(Transport::Rcs) || group_route_live(client, conversation)? {
+            return Ok(None);
+        }
+    }
     let (Some(gateway_id), Some(sim_id), Some(gateways)) = (
         input.gateway_id.as_deref(),
         input.sim_id.as_deref(),
@@ -730,6 +783,17 @@ pub fn prepared_draft_send_parts(
     let Some(gateway) = find_route(gateways, gateway_id, sim_id) else {
         return Ok(None);
     };
+    if let Ok(conversation) = ConversationId::from_str(&input.conversation_id)
+        && group_creation_media_route(
+            client,
+            conversation,
+            gateway_id,
+            input.recipient_ids.len(),
+            input.group_create_confirm_duplicate.unwrap_or(false),
+        )?
+    {
+        return Ok(None);
+    }
     let images = input
         .attachment_ids
         .iter()
@@ -824,13 +888,17 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
+        fixture_for_device(DeviceId::new())
+    }
+
+    fn fixture_for_device(device_id: DeviceId) -> Fixture {
         let directory = tempfile::tempdir().unwrap();
         let vault_id = VaultId::new();
         let client = Client::open(
             ClientConfig {
                 database_path: directory.path().join("compose.db"),
                 vault_id,
-                device_id: DeviceId::new(),
+                device_id,
             },
             DatabaseKey::new(&[7; 32]).unwrap(),
         )
@@ -880,6 +948,131 @@ mod tests {
                 },
             )
             .unwrap()
+    }
+
+    #[test]
+    fn the_next_media_draft_keeps_rcs_after_an_mms_shaped_rcs_send() {
+        let fixture = fixture();
+        let source = fixture._directory.path().join("media.bin");
+        std::fs::write(&source, b"media").unwrap();
+        let attachment = fixture
+            .client
+            .prepare_attachment(&source, "image/jpeg", "photo.jpg")
+            .unwrap();
+        let conversation = ConversationId::new();
+        let queued = fixture
+            .client
+            .queue_mms(
+                peppy_client_core::OutgoingMms {
+                    conversation_id: conversation,
+                    recipients: vec!["+14155552671".into()],
+                    body: "caption".into(),
+                    attachment_ids: vec![attachment.attachment_id],
+                    subject: None,
+                },
+                parse_route(GATEWAY_ID, "sim").ok().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            conversation_context(&fixture.client, conversation)
+                .ok()
+                .unwrap()
+                .1,
+            Some(Transport::Mms)
+        );
+        let db = rusqlite::Connection::open(fixture._directory.path().join("compose.db")).unwrap();
+        db.execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+        db.execute("INSERT INTO rcs_media_send_status(message_id,attachment_index,state) VALUES(?,0,'sent')", [queued.message_id.to_string()]).unwrap();
+        assert_eq!(
+            conversation_context(&fixture.client, conversation)
+                .ok()
+                .unwrap()
+                .1,
+            Some(Transport::Rcs)
+        );
+    }
+
+    #[test]
+    fn a_first_rcs_group_media_send_keeps_one_album_and_its_create_fields() {
+        let device: DeviceId = GATEWAY_ID.parse().unwrap();
+        let fixture = fixture_for_device(device);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        fixture
+            .client
+            .publish_rcs_capability(
+                &peppy_client_core::RcsLinkStatusEvent {
+                    gateway_device_id: device,
+                    state: peppy_client_core::RcsCapabilityState::Linked,
+                    availability: true,
+                    health: true,
+                    phone_responsive: true,
+                    observed_at_ms: now,
+                    capability_revision: 1,
+                    feature_bits: 1,
+                    linked_since_ms: Some(now),
+                },
+                &[],
+                now,
+            )
+            .unwrap();
+        let mut ids = Vec::new();
+        for (index, mime) in ["application/pdf", "video/mp4"].into_iter().enumerate() {
+            let source = fixture._directory.path().join(format!("group-{index}"));
+            std::fs::write(&source, vec![7_u8; 1024 * 1024]).unwrap();
+            let attachment = fixture
+                .client
+                .prepare_attachment(&source, mime, "media")
+                .unwrap();
+            fixture
+                .client
+                .mark_attachment_uploaded(
+                    attachment.attachment_id,
+                    &uuid::Uuid::new_v4().to_string(),
+                )
+                .unwrap();
+            ids.push(attachment.attachment_id);
+        }
+        let draft = fixture
+            .client
+            .save_new_compose_draft(ComposeDraftUpdate {
+                group_name: Some("Media group".into()),
+                text: "one caption".into(),
+                recipients: vec!["+14155552671".into(), "+14155552672".into()],
+                attachment_ids: ids,
+                route: Some(parse_route(GATEWAY_ID, "sim").ok().unwrap()),
+            })
+            .unwrap();
+        let mut request = input(&draft);
+        request.group_name = Some("Media group".into());
+        let result = send_draft(
+            &fixture.client,
+            &request,
+            Some(&[gateway(GatewayAvailability::Connected)]),
+        );
+        assert!(
+            result.is_ok(),
+            "a capable RCS create route must not invoke the MMS split planner"
+        );
+        let messages = fixture.client.messages(draft.conversation_id).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].payload.record.attachments.len(), 2);
+        assert_eq!(messages[0].payload.body, "one caption");
+        assert_eq!(
+            fixture
+                .client
+                .group_view(draft.conversation_id)
+                .unwrap()
+                .unwrap()
+                .members
+                .len(),
+            2
+        );
     }
 
     fn mark_synced(client: &Client, draft_id: DraftId) {

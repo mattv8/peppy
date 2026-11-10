@@ -203,6 +203,34 @@ class RcsNativeGoAdapterTest {
         assertEquals("", handle.commit)
     }
 
+    @Test fun `guarded classification forwards the exact snapshot and captures its target`() {
+        val handle = FakeHandle().apply { guarded = true; guardedSnapshot = " { exact candidate } " }
+
+        val target = adapter(handle).classifyTarget("ticket") { snapshot ->
+            assertEquals(handle.guardedSnapshot, snapshot)
+            RcsNativeTarget.CarrierOnly
+        }
+
+        assertEquals(RcsNativeTarget.CarrierOnly, target)
+        assertEquals("ticket", handle.guardedTicket)
+    }
+
+    @Test fun `guard rejection stale lease and callback failure fail closed without reentry`() {
+        val rejected = FakeHandle().apply { guarded = false }
+        assertEquals(null, adapter(rejected).classifyTarget("ticket") { RcsNativeTarget.CarrierOnly })
+        assertEquals(1, rejected.guardCalls)
+
+        val stale = FakeHandle()
+        val lease = lease(stale)
+        LinkRuntime.detachHandleForServiceStop(lease)?.let(LinkRuntime::closeDetachedHandle)
+        assertEquals(null, RcsNativeGoAdapter(lease).classifyTarget("ticket") { RcsNativeTarget.CarrierOnly })
+        assertEquals(0, stale.guardCalls)
+
+        val throwing = FakeHandle()
+        assertEquals(null, adapter(throwing).classifyTarget("ticket") { error("classifier failure") })
+        assertEquals(1, throwing.guardCalls)
+    }
+
     @Test fun `revoke only accepts exact result codes`() {
         val handle = FakeHandle()
         val adapter = adapter(handle)
@@ -265,10 +293,15 @@ class RcsNativeGoAdapterTest {
         var factsResponse = "{\"code\":\"facts_bound\"}"; var commitResponse = "{\"code\":\"accepted\"}"; var revokeResponse = "{\"code\":\"revoked\"}"; var throwCommit = false; var throwRevoke = false
         var prepareCalls = 0; var routeCalls = 0; var facts = ""; var commit = ""; val revoked = mutableListOf<String>(); var onBindTarget: (() -> Unit)? = null
         var interruptedPhase: String? = null
+        var guarded = false; var guardCalls = 0; var guardedTicket = ""; var guardedSnapshot = CANDIDATE
         override fun pair(cookiesJson: ByteArray) = Unit; override fun relink() = Unit; override fun run() = Unit; override fun checkHealth() = 0L; override fun unlink() = Unit; override fun stop() = Unit; override fun close() = Unit; override fun status() = ""
         override fun ownerGeneration() = 1L
         override fun prepareNativeRcs(requestJson: String) = prepareResponse.also { prepareCalls++ }
         override fun bindNativeRcsRoute(ticketId: String, linkGeneration: Long, sessionGeneration: Long, contextRevision: Long, mappingRevision: Long, observedAtMs: Long) = routeResponse.also { routeCalls++ }
+        override fun withNativeRcsTargetClassification(ticketId: String, classifier: NativeRcsTargetClassifier): Boolean {
+            guardCalls++; guardedTicket = ticketId
+            return guarded && classifier.classify(guardedSnapshot)
+        }
         override fun bindNativeRcsTarget(ticketId: String, googleConversationId: String, snapshotToken: String) = targetResponse.also { onBindTarget?.invoke() }
         override fun bindNativeRcsFacts(ticketId: String, factsJson: String) = factsResponse.also { interruptIf("facts"); facts = factsJson }
         override fun commitNativeRcs(ticketId: String, commitJson: String): String { interruptIf("commit"); if (throwCommit) throw IllegalStateException(); commit = commitJson; return commitResponse }

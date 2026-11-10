@@ -198,6 +198,7 @@ fn record(body: &str) -> RcsProjectedRecord {
         tmp_id: None,
         rcs_reported: true,
         e2ee_reported: Some(true),
+        attachments: Vec::new(),
     }
 }
 

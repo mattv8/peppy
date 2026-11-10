@@ -48,6 +48,10 @@ class GatewayHttp(
 ) {
     @Volatile private var retentionHeader: NativeAttachmentRetentionProtocolHeader? = null
     @Volatile private var attachmentProducerReady = true
+    @Volatile private var beforeRequest: () -> Unit = {}
+
+    /** Install before using a captured transport. Throwing denies the next request, not one already in flight. */
+    fun setBeforeRequest(check: () -> Unit) { beforeRequest = check }
     fun get(path: String): HttpResult = request("GET", path, null)
 
     fun postJson(path: String, body: String): HttpResult = request("POST", path, body)
@@ -68,7 +72,7 @@ class GatewayHttp(
         require(request.method in setOf("GET", "POST", "PUT", "DELETE"))
         requireV1JsonPath(request.relativePath)
         require(readLimitBytes > 0uL && readLimitBytes <= MAX_RESPONSE_BYTES.toULong())
-        val connection = URL(origin + request.relativePath).openConnection() as HttpURLConnection
+        val connection = openConnection(request.relativePath)
         try {
             configureConnection(connection, request.method)
             request.protocolHeader?.let { header -> connection.setRequestProperty(header.name, header.value) }
@@ -152,7 +156,7 @@ class GatewayHttp(
         val diagnosticsEnabled = SyncDiagnostics.enabled
         val started = if (diagnosticsEnabled) SyncDiagnostics.nowMs() else 0L
         val requestBytes = if (diagnosticsEnabled) body?.toByteArray(Charsets.UTF_8)?.size?.toLong() ?: 0L else 0L
-        val connection = URL(origin + path).openConnection() as HttpURLConnection
+        val connection = openConnection(path)
         try {
             configureConnection(connection, method)
             applyRetentionHeader(connection, method)
@@ -186,7 +190,7 @@ class GatewayHttp(
     private fun binaryConnection(method: String, path: String, requestBytes: Long = 0L, transfer: (HttpURLConnection) -> Long): HttpResult {
         val diagnosticsEnabled = SyncDiagnostics.enabled
         val started = if (diagnosticsEnabled) SyncDiagnostics.nowMs() else 0L
-        val connection = URL(origin + path).openConnection() as HttpURLConnection
+        val connection = openConnection(path)
         try {
             configureConnection(connection, method)
             applyRetentionHeader(connection, method)
@@ -216,6 +220,13 @@ class GatewayHttp(
             if (diagnosticsEnabled) recordRequest(method, path, -1, requestBytes, 0L, started, false)
             throw GatewayTransportException("transport failure")
         } finally { connection.disconnect() }
+    }
+
+    private fun openConnection(path: String): HttpURLConnection {
+        // Outside the request catch blocks: an IOException from the fence must not trigger
+        // binary responseCode recovery, which could itself start a denied network request.
+        beforeRequest()
+        return URL(origin + path).openConnection() as HttpURLConnection
     }
 
     private fun configureConnection(connection: HttpURLConnection, method: String) {

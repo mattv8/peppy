@@ -83,6 +83,16 @@ internal object GoogleMessagesLinkDiagnosticReason {
         ("group_send" to "commit_rejected") to 76L,
         ("group_send" to "lease_refused") to 77L,
         ("create" to "settle_failed") to 78L,
+        ("direct_send" to "submitted") to 79L,
+        ("direct_send" to "carrier_only") to 80L,
+        ("direct_send" to "route_not_current") to 81L,
+        ("direct_send" to "target_refused") to 82L,
+        ("direct_send" to "proof_refused") to 83L,
+        ("direct_send" to "begin_refused") to 84L,
+        ("direct_send" to "commit_rejected") to 85L,
+        ("direct_send" to "outcome_unknown") to 86L,
+        ("direct_send" to "refused") to 87L,
+        ("direct_send" to "proof_window_missed") to 88L,
     )
 }
 
