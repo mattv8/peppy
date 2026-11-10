@@ -9,6 +9,7 @@ describe("mcpErrorMessage", () => {
     ["mcp_device_not_enrolled", "Peppy MCP setup didn't finish. Try again."],
     ["mcp_unavailable", "Peppy MCP isn't reachable right now. Try again in a moment."],
     ["owner_required", "Only an owner can enable Peppy MCP."],
+    ["hosted-session-required", "Your Peppy Hosted sign-in has expired. Sign in again, then select Enable."],
     ["session-changed", "Your session changed. Close this and try again."],
     ["offline", "Couldn't reach the server. Check the connection and try again."],
   ])("uses actionable copy for %s", (code, expected) => {

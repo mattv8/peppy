@@ -169,6 +169,15 @@ impl Api {
     }
 
     async fn execute(&self, request: RequestBuilder) -> Result<Response, NetError> {
+        self.execute_preserving_unauthorized_status(request, false)
+            .await
+    }
+
+    async fn execute_preserving_unauthorized_status(
+        &self,
+        request: RequestBuilder,
+        preserve_unauthorized_status: bool,
+    ) -> Result<Response, NetError> {
         let response = request
             .bearer_auth(self.token.as_str())
             .send()
@@ -193,7 +202,13 @@ impl Api {
                     .and_then(|value| sanitize_code(&value))
                     .or_else(|| non_api_response.then(|| NON_API_ERROR_CODE.into()))
             });
-        if status == StatusCode::UNAUTHORIZED {
+        let account_enrollment_unauthorized = matches!(
+            code.as_deref(),
+            Some("mcp_enrollment_unauthorized" | "enrollment_unauthorized")
+        );
+        if status == StatusCode::UNAUTHORIZED
+            && (!preserve_unauthorized_status || !account_enrollment_unauthorized)
+        {
             return Err(NetError::Revoked);
         }
         Err(NetError::Status {
@@ -208,6 +223,21 @@ impl Api {
         cap: usize,
     ) -> Result<T, NetError> {
         let body = read_bounded(self.execute(request).await?, cap).await?;
+        serde_json::from_slice(&body).map_err(|_| NetError::Invalid)
+    }
+
+    async fn json_with_account<T: DeserializeOwned>(
+        &self,
+        request: RequestBuilder,
+        cap: usize,
+        account_session_attached: bool,
+    ) -> Result<T, NetError> {
+        let body = read_bounded(
+            self.execute_preserving_unauthorized_status(request, account_session_attached)
+                .await?,
+            cap,
+        )
+        .await?;
         serde_json::from_slice(&body).map_err(|_| NetError::Invalid)
     }
 
@@ -257,7 +287,8 @@ impl Api {
         if let Some(account_session) = account_session {
             request = request.header("Peppy-Account-Session", account_session);
         }
-        self.json(request, MAX_JSON_BYTES).await
+        self.json_with_account(request, MAX_JSON_BYTES, account_session.is_some())
+            .await
     }
 
     pub async fn put_json<B: Serialize + ?Sized, T: DeserializeOwned>(
@@ -908,6 +939,59 @@ pub mod tests {
                 code: None
             }
         );
+    }
+
+    #[tokio::test]
+    async fn account_posts_preserve_only_account_enrollment_unauthorized_statuses() {
+        for (status, code, account, expected) in [
+            (
+                "401 Unauthorized",
+                "mcp_enrollment_unauthorized",
+                Some("account"),
+                NetError::Status {
+                    status: 401,
+                    code: Some("mcp_enrollment_unauthorized".into()),
+                },
+            ),
+            (
+                "403 Forbidden",
+                "enrollment_unauthorized",
+                Some("account"),
+                NetError::Status {
+                    status: 403,
+                    code: Some("enrollment_unauthorized".into()),
+                },
+            ),
+            (
+                "401 Unauthorized",
+                "invalid_bearer",
+                Some("account"),
+                NetError::Revoked,
+            ),
+            (
+                "401 Unauthorized",
+                "mcp_enrollment_unauthorized",
+                None,
+                NetError::Revoked,
+            ),
+        ] {
+            let body = format!(r#"{{"code":"{code}"}}"#).into_bytes();
+            let origin = serve_once(
+                format!(
+                    "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                ),
+                body,
+            )
+            .await;
+            let api = Api::new(&origin, "credential").unwrap();
+            assert_eq!(
+                api.post_json_with_account::<_, serde_json::Value>("/mcp", &(), account)
+                    .await
+                    .unwrap_err(),
+                expected
+            );
+        }
     }
 
     #[tokio::test]

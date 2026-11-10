@@ -794,6 +794,15 @@ fn external_url_validation_accepts_only_safe_http_destinations() {
         "https://example.com:",
         "https://0x7f.0.0.1",
         "https://example.com\u{e0001}",
+        "cursor://anysphere.cursor-deeplink/other",
+        "cursor://anysphere.cursor-deeplink/mcp/install",
+        "cursor://anysphere.cursor-deeplink/mcp/install?",
+        "cursor://anysphere.cursor-deeplink/mcp/install? ",
+        "cursor://evil/mcp/install?x",
+        "cursor://user@anysphere.cursor-deeplink/mcp/install?x",
+        "cursor://anysphere.cursor-deeplink:443/mcp/install?x",
+        "cursor://anysphere.cursor-deeplink/mcp/install?x#frag",
+        "vscode://anysphere.cursor-deeplink/mcp/install?x",
     ] {
         assert_eq!(
             crate::validate_external_url(value).unwrap_err().code,
@@ -801,6 +810,14 @@ fn external_url_validation_accepts_only_safe_http_destinations() {
             "{value}"
         );
     }
+}
+
+#[test]
+fn external_url_validation_accepts_cursor_mcp_install_deeplink() {
+    assert!(crate::validate_external_url(
+        "cursor://anysphere.cursor-deeplink/mcp/install?name=peppy&config=abc"
+    )
+    .is_ok());
 }
 
 #[test]
@@ -1669,4 +1686,41 @@ fn send_rejects_a_draft_from_another_conversation_without_mutation() {
         "sim-1",
     );
     assert!(session.send_draft(&ok).unwrap().accepted);
+}
+
+#[test]
+fn mcp_oauth_redirect_validation_allows_only_vetted_callback_schemes() {
+    for value in [
+        "vscode://callback.example/oauth/callback",
+        "vscode-insiders://callback.example/oauth/callback",
+        "cursor://anysphere.cursor-retrieval/oauth/callback",
+        "windsurf://callback.example/oauth/callback",
+        "jetbrains://callback.example/oauth/callback",
+    ] {
+        assert!(
+            crate::validate_mcp_oauth_redirect_url(value).is_ok(),
+            "{value}"
+        );
+    }
+    for value in [
+        "myapp://callback.example/oauth/callback",
+        "vscode:callback",
+        "vscode://user@callback.example/oauth/callback",
+        "vscode://callback.example/oauth/callback#fragment",
+        "vscode://callback.example/path\\other",
+    ] {
+        assert_eq!(
+            crate::validate_mcp_oauth_redirect_url(value)
+                .unwrap_err()
+                .code,
+            "invalid-request",
+            "{value}"
+        );
+    }
+    assert_eq!(
+        crate::validate_external_url("vscode://callback.example/oauth/callback")
+            .unwrap_err()
+            .code,
+        "invalid-request"
+    );
 }

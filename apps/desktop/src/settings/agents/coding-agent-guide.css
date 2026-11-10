@@ -1,0 +1,31 @@
+.coding-agent-client-guide { display: grid; gap: 12px; min-width: 0; color: var(--peppy-text-secondary); font-family: var(--peppy-font-body); font-size: 13px; line-height: 1.4; }
+.coding-agent-client-guide :is(p, h3) { margin: 0; }
+.coding-agent-client-guide a:not(.primary-button) { color: var(--peppy-accent); text-underline-offset: 0.15em; }
+.coding-agent-client-guide a:focus-visible { outline: 2px solid var(--peppy-focus-ring); outline-offset: 2px; }
+.coding-agent-guide-section { display: grid; gap: 8px; min-width: 0; }
+.coding-agent-guide-section > h3 { margin: 0; color: var(--peppy-text-strong); font-size: 13px; font-weight: 700; }
+.coding-agent-guide-steps, .coding-agent-config-locations { display: grid; gap: 4px; margin: 0; padding-inline-start: 20px; }
+.coding-agent-guide-steps li, .coding-agent-config-locations li, .coding-agent-client-guide p { overflow-wrap: anywhere; }
+.coding-agent-guide-alternative { min-width: 0; }
+.coding-agent-guide-alternative > summary { cursor: pointer; color: var(--peppy-text-primary); }
+.coding-agent-guide-alternative > summary:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 2px; }
+.coding-agent-guide-alternative > :not(summary) { margin-top: 8px; }
+.coding-agent-guide-note { margin: 0; padding: 8px; border: 1px solid var(--peppy-warning-border); border-radius: var(--peppy-radius-sm); background: var(--peppy-warning-surface); color: var(--peppy-text-primary); }
+.coding-agent-copyable-snippet { display: grid; gap: 4px; min-width: 0; }
+.coding-agent-copyable-snippet-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.coding-agent-copyable-snippet-toolbar .secondary-button { min-width: 84px; }
+.coding-agent-copyable-snippet-label { color: var(--peppy-text-primary); font-size: 12px; font-weight: 700; }
+.coding-agent-copyable-snippet pre { box-sizing: border-box; width: 100%; max-height: 288px; margin: 0; padding: 8px; overflow-x: auto; overflow-y: auto; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-sm); background: var(--peppy-surface-editor); color: var(--peppy-text-primary); font-family: var(--peppy-font-mono); font-size: 12px; line-height: 1.5; }
+.coding-agent-copyable-snippet code { overflow-wrap: normal; }
+.coding-agent-copyable-snippet pre:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 2px; }
+.coding-agent-copy-status { min-height: 0; margin: 0; color: var(--peppy-error-text); }
+.coding-agent-copy-status:empty { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.coding-agent-config-location { display: grid; gap: 4px; }
+.coding-agent-config-location-label { color: var(--peppy-text-muted); font-size: 12px; font-weight: 700; }
+.coding-agent-guide-completion, .coding-agent-guide-image figcaption { color: var(--peppy-text-secondary); }
+.coding-agent-guide-image { display: grid; gap: 4px; margin: 0; }
+.coding-agent-guide-image img { width: 100%; height: auto; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-sm); }
+.coding-agent-client-guide a.primary-button { display: inline-flex; box-sizing: border-box; align-items: center; justify-self: start; color: var(--peppy-accent-text); text-decoration: none; }
+.coding-agent-client-guide a.primary-button:hover { background: var(--peppy-accent-hover); }
+@media (pointer: coarse) { .coding-agent-copyable-snippet-toolbar .secondary-button, .coding-agent-client-guide a.primary-button { min-height: 44px; } }
+@media (forced-colors: active) { .coding-agent-copyable-snippet pre { border-color: CanvasText; } .coding-agent-copyable-snippet pre:focus-visible { outline-color: Highlight; } .coding-agent-client-guide a.primary-button { border-color: ButtonText; background: ButtonFace; color: ButtonText; } }

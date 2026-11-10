@@ -5,6 +5,7 @@ import type { McpDeviceStatus, McpGrantView } from "@peppy/desktop-ui/bridge-con
 import { bridge, type DeviceRosterView } from "../bridge/bridge";
 import { McpDetailsModal } from "./McpDetailsModal";
 import { grantShortId, isRemovedDevice, isStartingState, mcpErrorMessage, mcpServerErrorCode, mcpStateLabel, mcpVaultId, unavailableReasonFor } from "./mcpDisplay";
+import { publishMcpStatus } from "./mcpStatusStore";
 
 type McpDeviceSettingsProps = {
   roster: DeviceRosterView;
@@ -104,6 +105,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
   const applyStatus = useCallback((next: McpDeviceStatus) => {
     statusRef.current = next;
     setStatus(next);
+    publishMcpStatus(context.current, next);
     onDeviceIdRef.current?.(next.device?.deviceId ?? null);
     if (!isStartingState(next.device?.state)) setEnableSettling(false);
   }, []);
@@ -411,11 +413,11 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
               <button id="mcp-device-remove" type="button" className="secondary-button" aria-label="Remove Peppy MCP" onClick={event => onRemove?.(matchedDevice, event.currentTarget)}>Remove</button>
             )}
             {canEnable && (
-              <button id="mcp-custody-review" ref={custodyOpener} type="button" className="secondary-button" aria-label="Review custody consent for Peppy MCP" onClick={openConsent}>Re-enable</button>
+              <button id="mcp-custody-review" ref={custodyOpener} type="button" className="secondary-button" aria-label="Re-enable Peppy MCP" onClick={openConsent}>Re-enable</button>
             )}
           </span>
         ) : canEnable && (
-          <button id="mcp-custody-review" ref={custodyOpener} type="button" className="secondary-button" aria-label="Review custody consent for Peppy MCP" onClick={openConsent}>Review custody consent</button>
+          <button id="mcp-custody-review" ref={custodyOpener} type="button" className="secondary-button" aria-label="Enable Peppy MCP" onClick={openConsent}>Enable</button>
         )}
       </li>
       {typeof document !== "undefined" && createPortal(<>

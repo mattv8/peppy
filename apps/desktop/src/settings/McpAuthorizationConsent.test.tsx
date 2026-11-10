@@ -19,7 +19,7 @@ describe("McpAuthorizationConsent", () => {
     vi.mocked(bridge.mcp_status).mockResolvedValue({ vaultId: "11111111-1111-4111-8111-111111111111", available: true, serverOrigin: "https://vault.example", hosted: true, device: null });
     vi.mocked(bridge.mcp_approve_authorization).mockResolvedValue({ redirectUri: "https://client.example/callback?code=validated" });
     vi.mocked(bridge.mcp_deny_authorization).mockResolvedValue({ redirectUri: "https://client.example/callback?error=access_denied" });
-    bridge.open_external_url = vi.fn().mockResolvedValue(undefined);
+    bridge.open_mcp_oauth_redirect = vi.fn().mockResolvedValue(undefined);
   });
   afterEach(cleanup);
 
@@ -29,14 +29,22 @@ describe("McpAuthorizationConsent", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: /Send real text messages/i }));
     fireEvent.click(screen.getByRole("button", { name: "Approve access" }));
     await waitFor(() => expect(bridge.mcp_approve_authorization).toHaveBeenCalledWith("request-1", ["conversations:read"]));
-    expect(bridge.open_external_url).toHaveBeenCalledWith("https://client.example/callback?code=validated");
+    expect(bridge.open_mcp_oauth_redirect).toHaveBeenCalledWith("https://client.example/callback?code=validated");
   });
 
   it("denies through the validated redirect", async () => {
     render(<McpAuthorizationConsent authorizationId="request-1" browserHost={false} sessionKey="vault-a" focusFallback={{ current: null }} onClose={() => undefined} />);
     fireEvent.click(await screen.findByRole("button", { name: "Deny access" }));
     await waitFor(() => expect(bridge.mcp_deny_authorization).toHaveBeenCalledWith("request-1"));
-    expect(bridge.open_external_url).toHaveBeenCalledWith("https://client.example/callback?error=access_denied");
+    expect(bridge.open_mcp_oauth_redirect).toHaveBeenCalledWith("https://client.example/callback?error=access_denied");
+  });
+
+  it("opens native OAuth callbacks through the dedicated bridge command", async () => {
+    vi.mocked(bridge.mcp_approve_authorization).mockResolvedValueOnce({ redirectUri: "cursor://anysphere.cursor-retrieval/oauth/callback?code=validated" });
+    render(<McpAuthorizationConsent authorizationId="request-1" browserHost={false} sessionKey="vault-a" focusFallback={{ current: null }} onClose={() => undefined} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Approve access" }));
+    await waitFor(() => expect(bridge.open_mcp_oauth_redirect).toHaveBeenCalledWith("cursor://anysphere.cursor-retrieval/oauth/callback?code=validated"));
+    expect(bridge.open_external_url).not.toHaveBeenCalled();
   });
 
   it("closes or retries an expired authorization fetch", async () => {
@@ -57,7 +65,7 @@ describe("McpAuthorizationConsent", () => {
 
   it("retries only opening a consumed approval redirect", async () => {
     const opener = vi.fn().mockRejectedValueOnce(new Error("Opener blocked")).mockResolvedValueOnce(undefined);
-    bridge.open_external_url = opener;
+    bridge.open_mcp_oauth_redirect = opener;
     render(<McpAuthorizationConsent authorizationId="request-1" browserHost={false} sessionKey="vault-a" focusFallback={{ current: null }} onClose={() => undefined} />);
     fireEvent.click(await screen.findByRole("button", { name: "Approve access" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Opener blocked");
@@ -85,7 +93,7 @@ describe("McpAuthorizationConsent", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Approve access" }));
     unmount();
     await act(async () => decision.resolve({ redirectUri: "https://client.example/callback?code=stale" }));
-    expect(bridge.open_external_url).not.toHaveBeenCalled();
+    expect(bridge.open_mcp_oauth_redirect).not.toHaveBeenCalled();
   });
 
   it("shows an immediate loading status with Close as the only action", () => {
@@ -191,7 +199,7 @@ describe("McpAuthorizationConsent", () => {
     expect(screen.queryByRole("button", { name: "Deny access" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(onClose).toHaveBeenCalled();
-    expect(bridge.open_external_url).not.toHaveBeenCalled();
+    expect(bridge.open_mcp_oauth_redirect).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -237,6 +245,6 @@ describe("McpAuthorizationConsent", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Approve access" }));
     rerender(<McpAuthorizationConsent authorizationId="request-2" browserHost={false} sessionKey="vault-b" focusFallback={{ current: null }} onClose={() => undefined} />);
     await act(async () => decision.resolve({ redirectUri: "https://client.example/callback?code=stale" }));
-    expect(bridge.open_external_url).not.toHaveBeenCalled();
+    expect(bridge.open_mcp_oauth_redirect).not.toHaveBeenCalled();
   });
 });

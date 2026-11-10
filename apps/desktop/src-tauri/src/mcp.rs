@@ -81,6 +81,33 @@ fn current_account(
     Ok(())
 }
 
+fn account_session_rejected(error: &NetError) -> Option<(u16, &str)> {
+    match error {
+        NetError::Status {
+            status,
+            code: Some(code),
+        } if matches!(*status, 401 | 403)
+            && matches!(
+                code.as_str(),
+                "mcp_enrollment_unauthorized" | "enrollment_unauthorized"
+            ) =>
+        {
+            Some((*status, code))
+        }
+        _ => None,
+    }
+}
+
+fn hosted_session_required(path: &str, status: u16, code: &str) -> BridgeError {
+    let path = path.split('?').next().unwrap_or(path);
+    BridgeError::new(
+        "hosted-session-required",
+        format!(
+            "Sign in again to Peppy Hosted before enrolling (POST {path}, HTTP {status}, {code})."
+        ),
+    )
+}
+
 async fn current(
     state: &AppState,
     expected: &std::sync::Arc<crate::session::Session>,
@@ -145,11 +172,43 @@ where
 {
     current(state, session).await?;
     current_account(hosted, account_revision)?;
-    let response = session
+    let response = match session
         .api
         .post_json_with_account(path, body, account)
         .await
-        .map_err(BridgeError::from)?;
+    {
+        Ok(response) => response,
+        Err(error) => {
+            if account.is_none() {
+                return Err(error.into());
+            }
+            let Some((status, code)) = account_session_rejected(&error) else {
+                return Err(error.into());
+            };
+            crate::hosted::force_renew_mcp_account_session(state, hosted, session.api.origin())
+                .await
+                .map_err(|_| hosted_session_required(path, status, code))?;
+            current(state, session).await?;
+            account
+                .map(|bearer| hosted.capture_mcp_account_session(bearer))
+                .expect("account rejections require an account session")
+                .await?;
+            current_account(hosted, account_revision)?;
+            match session
+                .api
+                .post_json_with_account(path, body, account)
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => match account_session_rejected(&error) {
+                    Some((status, code)) => {
+                        return Err(hosted_session_required(path, status, code))
+                    }
+                    None => return Err(error.into()),
+                },
+            }
+        }
+    };
     current(state, session).await?;
     current_account(hosted, account_revision)?;
     Ok(response)
@@ -936,6 +995,218 @@ mod tests {
             request.contains("peppy-account-session: account")
                 || request.contains("Peppy-Account-Session: account")
         );
+    }
+
+    async fn mcp_account_fixture(
+        origin: &str,
+    ) -> (
+        AppState,
+        std::sync::Arc<crate::session::Session>,
+        crate::hosted::HostedState,
+        std::sync::Arc<crate::secure_store::MemoryStore>,
+    ) {
+        let fixture = crate::tests::fixture_at(origin);
+        let session = std::sync::Arc::new(crate::tests::open(&fixture, &fixture.binding, &[]));
+        let store = std::sync::Arc::new(crate::secure_store::MemoryStore::default());
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::new(root.keep(), store.clone(), std::sync::Arc::new(|| {}));
+        state
+            .update_config(|config| {
+                config.origin = Some(fixture.binding.origin.clone());
+                config.remember(&fixture.binding);
+                config.active = Some(fixture.binding.clone());
+            })
+            .unwrap();
+        *state.session.lock().await = Some(session.clone());
+        let hosted = crate::hosted::HostedState::default();
+        let generation = hosted.begin_sign_in_attempt();
+        crate::hosted::commit_sign_in_session(
+            &*store,
+            &hosted,
+            origin,
+            generation,
+            crate::hosted::HostedSessionRecord {
+                account_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+                bearer: Zeroizing::new("account".into()),
+                expires_at_unix: u64::MAX,
+            },
+        )
+        .await
+        .unwrap();
+        (state, session, hosted, store)
+    }
+
+    fn http_response(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    async fn serve_mcp_responses(
+        responses: Vec<String>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 4096];
+                let read = socket.read(&mut request).await.unwrap();
+                requests.push(String::from_utf8(request[..read].to_vec()).unwrap());
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (origin, server)
+    }
+
+    async fn rejected_mcp_post(
+        origin: &str,
+    ) -> (
+        BridgeError,
+        std::sync::Arc<crate::secure_store::MemoryStore>,
+    ) {
+        let (state, session, hosted, store) = mcp_account_fixture(origin).await;
+        let revision = hosted.capture_mcp_account_session("account").await.unwrap();
+        let error = mcp_account_post::<serde_json::Value, _>(
+            &state,
+            &session,
+            &hosted,
+            Some(revision),
+            "/v1/mcp/device/prepare",
+            &(),
+            Some("account"),
+        )
+        .await
+        .unwrap_err();
+        (error, store)
+    }
+
+    #[tokio::test]
+    async fn account_rejection_forces_one_renewal_and_retries_once() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let responses = [
+                b"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: 38\r\nconnection: close\r\n\r\n{\"code\":\"mcp_enrollment_unauthorized\"}".as_slice(),
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 82\r\nconnection: close\r\n\r\n{\"account_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"expires_in_seconds\":2592000}".as_slice(),
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}".as_slice(),
+            ];
+            let mut requests = Vec::new();
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 4096];
+                let read = socket.read(&mut request).await.unwrap();
+                requests.push(String::from_utf8(request[..read].to_vec()).unwrap());
+                socket.write_all(response).await.unwrap();
+            }
+            requests
+        });
+        let (state, session, hosted, _) = mcp_account_fixture(&origin).await;
+        let revision = hosted.capture_mcp_account_session("account").await.unwrap();
+
+        let response: serde_json::Value = mcp_account_post(
+            &state,
+            &session,
+            &hosted,
+            Some(revision),
+            "/v1/mcp/device/prepare",
+            &(),
+            Some("account"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response, serde_json::json!({}));
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].starts_with("POST /v1/mcp/device/prepare "));
+        assert!(requests[1].starts_with("POST /hosted/v1/auth/session/renew "));
+        assert!(requests[2].starts_with("POST /v1/mcp/device/prepare "));
+    }
+
+    #[tokio::test]
+    async fn second_account_rejection_stops_after_one_retry() {
+        let rejected = r#"{"code":"mcp_enrollment_unauthorized"}"#;
+        let renewed =
+            r#"{"account_id":"550e8400-e29b-41d4-a716-446655440000","expires_in_seconds":2592000}"#;
+        let (origin, server) = serve_mcp_responses(vec![
+            http_response("401 Unauthorized", rejected),
+            http_response("200 OK", renewed),
+            http_response("403 Forbidden", r#"{"code":"enrollment_unauthorized"}"#),
+        ])
+        .await;
+
+        let (error, _) = rejected_mcp_post(&origin).await;
+        assert_eq!(error.code, "hosted-session-required");
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/mcp/device/prepare "))
+                .count(),
+            2
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /hosted/v1/auth/session/renew "))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn renewal_401_tombstones_the_account_without_retrying_enrollment() {
+        use crate::secure_store::SecretStore;
+
+        let (origin, server) = serve_mcp_responses(vec![
+            http_response(
+                "401 Unauthorized",
+                r#"{"code":"mcp_enrollment_unauthorized"}"#,
+            ),
+            http_response("401 Unauthorized", ""),
+        ])
+        .await;
+
+        let (error, store) = rejected_mcp_post(&origin).await;
+        assert_eq!(error.code, "hosted-session-required");
+        assert!(store
+            .get(&format!("hosted-session:{origin}"))
+            .unwrap()
+            .is_some_and(|session| session.is_empty()));
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/mcp/device/prepare "))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn forbidden_account_rejection_retries_but_invalid_bearer_remains_revoked() {
+        let renewed =
+            r#"{"account_id":"550e8400-e29b-41d4-a716-446655440000","expires_in_seconds":2592000}"#;
+        let (origin, server) = serve_mcp_responses(vec![
+            http_response("403 Forbidden", r#"{"code":"enrollment_unauthorized"}"#),
+            http_response("200 OK", renewed),
+            http_response("401 Unauthorized", r#"{"code":"invalid_bearer"}"#),
+        ])
+        .await;
+
+        let (error, _) = rejected_mcp_post(&origin).await;
+        assert_eq!(error.code, "revoked");
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
     }
 
     #[tokio::test]

@@ -992,7 +992,7 @@ async fn locally_expired_session_stays_available_for_authoritative_renewal() {
         )
         .unwrap();
 
-    super::renew_session(&store, &hosted, &origin)
+    super::renew_session(&store, &hosted, &origin, false)
         .await
         .unwrap();
 
@@ -1023,11 +1023,44 @@ async fn fresh_thirty_day_session_skips_renewal_post() {
         )
         .unwrap();
 
-    super::renew_session(&store, &hosted, &origin)
+    super::renew_session(&store, &hosted, &origin, false)
         .await
         .unwrap();
 
     assert_eq!(server.lock().unwrap().renew_calls, 0);
+}
+
+#[tokio::test]
+async fn forced_renewal_bypasses_freshness() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let server = Arc::new(Mutex::new(FakeServerState {
+        renew_response: FakeRenewalResponse::Invalid200,
+        ..FakeServerState::default()
+    }));
+    let (origin, _handle) = start_fake_server(server.clone()).await;
+    hosted.base_override.lock().unwrap().replace(origin.clone());
+    store
+        .set(
+            &super::session_key(&origin),
+            &encode_session(
+                ACCOUNT,
+                "fresh-bearer",
+                super::now_unix() + u64::from(peppy_hosted_api::SESSION_LIFETIME_SECONDS),
+            ),
+        )
+        .unwrap();
+
+    super::renew_session(&store, &hosted, &origin, false)
+        .await
+        .unwrap();
+    assert_eq!(server.lock().unwrap().renew_calls, 0);
+
+    server.lock().unwrap().renew_response = FakeRenewalResponse::Success;
+    super::renew_session(&store, &hosted, &origin, true)
+        .await
+        .unwrap();
+    assert_eq!(server.lock().unwrap().renew_calls, 1);
 }
 
 #[tokio::test]
@@ -1051,7 +1084,7 @@ async fn concurrent_renewals_share_one_post() {
         )
         .unwrap();
 
-    let first = super::renew_session(&store, &hosted, &origin);
+    let first = super::renew_session(&store, &hosted, &origin, false);
     tokio::pin!(first);
     let reached = gate.reached.notified();
     tokio::pin!(reached);
@@ -1059,7 +1092,7 @@ async fn concurrent_renewals_share_one_post() {
         _ = &mut reached => {}
         result = &mut first => panic!("first renewal completed before the deferred response: {result:?}"),
     }
-    let second = super::renew_session(&store, &hosted, &origin);
+    let second = super::renew_session(&store, &hosted, &origin, false);
     gate.release.notify_one();
     let (first, second) = tokio::join!(&mut first, second);
 
@@ -1087,17 +1120,22 @@ async fn malformed_renewal_response_preserves_bearer_and_uses_failure_backoff() 
         .unwrap();
 
     assert_eq!(
-        super::renew_session(&store, &hosted, &origin)
+        super::renew_session(&store, &hosted, &origin, false)
             .await
             .unwrap_err()
             .code,
         "server-response"
     );
-    super::renew_session(&store, &hosted, &origin)
+    super::renew_session(&store, &hosted, &origin, false)
         .await
         .unwrap();
 
     assert_eq!(server.lock().unwrap().renew_calls, 1);
+    server.lock().unwrap().renew_response = FakeRenewalResponse::Success;
+    super::renew_session(&store, &hosted, &origin, true)
+        .await
+        .unwrap();
+    assert_eq!(server.lock().unwrap().renew_calls, 2);
     assert_eq!(
         super::decode_session(&store.get(&key).unwrap().unwrap())
             .unwrap()
@@ -1124,13 +1162,13 @@ async fn renewal_write_failure_preserves_bearer_and_uses_failure_backoff() {
     store.fail_writes_with_prefix(&key);
 
     assert_eq!(
-        super::renew_session(&store, &hosted, &origin)
+        super::renew_session(&store, &hosted, &origin, false)
             .await
             .unwrap_err()
             .code,
         "secure-store-unavailable"
     );
-    super::renew_session(&store, &hosted, &origin)
+    super::renew_session(&store, &hosted, &origin, false)
         .await
         .unwrap();
 
@@ -1166,7 +1204,7 @@ async fn late_renewal_success_cannot_restore_a_signed_out_session() {
         )
         .unwrap();
 
-    let renewal = super::renew_session(&store, &hosted, &origin);
+    let renewal = super::renew_session(&store, &hosted, &origin, false);
     tokio::pin!(renewal);
     let reached = gate.reached.notified();
     tokio::pin!(reached);
@@ -1209,7 +1247,7 @@ async fn late_renewal_success_cannot_overwrite_a_same_account_replacement_bearer
         )
         .unwrap();
 
-    let renewal = super::renew_session(&store, &hosted, &origin);
+    let renewal = super::renew_session(&store, &hosted, &origin, false);
     tokio::pin!(renewal);
     let reached = gate.reached.notified();
     tokio::pin!(reached);
@@ -1260,7 +1298,7 @@ async fn renewal_401_only_tombstones_its_observed_bearer() {
         )
         .unwrap();
 
-    let error = super::renew_session(&store, &hosted, &origin)
+    let error = super::renew_session(&store, &hosted, &origin, false)
         .await
         .unwrap_err();
 
