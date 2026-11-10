@@ -1479,6 +1479,13 @@ fn contains_forbidden_url_character(value: &str) -> bool {
 }
 
 const CURSOR_MCP_INSTALL_URL_PREFIX: &str = "cursor://anysphere.cursor-deeplink/mcp/install?";
+const MCP_OAUTH_NATIVE_REDIRECT_SCHEMES: &[&str] = &[
+    "vscode",
+    "vscode-insiders",
+    "cursor",
+    "windsurf",
+    "jetbrains",
+];
 
 /// Accepts only Cursor's MCP install deeplink: fixed scheme, host, and path, with a
 /// non-empty query and no fragment. Userinfo and ports cannot appear because the
@@ -1572,6 +1579,25 @@ fn validate_external_url(value: &str) -> BridgeResult<url::Url> {
     Ok(url)
 }
 
+fn validate_mcp_oauth_redirect_url(value: &str) -> BridgeResult<url::Url> {
+    if value.chars().count() > 4096
+        || contains_forbidden_url_character(value)
+        || value.contains('\\')
+    {
+        return Err(invalid_url());
+    }
+    let url = url::Url::parse(value).map_err(|_| invalid_url())?;
+    if !MCP_OAUTH_NATIVE_REDIRECT_SCHEMES.contains(&url.scheme())
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(invalid_url());
+    }
+    Ok(url)
+}
+
 fn has_url_credentials(url: &url::Url) -> bool {
     !url.username().is_empty() || url.password().is_some()
 }
@@ -1608,6 +1634,24 @@ fn open_external_url(
     let _operation = admit_update_operation(&state)?;
     require_main_or_composer(window.label())?;
     let url = validate_external_url(&url)?;
+    app.opener()
+        .open_url(url.as_str(), None::<String>)
+        .map_err(|_| BridgeError::new("open-failed", "Could not open the URL."))
+}
+
+#[tauri::command]
+fn open_mcp_oauth_redirect(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+) -> BridgeResult<()> {
+    if state.app_locked.load(Ordering::Acquire) {
+        return Err(BridgeError::new("app-locked", "Peppy is locked."));
+    }
+    let _operation = admit_update_operation(&state)?;
+    require_main_or_composer(window.label())?;
+    let url = validate_external_url(&url).or_else(|_| validate_mcp_oauth_redirect_url(&url))?;
     app.opener()
         .open_url(url.as_str(), None::<String>)
         .map_err(|_| BridgeError::new("open-failed", "Could not open the URL."))
@@ -6657,6 +6701,7 @@ pub fn run() {
         search_history::cancel_history_search,
         load_message_window,
         open_external_url,
+        open_mcp_oauth_redirect,
         configure_server,
         unlock_sync,
         get_app_lock_status,

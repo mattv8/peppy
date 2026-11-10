@@ -1688,3 +1688,39 @@ fn send_rejects_a_draft_from_another_conversation_without_mutation() {
     assert!(session.send_draft(&ok).unwrap().accepted);
 }
 
+#[test]
+fn mcp_oauth_redirect_validation_allows_only_vetted_callback_schemes() {
+    for value in [
+        "vscode://callback.example/oauth/callback",
+        "vscode-insiders://callback.example/oauth/callback",
+        "cursor://anysphere.cursor-retrieval/oauth/callback",
+        "windsurf://callback.example/oauth/callback",
+        "jetbrains://callback.example/oauth/callback",
+    ] {
+        assert!(
+            crate::validate_mcp_oauth_redirect_url(value).is_ok(),
+            "{value}"
+        );
+    }
+    for value in [
+        "myapp://callback.example/oauth/callback",
+        "vscode:callback",
+        "vscode://user@callback.example/oauth/callback",
+        "vscode://callback.example/oauth/callback#fragment",
+        "vscode://callback.example/path\\other",
+    ] {
+        assert_eq!(
+            crate::validate_mcp_oauth_redirect_url(value)
+                .unwrap_err()
+                .code,
+            "invalid-request",
+            "{value}"
+        );
+    }
+    assert_eq!(
+        crate::validate_external_url("vscode://callback.example/oauth/callback")
+            .unwrap_err()
+            .code,
+        "invalid-request"
+    );
+}
