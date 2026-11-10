@@ -82,7 +82,8 @@ Android classes named in `AndroidManifest.xml` and WorkManager worker classes st
   permission comes from an explicit foreground opt-in, not app startup or a
   background pass. Other OS-permission prompts also follow explicit foreground
   actions; do not add automatic requests, default-SMS role requests, or general
-  RCS claims. Pairing belongs in onboarding or the primary owner flow, not
+  RCS claims. The Google Messages link may claim one-to-one RCS text chats only.
+  Pairing belongs in onboarding or the primary owner flow, not
   Settings, and has no Save QR action.
   See [Android enrollment UI](../apps/android/app/src/main/java/dev/peppy/mobile/enrollment/EnrollmentScreen.kt)
   and [iOS enrollment UI](../apps/ios/PeppyMobile/PhoneEnrollmentView.swift).
