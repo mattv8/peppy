@@ -364,7 +364,7 @@ diff -ruN a/pkg/libgm/client.go b/pkg/libgm/client.go
 +		c.listenLock.Unlock()
 +		return
 +	}
-+	dispatch := c.enqueueLifecycle(&events.PhonePingSucceeded{})
++	dispatch := c.enqueueLifecycle(&StreamEvent{Source: source, Event: &events.PhonePingSucceeded{}})
 +	c.listenLock.Unlock()
 +	c.dispatchLifecycle(dispatch)
 +}
@@ -894,7 +894,7 @@ diff -ruN a/pkg/libgm/http.go b/pkg/libgm/http.go
 diff -ruN a/pkg/libgm/lifecycle_safety_test.go b/pkg/libgm/lifecycle_safety_test.go
 --- pkg/libgm/lifecycle_safety_test.go	1969-12-31 17:00:00
 +++ pkg/libgm/lifecycle_safety_test.go	2026-11-07 04:07:00
-@@ -0,0 +1,507 @@
+@@ -0,0 +1,511 @@
 +package libgm
 +
 +import (
@@ -1189,7 +1189,11 @@ diff -ruN a/pkg/libgm/lifecycle_safety_test.go b/pkg/libgm/lifecycle_safety_test
 +	client.currentSource = StreamSource{ListenID: 44, PollAttempt: 2}
 +	var successes int
 +	client.SetEventHandler(func(event any) {
-+		if _, ok := event.(*events.PhonePingSucceeded); ok {
++		streamEvent, ok := event.(*StreamEvent)
++		if !ok || streamEvent.Source != client.currentSource {
++			return
++		}
++		if _, ok := streamEvent.Event.(*events.PhonePingSucceeded); ok {
 +			successes++
 +		}
 +	})
