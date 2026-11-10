@@ -5,6 +5,7 @@ import type { McpDeviceStatus, McpGrantView } from "@peppy/desktop-ui/bridge-con
 import { bridge, type DeviceRosterView } from "../bridge/bridge";
 import { McpDetailsModal } from "./McpDetailsModal";
 import { grantShortId, isRemovedDevice, isStartingState, mcpErrorMessage, mcpServerErrorCode, mcpStateLabel, mcpVaultId, unavailableReasonFor } from "./mcpDisplay";
+import { publishMcpStatus } from "./mcpStatusStore";
 
 type McpDeviceSettingsProps = {
   roster: DeviceRosterView;
@@ -104,6 +105,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
   const applyStatus = useCallback((next: McpDeviceStatus) => {
     statusRef.current = next;
     setStatus(next);
+    publishMcpStatus(context.current, next);
     onDeviceIdRef.current?.(next.device?.deviceId ?? null);
     if (!isStartingState(next.device?.state)) setEnableSettling(false);
   }, []);

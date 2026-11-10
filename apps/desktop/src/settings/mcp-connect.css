@@ -1,0 +1,28 @@
+#mcp-connect { position: relative; display: grid; gap: 8px; min-width: 0; }
+#mcp-connect-label { color: var(--peppy-text-secondary); font-size: 12px; }
+#mcp-connect-endpoint, #mcp-connect-agents { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 6px; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-sm, 4px); background: var(--peppy-surface-input); }
+#mcp-connect-endpoint code { min-width: 0; overflow-x: auto; color: var(--peppy-text-primary); font-family: var(--peppy-font-mono); scrollbar-width: none; user-select: all; white-space: nowrap; }
+[data-mcp-connect-spacer] { flex: 1; }
+#mcp-connect-copy { display: inline-flex; flex: none; align-items: center; gap: 4px; }
+#mcp-connect-copy-status:not([data-copy-state="failed"]), #mcp-agent-setup-guide-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+#mcp-connect-copy-status[data-copy-state="failed"] { color: var(--peppy-error-text); font-size: 12px; }
+#mcp-connect-agents { flex-wrap: wrap; }
+#mcp-connect-agents > [data-mcp-connect-agent-trigger] { min-height: 28px; margin-right: auto; padding: 0 6px; border: 0; border-radius: var(--peppy-radius-sm, 4px); background: transparent; color: var(--peppy-accent); font: inherit; text-decoration: underline; text-underline-offset: 0.15em; }
+#mcp-connect-agents > [data-mcp-connect-agent-trigger]:hover { background: var(--peppy-surface-hover); }
+#mcp-connect-agent-icons { display: flex; flex-wrap: wrap; gap: 6px; }
+#mcp-connect-agent-icons button { display: inline-grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--peppy-text-secondary); }
+#mcp-connect-agent-icons button:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
+.peppy-modal-panel.mcp-agent-setup-modal { width: min(640px, 100%); max-height: min(680px, 100%); overflow: hidden; grid-template-rows: auto minmax(0, 1fr) auto; }
+#mcp-agent-setup-body { display: grid; gap: 12px; min-height: 0; grid-template-rows: auto auto minmax(0, 1fr); }
+#mcp-agent-setup-body > p { margin: 0; }
+#mcp-agent-setup-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+#mcp-agent-setup-tabs button { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; padding: 4px 6px; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-sm, 4px); background: var(--peppy-surface-input); color: var(--peppy-text-primary); font: inherit; font-size: 12px; }
+#mcp-agent-setup-tabs button:hover:not([aria-pressed="true"]) { background: var(--peppy-surface-hover); }
+#mcp-agent-setup-tabs button[aria-pressed="true"] { border-color: var(--peppy-accent); background: var(--peppy-accent); color: var(--peppy-accent-text); font-weight: 600; }
+#mcp-agent-setup-guide { min-height: 0; overflow: auto; padding-right: 4px; overscroll-behavior: contain; }
+#mcp-agent-setup-link-error { margin: 0; color: var(--peppy-error-text); }
+#mcp-agent-setup-link-error code { overflow-wrap: anywhere; user-select: all; }
+@media (max-width: 520px) { #mcp-agent-setup-tabs { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; scroll-snap-type: x proximity; } #mcp-agent-setup-tabs button { flex: none; scroll-snap-align: start; } }
+@media (max-width: 400px) { #mcp-connect-endpoint { flex-wrap: wrap; } #mcp-connect-endpoint code { flex: 1 1 100%; } }
+@media (pointer: coarse) { #mcp-connect-agents > [data-mcp-connect-agent-trigger], #mcp-connect-agent-icons button, #mcp-agent-setup-tabs button { min-height: 44px; } #mcp-connect-agent-icons button { min-width: 44px; } #mcp-agent-setup-tabs button { padding-inline: 10px; } }
+@media (forced-colors: active) { #mcp-connect-endpoint, #mcp-connect-agents, #mcp-agent-setup-tabs button { border-color: CanvasText; background: Canvas; color: CanvasText; } #mcp-agent-setup-tabs button[aria-pressed="true"] { border-color: Highlight; background: Highlight; color: HighlightText; } #mcp-connect-agent-icons button:hover, #mcp-connect-endpoint .info-button:hover { outline: 1px solid Highlight; } #mcp-connect-copy-status[data-copy-state="failed"] { border: 1px solid CanvasText; color: CanvasText; padding: 2px 4px; } }

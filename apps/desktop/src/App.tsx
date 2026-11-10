@@ -107,6 +107,7 @@ import { ContactsView, type ContactNavigationGuard, type ContactTarget } from ".
 import { findContactTarget } from "./contacts/contact-target";
 import { useHistorySearch } from "./search/useHistorySearch";
 import { DevicesSettings } from "./settings/DevicesSettings";
+import { McpConnectHelp } from "./settings/McpConnectHelp";
 import { McpAuthorizationConsent } from "./settings/McpAuthorizationConsent";
 import { AttachmentStorageSettingsHost, HostedAccountSettings } from "./settings/HostedAccountSettings";
 import { PrivacySettings } from "./settings/PrivacySettings";
@@ -1418,6 +1419,7 @@ function SettingsView({
       <section id="settings-server" className="settings-card" data-settings-section="server">
         <h2>Server</h2>
         <p id="settings-connection-summary" className="settings-connection-summary"><strong>{connectionLabel}</strong><span> · </span><span>{configuredOrigin || "No server configured"}</span></p>
+        <McpConnectHelp sessionKey={sessionScopeId ?? "unavailable"} browserHost={browserHost} />
         {browserHost ? <p className="settings-note">This browser host uses its fixed server.</p> : mode === "self-hosted" ? <details className="settings-disclosure" id="settings-server-editor">
           <summary>Change server</summary>
           <div className="settings-control-row">
