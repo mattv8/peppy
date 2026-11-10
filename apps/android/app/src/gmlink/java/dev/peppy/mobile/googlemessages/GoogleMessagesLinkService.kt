@@ -702,7 +702,7 @@ class GoogleMessagesLinkService : Service() {
             (Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) &&
                 NotificationManagerCompat.from(context).areNotificationsEnabled()
         private const val SERVICE_STOP_JOIN_MS = 2_000L
-        private const val NATIVE_RCS_ENABLED = false
+        private const val NATIVE_RCS_ENABLED = true
         private val NATIVE_RCS_SEND_EXECUTOR = Executors.newSingleThreadExecutor()
     }
 }
