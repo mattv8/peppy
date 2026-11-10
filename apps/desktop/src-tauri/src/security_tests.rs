@@ -794,6 +794,15 @@ fn external_url_validation_accepts_only_safe_http_destinations() {
         "https://example.com:",
         "https://0x7f.0.0.1",
         "https://example.com\u{e0001}",
+        "cursor://anysphere.cursor-deeplink/other",
+        "cursor://anysphere.cursor-deeplink/mcp/install",
+        "cursor://anysphere.cursor-deeplink/mcp/install?",
+        "cursor://anysphere.cursor-deeplink/mcp/install? ",
+        "cursor://evil/mcp/install?x",
+        "cursor://user@anysphere.cursor-deeplink/mcp/install?x",
+        "cursor://anysphere.cursor-deeplink:443/mcp/install?x",
+        "cursor://anysphere.cursor-deeplink/mcp/install?x#frag",
+        "vscode://anysphere.cursor-deeplink/mcp/install?x",
     ] {
         assert_eq!(
             crate::validate_external_url(value).unwrap_err().code,
@@ -801,6 +810,14 @@ fn external_url_validation_accepts_only_safe_http_destinations() {
             "{value}"
         );
     }
+}
+
+#[test]
+fn external_url_validation_accepts_cursor_mcp_install_deeplink() {
+    assert!(crate::validate_external_url(
+        "cursor://anysphere.cursor-deeplink/mcp/install?name=peppy&config=abc"
+    )
+    .is_ok());
 }
 
 #[test]
@@ -1670,3 +1687,4 @@ fn send_rejects_a_draft_from_another_conversation_without_mutation() {
     );
     assert!(session.send_draft(&ok).unwrap().accepted);
 }
+

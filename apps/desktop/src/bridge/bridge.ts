@@ -381,7 +381,7 @@ export const fixtureBridge: DesktopBridge = {
   start_history_search: async (): Promise<HistorySearchSnapshot> => ({ state: "blocked", reason: "unsupported", canSearchFurther: false, progressVersion: "0", indexVersion: "0" }),
   cancel_history_search: async (): Promise<HistorySearchSnapshot> => ({ state: "cancelled", canSearchFurther: false, progressVersion: "0", indexVersion: "0" }),
   load_message_window: async input => fixtureMessageWindow(input),
-  open_external_url: async url => { if (!/^https?:\/\//.test(url)) throw fixtureError("invalid-request", "The URL is invalid."); },
+  open_external_url: async url => { if (!/^(https?:\/\/|cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?)/.test(url)) throw fixtureError("invalid-request", "The URL is invalid."); },
   load_history: async (conversationId, beforeMessageId) => {
     const conversation = fixtureSnapshot.conversations.find(item => item.id === conversationId);
     const anchorIndex = conversation?.messages.findIndex(message => message.id === beforeMessageId) ?? -1;
