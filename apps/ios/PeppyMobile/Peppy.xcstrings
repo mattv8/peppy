@@ -41,16 +41,6 @@
         }
       }
     },
-    "peppy.typing_share_hint": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Typing indicators work in one-to-one and group RCS chats through Google Messages. When this is on, the other people in those chats see when you are typing. Turn it off to stop that. You still see when they are typing."
-          }
-        }
-      }
-    },
     "peppy.toggle_android_account_loading": {
       "localizations": {
         "en": {

@@ -5,7 +5,6 @@
     <string name="peppy_typing_indicator_group">Someone is typing</string>
     <string name="peppy_typing_announce_direct">The other person is typing</string>
     <string name="peppy_typing_share_label">Show others when I am typing</string>
-    <string name="peppy_typing_share_hint">Typing indicators work in one-to-one and group RCS chats through Google Messages. When this is on, the other people in those chats see when you are typing. Turn it off to stop that. You still see when they are typing.</string>
     <string name="peppy_toggle_android_account_loading">Loading account…</string>
     <string name="peppy_toggle_android_background_sync">Background sync</string>
     <string name="peppy_toggle_android_mms_sms_stays_off">SMS sync stays off during MMS-only setup. You can enable SMS separately.</string>

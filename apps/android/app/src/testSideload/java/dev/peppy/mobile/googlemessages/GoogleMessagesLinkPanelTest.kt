@@ -248,33 +248,21 @@ class GoogleMessagesLinkPanelTest {
         compose.waitUntil { host.typingWrites == listOf(false, true) }
     }
 
-    @Test fun `typing sharing failure keeps the last confirmed value and exposes help`() {
+    @Test fun `typing sharing failure keeps the last confirmed value and shows the error`() {
         val host = FakePanelHost(FakeHandle("linked")).apply { typingWriteSucceeds = false }
         showPanel(host, PanelSurface.Details)
         awaitTypingEnabled()
         compose.onNodeWithTag("google-messages-link-typing-row").performScrollTo().performClick()
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-typing-error").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("google-messages-link-typing-row").assert(SemanticsMatcher.expectValue(SemanticsProperties.ToggleableState, androidx.compose.ui.state.ToggleableState.On))
-        compose.onNodeWithTag("info-typing-share").performScrollTo().performClick()
-        compose.onNodeWithTag("info-typing-share-dialog").fetchSemanticsNode()
-        compose.onNodeWithText(ApplicationProvider.getApplicationContext<android.content.Context>().getString(R.string.peppy_typing_share_hint)).assertIsDisplayed()
     }
 
-    @Test fun `typing sharing info is a separately focusable contextual action`() {
+    @Test fun `typing sharing toggle has no info action`() {
         val host = FakePanelHost(FakeHandle("linked"))
-        showPanel(host, PanelSurface.Details, readinessTag = "info-typing-share")
-        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
-        val infoDescription = context.getString(
-            R.string.peppy_help_android_more_about,
-            context.getString(R.string.peppy_typing_share_label),
-        )
-
-        val infoNode = compose.onNodeWithTag("info-typing-share")
-            .assert(SemanticsMatcher.expectValue(SemanticsProperties.ContentDescription, listOf(infoDescription)))
-            .assert(SemanticsMatcher.keyIsDefined(SemanticsActions.OnClick))
-            .fetchSemanticsNode()
-        val toggleNode = compose.onNodeWithTag("google-messages-link-typing-row").fetchSemanticsNode()
-        assertTrue("Info action must have its own merged semantics node", infoNode.id != toggleNode.id)
+        showPanel(host, PanelSurface.Details)
+        awaitTypingEnabled()
+        compose.onNodeWithTag("google-messages-link-typing-row").performScrollTo().assertIsDisplayed()
+        assertTrue(compose.onAllNodesWithTag("info-typing-share").fetchSemanticsNodes().isEmpty())
     }
 
     @Test fun `repair state offers re-link on the card and unlink and remove in details`() {

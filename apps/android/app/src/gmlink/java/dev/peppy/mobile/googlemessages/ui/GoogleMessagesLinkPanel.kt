@@ -15,7 +15,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -833,24 +832,14 @@ private class AndroidGoogleMessagesLinkPanelHost(
             if (batteryUnavailable) {
                 Text(stringResource(R.string.peppy_toggle_android_battery_unavailable), Modifier.testTag("google-messages-link-battery-unavailable"))
             }
-            Row(Modifier.fillMaxWidth()) {
-                Box(Modifier.weight(1f)) {
-                    SettingToggleRow(
-                        title = stringResource(R.string.peppy_typing_share_label),
-                        // Unknown until the confirmed value loads: shown unchecked and disabled, never assumed on.
-                        checked = typingShare ?: false,
-                        enabled = typingShare != null && !busy && !typingWriteBusy,
-                        onCheckedChange = onTypingShareChanged,
-                        tag = "google-messages-link-typing-row",
-                    )
-                }
-                InfoButton(
-                    topic = stringResource(R.string.peppy_typing_share_label),
-                    title = stringResource(R.string.peppy_typing_share_label),
-                    body = stringResource(R.string.peppy_typing_share_hint),
-                    tag = "info-typing-share",
-                )
-            }
+            SettingToggleRow(
+                title = stringResource(R.string.peppy_typing_share_label),
+                // Unknown until the confirmed value loads: shown unchecked and disabled, never assumed on.
+                checked = typingShare ?: false,
+                enabled = typingShare != null && !busy && !typingWriteBusy,
+                onCheckedChange = onTypingShareChanged,
+                tag = "google-messages-link-typing-row",
+            )
             if (typingError) Text(stringResource(R.string.peppy_setting_update_error), Modifier.testTag("google-messages-link-typing-error").semantics { liveRegion = LiveRegionMode.Assertive })
             if (notificationsOff) {
                 Notifications(busy, onAllowNotifications)
