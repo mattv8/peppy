@@ -158,7 +158,7 @@ pub(crate) fn core(error: CoreError) -> Failure {
         ),
         CoreError::DraftNotSynced => Failure::new(
             "draft-not-synced",
-            "The draft is still syncing. Wait for sync to finish, then send again.",
+            "This draft could not be synced. Try sending again.",
         ),
         CoreError::InvalidMedia => Failure::new(
             "attachment-invalid",

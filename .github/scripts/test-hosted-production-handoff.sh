@@ -36,7 +36,7 @@ EOF
 chmod +x "$fake_bin/curl"
 
 valid_env=(
-  PEPPY_PLATFORM_DISPATCH_TOKEN="$token"
+  GH_TOKEN="$token"
   SOURCE_REVISION="$source_revision"
   RUN_ID=123
   RUN_ATTEMPT=2
@@ -58,7 +58,7 @@ run_notifier() {
   local payload_file="$4"
 
   shift 4
-  env -u GITHUB_STEP_SUMMARY PATH="$fake_bin:$PATH" CURL_ARGS="$args_file" CURL_CONFIG="$config_file" CURL_PAYLOAD="$payload_file" "$@" "$NOTIFIER" 2> "$stderr_file"
+  env -u GITHUB_STEP_SUMMARY -u GH_TOKEN PATH="$fake_bin:$PATH" CURL_ARGS="$args_file" CURL_CONFIG="$config_file" CURL_PAYLOAD="$payload_file" "$@" "$NOTIFIER" 2> "$stderr_file"
 }
 
 expect_rejected() {
@@ -131,13 +131,14 @@ newline_config="$temp_dir/curl-config-newline-token"
 newline_payload="$temp_dir/curl-payload-newline-token"
 newline_stderr="$temp_dir/stderr-newline-token"
 run_notifier "$newline_stderr" "$newline_args" "$newline_config" "$newline_payload" \
-  PEPPY_PLATFORM_DISPATCH_TOKEN="$newline_token" SOURCE_REVISION="$source_revision" RUN_ID=123 RUN_ATTEMPT=2 \
+  GH_TOKEN="$newline_token" SOURCE_REVISION="$source_revision" RUN_ID=123 RUN_ATTEMPT=2 \
   SERVER_DIGEST="$server_digest" RELAY_DIGEST="$relay_digest"
 [[ ! -s "$newline_stderr" ]] || fail_test 'newline-terminated token dispatch wrote to stderr'
 expect_line "$newline_config" "header = \"Authorization: Bearer $token\""
 expect_line "$newline_payload" "$expected_payload"
 
-expect_rejected 'PEPPY_PLATFORM_DISPATCH_TOKEN is unavailable' "${valid_env[@]}" PEPPY_PLATFORM_DISPATCH_TOKEN=
+expect_rejected 'GH_TOKEN is unavailable; configure secrets.PEPPY_AUTOMATION_TOKEN as GH_TOKEN' "${valid_env[@]}" GH_TOKEN=
+expect_rejected 'GH_TOKEN is unavailable; configure secrets.PEPPY_AUTOMATION_TOKEN as GH_TOKEN' PEPPY_PLATFORM_DISPATCH_TOKEN="$token" SOURCE_REVISION="$source_revision" RUN_ID=123 RUN_ATTEMPT=2 SERVER_DIGEST="$server_digest" RELAY_DIGEST="$relay_digest"
 expect_rejected 'invalid source_revision' "${valid_env[@]}" SOURCE_REVISION='0123456789abcdef0123456789abcdef01234567;id'
 expect_rejected 'invalid public_run_id' "${valid_env[@]}" RUN_ID='123;id'
 expect_rejected 'invalid public_run_attempt' "${valid_env[@]}" RUN_ATTEMPT='2;id'
@@ -177,7 +178,7 @@ checkout_uses="$(grep -E '^[[:space:]]+uses: actions/checkout@' "$notifier_job" 
 printf '%s\n' "$checkout_uses" | grep -Eqx '^        uses: actions/checkout@[0-9a-f]{40}' || fail_test 'handoff checkout must pin an immutable 40-character commit SHA'
 expect_line "$notifier_job" '          ref: ${{ github.sha }}'
 expect_line "$notifier_job" '          persist-credentials: false'
-expect_line "$notifier_job" '          PEPPY_PLATFORM_DISPATCH_TOKEN: ${{ secrets.PEPPY_PLATFORM_DISPATCH_TOKEN }}'
+expect_line "$notifier_job" '          GH_TOKEN: ${{ secrets.PEPPY_AUTOMATION_TOKEN }}'
 expect_line "$notifier_job" '        run: bash .github/scripts/notify-hosted-production.sh'
 expect_no_text "$notifier_job" 'create-github-app-token'
 expect_no_text "$notifier_job" 'HOSTED_DISPATCH_APP_'

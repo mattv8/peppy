@@ -327,7 +327,7 @@ function errorFor(error: unknown): RpcError {
     return { code: "unavailable", message: "Reconnect to check this draft before sending." };
   }
   if (typeof error === "object" && error !== null && (error as { code?: unknown }).code === "draft-not-synced") {
-    return { code: "draft-not-synced", message: "This draft is still syncing. Wait for sync to finish, then send again.", ...errorDetails(error) };
+    return { code: "draft-not-synced", message: "This draft could not be synced. Try sending again.", ...errorDetails(error) };
   }
   if (typeof error === "object" && error !== null && typeof (error as { code?: unknown }).code === "string") {
     const code = (error as { code: string }).code;
@@ -1826,7 +1826,7 @@ export async function sendBrowserDraft(options: {
   try {
     gate = object(await session.mutate("_worker_draft_begin_send", { draftId, expectedRevision }));
   } catch (error) {
-    if (!(revisionChanged && error instanceof CoreRejectedError && error.code === "draft-not-synced")) throw error;
+    if (!(error instanceof CoreRejectedError && error.code === "draft-not-synced")) throw error;
     await synchronizeDraft();
     gate = object(await session.mutate("_worker_draft_begin_send", { draftId, expectedRevision }));
   }

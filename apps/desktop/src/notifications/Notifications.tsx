@@ -5,6 +5,8 @@ import type {
   MirroredNotification,
   NotificationTarget,
 } from "../bridge/bridge";
+import type { OneTimeCodeTarget } from "@peppy/desktop-ui/bridge-contracts";
+import { OneTimeCodeButton } from "../one-time-code/OneTimeCodeButton";
 
 type Source = { id: string; name: string };
 type SeenResult = Promise<void>;
@@ -48,6 +50,7 @@ export function NotificationsView({
   onDismiss,
   onMute,
   onSeen,
+  onCopyOneTimeCode,
   onSettings,
   focusRequest,
   onFocusResult,
@@ -62,6 +65,7 @@ export function NotificationsView({
   onDismiss(target: NotificationTarget): void;
   onMute(filter: AppFilter): void;
   onSeen(targets: NotificationTarget[]): SeenResult;
+  onCopyOneTimeCode(target: OneTimeCodeTarget, code: string): Promise<void>;
   onSettings(): void;
   /** Supply only after the current unlocked snapshot is ready. */
   focusRequest?: { requestId: string; target: NotificationTarget };
@@ -233,12 +237,13 @@ export function NotificationsView({
         title={displayTitle(notification.title)}
         onDismiss={onDismiss}
         onMute={onMute}
+        onCopyOneTimeCode={onCopyOneTimeCode}
       />)}
     </div>
   </section>;
 }
 
-function NotificationRow({ notification, phoneName, appName, filter, title, onDismiss, onMute }: { notification: MirroredNotification; phoneName: string; appName: string; filter: AppFilter; title: string; onDismiss(target: NotificationTarget): void; onMute(filter: AppFilter): void }) {
+function NotificationRow({ notification, phoneName, appName, filter, title, onDismiss, onMute, onCopyOneTimeCode }: { notification: MirroredNotification; phoneName: string; appName: string; filter: AppFilter; title: string; onDismiss(target: NotificationTarget): void; onMute(filter: AppFilter): void; onCopyOneTimeCode(target: OneTimeCodeTarget, code: string): Promise<void> }) {
   const pending = notification.dismissalPending;
   const id = notificationTuple(notification.target.sourceDeviceId, notification.target.notificationKey, notification.target.lifetime);
   return <article id={`notif-${id}`} tabIndex={-1} data-device-id={notification.target.sourceDeviceId} data-notification-key={notification.target.notificationKey} data-dismiss-state={pending ? "pending" : "idle"} data-notification-target={JSON.stringify(notification.target)} className="notif-row" aria-label={`${appName} on ${phoneName}: ${title}: ${notification.text}`}>
@@ -247,6 +252,7 @@ function NotificationRow({ notification, phoneName, appName, filter, title, onDi
       <span className="notif-row-app-source"><b>{appName}</b><span>{phoneName}</span></span>
       <b className="notif-row-title">{title}</b>
       <span className="notif-row-text">{notification.text}</span>
+      {notification.oneTimeCode && <OneTimeCodeButton key={`${id}:${notification.oneTimeCode}`} variant="notification" hookId={id} target={{ kind: "notification", target: notification.target }} code={notification.oneTimeCode} contextName={appName} onCopy={onCopyOneTimeCode} />}
       {pending && <span className="notif-pending" role="status">Dismissal pending — will apply on your phone&apos;s next sync.</span>}
     </div>
     <time className="notif-row-time" dateTime={isoDateTime(notification.postedAt)} title={formatDateTime(notification.postedAt) ?? "Unknown time"}>{formatElapsedShort(notification.postedAt) ?? "Unknown time"}</time>

@@ -459,6 +459,22 @@ describe("Worker notification presentation settings", () => {
     expect(calls).toEqual(["ack_banner_candidates"]);
   });
 
+  it("never carries a one-time code from a core candidate into the shown banner or its acknowledgement", async () => {
+    const calls: string[] = [];
+    const notification = adapter();
+    const withCode = { ...candidate(), oneTimeCode: "482913" } as unknown as BannerCandidate;
+    const presenter = new BannerPresenter({
+      query: async () => [withCode],
+      mutate: async command => { calls.push(command); return {}; },
+    }, preferences, notification, () => undefined);
+    await presenter.drain();
+    expect(notification.shown).toHaveLength(1);
+    expect(JSON.stringify(notification.shown)).not.toContain("oneTimeCode");
+    expect(JSON.stringify(notification.shown[0])).not.toContain("482913");
+    expect(calls).toEqual(["ack_banner_candidates"]);
+    expect(calls.join(" ")).not.toContain("482913");
+  });
+
   it("acknowledges denied browser notifications as an intentional policy drop", async () => {
     const calls: string[] = [];
     const presenter = new BannerPresenter({

@@ -3,10 +3,7 @@
 //! field (AppKit `NSAlert` + `NSSecureTextField` on macOS); it is never requested in the webview,
 //! never passed through IPC, and never placed on a process argv.
 use crate::error::{BridgeError, BridgeResult};
-use std::{
-    path::PathBuf,
-    sync::{Mutex, OnceLock},
-};
+use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::{
     DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
@@ -52,8 +49,6 @@ const VAULT_SECRET_CLOSE: &str = "Close";
 const COPY_SUCCEEDED: &str = "Copied";
 const COPY_FAILED: &str = "Could not copy. Try again.";
 
-static SECRET_CLIPBOARD: OnceLock<Mutex<Option<arboard::Clipboard>>> = OnceLock::new();
-
 trait SecretClipboard {
     fn copy_secret(&mut self, secret: &str) -> bool;
 }
@@ -62,50 +57,8 @@ struct NativeSecretClipboard;
 
 impl SecretClipboard for NativeSecretClipboard {
     fn copy_secret(&mut self, secret: &str) -> bool {
-        let Ok(mut clipboard) = SECRET_CLIPBOARD.get_or_init(|| Mutex::new(None)).lock() else {
-            return false;
-        };
-        if clipboard.is_none() {
-            let Ok(new_clipboard) = arboard::Clipboard::new() else {
-                return false;
-            };
-            *clipboard = Some(new_clipboard);
-        }
-        clipboard
-            .as_mut()
-            .is_some_and(|clipboard| set_sensitive_clipboard_text(clipboard, secret))
+        crate::sensitive_clipboard::write_sensitive_text(secret)
     }
-}
-
-#[cfg(target_os = "macos")]
-fn set_sensitive_clipboard_text(clipboard: &mut arboard::Clipboard, secret: &str) -> bool {
-    use arboard::SetExtApple;
-
-    clipboard.set().exclude_from_history().text(secret).is_ok()
-}
-
-#[cfg(target_os = "windows")]
-fn set_sensitive_clipboard_text(clipboard: &mut arboard::Clipboard, secret: &str) -> bool {
-    use arboard::SetExtWindows;
-
-    clipboard
-        .set()
-        .exclude_from_history()
-        .exclude_from_cloud()
-        .text(secret)
-        .is_ok()
-}
-
-#[cfg(target_os = "linux")]
-fn set_sensitive_clipboard_text(clipboard: &mut arboard::Clipboard, secret: &str) -> bool {
-    use arboard::SetExtLinux;
-
-    clipboard.set().exclude_from_history().text(secret).is_ok()
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-fn set_sensitive_clipboard_text(_: &mut arboard::Clipboard, _: &str) -> bool {
-    false
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

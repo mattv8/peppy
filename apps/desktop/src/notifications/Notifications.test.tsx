@@ -25,6 +25,7 @@ const props = (notifications: MirroredNotification[]) => ({
   onDismiss: vi.fn(),
   onMute: vi.fn(),
   onSeen: vi.fn().mockResolvedValue(undefined),
+  onCopyOneTimeCode: vi.fn().mockResolvedValue(undefined),
   onSettings: vi.fn(),
 });
 
@@ -344,5 +345,35 @@ describe("NotificationsView", () => {
       await waitFor(() => expect(view.onSeen).toHaveBeenCalled());
       expect(seenKeys(view.onSeen)).toEqual(["key-phone-b"]);
     });
+  });
+});
+
+describe("NotificationsView one-time codes", () => {
+  it("shows the copy button only for rows that carry a one-time code", () => {
+    render(<NotificationsView {...props([
+      notification("phone-a", "chat", { text: "Your code is 839201", oneTimeCode: "839201" }),
+      notification("phone-b", "mail", { text: "No code here" }),
+    ])} />);
+
+    expect(screen.getByRole("button", { name: "Copy code 839201 from Chat" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /^Copy code/ })).toHaveLength(1);
+  });
+
+  it("passes the notification target and code to onCopyOneTimeCode once per click", async () => {
+    const view = props([notification("phone-a", "chat", { oneTimeCode: "839201" })]);
+    render(<NotificationsView {...view} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy code 839201 from Chat" }));
+
+    await waitFor(() => expect(view.onCopyOneTimeCode).toHaveBeenCalledTimes(1));
+    expect(view.onCopyOneTimeCode).toHaveBeenCalledWith({ kind: "notification", target: view.notifications[0].target }, "839201");
+  });
+
+  it("keeps Mute and Dismiss as separate controls next to the copy button", () => {
+    render(<NotificationsView {...props([notification("phone-a", "chat", { oneTimeCode: "839201" })])} />);
+
+    expect(screen.getByRole("button", { name: "Mute Chat on Pixel" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Dismiss / })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy code 839201 from Chat" })).toBeInTheDocument();
   });
 });

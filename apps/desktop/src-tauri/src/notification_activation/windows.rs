@@ -2,13 +2,14 @@ use super::{owner::Signal, PostError};
 use crate::notification_icon::{self, Icon, Lease};
 use tauri::{AppHandle, Manager};
 use windows::{
-    core::{IInspectable, HSTRING},
+    core::{IInspectable, Interface, HSTRING},
     Data::Xml::Dom::XmlDocument,
     Foundation::TypedEventHandler,
     Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED},
     UI::Notifications::{
-        NotificationSetting, ToastDismissalReason, ToastDismissedEventArgs, ToastFailedEventArgs,
-        ToastNotification, ToastNotificationManager, ToastNotifier,
+        NotificationSetting, ToastActivatedEventArgs, ToastDismissalReason,
+        ToastDismissedEventArgs, ToastFailedEventArgs, ToastNotification, ToastNotificationManager,
+        ToastNotifier,
     },
 };
 
@@ -71,6 +72,7 @@ impl Backend {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn post(
         &mut self,
         id: &str,
@@ -78,9 +80,10 @@ impl Backend {
         body: &str,
         sound: bool,
         icon: Option<&Icon>,
+        copy_action: bool,
         signal: Signal,
     ) -> Result<Item, PostError> {
-        self.post_inner(id, title, body, sound, icon, signal)
+        self.post_inner(id, title, body, sound, icon, copy_action, signal)
             .map_err(|_| PostError::Failed)
     }
 
@@ -92,6 +95,7 @@ impl Backend {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn post_inner(
         &mut self,
         id: &str,
@@ -99,6 +103,7 @@ impl Backend {
         body: &str,
         sound: bool,
         icon: Option<&Icon>,
+        copy_action: bool,
         signal: Signal,
     ) -> windows::core::Result<Item> {
         let icon = icon.and_then(|icon| notification_icon::materialize(&self.app, icon));
@@ -116,6 +121,7 @@ impl Backend {
                 .state::<crate::AppState>()
                 .notifications
                 .persistence(),
+            copy_action,
         )))?;
         let toast = ToastNotification::CreateToastNotification(&document)?;
         let tag = HSTRING::from(id);
@@ -129,12 +135,21 @@ impl Backend {
             failed: None,
             _icon: icon,
         };
-        let click = signal.clone();
+        let activate = signal.clone();
         item.activated = Some(item.toast.Activated(&TypedEventHandler::<
             ToastNotification,
             IInspectable,
-        >::new(move |_, _| {
-            click.click();
+        >::new(move |_, args| {
+            if args
+                .as_ref()
+                .and_then(|args| args.cast::<ToastActivatedEventArgs>().ok())
+                .and_then(|args| args.Arguments().ok())
+                .is_some_and(|arguments| arguments == "copy-code")
+            {
+                activate.copy();
+            } else {
+                activate.click();
+            }
             Ok(())
         }))?);
         let dismiss = signal.clone();

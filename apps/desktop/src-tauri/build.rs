@@ -30,6 +30,7 @@ const COMMANDS: &[&str] = &[
     "send_typing",
     "set_typing_sharing",
     "mark_seen",
+    "copy_one_time_code",
     "mark_all_read",
     "pick_attachments",
     "prepare_pasted_attachment",

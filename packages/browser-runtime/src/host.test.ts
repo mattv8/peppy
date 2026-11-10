@@ -1899,6 +1899,50 @@ describe("browser host RPC", () => {
     ]);
   });
 
+  it("retries a not-yet-synced draft after syncing even when the revision is unchanged", async () => {
+    const calls: string[] = [];
+    let beginAttempts = 0;
+    const session = {
+      signal: new AbortController().signal,
+      async mutate(command: string, args: Record<string, unknown>) {
+        calls.push(command);
+        if (command === "_worker_draft_prepare_send") {
+          return { ...(args.input as Record<string, unknown>), id: "00000000-0000-4000-8000-000000000001", expectedRevision: "8" };
+        }
+        if (command === "_worker_draft_begin_send") {
+          beginAttempts += 1;
+          if (beginAttempts === 1) throw new CoreRejectedError("draft-not-synced");
+          return { remote: { draftId: "00000000-0000-4000-8000-000000000001", revisionId: "00000000-0000-4000-8000-000000000002", commandId: "00000000-0000-4000-8000-000000000003" } };
+        }
+        if (command === "_worker_draft_send_accepted") return { accepted: true };
+        throw new Error(`unexpected command ${command}`);
+      },
+    };
+    const transport = {
+      async json() {
+        calls.push("accept");
+        return { command_id: "00000000-0000-4000-8000-000000000003", duplicate: false };
+      },
+      async discard() { throw new Error("unexpected discard"); },
+    };
+
+    await expect(sendBrowserDraft({
+      session,
+      transport,
+      synchronizeDraft: async () => { calls.push("sync"); },
+      args: { input: { id: "00000000-0000-4000-8000-000000000001", expectedRevision: "8", gatewayId: "gateway", simId: "sim" } },
+    })).resolves.toEqual({ accepted: true });
+
+    expect(calls).toEqual([
+      "_worker_draft_prepare_send",
+      "_worker_draft_begin_send",
+      "sync",
+      "_worker_draft_begin_send",
+      "accept",
+      "_worker_draft_send_accepted",
+    ]);
+  });
+
   it("returns a sanitized synced-draft revision through the host without accepting", async () => {
     const session = new FakeSession();
     const sendSession = { mutate: (command: string, args: Record<string, unknown>) => session.mutate(command, args), signal: new AbortController().signal };
@@ -1929,7 +1973,8 @@ describe("browser host RPC", () => {
     attached.emit({ id: 1, command: "send_draft", args: { input: { id: "00000000-0000-4000-8000-000000000001", expectedRevision: "8" } } });
     await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
 
-    expect(attached.messages).toContainEqual({ id: 1, ok: false, error: { code: "draft-not-synced", message: "This draft is still syncing. Wait for sync to finish, then send again.", currentRevision: "8" } });
+    expect(attached.messages).toContainEqual({ id: 1, ok: false, error: { code: "draft-not-synced", message: "This draft could not be synced. Try sending again.", currentRevision: "8" } });
+    expect(session.calls.filter(call => call.command === "_worker_draft_begin_send")).toHaveLength(2);
     expect(accept).not.toHaveBeenCalled();
   });
 

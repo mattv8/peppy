@@ -11,10 +11,10 @@ use crate::{
 };
 use futures_util::{SinkExt, StreamExt};
 use peppy_client_core::{
-    Client, Cursor, DraftPushOutcome, DraftTerminalReasonCore, DraftTransferDirection,
-    EnvelopePurpose, HistorySearchReplayProof, HistorySearchSyncFacts, KeyProfile, RawReplayRecord,
-    RawSnapshotRecord, SnapshotPurpose, VaultCheckHeader, MAX_APPLY_BATCH, MAX_SEAL_BATCH,
-    MAX_SNAPSHOT_PAGE,
+    Client, Cursor, DraftPush, DraftPushOutcome, DraftTerminalReasonCore, DraftTransferDirection,
+    DraftUpload, EnvelopePurpose, HistorySearchReplayProof, HistorySearchSyncFacts, KeyProfile,
+    RawReplayRecord, RawSnapshotRecord, SnapshotPurpose, VaultCheckHeader, MAX_APPLY_BATCH,
+    MAX_SEAL_BATCH, MAX_SNAPSHOT_PAGE,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
@@ -34,6 +34,10 @@ use tokio_tungstenite::tungstenite::{
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const WORK_INTERVAL: Duration = Duration::from_secs(15);
 const DRAFT_SAVE_WAKE_DELAY: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const DRAFT_SEND_PUSH_LOCK_WAIT: Duration = Duration::from_millis(200);
+#[cfg(not(test))]
+const DRAFT_SEND_PUSH_LOCK_WAIT: Duration = Duration::from_secs(10);
 const GATEWAY_REFRESH_EVERY: u32 = 4;
 const WS_MAX_MESSAGE: usize = 2 * 1024 * 1024;
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1234,6 +1238,149 @@ fn remote_draft_change(
     })
 }
 
+async fn upload_draft_attachment(session: &Arc<Session>, upload: DraftUpload) -> BridgeResult<()> {
+    let id = upload.object.attachment_id;
+    match upload_object_for_draft(session, upload.object, Some(upload.draft_id)).await {
+        Ok(()) => clear_draft_transfer_failure(session, id).await,
+        Err(failure) => {
+            let direction =
+                draft_transfer_failure_direction(true, DraftTransferDirection::Upload, &failure);
+            handle_media_failure(session, id, failure)?;
+            if let Some(direction) = direction {
+                record_draft_transfer_failure(session, id, direction).await?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Marks, PUTs and records one pending revision. Returns the recorded outcome, or `None` when the
+/// push was no longer eligible or failed transiently.
+async fn push_draft_revision(
+    session: &Arc<Session>,
+    push: DraftPush,
+) -> BridgeResult<Option<DraftPushOutcome>> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use peppy_hosted_api::drafts::{PutDraftRevisionRequest, PutDraftRevisionResponse};
+
+    let c = client(session);
+    let attempted = blocking(move || {
+        c.mark_draft_push_attempt(push.draft_id, push.revision_id)
+            .map_err(core_error)
+    })
+    .await?;
+    if !attempted {
+        return Ok(None);
+    }
+    let request = PutDraftRevisionRequest {
+        base_revision_id: push.base_revision_id,
+        sealed_record: URL_SAFE_NO_PAD.encode(push.sealed_record),
+        attachment_ids: push.attachment_ids.iter().map(|id| id.0).collect(),
+        authored: push.authored,
+        resolves_branch_ids: push.resolves_branch_ids,
+    };
+    let outcome = match session
+        .api
+        .put_json::<_, PutDraftRevisionResponse>(
+            &format!(
+                "/v1/drafts/{}/revisions/{}",
+                push.draft_id, push.revision_id
+            ),
+            &request,
+        )
+        .await
+    {
+        Ok(response) => DraftPushOutcome::Accepted {
+            branch_id: response.branch_id,
+            expires_at_ms: draft_timestamp_ms(&response.expires_at).map_err(BridgeError::from)?,
+            conflict: response.conflict,
+        },
+        Err(NetError::Status {
+            status: 410,
+            code: Some(code),
+        }) => match code.as_str() {
+            "draft_sent" => DraftPushOutcome::Terminated(DraftTerminalReasonCore::Sent),
+            "draft_discarded" => DraftPushOutcome::Terminated(DraftTerminalReasonCore::Discarded),
+            "draft_expired" => DraftPushOutcome::Terminated(DraftTerminalReasonCore::Expired),
+            _ => return Ok(None),
+        },
+        Err(NetError::Status {
+            status: 409,
+            code: Some(code),
+        }) if code == "draft_branch_limit" => DraftPushOutcome::BranchLimit,
+        Err(NetError::Status {
+            status: 422,
+            code: Some(code),
+        }) if code == "draft_attachment_unavailable" => DraftPushOutcome::AttachmentUnavailable,
+        Err(NetError::Status {
+            status: 413,
+            code: Some(code),
+        }) if code == "draft_record_too_large" => DraftPushOutcome::Rejected,
+        Err(NetError::Status {
+            status: 422,
+            code: Some(code),
+        }) if code == "draft_invalid_request" => DraftPushOutcome::Rejected,
+        Err(error) if transport_fatal(&error) => return Err(error.into()),
+        Err(_) => return Ok(None),
+    };
+    let recorded = outcome.clone();
+    let c = client(session);
+    blocking(move || {
+        c.record_draft_push(push.draft_id, push.revision_id, recorded)
+            .map_err(core_error)
+    })
+    .await?;
+    Ok(Some(outcome))
+}
+
+pub(crate) enum DraftPushNow {
+    Accepted { conflict: bool },
+    Terminated(DraftTerminalReasonCore),
+    NotPushed,
+}
+
+/// Uploads one draft's pending attachments and pushes its pending revision for an immediate send.
+/// Waits for an in-flight worker push rather than racing it; a bounded wait yields `NotPushed`.
+pub(crate) async fn push_draft_now(
+    session: &Arc<Session>,
+    draft_id: peppy_client_core::DraftId,
+) -> BridgeResult<DraftPushNow> {
+    if retention_maintenance_ready(session).await? {
+        let failed = session
+            .transfer_errors
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        let c = client(session);
+        let uploads = blocking(move || c.pending_draft_uploads().map_err(core_error)).await?;
+        for upload in uploads.into_iter().filter(|upload| {
+            upload.draft_id == draft_id && !failed.contains(&upload.object.attachment_id)
+        }) {
+            upload_draft_attachment(session, upload).await?;
+        }
+    }
+    let Ok(_lock) = timeout(DRAFT_SEND_PUSH_LOCK_WAIT, session.draft_push_lock.lock()).await else {
+        return Ok(DraftPushNow::NotPushed);
+    };
+    let c = client(session);
+    let push = blocking(move || {
+        c.pending_draft_pushes()
+            .map_err(core_error)
+            .map(|pushes| pushes.into_iter().find(|push| push.draft_id == draft_id))
+    })
+    .await?;
+    let Some(push) = push else {
+        return Ok(DraftPushNow::NotPushed);
+    };
+    Ok(match push_draft_revision(session, push).await? {
+        Some(DraftPushOutcome::Accepted { conflict, .. }) => DraftPushNow::Accepted { conflict },
+        Some(DraftPushOutcome::Terminated(reason)) => DraftPushNow::Terminated(reason),
+        _ => DraftPushNow::NotPushed,
+    })
+}
+
 /// Synchronizes encrypted draft metadata and draft-only attachment objects. Draft contents are
 /// deliberately never logged; malformed server records fail the round without advancing the cursor.
 async fn sync_drafts(
@@ -1241,10 +1388,7 @@ async fn sync_drafts(
     retention_maintenance_ready: bool,
     failed: &[peppy_client_core::AttachmentId],
 ) -> BridgeResult<bool> {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-    use peppy_hosted_api::drafts::{
-        DraftChangesResponse, PutDraftRevisionRequest, PutDraftRevisionResponse,
-    };
+    use peppy_hosted_api::drafts::DraftChangesResponse;
     // Two MAX_DRAFT_RECORD_BYTES records can expand to roughly 700 KiB as JSON/base64, below browser's 1 MiB page cap.
     const DRAFT_PAGE_LIMIT: usize = 2;
 
@@ -1367,97 +1511,18 @@ async fn sync_drafts(
             if session.cancel.is_cancelled() {
                 return Ok(true);
             }
-            let id = upload.object.attachment_id;
-            match upload_object_for_draft(session, upload.object, Some(upload.draft_id)).await {
-                Ok(()) => clear_draft_transfer_failure(session, id).await?,
-                Err(failure) => {
-                    let direction = draft_transfer_failure_direction(
-                        true,
-                        DraftTransferDirection::Upload,
-                        &failure,
-                    );
-                    handle_media_failure(session, id, failure)?;
-                    if let Some(direction) = direction {
-                        record_draft_transfer_failure(session, id, direction).await?;
-                    }
-                }
-            }
+            upload_draft_attachment(session, upload).await?;
         }
     }
+    let _lock = session.draft_push_lock.lock().await;
     let c = client(session);
-    for push in blocking(move || c.pending_draft_pushes().map_err(core_error)).await? {
-        let c = client(session);
-        let attempted = blocking(move || {
-            c.mark_draft_push_attempt(push.draft_id, push.revision_id)
-                .map_err(core_error)
-        })
-        .await?;
-        if !attempted {
-            continue;
-        }
-        let request = PutDraftRevisionRequest {
-            base_revision_id: push.base_revision_id,
-            sealed_record: URL_SAFE_NO_PAD.encode(push.sealed_record),
-            attachment_ids: push.attachment_ids.iter().map(|id| id.0).collect(),
-            authored: push.authored,
-            resolves_branch_ids: push.resolves_branch_ids,
-        };
-        let outcome = match session
-            .api
-            .put_json::<_, PutDraftRevisionResponse>(
-                &format!(
-                    "/v1/drafts/{}/revisions/{}",
-                    push.draft_id, push.revision_id
-                ),
-                &request,
-            )
-            .await
-        {
-            Ok(response) => DraftPushOutcome::Accepted {
-                branch_id: response.branch_id,
-                expires_at_ms: draft_timestamp_ms(&response.expires_at)
-                    .map_err(BridgeError::from)?,
-                conflict: response.conflict,
-            },
-            Err(NetError::Status {
-                status: 410,
-                code: Some(code),
-            }) => match code.as_str() {
-                "draft_sent" => DraftPushOutcome::Terminated(DraftTerminalReasonCore::Sent),
-                "draft_discarded" => {
-                    DraftPushOutcome::Terminated(DraftTerminalReasonCore::Discarded)
-                }
-                "draft_expired" => DraftPushOutcome::Terminated(DraftTerminalReasonCore::Expired),
-                _ => continue,
-            },
-            Err(NetError::Status {
-                status: 409,
-                code: Some(code),
-            }) if code == "draft_branch_limit" => DraftPushOutcome::BranchLimit,
-            Err(NetError::Status {
-                status: 422,
-                code: Some(code),
-            }) if code == "draft_attachment_unavailable" => DraftPushOutcome::AttachmentUnavailable,
-            Err(NetError::Status {
-                status: 413,
-                code: Some(code),
-            }) if code == "draft_record_too_large" => DraftPushOutcome::Rejected,
-            Err(NetError::Status {
-                status: 422,
-                code: Some(code),
-            }) if code == "draft_invalid_request" => DraftPushOutcome::Rejected,
-            Err(error) if transport_fatal(&error) => return Err(error.into()),
-            Err(_) => continue,
-        };
-        let c = client(session);
-        blocking(move || {
-            c.record_draft_push(push.draft_id, push.revision_id, outcome)
-                .map_err(core_error)
-        })
-        .await?;
+    let pushes = blocking(move || c.pending_draft_pushes().map_err(core_error)).await?;
+    for push in pushes {
+        push_draft_revision(session, push).await?;
     }
     let c = client(session);
-    for draft_id in blocking(move || c.pending_draft_discards().map_err(core_error)).await? {
+    let discards = blocking(move || c.pending_draft_discards().map_err(core_error)).await?;
+    for draft_id in discards {
         match session
             .api
             .post_discard(
@@ -1475,6 +1540,29 @@ async fn sync_drafts(
         }
     }
     Ok(true)
+}
+
+async fn retention_maintenance_ready(session: &Arc<Session>) -> BridgeResult<bool> {
+    if !session
+        .attachment_retention_negotiated
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Ok(false);
+    }
+    if !session
+        .attachment_retention_supported
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Ok(true);
+    }
+    match crate::attachment_retention::drain_due_operations(session, &session.generation).await {
+        Ok(()) => Ok(true),
+        Err(error) if error.code != "revoked" => {
+            record_work_error(session, "attachment-retention-deferred");
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
@@ -1621,27 +1709,7 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
     session.set_status(|status| status.work_error = None);
     // A transient retention transport failure defers quota-bearing producers, but does not turn
     // the negotiated protocol off or prevent safe replay/outbox work from making progress.
-    let retention_maintenance_ready = if !session
-        .attachment_retention_negotiated
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        false
-    } else if !session
-        .attachment_retention_supported
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        true
-    } else {
-        match crate::attachment_retention::drain_due_operations(session, &session.generation).await
-        {
-            Ok(()) => true,
-            Err(error) if error.code != "revoked" => {
-                record_work_error(session, "attachment-retention-deferred");
-                false
-            }
-            Err(error) => return Err(error),
-        }
-    };
+    let retention_maintenance_ready = retention_maintenance_ready(session).await?;
     let mut changed = false;
     let failed: Vec<_> = session
         .transfer_errors

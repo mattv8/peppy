@@ -58,6 +58,7 @@ mod notification_icon;
 mod notification_permission;
 mod notification_persistence;
 mod notifications;
+mod one_time_code;
 mod origin;
 mod purchases;
 #[cfg(test)]
@@ -69,6 +70,7 @@ mod search_history;
 mod secure_store;
 #[cfg(test)]
 mod security_tests;
+mod sensitive_clipboard;
 mod session;
 mod snap_layout;
 mod startup;
@@ -97,7 +99,7 @@ use error::{core_error, BridgeError, BridgeResult};
 use notifications::{NotificationPreferences, NotificationSettings, NotificationView};
 use peppy_client_core::{
     AttachmentId, AttachmentInfo, ConversationFolder, ConversationId, DraftId, LocalSearchRequest,
-    MessageId, NativePlaintextFile, NotificationTarget, SearchIndexState,
+    MessageId, NativePlaintextFile, NotificationTarget, OneTimeCodeTarget, SearchIndexState,
 };
 use peppy_desktop_api::compose::{self, DiscardDraftInput};
 #[cfg(target_os = "macos")]
@@ -227,6 +229,7 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "send_typing",
     "set_typing_sharing",
     "mark_seen",
+    "copy_one_time_code",
     "pick_attachments",
     "prepare_pasted_attachment",
     "retry_attachment",
@@ -2516,6 +2519,98 @@ async fn draft_contains_attachments(
     .await
 }
 
+fn copy_draft_input(input: &DraftInput) -> DraftInput {
+    DraftInput {
+        id: input.id.clone(),
+        conversation_id: input.conversation_id.clone(),
+        text: input.text.clone(),
+        recipient_ids: input.recipient_ids.clone(),
+        attachment_ids: input.attachment_ids.clone(),
+        gateway_id: input.gateway_id.clone(),
+        sim_id: input.sim_id.clone(),
+        expected_revision: input.expected_revision.clone(),
+    }
+}
+
+type DraftSendGateResult =
+    Result<Option<peppy_client_core::RemoteDraftSend>, peppy_client_core::Error>;
+
+/// Runs the core send gate; the inner result keeps `DraftNotSynced` distinguishable.
+fn gate_draft_send(session: &Session, input: &DraftInput) -> BridgeResult<DraftSendGateResult> {
+    let (gateways, known) = session.gateways();
+    let draft_id = DraftId::from_str(&input.id)
+        .map_err(|_| BridgeError::new("invalid-draft", "Save the draft before sending it."))?;
+    let expected_revision = input
+        .expected_revision
+        .parse()
+        .map_err(|_| BridgeError::new("invalid-draft", "The draft revision is invalid."))?;
+    let parts = compose::prepared_draft_send_parts(
+        &session.client,
+        input,
+        known.then_some(gateways.as_slice()),
+    )
+    .map_err(session::compose_error)?;
+    Ok(session
+        .client
+        .begin_draft_send(draft_id, expected_revision, parts)
+        .map(|gate| gate.remote))
+}
+
+fn terminated_draft_send_error(reason: peppy_client_core::DraftTerminalReasonCore) -> BridgeError {
+    use peppy_client_core::DraftTerminalReasonCore as Reason;
+    match reason {
+        Reason::Sent => BridgeError::new("draft-sent", "This synced draft was already sent."),
+        Reason::Discarded => {
+            BridgeError::new("draft-discarded", "This synced draft was discarded.")
+        }
+        Reason::Expired => BridgeError::new(
+            "draft-expired",
+            "This synced draft expired before it could be sent.",
+        ),
+    }
+}
+
+/// Pushes a synced draft's pending revision now instead of waiting for the worker, then
+/// re-runs the send gate once. Never sends over a concurrent remote edit or a terminal draft.
+async fn push_and_regate_draft_send(
+    session: &Arc<Session>,
+    input: &DraftInput,
+) -> BridgeResult<Option<peppy_client_core::RemoteDraftSend>> {
+    let draft_id = DraftId::from_str(&input.id)
+        .map_err(|_| BridgeError::new("invalid-draft", "Save the draft before sending it."))?;
+    match sync::push_draft_now(session, draft_id).await {
+        Err(error) if error.code == "offline" => {
+            return Err(BridgeError::new(
+                "draft-sync-offline",
+                "Reconnect to check this draft before sending.",
+            ));
+        }
+        Err(error) => return Err(error),
+        Ok(sync::DraftPushNow::Accepted { conflict: true }) => {
+            session.request_work();
+            return Err(BridgeError::new(
+                "draft-review-required",
+                "Another device changed this draft. Review the versions before sending.",
+            ));
+        }
+        Ok(sync::DraftPushNow::Terminated(reason)) => {
+            session.notify();
+            return Err(terminated_draft_send_error(reason));
+        }
+        Ok(sync::DraftPushNow::Accepted { conflict: false } | sync::DraftPushNow::NotPushed) => {}
+    }
+    let gate_session = session.clone();
+    let gate_input = copy_draft_input(input);
+    match blocking(move || gate_draft_send(&gate_session, &gate_input)).await? {
+        Ok(remote) => Ok(remote),
+        Err(peppy_client_core::Error::DraftNotSynced) => Err(BridgeError::new(
+            "draft-syncing",
+            "This draft could not be synced. Try sending again.",
+        )),
+        Err(error) => Err(core_error(error)),
+    }
+}
+
 async fn send_draft_for_window(
     state: &AppState,
     label: &str,
@@ -2547,48 +2642,19 @@ async fn send_draft_for_window(
         attachment_retention::ensure_negotiated(&session)?;
     }
     let binding = session.binding.clone();
-    let intent_input = DraftInput {
-        id: input.id.clone(),
-        conversation_id: input.conversation_id.clone(),
-        text: input.text.clone(),
-        recipient_ids: input.recipient_ids.clone(),
-        attachment_ids: input.attachment_ids.clone(),
-        gateway_id: input.gateway_id.clone(),
-        sim_id: input.sim_id.clone(),
-        expected_revision: input.expected_revision.clone(),
-    };
-    let remote_send = blocking({
+    let gate = blocking({
         let session = session.clone();
-        let draft_id = intent_input.id.clone();
-        let expected_revision = intent_input.expected_revision.clone();
-        move || {
-            let (gateways, known) = session.gateways();
-            let draft_id = DraftId::from_str(&draft_id).map_err(|_| {
-                BridgeError::new("invalid-draft", "Save the draft before sending it.")
-            })?;
-            let expected_revision = expected_revision
-                .parse()
-                .map_err(|_| BridgeError::new("invalid-draft", "The draft revision is invalid."))?;
-            let parts = compose::prepared_draft_send_parts(
-                &session.client,
-                &intent_input,
-                known.then_some(gateways.as_slice()),
-            )
-            .map_err(session::compose_error)?;
-            match session
-                .client
-                .begin_draft_send(draft_id, expected_revision, parts)
-            {
-                Ok(gate) => Ok(gate.remote),
-                Err(peppy_client_core::Error::DraftNotSynced) => Err(BridgeError::new(
-                    "draft-syncing",
-                    "Wait for this synced draft to finish saving before sending.",
-                )),
-                Err(error) => Err(core_error(error)),
-            }
-        }
+        let input = copy_draft_input(&input);
+        move || gate_draft_send(&session, &input)
     })
     .await?;
+    let remote_send = match gate {
+        Ok(remote) => remote,
+        Err(peppy_client_core::Error::DraftNotSynced) => {
+            push_and_regate_draft_send(&session, &input).await?
+        }
+        Err(error) => return Err(core_error(error)),
+    };
     let result = if let Some(remote) = remote_send {
         let request = peppy_hosted_api::drafts::AcceptDraftSendRequest {
             revision_id: remote.revision_id,
@@ -2859,6 +2925,42 @@ async fn mark_seen(
         )?
     };
     blocking(move || session.mark_seen_scoped(&visible_message_ids, conversation)).await
+}
+
+/// Copies a one-time code and then marks its item read. The code is re-derived natively; the
+/// renderer never supplies it. Clipboard failure leaves the item unread.
+#[tauri::command]
+async fn copy_one_time_code(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    target: OneTimeCodeTarget,
+) -> BridgeResult<()> {
+    let operation = admit_update_operation(&state)?;
+    one_time_code::require_target_window(&target, window.label())?;
+    if !window.is_visible().unwrap_or(false)
+        || window.is_minimized().unwrap_or(true)
+        || !window.is_focused().unwrap_or(false)
+    {
+        return Err(BridgeError::new(
+            "window-not-visible",
+            "One-time codes can only be copied from a visible focused window.",
+        ));
+    }
+    let session = state.require_session_admitted(&operation).await?;
+    let conversation = if window.label() == tray::MAIN
+        || matches!(target, OneTimeCodeTarget::Notification { .. })
+    {
+        None
+    } else {
+        let source = tray::composer_conversation(window.label()).ok_or_else(window_error)?;
+        effective_composer_conversation(
+            &state,
+            window.label(),
+            &session,
+            Some(&source.to_string()),
+        )?
+    };
+    blocking(move || one_time_code::copy_and_mark(&session, &target, conversation)).await
 }
 
 #[tauri::command]
@@ -6538,6 +6640,7 @@ pub fn run() {
         live_typing::send_typing,
         live_typing::set_typing_sharing,
         mark_seen,
+        copy_one_time_code,
         mark_all_read,
         pick_attachments,
         prepare_pasted_attachment,

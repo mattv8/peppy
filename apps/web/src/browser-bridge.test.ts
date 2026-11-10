@@ -1620,3 +1620,94 @@ describe("BrowserBridge", () => {
     }
   });
 });
+
+describe("BrowserBridge one-time code copy", () => {
+  const replaceClipboard = (value: unknown) => {
+    const original = navigator.clipboard;
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value });
+    return () => Object.defineProperty(navigator, "clipboard", { configurable: true, value: original });
+  };
+
+  it("writes the code to the clipboard before marking the message read", async () => {
+    const port = new TestPort();
+    let finishWrite: () => void = () => undefined;
+    const writeText = vi.fn(() => new Promise<void>(resolve => { finishWrite = resolve; }));
+    const restoreClipboard = replaceClipboard({ writeText });
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const copy = bridge.copy_one_time_code({ kind: "message", messageId: "message-1" }, "482913");
+
+      expect(writeText).toHaveBeenCalledWith("482913");
+      expect(port.sent).toHaveLength(0);
+      finishWrite();
+      await vi.waitFor(() => expect(port.sent).toHaveLength(1));
+      expect(port.sent[0]).toMatchObject({ command: "mark_seen", args: { visibleMessageIds: ["message-1"] } });
+      port.reply({ id: 1, ok: true, value: undefined });
+      await copy;
+    } finally {
+      restoreClipboard();
+      bridge.dispose();
+    }
+  });
+
+  it("marks the notification read through the existing command after copying", async () => {
+    const port = new TestPort();
+    const restoreClipboard = replaceClipboard({ writeText: vi.fn().mockResolvedValue(undefined) });
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const target = { sourceDeviceId: "phone-a", notificationKey: "chat-1", lifetime: "one" };
+    try {
+      const copy = bridge.copy_one_time_code({ kind: "notification", target }, "839201");
+      await vi.waitFor(() => expect(port.sent).toHaveLength(1));
+      expect(port.sent[0]).toMatchObject({ command: "mark_notifications_seen", args: { targets: [target] } });
+      port.reply({ id: 1, ok: true, value: undefined });
+      await copy;
+    } finally {
+      restoreClipboard();
+      bridge.dispose();
+    }
+  });
+
+  it("resolves when the code was copied even if marking it read fails", async () => {
+    const port = new TestPort();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const restoreClipboard = replaceClipboard({ writeText });
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const copy = bridge.copy_one_time_code({ kind: "message", messageId: "message-1" }, "482913");
+      await vi.waitFor(() => expect(port.sent).toHaveLength(1));
+      port.reply({ id: 1, ok: false, error: { code: "unavailable", message: "The browser worker failed." } });
+
+      await expect(copy).resolves.toBeUndefined();
+      expect(writeText).toHaveBeenCalledWith("482913");
+    } finally {
+      restoreClipboard();
+      bridge.dispose();
+    }
+  });
+
+  it("rejects without marking read when the clipboard write fails", async () => {
+    const port = new TestPort();
+    const restoreClipboard = replaceClipboard({ writeText: vi.fn().mockRejectedValue(new Error("denied 482913")) });
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      await expect(bridge.copy_one_time_code({ kind: "message", messageId: "message-1" }, "482913")).rejects.toMatchObject({ code: "clipboard-unavailable" });
+      expect(port.sent).toHaveLength(0);
+    } finally {
+      restoreClipboard();
+      bridge.dispose();
+    }
+  });
+
+  it("rejects without marking read when the clipboard is unavailable", async () => {
+    const port = new TestPort();
+    const restoreClipboard = replaceClipboard(undefined);
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      await expect(bridge.copy_one_time_code({ kind: "notification", target: { sourceDeviceId: "phone-a", notificationKey: "chat-1", lifetime: "one" } }, "839201")).rejects.toMatchObject({ code: "clipboard-unavailable" });
+      expect(port.sent).toHaveLength(0);
+    } finally {
+      restoreClipboard();
+      bridge.dispose();
+    }
+  });
+});

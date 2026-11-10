@@ -20,6 +20,7 @@
     "allow-send-typing",
     "allow-set-typing-sharing",
     "allow-mark-seen",
+    "allow-copy-one-time-code",
     "allow-pick-attachments",
     "allow-prepare-pasted-attachment",
     "allow-retry-attachment",
