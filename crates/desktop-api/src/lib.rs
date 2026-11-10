@@ -3,8 +3,8 @@
 use peppy_client_core::{
     AppFilter, AttachmentId, AttachmentInfo, AttachmentState, Client, ComposeDraft,
     ConversationFolder, ConversationFolderReason, DeferredMediaStatus, Direction, Error,
-    GatewayRoute, MediaPage, MediaPageAround, Message, MessageId, MirroredNotification, SendState,
-    SenderUnblockStatus, Transport,
+    GatewayRoute, MediaPage, MediaPageAround, Message, MessageId, MirroredNotification,
+    SendRefusalReason, SendState, SenderUnblockStatus, Transport,
 };
 pub use peppy_client_core::{NotificationPreferences, NotificationPreview as Preview};
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,8 @@ pub use attachment_retention::*;
 pub mod avatar;
 pub mod compose;
 pub mod gateways;
+pub mod group;
+pub use group::*;
 pub mod images;
 pub mod mms_plan;
 pub mod notification_activation;
@@ -236,6 +238,9 @@ pub struct ConversationView {
     pub rcs_encryption: Option<bool>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rcs_history_gap: bool,
+    /// Present only for a group conversation (a roster or an RCS group mapping).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<GroupView>,
 }
 
 #[derive(Serialize)]
@@ -265,6 +270,9 @@ pub struct MessageView {
     /// Gateway-recorded time of `status`, as positive decimal epoch milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_at: Option<String>,
+    /// Group refusal or outcome the message view shows (see `group_hint`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_hint: Option<&'static str>,
     pub attachments: Vec<AttachmentView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transport: Option<&'static str>,
@@ -401,6 +409,9 @@ pub struct DraftView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sim_id: Option<String>,
     pub revision: String,
+    /// Group name for a draft to two or more members.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync: Option<DraftSyncView>,
 }
@@ -456,6 +467,9 @@ pub struct SendResultView {
     pub revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parts: Option<u32>,
+    /// Current members and revision, only for a `members_changed` group refusal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<GroupRefusalView>,
 }
 
 #[derive(Serialize)]
@@ -721,6 +735,7 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
         timestamp: positive_ms_to_decimal(message.payload.sent_at_ms).unwrap_or_default(),
         status: message.send_state.map(send_state_label),
         status_at: positive_ms_to_decimal(message.status_at_ms),
+        group_hint: message.send_refusal.and_then(group_hint),
         attachments,
         transport: match message.payload.transport {
             Transport::Sms => Some("sms"),
@@ -738,6 +753,19 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
             (!values.is_empty()).then_some(values)
         },
         rcs_reported: false,
+    }
+}
+
+/// The message-level hint for a group refusal, one wire value per core reason. The composer
+/// shows the same reasons on the send result; the message keeps them so they survive a restart
+/// and reach every device.
+fn group_hint(reason: SendRefusalReason) -> Option<&'static str> {
+    match reason {
+        SendRefusalReason::MembersChanged => Some("members_changed"),
+        SendRefusalReason::UpdateRequired => Some("update_required"),
+        SendRefusalReason::Withdrawn => Some("withdrawn"),
+        SendRefusalReason::CreateUnconfirmed => Some("create_unknown"),
+        SendRefusalReason::CreateNotRcs => Some("create_not_rcs"),
     }
 }
 
@@ -772,6 +800,7 @@ pub fn draft_view(draft: &ComposeDraft) -> DraftView {
         }),
         attachments: None,
         revision: draft.revision.to_string(),
+        group_name: draft.group_name.clone(),
         sync: None,
     }
 }
@@ -852,6 +881,7 @@ mod tests {
             attachment_ids: vec![AttachmentId::new()],
             route: None,
             revision: 18_446_744_073_709_551_615,
+            group_name: None,
         };
 
         let value = serde_json::to_value(draft_view(&draft)).unwrap();
@@ -883,9 +913,11 @@ mod tests {
             can_unblock: true,
             rcs_encryption: Some(true),
             rcs_history_gap: true,
+            group: None,
         };
 
         let value = serde_json::to_value(view).unwrap();
+        assert!(value.get("group").is_none());
         assert_eq!(value["pinned"], true);
         assert_eq!(value["folder"], "archived");
         assert_eq!(value["folderReason"], "marked");
@@ -1011,6 +1043,36 @@ mod tests {
     }
 
     #[test]
+    fn group_refusals_map_to_the_message_hint_the_composer_reads() {
+        let mut message = message_with_body(Direction::Outgoing, "hello");
+        message.send_refusal = Some(SendRefusalReason::MembersChanged);
+        assert_eq!(
+            message_view(&message, vec![]).group_hint,
+            Some("members_changed")
+        );
+        message.send_refusal = Some(SendRefusalReason::CreateUnconfirmed);
+        assert_eq!(
+            message_view(&message, vec![]).group_hint,
+            Some("create_unknown")
+        );
+        message.send_refusal = Some(SendRefusalReason::UpdateRequired);
+        assert_eq!(
+            message_view(&message, vec![]).group_hint,
+            Some("update_required")
+        );
+        message.send_refusal = Some(SendRefusalReason::Withdrawn);
+        assert_eq!(message_view(&message, vec![]).group_hint, Some("withdrawn"));
+        message.send_refusal = Some(SendRefusalReason::CreateNotRcs);
+        assert_eq!(
+            message_view(&message, vec![]).group_hint,
+            Some("create_not_rcs")
+        );
+        message.send_refusal = None;
+        let json = serde_json::to_value(message_view(&message, vec![])).unwrap();
+        assert!(json.get("groupHint").is_none());
+    }
+
+    #[test]
     fn message_status_time_serializes_as_optional_decimal_milliseconds() {
         let message = Message {
             payload: MessagePayload {
@@ -1036,6 +1098,7 @@ mod tests {
             seen: true,
             send_state: Some(SendState::Sent),
             status_at_ms: Some(1_725_363_180_000),
+            send_refusal: None,
         };
 
         let view = message_view(&message, vec![]);
@@ -1079,6 +1142,7 @@ mod tests {
             seen: false,
             send_state: None,
             status_at_ms: None,
+            send_refusal: None,
         }
     }
 

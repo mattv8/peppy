@@ -37,6 +37,8 @@ export type TypingDisplayEvent = {
   event: "typing";
   peerDeviceId: string;
   conversationId: string;
+  /** Canonical E.164 group member; absent for 1:1 typing. */
+  participant?: string;
   state: "started" | "stopped";
   deadlineMono: string;
 };
@@ -139,15 +141,19 @@ export class LiveTypingEngine {
     const deadlineMono = decimal(action.deadlineMono);
     const peer = this.peerSessions.get(action.peerDeviceId);
     if (!peer || peer.sessionToken !== sessionToken) return;
-    const priorSequence = peer.sequences.get(action.conversationId);
+    // Typing is keyed by conversation and group participant; a 1:1 signal carries no participant (null or absent).
+    const participant = typeof action.participant === "string" ? action.participant : undefined;
+    const key = participant === undefined ? action.conversationId : `${action.conversationId}\n${participant}`;
+    const priorSequence = peer.sequences.get(key);
     if (priorSequence !== undefined && sequence <= priorSequence) return;
     if (!this.isCurrent(incarnation, generation) || BigInt(deadlineMono) <= monotonic(this.clock().monoMs)) return;
-    peer.sequences.set(action.conversationId, sequence);
+    peer.sequences.set(key, sequence);
     if (!this.isCurrent(incarnation, generation)) return;
     this.display({
       event: "typing",
       peerDeviceId: action.peerDeviceId,
       conversationId: action.conversationId,
+      ...(participant === undefined ? {} : { participant }),
       state: action.state,
       deadlineMono,
     });

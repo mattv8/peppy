@@ -4,7 +4,7 @@ import type {
   DesktopBridge, DesktopSnapshot, DeviceRosterView, Draft, DraftInput, HistoryPage,
   HistorySearchAttemptInput, HistorySearchSnapshot, LocalSearchPage, LocalSearchRequest, MaximizeButtonRegion, MediaCursor, MediaOpen, MediaPage, MessageWindow,
   MessageWindowRequest, NotificationCheck, NotificationPreferences, NotificationTarget, OneTimeCodeTarget, PublicCopy,
-  RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput, StartHistorySearchInput,
+  RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput, SendResultView, StartHistorySearchInput,
   BillingSummaryView, HostedSignInProvider, PurchaseOptions, StartupStatus, StoreProduct,
   AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult, ConversationFolder, NotificationPersistence, NotificationPersistenceSettings, PastedImage,
 } from "@peppy/desktop-ui/bridge-contracts";
@@ -14,6 +14,16 @@ import { validateAccountUrl } from "./account-navigation";
 import { beginHostedAuthorization, fetchHostedWebConfig } from "./newhosted-app-auth";
 import { appSessionRenewal } from "./app-session-renewal";
 import { inlineMediaType, safeSuggestedFilename } from "./attachment-safety";
+import { groupDraftFields, normalizeGroupSnapshot, parseSendResult } from "./group-payload";
+
+/** Runs a bridge call whose input validation may throw, reporting the failure as a rejected promise. */
+function callChecked<T>(call: () => Promise<T>): Promise<T> {
+  try {
+    return call();
+  } catch (error) {
+    return Promise.reject(error);
+  }
+}
 
 type RpcReply = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: BridgeError };
 type WorkerEvent = { event: "changed" } | { event: "ready"; version: 1 } | { event: "stopped"; reason?: string } | { event: "banner"; candidate: { id: string; title: string; body: string; icon?: string } };
@@ -506,11 +516,11 @@ export class BrowserBridge implements DesktopBridge {
     this.stop("disconnected");
   }
   public load_state(conversationId?: string, historyFromMessageId?: string, options?: { metadataOnly?: boolean }): Promise<DesktopSnapshot> {
-    return this.call("load_state", {
+    return this.call<DesktopSnapshot>("load_state", {
       ...(conversationId ? { conversationId } : {}),
       ...(historyFromMessageId ? { historyFromMessageId } : {}),
       ...(options?.metadataOnly === undefined ? {} : { metadataOnly: options.metadataOnly }),
-    });
+    }).then(normalizeGroupSnapshot);
   }
   public search_local(input: LocalSearchRequest): Promise<LocalSearchPage> { return this.call("search_local", input); }
   public advance_search_index(input?: { budgetRows?: number }): Promise<SearchIndexProgress> { return this.call("advance_search_index", input ?? {}); }
@@ -520,8 +530,8 @@ export class BrowserBridge implements DesktopBridge {
   public cancel_history_search(input: HistorySearchAttemptInput): Promise<HistorySearchSnapshot> { return this.call("cancel_history_search", { attemptId: input.attemptId }); }
   public load_message_window(input: MessageWindowRequest): Promise<MessageWindow> { return this.call("load_message_window", input); }
   public load_history(conversationId: string, beforeMessageId: string): Promise<HistoryPage> { return this.call("load_history", { conversationId, beforeMessageId }); }
-  public save_draft(input: DraftInput): Promise<Draft> { return this.call("save_draft", { input }); }
-  public send_draft(input: SendDraftInput): Promise<{ accepted: boolean; status: "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown"; reason?: string; revision?: string }> { return this.call("send_draft", { input }); }
+  public save_draft(input: DraftInput): Promise<Draft> { return callChecked(() => this.call<Draft>("save_draft", { input: { ...input, ...groupDraftFields(input) } })); }
+  public send_draft(input: SendDraftInput): Promise<SendResultView> { return callChecked(() => this.call<unknown>("send_draft", { input: { ...input, ...groupDraftFields(input) } }).then(parseSendResult)); }
   public discard_draft(input: { id: string; conversationId: string; expectedRevision: string }): Promise<void> { return this.call("discard_draft", { input }); }
   public mark_seen(visibleMessageIds: string[]): Promise<void> { return this.call("mark_seen", { visibleMessageIds }); }
   /** Copies first; the read mark runs only after the clipboard accepts the code. */

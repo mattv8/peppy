@@ -46,6 +46,21 @@ describe("currentRcsRoute", () => {
     expect(currentRcsRoute(input)).toEqual({ current: false });
   });
 
+  it.each([
+    ["live", true],
+    ["paused", true],
+    ["unlinked", false],
+    ["proving", false],
+    ["withdrawn", false],
+  ] as const)("routes a group in state %s: %s", (state, routed) => {
+    const value = snapshot();
+    value.conversations[0].participants = ["one", "two"];
+    value.conversations[0].group = { members: ["one", "two"], state, memberRevision: "1", canCreate: false, createNeedsConfirmation: false };
+    const route = currentRcsRoute({ snapshot: value, activeConversationId: "conversation-a", gatewayId: "gateway-a", nowMs: 149, locked: false });
+
+    expect(route.current).toBe(routed);
+  });
+
   it("expires strictly at the projection deadline", () => {
     const value = snapshot();
 

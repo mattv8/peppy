@@ -585,6 +585,7 @@ export function RecipientPanel({
   onPendingChange,
   searchContacts,
   onSuggestionChosen,
+  nameField,
 }: {
   recipients: RecipientChip[];
   onCommit(ids: string[]): void;
@@ -596,6 +597,8 @@ export function RecipientPanel({
   /** Contact discovery: phone numbers (not contact IDs) matching a name or digits. */
   searchContacts?(query: string): Promise<RecipientSuggestion[]>;
   onSuggestionChosen?(suggestion: RecipientSuggestion): void;
+  /** Optional row under the recipient chips, such as the group name field. */
+  nameField?: ReactNode;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const panelRef = useRef<HTMLElement>(null);
@@ -758,6 +761,7 @@ export function RecipientPanel({
         showGroupTag
         inputRef={inputRef}
       />
+      {nameField}
     </section>;
 }
 

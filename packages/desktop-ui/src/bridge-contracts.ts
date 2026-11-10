@@ -52,13 +52,14 @@ export type TypingSignal = {
   conversationId: string;
   state: "started" | "stopped";
   expiresAtMs?: string;
+  participant?: string;
 };
 export type MessageStatus = "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown" | "read";
 export type AttachmentState = "pending" | "uploading" | "failed" | "ready";
 export type DraftAttachmentState = "saving" | "local" | "waiting" | "uploading" | "uploaded" | "upload-failed" | "downloading" | "download-failed" | "unavailable";
 export const MAX_DRAFT_ATTACHMENTS = 10;
 export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; draftState?: DraftAttachmentState; mediaHold?: "held" | "requested"; mediaMeta?: MediaMetadataView; remoteState?: "available" | "removed_by_storage_policy"; localAvailable?: boolean };
-export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms" | "rcs"; subject?: string; participants?: string[]; rcsReported?: boolean; oneTimeCode?: string };
+export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms" | "rcs"; subject?: string; participants?: string[]; rcsReported?: boolean; oneTimeCode?: string; groupHint?: "members_changed" | "update_required" | "withdrawn" | "create_unknown" | "create_not_rcs" };
 export type MessageWindow = GeneratedMessageWindow<MessageView>;
 export type MediaCursor = { sortAtMs: string; localOrder: string; messageId: string; attachmentPosition: number };
 export type MediaMetadataView = { width?: number; height?: number; durationMs?: string; thumbnail?: AttachmentView; previewUnavailable?: "thumbnail_unavailable" };
@@ -69,7 +70,10 @@ export type MediaOpen = { state: "ready"; url: string; mediaType: string; byteSi
 /** `participants` are native-provided reply addressees and exclude a confirmed self address. */
 /** Draft flags are authoritative host metadata; do not infer them from an unloaded message list. */
 /** RCS facts absent from the snapshot make no claim. `rcsEncryption` is only what Google reports. */
-export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; hasOlderMessages?: boolean; participants?: string[]; recipientlessDraft?: boolean; draftOnly?: boolean; pinned?: boolean; folder?: ConversationFolder; folderReason?: "marked" | "blocked"; unblock?: "pending" | "failed"; canUnblock?: boolean; rcsEncryption?: boolean; rcsHistoryGap?: boolean };
+export type GroupView = { name?: string; members: string[]; state: "unlinked" | "proving" | "live" | "paused" | "withdrawn"; memberRevision: string; canCreate: boolean; createNeedsConfirmation: boolean; /** Best-effort local notices from core, oldest first. Compaction may drop some. */ notices?: GroupNoticeView[] };
+/** One membership or name change. `member` is canonical; `name` is absent when the group name was removed. `atMs` is decimal ms. */
+export type GroupNoticeView = { kind: "renamed" | "added" | "removed"; name?: string; member?: string; atMs: string };
+export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; hasOlderMessages?: boolean; participants?: string[]; recipientlessDraft?: boolean; draftOnly?: boolean; pinned?: boolean; folder?: ConversationFolder; folderReason?: "marked" | "blocked"; unblock?: "pending" | "failed"; canUnblock?: boolean; rcsEncryption?: boolean; rcsHistoryGap?: boolean; group?: GroupView };
 /** Effective folder from core: an archived conversation reads as `inbox` once a newer message arrives. */
 export type ConversationFolder = "inbox" | "archived" | "spam";
 export type HistoryPage = { conversationId: string; messages: MessageView[]; hasMore: boolean };
@@ -78,8 +82,8 @@ export type GatewayPresence = { state: "connected" | "seen" | "never"; last_seen
 export type GatewayView = { id: string; name: string; simId: string; online: boolean; simulated: boolean; supportsSms: boolean; supportsMms: boolean; availability?: GatewayAvailability; lastSeenAgeSeconds?: number; presence?: GatewayPresence; wakeRoute?: boolean; capabilityNote?: string; mmsContentVersion?: number; mmsMaxBytes?: number; mmsLimitSource?: "carrier" | "fallback"; mmsMaxRecipients?: number };
 export type DraftConflictView = { branchId: string; text: string; attachmentIds: string[]; recipientIds: string[]; gatewayId?: string; simId?: string };
 export type DraftSyncView = { state: "local-only" | "saving" | "saved-local" | "syncing" | "synced" | "paused" | "failed"; expiresAt: string | null; conflicts: DraftConflictView[]; notice: "restored-after-expiry" | "kept-after-sent" | "updated-from-other-device" | null; sendRequiresConnection: boolean };
-export type SendResultView = { accepted: boolean; status: MessageStatus; reason?: string; revision?: string; parts?: number };
-export type Draft = { id: string; conversationId: string; text: string; recipientIds: string[]; attachmentIds: string[]; gatewayId?: string; simId?: string; revision: string; /** Authoritative host views for the draft's attachments. */ attachments?: AttachmentView[]; sync?: DraftSyncView };
+export type SendResultView = { accepted: boolean; status: MessageStatus; reason?: "members_changed" | "update_required" | "withdrawn" | "create_unconfirmed" | "create_not_rcs" | string; revision?: string; parts?: number; group?: { members: string[]; memberRevision: string } };
+export type Draft = { id: string; conversationId: string; text: string; recipientIds: string[]; attachmentIds: string[]; gatewayId?: string; simId?: string; revision: string; groupName?: string; /** Authoritative host views for the draft's attachments. */ attachments?: AttachmentView[]; sync?: DraftSyncView };
 export type PastedImage = { bytes: ArrayBuffer; name: string; mediaType: string };
 /** Successful pasted attachments plus per-file failures. Hosts never discard successful files because another file failed. */
 export type PreparedPastedAttachments = { views: AttachmentView[]; failures: string[] };
@@ -87,9 +91,10 @@ export type PreparedPastedAttachments = { views: AttachmentView[]; failures: str
 export type SyncProgress = { phase: "receiving" | "applying" | "waitingForKeys" | "current"; receivedThrough: string; processedThrough: string; targetHighWater?: string; snapshotReceived?: string; snapshotExpected?: string; snapshotRemaining?: string };
 export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; sessionScopeId?: string; head: { enabled: boolean; capability: "available" | "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus; toneOverrides?: Record<string, number>; syncProgress?: SyncProgress; rcsStatus?: RcsStatusSnapshot };
 /** gatewayId/simId are optional on saves (omitted = keep the stored route) and required on sends. */
-export type DraftInput = Pick<Draft, "id" | "conversationId" | "text" | "recipientIds" | "attachmentIds"> & { expectedRevision: string; gatewayId?: string; simId?: string };
+export type DraftInput = Pick<Draft, "id" | "conversationId" | "text" | "recipientIds" | "attachmentIds" | "groupName"> & { expectedRevision: string; gatewayId?: string; simId?: string };
 export type DiscardDraftInput = Pick<Draft, "id" | "conversationId"> & { expectedRevision: string };
-export type SendDraftInput = DraftInput & { gatewayId: string; simId: string };
+/** `expectedMemberRevision` is required for a group send; `groupCreateConfirmDuplicate` is set only by the explicit "Create it again" action. */
+export type SendDraftInput = DraftInput & { gatewayId: string; simId: string; expectedMemberRevision?: string; groupCreateConfirmDuplicate?: boolean };
 /** A separate, server-readable re-encoded copy created only after native confirmation. */
 export type PublicCopy = { url: string; expiresInSeconds: number };
 export type NotificationTarget = { sourceDeviceId: string; notificationKey: string; lifetime: string };

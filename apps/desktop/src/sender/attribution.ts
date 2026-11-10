@@ -1,5 +1,6 @@
 import { formatPhoneNumber } from "@peppy/desktop-ui";
 import type { ContactResolutionMap } from "../bridge/bridge";
+import { peppyCopy } from "../generated/peppyCopy";
 
 export type SenderLabel = {
   text: string;
@@ -19,7 +20,7 @@ export type SenderRunOptions<T> = {
 };
 
 export function senderLabel(address: string | undefined, resolution: ContactResolutionMap): SenderLabel {
-  if (!address) return { text: "Unknown sender", isName: false };
+  if (!address) return { text: peppyCopy.sender_unknown, isName: false };
 
   const contact = resolution[address];
   if (!contact) return { text: formatPhoneNumber(address), isName: false };

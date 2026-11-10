@@ -1,11 +1,12 @@
 //! Shared local draft composition policy for native and browser hosts.
 use crate::{
-    DraftView, GatewayAvailability, GatewayView, SendResultView, draft_view,
+    DraftView, GatewayAvailability, GatewayView, SendResultView, draft_view, group_refusal_view,
     mms_plan::{MmsImage, MmsPlan, MmsPlanError, plan_mms},
 };
 use peppy_client_core::{
     AttachmentId, Client, CommandId, ComposeDraft, ComposeDraftUpdate, ConversationId, DeviceId,
-    Direction, DraftId, DraftSendParts, Error as CoreError, GatewayRoute, Message, Transport,
+    Direction, DraftId, DraftSendParts, Error as CoreError, GatewayRoute, GroupDraftSend, Message,
+    SendRefusalReason, Transport,
 };
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -45,6 +46,15 @@ pub struct DraftInput {
     pub sim_id: Option<String>,
     #[serde(default)]
     pub expected_revision: String,
+    /// Group name for a draft to two or more members; carried into a create request only.
+    #[serde(default)]
+    pub group_name: Option<String>,
+    /// The member revision the composer showed (decimal `u64`); group sends only.
+    #[serde(default)]
+    pub expected_member_revision: Option<String>,
+    /// Set only by "Create it again" after an unknown create outcome.
+    #[serde(default)]
+    pub group_create_confirm_duplicate: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -211,7 +221,9 @@ pub fn save_draft(client: &Client, input: &DraftInput) -> Result<DraftView, Comp
         }
         _ => return Err(ui("invalid-route", "Select a phone and SIM together.")),
     };
+    let group_name = draft_group_name(&input.group_name, recipients.len())?;
     let update = ComposeDraftUpdate {
+        group_name,
         text: input.text.clone(),
         recipients,
         attachment_ids,
@@ -252,6 +264,7 @@ pub fn save_draft(client: &Client, input: &DraftInput) -> Result<DraftView, Comp
                 draft_id,
                 expected,
                 ComposeDraftUpdate {
+                    group_name: update.group_name,
                     text: update.text,
                     recipients: update.recipients,
                     attachment_ids: update.attachment_ids,
@@ -274,6 +287,7 @@ pub fn save_draft(client: &Client, input: &DraftInput) -> Result<DraftView, Comp
             draft_id,
             expected,
             ComposeDraftUpdate {
+                group_name: update.group_name,
                 text: update.text,
                 recipients: update.recipients,
                 attachment_ids: update.attachment_ids,
@@ -282,6 +296,27 @@ pub fn save_draft(client: &Client, input: &DraftInput) -> Result<DraftView, Comp
         )
         .map_err(ComposeError::Core)?;
     Ok(draft_view(&saved))
+}
+
+/// Longest group name a draft keeps, in Unicode code points (the composer's field limit).
+const GROUP_NAME_MAX_CHARS: usize = 100;
+
+/// The group name a draft keeps. Only a draft to two or more members has one; an empty or
+/// blank name is no name.
+fn draft_group_name(
+    name: &Option<String>,
+    recipient_count: usize,
+) -> Result<Option<String>, ComposeError> {
+    let Some(name) = name.as_deref().filter(|_| recipient_count > 1) else {
+        return Ok(None);
+    };
+    if name.trim().is_empty() {
+        return Ok(None);
+    }
+    if name.chars().count() > GROUP_NAME_MAX_CHARS {
+        return Err(ui("invalid-draft", "The group name is too long."));
+    }
+    Ok(Some(name.to_owned()))
 }
 
 pub fn discard_draft(client: &Client, input: &DiscardDraftInput) -> Result<(), ComposeError> {
@@ -339,6 +374,7 @@ pub fn send_draft_accepted(
         reason: None,
         revision: Some((revision + 1).to_string()),
         parts,
+        group: None,
     })
 }
 
@@ -495,6 +531,7 @@ pub fn prepare_draft_send(
                     draft_id,
                     expected,
                     ComposeDraftUpdate {
+                        group_name: draft_group_name(&stored.group_name, recipients.len())?,
                         text: stored.text.clone(),
                         recipients: recipients.clone(),
                         attachment_ids: stored.attachment_ids.clone(),
@@ -526,6 +563,9 @@ pub fn prepare_draft_send(
         gateway_id: Some(gateway_id.to_owned()),
         sim_id: Some(sim_id.to_owned()),
         expected_revision: revision.to_string(),
+        group_name: input.group_name.clone(),
+        expected_member_revision: input.expected_member_revision.clone(),
+        group_create_confirm_duplicate: input.group_create_confirm_duplicate,
     })
 }
 
@@ -542,6 +582,16 @@ fn queue_prepared_draft_send(
         .resolve_compose_draft_for_send(draft_id, revision)
         .map_err(ComposeError::Core)?;
     let (_, latest_transport) = conversation_context(client, stored.conversation_id)?;
+    if command_id.is_none()
+        && stored.recipients.len() > 1
+        && !stored.attachment_ids.is_empty()
+        && group_route_live(client, stored.conversation_id)?
+    {
+        return Err(ui(
+            "group-media-unsupported",
+            "Photos can't be sent to this RCS group yet. Remove them, or send to the group as text.",
+        ));
+    }
     let parts = command_id
         .is_none()
         .then(|| prepared_draft_send_parts(client, input, gateways))
@@ -554,17 +604,27 @@ fn queue_prepared_draft_send(
     } else {
         Transport::Sms
     };
-    let sent = match (command_id, parts.as_ref().and_then(Option::as_ref)) {
-        (Some(command_id), _) => {
+    let group = match (command_id, parts.as_ref().and_then(Option::as_ref)) {
+        (None, None) if stored.recipients.len() > 1 => Some(group_send(input)?),
+        _ => None,
+    };
+    let sent = match (command_id, parts.as_ref().and_then(Option::as_ref), group) {
+        (Some(command_id), _, _) => {
             client.send_compose_draft_accepted_with_parts(draft_id, revision, command_id, None)
         }
-        (None, Some(parts)) => client
+        (None, Some(parts), _) => client
             .send_compose_draft_with_parts(draft_id, revision, parts.clone())
             .map(|_| ()),
-        (None, None) => client
+        (None, None, Some(group)) => client
+            .send_compose_draft_for_group_checked_transport(draft_id, revision, transport, group)
+            .map(|_| ()),
+        (None, None, None) => client
             .send_compose_draft_checked_transport(draft_id, revision, transport)
             .map(|_| ()),
     };
+    if matches!(sent, Err(CoreError::GroupMembersChanged)) {
+        return members_changed_refusal(client, stored.conversation_id, revision);
+    }
     if let Err(source) = sent {
         let current_revision = match &source {
             CoreError::DraftMoved {
@@ -590,7 +650,65 @@ fn queue_prepared_draft_send(
         parts: parts
             .flatten()
             .map(|parts| (parts.image_groups.len() + usize::from(parts.caption)) as u32),
+        group: None,
     })
+}
+
+/// Whether a group's RCS route is live or paused, the states where core blocks carrier media.
+fn group_route_live(
+    client: &Client,
+    conversation_id: ConversationId,
+) -> Result<bool, ComposeError> {
+    Ok(client
+        .group_view(conversation_id)
+        .map_err(ComposeError::Core)?
+        .is_some_and(|view| {
+            matches!(
+                view.state,
+                peppy_client_core::GroupLinkState::Live | peppy_client_core::GroupLinkState::Paused
+            )
+        }))
+}
+
+/// Group fields of a draft send. The revision is the composer's expectation; core refuses a mismatch.
+fn group_send(input: &DraftInput) -> Result<GroupDraftSend, ComposeError> {
+    Ok(GroupDraftSend {
+        group_name: input.group_name.clone(),
+        expected_member_revision: input
+            .expected_member_revision
+            .as_deref()
+            .map(revision)
+            .transpose()?,
+        group_create_confirm_duplicate: input.group_create_confirm_duplicate.unwrap_or(false),
+    })
+}
+
+/// A group send refused before anything was queued: the draft is kept at `revision`, and the
+/// refusal carries the group's current members so the composer can show them.
+fn members_changed_refusal(
+    client: &Client,
+    conversation_id: ConversationId,
+    revision: u64,
+) -> Result<SendResultView, ComposeError> {
+    Ok(SendResultView {
+        accepted: false,
+        status: "failed-before-submit",
+        reason: Some(SendRefusalReason::MembersChanged.code().to_owned()),
+        revision: Some(revision.to_string()),
+        parts: None,
+        group: group_refusal_view(client, conversation_id).map_err(ComposeError::Core)?,
+    })
+}
+
+/// The group fields to persist with a remote draft-send intent: present for a send to two or
+/// more members, so the accepted send carries the same expectations as a local one.
+pub fn prepared_draft_send_group(
+    input: &DraftInput,
+) -> Result<Option<GroupDraftSend>, ComposeError> {
+    if input.recipient_ids.len() < 2 {
+        return Ok(None);
+    }
+    group_send(input).map(Some)
 }
 
 /// Computes the immutable split plan to persist with a remote draft-send intent.
@@ -741,6 +859,9 @@ mod tests {
             gateway_id: Some(GATEWAY_ID.into()),
             sim_id: Some("sim".into()),
             expected_revision: draft.revision.to_string(),
+            group_name: None,
+            expected_member_revision: None,
+            group_create_confirm_duplicate: None,
         }
     }
 
@@ -751,6 +872,7 @@ mod tests {
                 draft.draft_id,
                 draft.revision,
                 ComposeDraftUpdate {
+                    group_name: None,
                     text: "ready".into(),
                     recipients: recipients.into_iter().map(str::to_owned).collect(),
                     attachment_ids: vec![],
@@ -894,6 +1016,9 @@ mod tests {
                 gateway_id: None,
                 sim_id: None,
                 expected_revision: "0".into(),
+                group_name: None,
+                expected_member_revision: None,
+                group_create_confirm_duplicate: None,
             },
         ) {
             Ok(saved) => saved,
@@ -986,6 +1111,79 @@ mod tests {
     }
 
     #[test]
+    fn accepted_group_send_carries_the_group_fields_from_its_intent() {
+        let fixture = fixture();
+        let draft = saved_draft(&fixture.client, vec!["+14155552671", "+14155552672"]);
+        let mut named = input(&draft);
+        named.group_name = Some("Weekend".into());
+        let saved = match save_draft(&fixture.client, &named) {
+            Ok(view) => view,
+            Err(_) => panic!("a named group draft should save"),
+        };
+        assert_eq!(saved.group_name.as_deref(), Some("Weekend"));
+
+        let current = fixture
+            .client
+            .compose_draft(DraftId::from_str(&saved.id).unwrap())
+            .unwrap()
+            .unwrap();
+        let prepared = prepared(prepare_draft_send(
+            &fixture.client,
+            &input(&current),
+            Some(&[gateway(GatewayAvailability::Connected)]),
+        ));
+        let draft_id = DraftId::from_str(&prepared.id).unwrap();
+        mark_synced(&fixture.client, draft_id);
+        let group = GroupDraftSend {
+            group_name: Some("Weekend".into()),
+            expected_member_revision: None,
+            group_create_confirm_duplicate: false,
+        };
+        let command = fixture
+            .client
+            .begin_draft_send_for_group(
+                draft_id,
+                prepared.expected_revision.parse().unwrap(),
+                None,
+                Some(group),
+            )
+            .unwrap()
+            .remote
+            .unwrap()
+            .command_id;
+
+        send_draft_accepted(
+            &fixture.client,
+            &prepared,
+            Some(&[gateway(GatewayAvailability::Connected)]),
+            command,
+        )
+        .unwrap_or_else(|_| panic!("the accepted group send should queue"));
+        // A group send writes the roster with the intent's name; a 1:1 send would write none.
+        let view = fixture
+            .client
+            .group_view(ConversationId::from_str(&prepared.conversation_id).unwrap())
+            .unwrap()
+            .expect("the accepted group send writes its roster");
+        assert_eq!(view.name.as_deref(), Some("Weekend"));
+        assert_eq!(view.members.len(), 2);
+    }
+
+    #[test]
+    fn group_name_is_kept_only_for_a_group_and_capped() {
+        let kept = |name: &str, recipients| {
+            draft_group_name(&Some(name.into()), recipients)
+                .ok()
+                .flatten()
+        };
+        assert_eq!(kept("Weekend", 2).as_deref(), Some("Weekend"));
+        assert_eq!(kept("Weekend", 1), None);
+        assert_eq!(kept("  ", 3), None);
+        let long = "x".repeat(GROUP_NAME_MAX_CHARS + 1);
+        assert!(draft_group_name(&Some(long), 2).is_err());
+    }
+
+    #[test]
     fn accepted_send_is_idempotent_after_the_command_is_already_queued() {
         let fixture = fixture();
         let draft = saved_draft(&fixture.client, vec!["+14155552671"]);
@@ -1046,6 +1244,7 @@ mod tests {
                 draft.draft_id,
                 draft.revision,
                 ComposeDraftUpdate {
+                    group_name: None,
                     text: "caption".into(),
                     recipients: draft.recipients,
                     attachment_ids: attachment_ids.clone(),
@@ -1121,6 +1320,7 @@ mod tests {
                 draft.draft_id,
                 draft.revision,
                 ComposeDraftUpdate {
+                    group_name: None,
                     text: "body".into(),
                     recipients: draft.recipients.clone(),
                     attachment_ids: vec![],
@@ -1140,5 +1340,91 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    fn group_input(expected_member_revision: Option<&str>) -> DraftInput {
+        DraftInput {
+            id: DraftId::new().to_string(),
+            conversation_id: String::new(),
+            text: "hi".into(),
+            recipient_ids: vec!["+15551230001".into(), "+15551230002".into()],
+            attachment_ids: vec![],
+            gateway_id: None,
+            sim_id: None,
+            expected_revision: "1".into(),
+            group_name: Some("Weekend".into()),
+            expected_member_revision: expected_member_revision.map(str::to_owned),
+            group_create_confirm_duplicate: Some(true),
+        }
+    }
+
+    #[test]
+    fn group_send_fields_carry_the_composer_expectation() {
+        let fields = group_send(&group_input(Some("42")))
+            .ok()
+            .expect("valid fields");
+
+        assert_eq!(
+            fields,
+            GroupDraftSend {
+                group_name: Some("Weekend".into()),
+                expected_member_revision: Some(42),
+                group_create_confirm_duplicate: true,
+            }
+        );
+        assert_eq!(
+            group_send(&group_input(None))
+                .ok()
+                .expect("valid fields")
+                .expected_member_revision,
+            None
+        );
+    }
+
+    #[test]
+    fn group_send_rejects_a_malformed_member_revision() {
+        assert!(group_send(&group_input(Some("4x"))).is_err());
+        assert!(group_send(&group_input(Some("-1"))).is_err());
+    }
+
+    #[test]
+    fn members_changed_refusal_keeps_the_draft_revision_and_reason() {
+        let fixture = fixture();
+        let conversation_id = ConversationId::new();
+
+        let refused = members_changed_refusal(&fixture.client, conversation_id, 7)
+            .ok()
+            .expect("refusal view");
+
+        assert!(!refused.accepted);
+        assert_eq!(refused.status, "failed-before-submit");
+        assert_eq!(refused.reason.as_deref(), Some("members_changed"));
+        assert_eq!(refused.revision.as_deref(), Some("7"));
+        assert!(refused.group.is_none());
+    }
+
+    #[test]
+    fn group_send_writes_the_roster_and_queues_one_command() {
+        let fixture = fixture();
+        let draft = saved_draft(&fixture.client, vec!["+14155552671", "+14155552672"]);
+        let gateways = [gateway(GatewayAvailability::Connected)];
+        let mut group = input(&draft);
+        group.group_name = Some("Weekend".into());
+
+        let sent = send_draft(&fixture.client, &group, Some(&gateways))
+            .ok()
+            .expect("group send is accepted");
+
+        assert!(sent.accepted);
+        assert_eq!(sent.reason, None);
+        assert!(sent.group.is_none());
+        let view = fixture
+            .client
+            .group_view(draft.conversation_id)
+            .unwrap()
+            .expect("the first group send writes the roster");
+        assert_eq!(view.name.as_deref(), Some("Weekend"));
+        assert_eq!(view.members.len(), 2);
+        assert!(view.can_create);
     }
 }

@@ -994,6 +994,7 @@ fn inferred_group_recipients_are_v1_denied_before_draft_cas() {
             draft_id,
             0,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "group reply".into(),
                 recipients: vec![],
                 attachment_ids: vec![],
@@ -1136,6 +1137,7 @@ fn incoming_group_without_known_self_sends_to_all_participants() {
             draft_id,
             0,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "reply".into(),
                 recipients: vec![],
                 attachment_ids: vec![],

@@ -8,6 +8,7 @@
 import type {
   ConnectionState,
   MessageStatus,
+  GroupView,
   AttachmentState,
   AttachmentView,
   MessageView,
@@ -202,6 +203,26 @@ fixtureSnapshot.contactResolution = {
 };
 fixtureSnapshot.contactsPendingCount = 1;
 fixtureSnapshot.conversations.push({ id: "conv-sam", name: "Sam Rivera", preview: "Reacted 👍 to “a message from last year that is not loaded…”", unread: 0, participants: ["+15555550142"], messages: fixtureReactionMessages });
+
+// Group fixtures, one per UX state (ux-spec §2, §4, §7). Member addresses are fixture-only.
+const fixtureGroupMembers = ["+15555550142", "+15555550199"];
+const fixtureGroupNamed = (name: string, group: Omit<GroupView, "name" | "members" | "canCreate" | "createNeedsConfirmation">): GroupView => ({ name, members: fixtureGroupMembers, canCreate: false, createNeedsConfirmation: false, ...group });
+fixtureSnapshot.conversations.push(
+  { id: "conv-group-live", name: "Weekend crew", preview: "Saturday works", unread: 0, participants: fixtureGroupMembers, group: { ...fixtureGroupNamed("Weekend crew", { state: "live", memberRevision: "3" }), notices: [{ kind: "added", member: "+15555550199", atMs: "1788434100000" }, { kind: "renamed", name: "Weekend crew", atMs: "1788434150000" }] }, messages: [
+    { id: "message-group-live-1", revision: "1", sender: "other", senderAddress: "+15555550142", body: "Plans for Saturday?", timestamp: "1788434200000", transport: "rcs", attachments: [] },
+    { id: "message-group-live-2", revision: "1", sender: "other", body: "Sent from a number that is not in the roster", timestamp: "1788434300000", transport: "rcs", attachments: [] },
+    { id: "message-group-live-3", revision: "1", sender: "self", body: "Saturday works", timestamp: "1788434400000", transport: "rcs", status: "delivery-confirmed", attachments: [] },
+  ] },
+  { id: "conv-group-unnamed", name: "+15555550142, +15555550199", preview: "Unnamed group", unread: 0, participants: fixtureGroupMembers, group: { members: fixtureGroupMembers, state: "live", memberRevision: "1", canCreate: false, createNeedsConfirmation: false }, messages: [] },
+  { id: "conv-group-paused", name: "Project team", preview: "Members changed", unread: 0, participants: fixtureGroupMembers, group: { ...fixtureGroupNamed("Project team", { state: "paused", memberRevision: "5" }) }, messages: [
+    { id: "message-group-paused-1", revision: "1", sender: "other", senderAddress: "+15555550199", body: "Moving the review to Monday", timestamp: "1788434500000", transport: "rcs", attachments: [] },
+  ] },
+  { id: "conv-group-withdrawn", name: "Old crew", preview: "You left this group", unread: 0, participants: fixtureGroupMembers, group: { ...fixtureGroupNamed("Old crew", { state: "withdrawn", memberRevision: "4" }) }, messages: [
+    { id: "message-group-withdrawn-1", revision: "1", sender: "other", senderAddress: "+15555550142", body: "Thanks everyone", timestamp: "1788434600000", transport: "rcs", attachments: [] },
+  ] },
+  { id: "conv-group-long-name", name: "Long group name for the header and details dialog", preview: "Long name", unread: 0, participants: fixtureGroupMembers, group: { ...fixtureGroupNamed("Long group name for the header and details dialog that keeps going well past the header width and wraps inside the dialog", { state: "live", memberRevision: "2" }) }, messages: [] },
+);
+fixtureSnapshot.conversations.find(conversation => conversation.id === "conv-group-numbers")!.group = { members: ["+18015551234", "+15555550199"], state: "unlinked", memberRevision: "1", canCreate: true, createNeedsConfirmation: false };
 
 /** Fixture drafts keyed by conversation ID; mirrors the native compose-draft save contract (session.rs). */
 const fixtureDrafts = new Map<string, Draft>();
@@ -739,7 +760,8 @@ const isTypingSignal = (value: unknown): value is TypingSignal => {
   const signal = value as Partial<TypingSignal>;
   return typeof signal.conversationId === "string" &&
     (signal.state === "started" || signal.state === "stopped") &&
-    (signal.expiresAtMs === undefined || isCanonicalU64(signal.expiresAtMs));
+    (signal.expiresAtMs === undefined || isCanonicalU64(signal.expiresAtMs)) &&
+    (signal.participant === undefined || typeof signal.participant === "string");
 };
 const subscribeEvent = (event: string, listener: (payload: unknown) => void) => {
   let disposed = false;
