@@ -133,6 +133,26 @@ fn write_frame(stream: &mut TcpStream, value: &impl serde::Serialize) {
 fn same_live_go_ticket_uses_real_rust_facts_and_commit() {
     let fixture =
         fixture_with_google_conversation_id_and_peer("conversation-local", "+12025550123");
+    run_live_ticket(fixture);
+}
+
+#[test]
+#[ignore = "launches the tagged Go live-ticket contract test; invoke explicitly in CI"]
+fn carrier_live_go_ticket_uses_real_rust_facts_and_commit() {
+    let fixture = carrier_fixture_with_google_conversation_id_and_peer_on_sim(
+        "conversation-carrier",
+        "+12025550123",
+        "android-subscription-1",
+        1,
+    );
+    assert_eq!(
+        fixture.observation.selected_sim_id,
+        "android-subscription-1"
+    );
+    run_live_ticket(fixture);
+}
+
+fn run_live_ticket(fixture: Fixture) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let go_dir =

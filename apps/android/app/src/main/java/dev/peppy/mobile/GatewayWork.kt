@@ -311,7 +311,14 @@ class GatewaySync(
     private enum class GatewayPhase(val code: Long) {
         RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_PHONE_READS(21), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19), MMS_CLEANUP(BackgroundDiagnostics.MMS_CLEANUP_PHASE), MESSAGING_APP(22),
     }
-    class PassResult(val more: Boolean, val failure: Exception?, val producersReady: Boolean, val accountPaused: Boolean = false, val commandsProgressed: Boolean = false)
+    class PassResult(
+        val more: Boolean,
+        val failure: Exception?,
+        val producersReady: Boolean,
+        val accountPaused: Boolean = false,
+        val commandsProgressed: Boolean = false,
+        val carrierOnlyProofBlocked: Int = 0,
+    )
 
     private var more = false
     private var failure: Exception? = null
@@ -328,6 +335,7 @@ class GatewaySync(
     private var retentionAllowsProducers = false
     private var accountPaused = false
     private var commandsProgressed = false
+    private var carrierOnlyProofBlocked = 0
 
     fun run(): PassResult {
         ensureEffectsPermitted()
@@ -396,13 +404,15 @@ class GatewaySync(
         }
         if (mayEmit()) phase(GatewayPhase.MESSAGING_APP) { messagingApp(); false }
         if (mayEmit()) phase(GatewayPhase.UPLOAD) { upload() }
-        if (mayEmit()) phase(GatewayPhase.DISPATCH) { dispatch().moreRemaining }
+        if (mayEmit()) phase(GatewayPhase.DISPATCH) {
+            dispatch().also { carrierOnlyProofBlocked += it.carrierOnlyProofBlocked }.moreRemaining
+        }
         // Envelopes sealed during the first upload may have produced new photo registrations.
         if (mayPrepare() && retentionAllowsProducers && state.phase == SyncPhase.LIVE) phase(GatewayPhase.FINAL_CONTACT_PHOTOS) { contactPhotos() }
         if (mayEmit()) phase(GatewayPhase.FINAL_UPLOAD) { upload() }
         if (mayEmit()) phase(GatewayPhase.MMS_CLEANUP) { cleanupMmsCiphertext(); false }
         if (diagnosticsEnabled) BackgroundDiagnostics.gateway(received, snapshotReceived, progressed, uploaded, snapshotRemaining, contactReadiness)
-        return PassResult(more, failure, retentionAllowsProducers, accountPaused, commandsProgressed)
+        return PassResult(more, failure, retentionAllowsProducers, accountPaused, commandsProgressed, carrierOnlyProofBlocked)
     }
 
     private fun mayEmit() = state.phase == SyncPhase.LIVE && state.outboxRejection == null
@@ -851,6 +861,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
                     mms.refusedBeforeCarrier + sms.refusedBeforeCarrier,
                     mms.waiting + sms.waiting,
                     mms.moreRemaining || sms.moreRemaining,
+                    sms.carrierOnlyProofBlocked,
                 )
             },
             capabilities = SimRoutes.capabilityReport(routes, sendGranted, mmsEnabled, mmsReceiveGranted, session.client.mmsContentVersion()) { MmsLimits.forSubscription(applicationContext, it) },
@@ -896,7 +907,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         } catch (_: GatewayAuthException) {
             return Result.failure()
         }
-        if (result.commandsProgressed) RcsSendWake.notifyCommandsJournaled()
+        if (result.commandsProgressed || result.carrierOnlyProofBlocked > 0) RcsSendWake.notifyCommandsJournaled()
         if (result.accountPaused) AccountAccessState.onPolicyDenial(applicationContext)
         runCatching { AccountAccessState.refreshIfDue(applicationContext) }
         if (result.producersReady && NativeGateway.markProducerReady(applicationContext, session)) {

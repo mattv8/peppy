@@ -59,6 +59,39 @@ fn fixture_with_google_conversation_id_and_peer(
     google_conversation_id: &str,
     peer: &str,
 ) -> Fixture {
+    fixture_with_route(google_conversation_id, peer, None)
+}
+
+fn carrier_fixture_with_google_conversation_id_and_peer(
+    google_conversation_id: &str,
+    peer: &str,
+) -> Fixture {
+    carrier_fixture_with_google_conversation_id_and_peer_on_sim(
+        google_conversation_id,
+        peer,
+        "android-subscription-7",
+        7,
+    )
+}
+
+fn carrier_fixture_with_google_conversation_id_and_peer_on_sim(
+    google_conversation_id: &str,
+    peer: &str,
+    carrier_subscription_id: &str,
+    sim_number: i32,
+) -> Fixture {
+    fixture_with_route(
+        google_conversation_id,
+        peer,
+        Some((carrier_subscription_id, sim_number)),
+    )
+}
+
+fn fixture_with_route(
+    google_conversation_id: &str,
+    peer: &str,
+    carrier_route: Option<(&str, i32)>,
+) -> Fixture {
     let temp_dir = TempDir::new();
     let vault_id = Uuid::new_v4().to_string();
     let sender = native_client(&temp_dir, &vault_id, Uuid::new_v4().to_string());
@@ -81,6 +114,15 @@ fn fixture_with_google_conversation_id_and_peer(
     let mut observation = observation();
     observation.google_conversation_id = google_conversation_id.into();
     observation.participants[0].identity = peer.into();
+    if let Some((subscription_id, sim_number)) = carrier_route {
+        observation.selected_sim_id = subscription_id.into();
+        observation.carrier_binding.carrier_route_id = subscription_id.into();
+        observation.carrier_binding.android_subscription_id = sim_number;
+        observation.outgoing.sim_payload.sim_number = sim_number;
+        observation.native_evidence.current_settings_sims[0]
+            .sim_payload
+            .sim_number = sim_number;
+    }
     let conversation_id = with_client(&gateway.client, |core| {
         let captured = core.capture_incoming(IncomingSms {
             conversation_id: None,
@@ -101,8 +143,14 @@ fn fixture_with_google_conversation_id_and_peer(
                     recipients: vec![peer.into()],
                     body: String::from('\0'),
                 },
-                GatewayRoute::RcsLink {
-                    gateway_device_id: gateway_device_id.to_string().parse().unwrap(),
+                match carrier_route {
+                    Some((subscription_id, _)) => GatewayRoute::Carrier {
+                        gateway_device_id: gateway_device_id.to_string().parse().unwrap(),
+                        subscription_id: subscription_id.into(),
+                    },
+                    None => GatewayRoute::RcsLink {
+                        gateway_device_id: gateway_device_id.to_string().parse().unwrap(),
+                    },
                 },
             )?
             .command_id)
@@ -482,6 +530,35 @@ fn stale_observation_consumes_the_preparation_without_an_attempt() {
     ));
     let fresh = native_preparation(&fixture);
     assert!(fresh.begin(observation_json(&fixture), 1_000).is_ok());
+}
+
+#[test]
+fn carrier_begin_refusals_are_binding_invalid_requests_without_attempts() {
+    for wrong_sim in [true, false] {
+        let fixture = carrier_fixture_with_google_conversation_id_and_peer(
+            "conversation-carrier-refusal",
+            "+12025550123",
+        );
+        let preparation = native_preparation(&fixture);
+        let mut observation = fixture.observation.clone();
+        if wrong_sim {
+            observation.selected_sim_id = "android-subscription-8".into();
+        } else {
+            observation.participants[0].identity = "+12025550124".into();
+        }
+        assert!(matches!(
+            preparation.begin(serde_json::to_string(&observation).unwrap(), 1_000),
+            Err(MobileBindingsError::InvalidRequest)
+        ));
+        let db = persisted::Connection::open(&fixture.database_path);
+        assert!(
+            db.query(&format!(
+                "SELECT state FROM attempts WHERE command_id='{}'",
+                fixture.command_id
+            ))
+            .is_empty()
+        );
+    }
 }
 
 #[test]

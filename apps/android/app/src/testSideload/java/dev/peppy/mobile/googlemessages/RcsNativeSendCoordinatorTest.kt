@@ -54,6 +54,25 @@ class RcsNativeSendCoordinatorTest {
         }
     }
 
+    @Test fun `carrier only target revokes the ticket without binding or beginning`() {
+        val harness = Harness(target = RcsNativeTarget.CarrierOnly)
+
+        assertEquals(RcsNativeSendOutcome.CARRIER_ONLY, harness.execute())
+        assertEquals(0, harness.go.bindTargetCalls)
+        assertEquals(0, harness.lease.beginCalls)
+        assertEquals(0, harness.go.commitCalls)
+        assertEquals(1, harness.go.revokes)
+    }
+
+    @Test fun `guard rejection does not classify core facts begin or commit`() {
+        val harness = Harness(guardTarget = null)
+
+        assertEquals(RcsNativeSendOutcome.REFUSED, harness.execute())
+        assertEquals("", harness.lease.classifiedSnapshot)
+        assertEquals(0, harness.lease.beginCalls)
+        assertEquals(0, harness.go.commitCalls)
+    }
+
     @Test fun `prebegin failure refuses but begin failure is durability unknown`() {
         val prebegin = Harness(prepareFailure = true)
         assertEquals(RcsNativeSendOutcome.REFUSED, prebegin.execute())
@@ -216,8 +235,21 @@ class RcsNativeSendCoordinatorTest {
             Harness(groupDigest = "digest", commitResult = RcsNativeCommitResult.Rejected).execute()
             Harness().execute()
         }
-        // submitted, route_not_current, members_changed, outcome_unknown, target_refused, proof_refused, commit_rejected
-        assertEquals(listOf(68L, 72L, 69L, 70L, 73L, 74L, 76L), records.map { it.substringAfterLast("29=").toLong() })
+        // submitted, route_not_current, members_changed, outcome_unknown, target_refused, proof_refused, commit_rejected, direct submitted
+        assertEquals(listOf(68L, 72L, 69L, 70L, 73L, 74L, 76L, 79L), records.map { it.substringAfterLast("29=").toLong() })
+    }
+
+    @Test fun `one to one diagnostics use only fixed direct send codes`() {
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            Harness().execute()
+            Harness(target = RcsNativeTarget.CarrierOnly).execute()
+            Harness(routeVerification = RcsNativeMappingVerification.Refused).execute()
+            Harness(target = RcsNativeTarget.Unknown).execute()
+            Harness(beginFailure = true).execute()
+        }
+
+        assertEquals(listOf(79L, 80L, 81L, 82L, 86L), records.map { it.substringAfterLast("29=").toLong() })
     }
 
     @Test fun `group members changed before any admission refuses with no commit and no ledger row`() {
@@ -247,15 +279,15 @@ class RcsNativeSendCoordinatorTest {
         assertEquals(0, harness.go.commitCalls)
     }
 
-    @Test fun `group prepare-time members changed and lease refusals record their group codes, one to one records nothing`() {
+    @Test fun `group prepare-time members changed and lease refusals record their group codes, one to one records direct-send refusal`() {
         val records = mutableListOf<String>()
         SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
             Harness(groupDigest = "digest", prepareMembersChanged = true).execute()
             Harness(groupDigest = "digest", factoryReturnsNull = true).execute()
             Harness(factoryReturnsNull = true).execute()
         }
-        // members_changed (group, prepare), lease_refused (group); the 1:1 lease refusal is not a group send.
-        assertEquals(listOf(69L, 77L), records.map { it.substringAfterLast("29=").toLong() })
+        // members_changed (group, prepare), lease_refused (group), direct_send_refused (1:1 lease refusal).
+        assertEquals(listOf(69L, 77L, 0L), records.map { it.substringAfterLast("29=").toLong() })
     }
 
     private fun retiredLease() = FakeLease()
@@ -285,10 +317,11 @@ class RcsNativeSendCoordinatorTest {
         private val prepareMembersChanged: Boolean = false,
         private val proved: Boolean = true,
         private val groupRouteCurrent: Boolean = true,
+        private val guardTarget: RcsNativeTarget? = target,
         acquire: ((String, () -> Unit) -> RcsNativeCoreLease?)? = null,
         onPrepare: (() -> Unit)? = null,
     ) {
-        val go = FakeGo(bindTargetFailure, bindFacts, commitFailure, commitResult, invalidPrepared, currentAfterBegin, onPrepare, prepareMembersChanged)
+        val go = FakeGo(bindTargetFailure, bindFacts, commitFailure, commitResult, invalidPrepared, currentAfterBegin, onPrepare, prepareMembersChanged) { guardTarget }
         val lease = FakeLease(routeVerification, target, bindFacts, prepareFailure, beginFailure, refusalRecorded, acknowledged, groupVerification, beginMembersChanged, proved, groupRouteCurrent)
         private var reads = 0
         private var clockCalls = 0
@@ -320,8 +353,9 @@ class RcsNativeSendCoordinatorTest {
         private val currentAfterBegin: Boolean,
         private val onPrepare: (() -> Unit)?,
         private val prepareMembersChanged: Boolean,
+        private val classification: () -> RcsNativeTarget?,
     ) : RcsNativeGoOperation {
-        var prepares = 0; var revokes = 0; var commitCalls = 0; var dispatches = 0; var boundFacts = ""; var committedJson = ""
+        var prepares = 0; var revokes = 0; var commitCalls = 0; var dispatches = 0; var bindTargetCalls = 0; var boundFacts = ""; var committedJson = ""
         var lastRevoke: RcsNativeRevokeResult = RcsNativeRevokeResult.None
         var lastDigest: String? = null; var routeRevision: ULong? = null; var bound = 0
         private var currentCalls = 0
@@ -338,7 +372,10 @@ class RcsNativeSendCoordinatorTest {
             routeRevision = mappingRevision
             return ROUTE_OBSERVATION
         }
+        override fun classifyTarget(ticketId: String, classify: (String) -> RcsNativeTarget): RcsNativeTarget? =
+            classification()?.let { expected -> classify(CANDIDATE).takeIf { expected == it } }
         override fun bindTarget(ticketId: String, googleConversationId: String, snapshotToken: String): String {
+            bindTargetCalls++
             if (bindTargetFailure) throw IllegalStateException("bind")
             return FULL_OBSERVATION
         }

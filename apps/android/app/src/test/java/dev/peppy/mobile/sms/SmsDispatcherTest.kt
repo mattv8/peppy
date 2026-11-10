@@ -64,6 +64,12 @@ class SmsDispatcherTest : GatewayTestBase() {
         assertEquals(NativePermitState.PERMIT, permitState(client, command).state)
     }
 
+    @Test fun `only carrier proof unavailable is counted as a proof blocked wait`() {
+        assertTrue(isCarrierOnlyProofBlocked(NativePermitState.CARRIER_ONLY_PROOF_UNAVAILABLE))
+        assertFalse(isCarrierOnlyProofBlocked(NativePermitState.MAPPING_UNPROVEN))
+        assertFalse(isCarrierOnlyProofBlocked(NativePermitState.ROUTE_UNAVAILABLE))
+    }
+
     @Test
     fun staleOrUnknownSimRouteMakesNoCarrierCallAndConsumesNoPermit() {
         val client = enrollAndUnlock()

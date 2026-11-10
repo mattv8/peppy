@@ -34,6 +34,7 @@ internal data class RcsNativeContextTuple(val linkGeneration: ULong, val session
 
 internal sealed interface RcsNativeTarget {
     data class Found(val googleConversationId: String, val snapshotToken: String) : RcsNativeTarget
+    data object CarrierOnly : RcsNativeTarget
     data object Unknown : RcsNativeTarget
     data object Ambiguous : RcsNativeTarget
     data object Unsupported : RcsNativeTarget
@@ -71,6 +72,7 @@ internal interface RcsNativeGoOperation {
     /** [expectedMemberDigest] is set only for a Live group target; Go rejects a group prepare without it. */
     fun prepare(command: RcsNativeCommand, canonicalizerRevision: Int, route: RcsNativeRouteEvidence, expectedMemberDigest: String?): RcsNativePrepared
     fun bindRoute(ticketId: String, tuple: RcsNativeContextTuple, mappingRevision: ULong, observedAtMs: Long): String
+    fun classifyTarget(ticketId: String, classify: (String) -> RcsNativeTarget): RcsNativeTarget?
     fun bindTarget(ticketId: String, googleConversationId: String, snapshotToken: String): String
     fun bindFacts(ticketId: String, factsJson: String): Boolean
     fun commit(ticketId: String, exactCommitJson: String): RcsNativeCommitResult
@@ -134,4 +136,4 @@ internal fun interface RcsNativeCoreLeaseFactory {
     fun groupMemberDigest(conversationId: String): String? = null
 }
 
-internal enum class RcsNativeSendOutcome { REFUSED, SUBMITTED, OUTCOME_UNKNOWN, MEMBERS_CHANGED }
+internal enum class RcsNativeSendOutcome { REFUSED, SUBMITTED, CARRIER_ONLY, OUTCOME_UNKNOWN, MEMBERS_CHANGED }

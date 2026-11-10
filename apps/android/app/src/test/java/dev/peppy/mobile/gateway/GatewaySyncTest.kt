@@ -516,6 +516,13 @@ class GatewaySyncTest : GatewayTestBase() {
         assertTrue(sync(transientApplyFailure).run().commandsProgressed)
     }
 
+    @Test fun `carrier proof blocked dispatch is exposed without command apply progress`() {
+        val result = sync(live(), dispatch = { DispatchSummary(0, 0, 1, false, carrierOnlyProofBlocked = 1) }).run()
+
+        assertFalse(result.commandsProgressed)
+        assertEquals(1, result.carrierOnlyProofBlocked)
+    }
+
     @Test
     fun transientMediaFailureStillUploadsAndDispatchesSmsWithoutRetryingTheGatewayPass() {
         val client = live()

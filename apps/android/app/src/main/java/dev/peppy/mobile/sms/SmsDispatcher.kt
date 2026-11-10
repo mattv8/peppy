@@ -44,6 +44,8 @@ data class DispatchSummary(
     val waiting: Int,
     /** The per-run budget stopped the loop with commands still unexamined: schedule another pass. */
     val moreRemaining: Boolean,
+    /** Commands blocked specifically because a fresh carrier-only proof has not been supplied. */
+    val carrierOnlyProofBlocked: Int = 0,
 )
 
 /**
@@ -71,6 +73,7 @@ class SmsDispatcher(
         var submitted = 0
         var refused = 0
         var waiting = 0
+        var carrierOnlyProofBlocked = 0
         var permits = 0
         var more = false
         for (pending in client.pendingCommands()) {
@@ -128,6 +131,7 @@ class SmsDispatcher(
             val command = permit.command
             if (permit.state != NativePermitState.PERMIT || command == null || command.commandId != pending.commandId) {
                 waiting++
+                if (isCarrierOnlyProofBlocked(permit.state)) carrierOnlyProofBlocked++
                 continue
             }
             permits++
@@ -152,7 +156,7 @@ class SmsDispatcher(
             record(command.commandId, NativeSendResult.SUBMITTED)
             submitted++
         }
-        return DispatchSummary(submitted, refused, waiting, more)
+        return DispatchSummary(submitted, refused, waiting, more, carrierOnlyProofBlocked)
     }
 
     /** Takes the permit only to record a truthful terminal refusal; never calls the OS. */
@@ -176,3 +180,6 @@ class SmsDispatcher(
         const val MAX_COMMANDS_PER_RUN = 10
     }
 }
+
+internal fun isCarrierOnlyProofBlocked(state: NativePermitState) =
+    state == NativePermitState.CARRIER_ONLY_PROOF_UNAVAILABLE

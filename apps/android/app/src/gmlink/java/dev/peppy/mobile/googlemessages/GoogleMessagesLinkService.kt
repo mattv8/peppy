@@ -20,6 +20,7 @@ import androidx.core.content.ContextCompat
 import dev.peppy.mobile.MainActivity
 import dev.peppy.mobile.RcsSendWake
 import dev.peppy.mobile.R
+import dev.peppy.mobile.GatewayWork
 import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
 import dev.peppy.mobile.gateway.NativeGateway
 import java.util.concurrent.Executor
@@ -80,6 +81,7 @@ class GoogleMessagesLinkService : Service() {
     @Volatile private var cancelled = false
     private var lastNotification: String? = null
     private lateinit var nativeRcsSendWork: RcsNativeSendWork
+    private val carrierProofWakes = CarrierProofWakeTracker()
     private lateinit var typingBridge: TypingBridge
     private var typingRetirementListener: (() -> Unit)? = null
     private var eligibilityPublisher: RcsEligibilityPublisher? = null
@@ -164,7 +166,17 @@ class GoogleMessagesLinkService : Service() {
             clock,
             rcsCanonicalizerRevision().toInt(),
             RcsNativeAndroidRouteChangeRevoker(applicationContext),
-        ).execute(command)
+        ).execute(command).also { outcome ->
+            when (carrierProofWakes.record(command.commandId, outcome)) {
+                CarrierProofWakeAction.WAKE -> GatewayWork.enqueueUrgent(applicationContext)
+                CarrierProofWakeAction.PROOF_WINDOW_MISSED ->
+                    recordGoogleMessagesLinkEvent("direct_send", "proof_window_missed", 0L)
+                CarrierProofWakeAction.NONE -> Unit
+            }
+            if (outcome == RcsNativeSendOutcome.SUBMITTED || outcome == RcsNativeSendOutcome.OUTCOME_UNKNOWN) {
+                GatewayWork.enqueueAfterCapture(applicationContext)
+            }
+        }
         publishNativeRcsEligibility(command.conversationId)
     }
 

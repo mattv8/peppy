@@ -235,6 +235,9 @@ internal class NativeRcsCoreLease(
             } catch (_: MobileBindingsException.GroupMembersChanged) {
                 // Core paused the group and admitted nothing; this is a definite refusal, not an unknown outcome.
                 RcsNativeBeginResult.MembersChanged
+            } catch (_: MobileBindingsException.InvalidRequest) {
+                // Binding contract: this begin error is before any committed attempt.
+                RcsNativeBeginResult.KnownRefused
             } catch (failure: Throwable) {
                 preserveCoreInterruption(failure)
                 RcsNativeBeginResult.DurabilityUnknown
@@ -325,7 +328,8 @@ internal fun nativeRcsMappingVerification(value: NativeRcsMappingVerification) =
 internal fun nativeRcsTarget(target: NativeRcsTargetDecision): RcsNativeTarget = when (target) {
     is NativeRcsTargetDecision.Found -> RcsNativeTarget.Found(target.googleConversationId, target.snapshotToken)
     NativeRcsTargetDecision.Ambiguous -> RcsNativeTarget.Ambiguous
-    NativeRcsTargetDecision.Unknown, NativeRcsTargetDecision.NotFoundComplete -> RcsNativeTarget.Unknown
+    NativeRcsTargetDecision.Unknown -> RcsNativeTarget.Unknown
+    NativeRcsTargetDecision.NotFoundComplete -> RcsNativeTarget.CarrierOnly
     NativeRcsTargetDecision.Unsupported -> RcsNativeTarget.Unsupported
 }
 

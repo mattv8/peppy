@@ -33,6 +33,8 @@ interface LinkHandle {
         acceptsOutput(generation, revision)
     fun prepareNativeRcs(requestJson: String): String = "{\"code\":\"invalid_request\"}"
     fun bindNativeRcsRoute(ticketId: String, linkGeneration: Long, sessionGeneration: Long, contextRevision: Long, mappingRevision: Long, observedAtMs: Long): String = "{\"code\":\"rejected\"}"
+    /** Holds Go's current frozen ticket while [classifier] performs captured-core classification. */
+    fun withNativeRcsTargetClassification(ticketId: String, classifier: NativeRcsTargetClassifier): Boolean = false
     fun bindNativeRcsTarget(ticketId: String, googleConversationId: String, snapshotToken: String): String = "{\"code\":\"rejected\"}"
     fun bindNativeRcsFacts(ticketId: String, factsJson: String): String = "{\"code\":\"rejected\"}"
     fun commitNativeRcs(ticketId: String, commitJson: String): String = "{\"code\":\"outcome_unknown\"}"
@@ -45,6 +47,8 @@ interface LinkHandle {
     fun conversationLastActivity(googleIdsJson: String): String = "{\"code\":\"conversation_last_activity_unavailable\",\"complete\":false,\"last_message_ms\":{}}"
     fun fetchRcsGap(googleConversationId: String, pageToken: String): String = "{\"code\":\"gap_unavailable\"}"
 }
+
+fun interface NativeRcsTargetClassifier { fun classify(candidateSnapshot: String): Boolean }
 
 data class LinkTypingRequest(
     val conversationId: String,

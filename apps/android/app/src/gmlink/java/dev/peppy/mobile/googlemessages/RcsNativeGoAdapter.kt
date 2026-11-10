@@ -48,6 +48,27 @@ internal class RcsNativeGoAdapter(private val lease: LinkHandleLease) : RcsNativ
         return observation(scoped { it.bindNativeRcsRoute(ticketId, values[0], values[1], values[2], values[3], observedAtMs) }, "route_bound")
     }
 
+    override fun classifyTarget(ticketId: String, classify: (String) -> RcsNativeTarget): RcsNativeTarget? {
+        var result: RcsNativeTarget? = null
+        val completed = try {
+            LinkRuntime.withCapturedLinkOperation(lease) { handle ->
+                handle.withNativeRcsTargetClassification(ticketId, NativeRcsTargetClassifier { snapshot ->
+                    try {
+                        result = classify(snapshot)
+                        true
+                    } catch (failure: Throwable) {
+                        preserveInterruption(failure)
+                        false
+                    }
+                })
+            } ?: false
+        } catch (failure: Throwable) {
+            preserveInterruption(failure)
+            false
+        }
+        return result?.takeIf { completed }
+    }
+
     override fun bindTarget(ticketId: String, googleConversationId: String, snapshotToken: String): String =
         observation(scoped { it.bindNativeRcsTarget(ticketId, googleConversationId, snapshotToken) }, "target_bound")
 
