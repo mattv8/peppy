@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { bridge, fixtureBridge, type DesktopSnapshot } from "./bridge/bridge";
@@ -75,6 +75,23 @@ describe("typing sharing", () => {
     openSettings();
     expect(screen.queryByRole("checkbox", { name: /Show others/ })).toBeNull();
     bridge.send_typing = sendTyping;
+  });
+
+  it("lists RCS Features directly before Advanced when the setting is available", async () => {
+    render(<App />);
+    await screen.findByRole("textbox", { name: "Message" });
+    openSettings();
+
+    const navigation = screen.getByRole("navigation", { name: "Settings categories" });
+    const links = within(navigation).getAllByRole("link");
+    expect(links.at(-2)).toHaveTextContent("RCS Features");
+    expect(links.at(-1)).toHaveTextContent("Advanced");
+    const rcsSection = document.getElementById("settings-rcs-features")!;
+    expect(rcsSection).toBeInTheDocument();
+    const advancedSection = document.getElementById("settings-advanced")!;
+    expect(rcsSection).toHaveAttribute("data-settings-section", "rcs-features");
+    expect(rcsSection.compareDocumentPosition(advancedSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(document.getElementById("settings-sharing")).toBeNull();
   });
 
   it("reverts a failed preference write and reports the catalog error", async () => {

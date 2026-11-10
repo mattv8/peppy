@@ -110,6 +110,7 @@ import { DevicesSettings } from "./settings/DevicesSettings";
 import { McpAuthorizationConsent } from "./settings/McpAuthorizationConsent";
 import { AttachmentStorageSettingsHost, HostedAccountSettings } from "./settings/HostedAccountSettings";
 import { PrivacySettings } from "./settings/PrivacySettings";
+import { RcsFeaturesSettings } from "./settings/RcsFeaturesSettings";
 import { AdvancedSettings } from "./settings/AdvancedSettings";
 import { searchRecipientSuggestions } from "./contacts/recipientSearch";
 export { searchRecipientSuggestions } from "./contacts/recipientSearch";
@@ -1325,6 +1326,7 @@ function SettingsView({
     ...(nativeUpdateHost ? [{ id: "updates", label: "Updates" }] : []),
     ...(browserHost ? [] : [{ id: "app-lock", label: "App lock" }]),
     ...(hasAccount ? [{ id: "account-billing", label: "Account" }] : []),
+    ...(typingShare !== undefined ? [{ id: "rcs-features", label: "RCS Features" }] : []),
     { id: "advanced", label: "Advanced" },
   ];
   const sectionElementId = (id: string) => {
@@ -1609,8 +1611,9 @@ function SettingsView({
         {browserHost && accountUrl && <a id="settings-account-portal-link" className="secondary-button" href={accountUrl} target="_blank" rel="noopener noreferrer">{peppyCopy.account_portal_cta}<span className="visually-hidden"> (opens in a new tab)</span></a>}
         {browserHost ? <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} manageStorageUrl={accountUrl} /> : <HostedAccountSettings sessionScopeId={sessionScopeId} onAccountDeleted={onAccountDeleted} />}
       </section>}
+      {typingShare !== undefined && <RcsFeaturesSettings typingShare={{ enabled: typingShare, onChange: onTypingShare, error: typingShareError }} />}
       <AdvancedSettings sessionKey={sessionScopeId ?? "unavailable"} unlocked={encryption === "unlocked"} serverOffline={serverOffline} onOpenDevices={() => { selectSection("devices"); window.setTimeout(() => document.getElementById("mcp-custody-review")?.focus(), 0); }} />
-      <PrivacySettings browserHost={browserHost} typingShare={typingShare === undefined ? undefined : { enabled: typingShare, onChange: onTypingShare, error: typingShareError }} />
+      <PrivacySettings browserHost={browserHost} />
       </div>
       </div>
     </section>

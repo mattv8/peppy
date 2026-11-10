@@ -8,7 +8,7 @@ export async function openPrivacyPolicy(): Promise<void> {
   await openUrl(PRIVACY_POLICY_URL);
 }
 
-export function PrivacySettings({ browserHost, typingShare }: { browserHost: boolean; typingShare?: { enabled: boolean; onChange(next: boolean): void; error?: boolean } }) {
+export function PrivacySettings({ browserHost }: { browserHost: boolean }) {
   const [openError, setOpenError] = useState(false);
 
   const openPolicy = async () => {
@@ -18,18 +18,6 @@ export function PrivacySettings({ browserHost, typingShare }: { browserHost: boo
 
   const scopeId = "settings-privacy-policy-scope";
   return <>
-    {typingShare && <section id="settings-sharing" className="settings-card" data-settings-section="sharing" aria-labelledby="settings-sharing-title">
-      <h2 id="settings-sharing-title">Sharing</h2>
-      <div id="settings-share-typing-group" data-setting="share-typing">
-        <div id="settings-share-typing-row" className="settings-check-row">
-          <label className="settings-check">
-            <input id="settings-share-typing" type="checkbox" checked={typingShare.enabled} onChange={(event) => typingShare.onChange(event.target.checked)} />
-            {peppyCopy.typing_share_label}
-          </label>
-        </div>
-        {typingShare.error && <p id="settings-share-typing-error" className="settings-error" role="alert">{peppyCopy.setting_update_error}</p>}
-      </div>
-    </section>}
     <footer id="settings-privacy" data-settings-section="privacy-links">
       {browserHost ? (
         <a id="settings-privacy-policy-link" href={PRIVACY_POLICY_URL} target="_blank" rel="noopener noreferrer" aria-describedby={scopeId}>

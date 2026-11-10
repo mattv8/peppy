@@ -5557,6 +5557,8 @@ describe("host state display", () => {
     const navigation = screen.getByRole("navigation", { name: "Settings categories" });
     expect(within(navigation).getByRole("link", { name: "Server" })).toHaveAttribute("aria-current", "location");
     expect(within(navigation).getByRole("link", { name: "Advanced" })).toBeInTheDocument();
+    expect(within(navigation).queryByRole("link", { name: "RCS Features" })).not.toBeInTheDocument();
+    expect(document.getElementById("settings-rcs-features")).toBeNull();
     const account = within(navigation).getByRole("link", { name: "Account" });
     fireEvent.click(account);
 
