@@ -101,7 +101,7 @@ if grep -Fq 'peppyGoogleMessagesLink' <<< "$debug_block" || grep -Fq 'peppyGoogl
   echo 'debug and sideload unit test jobs must use the default-off Google Messages link setting' >&2
   exit 1
 fi
-test "$(grep -Foc -- '-PpeppyGoogleMessagesLink=true' <<< "$lint_block")" -eq 1
+test "$(grep -Foc -- '-PpeppyGoogleMessagesLink=true' <<< "$lint_block")" -eq 2
 if grep -Fq 'peppyGoogleMessagesLink=false' "$workflow"; then
   echo 'workflow must not pass a default-off Google Messages link flag' >&2
   exit 1
