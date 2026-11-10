@@ -188,18 +188,19 @@ diff -ruN a/pkg/libgm/client.go b/pkg/libgm/client.go
  	c.bumpNextDataReceiveCheck(10 * time.Minute)
  
  	//webEncryptionKeyResponse, err := c.GetWebEncryptionKey()
-@@ -275,8 +370,8 @@
+@@ -275,8 +370,9 @@
  	//	return fmt.Errorf("failed to get web encryption key: %w", err)
  	//}
  	//c.updateWebEncryptionKey(webEncryptionKeyResponse.GetKey())
 -	go c.doLongPoll(ctx, true, false, c.postConnect)
 -	c.sessionHandler.startAckInterval()
-+	go c.doLongPollWithID(pollCtx, ctx, listenID, true, false, func() { c.postConnect(pollCtx) })
++	pingReady := make(chan struct{}, 1)
++	go c.doLongPollWithID(pollCtx, ctx, listenID, true, false, func() { c.postConnect(pollCtx, pingReady) }, pingReady)
 +	c.sessionHandler.startAckInterval(pollCtx)
  }
  
  func (c *Client) Connect(ctx context.Context) error {
-@@ -294,7 +389,14 @@
+@@ -294,7 +390,14 @@
  		}
  		c.Logger.Warn().Err(err).Msg("Transient error refreshing auth token on connect, will retry in long polling loop")
  	}
@@ -215,7 +216,7 @@ diff -ruN a/pkg/libgm/client.go b/pkg/libgm/client.go
  	return nil
  }
  
-@@ -303,29 +405,62 @@
+@@ -303,29 +406,62 @@
  		return err
  	}
  	cleanExit := c.doLongPoll(ctx, true, true, nil)
@@ -257,7 +258,7 @@ diff -ruN a/pkg/libgm/client.go b/pkg/libgm/client.go
 +	return waitForContext(ctx, duration)
 +}
 +
-+func (c *Client) postConnect(ctx context.Context) {
++func (c *Client) postConnect(ctx context.Context, pingReady chan<- struct{}) {
 +	if !c.waitPostConnect(ctx, 2*time.Second) {
 +		return
 +	}
@@ -290,7 +291,20 @@ diff -ruN a/pkg/libgm/client.go b/pkg/libgm/client.go
  	c.Logger.Debug().Msg("Sending get updates request")
  	err := c.SetActiveSession(ctx)
  	if err != nil {
-@@ -351,6 +486,7 @@
+@@ -336,6 +472,12 @@
+ 		return
+ 	}
+ 	c.Logger.Debug().Msg("Sent set active session/get updates request")
++	if pingReady != nil {
++		select {
++		case pingReady <- struct{}{}:
++		case <-ctx.Done():
++		}
++	}
+ 
+ 	if !c.shouldCheckBugleDefault() {
+ 		c.Logger.Debug().Msg("Skipping bugle default check, already checked recently")
+@@ -351,6 +493,7 @@
  			default:
  			}
  		case <-doneChan:
@@ -298,7 +312,7 @@ diff -ruN a/pkg/libgm/client.go b/pkg/libgm/client.go
  		}
  	}()
  	bugleRes, err := c.IsBugleDefault(ctx)
-@@ -376,6 +512,16 @@
+@@ -376,6 +519,16 @@
  	if c == nil {
  		return
  	}
@@ -315,7 +329,7 @@ diff -ruN a/pkg/libgm/client.go b/pkg/libgm/client.go
  	c.closeLongPolling()
  	c.sessionHandler.stopAckInterval()
  	// Fail any requests that are still waiting for a response from the phone:
-@@ -385,13 +531,23 @@
+@@ -385,13 +538,23 @@
  	c.http.CloseIdleConnections()
  }
  
@@ -340,7 +354,7 @@ diff -ruN a/pkg/libgm/client.go b/pkg/libgm/client.go
  }
  
  func (c *Client) Reconnect(ctx context.Context) error {
-@@ -402,6 +558,11 @@
+@@ -402,6 +565,11 @@
  		c.triggerEvent(&events.ListenFatalError{Error: fmt.Errorf("failed to reconnect: %w", err)})
  		return err
  	}
@@ -352,7 +366,7 @@ diff -ruN a/pkg/libgm/client.go b/pkg/libgm/client.go
  	c.startLongPolling(ctx)
  	c.Logger.Debug().Msg("Successfully reconnected to server")
  	return nil
-@@ -413,13 +574,75 @@
+@@ -413,13 +581,75 @@
  	}
  }
  
@@ -429,7 +443,7 @@ diff -ruN a/pkg/libgm/client.go b/pkg/libgm/client.go
  		if err != nil {
  			c.Logger.Err(err).Str("device_id", deviceID).Msg("Failed to parse device ID")
  		}
-@@ -443,9 +666,6 @@
+@@ -443,9 +673,6 @@
  	c.AuthData.AddCookiesToRequest(req)
  
  	resp, err := c.http.Do(req)
@@ -439,7 +453,7 @@ diff -ruN a/pkg/libgm/client.go b/pkg/libgm/client.go
  	config, err := typedHTTPResponse[*gmproto.Config](resp, err)
  	if err != nil {
  		return nil, err
-@@ -472,7 +692,9 @@
+@@ -472,7 +699,9 @@
  }
  
  func (c *Client) updateTachyonAuthToken(data *gmproto.TokenData) {
@@ -450,7 +464,7 @@ diff -ruN a/pkg/libgm/client.go b/pkg/libgm/client.go
  	validForDuration := time.Duration(data.GetTTL()) * time.Microsecond
  	if validForDuration == 0 {
  		validForDuration = 24 * time.Hour
-@@ -525,7 +747,8 @@
+@@ -525,7 +754,8 @@
  }
  
  func (c *Client) refreshAuthToken(pushKeyOverride *PushKeys) error {
@@ -460,7 +474,7 @@ diff -ruN a/pkg/libgm/client.go b/pkg/libgm/client.go
  		return nil
  	}
  	jwk := c.AuthData.RefreshKey
-@@ -559,7 +782,7 @@
+@@ -559,7 +789,7 @@
  		}
  	}
  	c.Logger.Debug().
@@ -469,7 +483,7 @@ diff -ruN a/pkg/libgm/client.go b/pkg/libgm/client.go
  		Bool("force_refresh", pushKeyOverride != nil).
  		Bool("include_push_keys", moreParams.GetPushReg() != nil).
  		Msg("Refreshing auth token")
-@@ -567,11 +790,11 @@
+@@ -567,11 +797,11 @@
  	payload := &gmproto.RegisterRefreshRequest{
  		MessageAuth: &gmproto.AuthMessage{
  			RequestID:        requestID,
@@ -894,7 +908,7 @@ diff -ruN a/pkg/libgm/http.go b/pkg/libgm/http.go
 diff -ruN a/pkg/libgm/lifecycle_safety_test.go b/pkg/libgm/lifecycle_safety_test.go
 --- pkg/libgm/lifecycle_safety_test.go	1969-12-31 17:00:00
 +++ pkg/libgm/lifecycle_safety_test.go	2026-11-07 04:07:00
-@@ -0,0 +1,511 @@
+@@ -0,0 +1,734 @@
 +package libgm
 +
 +import (
@@ -912,6 +926,7 @@ diff -ruN a/pkg/libgm/lifecycle_safety_test.go b/pkg/libgm/lifecycle_safety_test
 +	"github.com/rs/zerolog"
 +	"go.mau.fi/util/exhttp"
 +	"go.mau.fi/util/pblite"
++	"google.golang.org/protobuf/proto"
 +
 +	"go.mau.fi/mautrix-gmessages/pkg/libgm/events"
 +	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
@@ -1076,7 +1091,7 @@ diff -ruN a/pkg/libgm/lifecycle_safety_test.go b/pkg/libgm/lifecycle_safety_test
 +				}
 +				return true
 +			}
-+			client.postConnect(ctx)
++			client.postConnect(ctx, nil)
 +			if got := requests.Load(); got != tc.want {
 +				t.Fatalf("requests = %d, want %d", got, tc.want)
 +			}
@@ -1096,7 +1111,7 @@ diff -ruN a/pkg/libgm/lifecycle_safety_test.go b/pkg/libgm/lifecycle_safety_test
 +	client.sessionHandler.queueMessageAck("synthetic-ack")
 +	ctx, cancel := context.WithCancel(context.Background())
 +	done := make(chan struct{})
-+	go func() { client.postConnect(ctx); close(done) }()
++	go func() { client.postConnect(ctx, nil); close(done) }()
 +	awaitSafetySignal(t, started, "admitted ack")
 +	cancel()
 +	awaitSafetySignal(t, observed, "ack context cancellation")
@@ -1119,7 +1134,7 @@ diff -ruN a/pkg/libgm/lifecycle_safety_test.go b/pkg/libgm/lifecycle_safety_test
 +	client.sessionHandler.queueMessageAck("synthetic-ack")
 +	ctx, cancel := context.WithCancel(context.Background())
 +	done := make(chan struct{})
-+	go func() { client.postConnect(ctx); close(done) }()
++	go func() { client.postConnect(ctx, nil); close(done) }()
 +	awaitSafetySignal(t, started, "admitted active-session request")
 +	cancel()
 +	awaitSafetySignal(t, observed, "active-session context cancellation")
@@ -1215,6 +1230,228 @@ diff -ruN a/pkg/libgm/lifecycle_safety_test.go b/pkg/libgm/lifecycle_safety_test
 +	if successes != 1 {
 +		t.Fatalf("cancelled poll ping emitted success; total = %d", successes)
 +	}
++}
++
++func TestPingerLoopDoesNotPingBeforeConnectionIsReady(t *testing.T) {
++	requestIDs := make(chan string, 1)
++	client := newSafetyClient(linkedSafetyAuth(), func(request *http.Request) (*http.Response, error) {
++		body, err := io.ReadAll(request.Body)
++		if err != nil {
++			return nil, err
++		}
++		var outgoing gmproto.OutgoingRPCMessage
++		if err := pblite.Unmarshal(body, &outgoing); err != nil {
++			return nil, err
++		}
++		var data gmproto.OutgoingRPCData
++		if err := proto.Unmarshal(outgoing.GetData().GetMessageData(), &data); err != nil {
++			return nil, err
++		}
++		if data.GetAction() == gmproto.ActionType_NOTIFY_DITTO_ACTIVITY {
++			requestIDs <- data.GetRequestID()
++		}
++		return successfulProtoResponse(request)
++	})
++	ownerCtx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	client.pollCtx = ownerCtx
++	client.listenID.Store(44)
++	client.currentSource = StreamSource{ListenID: 44, PollAttempt: 2}
++	succeeded := make(chan StreamSource, 1)
++	client.SetEventHandler(func(event any) {
++		streamEvent, ok := event.(*StreamEvent)
++		if ok {
++			if _, ok := streamEvent.Event.(*events.PhonePingSucceeded); ok {
++				succeeded <- streamEvent.Source
++			}
++		}
++	})
++	stop := make(chan struct{})
++	ready := make(chan struct{}, 1)
++	pinger := dittoPinger{
++		client:       client,
++		pingInterval: time.Hour,
++		stop:         stop,
++		log:          &client.Logger,
++		ctx:          ownerCtx,
++		ownerCtx:     ownerCtx,
++		listenID:     44,
++		ready:        ready,
++	}
++	loopDone := make(chan struct{})
++	go func() {
++		pinger.Loop()
++		close(loopDone)
++	}()
++	select {
++	case <-requestIDs:
++		t.Fatal("pinger sent a ditto ping before the connection was ready")
++	case <-time.After(100 * time.Millisecond):
++	}
++	ready <- struct{}{}
++	var requestID string
++	select {
++	case requestID = <-requestIDs:
++	case <-time.After(time.Second):
++		t.Fatal("ready pinger did not send a ditto ping")
++	}
++	if !client.sessionHandler.receiveResponse(&IncomingRPCMessage{
++		IncomingRPCMessage: &gmproto.IncomingRPCMessage{},
++		Source:             client.currentSource,
++		Message: &gmproto.RPCMessageData{
++			Action:    gmproto.ActionType_NOTIFY_DITTO_ACTIVITY,
++			SessionID: requestID,
++		},
++	}) {
++		t.Fatal("ready ping response was not accepted")
++	}
++	select {
++	case source := <-succeeded:
++		if source != client.currentSource {
++			t.Fatalf("ping success source = %+v, want %+v", source, client.currentSource)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("ready ping did not emit PhonePingSucceeded")
++	}
++	close(stop)
++	awaitSafetySignal(t, loopDone, "pinger loop shutdown")
++}
++
++func TestPingerLoopDoesNotPingWhenStoppedBeforeStart(t *testing.T) {
++	pings := make(chan struct{}, 1)
++	client := newSafetyClient(linkedSafetyAuth(), func(request *http.Request) (*http.Response, error) {
++		body, err := io.ReadAll(request.Body)
++		if err != nil {
++			return nil, err
++		}
++		var outgoing gmproto.OutgoingRPCMessage
++		if err := pblite.Unmarshal(body, &outgoing); err != nil {
++			return nil, err
++		}
++		var data gmproto.OutgoingRPCData
++		if err := proto.Unmarshal(outgoing.GetData().GetMessageData(), &data); err != nil {
++			return nil, err
++		}
++		if data.GetAction() == gmproto.ActionType_NOTIFY_DITTO_ACTIVITY {
++			pings <- struct{}{}
++		}
++		return successfulProtoResponse(request)
++	})
++	stop := make(chan struct{})
++	close(stop)
++	loopDone := make(chan struct{})
++	go func() {
++		(&dittoPinger{client: client, pingInterval: time.Hour, stop: stop, log: &client.Logger}).Loop()
++		close(loopDone)
++	}()
++	awaitSafetySignal(t, loopDone, "stopped pinger loop shutdown")
++	select {
++	case <-pings:
++		t.Fatal("stopped pinger sent a ditto ping")
++	default:
++	}
++}
++
++func TestPingerLoopImmediatePingBypassesRecentPreviousStreamPing(t *testing.T) {
++	pings := make(chan struct{}, 1)
++	client := newSafetyClient(linkedSafetyAuth(), func(request *http.Request) (*http.Response, error) {
++		pings <- struct{}{}
++		return successfulProtoResponse(request)
++	})
++	client.phone.lastPingTime = time.Now()
++	ownerCtx := context.Background()
++	client.pollCtx = ownerCtx
++	client.listenID.Store(44)
++	client.currentSource = StreamSource{ListenID: 44, PollAttempt: 2}
++	stop := make(chan struct{})
++	ready := make(chan struct{}, 1)
++	pinger := dittoPinger{client: client, pingInterval: time.Hour, stop: stop, log: &client.Logger, ctx: ownerCtx, ownerCtx: ownerCtx, listenID: 44, ready: ready}
++	loopDone := make(chan struct{})
++	go func() {
++		pinger.Loop()
++		close(loopDone)
++	}()
++	ready <- struct{}{}
++	select {
++	case <-pings:
++	case <-time.After(time.Second):
++		t.Fatal("recent previous-stream ping suppressed the immediate ping")
++	}
++	close(stop)
++	awaitSafetySignal(t, loopDone, "recent-ping pinger loop shutdown")
++}
++
++func TestPingerLoopIgnoresStaleReadySignal(t *testing.T) {
++	pings := make(chan struct{}, 1)
++	client := newSafetyClient(linkedSafetyAuth(), func(request *http.Request) (*http.Response, error) {
++		body, err := io.ReadAll(request.Body)
++		if err != nil {
++			return nil, err
++		}
++		var outgoing gmproto.OutgoingRPCMessage
++		if err := pblite.Unmarshal(body, &outgoing); err != nil {
++			return nil, err
++		}
++		var data gmproto.OutgoingRPCData
++		if err := proto.Unmarshal(outgoing.GetData().GetMessageData(), &data); err != nil {
++			return nil, err
++		}
++		if data.GetAction() == gmproto.ActionType_NOTIFY_DITTO_ACTIVITY {
++			pings <- struct{}{}
++		}
++		return successfulProtoResponse(request)
++	})
++	ownerCtx := context.Background()
++	client.pollCtx = ownerCtx
++	client.listenID.Store(45)
++	client.currentSource = StreamSource{ListenID: 45, PollAttempt: 2}
++	stop := make(chan struct{})
++	ready := make(chan struct{}, 1)
++	pinger := dittoPinger{client: client, pingInterval: time.Hour, stop: stop, log: &client.Logger, ctx: ownerCtx, ownerCtx: ownerCtx, listenID: 44, ready: ready}
++	loopDone := make(chan struct{})
++	go func() {
++		pinger.Loop()
++		close(loopDone)
++	}()
++	ready <- struct{}{}
++	select {
++	case <-pings:
++		t.Fatal("stale ready signal sent a ditto ping")
++	case <-time.After(100 * time.Millisecond):
++	}
++	close(stop)
++	awaitSafetySignal(t, loopDone, "stale-ready pinger loop shutdown")
++}
++
++func TestBackgroundLongPollDoesNotSendInitialPing(t *testing.T) {
++	opened := make(chan struct{})
++	pings := make(chan struct{}, 1)
++	body := newSafetyBlockingPollBody()
++	var requests atomic.Int64
++	client := newSafetyClient(linkedSafetyAuth(), func(request *http.Request) (*http.Response, error) {
++		if requests.Add(1) == 1 {
++			close(opened)
++			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body, Request: request}, nil
++		}
++		pings <- struct{}{}
++		return successfulProtoResponse(request)
++	})
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	client.listenID.Store(44)
++	done := make(chan struct{})
++	go func() {
++		client.doLongPollWithID(ctx, ctx, 44, true, true, nil, nil)
++		close(done)
++	}()
++	awaitSafetySignal(t, opened, "background long-poll open")
++	select {
++	case <-pings:
++		t.Fatal("background long poll sent an initial ditto ping")
++	case <-time.After(100 * time.Millisecond):
++	}
++	_ = body.Close()
++	awaitSafetySignal(t, done, "background long-poll shutdown")
 +}
 +
 +func publishSafetyAuth(auth *AuthData, token string, ttl int64) {
@@ -1409,17 +1646,18 @@ diff -ruN a/pkg/libgm/lifecycle_safety_test.go b/pkg/libgm/lifecycle_safety_test
 diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
 --- pkg/libgm/longpoll.go	2026-11-07 04:07:00
 +++ pkg/libgm/longpoll.go	2026-11-07 04:07:00
-@@ -159,7 +159,9 @@
+@@ -159,7 +159,10 @@
  	stop         <-chan struct{}
  	log          *zerolog.Logger
  	ctx          context.Context
 +	ownerCtx     context.Context
  	reconnectCtx context.Context
 +	listenID     int64
++	ready        <-chan struct{}
  }
  
  type resetter struct {
-@@ -182,7 +184,7 @@
+@@ -182,7 +185,7 @@
  	}
  }
  
@@ -1428,7 +1666,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  	notRespondingSent, wasFailing, needsCatchUp := dp.client.phone.onLiveness()
  	logEvt := dp.log.Debug().Uint64("ping_id", pingID).Dur("duration", dur)
  	switch {
-@@ -198,8 +200,9 @@
+@@ -198,8 +201,9 @@
  		dp.client.triggerEvent(&events.PhoneRespondingAgain{})
  	}
  	if needsCatchUp {
@@ -1439,7 +1677,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  	reset.Done()
  }
  
-@@ -227,8 +230,11 @@
+@@ -227,8 +231,11 @@
  	timer := time.NewTimer(timeout)
  	defer timer.Stop()
  	select {
@@ -1453,7 +1691,37 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  		return
  	case <-timer.C:
  		dp.OnTimeout(ping.id, timeout == shortPingTimeout, reset)
-@@ -386,7 +392,7 @@
+@@ -244,9 +251,13 @@
+ }
+ 
+ func (dp *dittoPinger) Ping(pingID uint64, timeout time.Duration, reset *resetter) {
++	dp.ping(pingID, timeout, reset, false)
++}
++
++func (dp *dittoPinger) ping(pingID uint64, timeout time.Duration, reset *resetter, ignoreMinInterval bool) {
+ 	pl := &dp.client.phone
+ 	pl.lock.Lock()
+-	if time.Since(pl.lastPingTime) < minPingInterval {
++	if !ignoreMinInterval && time.Since(pl.lastPingTime) < minPingInterval {
+ 		dp.log.Debug().
+ 			Uint64("ping_id", pingID).
+ 			Time("last_ping_time", pl.lastPingTime).
+@@ -358,6 +369,14 @@
+ func (dp *dittoPinger) Loop() {
+ 	for {
+ 		select {
++		case <-dp.ready:
++			if dp.client.currentPinger(dp.ownerCtx, dp.listenID) {
++				pingID := pingIDCounter.Add(1)
++				dp.log.Debug().Uint64("ping_id", pingID).Msg("Doing initial ready ditto ping")
++				// A reconnect can start within minPingInterval of the previous stream's ping.
++				// This first ping belongs to the new stream, so it must still prove its liveness.
++				dp.ping(pingID, defaultPingTimeout, newResetter(), true)
++			}
+ 		case <-dp.client.pingShortCircuit:
+ 			if dp.recovering.Load() {
+ 				// Recovery pings are already in flight, but the user is actively waiting
+@@ -386,11 +405,18 @@
  		}
  		if dp.client.shouldDoDataReceiveCheck() {
  			dp.log.Warn().Msg("No data received recently, sending extra GET_UPDATES call")
@@ -1462,7 +1730,18 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  		}
  	}
  }
-@@ -411,16 +417,30 @@
+ 
++func (c *Client) currentPinger(ownerCtx context.Context, listenID int64) bool {
++	c.listenLock.Lock()
++	defer c.listenLock.Unlock()
++	return ownerCtx != nil && ownerCtx.Err() == nil && c.pollCtx == ownerCtx &&
++		c.listenID.Load() == listenID && c.currentSource.ListenID == listenID && !c.disconnecting.Load()
++}
++
+ // onPhoneActivity is called when data is received from the phone outside of the ditto pings and
+ // is counted as liveness just like pings.
+ func (c *Client) onPhoneActivity(source string) {
+@@ -411,16 +437,30 @@
  		c.triggerEvent(&events.PhoneRespondingAgain{})
  	}
  	if needsCatchUp {
@@ -1497,7 +1776,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  	})
  	if err != nil {
  		log.Err(err).Str("reason", reason).Msg("Failed to send extra GET_UPDATES call")
-@@ -454,15 +474,27 @@
+@@ -454,19 +494,31 @@
  }
  
  func (c *Client) doLongPoll(ctx context.Context, loggedIn, background bool, onFirstConnect func()) bool {
@@ -1510,10 +1789,10 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
 +	}
 +	listenID := c.listenID.Add(1)
 +	c.listenLock.Unlock()
-+	return c.doLongPollWithID(ctx, ctx, listenID, loggedIn, background, onFirstConnect)
++	return c.doLongPollWithID(ctx, ctx, listenID, loggedIn, background, onFirstConnect, nil)
 +}
 +
-+func (c *Client) doLongPollWithID(ctx, reconnectCtx context.Context, listenID int64, loggedIn, background bool, onFirstConnect func()) bool {
++func (c *Client) doLongPollWithID(ctx, reconnectCtx context.Context, listenID int64, loggedIn, background bool, onFirstConnect func(), pingReady <-chan struct{}) bool {
 +	if ctx.Err() != nil {
 +		return true
 +	}
@@ -1529,7 +1808,12 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  	ctx = log.WithContext(ctx)
  	log.Debug().Str("listen_uuid", listenReqID).Msg("Long polling starting")
  
-@@ -476,13 +508,15 @@
+-	if loggedIn {
++	if loggedIn && !background {
+ 		stopDittoPinger := make(chan struct{})
+ 		defer close(stopDittoPinger)
+ 		go (&dittoPinger{
+@@ -476,13 +528,16 @@
  			log:               &log,
  			client:            c,
  			ctx:               ctx,
@@ -1537,6 +1821,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
 +			ownerCtx:          ownerCtx,
 +			reconnectCtx:      reconnectCtx,
 +			listenID:          listenID,
++			ready:             pingReady,
  		}).Loop()
  	}
  
@@ -1547,7 +1832,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  		err := c.refreshAuthToken(nil)
  		if err != nil {
  			if isFatalRefreshError(err) {
-@@ -504,15 +538,18 @@
+@@ -504,15 +559,18 @@
  				sleepSeconds = errorCount * 2
  			}
  			log.Err(err).Int("sleep_seconds", sleepSeconds).Msg("Error refreshing auth token, retrying in a while")
@@ -1569,7 +1854,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  				ConfigVersion:    util.ConfigMessage,
  			},
  			Unknown: &gmproto.ReceiveMessagesRequest_UnknownEmptyObject2{
-@@ -523,6 +560,7 @@
+@@ -523,6 +581,7 @@
  		if c.AuthData.HasCookies() {
  			url = util.ReceiveMessagesURLGoogle
  		}
@@ -1577,7 +1862,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  		connCtx, cancel := context.WithCancel(ctx)
  		resp, err := c.makeProtobufHTTPRequestContext(connCtx, url, payload, ContentTypePBLite, true)
  		if err != nil {
-@@ -539,7 +577,9 @@
+@@ -539,7 +598,9 @@
  				sleepSeconds = errorCount * 2
  			}
  			log.Err(err).Int("sleep_seconds", sleepSeconds).Msg("Error making listen request, retrying in a while")
@@ -1588,7 +1873,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  			continue
  		}
  		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-@@ -572,15 +612,22 @@
+@@ -572,15 +633,22 @@
  				Int("statusCode", resp.StatusCode).
  				Int("sleep_seconds", sleepSeconds).
  				Msg("Error in long polling, retrying in a while")
@@ -1613,7 +1898,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  		if errorCount > 0 {
  			errorCount = 0
  			if loggedIn {
-@@ -588,21 +635,22 @@
+@@ -588,21 +656,22 @@
  			}
  		}
  		log.Debug().Int("statusCode", resp.StatusCode).Msg("Long polling opened")
@@ -1640,7 +1925,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  		if background {
  			return cleanClose
  		}
-@@ -611,9 +659,8 @@
+@@ -611,9 +680,8 @@
  	return true
  }
  
@@ -1651,7 +1936,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  	reader := bufio.NewReader(rc)
  	buf := make([]byte, 32*1024)
  	var accumulatedData []byte
-@@ -671,7 +718,7 @@
+@@ -671,7 +739,7 @@
  		lastRead = time.Now()
  		if err != nil {
  			var logEvt *zerolog.Event
@@ -1660,7 +1945,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  				logEvt = log.Trace()
  			} else {
  				logEvt = log.Warn()
-@@ -701,12 +748,13 @@
+@@ -701,12 +769,13 @@
  		msg := &gmproto.LongPollingPayload{}
  		err = pblite.Unmarshal(currentBlock, msg)
  		if err != nil {
@@ -1675,7 +1960,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  			receivedEvents = true
  			onRead()
  		case msg.GetAck() != nil:
-@@ -715,7 +763,9 @@
+@@ -715,7 +784,9 @@
  				level = zerolog.DebugLevel
  			}
  			log.WithLevel(level).Int32("count", msg.GetAck().GetCount()).Msg("Got startup ack count message")
@@ -1685,7 +1970,7 @@ diff -ruN a/pkg/libgm/longpoll.go b/pkg/libgm/longpoll.go
  		case msg.GetStartRead() != nil:
  			log.Trace().Msg("Got startRead message")
  		case msg.GetHeartbeat() != nil:
-@@ -728,18 +778,97 @@
+@@ -728,18 +799,97 @@
  	}
  }
  
