@@ -5,9 +5,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -31,6 +33,7 @@ import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import dev.peppy.mobile.googlemessages.ui.GoogleMessagesLinkPanel
+import dev.peppy.mobile.googlemessages.ui.GoogleMessagesLinkPanelDetails
 import dev.peppy.mobile.R
 import dev.peppy.mobile.googlemessages.ui.GoogleMessagesLinkPanelHost
 import dev.peppy.mobile.testing.ComposeTestActivityRule
@@ -56,6 +59,68 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
+/** Which composable surface a test renders: the card, the details page, or a card that opens details on Manage. */
+private enum class PanelSurface { Card, Details, Managed }
+
+@Composable
+private fun LinkPanelSurface(surface: PanelSurface, host: GoogleMessagesLinkPanelHost?) {
+    when (surface) {
+        PanelSurface.Card -> if (host == null) GoogleMessagesLinkPanel {} else GoogleMessagesLinkPanel(host, onChanged = {})
+        PanelSurface.Details -> if (host == null) {
+            GoogleMessagesLinkPanelDetails(
+                onBack = {}, onChanged = {}, notice = null, onNoticeChange = {},
+                dismissedSeq = null, onDismissedSeqChange = {}, notificationAsked = false, onNotificationAskedChange = {},
+            )
+        } else {
+            GoogleMessagesLinkPanelDetails(host, onChanged = {})
+        }
+        PanelSurface.Managed -> ManagedLinkPanel(host)
+    }
+}
+
+/** Mirrors SmsTab: the card and details share hoisted notice and per-link UI memory, and only one is shown at a time. */
+@Composable
+private fun ManagedLinkPanel(host: GoogleMessagesLinkPanelHost?) {
+    val inDetails = remember { mutableStateOf(false) }
+    val notice = remember { mutableStateOf<String?>(null) }
+    val dismissedSeq = remember { mutableStateOf<Long?>(null) }
+    val notificationAsked = remember { mutableStateOf(false) }
+    val onNoticeChange: (String?) -> Unit = { notice.value = it }
+    val onDismissedSeqChange: (Long?) -> Unit = { dismissedSeq.value = it }
+    val onNotificationAskedChange: (Boolean) -> Unit = { notificationAsked.value = it }
+    if (inDetails.value) {
+        val onBack: () -> Unit = { inDetails.value = false }
+        if (host == null) {
+            GoogleMessagesLinkPanelDetails(
+                onBack = onBack, onChanged = {}, notice = notice.value, onNoticeChange = onNoticeChange,
+                dismissedSeq = dismissedSeq.value, onDismissedSeqChange = onDismissedSeqChange,
+                notificationAsked = notificationAsked.value, onNotificationAskedChange = onNotificationAskedChange,
+            )
+        } else {
+            GoogleMessagesLinkPanelDetails(
+                host, onBack = onBack, onChanged = {}, notice = notice.value, onNoticeChange = onNoticeChange,
+                dismissedSeq = dismissedSeq.value, onDismissedSeqChange = onDismissedSeqChange,
+                notificationAsked = notificationAsked.value, onNotificationAskedChange = onNotificationAskedChange,
+            )
+        }
+    } else {
+        val onManage: () -> Unit = { inDetails.value = true }
+        if (host == null) {
+            GoogleMessagesLinkPanel(
+                onChanged = {}, notice = notice.value, onNoticeChange = onNoticeChange, onManage = onManage,
+                dismissedSeq = dismissedSeq.value, onDismissedSeqChange = onDismissedSeqChange,
+                notificationAsked = notificationAsked.value, onNotificationAskedChange = onNotificationAskedChange,
+            )
+        } else {
+            GoogleMessagesLinkPanel(
+                host, onChanged = {}, onManage = onManage, notice = notice.value, onNoticeChange = onNoticeChange,
+                dismissedSeq = dismissedSeq.value, onDismissedSeqChange = onDismissedSeqChange,
+                notificationAsked = notificationAsked.value, onNotificationAskedChange = onNotificationAskedChange,
+            )
+        }
+    }
+}
+
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class GoogleMessagesLinkPanelTest {
@@ -68,6 +133,8 @@ class GoogleMessagesLinkPanelTest {
         LinkRuntimeTestHooks.storeFactory = null
         LinkCoreBridge.resetForTest()
         GoogleMessagesLinkTestHooks.available = null
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        GoogleMessagesLink.clearCutoverMayHaveMissedMessages(context)
     }
 
     @Test fun `unavailable engine renders nothing`() {
@@ -77,7 +144,7 @@ class GoogleMessagesLinkPanelTest {
         }
         GoogleMessagesLinkTestHooks.available = false
         compose.setContent { PeppyTheme { GoogleMessagesLinkPanel {} } }
-        check(compose.onAllNodesWithTag("google-messages-link-panel").fetchSemanticsNodes().isEmpty())
+        check(compose.onAllNodesWithTag("google-messages-link-card").fetchSemanticsNodes().isEmpty())
     }
 
     @Test fun `unlinked link offers owner action`() = panel("unlinked") {
@@ -91,38 +158,111 @@ class GoogleMessagesLinkPanelTest {
         compose.onNodeWithTag("google-messages-link-consent-sheet-body").fetchSemanticsNode()
     }
 
-    @Test fun `linked link presents health actions`() = panel("linked") {
-        compose.onNodeWithTag("google-messages-link-linked").fetchSemanticsNode()
+    @Test fun `linked card shows a success chip and the manage row`() = panel("linked") {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_status_linked)).fetchSemanticsNode()
+        compose.onNodeWithTag("google-messages-link-manage").fetchSemanticsNode()
+        check(compose.onAllNodesWithTag("google-messages-link-check-now").fetchSemanticsNodes().isEmpty())
+        check(compose.onAllNodesWithTag("google-messages-link-unlink").fetchSemanticsNodes().isEmpty())
+    }
+
+    @Test fun `unlinked card with the real unlinked status stays neutral`() = panel("unlinked", statusJson = UNLINKED_JSON) {
+        compose.onNodeWithTag("google-messages-link-card-tone-neutral").fetchSemanticsNode()
+        check(compose.onAllNodesWithTag("google-messages-link-card-tone-warning").fetchSemanticsNodes().isEmpty())
+    }
+
+    @Test fun `pairing card with the real unlinked-style running flags stays neutral`() = panel("pairing", statusJson = PAIRING_JSON) {
+        compose.onNodeWithTag("google-messages-link-pairing").fetchSemanticsNode()
+        compose.onNodeWithTag("google-messages-link-card-tone-neutral").fetchSemanticsNode()
+        check(compose.onAllNodesWithTag("google-messages-link-card-tone-warning").fetchSemanticsNodes().isEmpty())
+    }
+
+    @Test fun `linked details present health, typing, battery and unlink actions`() = panel("linked", PanelSurface.Details) {
+        compose.onNodeWithTag("google-messages-link-connection").fetchSemanticsNode()
         compose.onNodeWithTag("google-messages-link-check-now").fetchSemanticsNode()
         compose.onNodeWithTag("google-messages-link-unlink").fetchSemanticsNode()
         compose.onNodeWithTag("google-messages-link-battery-row").fetchSemanticsNode()
+        compose.onNodeWithTag("google-messages-link-typing-row").fetchSemanticsNode()
+    }
+
+    @Test fun `linked not running card offers reconnect and manage`() {
+        showPanel(FakePanelHost(FakeHandle("linked").apply { running = false }), readinessTag = "google-messages-link-chip")
+        compose.onNodeWithTag("google-messages-link-reconnect").fetchSemanticsNode()
+        compose.onNodeWithTag("google-messages-link-card-tone-warning").fetchSemanticsNode()
+        compose.onNodeWithTag("google-messages-link-manage").fetchSemanticsNode()
+    }
+
+    @Test fun `pairing emoji stays on the card`() {
+        val host = FakePanelHost(FakeHandle("pairing")).apply { emojiFlow.value = "😀" }
+        showPanel(host, readinessTag = "google-messages-link-emoji-card")
+        compose.onNodeWithTag("google-messages-link-emoji-card").assertTextContains("😀", substring = true)
+    }
+
+    @Test fun `cutover ambiguity notice shows on the card and dismisses`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        LinkCoreBridgeTestHooks.cutoverAlertIds = { setOf("conversation") }
+        panel("linked") {
+            compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notice-cutover").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_notice_cutover_ambiguous)).fetchSemanticsNode()
+            compose.onNodeWithTag("google-messages-link-notice-cutover-dismiss").performClick()
+            compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notice-cutover").fetchSemanticsNodes().isEmpty() }
+        }
+        check(!GoogleMessagesLink.cutoverMayHaveMissedMessages(context))
+    }
+
+    @Test fun `dismissing a local notice does not record the stop code as dismissed`() {
+        val host = FakePanelHost(FakeHandle("linked").apply { stopCode = "persist_failed" })
+        val dismissedChanges = mutableListOf<Long?>()
+        GoogleMessagesLinkTestHooks.available = true
+        compose.setContent {
+            PeppyTheme {
+                GoogleMessagesLinkPanel(host, onChanged = {}, notice = "unlinked_done", onDismissedSeqChange = { dismissedChanges += it })
+            }
+        }
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notice-dismiss").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("google-messages-link-notice-dismiss").performClick()
+        assertTrue(dismissedChanges.isEmpty())
+    }
+
+    @Test fun `dismissing the stop-code notice records its status sequence as dismissed`() {
+        val host = FakePanelHost(FakeHandle("linked").apply { stopCode = "persist_failed" })
+        val dismissedChanges = mutableListOf<Long?>()
+        GoogleMessagesLinkTestHooks.available = true
+        compose.setContent {
+            PeppyTheme {
+                GoogleMessagesLinkPanel(host, onChanged = {}, onDismissedSeqChange = { dismissedChanges += it })
+            }
+        }
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notice-dismiss").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("google-messages-link-notice-dismiss").performClick()
+        assertEquals(listOf<Long?>(1L), dismissedChanges)
     }
 
     @Test fun `linked typing sharing defaults on and writes each toggle once`() {
         val host = FakePanelHost(FakeHandle("linked"))
-        showPanel(host)
-        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-typing-row").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("google-messages-link-typing-row").performClick()
+        showPanel(host, PanelSurface.Details)
+        awaitTypingEnabled()
+        compose.onNodeWithTag("google-messages-link-typing-row").performScrollTo().performClick()
         compose.waitUntil { host.typingWrites == listOf(false) }
-        compose.onNodeWithTag("google-messages-link-typing-row").performClick()
+        compose.onNodeWithTag("google-messages-link-typing-row").performScrollTo().performClick()
         compose.waitUntil { host.typingWrites == listOf(false, true) }
     }
 
     @Test fun `typing sharing failure keeps the last confirmed value and exposes help`() {
         val host = FakePanelHost(FakeHandle("linked")).apply { typingWriteSucceeds = false }
-        showPanel(host)
-        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-typing-row").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("google-messages-link-typing-row").performClick()
+        showPanel(host, PanelSurface.Details)
+        awaitTypingEnabled()
+        compose.onNodeWithTag("google-messages-link-typing-row").performScrollTo().performClick()
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-typing-error").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("google-messages-link-typing-row").assert(SemanticsMatcher.expectValue(SemanticsProperties.ToggleableState, androidx.compose.ui.state.ToggleableState.On))
-        compose.onNodeWithTag("info-typing-share").performClick()
+        compose.onNodeWithTag("info-typing-share").performScrollTo().performClick()
         compose.onNodeWithTag("info-typing-share-dialog").fetchSemanticsNode()
         compose.onNodeWithText(ApplicationProvider.getApplicationContext<android.content.Context>().getString(R.string.peppy_typing_share_hint)).assertIsDisplayed()
     }
 
     @Test fun `typing sharing info is a separately focusable contextual action`() {
         val host = FakePanelHost(FakeHandle("linked"))
-        showPanel(host, readinessTag = "info-typing-share")
+        showPanel(host, PanelSurface.Details, readinessTag = "info-typing-share")
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val infoDescription = context.getString(
             R.string.peppy_help_android_more_about,
@@ -137,28 +277,31 @@ class GoogleMessagesLinkPanelTest {
         assertTrue("Info action must have its own merged semantics node", infoNode.id != toggleNode.id)
     }
 
-    @Test fun `repair state offers owner actions`() {
-        panel("needs_relink") {
+    @Test fun `repair state offers re-link on the card and unlink and remove in details`() {
+        panel("needs_relink", PanelSurface.Managed) {
             compose.onNodeWithTag("google-messages-link-relink").fetchSemanticsNode()
+            openManage()
             compose.onNodeWithTag("google-messages-link-unlink").fetchSemanticsNode()
             compose.onNodeWithTag("google-messages-link-remove-local").fetchSemanticsNode()
         }
     }
 
     @Test fun `unlink and remove require confirmation`() {
-        panel("needs_relink") {
+        panel("needs_relink", PanelSurface.Managed) {
+            openManage()
             compose.onNodeWithTag("google-messages-link-unlink").performClick()
             compose.onNodeWithTag("google-messages-link-unlink-sheet").fetchSemanticsNode()
         }
     }
 
-    @Test fun `health check reports a completed result`() = panel("linked") {
+    @Test fun `health check reports a completed result`() = panel("linked", PanelSurface.Details) {
         compose.onNodeWithTag("google-messages-link-check-now").performClick()
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-check-result").fetchSemanticsNodes().isNotEmpty() }
     }
 
-    @Test fun `signed out state never offers unlink`() = panel("signed_out") {
+    @Test fun `signed out state never offers unlink`() = panel("signed_out", PanelSurface.Managed) {
         compose.onNodeWithTag("google-messages-link-sign-in-again").fetchSemanticsNode()
+        openManage()
         compose.onNodeWithTag("google-messages-link-remove-local").fetchSemanticsNode()
         check(compose.onAllNodesWithTag("google-messages-link-unlink").fetchSemanticsNodes().isEmpty())
     }
@@ -178,6 +321,8 @@ class GoogleMessagesLinkPanelTest {
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-reset").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("google-messages-link-reset").fetchSemanticsNode()
         check(compose.onAllNodesWithTag("google-messages-link-start").fetchSemanticsNodes().isEmpty())
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_status_unreadable)).fetchSemanticsNode()
     }
 
 
@@ -237,7 +382,7 @@ class GoogleMessagesLinkPanelTest {
         GoogleMessagesLinkTestHooks.available = true
         restoration.setContent {
             CompositionLocalProvider(LocalLifecycleOwner provides owner) {
-                PeppyTheme { GoogleMessagesLinkPanel(host) {} }
+                PeppyTheme { GoogleMessagesLinkPanel(host, onChanged = {}) }
             }
         }
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-start").fetchSemanticsNodes().isNotEmpty() }
@@ -266,7 +411,7 @@ class GoogleMessagesLinkPanelTest {
         GoogleMessagesLinkTestHooks.available = true
         restoration.setContent {
             CompositionLocalProvider(LocalLifecycleOwner provides owner) {
-                PeppyTheme { GoogleMessagesLinkPanel(host) {} }
+                PeppyTheme { GoogleMessagesLinkPanel(host, onChanged = {}) }
             }
         }
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-relink").fetchSemanticsNodes().isNotEmpty() }
@@ -295,7 +440,7 @@ class GoogleMessagesLinkPanelTest {
         GoogleMessagesLinkTestHooks.available = true
         compose.setContent {
             CompositionLocalProvider(LocalLifecycleOwner provides owner) {
-                PeppyTheme { GoogleMessagesLinkPanel(host) {} }
+                PeppyTheme { GoogleMessagesLinkPanel(host, onChanged = {}) }
             }
         }
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-start").fetchSemanticsNodes().isNotEmpty() }
@@ -361,7 +506,8 @@ class GoogleMessagesLinkPanelTest {
     @Test fun `successful confirmed unlink shows polite success notice`() {
         val handle = FakeHandle("linked").apply { unlinkAction = { state = "unlinked" } }
         val host = FakePanelHost(handle)
-        showPanel(host)
+        showPanel(host, PanelSurface.Managed)
+        openManage()
         confirm("google-messages-link-unlink")
         compose.waitUntil { handle.unlinkCalls == 1 && compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
 
@@ -379,7 +525,8 @@ class GoogleMessagesLinkPanelTest {
                 stopCode = "unlink_remote_failed"
             }
         }
-        showPanel(FakePanelHost(handle))
+        showPanel(FakePanelHost(handle), PanelSurface.Managed)
+        openManage()
         confirm("google-messages-link-unlink")
         compose.waitUntil { handle.unlinkCalls == 1 && compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
 
@@ -392,9 +539,10 @@ class GoogleMessagesLinkPanelTest {
             running = false
             stopCode = "persist_failed"
         }
-        showPanel(FakePanelHost(handle))
-        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-unlink").fetchSemanticsNodes().isNotEmpty() }
+        showPanel(FakePanelHost(handle), PanelSurface.Managed, readinessTag = "google-messages-link-chip")
 
+        check(compose.onAllNodesWithTag("google-messages-link-reconnect").fetchSemanticsNodes().isEmpty())
+        openManage()
         check(compose.onAllNodesWithTag("google-messages-link-reconnect").fetchSemanticsNodes().isEmpty())
         compose.onNodeWithTag("google-messages-link-unlink").fetchSemanticsNode()
         compose.onNodeWithTag("google-messages-link-remove-local").fetchSemanticsNode()
@@ -403,7 +551,8 @@ class GoogleMessagesLinkPanelTest {
     @Test fun `confirmed remove runs once and returns to unlinked`() {
         val handle = FakeHandle("needs_relink")
         val host = FakePanelHost(handle)
-        showPanel(host)
+        showPanel(host, PanelSurface.Managed)
+        openManage()
         confirm("google-messages-link-remove-local", "google-messages-link-remove-sheet-confirm")
         compose.waitUntil { host.resetCalls == 1 && compose.onAllNodesWithTag("google-messages-link-start").fetchSemanticsNodes().isNotEmpty() }
         check(host.resetCalls == 1)
@@ -440,7 +589,7 @@ class GoogleMessagesLinkPanelTest {
         GoogleMessagesLinkTestHooks.available = true
         compose.setContent {
             PeppyTheme {
-                if (visible.value) GoogleMessagesLinkPanel(host) {}
+                if (visible.value) GoogleMessagesLinkPanel(host, onChanged = {})
             }
         }
         confirm("google-messages-link-reset")
@@ -460,11 +609,54 @@ class GoogleMessagesLinkPanelTest {
             }
         }
         val host = FakePanelHost(handle)
-        showPanel(host)
+        showPanel(host, PanelSurface.Managed)
+        openManage()
         confirm("google-messages-link-unlink")
         compose.waitUntil { handle.unlinkCalls == 1 && compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_notice_persist_failed)).fetchSemanticsNode()
+        // Still linked: the operation stays on details, so unlink is enabled again there.
+        compose.onNodeWithTag("google-messages-details-screen").fetchSemanticsNode()
+        compose.onNodeWithTag("google-messages-link-unlink").assertIsEnabled()
+    }
+
+    @Test fun `status flip to unlinked keeps details open until the lock is released and the notice is set`() {
+        val recordEntered = CountDownLatch(1)
+        val releaseRecord = CountDownLatch(1)
+        val handle = FakeHandle("linked").apply { unlinkAction = { state = "unlinked" } }
+        val host = FakePanelHost(handle).apply {
+            onRecordUnlinked = {
+                recordEntered.countDown()
+                awaitIgnoringInterrupts(releaseRecord)
+            }
+        }
+        showPanel(host, PanelSurface.Managed)
+        openManage()
+        confirm("google-messages-link-unlink")
+        assertTrue(recordEntered.await(5, TimeUnit.SECONDS))
+        // The reload already reports unlinked, but details must not close under the held operation.
+        compose.waitUntil(5_000) { host.observedStates.contains("unlinked") }
+        compose.onNodeWithTag("google-messages-details-screen").fetchSemanticsNode()
+        assertTrue(LinkOperationLock.inProgress.value)
+
+        releaseRecord.countDown()
+        compose.waitUntil(5_000) { compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil(5_000) { !LinkOperationLock.inProgress.value }
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_unlinked_done)).fetchSemanticsNode()
+        assertEquals(listOf("unlinked", "completed"), host.ownerUnlinkEvents)
+    }
+
+    @Test fun `unlink that leaves the link linked keeps details open with a retry notice`() {
+        val handle = FakeHandle("linked").apply { unlinkAction = { throw IllegalStateException("test") } }
+        showPanel(FakePanelHost(handle), PanelSurface.Managed)
+        openManage()
+        confirm("google-messages-link-unlink")
+        compose.waitUntil { handle.unlinkCalls == 1 && compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
+
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_notice_unlink_failed)).fetchSemanticsNode()
+        compose.onNodeWithTag("google-messages-details-screen").fetchSemanticsNode()
         compose.onNodeWithTag("google-messages-link-unlink").assertIsEnabled()
     }
 
@@ -584,9 +776,10 @@ class GoogleMessagesLinkPanelTest {
                 }
             }
         }
-        showPanel(host)
+        showPanel(host, PanelSurface.Managed, readinessTag = null)
         assertTrue(observationEntered.await(5, TimeUnit.SECONDS))
 
+        openManage()
         confirm("google-messages-link-unlink")
         compose.waitUntil(5_000) { handle.unlinkCalls == 1 && host.observedStates.contains("unlinked") }
         releaseObservation.countDown()
@@ -642,7 +835,8 @@ class GoogleMessagesLinkPanelTest {
                 awaitIgnoringInterrupts(releaseRecord)
             }
         }
-        showPanel(host)
+        showPanel(host, PanelSurface.Managed)
+        openManage()
         confirm("google-messages-link-unlink")
         assertTrue(recordEntered.await(5, TimeUnit.SECONDS))
         check(compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isEmpty())
@@ -656,7 +850,8 @@ class GoogleMessagesLinkPanelTest {
     @Test fun `failed unlink lifecycle record reports persistence failure instead of success`() {
         val handle = FakeHandle("linked").apply { unlinkAction = { state = "unlinked" } }
         val host = FakePanelHost(handle).apply { recordUnlinkedResult = false }
-        showPanel(host)
+        showPanel(host, PanelSurface.Managed)
+        openManage()
 
         confirm("google-messages-link-unlink")
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
@@ -675,7 +870,8 @@ class GoogleMessagesLinkPanelTest {
             }
         }
         val host = FakePanelHost(handle).apply { onRecordUnlinked = { records.incrementAndGet() } }
-        showPanel(host)
+        showPanel(host, PanelSurface.Managed)
+        openManage()
 
         confirm("google-messages-link-unlink")
         compose.waitUntil { records.get() == 1 && compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
@@ -690,7 +886,8 @@ class GoogleMessagesLinkPanelTest {
             unlinkAction = { throw IllegalStateException("persist_failed") }
         }
         val host = FakePanelHost(handle).apply { onRecordUnlinked = { records.incrementAndGet() } }
-        showPanel(host)
+        showPanel(host, PanelSurface.Managed)
+        openManage()
 
         confirm("google-messages-link-unlink")
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
@@ -709,7 +906,8 @@ class GoogleMessagesLinkPanelTest {
             }
         }
         val host = FakePanelHost(handle).apply { onRecordUnlinked = { records.incrementAndGet() } }
-        showPanel(host)
+        showPanel(host, PanelSurface.Managed)
+        openManage()
 
         confirm("google-messages-link-unlink")
         compose.waitUntil { records.get() == 1 && compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty() }
@@ -735,7 +933,7 @@ class GoogleMessagesLinkPanelTest {
         compose.setContent {
             PeppyTheme {
                 key(activeHost.value) {
-                    GoogleMessagesLinkPanel(activeHost.value) {}
+                    GoogleMessagesLinkPanelDetails(activeHost.value, onBack = {}, onChanged = {})
                 }
             }
         }
@@ -767,7 +965,7 @@ class GoogleMessagesLinkPanelTest {
         GoogleMessagesLinkTestHooks.available = true
         compose.setContent {
             PeppyTheme {
-                if (visible.value) GoogleMessagesLinkPanel(host) {}
+                if (visible.value) GoogleMessagesLinkPanel(host, onChanged = {})
             }
         }
         confirm("google-messages-link-relink")
@@ -789,7 +987,7 @@ class GoogleMessagesLinkPanelTest {
             unlinkAction = { unlinkEntered.countDown(); awaitIgnoringInterrupts(releaseUnlink) }
         }
         val host = FakePanelHost(handle, notificationsGranted = false)
-        showPanel(host, readinessTag = "google-messages-link-check-now")
+        showPanel(host, PanelSurface.Details, readinessTag = "google-messages-link-check-now")
         compose.onNodeWithTag("google-messages-link-notifications-allow").performScrollTo().performClick()
         host.completePermissionRequest(granted = false)
         compose.waitUntil { host.permissionRequests == 1 }
@@ -815,19 +1013,13 @@ class GoogleMessagesLinkPanelTest {
     @Test fun `pairing notifications stay disabled while relink is held`() {
         val relinkEntered = CountDownLatch(1)
         val releaseRelink = CountDownLatch(1)
-        val handle = FakeHandle("linked").apply {
+        val handle = FakeHandle("needs_relink").apply {
             relinkAction = { relinkEntered.countDown(); awaitIgnoringInterrupts(releaseRelink) }
         }
         val host = FakePanelHost(handle, notificationsGranted = false)
-        showPanel(host, readinessTag = "google-messages-link-notifications-allow")
-        compose.onNodeWithTag("google-messages-link-notifications-allow").performScrollTo().performClick()
-        host.completePermissionRequest(granted = false)
-        compose.waitUntil { host.permissionRequests == 1 }
-
-        handle.state = "needs_relink"
-        host.signalChange()
+        showPanel(host)
         confirm("google-messages-link-relink")
-        compose.waitUntil { host.permissionRequests == 2 }
+        compose.waitUntil { host.permissionRequests == 1 }
         host.completePermissionRequest(granted = false)
         compose.waitUntil(5_000) { relinkEntered.count == 0L }
         handle.state = "pairing"
@@ -837,7 +1029,7 @@ class GoogleMessagesLinkPanelTest {
 
         val application = ApplicationProvider.getApplicationContext<android.app.Application>()
         compose.onNodeWithTag("google-messages-link-notifications-allow").assertIsNotEnabled()
-        check(host.permissionRequests == 2)
+        check(host.permissionRequests == 1)
         check(shadowOf(application).nextStartedActivity == null)
         releaseRelink.countDown()
     }
@@ -851,14 +1043,15 @@ class GoogleMessagesLinkPanelTest {
             val density = LocalDensity.current
             CompositionLocalProvider(LocalDensity provides Density(density.density, 2f)) {
                 Column(Modifier.width(240.dp).height(320.dp).verticalScroll(rememberScrollState())) {
-                    PeppyTheme { GoogleMessagesLinkPanel(host) {} }
+                    PeppyTheme { GoogleMessagesLinkPanelDetails(host, onChanged = {}) }
                 }
             }
         }
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-check-now").fetchSemanticsNodes().isNotEmpty() }
         val polite = SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite)
-        compose.onNodeWithTag("google-messages-link-status")
-            .assert(polite).assertTextContains("Status").assertTextContains("Linked")
+        // The status row is a plain label/value pair; the value carries the text, the row carries the tag.
+        compose.onNodeWithTag("google-messages-link-status").fetchSemanticsNode()
+        compose.onNodeWithText(ApplicationProvider.getApplicationContext<android.content.Context>().getString(R.string.peppy_google_messages_link_status_linked)).fetchSemanticsNode()
         compose.onNodeWithTag("google-messages-link-check-now").performScrollTo().assertIsDisplayed().performClick()
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-check-result").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("google-messages-link-check-result").assert(polite)
@@ -886,9 +1079,22 @@ class GoogleMessagesLinkPanelTest {
         compose.onNodeWithTag(confirmTag).performSemanticsAction(SemanticsActions.OnClick)
     }
 
+    /** The typing toggle is disabled until the confirmed value loads from preferences. */
+    private fun awaitTypingEnabled() {
+        compose.waitUntil { runCatching { compose.onNodeWithTag("google-messages-link-typing-row").assertIsEnabled() }.isSuccess }
+    }
+
+    /** Opens the details page from the card's Manage row and waits for its status to load. */
+    private fun openManage() {
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-manage").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("google-messages-link-manage").performClick()
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-status").fetchSemanticsNodes().isNotEmpty() }
+    }
+
     private fun panel(
         state: String,
-        readinessTag: String = "google-messages-link-status",
+        surface: PanelSurface = PanelSurface.Card,
+        statusJson: String = """{"seq":1,"state":"$state","running":true,"healthy":true,"phone_responding":true,"last_ok_ms":0,"stop_code":""}""",
         assertion: () -> Unit,
     ) {
         GoogleMessagesLinkTestHooks.available = true
@@ -902,22 +1108,22 @@ class GoogleMessagesLinkPanelTest {
                 override fun unlink() = Unit
                 override fun stop() = Unit
                 override fun close() = Unit
-                override fun status() = """{"seq":1,"state":"$state","running":true,"healthy":true,"phone_responding":true,"last_ok_ms":0,"stop_code":""}"""
+                override fun status() = statusJson
             }
         }
         LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
-        compose.setContent { PeppyTheme { GoogleMessagesLinkPanel {} } }
+        compose.setContent { PeppyTheme { LinkPanelSurface(surface, null) } }
+        val readinessTag = if (surface == PanelSurface.Details) "google-messages-link-status" else "google-messages-link-chip"
         compose.waitUntil { compose.onAllNodesWithTag(readinessTag).fetchSemanticsNodes().isNotEmpty() }
         assertion()
     }
 
-
-    private fun showPanel(host: FakePanelHost, readinessTag: String? = null) {
+    private fun showPanel(host: FakePanelHost, surface: PanelSurface = PanelSurface.Card, readinessTag: String? = null) {
         GoogleMessagesLinkTestHooks.available = true
         compose.setContent {
             PeppyTheme {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
-                    GoogleMessagesLinkPanel(host) {}
+                    LinkPanelSurface(surface, host)
                 }
             }
         }
@@ -1060,6 +1266,10 @@ class GoogleMessagesLinkPanelTest {
     }
 
     private companion object {
+        // Same payloads as GoogleMessagesLinkServiceTest: unlinked and pairing report running and phone_responding as false.
+        const val UNLINKED_JSON = """{"seq":1,"state":"unlinked","running":false,"healthy":false,"phone_responding":false,"last_ok_ms":0,"stop_code":""}"""
+        const val PAIRING_JSON = """{"seq":1,"state":"pairing","running":false,"healthy":false,"phone_responding":false,"last_ok_ms":0,"stop_code":""}"""
+
         fun statusJson(state: String, running: Boolean = true, stopCode: String = "") =
             """{"seq":1,"state":"$state","running":$running,"healthy":true,"phone_responding":true,"last_ok_ms":0,"stop_code":"$stopCode"}"""
     }

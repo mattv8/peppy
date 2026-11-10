@@ -33,6 +33,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
@@ -118,6 +119,10 @@ internal fun SmsTab(
     var resultHint by remember { mutableStateOf<String?>(null) }
     var permissionDenied by remember { mutableStateOf(false) }
     var detailsOpen by remember { mutableStateOf(false) }
+    var linkDetailsOpen by remember { mutableStateOf(false) }
+    var linkNotice by rememberSaveable { mutableStateOf<String?>(null) }
+    var linkDismissedSeq by rememberSaveable { mutableStateOf<Long?>(null) }
+    var linkNotificationAsked by rememberSaveable { mutableStateOf(false) }
     var history by remember { mutableStateOf(SmsHistoryState.WAITING_FOR_VAULT) }
     var advancedFeatures by remember { mutableStateOf<AdvancedFeatureState?>(null) }
     val accountReadOnly by AccountAccessState.readOnly.collectAsState()
@@ -206,8 +211,8 @@ internal fun SmsTab(
         }
         advancedFeatures = withContext(Dispatchers.IO) { readAdvancedFeatureState(context) }
     }
-    DisposableEffect(detailsOpen) {
-        onDetailsChanged(detailsOpen)
+    DisposableEffect(detailsOpen, linkDetailsOpen) {
+        onDetailsChanged(detailsOpen || linkDetailsOpen)
         onDispose {
             consent = consent.cancel()
             onDetailsChanged(false)
@@ -301,9 +306,19 @@ internal fun SmsTab(
             SmsSettings(context, history, policy == true, ::beginEnable)
             MmsSettings(context, refresh, databaseOpen, onChanged, detailsOnly = true)
             if (restrictedSetupAvailable(context)) AdvancedFeaturesSection(context, refresh, onChanged)
-            GoogleMessagesLink.Entry(onChanged)
             resultHint?.let { Text(it, Modifier.testTag("sms-action-error")) }
         }
+    } else if (linkDetailsOpen) {
+        GoogleMessagesLink.Details(
+            onBack = { linkDetailsOpen = false },
+            onChanged = onChanged,
+            notice = linkNotice,
+            onNoticeChange = { linkNotice = it },
+            dismissedSeq = linkDismissedSeq,
+            onDismissedSeqChange = { linkDismissedSeq = it },
+            notificationAsked = linkNotificationAsked,
+            onNotificationAskedChange = { linkNotificationAsked = it },
+        )
     } else Column(Modifier.testTag("sms-tab-screen")) {
         HeroBanner(
             stringResource(R.string.peppy_toggle_android_sms_hero_title),
@@ -311,6 +326,16 @@ internal fun SmsTab(
             "sms-hero",
         )
         dev.peppy.mobile.ui.ScreenBody("sms-tab-body") {
+        GoogleMessagesLink.Entry(
+            onChanged = onChanged,
+            notice = linkNotice,
+            onNoticeChange = { linkNotice = it },
+            onManage = { linkDetailsOpen = true },
+            dismissedSeq = linkDismissedSeq,
+            onDismissedSeqChange = { linkDismissedSeq = it },
+            notificationAsked = linkNotificationAsked,
+            onNotificationAskedChange = { linkNotificationAsked = it },
+        )
         Column(Modifier.fillMaxWidth().testTag("sms-section"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             val actualCapture = policy == true && readGranted
             val subtitle = when {
