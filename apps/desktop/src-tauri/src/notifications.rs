@@ -6,7 +6,7 @@ use crate::{
     session::Session,
     tray, AppState,
 };
-use peppy_client_core::{BannerCandidate, Client};
+use peppy_client_core::{BannerCandidate, Client, OneTimeCodeTarget};
 pub use peppy_desktop_api::{NotificationPreferences, Preview};
 use serde::Deserialize;
 use std::{
@@ -417,6 +417,21 @@ fn banner_text(
     }
 }
 
+/// The item a popup's Copy action refers to: the message itself, or the mirrored notification.
+fn copy_target(candidate: &BannerCandidate) -> Option<OneTimeCodeTarget> {
+    candidate.one_time_code.as_ref()?;
+    match candidate.kind.as_str() {
+        "message" => Some(OneTimeCodeTarget::Message {
+            message_id: candidate.id.clone(),
+        }),
+        "notification" => candidate
+            .notification_target
+            .clone()
+            .map(|target| OneTimeCodeTarget::Notification { target }),
+        _ => None,
+    }
+}
+
 fn source_or_generic_title(kind: &str, source_name: Option<&str>) -> String {
     if let Some(source_name) = source_name.filter(|name| !name.trim().is_empty()) {
         return source_name.to_owned();
@@ -468,8 +483,8 @@ pub fn drain_banner_candidates(
                     crate::heads_runtime::has_head(app, id)
                 })
         },
-        |destination, title, body, icon| {
-            crate::notification_activation::post(app, session, destination, title, body, icon)
+        |destination, title, body, icon, copy| {
+            crate::notification_activation::post(app, session, destination, title, body, icon, copy)
         },
     )
 }
@@ -484,6 +499,7 @@ pub(crate) fn drain_with_delivery(
         String,
         String,
         Option<crate::notification_icon::Icon>,
+        Option<OneTimeCodeTarget>,
     ) -> Result<(), crate::notification_activation::PostError>,
 ) -> BridgeResult<bool> {
     let _drain = settings
@@ -566,11 +582,17 @@ pub(crate) fn drain_with_delivery(
                         .map(|target| target.source_device_id.as_str());
                     title = crate::contacts::banner_title(&session.client, &title, source);
                 }
+                // Copy is offered only for full previews of unlocked popups; hidden previews
+                // and locked popups never carry the code.
+                let copy = (matches!(preferences.preview, Preview::Full) && !locked)
+                    .then(|| copy_target(&candidate))
+                    .flatten();
                 match post(
                     crate::notification_activation::destination(&candidate),
                     title,
                     body,
                     crate::notification_icon::for_candidate(&preferences, &candidate, locked),
+                    copy,
                 ) {
                     Ok(()) | Err(crate::notification_activation::PostError::NotAllowed) => {
                         acknowledge.push(candidate.id);
@@ -634,6 +656,7 @@ pub(crate) fn drain_with_delivery(
                     peppy_desktop_api::NotificationActivationDestination::Main,
                     title,
                     body,
+                    None,
                     None,
                 ) {
                     Ok(()) | Err(crate::notification_activation::PostError::NotAllowed) => {}
@@ -716,6 +739,18 @@ mod tests {
         NotificationSettings,
         peppy_client_core::Client,
     ) {
+        mirrored_candidates_with_text(posted_at, "private body")
+    }
+
+    fn mirrored_candidates_with_text(
+        posted_at: &[i64],
+        text: &str,
+    ) -> (
+        crate::tests::Fixture,
+        Session,
+        NotificationSettings,
+        peppy_client_core::Client,
+    ) {
         use peppy_client_core::{
             Client, ClientConfig, Cursor, DatabaseKey, DeviceId, NotificationCapture,
         };
@@ -752,7 +787,7 @@ mod tests {
                     app_name: "Calendar".into(),
                     app_icon_png_base64: Some(app_icon()),
                     title: "private title".into(),
-                    text: "private body".into(),
+                    text: text.into(),
                     category: None,
                     posted_at: *posted_at,
                     dismissible: true,
@@ -806,7 +841,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |destination, title, body, _| {
+            |destination, title, body, _, _| {
                 posts.borrow_mut().push((destination, title, body));
                 for id in 0..4 {
                     phone
@@ -852,7 +887,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |destination, title, body, _| {
+            |destination, title, body, _, _| {
                 posts.borrow_mut().push((destination, title, body));
                 Ok(())
             },
@@ -884,7 +919,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |destination, title, body, _| {
+            |destination, title, body, _, _| {
                 posts.borrow_mut().push((destination, title, body));
                 fs::create_dir_all(settings.claim_path(&session.binding).parent().unwrap())
                     .unwrap();
@@ -907,7 +942,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |destination, title, body, _| {
+            |destination, title, body, _, _| {
                 posts.borrow_mut().push((destination, title, body));
                 Ok(())
             },
@@ -927,6 +962,145 @@ mod tests {
             .is_empty());
     }
 
+    /// Drains one wake and returns each popup's copy target, in post order.
+    fn drained_copy_targets(
+        session: &Session,
+        settings: &NotificationSettings,
+        app_locked: bool,
+    ) -> Vec<Option<OneTimeCodeTarget>> {
+        let copies = RefCell::new(Vec::new());
+        drain_with_delivery(
+            session,
+            settings,
+            || app_locked,
+            |_, _| false,
+            |_, _, _, _, copy| {
+                copies.borrow_mut().push(copy);
+                Ok(())
+            },
+        )
+        .unwrap();
+        copies.into_inner()
+    }
+
+    fn candidate(
+        kind: &str,
+        notification_target: Option<peppy_client_core::NotificationTarget>,
+        one_time_code: Option<&str>,
+    ) -> BannerCandidate {
+        BannerCandidate {
+            id: "candidate".into(),
+            kind: kind.into(),
+            conversation_id: None,
+            notification_target,
+            title: "title".into(),
+            body: "body".into(),
+            created_at: 0,
+            source_name: None,
+            app_icon_png_base64: None,
+            one_time_code: one_time_code.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn copy_target_is_the_mirrored_notification_for_a_coded_full_preview() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let (_fixture, session, settings, _phone) =
+            mirrored_candidates_with_text(&[now], "Your verification code is 482913");
+
+        let copies = drained_copy_targets(&session, &settings, false);
+
+        assert_eq!(copies.len(), 1);
+        assert!(matches!(
+            &copies[0],
+            Some(OneTimeCodeTarget::Notification { target })
+                if target.notification_key == "notification-0"
+        ));
+    }
+
+    #[test]
+    fn copy_is_withheld_for_hidden_previews() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let (_fixture, session, settings, _phone) =
+            mirrored_candidates_with_text(&[now], "Your verification code is 482913");
+        session
+            .client
+            .set_notification_preferences(NotificationPreferences {
+                preview: Preview::Hidden,
+                ..NotificationPreferences::default()
+            })
+            .unwrap();
+
+        assert_eq!(drained_copy_targets(&session, &settings, false), [None]);
+    }
+
+    #[test]
+    fn copy_is_withheld_for_notifications_while_locked() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let (_fixture, session, settings, _phone) =
+            mirrored_candidates_with_text(&[now], "Your verification code is 482913");
+
+        assert_eq!(drained_copy_targets(&session, &settings, true), [None]);
+    }
+
+    #[test]
+    fn copy_is_withheld_when_no_code_was_detected() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let (_fixture, session, settings, _phone) = mirrored_candidates(&[now]);
+
+        assert_eq!(drained_copy_targets(&session, &settings, false), [None]);
+    }
+
+    #[test]
+    fn copy_target_needs_a_detected_code_and_a_notification_target() {
+        let target = peppy_client_core::NotificationTarget {
+            source_device_id: "phone".into(),
+            notification_key: "key".into(),
+            lifetime: "life".into(),
+        };
+        assert_eq!(
+            copy_target(&candidate(
+                "notification",
+                Some(target.clone()),
+                Some("482913")
+            )),
+            Some(OneTimeCodeTarget::Notification {
+                target: target.clone()
+            })
+        );
+        assert_eq!(
+            copy_target(&candidate("notification", None, Some("482913"))),
+            None
+        );
+        assert_eq!(
+            copy_target(&candidate("notification", Some(target), None)),
+            None
+        );
+        assert_eq!(
+            copy_target(&candidate("message", None, Some("482913"))),
+            Some(OneTimeCodeTarget::Message {
+                message_id: "candidate".into()
+            })
+        );
+        assert_eq!(copy_target(&candidate("message", None, None)), None);
+        assert_eq!(
+            copy_target(&candidate("summary", None, Some("482913"))),
+            None
+        );
+    }
+
     #[test]
     fn drain_rechecks_hidden_preview_after_an_accepted_first_post() {
         let (_fixture, session, settings, _phone) = recent_mirrored_candidates(2);
@@ -937,7 +1111,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |_, title, body, icon| {
+            |_, title, body, icon, _| {
                 let mut posts = posts.borrow_mut();
                 posts.push((
                     title,
@@ -981,7 +1155,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |_, title, body, icon| {
+            |_, title, body, icon, _| {
                 let mut posts = posts.borrow_mut();
                 posts.push((
                     title,
@@ -1023,7 +1197,7 @@ mod tests {
             &settings,
             || locked.get(),
             |_, _| false,
-            |_, title, body, icon| {
+            |_, title, body, icon, _| {
                 let mut posts = posts.borrow_mut();
                 posts.push((
                     title,
@@ -1058,7 +1232,7 @@ mod tests {
             &settings,
             || false,
             |_, _| suppress_remaining.get(),
-            |_, _, _, _| {
+            |_, _, _, _, _| {
                 posts.set(posts.get() + 1);
                 suppress_remaining.set(true);
                 Ok(())
@@ -1089,7 +1263,7 @@ mod tests {
                     .as_ref()
                     .is_none_or(|target| target.notification_key != "notification-3")
             },
-            |destination, title, body, _| {
+            |destination, title, body, _, _| {
                 posts.borrow_mut().push((destination, title, body));
                 Ok(())
             },
@@ -1278,6 +1452,7 @@ mod tests {
             created_at: 0,
             source_name: Some("private source".into()),
             app_icon_png_base64: None,
+            one_time_code: None,
         };
         let rendered = banner_text(
             &NotificationPreferences {
@@ -1315,6 +1490,7 @@ mod tests {
             created_at: 0,
             source_name: Some("Calendar".into()),
             app_icon_png_base64: None,
+            one_time_code: None,
         };
         assert_eq!(
             banner_text(
@@ -1346,6 +1522,7 @@ mod tests {
             created_at: 0,
             source_name: None,
             app_icon_png_base64: None,
+            one_time_code: None,
         };
         let mirrored = BannerCandidate {
             id: "mirror".into(),
@@ -1357,6 +1534,7 @@ mod tests {
             created_at: 0,
             source_name: None,
             app_icon_png_base64: None,
+            one_time_code: None,
         };
         let notifications = NotificationContext {
             view: Some(NotificationView::Notifications),
@@ -1384,6 +1562,7 @@ mod tests {
             created_at: 0,
             source_name: None,
             app_icon_png_base64: None,
+            one_time_code: None,
         };
         let headed = |id: &str| id == "conversation-a";
         let enabled = NotificationPreferences::default();

@@ -1,0 +1,21 @@
+.one-time-code-action { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; margin-top: 8px; user-select: none; -webkit-user-select: none; }
+.one-time-code-button { display: inline-flex; align-items: center; gap: 6px; min-width: 6.5rem; max-width: 100%; white-space: nowrap; font-weight: 600; cursor: pointer; user-select: none; -webkit-user-select: none; }
+.one-time-code-button[aria-disabled="true"] { cursor: progress; opacity: 0.7; }
+.one-time-code-error { display: inline-flex; flex: 1 1 100%; align-items: flex-start; gap: 4px; min-width: 0; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; color: inherit; }
+.one-time-code-error svg { flex: none; margin-top: 2px; }
+.message-bubble .one-time-code-button { border-color: color-mix(in srgb, currentColor 60%, transparent); border-radius: var(--peppy-radius-md, 8px); background: transparent; color: inherit; }
+.message-bubble .one-time-code-button:hover { background: transparent; }
+.message-bubble .one-time-code-button:hover:not([aria-disabled="true"]) { border-color: currentColor; text-decoration: underline; text-underline-offset: 2px; }
+.message-bubble .one-time-code-button:focus-visible { outline-color: currentColor; }
+.message-bubble[data-chromeless] .one-time-code-action { margin-bottom: 10px; }
+.message-bubble[data-chromeless] .one-time-code-error { color: var(--peppy-error-text); }
+.notif-row .one-time-code-action { justify-self: start; margin-top: 6px; }
+.notif-row .one-time-code-button { font-size: 12px; font-weight: 500; }
+.notif-row .one-time-code-button:hover { border-color: var(--peppy-text-secondary); }
+.notif-row .one-time-code-error { color: var(--peppy-error-text); }
+@media (pointer: coarse) { .one-time-code-button { min-height: 44px; } }
+@media (forced-colors: active) {
+  .one-time-code-button, .message-bubble .one-time-code-button { background: ButtonFace; color: ButtonText; border-color: ButtonText; }
+  .one-time-code-button:focus-visible, .message-bubble .one-time-code-button:focus-visible { outline-color: Highlight; }
+  .one-time-code-error { color: CanvasText; }
+}

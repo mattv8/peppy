@@ -20,8 +20,13 @@ pub(super) const CAPACITY: usize = 256;
 const ACCEPTANCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 #[cfg(any(target_os = "macos", test))]
 pub(super) const PLATFORM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+// Terminal events occupy the low bits; the sequence sits above them. RETIRE may be OR-ed
+// onto CLICK or COPY after delivery so cleanup retries never redeliver the same event.
 const CLICK: u64 = 1;
 const RETIRE: u64 = 2;
+const COPY: u64 = 4;
+const EVENT_MASK: u64 = 0b111;
+const SEQUENCE_SHIFT: u32 = 3;
 
 pub struct Post {
     pub activation: Option<NotificationActivation>,
@@ -30,6 +35,8 @@ pub struct Post {
     pub body: String,
     pub sound: bool,
     pub icon: Option<crate::notification_icon::Icon>,
+    /// Copy target for the popup's Copy action. The OS carries only the post id.
+    pub copy: Option<OneTimeCodeTarget>,
 }
 
 #[derive(Clone)]
@@ -46,6 +53,9 @@ impl Signal {
     pub fn retire(&self) {
         self.set(RETIRE);
     }
+    pub fn copy(&self) {
+        self.set(COPY);
+    }
     #[cfg(any(target_os = "windows", test))]
     pub fn dismissed(&self, timed_out: bool) {
         if !timed_out {
@@ -57,7 +67,7 @@ impl Signal {
         let sequence = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
         let _ = self.event.compare_exchange(
             0,
-            (sequence << 2) | event,
+            (sequence << SEQUENCE_SHIFT) | event,
             Ordering::AcqRel,
             Ordering::Acquire,
         );
@@ -122,12 +132,14 @@ struct Entry<T> {
     activation: Option<NotificationActivation>,
     cancel: CancellationToken,
     signal: Signal,
+    copy: Option<OneTimeCodeTarget>,
     handle: T,
 }
 
 trait Backend {
     type Item;
     fn ensure_authorized(&mut self) -> Result<(), PostError>;
+    #[allow(clippy::too_many_arguments)]
     fn post(
         &mut self,
         id: &str,
@@ -135,6 +147,7 @@ trait Backend {
         body: &str,
         sound: bool,
         icon: Option<&crate::notification_icon::Icon>,
+        copy_action: bool,
         signal: Signal,
     ) -> Result<Self::Item, PostError>;
     fn remove(&mut self, item: &Self::Item) -> bool;
@@ -142,6 +155,7 @@ trait Backend {
 
 impl Backend for platform::Backend {
     type Item = platform::Item;
+    #[allow(clippy::too_many_arguments)]
     fn post(
         &mut self,
         id: &str,
@@ -149,9 +163,10 @@ impl Backend for platform::Backend {
         body: &str,
         sound: bool,
         icon: Option<&crate::notification_icon::Icon>,
+        copy_action: bool,
         signal: Signal,
     ) -> Result<Self::Item, PostError> {
-        platform::Backend::post(self, id, title, body, sound, icon, signal)
+        platform::Backend::post(self, id, title, body, sound, icon, copy_action, signal)
     }
     fn ensure_authorized(&mut self) -> Result<(), PostError> {
         platform::Backend::ensure_authorized(self)
@@ -195,31 +210,49 @@ impl<B: Backend> Registry<B> {
             &post.body,
             post.sound,
             post.icon.as_ref(),
+            post.copy.is_some(),
             signal.clone(),
         )?;
         self.entries.push_back(Entry {
             activation: post.activation,
             cancel: post.cancel,
             signal,
+            copy: post.copy,
             handle,
         });
         Ok(())
     }
 
-    fn reconcile(&mut self) -> Vec<(u64, NotificationActivation, CancellationToken)> {
-        let mut clicks = Vec::new();
+    /// Returns each delivered terminal event in sequence order. `None` is a click
+    /// (navigation); `Some(target)` is a Copy action that must never navigate.
+    fn reconcile(
+        &mut self,
+    ) -> Vec<(
+        u64,
+        NotificationActivation,
+        CancellationToken,
+        Option<OneTimeCodeTarget>,
+    )> {
+        let mut delivered = Vec::new();
         let mut index = 0;
         while index < self.entries.len() {
             let entry = &self.entries[index];
             let event = entry.signal.event.load(Ordering::Acquire);
             if event != 0 || entry.cancel.is_cancelled() {
-                if event & 3 == CLICK && !entry.cancel.is_cancelled() {
-                    if let Some(activation) = &entry.activation {
-                        clicks.push((event >> 2, activation.clone(), entry.cancel.clone()));
+                if !entry.cancel.is_cancelled() {
+                    if let Some(action) = delivery(event, &entry.copy) {
+                        if let Some(activation) = &entry.activation {
+                            delivered.push((
+                                event >> SEQUENCE_SHIFT,
+                                activation.clone(),
+                                entry.cancel.clone(),
+                                action,
+                            ));
+                        }
+                        // Cleanup failure must not suppress a genuine click or copy or replay
+                        // it on the next wake. Keep its registration until removal succeeds.
+                        entry.signal.event.store(event | RETIRE, Ordering::Release);
                     }
-                    // Cleanup failure must not suppress a genuine click or replay
-                    // it on the next wake. Keep its registration until removal succeeds.
-                    entry.signal.event.store(event | RETIRE, Ordering::Release);
                 }
                 if !self.backend.remove(&entry.handle) {
                     index += 1;
@@ -230,8 +263,18 @@ impl<B: Backend> Registry<B> {
                 index += 1;
             }
         }
-        clicks.sort_by_key(|(sequence, _, _)| *sequence);
-        clicks
+        delivered.sort_by_key(|(sequence, _, _, _)| *sequence);
+        delivered
+    }
+}
+
+/// Maps a stored terminal event to its delivery. A retired event carries RETIRE in the
+/// mask, so it matches neither arm and is never delivered as a click or a copy.
+fn delivery(event: u64, copy: &Option<OneTimeCodeTarget>) -> Option<Option<OneTimeCodeTarget>> {
+    match event & EVENT_MASK {
+        CLICK => Some(None),
+        COPY => copy.clone().map(Some),
+        _ => None,
     }
 }
 
@@ -248,14 +291,14 @@ fn serve<B: Backend>(
     mut registry: Registry<B>,
     receiver: mpsc::Receiver<Command>,
     stop: Arc<AtomicBool>,
-    mut activate: impl FnMut(u64, NotificationActivation, CancellationToken),
+    mut activate: impl FnMut(u64, NotificationActivation, CancellationToken, Option<OneTimeCodeTarget>),
 ) {
     while let Ok(command) = receiver.recv() {
         if stop.load(Ordering::Acquire) {
             break;
         }
-        for (sequence, activation, cancel) in registry.reconcile() {
-            activate(sequence, activation, cancel);
+        for (sequence, activation, cancel, copy) in registry.reconcile() {
+            activate(sequence, activation, cancel, copy);
         }
         if let Command::Post(post, reply) = command {
             let result = registry.post(*post);
@@ -287,9 +330,14 @@ impl Owner {
                     sequence: Arc::new(AtomicU64::new(0)),
                     wake,
                 };
-                serve(registry, receiver, stop, |sequence, activation, cancel| {
-                    super::activate(&app, activation, &cancel, sequence)
-                });
+                serve(
+                    registry,
+                    receiver,
+                    stop,
+                    |sequence, activation, cancel, copy| {
+                        super::activate(&app, activation, &cancel, sequence, copy)
+                    },
+                );
             })
             .ok()?;
         Some(Self {
@@ -339,6 +387,7 @@ mod tests {
     struct TestBackend {
         callbacks: HashMap<String, Signal>,
         sounds: Vec<bool>,
+        copy_actions: Vec<bool>,
         icons: Vec<&'static str>,
         log: Arc<Mutex<Vec<String>>>,
         fail_post: bool,
@@ -368,6 +417,7 @@ mod tests {
         fn ensure_authorized(&mut self) -> Result<(), PostError> {
             Ok(())
         }
+        #[allow(clippy::too_many_arguments)]
         fn post(
             &mut self,
             id: &str,
@@ -375,9 +425,11 @@ mod tests {
             _: &str,
             sound: bool,
             icon: Option<&crate::notification_icon::Icon>,
+            copy_action: bool,
             signal: Signal,
         ) -> Result<TestItem, PostError> {
             self.post_attempts.fetch_add(1, Ordering::AcqRel);
+            self.copy_actions.push(copy_action);
             self.sounds.push(sound);
             self.icons.push(match icon {
                 None => "none",
@@ -453,6 +505,7 @@ mod tests {
             body: "not retained".into(),
             sound: false,
             icon: Some(crate::notification_icon::Icon::Message),
+            copy: None,
         }
     }
 
@@ -488,6 +541,7 @@ mod tests {
             body: "Test notification".into(),
             sound: true,
             icon: Some(crate::notification_icon::Icon::Message),
+            copy: None,
         }
     }
 
@@ -732,7 +786,7 @@ mod tests {
             registry.post(post(id)).unwrap();
         }
         registry.backend.fail_remove = fail_remove;
-        let thread = std::thread::spawn(move || serve(registry, receiver, stop, |_, _, _| {}));
+        let thread = std::thread::spawn(move || serve(registry, receiver, stop, |_, _, _, _| {}));
         Owner {
             sender,
             stopped,
@@ -807,7 +861,7 @@ mod tests {
             settings,
             || false,
             |_, _| false,
-            |destination, title, body, icon| {
+            |destination, title, body, icon, _copy| {
                 owner
                     .submit(Post {
                         activation: Some(NotificationActivation {
@@ -820,6 +874,7 @@ mod tests {
                         title,
                         body,
                         icon,
+                        copy: None,
                     })
                     .and_then(Acceptance::wait)
             },
@@ -877,7 +932,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |_, _, _, _| Err(PostError::AwaitingAuthorization),
+            |_, _, _, _, _| Err(PostError::AwaitingAuthorization),
         )
         .unwrap());
         assert_eq!(
@@ -896,7 +951,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |_, _, _, _| {
+            |_, _, _, _, _| {
                 posts.set(posts.get() + 1);
                 Err(PostError::AwaitingAuthorization)
             },
@@ -919,7 +974,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |_, _, _, _| await_authorization(),
+            |_, _, _, _, _| await_authorization(),
         )
         .unwrap());
         let posted = std::cell::Cell::new(0);
@@ -928,7 +983,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |_, _, _, _| {
+            |_, _, _, _, _| {
                 posted.set(posted.get() + 1);
                 Ok(())
             },
@@ -950,7 +1005,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |_, _, _, _| Err(PostError::AwaitingAuthorization),
+            |_, _, _, _, _| Err(PostError::AwaitingAuthorization),
         )
         .unwrap());
         assert!(!crate::notifications::drain_with_delivery(
@@ -958,7 +1013,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |_, _, _, _| Err(PostError::NotAllowed),
+            |_, _, _, _, _| Err(PostError::NotAllowed),
         )
         .unwrap());
         assert!(session
@@ -1118,7 +1173,7 @@ mod tests {
             &settings,
             || false,
             |_, _| false,
-            |destination, title, body, icon| {
+            |destination, title, body, icon, _copy| {
                 let receipt = owner.submit(Post {
                     activation: Some(NotificationActivation {
                         request_id: "late-post".into(),
@@ -1130,6 +1185,7 @@ mod tests {
                     title,
                     body,
                     icon,
+                    copy: None,
                 })?;
                 observing.recv_timeout(PLATFORM_TIMEOUT).unwrap();
                 receipt.wait_for(std::time::Duration::ZERO)
@@ -1295,10 +1351,112 @@ mod tests {
         assert_eq!(
             clicks
                 .iter()
-                .map(|(_, value, _)| value.request_id.as_str())
+                .map(|(_, value, _, _)| value.request_id.as_str())
                 .collect::<Vec<_>>(),
             ["1", "0"]
         );
         assert!(clicks[0].0 < clicks[1].0);
+    }
+
+    fn copy_target(id: &str) -> OneTimeCodeTarget {
+        OneTimeCodeTarget::Message {
+            message_id: id.into(),
+        }
+    }
+
+    fn copy_post(id: usize) -> Post {
+        Post {
+            copy: Some(copy_target(&id.to_string())),
+            ..post(id)
+        }
+    }
+
+    #[test]
+    fn notification_copy_is_delivered_once_with_its_target_and_registers_the_action() {
+        let mut owner = registry();
+        owner.post(copy_post(0)).unwrap();
+        owner.post(post(1)).unwrap();
+        assert_eq!(owner.backend.copy_actions, [true, false]);
+        owner.backend.callbacks["0"].copy();
+        let delivered = owner.reconcile();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].1.request_id, "0");
+        assert_eq!(delivered[0].3, Some(copy_target("0")));
+        assert_eq!(
+            owner.entries.len(),
+            1,
+            "the click-only post stays registered"
+        );
+        assert!(owner.reconcile().is_empty());
+    }
+
+    #[test]
+    fn notification_first_terminal_event_wins_between_copy_and_click() {
+        let mut owner = registry();
+        owner.post(copy_post(0)).unwrap();
+        let signal = owner.backend.callbacks["0"].clone();
+        signal.copy();
+        signal.click();
+        let delivered = owner.reconcile();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].3, Some(copy_target("0")));
+        assert!(owner.reconcile().is_empty());
+        assert!(owner.entries.is_empty());
+    }
+
+    #[test]
+    fn notification_retired_copy_is_neither_a_click_nor_a_copy() {
+        let mut owner = registry();
+        owner.post(copy_post(0)).unwrap();
+        owner.backend.callbacks["0"].retire();
+        owner.backend.callbacks["0"].copy();
+        assert!(owner.reconcile().is_empty());
+        assert!(owner.entries.is_empty());
+    }
+
+    #[test]
+    fn notification_copy_is_not_redelivered_while_cleanup_is_retried() {
+        let mut owner = registry();
+        owner.post(copy_post(0)).unwrap();
+        owner.backend.fail_remove = true;
+        owner.backend.callbacks["0"].copy();
+        assert_eq!(owner.reconcile().len(), 1);
+        assert_eq!(owner.entries.len(), 1);
+        assert!(owner.reconcile().is_empty());
+        owner.backend.fail_remove = false;
+        assert!(owner.reconcile().is_empty());
+        assert!(owner.entries.is_empty());
+    }
+
+    #[test]
+    fn notification_cancelled_session_ignores_late_copy() {
+        let mut owner = registry();
+        let first = copy_post(0);
+        let cancel = first.cancel.clone();
+        owner.post(first).unwrap();
+        let delayed = owner.backend.callbacks["0"].clone();
+        cancel.cancel();
+        delayed.copy();
+        assert!(owner.reconcile().is_empty());
+        assert!(owner.entries.is_empty());
+    }
+
+    #[test]
+    fn notification_copy_and_click_keep_sequence_order_in_the_three_bit_event_field() {
+        let mut owner = registry();
+        owner.post(copy_post(0)).unwrap();
+        owner.post(post(1)).unwrap();
+        owner.backend.callbacks["1"].click();
+        owner.backend.callbacks["0"].copy();
+        let delivered = owner.reconcile();
+        assert_eq!(
+            delivered
+                .iter()
+                .map(|(_, value, _, copy)| (value.request_id.as_str(), copy.is_some()))
+                .collect::<Vec<_>>(),
+            [("1", false), ("0", true)]
+        );
+        assert_eq!(delivered[0].0, 1);
+        assert_eq!(delivered[1].0, 2);
     }
 }

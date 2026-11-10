@@ -4,7 +4,9 @@ use block2::{DynBlock, RcBlock};
 use objc2::{
     define_class, msg_send, rc::Retained, runtime::ProtocolObject, AnyThread, DefinedClass,
 };
-use objc2_foundation::{NSArray, NSBundle, NSError, NSObject, NSObjectProtocol, NSString, NSURL};
+use objc2_foundation::{
+    NSArray, NSBundle, NSError, NSObject, NSObjectProtocol, NSSet, NSString, NSURL,
+};
 use objc2_user_notifications::*;
 use std::{
     cell::RefCell,
@@ -18,6 +20,9 @@ use tauri::Emitter;
 
 type Signals = Arc<Mutex<HashMap<String, Signal>>>;
 const UN_ERROR_CODE_NOTIFICATIONS_NOT_ALLOWED: isize = 1;
+/// Registered once in `prepare`; posts opt in by category, and the action id is the only payload.
+const COPY_CATEGORY: &str = "peppy.one-time-code";
+const COPY_ACTION: &str = "copy-code";
 
 fn notification_content(
     title: &str,
@@ -87,6 +92,11 @@ define_class!(
                         .isEqualToString(UNNotificationDefaultActionIdentifier)
                 } {
                     signal.click();
+                } else if response
+                    .actionIdentifier()
+                    .isEqualToString(&NSString::from_str(COPY_ACTION))
+                {
+                    signal.copy();
                 } else if unsafe {
                     response
                         .actionIdentifier()
@@ -122,10 +132,29 @@ pub fn prepare() -> Option<Signals> {
     let signals = Signals::default();
     let delegate: Retained<Delegate> =
         unsafe { msg_send![super(Delegate::alloc().set_ivars(signals.clone())), init] };
-    UNUserNotificationCenter::currentNotificationCenter()
-        .setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    let center = UNUserNotificationCenter::currentNotificationCenter();
+    center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    register_copy_category(&center);
     DELEGATE.with(|slot| *slot.borrow_mut() = Some(delegate));
     Some(signals)
+}
+
+/// The Copy action is a background action (no foreground option), so it never brings Peppy forward.
+fn register_copy_category(center: &UNUserNotificationCenter) {
+    let action = UNNotificationAction::actionWithIdentifier_title_options(
+        &NSString::from_str(COPY_ACTION),
+        &NSString::from_str("Copy code"),
+        UNNotificationActionOptionNone,
+    );
+    let actions = NSArray::from_retained_slice(&[action]);
+    let intents: Retained<NSArray<NSString>> = NSArray::new();
+    let category = UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
+        &NSString::from_str(COPY_CATEGORY),
+        &actions,
+        &intents,
+        UNNotificationCategoryOptionNone,
+    );
+    center.setNotificationCategories(&NSSet::from_retained_slice(&[category]));
 }
 
 pub struct Backend {
@@ -170,6 +199,7 @@ impl Backend {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn post(
         &mut self,
         id: &str,
@@ -177,6 +207,7 @@ impl Backend {
         body: &str,
         sound: bool,
         icon: Option<&Icon>,
+        copy_action: bool,
         signal: Signal,
     ) -> Result<Item, PostError> {
         // UN owns completion blocks until posting finishes. Removing a request
@@ -186,6 +217,9 @@ impl Backend {
             let icon =
                 content_icon(icon).and_then(|icon| notification_icon::materialize(&self.app, icon));
             let content = notification_content(title, body, sound, icon.as_ref());
+            if copy_action {
+                content.setCategoryIdentifier(&NSString::from_str(COPY_CATEGORY));
+            }
             let identifier = NSString::from_str(id);
             let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
                 &identifier,

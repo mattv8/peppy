@@ -58,7 +58,7 @@ export type AttachmentState = "pending" | "uploading" | "failed" | "ready";
 export type DraftAttachmentState = "saving" | "local" | "waiting" | "uploading" | "uploaded" | "upload-failed" | "downloading" | "download-failed" | "unavailable";
 export const MAX_DRAFT_ATTACHMENTS = 10;
 export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; draftState?: DraftAttachmentState; mediaHold?: "held" | "requested"; mediaMeta?: MediaMetadataView; remoteState?: "available" | "removed_by_storage_policy"; localAvailable?: boolean };
-export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms" | "rcs"; subject?: string; participants?: string[]; rcsReported?: boolean };
+export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms" | "rcs"; subject?: string; participants?: string[]; rcsReported?: boolean; oneTimeCode?: string };
 export type MessageWindow = GeneratedMessageWindow<MessageView>;
 export type MediaCursor = { sortAtMs: string; localOrder: string; messageId: string; attachmentPosition: number };
 export type MediaMetadataView = { width?: number; height?: number; durationMs?: string; thumbnail?: AttachmentView; previewUnavailable?: "thumbnail_unavailable" };
@@ -93,7 +93,8 @@ export type SendDraftInput = DraftInput & { gatewayId: string; simId: string };
 /** A separate, server-readable re-encoded copy created only after native confirmation. */
 export type PublicCopy = { url: string; expiresInSeconds: number };
 export type NotificationTarget = { sourceDeviceId: string; notificationKey: string; lifetime: string };
-export type MirroredNotification = { target: NotificationTarget; packageName: string; appName: string; appIconPngBase64?: string; title: string; text: string; category?: string; postedAt: number; dismissible: boolean; seen: boolean; dismissalPending: boolean };
+export type OneTimeCodeTarget = { kind: "message"; messageId: string } | { kind: "notification"; target: NotificationTarget };
+export type MirroredNotification = { target: NotificationTarget; packageName: string; appName: string; appIconPngBase64?: string; title: string; text: string; category?: string; postedAt: number; dismissible: boolean; seen: boolean; dismissalPending: boolean; oneTimeCode?: string };
 export type AppFilter = { sourceDeviceId: string; packageName: string; appName: string; muted: boolean };
 export type NotificationPreferences = { messageBanners: boolean; mirroredBanners: boolean; preview: "full" | "hidden"; showSource?: boolean; muteWithHeads?: boolean };
 export type NotificationPermissionStatus = "granted" | "quiet" | "denied" | "unknown";
@@ -225,6 +226,7 @@ export interface DesktopBridge {
   /** `accepted` means durably queued in the local encrypted outbox; `revision` is the stored draft revision afterwards. */
   send_draft(input: SendDraftInput): Promise<SendResultView>;
   mark_seen(visibleMessageIds: string[]): Promise<void>;
+  copy_one_time_code(target: OneTimeCodeTarget, code: string): Promise<void>;
   /** Actual number changed, encoded as a canonical unsigned decimal string. */
   mark_all_read(): Promise<string>;
   set_conversation_pinned(conversationId: string, pinned: boolean): Promise<void>;

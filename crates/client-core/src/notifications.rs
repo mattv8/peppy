@@ -288,6 +288,11 @@ impl Client {
                     dismissible: r.get(10)?,
                     seen: r.get(11)?,
                     dismissal_pending: r.get(12)?,
+                    one_time_code: one_time_code::detect_notification(
+                        &r.get::<_, String>(7)?,
+                        &r.get::<_, String>(6)?,
+                    )
+                    .map(|code| code.code),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -550,6 +555,15 @@ impl Client {
                         }
                         _ => None,
                     };
+                    let one_time_code = if kind == "message" {
+                        message
+                            .as_ref()
+                            .filter(|payload| payload.direction == Direction::Incoming)
+                            .and_then(|payload| one_time_code::detect(&payload.body))
+                            .map(|code| code.code)
+                    } else {
+                        one_time_code::detect_notification(&body, &title).map(|code| code.code)
+                    };
                     let (source_name, app_icon_png_base64) = if kind == "message" {
                         let source_name = message.and_then(|payload| {
                             let sender = payload.sender_address?;
@@ -590,6 +604,7 @@ impl Client {
                         created_at,
                         source_name,
                         app_icon_png_base64,
+                        one_time_code,
                     })
                 },
             )
