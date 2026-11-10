@@ -90,6 +90,25 @@ class MmsBackfillScannerTest {
         assertTrue(more)
     }
 
+    @Test fun recheckFeedbackFailureDoesNotStopLaterRequests() {
+        val core = FakeCore(
+            listOf(MmsBackfillScanPlan(MmsBackfillPhase.RECHECK, null, null, false, false, 32)),
+            MmsBackfillRecheck(listOf(MmsBackfillRecheckRequest("7", true, "7"), MmsBackfillRecheckRequest("8", true, "8")), 32),
+            failRecheckIds = setOf("7"),
+        )
+        var feedbackFailures = 0
+
+        MmsBackfillScanner(core).run(
+            "generation", "scope", MmsLegacyBackfillState(null, null, null), "9", 1L, idle,
+            scanPage = { error("recheck plans do not scan provider pages") },
+            recheck = { MmsBackfillRecheckOutcome.PROGRESS },
+            onRecheckFeedbackFailure = { feedbackFailures++ },
+        )
+
+        assertEquals(listOf("8"), core.outcomes.map { it.first })
+        assertEquals(1, feedbackFailures)
+    }
+
     @Test fun unattemptedRechecksAreNotRecordedAsOutcomes() {
         val core = FakeCore(
             listOf(MmsBackfillScanPlan(MmsBackfillPhase.RECHECK, null, null, false, false, 32)),
@@ -419,6 +438,7 @@ class MmsBackfillScannerTest {
         private val rechecks: MmsBackfillRecheck = MmsBackfillRecheck(emptyList(), 32),
         private val finishResult: Boolean = true,
         private val calls: MutableList<String>? = null,
+        private val failRecheckIds: Set<String> = emptySet(),
     ) : MmsBackfillCore {
         var migrations = 0
         val advanced = mutableListOf<Pair<MmsBackfillPhase, String>>()
@@ -445,6 +465,7 @@ class MmsBackfillScannerTest {
         ) = false
         override fun dueRechecks(generation: String, scope: String, nowMs: Long, conditions: MmsBackfillRecheckConditions) = rechecks
         override fun recordRecheckOutcome(acquisitionId: String, nowMs: Long, outcome: MmsBackfillRecheckOutcome, conditions: MmsBackfillRecheckConditions) {
+            if (acquisitionId in failRecheckIds) error("feedback unavailable")
             outcomes += acquisitionId to outcome
         }
     }

@@ -21,7 +21,10 @@ import dev.peppy.mobile.diagnostics.MmsCaptureScanDiagnostics
 import dev.peppy.mobile.diagnostics.MmsDiagnosticStage
 import dev.peppy.mobile.diagnostics.MmsPassDiagnostics
 import dev.peppy.mobile.diagnostics.SyncDiagnosticStage
+import dev.peppy.mobile.diagnostics.SyncDiagnosticReason
 import dev.peppy.mobile.diagnostics.SyncDiagnostics
+import dev.peppy.mobile.diagnostics.SyncTraceEvent
+import dev.peppy.mobile.diagnostics.SyncTraceField
 import dev.peppy.mobile.diagnostics.captureMmsPass
 import dev.peppy.mobile.diagnostics.captureMmsProgress
 import dev.peppy.mobile.diagnostics.captureMmsStage
@@ -42,6 +45,7 @@ import dev.peppy.mobile.mms.MmsBackfillScanPlan
 import dev.peppy.mobile.mms.MmsBackfillScanner
 import dev.peppy.mobile.mms.MmsCaptureHintScheduler
 import dev.peppy.mobile.mms.MmsCaptureHints
+import dev.peppy.mobile.mms.MmsCaptureHintScheduleSink
 import dev.peppy.mobile.mms.MmsCaptureScheduleSink
 import dev.peppy.mobile.mms.MmsCaptureSummary
 import dev.peppy.mobile.mms.MmsLegacyBackfillState
@@ -112,7 +116,7 @@ object MmsCaptureWork {
     /** Provider observer and WAP hints bypass unchanged-failure backoff for one coalesced pass. */
     fun enqueueProviderHint(context: Context) {
         MmsCaptureHints.record(context)
-        hintScheduler.requestHint(scheduleSink(context))
+        hintScheduler.requestHint(hintScheduleSink(context))
     }
 
     /** Starts provider observation and bounded reconciliation after a permission or foreground change. */
@@ -154,6 +158,18 @@ object MmsCaptureWork {
         hintScheduler.requestContinuation(result.more, scheduleSink(context))
     }
 
+    private fun handleHintResult(context: Context, result: MmsCaptureSummary) {
+        if (result.captured > 0) GatewayWork.enqueueAfterCapture(context)
+        if (result.more) hintScheduler.requestHint(hintScheduleSink(context))
+    }
+
+    internal fun recordHintFailure(kind: Long) = SyncDiagnostics.record(
+        SyncTraceEvent.CAPTURE_PROGRESS,
+        SyncTraceField.STAGE to SyncDiagnosticStage.MMS,
+        SyncTraceField.REASON to SyncDiagnosticReason.CORE_ERROR,
+        SyncTraceField.COUNT to kind,
+    )
+
     fun ensurePeriodic(context: Context) {
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(
             PERIODIC_NAME,
@@ -171,10 +187,11 @@ object MmsCaptureWork {
         delayed: Boolean,
         manualRecheck: Boolean,
         managedWork: Boolean,
+        hintWork: Boolean = false,
     ) {
         val request = OneTimeWorkRequestBuilder<MmsCaptureWorker>()
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-            .setInputData(workDataOf(MANUAL_RECHECK to manualRecheck, MANAGED_WORK to managedWork))
+            .setInputData(workDataOf(MANUAL_RECHECK to manualRecheck, MANAGED_WORK to managedWork, HINT_WORK to hintWork))
             .apply { if (delayed) setInitialDelay(15, TimeUnit.SECONDS) }
             .build()
         WorkManager.getInstance(context).enqueueUniqueWork(name, policy, request)
@@ -184,16 +201,43 @@ object MmsCaptureWork {
         schedule(context, NAME, policy, delayed, manualRecheck, managedWork = true)
     }
 
+    private fun hintScheduleSink(context: Context) = MmsCaptureHintScheduleSink { token, onFailure ->
+        try {
+            val request = OneTimeWorkRequestBuilder<MmsCaptureWorker>()
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+                .setInputData(workDataOf(HINT_WORK to true))
+                .setInitialDelay(15, TimeUnit.SECONDS)
+                .build()
+            val operation = WorkManager.getInstance(context).enqueueUniqueWork(HINT_NAME, ExistingWorkPolicy.APPEND_OR_REPLACE, request)
+            operation.result.addListener({
+                try { operation.result.get() } catch (_: Exception) {
+                    recordHintFailure(HINT_FAILURE_ENQUEUE)
+                    onFailure(token)
+                }
+            }, ContextCompat.getMainExecutor(context))
+        } catch (_: Exception) {
+            recordHintFailure(HINT_FAILURE_ENQUEUE)
+            onFailure(token)
+        }
+    }
+
     private const val DEFERRED_CAPTURE = "peppy-mms-retention-deferred"
     private const val DEFERRED_MANUAL = "manual"
     private const val DEFERRED_PROVIDER = "provider"
     internal const val MANUAL_RECHECK = "manual-mms-recheck"
     internal const val MANAGED_WORK = "managed-mms-capture-work"
+    internal const val HINT_WORK = "mms-provider-hint-work"
+    internal const val HINT_NAME = "peppy-mms-capture-hint"
+    private const val HINT_FAILURE_ENQUEUE = 1L
+    private const val HINT_FAILURE_RECOVERY = 2L
+    internal const val HINT_FAILURE_POSTPROCESS = 3L
     internal val hintScheduler = MmsCaptureHintScheduler()
 
     internal fun isManagedData(inputData: Data): Boolean =
         if (inputData.keyValueMap.containsKey(MANAGED_WORK)) inputData.getBoolean(MANAGED_WORK, false)
         else inputData.keyValueMap.containsKey(MANUAL_RECHECK)
+
+    internal fun isHintData(inputData: Data) = inputData.getBoolean(HINT_WORK, false)
 
     internal fun runWorkerPass(
         context: Context,
@@ -201,26 +245,33 @@ object MmsCaptureWork {
         onSuccess: (MmsCaptureSummary) -> Unit = {},
         run: (manualRecheck: Boolean, providerChanged: Boolean) -> MmsCaptureSummary,
     ): ListenableWorker.Result {
-        val managedWork = isManagedData(inputData)
-        hintScheduler.beginPass(managedWork)
+        val hintWork = isHintData(inputData)
+        val managedWork = isManagedData(inputData) && !hintWork
+        if (hintWork) hintScheduler.beginHintPass() else hintScheduler.beginPass(managedWork)
         var consumedHint = false
         var completed = false
         try {
             consumedHint = MmsCaptureHints.consumeProviderChange(context)
             val result = run(inputData.getBoolean(MANUAL_RECHECK, false), consumedHint)
-            handleResult(context, result)
+            if (hintWork) handleHintResult(context, result) else handleResult(context, result)
             onSuccess(result)
             completed = true
             return ListenableWorker.Result.success()
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
-            return ListenableWorker.Result.retry()
+            if (!hintWork) return ListenableWorker.Result.retry()
+            if (consumedHint) MmsCaptureHints.record(context)
+            try { enqueue(context) } catch (_: Exception) {
+                recordHintFailure(HINT_FAILURE_RECOVERY)
+            }
+            completed = true
+            return ListenableWorker.Result.success()
         } finally {
             try {
                 if (!completed && consumedHint) MmsCaptureHints.record(context)
             } finally {
-                hintScheduler.finishPass(managedWork)
+                if (!hintWork) hintScheduler.finishPass(managedWork)
             }
         }
     }
@@ -242,7 +293,14 @@ class MmsCaptureWorker(context: Context, params: WorkerParameters) : CoroutineWo
                 },
             )
             if (result == ListenableWorker.Result.success() && PhoneReadCaptureWork.shouldRun(more)) {
-                PhoneReadCaptureWork.run(applicationContext)
+                try {
+                    PhoneReadCaptureWork.run(applicationContext)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    if (!MmsCaptureWork.isHintData(inputData)) throw error
+                    MmsCaptureWork.recordHintFailure(MmsCaptureWork.HINT_FAILURE_POSTPROCESS)
+                }
             }
             result
         }
@@ -543,7 +601,11 @@ internal object MmsCapture {
                     diagnostics.pending += outcome.pending
                     diagnostics.unavailable += outcome.unavailable
                     recordOutcome(when {
-                        outcome.verified -> MmsBackfillRecheckOutcome.VERIFIED
+                        outcome.verified && (outcome.acquisitionId == request.acquisitionId || request.state == MmsBackfillRecheckState.COMPLETE) -> MmsBackfillRecheckOutcome.VERIFIED
+                        outcome.verified -> {
+                            diagnostics.recheckIdentityMismatch++
+                            MmsBackfillRecheckOutcome.TRANSIENT_FAILURE
+                        }
                         outcome.captured > 0 || outcome.followup -> MmsBackfillRecheckOutcome.PROGRESS
                         // Carrier content still arriving: the core keeps the fair order and bounded resting schedule.
                         !record.ready && record.error == "provider_content_pending" -> MmsBackfillRecheckOutcome.AWAITING_PROVIDER
@@ -552,6 +614,7 @@ internal object MmsCapture {
                         else -> MmsBackfillRecheckOutcome.TRANSIENT_FAILURE
                     })
                     },
+                    onRecheckFeedbackFailure = { diagnostics.recheckFeedbackFailed++ },
                     historyAdmission = history?.let { coordinator -> object : MmsHistoryCaptureAdmission {
                         override fun begin() = coordinator.begin(plan.generation, "mms")
                         override fun finish(admission: MessageHistoryRequestCoordinator.Admission, observations: Int, exhausted: Boolean, reason: String?) =
@@ -673,7 +736,7 @@ internal object MmsCapture {
             is NativeMmsBeginOutcome.Quarantined -> return ProcessResult(true)
         }
         when (acquisition.state) {
-            NativeMmsAcquisitionState.COMPLETE -> return ProcessResult(true, verified = true)
+            NativeMmsAcquisitionState.COMPLETE -> return ProcessResult(true, verified = true, acquisitionId = acquisition.acquisitionId)
             NativeMmsAcquisitionState.UNAVAILABLE -> return ProcessResult(true, unavailable = 1)
             NativeMmsAcquisitionState.BLOCKED -> return ProcessResult(true, pending = 1)
             NativeMmsAcquisitionState.PENDING -> Unit
@@ -719,7 +782,7 @@ internal object MmsCapture {
             is NativeMmsBeginOutcome.Quarantined -> return ProcessResult(true)
         }
         return when (updated.state) {
-            NativeMmsAcquisitionState.COMPLETE -> ProcessResult(true, verified = true)
+            NativeMmsAcquisitionState.COMPLETE -> ProcessResult(true, verified = true, acquisitionId = updated.acquisitionId)
             NativeMmsAcquisitionState.UNAVAILABLE -> ProcessResult(true, unavailable = 1)
             NativeMmsAcquisitionState.BLOCKED -> ProcessResult(true, pending = 1)
             NativeMmsAcquisitionState.PENDING -> copyParts(core, provider, tempDirectory, updated, stable)
@@ -859,7 +922,7 @@ internal object MmsCapture {
             core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.PENDING, "preview_deferred")
             return ProcessResult(true, pending = 1)
         }
-        return try { core.complete(acquisition.acquisitionId); ProcessResult(true, captured = 1, verified = true) }
+        return try { core.complete(acquisition.acquisitionId); ProcessResult(true, captured = 1, verified = true, acquisitionId = acquisition.acquisitionId) }
         catch (_: MobileBindingsException.Conflict) {
             ProcessResult(true)
         }
@@ -963,6 +1026,7 @@ internal object MmsCapture {
         val followup: Boolean = false,
         val partUnavailable: Boolean = false,
         val verified: Boolean = false,
+        val acquisitionId: String? = null,
     )
     private data class ScanResult(
         val captured: Int,

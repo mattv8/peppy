@@ -152,6 +152,8 @@ class DiagnosticsLogTest {
         assertTrue(header.contains("45:provider_failure_high_water_page"))
         assertTrue(header.contains("59:recheck_provider_changed"))
         assertTrue(header.contains("60:provider_failure_provider"))
+        assertTrue(header.contains("61:recheck_feedback_failed"))
+        assertTrue(header.contains("62:recheck_identity_mismatch"))
         assertTrue(header.contains("phone_read_outcomes=1:skipped_no_candidate"))
         assertTrue(header.contains("15:mms_recheck_selection_unclassified"))
         assertTrue(header.contains("9:locked gateway_progress phase=20:mms_cleanup"))

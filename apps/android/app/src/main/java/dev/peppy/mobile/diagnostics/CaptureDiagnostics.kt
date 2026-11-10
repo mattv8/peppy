@@ -103,6 +103,8 @@ internal class MmsPassDiagnostics {
     var recheckUnchangedPartUnavailable = 0
     var recheckTransientFailure = 0
     var recheckProviderChanged = 0
+    var recheckFeedbackFailed = 0
+    var recheckIdentityMismatch = 0
 
     fun recordRecheckOutcome(outcome: MmsBackfillRecheckOutcome) {
         when (outcome) {
@@ -168,6 +170,8 @@ internal fun <T> captureMmsPass(diagnostics: MmsPassDiagnostics, more: () -> Boo
             SyncTraceField.RECHECK_UNCHANGED_PART_UNAVAILABLE to diagnostics.recheckUnchangedPartUnavailable.toLong(),
             SyncTraceField.RECHECK_TRANSIENT_FAILURE to diagnostics.recheckTransientFailure.toLong(),
             SyncTraceField.RECHECK_PROVIDER_CHANGED to diagnostics.recheckProviderChanged.toLong(),
+            SyncTraceField.RECHECK_FEEDBACK_FAILED to diagnostics.recheckFeedbackFailed.toLong(),
+            SyncTraceField.RECHECK_IDENTITY_MISMATCH to diagnostics.recheckIdentityMismatch.toLong(),
             SyncTraceField.BUDGET_EXHAUSTED to if (diagnostics.budgetExhausted) 1 else 0,
             SyncTraceField.MORE to if (more()) 1 else 0,
             SyncTraceField.REASON to when {
