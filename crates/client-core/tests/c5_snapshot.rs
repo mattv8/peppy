@@ -122,6 +122,7 @@ fn new_device_resyncs_history_read_and_media_without_touching_local_work() {
             draft.draft_id,
             0,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "unsent".into(),
                 ..Default::default()
             },

@@ -605,6 +605,7 @@ async fn simulated_mms_storage_and_public_copy_over_real_postgres_and_seaweed() 
             draft.draft_id,
             0,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "outbound image".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![outbound_attachment.attachment_id],

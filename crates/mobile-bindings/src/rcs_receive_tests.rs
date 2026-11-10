@@ -128,6 +128,73 @@ fn go_exported_receive_record_ingests_through_mobile_boundary() {
     assert_eq!(result.status_outcome.as_deref(), Some("status_applied"));
 }
 
+/// Group receive records exactly as `contracts.md` §1 freezes them. The record object is the
+/// `record` of `{"code":"ok","record":...}`; sender fields are present only where the contract says.
+fn go_group_record(direction: &str, sender_fields: serde_json::Value) -> String {
+    let mut value = json!({
+        "google_message_id": "m-local",
+        "google_conversation_id": "g-local",
+        "direction": direction,
+        "body": "hi",
+        "sent_at_ms": 1_730_000_000_000_i64,
+        "status": "",
+        "rcs_reported": true,
+    });
+    for (key, field) in sender_fields.as_object().unwrap() {
+        value[key] = field.clone();
+    }
+    value.to_string()
+}
+
+#[test]
+fn go_group_sender_fields_parse_strictly_and_never_attribute_a_one_to_one_conversation() {
+    let fixture = fixture();
+    let ingest = |record: String| {
+        fixture.client.gateway_ingest_go_rcs_record_json(
+            fixture.conversation_id.clone(),
+            fixture.generation,
+            record,
+        )
+    };
+    // Group sender fields on a 1:1 conversation are a conflict, never an attribution.
+    assert_eq!(
+        ingest(go_group_record(
+            "incoming",
+            json!({"sender_address": "+14155552671"})
+        ))
+        .unwrap()
+        .record_outcome,
+        "rejected:identity_conflict"
+    );
+    // Plain 1:1 incoming records (no sender fields) are unchanged.
+    assert_eq!(
+        ingest(go_group_record("incoming", json!({})))
+            .unwrap()
+            .record_outcome,
+        "inserted"
+    );
+    // Exactly one sender shape per incoming group message; self_sent is outgoing-only.
+    for malformed in [
+        go_group_record(
+            "incoming",
+            json!({"sender_address": "+14155552671", "sender_unknown": true}),
+        ),
+        go_group_record("incoming", json!({"self_sent": true})),
+        go_group_record("outgoing", json!({"sender_address": "+14155552671"})),
+        go_group_record(
+            "outgoing",
+            json!({"self_sent": true, "sender_unknown": true}),
+        ),
+        go_group_record("incoming", json!({"sender_address": ""})),
+        go_group_record("incoming", json!({"sender_unknown": false, "cursor": "x"})),
+    ] {
+        assert!(matches!(
+            ingest(malformed),
+            Err(MobileBindingsError::InvalidRequest)
+        ));
+    }
+}
+
 #[test]
 fn projected_observation_wrapper_requires_explicit_provenance() {
     for provenance in [

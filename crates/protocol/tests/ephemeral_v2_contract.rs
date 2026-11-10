@@ -4,9 +4,10 @@ use base64::{
 };
 use peppy_domain::{DeviceId, VaultId};
 use peppy_protocol::{
-    ChallengePlaintextV2, Envelope, EphemeralSignalV1, EphemeralSignalV2, EphemeralSignalV2Kind,
-    LiveHelloV2, MAX_EPHEMERAL_V2_CONTROL_CIPHERTEXT_BYTES,
-    MAX_EPHEMERAL_V2_TYPING_CIPHERTEXT_BYTES, SessionAckPlaintextV2, TypingPlaintextV2,
+    ChallengePlaintextV2, EPHEMERAL_V2_PROTOCOL_VERSION, Envelope, EphemeralSignalV1,
+    EphemeralSignalV2, EphemeralSignalV2Kind, LiveHelloV2,
+    MAX_EPHEMERAL_V2_CONTROL_CIPHERTEXT_BYTES, MAX_EPHEMERAL_V2_TYPING_CIPHERTEXT_BYTES,
+    SessionAckPlaintextV2, TypingOriginV2, TypingPlaintextV2, TypingStateV2,
 };
 
 fn signal(kind: EphemeralSignalV2Kind) -> EphemeralSignalV2 {
@@ -256,6 +257,49 @@ fn v2_wire_rejects_noncanonical_identifiers_and_strict_gateway_presence() {
     assert!(serde_json::from_value::<TypingPlaintextV2>(vault.clone()).is_err());
     vault["gateway_device_id"] = serde_json::Value::Null;
     assert!(serde_json::from_value::<TypingPlaintextV2>(vault).is_err());
+}
+
+#[test]
+fn group_participant_is_only_accepted_for_google_contact_typing() {
+    let google_contact = serde_json::json!({
+        "version":2,"origin":"google_contact","conversation_id":"00000000-0000-0000-0000-000000000003",
+        "state":"started","participant":"+15551230001"
+    });
+    assert!(serde_json::from_value::<TypingPlaintextV2>(google_contact.clone()).is_ok());
+
+    for participant in [
+        "15551230001",
+        "+0551230001",
+        "+1 555 123 0001",
+        "+155512300010000000",
+    ] {
+        let mut value = google_contact.clone();
+        value["participant"] = serde_json::json!(participant);
+        assert!(
+            serde_json::from_value::<TypingPlaintextV2>(value).is_err(),
+            "non-canonical participant {participant:?} must be rejected"
+        );
+    }
+    let mut vault_device = google_contact;
+    vault_device["origin"] = serde_json::json!("vault_device");
+    vault_device["gateway_device_id"] = serde_json::json!("00000000-0000-0000-0000-000000000004");
+    assert!(serde_json::from_value::<TypingPlaintextV2>(vault_device).is_err());
+}
+
+#[test]
+fn one_to_one_typing_plaintext_serializes_without_participant() {
+    let plaintext = TypingPlaintextV2 {
+        version: EPHEMERAL_V2_PROTOCOL_VERSION,
+        origin: TypingOriginV2::GoogleContact,
+        conversation_id: uuid::Uuid::from_u128(3),
+        state: TypingStateV2::Started,
+        gateway_device_id: None,
+        participant: None,
+    };
+    assert_eq!(
+        serde_json::to_string(&plaintext).unwrap(),
+        r#"{"version":2,"origin":"google_contact","conversation_id":"00000000-0000-0000-0000-000000000003","state":"started"}"#
+    );
 }
 
 #[test]

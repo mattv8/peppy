@@ -29,6 +29,18 @@ name = "rcs_receive"
 path = "tests/rcs_receive.rs"
 
 [[test]]
+name = "rcs_group_receive"
+path = "tests/rcs_group_receive.rs"
+
+[[test]]
+name = "rcs_group_create"
+path = "tests/rcs_group_create.rs"
+
+[[test]]
+name = "rcs_group_e2e"
+path = "tests/rcs_group_e2e.rs"
+
+[[test]]
 name = "rcs_status"
 path = "tests/rcs_status.rs"
 

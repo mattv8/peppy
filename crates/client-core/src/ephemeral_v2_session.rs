@@ -44,11 +44,18 @@ pub(crate) enum SessionTypingState {
     Stopped,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Canonical E.164 roster participant of a gateway-attributed group typing frame. `None` is 1:1.
+pub(crate) type Participant = Option<String>;
+
+/// Session typing key: one lease and one repeat-suppression record per participant.
+type RecordKey = (DeviceId, ConversationId, Participant);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AuthenticatedTyping {
     pub(crate) peer: DeviceId,
     pub(crate) session: SessionId,
     pub(crate) conversation: ConversationId,
+    pub(crate) participant: Participant,
     pub(crate) sequence: AuthenticatedSequence,
     pub(crate) state: SessionTypingState,
     pub(crate) routing: RoutedTyping,
@@ -81,13 +88,14 @@ pub(crate) struct PeerSessionUpdate {
     pub(crate) validation_revision: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionAction {
     pub(crate) routing: RoutedTyping,
     pub(crate) peer: DeviceId,
     pub(crate) session_token: u64,
     pub(crate) sequence: AuthenticatedSequence,
     pub(crate) conversation: ConversationId,
+    pub(crate) participant: Participant,
     pub(crate) state: SessionTypingState,
     pub(crate) deadline_mono_ms: MonoTime,
 }
@@ -112,7 +120,7 @@ pub(crate) struct EphemeralV2SessionState {
     pending: HashMap<DeviceId, PendingChallenge>,
     episodes: HashMap<DeviceId, Episode>,
     validated: HashMap<DeviceId, ValidatedSession>,
-    records: HashMap<(DeviceId, ConversationId), ConversationRecord>,
+    records: HashMap<RecordKey, ConversationRecord>,
     next_session_token: u64,
     next_validation_revision: u64,
 }
@@ -176,7 +184,7 @@ impl EphemeralV2SessionState {
             return self.challenge_for(input.peer, input.received_mono_ms.0);
         }
 
-        let key = (input.peer, input.conversation);
+        let key = (input.peer, input.conversation, input.participant.clone());
         let is_new = !self.records.contains_key(&key);
         if is_new && !self.has_record_capacity(input.peer) {
             return Ok(SessionTransition::default());
@@ -207,6 +215,7 @@ impl EphemeralV2SessionState {
                 session_token: validated.token,
                 sequence: input.sequence,
                 conversation: input.conversation,
+                participant: input.participant.clone(),
                 state: input.state,
                 deadline_mono_ms,
             })
@@ -222,6 +231,7 @@ impl EphemeralV2SessionState {
                 session_token: validated.token,
                 sequence: input.sequence,
                 conversation: input.conversation,
+                participant: input.participant.clone(),
                 state: input.state,
                 deadline_mono_ms,
             })
@@ -327,7 +337,7 @@ impl EphemeralV2SessionState {
                     token,
                 },
             );
-            for ((peer, _), record) in &mut self.records {
+            for ((peer, _, _), record) in &mut self.records {
                 if *peer == input.peer {
                     record.session = None;
                     record.high_water = 0;
@@ -399,7 +409,7 @@ impl EphemeralV2SessionState {
             && self
                 .records
                 .keys()
-                .filter(|(record_peer, _)| *record_peer == peer)
+                .filter(|(record_peer, _, _)| *record_peer == peer)
                 .count()
                 < MAX_PEER_RECORDS
     }
@@ -413,7 +423,7 @@ impl EphemeralV2SessionState {
             now_ms < session.lease_deadline_mono_ms || pending_peers.contains(peer)
         });
         let validated = &self.validated;
-        self.records.retain(|(peer, _), record| {
+        self.records.retain(|(peer, _, _), record| {
             record
                 .emitted_starts
                 .retain(|start| now_ms.saturating_sub(*start) < QUOTA_WINDOW_MS);
@@ -486,6 +496,7 @@ mod tests {
             routing: RoutedTyping::Display,
             received_mono_ms: MonoTime(now),
             wire_deadline_mono_ms: MonoTime(now + LEASE_MS),
+            participant: None,
         }
     }
     fn validate(
@@ -1080,6 +1091,148 @@ mod tests {
         );
     }
 
+    fn typing_for(
+        peer: DeviceId,
+        session: SessionId,
+        participant: Option<&str>,
+        sequence: u64,
+        state: SessionTypingState,
+        now: u64,
+    ) -> AuthenticatedTyping {
+        AuthenticatedTyping {
+            participant: participant.map(str::to_owned),
+            ..typing(peer, session, conversation(1), sequence, state, now)
+        }
+    }
+
+    #[test]
+    fn participants_interleave_without_clearing_each_other() {
+        let peer = device(1);
+        let peer_session = session(2);
+        let mut state = EphemeralV2SessionState::new(session(9));
+        validate(&mut state, peer, peer_session, 0);
+        let alex = Some("+15551230001");
+        let sam = Some("+15551230002");
+        let start = |who, sequence, now| {
+            typing_for(
+                peer,
+                peer_session,
+                who,
+                sequence,
+                SessionTypingState::Started,
+                now,
+            )
+        };
+        let stop = |who, sequence, now| {
+            typing_for(
+                peer,
+                peer_session,
+                who,
+                sequence,
+                SessionTypingState::Stopped,
+                now,
+            )
+        };
+
+        let alex_start = state
+            .observe_typing(start(alex, 101, 1_000))
+            .unwrap()
+            .action
+            .unwrap();
+        assert_eq!(alex_start.participant.as_deref(), Some("+15551230001"));
+        let sam_start = state
+            .observe_typing(start(sam, 102, 1_100))
+            .unwrap()
+            .action
+            .unwrap();
+        assert_eq!(sam_start.participant.as_deref(), Some("+15551230002"));
+        assert!(
+            state
+                .observe_typing(stop(alex, 103, 1_200))
+                .unwrap()
+                .action
+                .is_some()
+        );
+        assert!(
+            state
+                .observe_typing(stop(sam, 104, 1_300))
+                .unwrap()
+                .action
+                .is_some(),
+            "Alex's stop must not clear Sam's live start"
+        );
+        assert!(
+            state
+                .observe_typing(stop(sam, 105, 1_400))
+                .unwrap()
+                .action
+                .is_none(),
+            "a stop without a live start for the same participant is suppressed"
+        );
+    }
+
+    #[test]
+    fn participant_leases_expire_independently() {
+        let peer = device(1);
+        let peer_session = session(2);
+        let mut state = EphemeralV2SessionState::new(session(9));
+        validate(&mut state, peer, peer_session, 0);
+        let mut short = typing_for(
+            peer,
+            peer_session,
+            Some("+15551230001"),
+            101,
+            SessionTypingState::Started,
+            1_000,
+        );
+        short.wire_deadline_mono_ms = MonoTime(3_000);
+        assert!(state.observe_typing(short).unwrap().action.is_some());
+        assert!(
+            state
+                .observe_typing(typing_for(
+                    peer,
+                    peer_session,
+                    Some("+15551230002"),
+                    102,
+                    SessionTypingState::Started,
+                    1_000,
+                ))
+                .unwrap()
+                .action
+                .is_some()
+        );
+        assert!(
+            state
+                .observe_typing(typing_for(
+                    peer,
+                    peer_session,
+                    Some("+15551230001"),
+                    103,
+                    SessionTypingState::Stopped,
+                    4_000,
+                ))
+                .unwrap()
+                .action
+                .is_none(),
+            "Alex's lease expired at 3000"
+        );
+        assert!(
+            state
+                .observe_typing(typing_for(
+                    peer,
+                    peer_session,
+                    Some("+15551230002"),
+                    104,
+                    SessionTypingState::Stopped,
+                    4_000,
+                ))
+                .unwrap()
+                .action
+                .is_some(),
+            "Sam's lease is independent of Alex's"
+        );
+    }
+
     #[test]
     fn expired_lease_with_pending_renewal_preserves_same_session_authority() {
         let peer = device(1);
@@ -1154,7 +1307,10 @@ mod tests {
         assert_eq!(renewal_ack.session_update, None);
         let validated = state.validated[&peer];
         assert_eq!((validated.token, validated.floor), (1, 100));
-        assert_eq!(state.records[&(peer, conversation(1))].high_water, 103);
+        assert_eq!(
+            state.records[&(peer, conversation(1), None)].high_water,
+            103
+        );
         assert!(
             state
                 .observe_typing(typing(

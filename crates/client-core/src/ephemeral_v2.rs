@@ -13,10 +13,13 @@ use peppy_protocol::{
 use super::{
     ephemeral_v2_control::{ControlBudget, IngressBudget},
     ephemeral_v2_decode::{AuthenticatedPlaintext, decode_authenticated_frame},
-    ephemeral_v2_policy::{ClockState, LiveClock as PolicyClock, PolicyError, SenderBudget},
+    ephemeral_v2_policy::{
+        ClockState, LiveClock as PolicyClock, PolicyError, SenderBudget, TypingSlot,
+    },
     ephemeral_v2_session::{
         AuthenticatedAck, AuthenticatedSequence, AuthenticatedTyping, ChallengeNonce,
-        EphemeralV2SessionState, MonoTime, RoutedTyping, SessionId, SessionTypingState,
+        EphemeralV2SessionState, MonoTime, Participant, RoutedTyping, SessionId,
+        SessionTypingState,
     },
 };
 
@@ -68,13 +71,16 @@ pub struct PeerSessionUpdate {
     pub validation_revision: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `participant` is the canonical E.164 roster member for gateway-attributed group typing and
+/// `None` for 1:1 typing. Typing state is keyed by (peer, conversation, participant).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LiveAction {
     Display {
         peer_device_id: DeviceId,
         session_token: u64,
         sequence: u64,
         conversation_id: ConversationId,
+        participant: Option<String>,
         state: TypingStateV2,
         deadline_mono: u64,
     },
@@ -83,6 +89,7 @@ pub enum LiveAction {
         session_token: u64,
         sequence: u64,
         conversation_id: ConversationId,
+        participant: Option<String>,
         state: TypingStateV2,
         deadline_mono: u64,
     },
@@ -192,14 +199,33 @@ pub(crate) fn enable(
     Ok(LiveEnableGeneration(generation))
 }
 
+/// Attribution seam for group typing (I7). Returns true only when `participant` is a current
+/// roster member of a Live group mapping for the conversation. A participant the seam does not
+/// confirm is never sealed.
+pub(crate) type GroupTypingRoster<'a> = &'a dyn Fn(ConversationId, &str) -> bool;
+
+/// The identity and content of one outbound typing frame.
+pub(crate) struct TypingSealRequest {
+    pub(crate) conversation_id: ConversationId,
+    pub(crate) gateway_device_id: DeviceId,
+    pub(crate) origin: TypingOriginV2,
+    pub(crate) participant: Participant,
+    pub(crate) state: TypingStateV2,
+}
+
 pub(crate) fn seal(
     store: &mut Store,
-    conversation_id: ConversationId,
-    gateway_device_id: DeviceId,
-    origin: TypingOriginV2,
-    state: TypingStateV2,
+    request: TypingSealRequest,
     clock: LiveClock,
+    roster: GroupTypingRoster<'_>,
 ) -> Result<Option<LiveOutbound>, LiveError> {
+    let TypingSealRequest {
+        conversation_id,
+        gateway_device_id,
+        origin,
+        participant,
+        state,
+    } = request;
     if !store.ephemeral_v2.enabled {
         return Err(LiveError::Disabled);
     }
@@ -236,14 +262,38 @@ pub(crate) fn seal(
         }
         _ => {}
     }
-    let eligible = matches!(rcs_capability::projection(&store.conn, conversation_id, gateway_device_id, effective_wall).map_err(|_| LiveError::InvalidContext)?, Some(projection) if projection.eligibility == RcsEligibility::Eligible);
+    let typing = TypingPlaintextV2 {
+        version: EPHEMERAL_V2_PROTOCOL_VERSION,
+        origin,
+        conversation_id: conversation_id.0,
+        state,
+        gateway_device_id: (origin == TypingOriginV2::VaultDevice).then_some(gateway_device_id),
+        participant,
+    };
+    // Rejects participants on vault-device frames and non-canonical E.164 values.
+    typing.validate().map_err(|_| LiveError::InvalidContext)?;
+    if let Some(participant) = typing.participant.as_deref()
+        && !roster(conversation_id, participant)
+    {
+        return Ok(None);
+    }
+    let eligible = match crate::rcs_group::group_mapping(&store.conn, conversation_id)
+        .map_err(|_| LiveError::InvalidContext)?
+    {
+        // Group typing (both directions) flows only while the group mapping is Live (I7).
+        Some(mapping) => mapping.state == crate::rcs_group::GroupMappingState::Live,
+        None => {
+            matches!(rcs_capability::projection(&store.conn, conversation_id, gateway_device_id, effective_wall).map_err(|_| LiveError::InvalidContext)?, Some(projection) if projection.eligibility == RcsEligibility::Eligible)
+        }
+    };
     if !eligible {
         return Ok(None);
     }
+    let slot = typing_slot(conversation_id, typing.participant.as_deref());
     let mut budget_candidate = store.ephemeral_v2.budget.clone();
     let admitted = match state {
-        TypingStateV2::Started => budget_candidate.admit_start(conversation_id, clock.mono_ms),
-        TypingStateV2::Stopped => budget_candidate.admit_stop(conversation_id, clock.mono_ms),
+        TypingStateV2::Started => budget_candidate.admit_start(slot, clock.mono_ms),
+        TypingStateV2::Stopped => budget_candidate.admit_stop(slot, clock.mono_ms),
     }
     .map_err(policy_error)?;
     if !admitted {
@@ -269,14 +319,7 @@ pub(crate) fn seal(
         // replaced before return and is never exposed outside this critical section.
         ciphertext_b64: STANDARD.encode([0_u8]),
     };
-    let plaintext = serde_json::to_vec(&TypingPlaintextV2 {
-        version: EPHEMERAL_V2_PROTOCOL_VERSION,
-        origin,
-        conversation_id: conversation_id.0,
-        state,
-        gateway_device_id: (origin == TypingOriginV2::VaultDevice).then_some(gateway_device_id),
-    })
-    .map_err(|_| LiveError::Crypto)?;
+    let plaintext = serde_json::to_vec(&typing).map_err(|_| LiveError::Crypto)?;
     let aad = signal
         .aad_bytes(store.config.vault_id)
         .map_err(|_| LiveError::Crypto)?;
@@ -385,6 +428,7 @@ pub(crate) fn open(
                     peer: authenticated.sender_device_id,
                     session: SessionId(authenticated.session_id),
                     conversation: ConversationId(typing.conversation_id),
+                    participant: typing.participant.clone(),
                     sequence: AuthenticatedSequence(authenticated.sequence),
                     state: match typing.state {
                         TypingStateV2::Started => SessionTypingState::Started,
@@ -498,6 +542,7 @@ pub(crate) fn open(
                 session_token: action.session_token,
                 sequence: action.sequence.0,
                 conversation_id: action.conversation,
+                participant: action.participant,
                 state: match action.state {
                     SessionTypingState::Started => TypingStateV2::Started,
                     SessionTypingState::Stopped => TypingStateV2::Stopped,
@@ -509,6 +554,7 @@ pub(crate) fn open(
                 session_token: action.session_token,
                 sequence: action.sequence.0,
                 conversation_id: action.conversation,
+                participant: action.participant,
                 state: match action.state {
                     SessionTypingState::Started => TypingStateV2::Started,
                     SessionTypingState::Stopped => TypingStateV2::Stopped,
@@ -548,6 +594,13 @@ pub(crate) fn open_json(
         return Ok(empty_outcome(store));
     };
     open(store, &frame, clock)
+}
+
+fn typing_slot(conversation: ConversationId, participant: Option<&str>) -> TypingSlot {
+    participant.map_or_else(
+        || conversation.into(),
+        |participant| TypingSlot::participant(conversation, participant),
+    )
 }
 
 fn empty_outcome(store: &Store) -> LiveOutcome {
@@ -609,5 +662,181 @@ fn policy_error(error: PolicyError) -> LiveError {
     match error {
         PolicyError::Clock => LiveError::Clock,
         PolicyError::InvalidContext | PolicyError::Capacity => LiveError::InvalidContext,
+    }
+}
+
+#[cfg(test)]
+mod group_seam_tests {
+    use super::*;
+    use crate::{
+        Client, ClientConfig, DatabaseKey, KeyProfile, RcsCapabilityState,
+        RcsEligibilityProjection, RcsLinkStatusEvent, VaultId,
+    };
+    use peppy_crypto::{create_vault_check_header, derive_root_key};
+
+    const PASSPHRASE: &str = "correct horse battery staple";
+    const ALEX: &str = "+15551230001";
+
+    fn fixture(conversation: ConversationId) -> (tempfile::TempDir, Client, DeviceId) {
+        let directory = tempfile::tempdir().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key(PASSPHRASE, &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let device_id = DeviceId::new();
+        let config = ClientConfig {
+            database_path: directory.path().join("seam.db"),
+            vault_id,
+            device_id,
+        };
+        let client = Client::open(config, DatabaseKey::new(&[7; 32]).unwrap()).unwrap();
+        client.unlock(&profile, &header, PASSPHRASE).unwrap();
+        client.set_server_compaction_state(true, true).unwrap();
+        client
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id: device_id,
+                    state: RcsCapabilityState::Linked,
+                    availability: true,
+                    health: true,
+                    phone_responsive: true,
+                    observed_at_ms: 1_000,
+                    capability_revision: 1,
+                    feature_bits: 1,
+                    linked_since_ms: Some(1_000),
+                },
+                &[RcsEligibilityProjection {
+                    conversation_id: conversation,
+                    eligibility: RcsEligibility::Eligible,
+                    feature_bits: 1,
+                    mapping_revision: 1,
+                    observed_at_ms: 1_000,
+                    gateway_device_id: device_id,
+                }],
+                1_000,
+            )
+            .unwrap();
+        client
+            .enable_live_typing(
+                LiveEnableContext {
+                    trusted_roster: vec![device_id],
+                    local_gateway_device_id: device_id,
+                    local_executor: LiveExecutor::CurrentGateway,
+                },
+                LiveClock {
+                    wall_ms: 1_000,
+                    mono_ms: 1_000,
+                },
+            )
+            .unwrap();
+        (directory, client, device_id)
+    }
+
+    fn seal_with(
+        client: &Client,
+        conversation: ConversationId,
+        gateway: DeviceId,
+        origin: TypingOriginV2,
+        participant: Option<&str>,
+        mono_ms: u64,
+        roster: GroupTypingRoster<'_>,
+    ) -> Result<Option<LiveOutbound>, LiveError> {
+        let mut store = client.lock().map_err(|_| LiveError::InvalidContext)?;
+        seal(
+            &mut store,
+            TypingSealRequest {
+                conversation_id: conversation,
+                gateway_device_id: gateway,
+                origin,
+                participant: participant.map(str::to_owned),
+                state: TypingStateV2::Started,
+            },
+            LiveClock {
+                wall_ms: i64::try_from(mono_ms).unwrap(),
+                mono_ms,
+            },
+            roster,
+        )
+    }
+
+    #[test]
+    fn participant_frames_seal_only_for_roster_confirmed_members() {
+        let conversation = ConversationId::new();
+        let (_directory, client, device) = fixture(conversation);
+        let confirmed = |candidate: ConversationId, participant: &str| {
+            candidate == conversation && participant == ALEX
+        };
+        let unknown = |_: ConversationId, _: &str| false;
+
+        let sealed = seal_with(
+            &client,
+            conversation,
+            device,
+            TypingOriginV2::GoogleContact,
+            Some(ALEX),
+            1_001,
+            &confirmed,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(sealed.signal.sequence, "1");
+
+        assert!(
+            seal_with(
+                &client,
+                conversation,
+                device,
+                TypingOriginV2::GoogleContact,
+                Some("+15551230002"),
+                1_002,
+                &unknown,
+            )
+            .unwrap()
+            .is_none(),
+            "an unconfirmed participant is never sealed"
+        );
+        let next = seal_with(
+            &client,
+            conversation,
+            device,
+            TypingOriginV2::GoogleContact,
+            Some(ALEX),
+            4_500,
+            &confirmed,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            next.signal.sequence, "2",
+            "a suppressed unknown participant consumes no sequence"
+        );
+    }
+
+    #[test]
+    fn participant_attribution_is_rejected_for_vault_frames_and_malformed_numbers() {
+        let conversation = ConversationId::new();
+        let (_directory, client, device) = fixture(conversation);
+        let confirmed = |_: ConversationId, _: &str| true;
+
+        for (origin, participant) in [
+            (TypingOriginV2::VaultDevice, Some(ALEX)),
+            (TypingOriginV2::GoogleContact, Some("15551230001")),
+            (TypingOriginV2::GoogleContact, Some("+0551230001")),
+        ] {
+            assert_eq!(
+                seal_with(
+                    &client,
+                    conversation,
+                    device,
+                    origin,
+                    participant,
+                    1_001,
+                    &confirmed,
+                )
+                .unwrap_err(),
+                LiveError::InvalidContext,
+                "{origin:?} with {participant:?}"
+            );
+        }
     }
 }

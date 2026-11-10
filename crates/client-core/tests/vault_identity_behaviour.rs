@@ -413,7 +413,7 @@ fn sqlcipher_identity_row_contains_only_non_secret_state() {
 }
 
 #[test]
-fn independently_built_schema_version_50_fixture_upgrades_to_52() {
+fn independently_built_schema_version_50_fixture_upgrades_to_53() {
     let dir = TempDir::new().unwrap();
     let database_path = dir.path().join("upgrade.db");
     std::fs::copy(
@@ -473,7 +473,7 @@ fn independently_built_schema_version_50_fixture_upgrades_to_52() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!((version, table.as_str()), (52, "vault_identity_state"));
+    assert_eq!((version, table.as_str()), (53, "vault_identity_state"));
 }
 
 #[test]

@@ -4,8 +4,8 @@
 //! are the only JSON-schema-capable projection an Android transport may receive after core has
 //! admitted an RCS attempt.
 use crate::{
-    CommandId, ConversationId, Error, RcsCapabilityState, RcsConversationType, RcsMapping,
-    RcsMappingObservation, RcsSendMode, rcs_mapping,
+    CommandId, ConversationId, Error, GroupSendAuthority, RcsCapabilityState, RcsConversationType,
+    RcsMapping, RcsMappingObservation, RcsSendMode, rcs_group, rcs_mapping,
 };
 use rusqlite::{Connection, params};
 use schemars::{JsonSchema, schema_for};
@@ -33,7 +33,7 @@ pub(crate) fn pending_commands(
         return Ok(Vec::new());
     };
     let mut query = conn.prepare(
-        "SELECT l.local_order,l.command_id FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE a.command_id IS NULL AND l.historical=0 AND l.subscription_id='' AND l.key_epoch=? AND (l.local_order>? OR (l.local_order=? AND l.command_id>?)) ORDER BY l.local_order,l.command_id LIMIT ?",
+        "SELECT l.local_order,l.command_id FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE a.command_id IS NULL AND l.historical=0 AND l.key_epoch=? AND (l.local_order>? OR (l.local_order=? AND l.command_id>?)) ORDER BY l.local_order,l.command_id LIMIT ?",
     )?;
     // The client store mutex prevents ledger growth during this scan. Each batch advances the
     // keyset cursor, so one call examines at most the qualifying raw rows present on entry.
@@ -86,7 +86,7 @@ fn candidate(
         Err(error) => return Err(error),
     };
     let Some(mapping) = rcs_mapping::get(conn, message.record.conversation_id)? else {
-        return Ok(None);
+        return group_candidate(conn, command_id, &message);
     };
     if crate::require_exact_rcs_recipient(&message, &mapping).is_err() {
         return Ok(None);
@@ -99,6 +99,23 @@ fn candidate(
         conversation_id: message.record.conversation_id,
         recipient: recipient.clone(),
     }))
+}
+
+/// A queued text to a proved group is a native candidate; its recipient is the member digest.
+fn group_candidate(
+    conn: &Connection,
+    command_id: CommandId,
+    message: &crate::MessagePayload,
+) -> Result<Option<PendingNativeRcsCommand>, Error> {
+    let conversation_id = message.record.conversation_id;
+    Ok(
+        rcs_group::native_candidate_digest(conn, conversation_id, command_id, &message.recipients)?
+            .map(|digest| PendingNativeRcsCommand {
+                command_id,
+                conversation_id,
+                recipient: digest,
+            }),
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -192,6 +209,7 @@ pub struct NativeRcsEvidence {
 pub enum NativeRcsTargetClass {
     OneToOne,
     SelfChat,
+    Group,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -228,6 +246,9 @@ pub struct NativeRcsCommitProjection {
     pub proof_digest: Vec<u8>,
     pub message_body: String,
     pub target: LocalRcsTargetSnapshot,
+    /// Group targets only: the stored member digest Go rechecks immediately before sending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_member_digest: Option<String>,
 }
 
 /// Core-owned input for asking the native host to observe one exact local RCS target.
@@ -239,11 +260,18 @@ pub struct NativeRcsPrepareRequest {
     pub canonical_recipient: String,
 }
 
-/// Core-owned native RCS preparation that retains the complete verified mapping.
+/// The stored authority a native preparation was captured from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeRcsPreparationTarget {
+    OneToOne(RcsMapping),
+    Group(GroupSendAuthority),
+}
+
+/// Core-owned native RCS preparation that retains the stored authority it was captured from.
 pub struct NativeRcsPreparation {
     command_id: CommandId,
     request: NativeRcsPrepareRequest,
-    mapping: RcsMapping,
+    target: NativeRcsPreparationTarget,
 }
 
 impl NativeRcsPreparation {
@@ -256,7 +284,21 @@ impl NativeRcsPreparation {
         Self {
             command_id,
             request,
-            mapping,
+            target: NativeRcsPreparationTarget::OneToOne(mapping),
+        }
+    }
+
+    /// Group targets carry the member digest as their canonical recipient, as the Go facts require.
+    pub(crate) fn new_group(command_id: CommandId, authority: GroupSendAuthority) -> Self {
+        let request = NativeRcsPrepareRequest {
+            command_id: command_id.to_string(),
+            peppy_conversation_id: authority.conversation_id.to_string(),
+            canonical_recipient: authority.member_set_digest.clone(),
+        };
+        Self {
+            command_id,
+            request,
+            target: NativeRcsPreparationTarget::Group(authority),
         }
     }
 
@@ -264,12 +306,29 @@ impl NativeRcsPreparation {
         &self.request
     }
 
-    pub fn mapping(&self) -> &RcsMapping {
-        &self.mapping
+    pub fn target(&self) -> &NativeRcsPreparationTarget {
+        &self.target
     }
 
-    pub(crate) fn into_parts(self) -> (CommandId, RcsMapping) {
-        (self.command_id, self.mapping)
+    /// The 1:1 mapping, or `None` for a group preparation.
+    pub fn mapping(&self) -> Option<&RcsMapping> {
+        match &self.target {
+            NativeRcsPreparationTarget::OneToOne(mapping) => Some(mapping),
+            NativeRcsPreparationTarget::Group(_) => None,
+        }
+    }
+
+    /// The member digest the Go prepare request must carry. Only group targets have one; a 1:1
+    /// request stays byte-identical because it omits the field.
+    pub fn expected_member_digest(&self) -> Option<&str> {
+        match &self.target {
+            NativeRcsPreparationTarget::OneToOne(_) => None,
+            NativeRcsPreparationTarget::Group(authority) => Some(&authority.member_set_digest),
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (CommandId, NativeRcsPreparationTarget) {
+        (self.command_id, self.target)
     }
 }
 

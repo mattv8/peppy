@@ -37,6 +37,7 @@ fn capture(client: &Client, input: MmsAcquisitionInput) -> ConversationId {
 
 fn draft_update(recipients: &[&str]) -> ComposeDraftUpdate {
     ComposeDraftUpdate {
+        group_name: None,
         text: "reply".into(),
         recipients: recipients
             .iter()

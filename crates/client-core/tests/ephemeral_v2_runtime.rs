@@ -73,6 +73,7 @@ fn seal(
             conversation,
             gateway,
             TypingOriginV2::VaultDevice,
+            None,
             state,
             LiveClock { wall_ms, mono_ms },
         )
@@ -165,6 +166,7 @@ fn v2_is_disabled_until_a_trusted_context_enables_and_then_seals_a_real_frame() 
                 conversation,
                 config.device_id,
                 TypingOriginV2::VaultDevice,
+                None,
                 TypingStateV2::Started,
                 clock,
             )
@@ -186,6 +188,7 @@ fn v2_is_disabled_until_a_trusted_context_enables_and_then_seals_a_real_frame() 
             conversation,
             config.device_id,
             TypingOriginV2::VaultDevice,
+            None,
             TypingStateV2::Started,
             LiveClock {
                 wall_ms: 1_001,
@@ -383,6 +386,7 @@ fn disabled_sharing_validates_and_commits_the_outbound_clock_without_sealing() {
             conversation,
             config.device_id,
             TypingOriginV2::VaultDevice,
+            None,
             TypingStateV2::Stopped,
             LiveClock {
                 wall_ms: 1_002,
@@ -467,6 +471,7 @@ fn disabled_sharing_suppresses_both_states_without_consuming_sequence_or_budget(
                 google_conversation,
                 config.device_id,
                 TypingOriginV2::GoogleContact,
+                None,
                 TypingStateV2::Started,
                 LiveClock {
                     wall_ms: 1_004,
@@ -485,6 +490,7 @@ fn disabled_sharing_suppresses_both_states_without_consuming_sequence_or_budget(
                 google_conversation,
                 config.device_id,
                 TypingOriginV2::GoogleContact,
+                None,
                 TypingStateV2::Stopped,
                 LiveClock {
                     wall_ms: 1_005,
@@ -571,6 +577,7 @@ fn google_contact_typing_displays_only_for_the_current_gateway() {
             conversation,
             gateway_config.device_id,
             TypingOriginV2::GoogleContact,
+            None,
             TypingStateV2::Started,
             LiveClock {
                 wall_ms: 1_001,
@@ -615,6 +622,7 @@ fn google_contact_typing_displays_only_for_the_current_gateway() {
             conversation,
             gateway_config.device_id,
             TypingOriginV2::GoogleContact,
+            None,
             TypingStateV2::Started,
             LiveClock {
                 wall_ms: 4_001,
@@ -641,6 +649,7 @@ fn google_contact_typing_displays_only_for_the_current_gateway() {
             conversation,
             other_config.device_id,
             TypingOriginV2::GoogleContact,
+            None,
             TypingStateV2::Started,
             LiveClock {
                 wall_ms: 1_001,
@@ -1067,6 +1076,7 @@ fn eligibility_changes_refuse_without_consuming_the_next_sequence() {
             conversation,
             config.device_id,
             TypingOriginV2::VaultDevice,
+            None,
             TypingStateV2::Stopped,
             LiveClock {
                 wall_ms: 1_003,
@@ -1138,6 +1148,7 @@ fn rate_limited_start_advances_the_clock_without_consuming_sequence() {
             conversation,
             config.device_id,
             TypingOriginV2::VaultDevice,
+            None,
             TypingStateV2::Started,
             LiveClock {
                 wall_ms: 1_003,
@@ -1188,6 +1199,7 @@ fn invalid_context_and_clock_do_not_create_outbound_authority() {
             conversation,
             DeviceId::new(),
             TypingOriginV2::VaultDevice,
+            None,
             TypingStateV2::Started,
             LiveClock {
                 wall_ms: 1_001,
@@ -1201,6 +1213,7 @@ fn invalid_context_and_clock_do_not_create_outbound_authority() {
             conversation,
             config.device_id,
             TypingOriginV2::GoogleContact,
+            None,
             TypingStateV2::Started,
             LiveClock {
                 wall_ms: 1_001,
@@ -1214,6 +1227,7 @@ fn invalid_context_and_clock_do_not_create_outbound_authority() {
             conversation,
             config.device_id,
             TypingOriginV2::VaultDevice,
+            None,
             TypingStateV2::Started,
             LiveClock {
                 wall_ms: -1,
@@ -1279,6 +1293,7 @@ fn frozen_wall_cannot_prolong_eligibility_and_clock_errors_precede_missing_gates
             ConversationId::new(),
             config.device_id,
             TypingOriginV2::VaultDevice,
+            None,
             TypingStateV2::Started,
             LiveClock {
                 wall_ms: -1,
@@ -1292,6 +1307,7 @@ fn frozen_wall_cannot_prolong_eligibility_and_clock_errors_precede_missing_gates
             ConversationId::new(),
             config.device_id,
             TypingOriginV2::VaultDevice,
+            None,
             TypingStateV2::Started,
             LiveClock {
                 wall_ms: 1_000,
@@ -1433,6 +1449,7 @@ fn suppressed_redundant_stop_advances_the_clock_without_consuming_sequence() {
             second,
             config.device_id,
             TypingOriginV2::VaultDevice,
+            None,
             TypingStateV2::Started,
             LiveClock {
                 wall_ms: 1_004,
@@ -1646,6 +1663,7 @@ fn remote_gateway_capability_reaches_an_ordinary_desktop_before_vault_sealing() 
             conversation,
             gateway_config.device_id,
             TypingOriginV2::VaultDevice,
+            None,
             TypingStateV2::Started,
             LiveClock {
                 wall_ms: 1_001,
@@ -1675,6 +1693,7 @@ fn remote_gateway_capability_reaches_an_ordinary_desktop_before_vault_sealing() 
             conversation,
             desktop_config.device_id,
             TypingOriginV2::GoogleContact,
+            None,
             TypingStateV2::Started,
             LiveClock {
                 wall_ms: 1_002,
@@ -1688,6 +1707,7 @@ fn remote_gateway_capability_reaches_an_ordinary_desktop_before_vault_sealing() 
             conversation,
             DeviceId::new(),
             TypingOriginV2::VaultDevice,
+            None,
             TypingStateV2::Started,
             LiveClock {
                 wall_ms: 1_002,
@@ -1715,6 +1735,7 @@ fn remote_gateway_capability_reaches_an_ordinary_desktop_before_vault_sealing() 
             conversation,
             gateway_config.device_id,
             TypingOriginV2::VaultDevice,
+            None,
             TypingStateV2::Started,
             LiveClock {
                 wall_ms: 1_003,

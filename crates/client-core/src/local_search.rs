@@ -992,7 +992,7 @@ fn message_edge_flags(
 }
 
 fn load_message(store: &Store, conversation_id: &str, id: &str) -> Result<Option<Message>, Error> {
-    store.conn.query_row("SELECT m.payload,m.seen,selected_status.state,selected_status.status_at_ms,(SELECT o.state FROM commands c JOIN outbox o ON o.command_id=c.command_id WHERE c.message_id=m.id),EXISTS(SELECT 1 FROM commands c WHERE c.message_id=m.id) FROM messages m LEFT JOIN send_status selected_status ON selected_status.rowid=(SELECT st.rowid FROM commands c JOIN send_status st ON st.command_id=c.command_id AND st.producer_device_id=c.gateway_device_id WHERE c.message_id=m.id ORDER BY c.rowid LIMIT 1) WHERE m.id=? AND m.conversation_id=?", params![id, conversation_id], message_row).optional()?.map(|row| message_from_row(&store.conn, row)).transpose()
+    store.conn.query_row("SELECT m.payload,m.seen,selected_status.state,selected_status.status_at_ms,selected_status.refusal_reason,(SELECT o.state FROM commands c JOIN outbox o ON o.command_id=c.command_id WHERE c.message_id=m.id),EXISTS(SELECT 1 FROM commands c WHERE c.message_id=m.id) FROM messages m LEFT JOIN send_status selected_status ON selected_status.rowid=(SELECT st.rowid FROM commands c JOIN send_status st ON st.command_id=c.command_id AND st.producer_device_id=c.gateway_device_id WHERE c.message_id=m.id ORDER BY c.rowid LIMIT 1) WHERE m.id=? AND m.conversation_id=?", params![id, conversation_id], message_row).optional()?.map(|row| message_from_row(&store.conn, row)).transpose()
 }
 
 #[cfg(test)]
@@ -1337,7 +1337,7 @@ mod tests {
                 .conn
                 .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 52);
+            assert_eq!(version, crate::SCHEMA_VERSION);
             let after_adoption = search_adoption_snapshot(&store.conn);
             assert_eq!(after_adoption.source_rows, before_adoption.source_rows);
             assert_eq!(after_adoption.fts_rowids, before_adoption.fts_rowids);

@@ -129,6 +129,7 @@ fn draft_mms_is_atomic_held_for_upload_and_permit_waits_for_verified_media() {
 
     let draft = desktop.create_compose_draft(None).unwrap();
     let update = ComposeDraftUpdate {
+        group_name: None,
         text: "look".into(),
         recipients: vec![ADDRESS.into()],
         attachment_ids: vec![info.attachment_id],

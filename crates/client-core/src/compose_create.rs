@@ -112,6 +112,7 @@ fn blank_draft(draft: &ComposeDraft) -> ComposeDraft {
         attachment_ids: Vec::new(),
         route: None,
         revision: 0,
+        group_name: None,
     }
 }
 
@@ -162,9 +163,10 @@ fn insert_initial_draft(
         attachment_ids: update.attachment_ids,
         route: update.route,
         revision: 0,
+        group_name: update.group_name,
     };
     conn.execute(
-        "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,draft_only) VALUES(?,?,?,?,?,?,0,1)",
+        "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,group_name,draft_only) VALUES(?,?,?,?,?,?,0,?,1)",
         params![
             draft.draft_id.to_string(),
             draft.conversation_id.to_string(),
@@ -172,6 +174,7 @@ fn insert_initial_draft(
             json(&draft.recipients)?,
             json(&draft.attachment_ids)?,
             draft.route.as_ref().map(json).transpose()?,
+            draft.group_name,
         ],
     )?;
     Ok(draft)
@@ -184,13 +187,14 @@ fn update_existing_draft(
 ) -> Result<ComposeDraft, Error> {
     let revision = existing.revision.checked_add(1).ok_or(Error::Database)?;
     conn.execute(
-        "UPDATE compose_drafts SET text=?,recipients=?,attachment_ids=?,route=?,revision=?,draft_only=1 WHERE draft_id=?",
+        "UPDATE compose_drafts SET text=?,recipients=?,attachment_ids=?,route=?,revision=?,group_name=?,draft_only=1 WHERE draft_id=?",
         params![
             update.text,
             json(&update.recipients)?,
             json(&update.attachment_ids)?,
             update.route.as_ref().map(json).transpose()?,
             to_i64(revision)?,
+            update.group_name.clone(),
             existing.draft_id.to_string(),
         ],
     )?;
@@ -202,6 +206,7 @@ fn update_existing_draft(
         attachment_ids: update.attachment_ids,
         route: update.route,
         revision,
+        group_name: update.group_name,
     })
 }
 

@@ -10,6 +10,32 @@ const BURST_WINDOW_MS: u64 = 1_000;
 const MAX_OCCUPANCY: usize = 50;
 const MAX_CONVERSATIONS: usize = 256;
 
+/// Sender repeat-suppression key: one slot per conversation and roster participant.
+/// `participant: None` is the 1:1 slot and matches the pre-group behavior exactly.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TypingSlot {
+    conversation: ConversationId,
+    participant: Option<String>,
+}
+
+impl From<ConversationId> for TypingSlot {
+    fn from(conversation: ConversationId) -> Self {
+        Self {
+            conversation,
+            participant: None,
+        }
+    }
+}
+
+impl TypingSlot {
+    pub(crate) fn participant(conversation: ConversationId, participant: &str) -> Self {
+        Self {
+            conversation,
+            participant: Some(participant.to_owned()),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LiveClock {
     pub wall_ms: i64,
@@ -77,8 +103,8 @@ struct ConversationBudget {
 pub(crate) struct SenderBudget {
     sent: VecDeque<u64>,
     burst_starts: VecDeque<u64>,
-    reservations: HashMap<ConversationId, u64>,
-    conversations: HashMap<ConversationId, ConversationBudget>,
+    reservations: HashMap<TypingSlot, u64>,
+    conversations: HashMap<TypingSlot, ConversationBudget>,
 }
 
 impl SenderBudget {
@@ -93,31 +119,27 @@ impl SenderBudget {
 
     pub(crate) fn admit_start(
         &mut self,
-        conversation: ConversationId,
+        slot: impl Into<TypingSlot>,
         mono_ms: u64,
     ) -> Result<bool, PolicyError> {
         let mut candidate = self.clone();
-        let admitted = candidate.admit_start_inner(conversation, mono_ms)?;
+        let admitted = candidate.admit_start_inner(slot.into(), mono_ms)?;
         *self = candidate;
         Ok(admitted)
     }
 
     pub(crate) fn admit_stop(
         &mut self,
-        conversation: ConversationId,
+        slot: impl Into<TypingSlot>,
         mono_ms: u64,
     ) -> Result<bool, PolicyError> {
         let mut candidate = self.clone();
-        let admitted = candidate.admit_stop_inner(conversation, mono_ms)?;
+        let admitted = candidate.admit_stop_inner(slot.into(), mono_ms)?;
         *self = candidate;
         Ok(admitted)
     }
 
-    fn admit_start_inner(
-        &mut self,
-        conversation: ConversationId,
-        mono_ms: u64,
-    ) -> Result<bool, PolicyError> {
+    fn admit_start_inner(&mut self, slot: TypingSlot, mono_ms: u64) -> Result<bool, PolicyError> {
         let reservation_until = mono_ms
             .checked_add(RESERVATION_MS)
             .ok_or(PolicyError::InvalidContext)?;
@@ -125,13 +147,13 @@ impl SenderBudget {
 
         let active = self
             .conversations
-            .get(&conversation)
+            .get(&slot)
             .is_some_and(|entry| entry.active);
         let occupancy_cost = if active { 1 } else { 2 };
         if self.occupancy() > MAX_OCCUPANCY - occupancy_cost || self.burst_starts.len() >= 5 {
             return Ok(false);
         }
-        if let Some(entry) = self.conversations.get(&conversation)
+        if let Some(entry) = self.conversations.get(&slot)
             && (entry
                 .last_start_ms
                 .is_some_and(|last| mono_ms.saturating_sub(last) < START_INTERVAL_MS)
@@ -139,15 +161,15 @@ impl SenderBudget {
         {
             return Ok(false);
         }
-        let added_records = usize::from(!self.conversations.contains_key(&conversation))
-            + usize::from(!self.reservations.contains_key(&conversation));
+        let added_records = usize::from(!self.conversations.contains_key(&slot))
+            + usize::from(!self.reservations.contains_key(&slot));
         if self.record_count() + added_records > MAX_CONVERSATIONS {
             return Err(PolicyError::Capacity);
         }
 
         let entry = self
             .conversations
-            .entry(conversation)
+            .entry(slot.clone())
             .or_insert_with(|| ConversationBudget {
                 active: false,
                 last_start_ms: None,
@@ -158,20 +180,16 @@ impl SenderBudget {
         entry.starts.push_back(mono_ms);
         self.sent.push_back(mono_ms);
         self.burst_starts.push_back(mono_ms);
-        self.reservations.insert(conversation, reservation_until);
+        self.reservations.insert(slot, reservation_until);
         Ok(true)
     }
 
-    fn admit_stop_inner(
-        &mut self,
-        conversation: ConversationId,
-        mono_ms: u64,
-    ) -> Result<bool, PolicyError> {
+    fn admit_stop_inner(&mut self, slot: TypingSlot, mono_ms: u64) -> Result<bool, PolicyError> {
         self.prune(mono_ms);
-        let Some(entry) = self.conversations.get_mut(&conversation) else {
+        let Some(entry) = self.conversations.get_mut(&slot) else {
             return Ok(false);
         };
-        if !entry.active || self.reservations.remove(&conversation).is_none() {
+        if !entry.active || self.reservations.remove(&slot).is_none() {
             return Ok(false);
         }
         entry.active = false;
@@ -185,13 +203,12 @@ impl SenderBudget {
         let expired_reservations: Vec<_> = self
             .reservations
             .iter()
-            .filter_map(|(conversation, expires_at)| {
-                (*expires_at <= mono_ms).then_some(*conversation)
-            })
+            .filter(|(_, expires_at)| **expires_at <= mono_ms)
+            .map(|(slot, _)| slot.clone())
             .collect();
-        for conversation in expired_reservations {
-            self.reservations.remove(&conversation);
-            if let Some(entry) = self.conversations.get_mut(&conversation) {
+        for slot in expired_reservations {
+            self.reservations.remove(&slot);
+            if let Some(entry) = self.conversations.get_mut(&slot) {
                 entry.active = false;
             }
         }
@@ -459,7 +476,7 @@ mod tests {
         let mut budget = SenderBudget::new();
         for number in 0..MAX_CONVERSATIONS {
             budget.conversations.insert(
-                conversation(number as u128),
+                conversation(number as u128).into(),
                 ConversationBudget {
                     active: true,
                     last_start_ms: None,
@@ -468,7 +485,7 @@ mod tests {
             );
             budget
                 .reservations
-                .insert(conversation(number as u128), RESERVATION_MS);
+                .insert(conversation(number as u128).into(), RESERVATION_MS);
         }
         assert_eq!(
             budget.admit_start(conversation(MAX_CONVERSATIONS as u128), RESERVATION_MS),
@@ -480,7 +497,7 @@ mod tests {
             .sent
             .extend(std::iter::repeat_n(RESERVATION_MS, 49));
         nearly_full.conversations.insert(
-            conversation(1),
+            conversation(1).into(),
             ConversationBudget {
                 active: true,
                 last_start_ms: Some(0),
@@ -489,7 +506,7 @@ mod tests {
         );
         nearly_full
             .reservations
-            .insert(conversation(1), RESERVATION_MS);
+            .insert(conversation(1).into(), RESERVATION_MS);
         assert_eq!(
             nearly_full.admit_start(conversation(1), RESERVATION_MS),
             Ok(false)
@@ -502,7 +519,7 @@ mod tests {
         let mut budget = SenderBudget::new();
         for number in 0..MAX_CONVERSATIONS {
             budget.conversations.insert(
-                conversation(number as u128),
+                conversation(number as u128).into(),
                 ConversationBudget {
                     active: true,
                     last_start_ms: None,
@@ -523,7 +540,7 @@ mod tests {
         let mut budget = SenderBudget::new();
         for number in 0..255 {
             budget.conversations.insert(
-                conversation(number),
+                conversation(number).into(),
                 ConversationBudget {
                     active: false,
                     last_start_ms: Some(0),
@@ -539,7 +556,7 @@ mod tests {
         assert_eq!(budget, before);
 
         budget.conversations.insert(
-            conversation(255),
+            conversation(255).into(),
             ConversationBudget {
                 active: false,
                 last_start_ms: Some(0),
@@ -564,5 +581,18 @@ mod tests {
         );
         assert_eq!(candidate, before);
         assert_eq!(budget, before);
+    }
+
+    #[test]
+    fn participant_slots_suppress_repeats_independently_of_each_other_and_one_to_one() {
+        let mut budget = SenderBudget::new();
+        let alex = TypingSlot::participant(conversation(1), "+15551230001");
+        let sam = TypingSlot::participant(conversation(1), "+15551230002");
+        assert_eq!(budget.admit_start(alex.clone(), 0), Ok(true));
+        assert_eq!(budget.admit_start(sam.clone(), 1_000), Ok(true));
+        assert_eq!(budget.admit_start(alex.clone(), 1_000), Ok(false));
+        assert_eq!(budget.admit_stop(sam, 1_500), Ok(true));
+        assert_eq!(budget.admit_stop(alex, 1_500), Ok(true));
+        assert_eq!(budget.admit_start(conversation(1), 1_500), Ok(true));
     }
 }

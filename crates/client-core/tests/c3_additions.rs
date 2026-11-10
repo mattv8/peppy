@@ -301,6 +301,7 @@ fn compose_draft_send_is_atomic_across_double_submit_and_reopen() {
     let draft = desktop.create_compose_draft(None).unwrap();
     assert_eq!((draft.revision, draft.text.as_str()), (0, ""));
     let update = ComposeDraftUpdate {
+        group_name: None,
         text: "hello from a new conversation".into(),
         recipients: vec![ADDRESS.into()],
         attachment_ids: vec![],
@@ -315,6 +316,7 @@ fn compose_draft_send_is_atomic_across_double_submit_and_reopen() {
             draft.draft_id,
             0,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "stale".into(),
                 ..update.clone()
             }
@@ -345,6 +347,7 @@ fn compose_draft_send_is_atomic_across_double_submit_and_reopen() {
             draft.draft_id,
             1,
             ComposeDraftUpdate {
+                group_name: None,
                 attachment_ids: vec![AttachmentId::new()],
                 ..update.clone()
             },
@@ -479,6 +482,7 @@ fn authenticated_status_with_out_of_range_sequence_is_quarantined_not_stalled() 
         command_id: CommandId::new(),
         state: SendState::Sent,
         at_ms: None,
+        reason: None,
     })
     .unwrap();
     let sealed = encrypt(&key, &envelope.aad_bytes().unwrap(), &plain).unwrap();

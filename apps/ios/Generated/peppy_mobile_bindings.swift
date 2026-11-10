@@ -1101,7 +1101,7 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      * Seals a canonical protocol frame for the private live transport. Call this off the UI
      * thread.
      */
-    func sealTypingSignalV2(conversationId: String, gatewayDeviceId: String, origin: NativeTypingOrigin, state: NativeTypingState, clock: NativeLiveClock) throws  -> NativeLiveOutbound?
+    func sealTypingSignalV2(conversationId: String, gatewayDeviceId: String, origin: NativeTypingOrigin, participant: String?, state: NativeTypingState, clock: NativeLiveClock) throws  -> NativeLiveOutbound?
     
     func sendComposeDraft(draftId: String, expectedRevision: UInt64) throws  -> NativeQueuedSend
     
@@ -3076,7 +3076,7 @@ open func saveComposeDraft(draftId: String, expectedRevision: UInt64, update: Na
      * Seals a canonical protocol frame for the private live transport. Call this off the UI
      * thread.
      */
-open func sealTypingSignalV2(conversationId: String, gatewayDeviceId: String, origin: NativeTypingOrigin, state: NativeTypingState, clock: NativeLiveClock)throws  -> NativeLiveOutbound?  {
+open func sealTypingSignalV2(conversationId: String, gatewayDeviceId: String, origin: NativeTypingOrigin, participant: String?, state: NativeTypingState, clock: NativeLiveClock)throws  -> NativeLiveOutbound?  {
     return try  FfiConverterOptionTypeNativeLiveOutbound.lift(try rustCallWithError(FfiConverterTypeNativeLiveTypingError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_seal_typing_signal_v2(
@@ -3084,6 +3084,7 @@ open func sealTypingSignalV2(conversationId: String, gatewayDeviceId: String, or
         FfiConverterString.lower(conversationId),
         FfiConverterString.lower(gatewayDeviceId),
         FfiConverterTypeNativeTypingOrigin_lower(origin),
+        FfiConverterOptionString.lower(participant),
         FfiConverterTypeNativeTypingState_lower(state),
         FfiConverterTypeNativeLiveClock_lower(clock),uniffiCallStatus
     )
@@ -5254,6 +5255,11 @@ public protocol NativeRcsSendPreparationProtocol: AnyObject, Sendable {
     
     func begin(observationJson: String, nowMs: Int64) throws  -> NativeRcsCommittedSend
     
+    /**
+     * The group member digest for the Go prepare request; `None` for a 1:1 target, which must omit it.
+     */
+    func expectedMemberDigest()  -> String?
+    
     func factsJson() throws  -> String
     
 }
@@ -5320,6 +5326,18 @@ open func begin(observationJson: String, nowMs: Int64)throws  -> NativeRcsCommit
             self.uniffiCloneHandle(),
         FfiConverterString.lower(observationJson),
         FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The group member digest for the Go prepare request; `None` for a 1:1 target, which must omit it.
+     */
+open func expectedMemberDigest() -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativercssendpreparation_expected_member_digest(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -6966,6 +6984,91 @@ public func FfiConverterTypeNativeGatewaySettings_lower(_ value: NativeGatewaySe
 
 
 /**
+ * Counts from one group candidate snapshot. Google identifiers never cross this boundary.
+ */
+public struct NativeGroupClassification: Equatable, Hashable {
+    public var linked: UInt64
+    public var created: UInt64
+    public var live: UInt64
+    public var membersChanged: UInt64
+    public var paused: UInt64
+    public var withdrawn: UInt64
+    public var notProvable: UInt64
+    public var dormant: UInt64
+    public var conflicts: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(linked: UInt64, created: UInt64, live: UInt64, membersChanged: UInt64, paused: UInt64, withdrawn: UInt64, notProvable: UInt64, dormant: UInt64, conflicts: UInt64) {
+        self.linked = linked
+        self.created = created
+        self.live = live
+        self.membersChanged = membersChanged
+        self.paused = paused
+        self.withdrawn = withdrawn
+        self.notProvable = notProvable
+        self.dormant = dormant
+        self.conflicts = conflicts
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeGroupClassification: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeGroupClassification: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeGroupClassification {
+        return
+            try NativeGroupClassification(
+                linked: FfiConverterUInt64.read(from: &buf), 
+                created: FfiConverterUInt64.read(from: &buf), 
+                live: FfiConverterUInt64.read(from: &buf), 
+                membersChanged: FfiConverterUInt64.read(from: &buf), 
+                paused: FfiConverterUInt64.read(from: &buf), 
+                withdrawn: FfiConverterUInt64.read(from: &buf), 
+                notProvable: FfiConverterUInt64.read(from: &buf), 
+                dormant: FfiConverterUInt64.read(from: &buf), 
+                conflicts: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeGroupClassification, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.linked, into: &buf)
+        FfiConverterUInt64.write(value.created, into: &buf)
+        FfiConverterUInt64.write(value.live, into: &buf)
+        FfiConverterUInt64.write(value.membersChanged, into: &buf)
+        FfiConverterUInt64.write(value.paused, into: &buf)
+        FfiConverterUInt64.write(value.withdrawn, into: &buf)
+        FfiConverterUInt64.write(value.notProvable, into: &buf)
+        FfiConverterUInt64.write(value.dormant, into: &buf)
+        FfiConverterUInt64.write(value.conflicts, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeGroupClassification_lift(_ buf: RustBuffer) throws -> NativeGroupClassification {
+    return try FfiConverterTypeNativeGroupClassification.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeGroupClassification_lower(_ value: NativeGroupClassification) -> RustBuffer {
+    return FfiConverterTypeNativeGroupClassification.lower(value)
+}
+
+
+/**
  * Current host conditions used solely to increase text-history capture throughput.
  */
 public struct NativeHistoryImportConditions: Equatable, Hashable {
@@ -7584,13 +7687,22 @@ public struct NativeMessage: Equatable, Hashable {
     public var incoming: Bool
     public var seen: Bool
     public var sendState: String?
+    /**
+     * The gateway's recorded group refusal for this send (`members_changed`, `update_required`,
+     * `withdrawn`, `create_unconfirmed`, or `create_not_rcs`), when there is one.
+     */
+    public var sendRefusal: String?
     public var sentAtMs: Int64?
     public var rcsStatus: String?
     public var rcsReported: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(messageId: String, conversationId: String, senderAddress: String?, recipients: [String], body: String, subject: String?, transport: String, attachmentIds: [String], incoming: Bool, seen: Bool, sendState: String?, sentAtMs: Int64?, rcsStatus: String?, rcsReported: Bool) {
+    public init(messageId: String, conversationId: String, senderAddress: String?, recipients: [String], body: String, subject: String?, transport: String, attachmentIds: [String], incoming: Bool, seen: Bool, sendState: String?, 
+        /**
+         * The gateway's recorded group refusal for this send (`members_changed`, `update_required`,
+         * `withdrawn`, `create_unconfirmed`, or `create_not_rcs`), when there is one.
+         */sendRefusal: String?, sentAtMs: Int64?, rcsStatus: String?, rcsReported: Bool) {
         self.messageId = messageId
         self.conversationId = conversationId
         self.senderAddress = senderAddress
@@ -7602,6 +7714,7 @@ public struct NativeMessage: Equatable, Hashable {
         self.incoming = incoming
         self.seen = seen
         self.sendState = sendState
+        self.sendRefusal = sendRefusal
         self.sentAtMs = sentAtMs
         self.rcsStatus = rcsStatus
         self.rcsReported = rcsReported
@@ -7634,6 +7747,7 @@ public struct FfiConverterTypeNativeMessage: FfiConverterRustBuffer {
                 incoming: FfiConverterBool.read(from: &buf), 
                 seen: FfiConverterBool.read(from: &buf), 
                 sendState: FfiConverterOptionString.read(from: &buf), 
+                sendRefusal: FfiConverterOptionString.read(from: &buf), 
                 sentAtMs: FfiConverterOptionInt64.read(from: &buf), 
                 rcsStatus: FfiConverterOptionString.read(from: &buf), 
                 rcsReported: FfiConverterBool.read(from: &buf)
@@ -7652,6 +7766,7 @@ public struct FfiConverterTypeNativeMessage: FfiConverterRustBuffer {
         FfiConverterBool.write(value.incoming, into: &buf)
         FfiConverterBool.write(value.seen, into: &buf)
         FfiConverterOptionString.write(value.sendState, into: &buf)
+        FfiConverterOptionString.write(value.sendRefusal, into: &buf)
         FfiConverterOptionInt64.write(value.sentAtMs, into: &buf)
         FfiConverterOptionString.write(value.rcsStatus, into: &buf)
         FfiConverterBool.write(value.rcsReported, into: &buf)
@@ -12029,6 +12144,7 @@ enum MobileBindingsError: Swift.Error, Equatable, Hashable, Foundation.Localized
     case MmsMediaQuota
     case SmsCapacity
     case LockPoisoned
+    case GroupMembersChanged
 
     
 
@@ -12080,6 +12196,7 @@ public struct FfiConverterTypeMobileBindingsError: FfiConverterRustBuffer {
         case 20: return .MmsMediaQuota
         case 21: return .SmsCapacity
         case 22: return .LockPoisoned
+        case 23: return .GroupMembersChanged
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -12178,6 +12295,10 @@ public struct FfiConverterTypeMobileBindingsError: FfiConverterRustBuffer {
         
         case .LockPoisoned:
             writeInt(&buf, Int32(22))
+        
+        
+        case .GroupMembersChanged:
+            writeInt(&buf, Int32(23))
         
         }
     }
@@ -13277,6 +13398,272 @@ public func FfiConverterTypeNativeGatewayPlatform_lower(_ value: NativeGatewayPl
 
 
 
+/**
+ * Outcome of asking for the one-use create permit of a group send that waits on its create.
+ */
+
+public enum NativeGroupCreateBegin: Equatable, Hashable {
+    
+    /**
+     * Run exactly one create with these canonical other members and this name, then commit it.
+     */
+    case permit(commandId: String, numbers: [String], name: String?
+    )
+    /**
+     * No create was issued. `state` is the send's definite refusal.
+     */
+    case refused(state: NativePermitState
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeGroupCreateBegin: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeGroupCreateBegin: FfiConverterRustBuffer {
+    typealias SwiftType = NativeGroupCreateBegin
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeGroupCreateBegin {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .permit(commandId: try FfiConverterString.read(from: &buf), numbers: try FfiConverterSequenceString.read(from: &buf), name: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        case 2: return .refused(state: try FfiConverterTypeNativePermitState.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeGroupCreateBegin, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .permit(commandId,numbers,name):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(commandId, into: &buf)
+            FfiConverterSequenceString.write(numbers, into: &buf)
+            FfiConverterOptionString.write(name, into: &buf)
+            
+        
+        case let .refused(state):
+            writeInt(&buf, Int32(2))
+            FfiConverterTypeNativePermitState.write(state, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeGroupCreateBegin_lift(_ buf: RustBuffer) throws -> NativeGroupCreateBegin {
+    return try FfiConverterTypeNativeGroupCreateBegin.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeGroupCreateBegin_lower(_ value: NativeGroupCreateBegin) -> RustBuffer {
+    return FfiConverterTypeNativeGroupCreateBegin.lower(value)
+}
+
+
+
+/**
+ * Google's create answer, recorded once per permit.
+ */
+
+public enum NativeGroupCreateOutcome: Equatable, Hashable {
+    
+    case pending
+    case notRcs
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeGroupCreateOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeGroupCreateOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = NativeGroupCreateOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeGroupCreateOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .pending
+        
+        case 2: return .notRcs
+        
+        case 3: return .unknown
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeGroupCreateOutcome, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .pending:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .notRcs:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeGroupCreateOutcome_lift(_ buf: RustBuffer) throws -> NativeGroupCreateOutcome {
+    return try FfiConverterTypeNativeGroupCreateOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeGroupCreateOutcome_lower(_ value: NativeGroupCreateOutcome) -> RustBuffer {
+    return FfiConverterTypeNativeGroupCreateOutcome.lower(value)
+}
+
+
+
+/**
+ * Create state of a conversation's group, for native status.
+ */
+
+public enum NativeGroupCreateState: Equatable, Hashable {
+    
+    case notRequested
+    case begun
+    case pending
+    case unknown
+    case notRcs
+    case refused(state: NativePermitState
+    )
+    case linked
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeGroupCreateState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeGroupCreateState: FfiConverterRustBuffer {
+    typealias SwiftType = NativeGroupCreateState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeGroupCreateState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .notRequested
+        
+        case 2: return .begun
+        
+        case 3: return .pending
+        
+        case 4: return .unknown
+        
+        case 5: return .notRcs
+        
+        case 6: return .refused(state: try FfiConverterTypeNativePermitState.read(from: &buf)
+        )
+        
+        case 7: return .linked
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeGroupCreateState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .notRequested:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .begun:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .pending:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .notRcs:
+            writeInt(&buf, Int32(5))
+        
+        
+        case let .refused(state):
+            writeInt(&buf, Int32(6))
+            FfiConverterTypeNativePermitState.write(state, into: &buf)
+            
+        
+        case .linked:
+            writeInt(&buf, Int32(7))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeGroupCreateState_lift(_ buf: RustBuffer) throws -> NativeGroupCreateState {
+    return try FfiConverterTypeNativeGroupCreateState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeGroupCreateState_lower(_ value: NativeGroupCreateState) -> RustBuffer {
+    return FfiConverterTypeNativeGroupCreateState.lower(value)
+}
+
+
+
 
 public enum NativeHostedClientKind: Equatable, Hashable {
     
@@ -13433,9 +13820,15 @@ public func FfiConverterTypeNativeIngestState_lower(_ value: NativeIngestState) 
 
 public enum NativeLiveAction: Equatable, Hashable {
     
-    case display(peerDeviceId: String, sessionToken: UInt64, sequence: UInt64, conversationId: String, state: NativeTypingState, deadlineMono: UInt64
+    case display(peerDeviceId: String, sessionToken: UInt64, sequence: UInt64, conversationId: String, 
+        /**
+         * Canonical E.164 group member; `None` for 1:1 typing.
+         */participant: String?, state: NativeTypingState, deadlineMono: UInt64
     )
-    case gatewayTypingIntent(peerDeviceId: String, sessionToken: UInt64, sequence: UInt64, conversationId: String, state: NativeTypingState, deadlineMono: UInt64
+    case gatewayTypingIntent(peerDeviceId: String, sessionToken: UInt64, sequence: UInt64, conversationId: String, 
+        /**
+         * Canonical E.164 group member; `None` for 1:1 typing.
+         */participant: String?, state: NativeTypingState, deadlineMono: UInt64
     )
 
 
@@ -13458,10 +13851,10 @@ public struct FfiConverterTypeNativeLiveAction: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
         
-        case 1: return .display(peerDeviceId: try FfiConverterString.read(from: &buf), sessionToken: try FfiConverterUInt64.read(from: &buf), sequence: try FfiConverterUInt64.read(from: &buf), conversationId: try FfiConverterString.read(from: &buf), state: try FfiConverterTypeNativeTypingState.read(from: &buf), deadlineMono: try FfiConverterUInt64.read(from: &buf)
+        case 1: return .display(peerDeviceId: try FfiConverterString.read(from: &buf), sessionToken: try FfiConverterUInt64.read(from: &buf), sequence: try FfiConverterUInt64.read(from: &buf), conversationId: try FfiConverterString.read(from: &buf), participant: try FfiConverterOptionString.read(from: &buf), state: try FfiConverterTypeNativeTypingState.read(from: &buf), deadlineMono: try FfiConverterUInt64.read(from: &buf)
         )
         
-        case 2: return .gatewayTypingIntent(peerDeviceId: try FfiConverterString.read(from: &buf), sessionToken: try FfiConverterUInt64.read(from: &buf), sequence: try FfiConverterUInt64.read(from: &buf), conversationId: try FfiConverterString.read(from: &buf), state: try FfiConverterTypeNativeTypingState.read(from: &buf), deadlineMono: try FfiConverterUInt64.read(from: &buf)
+        case 2: return .gatewayTypingIntent(peerDeviceId: try FfiConverterString.read(from: &buf), sessionToken: try FfiConverterUInt64.read(from: &buf), sequence: try FfiConverterUInt64.read(from: &buf), conversationId: try FfiConverterString.read(from: &buf), participant: try FfiConverterOptionString.read(from: &buf), state: try FfiConverterTypeNativeTypingState.read(from: &buf), deadlineMono: try FfiConverterUInt64.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -13472,22 +13865,24 @@ public struct FfiConverterTypeNativeLiveAction: FfiConverterRustBuffer {
         switch value {
         
         
-        case let .display(peerDeviceId,sessionToken,sequence,conversationId,state,deadlineMono):
+        case let .display(peerDeviceId,sessionToken,sequence,conversationId,participant,state,deadlineMono):
             writeInt(&buf, Int32(1))
             FfiConverterString.write(peerDeviceId, into: &buf)
             FfiConverterUInt64.write(sessionToken, into: &buf)
             FfiConverterUInt64.write(sequence, into: &buf)
             FfiConverterString.write(conversationId, into: &buf)
+            FfiConverterOptionString.write(participant, into: &buf)
             FfiConverterTypeNativeTypingState.write(state, into: &buf)
             FfiConverterUInt64.write(deadlineMono, into: &buf)
             
         
-        case let .gatewayTypingIntent(peerDeviceId,sessionToken,sequence,conversationId,state,deadlineMono):
+        case let .gatewayTypingIntent(peerDeviceId,sessionToken,sequence,conversationId,participant,state,deadlineMono):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(peerDeviceId, into: &buf)
             FfiConverterUInt64.write(sessionToken, into: &buf)
             FfiConverterUInt64.write(sequence, into: &buf)
             FfiConverterString.write(conversationId, into: &buf)
+            FfiConverterOptionString.write(participant, into: &buf)
             FfiConverterTypeNativeTypingState.write(state, into: &buf)
             FfiConverterUInt64.write(deadlineMono, into: &buf)
             
@@ -14487,6 +14882,15 @@ public enum NativePermitState: Equatable, Hashable {
     case unknownRoute
     case mappingUnproven
     case carrierOnlyProofUnavailable
+    case groupMembersChanged
+    case groupUpdateRequired
+    case groupWithdrawn
+    case groupCreateUnconfirmed
+    case groupCreateNotRcs
+    /**
+     * The group create is needed or in flight, or its proof is pending. Nothing was sent.
+     */
+    case groupCreatePending
 
 
 
@@ -14531,6 +14935,18 @@ public struct FfiConverterTypeNativePermitState: FfiConverterRustBuffer {
         case 11: return .mappingUnproven
         
         case 12: return .carrierOnlyProofUnavailable
+        
+        case 13: return .groupMembersChanged
+        
+        case 14: return .groupUpdateRequired
+        
+        case 15: return .groupWithdrawn
+        
+        case 16: return .groupCreateUnconfirmed
+        
+        case 17: return .groupCreateNotRcs
+        
+        case 18: return .groupCreatePending
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -14586,6 +15002,30 @@ public struct FfiConverterTypeNativePermitState: FfiConverterRustBuffer {
         
         case .carrierOnlyProofUnavailable:
             writeInt(&buf, Int32(12))
+        
+        
+        case .groupMembersChanged:
+            writeInt(&buf, Int32(13))
+        
+        
+        case .groupUpdateRequired:
+            writeInt(&buf, Int32(14))
+        
+        
+        case .groupWithdrawn:
+            writeInt(&buf, Int32(15))
+        
+        
+        case .groupCreateUnconfirmed:
+            writeInt(&buf, Int32(16))
+        
+        
+        case .groupCreateNotRcs:
+            writeInt(&buf, Int32(17))
+        
+        
+        case .groupCreatePending:
+            writeInt(&buf, Int32(18))
         
         }
     }
@@ -14930,6 +15370,82 @@ public func FfiConverterTypeNativeRcsEligibility_lift(_ buf: RustBuffer) throws 
 #endif
 public func FfiConverterTypeNativeRcsEligibility_lower(_ value: NativeRcsEligibility) -> RustBuffer {
     return FfiConverterTypeNativeRcsEligibility.lower(value)
+}
+
+
+
+/**
+ * Outcome of re-proving a live group against one fresh target observation.
+ */
+
+public enum NativeRcsGroupVerification: Equatable, Hashable {
+    
+    case proven
+    case membersChanged
+    case refused
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeRcsGroupVerification: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRcsGroupVerification: FfiConverterRustBuffer {
+    typealias SwiftType = NativeRcsGroupVerification
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsGroupVerification {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .proven
+        
+        case 2: return .membersChanged
+        
+        case 3: return .refused
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeRcsGroupVerification, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .proven:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .membersChanged:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .refused:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsGroupVerification_lift(_ buf: RustBuffer) throws -> NativeRcsGroupVerification {
+    return try FfiConverterTypeNativeRcsGroupVerification.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsGroupVerification_lower(_ value: NativeRcsGroupVerification) -> RustBuffer {
+    return FfiConverterTypeNativeRcsGroupVerification.lower(value)
 }
 
 
@@ -18046,6 +18562,20 @@ public func ownerPhoneShouldRotate(stage: NativeOwnerPhoneStage, expiresInSecond
     )
 })
 }
+/**
+ * Issues the one-use create permit for a group send that is waiting on a create.
+ */
+public func gatewayBeginRcsGroupCreate(client: NativeClient, conversationId: String, commandId: String, nowMs: Int64)throws  -> NativeGroupCreateBegin  {
+    return try  FfiConverterTypeNativeGroupCreateBegin_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_begin_rcs_group_create(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(conversationId),
+        FfiConverterString.lower(commandId),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
 public func gatewayClassifyRcsTarget(client: NativeClient, conversationId: String, recipient: String, snapshotJson: String, nowMs: Int64)throws  -> NativeRcsTargetDecision  {
     return try  FfiConverterTypeNativeRcsTargetDecision_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -18053,6 +18583,44 @@ public func gatewayClassifyRcsTarget(client: NativeClient, conversationId: Strin
         FfiConverterTypeNativeClient_lower(client),
         FfiConverterString.lower(conversationId),
         FfiConverterString.lower(recipient),
+        FfiConverterString.lower(snapshotJson),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+/**
+ * Records Google's create answer for a begun permit. Anything unrecognised is `Unknown`.
+ */
+public func gatewayCommitRcsGroupCreate(client: NativeClient, commandId: String, resultJson: String)throws  -> NativeGroupCreateOutcome  {
+    return try  FfiConverterTypeNativeGroupCreateOutcome_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_commit_rcs_group_create(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(commandId),
+        FfiConverterString.lower(resultJson),uniffiCallStatus
+    )
+})
+}
+/**
+ * The create state of a conversation's group.
+ */
+public func gatewayGroupCreateState(client: NativeClient, conversationId: String)throws  -> NativeGroupCreateState  {
+    return try  FfiConverterTypeNativeGroupCreateState_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_group_create_state(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(conversationId),uniffiCallStatus
+    )
+})
+}
+/**
+ * Applies one complete Google group candidate snapshot and reports counts only.
+ */
+public func gatewayIngestGroupCandidates(client: NativeClient, snapshotJson: String, nowMs: Int64)throws  -> NativeGroupClassification  {
+    return try  FfiConverterTypeNativeGroupClassification_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_ingest_group_candidates(
+        FfiConverterTypeNativeClient_lower(client),
         FfiConverterString.lower(snapshotJson),
         FfiConverterInt64.lower(nowMs),uniffiCallStatus
     )
@@ -18100,6 +18668,32 @@ public func gatewayPrepareNativeRcsSend(client: NativeClient, commandId: String,
     )
 })
 }
+/**
+ * The stored member digest of a Live group for the advisory Go prepare request; `None` otherwise.
+ * It carries no freshness and authorizes nothing by itself.
+ */
+public func gatewayProvedGroupMemberDigest(client: NativeClient, conversationId: String)throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_proved_group_member_digest(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(conversationId),uniffiCallStatus
+    )
+})
+}
+/**
+ * The proved member revision while the group is Live; `None` otherwise. Decimal string, as all
+ * revisions cross the boundary.
+ */
+public func gatewayProvedGroupMemberRevision(client: NativeClient, conversationId: String)throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_proved_group_member_revision(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(conversationId),uniffiCallStatus
+    )
+})
+}
 public func gatewayPublishRcsEligibility(client: NativeClient, publications: [NativeRcsEligibilityPublication], nowMs: Int64)throws  -> UInt32  {
     return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -18135,13 +18729,15 @@ public func gatewayRecordRcsOutcomeUnknown(client: NativeClient, commandId: Stri
     )
 }
 }
-public func gatewayRecordRcsPreEffectRefusal(client: NativeClient, commandId: String, tmpId: String, googleConversationId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+public func gatewayRecordRcsPreEffectRefusal(client: NativeClient, commandId: String, tmpId: String, googleConversationId: String, membersChanged: Bool, nowMs: Int64)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_func_gateway_record_rcs_pre_effect_refusal(
         FfiConverterTypeNativeClient_lower(client),
         FfiConverterString.lower(commandId),
         FfiConverterString.lower(tmpId),
-        FfiConverterString.lower(googleConversationId),uniffiCallStatus
+        FfiConverterString.lower(googleConversationId),
+        FfiConverterBool.lower(membersChanged),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
     )
 }
 }
@@ -18172,6 +18768,46 @@ public func gatewayResolveRcsBootstrapConversations(client: NativeClient, candid
     uniffi_peppy_mobile_bindings_fn_func_gateway_resolve_rcs_bootstrap_conversations(
         FfiConverterTypeNativeClient_lower(client),
         FfiConverterString.lower(candidatesJson),uniffiCallStatus
+    )
+})
+}
+/**
+ * Settles a create whose Google answer could not be committed: persists unknown without calling
+ * Google. Only a command retained by this process is settled.
+ */
+public func gatewaySettleRcsGroupCreate(client: NativeClient, commandId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_settle_rcs_group_create(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(commandId),uniffiCallStatus
+    )
+}
+}
+/**
+ * Re-proves a live group against the fresh target observation the send will use. Call it where
+ * the 1:1 target verification runs for a group ticket, before preparing the send.
+ */
+public func gatewayVerifyRcsGroupObservation(client: NativeClient, observationJson: String, nowMs: Int64)throws  -> NativeRcsGroupVerification  {
+    return try  FfiConverterTypeNativeRcsGroupVerification_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_verify_rcs_group_observation(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(observationJson),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+/**
+ * Advances the link context from a group's route observation, as the 1:1 route step does. `false`
+ * means the context is not current; the group must not be proved or sent on that route.
+ */
+public func gatewayVerifyRcsGroupRoute(client: NativeClient, observationJson: String, nowMs: Int64)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_verify_rcs_group_route(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(observationJson),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
     )
 })
 }
@@ -18331,7 +18967,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_func_owner_phone_should_rotate() != 43566) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_begin_rcs_group_create() != 20642) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_classify_rcs_target() != 39946) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_commit_rcs_group_create() != 37187) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_group_create_state() != 11446) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_ingest_group_candidates() != 56958) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_next_rcs_context_tuple() != 10501) {
@@ -18346,6 +18994,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_prepare_native_rcs_send() != 22733) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_proved_group_member_digest() != 51768) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_proved_group_member_revision() != 50707) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_publish_rcs_eligibility() != 19264) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18355,7 +19009,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_outcome_unknown() != 45222) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_pre_effect_refusal() != 16858) {
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_pre_effect_refusal() != 29483) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_record_rcs_submitted() != 28724) {
@@ -18365,6 +19019,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_resolve_rcs_bootstrap_conversations() != 33213) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_settle_rcs_group_create() != 28103) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_group_observation() != 3893) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_group_route() != 40226) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_mapping() != 16011) {
@@ -18856,7 +19519,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_save_compose_draft() != 5300) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_seal_typing_signal_v2() != 40376) {
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_seal_typing_signal_v2() != 65402) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_send_compose_draft() != 23646) {
@@ -19202,6 +19865,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativercssendpreparation_begin() != 16625) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativercssendpreparation_expected_member_digest() != 56105) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativercssendpreparation_facts_json() != 11822) {

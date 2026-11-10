@@ -795,6 +795,8 @@ fn terminal_lifecycle_states_refuse_every_rcs_permit_entry_point() {
                 command_id,
                 permit.tmp_id(),
                 permit.google_conversation_id(),
+                false,
+                1_000,
             )
             .unwrap();
         gateway

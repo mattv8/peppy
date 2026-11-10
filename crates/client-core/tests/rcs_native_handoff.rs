@@ -10,6 +10,19 @@ fn actual_go_observations_verify_classify_and_begin() {
         target: String,
         snapshot: String,
         now_ms: i64,
+        group_ticket: String,
+        group_prepare: serde_json::Value,
+        group_commit: serde_json::Value,
+    }
+    /// The Go group prepare handoff: the Go-built request that carries the stored member digest.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct GoGroupPrepare {
+        command_id: String,
+        canonicalizer_revision: u32,
+        identity_region: String,
+        carrier_binding: serde_json::Value,
+        expected_member_digest: String,
     }
     let path = std::env::var("PEPPY_RCS_GO_OBSERVATION_PATH").expect("Go fixture path required");
     let fixture: GoFixture = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
@@ -50,6 +63,22 @@ fn actual_go_observations_verify_classify_and_begin() {
         target.google_conversation_id
     );
     assert_eq!(attempt_count(&config, command_id), 1);
+    let group_prepare: GoGroupPrepare = serde_json::from_value(fixture.group_prepare).unwrap();
+    let group_commit: peppy_client_core::NativeRcsCommitProjection =
+        serde_json::from_value(fixture.group_commit).unwrap();
+    assert!(!fixture.group_ticket.is_empty());
+    assert_eq!(group_prepare.canonicalizer_revision, 1);
+    assert!(!group_prepare.identity_region.is_empty());
+    assert!(group_prepare.carrier_binding.is_object());
+    assert_eq!(group_commit.command_id, group_prepare.command_id);
+    assert_eq!(
+        group_commit.target.class,
+        peppy_client_core::NativeRcsTargetClass::Group
+    );
+    assert_eq!(
+        group_commit.expected_member_digest.as_deref(),
+        Some(group_prepare.expected_member_digest.as_str())
+    );
     if let Ok(path) = std::env::var("PEPPY_RCS_NATIVE_FIXTURE_PATH") {
         std::fs::write(path, serde_json::to_vec(&committed).unwrap()).unwrap();
     }
@@ -64,13 +93,13 @@ fn native_preparation_does_not_admit_an_attempt_and_begin_uses_the_stored_comman
     assert_eq!(preparation.request().command_id, command_id.to_string());
     assert_eq!(
         preparation.request().peppy_conversation_id,
-        preparation.mapping().conversation_id.to_string()
+        preparation.mapping().unwrap().conversation_id.to_string()
     );
     assert_eq!(preparation.request().canonical_recipient, "raw:peer-local");
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 
-    let expected_mapping = preparation.mapping().clone();
+    let expected_mapping = preparation.mapping().unwrap().clone();
     let projection = gateway
         .begin_native_rcs_send(preparation, &observation, 1_000)
         .unwrap();
@@ -318,11 +347,11 @@ fn context_tuple_allocator_fences_go_lifecycles_without_using_core_generations()
     let preparation = gateway.prepare_native_rcs_send(command_id, 1_000).unwrap();
     assert_eq!(
         gateway
-            .next_rcs_mapping_revision(preparation.mapping().conversation_id)
+            .next_rcs_mapping_revision(preparation.mapping().unwrap().conversation_id)
             .unwrap(),
         2
     );
-    let conversation_id = preparation.mapping().conversation_id;
+    let conversation_id = preparation.mapping().unwrap().conversation_id;
     let connection = encrypted_connection(&config);
     connection
         .execute(
@@ -417,7 +446,15 @@ fn candidate_snapshot(
                 "number_present": true,
                 "visible": true,
                 "self": false,
+                "canonical_address": recipient,
+                "canonical_address_present": true,
+                "display_name": "",
             }],
+            "name": "",
+            "is_group_chat": false,
+            "read_only": false,
+            "invisible_participant_count": 0,
+            "member_digest": "",
         }],
     })
     .to_string()
@@ -666,6 +703,7 @@ fn public_allocators_refuse_persisted_exhaustion_without_mutating_state() {
         .prepare_native_rcs_send(command_id, 1_000)
         .unwrap()
         .mapping()
+        .unwrap()
         .conversation_id;
     encrypted_connection(&config)
         .execute(
@@ -823,7 +861,7 @@ fn native_begin_refuses_replaced_or_invalidated_prepared_mappings_without_an_att
     encrypted_connection(&config)
         .execute(
             "UPDATE rcs_mapping_proofs SET identity_region='CA' WHERE peppy_conversation_id=?",
-            [preparation.mapping().conversation_id.to_string()],
+            [preparation.mapping().unwrap().conversation_id.to_string()],
         )
         .unwrap();
     assert!(matches!(
@@ -838,7 +876,7 @@ fn native_begin_refuses_replaced_or_invalidated_prepared_mappings_without_an_att
     encrypted_connection(&config)
         .execute(
             "UPDATE rcs_conversation_mappings SET invalidated_at_ms=1001 WHERE peppy_conversation_id=?",
-            [preparation.mapping().conversation_id.to_string()],
+            [preparation.mapping().unwrap().conversation_id.to_string()],
         )
         .unwrap();
     assert!(matches!(
@@ -867,7 +905,7 @@ fn native_begin_refuses_replaced_or_invalidated_prepared_mappings_without_an_att
     encrypted_connection(&config)
         .execute(
             "UPDATE rcs_conversation_mappings SET verified_at_ms=999 WHERE peppy_conversation_id=?",
-            [preparation.mapping().conversation_id.to_string()],
+            [preparation.mapping().unwrap().conversation_id.to_string()],
         )
         .unwrap();
     let mut current = observation;
@@ -1133,6 +1171,8 @@ fn native_pre_effect_refusal_requires_the_exact_unacknowledged_rcs_attempt() {
                     command_id,
                     wrong_tmp_id,
                     wrong_google_conversation_id,
+                    false,
+                    1_000,
                 )
                 .is_err()
         );
@@ -1149,7 +1189,13 @@ fn native_pre_effect_refusal_requires_the_exact_unacknowledged_rcs_attempt() {
 
     assert_eq!(
         gateway
-            .record_native_rcs_pre_effect_refusal(command_id, &tmp_id, &google_conversation_id)
+            .record_native_rcs_pre_effect_refusal(
+                command_id,
+                &tmp_id,
+                &google_conversation_id,
+                false,
+                1_000
+            )
             .unwrap(),
         SendState::FailedBeforeSubmission
     );
@@ -1157,7 +1203,13 @@ fn native_pre_effect_refusal_requires_the_exact_unacknowledged_rcs_attempt() {
     assert_eq!(outbox_after_failure, outbox_before + 1);
     assert_eq!(
         gateway
-            .record_native_rcs_pre_effect_refusal(command_id, &tmp_id, &google_conversation_id)
+            .record_native_rcs_pre_effect_refusal(
+                command_id,
+                &tmp_id,
+                &google_conversation_id,
+                false,
+                1_000
+            )
             .unwrap(),
         SendState::FailedBeforeSubmission
     );
@@ -1179,7 +1231,9 @@ fn native_pre_effect_refusal_requires_the_exact_unacknowledged_rcs_attempt() {
             .record_native_rcs_pre_effect_refusal(
                 command_id,
                 permit.tmp_id(),
-                permit.google_conversation_id()
+                permit.google_conversation_id(),
+                false,
+                1_000,
             )
             .is_err()
     );
@@ -1196,7 +1250,9 @@ fn native_pre_effect_refusal_requires_the_exact_unacknowledged_rcs_attempt() {
                 .record_native_rcs_pre_effect_refusal(
                     command_id,
                     permit.tmp_id(),
-                    permit.google_conversation_id()
+                    permit.google_conversation_id(),
+                    false,
+                    1_000,
                 )
                 .is_err()
         );
@@ -1218,6 +1274,8 @@ fn native_pre_effect_refusal_requires_the_exact_unacknowledged_rcs_attempt() {
                 command_id,
                 permit.tmp_id(),
                 permit.google_conversation_id(),
+                false,
+                1_000,
             )
             .is_err()
     );
@@ -1225,7 +1283,7 @@ fn native_pre_effect_refusal_requires_the_exact_unacknowledged_rcs_attempt() {
     let (_directory, _vault, _config, gateway, command_id) = carrier_command();
     assert!(
         gateway
-            .record_native_rcs_pre_effect_refusal(command_id, "tmp", "google")
+            .record_native_rcs_pre_effect_refusal(command_id, "tmp", "google", false, 1_000)
             .is_err()
     );
 }
@@ -1327,6 +1385,8 @@ fn native_pre_effect_refusal_rolls_back_when_status_outbox_insert_aborts() {
             command_id,
             permit.tmp_id(),
             permit.google_conversation_id(),
+            false,
+            1_000,
         ),
         Err(Error::Database)
     ));
@@ -1340,6 +1400,8 @@ fn native_pre_effect_refusal_rolls_back_when_status_outbox_insert_aborts() {
                 command_id,
                 permit.tmp_id(),
                 permit.google_conversation_id(),
+                false,
+                1_000,
             )
             .unwrap(),
         SendState::FailedBeforeSubmission
@@ -1391,7 +1453,7 @@ fn assert_refusal_unchanged(
     let before = refusal_persisted_rows(config);
     assert!(
         gateway
-            .record_native_rcs_pre_effect_refusal(command_id, tmp_id, google_id)
+            .record_native_rcs_pre_effect_refusal(command_id, tmp_id, google_id, false, 1_000)
             .is_err()
     );
     assert_eq!(refusal_persisted_rows(config), before);
@@ -1466,6 +1528,8 @@ fn native_refusal_rechecks_identity_and_ack_even_for_an_already_failed_attempt()
             command_id,
             first.tmp_id(),
             first.google_conversation_id(),
+            false,
+            1_000,
         )
         .unwrap();
     assert_refusal_unchanged(
@@ -1488,7 +1552,9 @@ fn native_refusal_rechecks_identity_and_ack_even_for_an_already_failed_attempt()
             .record_native_rcs_pre_effect_refusal(
                 command_id,
                 first.tmp_id(),
-                first.google_conversation_id()
+                first.google_conversation_id(),
+                false,
+                1_000,
             )
             .unwrap(),
         SendState::FailedBeforeSubmission

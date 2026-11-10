@@ -70,6 +70,7 @@ fn authored_save_creates_a_stable_pending_push() {
             draft.draft_id,
             draft.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "draft".into(),
                 recipients: vec!["+14155552671".into()],
                 attachment_ids: vec![],
@@ -104,6 +105,7 @@ fn attempted_initial_push_requires_reconciliation_but_never_attempted_draft_stay
             attempted.draft_id,
             attempted.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "attempted r2".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![],
@@ -148,6 +150,7 @@ fn local_queue_rechecks_a_push_attempt_after_the_initial_send_gate() {
     let client = unlocked(&client_config, &vault);
     let draft = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "offline".into(),
             recipients: vec!["+14155552672".into()],
             attachment_ids: vec![],
@@ -183,6 +186,7 @@ fn local_queue_retirement_makes_a_later_push_mark_stale() {
     let client = unlocked(&client_config, &vault);
     let draft = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "offline".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![],
@@ -214,6 +218,7 @@ fn marking_a_replaced_pending_revision_is_stale() {
             first.draft_id,
             first.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "second".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![],
@@ -312,7 +317,7 @@ fn fresh_schema_50_contains_the_production_and_draft_layouts() {
                 row.get::<_, i64>(0)
             })
             .unwrap(),
-        52
+        53
     );
     assert!(column_exists(
         &connection,
@@ -348,6 +353,7 @@ fn production_schema_46_keeps_legacy_drafts_and_adds_the_feature_schema() {
         .unwrap();
     let compose = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "existing image".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![attachment.attachment_id],
@@ -388,7 +394,7 @@ fn production_schema_46_keeps_legacy_drafts_and_adds_the_feature_schema() {
             .query_row("SELECT version FROM schema_meta", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        52
+        53
     );
     assert_eq!(
         connection
@@ -445,6 +451,7 @@ fn production_schema_46_keeps_legacy_drafts_and_adds_the_feature_schema() {
             compose.draft_id,
             compose.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "existing image edited".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![attachment.attachment_id],
@@ -499,7 +506,7 @@ fn feature_schema_46_backfills_pending_drafts_and_repairs_notification_preferenc
                 row.get::<_, i64>(0)
             })
             .unwrap(),
-        52
+        53
     );
     assert!(column_exists(
         &connection,
@@ -527,6 +534,7 @@ fn feature_schema_48_preserves_attempt_evidence_without_backfilling_never_attemp
     let client = unlocked(&client_config, &vault);
     let attempted = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "attempted".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![],
@@ -535,6 +543,7 @@ fn feature_schema_48_preserves_attempt_evidence_without_backfilling_never_attemp
         .unwrap();
     let never_attempted = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "offline".into(),
             recipients: vec!["+14155552672".into()],
             attachment_ids: vec![],
@@ -583,7 +592,7 @@ fn feature_schema_48_preserves_attempt_evidence_without_backfilling_never_attemp
             .query_row("SELECT version FROM schema_meta", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        52
+        53
     );
     assert!(
         !connection
@@ -683,6 +692,7 @@ fn save_draft(client: &Client, text: &str, recipients: Vec<String>) -> ComposeDr
             draft.draft_id,
             draft.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: text.into(),
                 recipients,
                 attachment_ids: vec![],
@@ -806,6 +816,7 @@ fn invalid_second_descriptor_rolls_back_before_quarantine_and_reopen() {
                 invalid_b.clone(),
             ],
             authored_at_ms: 0,
+            group_name: None,
         },
     );
     let valid = save_draft(&sender, "valid", vec!["+15555552672".into()]);
@@ -863,6 +874,7 @@ fn out_of_range_descriptor_is_quarantined_without_blocking_a_valid_head() {
             route: None,
             attachments: vec![invalid],
             authored_at_ms: 0,
+            group_name: None,
         },
     );
     let valid = save_draft(&sender, "valid", vec!["+15555552672".into()]);
@@ -887,6 +899,7 @@ fn retired_draft_rotates_before_missing_descriptor_and_ignores_a_late_old_head()
     let client = unlocked(&client_config, &vault);
     let sent = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "sent".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![],
@@ -904,6 +917,7 @@ fn retired_draft_rotates_before_missing_descriptor_and_ignores_a_late_old_head()
             cleared.draft_id,
             cleared.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "needs media".into(),
                 recipients: cleared.recipients.clone(),
                 attachment_ids: vec![missing],
@@ -923,6 +937,7 @@ fn retired_draft_rotates_before_missing_descriptor_and_ignores_a_late_old_head()
             fresh.draft_id,
             fresh.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: fresh.text,
                 recipients: fresh.recipients,
                 attachment_ids: vec![attachment.attachment_id],
@@ -964,6 +979,7 @@ fn accepted_echo_preserves_a_later_pending_save() {
             adopted.draft_id,
             adopted.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "r2".into(),
                 recipients: adopted.recipients,
                 attachment_ids: vec![],
@@ -1005,6 +1021,7 @@ fn clean_device_fast_forwards_to_a_newer_head() {
             saved.draft_id,
             saved.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "second".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![],
@@ -1045,6 +1062,7 @@ fn disjoint_caption_edits_are_merged_and_queued() {
             local.draft_id,
             local.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "hi world".into(),
                 recipients: local.recipients.clone(),
                 attachment_ids: local.attachment_ids.clone(),
@@ -1057,6 +1075,7 @@ fn disjoint_caption_edits_are_merged_and_queued() {
             initial.draft_id,
             initial.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "hello earth".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![],
@@ -1104,6 +1123,7 @@ fn auto_merge_rebases_on_an_incoming_distinct_branch_and_closes_only_the_old_bra
             local.draft_id,
             local.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "hi world".into(),
                 recipients: local.recipients.clone(),
                 attachment_ids: local.attachment_ids.clone(),
@@ -1116,6 +1136,7 @@ fn auto_merge_rebases_on_an_incoming_distinct_branch_and_closes_only_the_old_bra
             initial.draft_id,
             initial.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "hello earth".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![],
@@ -1138,6 +1159,7 @@ fn auto_merge_rebases_on_an_incoming_distinct_branch_and_closes_only_the_old_bra
             sender_draft.draft_id,
             sender_draft.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "hello mars".into(),
                 recipients: sender_draft.recipients.clone(),
                 attachment_ids: sender_draft.attachment_ids.clone(),
@@ -1174,6 +1196,7 @@ fn auto_merge_does_not_close_a_tracked_branch_already_closed_remotely() {
             local.draft_id,
             local.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "hi world".into(),
                 recipients: local.recipients.clone(),
                 attachment_ids: local.attachment_ids.clone(),
@@ -1187,6 +1210,7 @@ fn auto_merge_does_not_close_a_tracked_branch_already_closed_remotely() {
             remote.draft_id,
             remote.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "hello earth".into(),
                 recipients: remote.recipients.clone(),
                 attachment_ids: remote.attachment_ids.clone(),
@@ -1235,6 +1259,7 @@ fn auto_merge_keeps_an_unrelated_same_draft_conflict_reviewable() {
             local.draft_id,
             local.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "hi world".into(),
                 recipients: local.recipients,
                 attachment_ids: vec![],
@@ -1247,6 +1272,7 @@ fn auto_merge_keeps_an_unrelated_same_draft_conflict_reviewable() {
             initial.draft_id,
             initial.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "hey world".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![],
@@ -1264,6 +1290,7 @@ fn auto_merge_keeps_an_unrelated_same_draft_conflict_reviewable() {
             b.draft_id,
             b.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "hello earth".into(),
                 recipients: b.recipients,
                 attachment_ids: vec![],
@@ -1382,6 +1409,7 @@ fn caption_merge_rejects_touching_changes_and_deduplicates_identical_insertions(
                 local.draft_id,
                 local.revision,
                 ComposeDraftUpdate {
+                    group_name: None,
                     text: local_text.into(),
                     recipients: local.recipients.clone(),
                     attachment_ids: local.attachment_ids.clone(),
@@ -1394,6 +1422,7 @@ fn caption_merge_rejects_touching_changes_and_deduplicates_identical_insertions(
                 initial.draft_id,
                 initial.revision,
                 ComposeDraftUpdate {
+                    group_name: None,
                     text: remote_text.into(),
                     recipients: vec![ADDRESS.into()],
                     attachment_ids: vec![],
@@ -1445,6 +1474,7 @@ fn overlapping_caption_edits_remain_a_conflict() {
             local.draft_id,
             local.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "hullo".into(),
                 recipients: local.recipients.clone(),
                 attachment_ids: vec![],
@@ -1457,6 +1487,7 @@ fn overlapping_caption_edits_remain_a_conflict() {
             initial.draft_id,
             initial.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "hallo".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![],
@@ -1677,6 +1708,7 @@ fn attachment_failure_states_map_upload_download_and_unavailable() {
             draft.draft_id,
             draft.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "image".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![attachment.attachment_id],
@@ -1743,6 +1775,7 @@ fn downloaded_synced_draft_queues_one_mms_after_verified_install() {
         .unwrap();
     let saved = sender
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "caption".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![attachment.attachment_id],
@@ -1784,6 +1817,7 @@ fn downloaded_synced_draft_queues_one_mms_after_verified_install() {
             saved.draft_id,
             received.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: received.text,
                 recipients: received.recipients,
                 attachment_ids: received.attachment_ids,
@@ -1834,6 +1868,7 @@ fn resolving_same_draft_conflicts_uses_the_selected_branch_as_the_next_base() {
                 saved.draft_id,
                 saved.revision,
                 ComposeDraftUpdate {
+                    group_name: None,
                     text: "B".into(),
                     recipients: vec![ADDRESS.into()],
                     attachment_ids: vec![],
@@ -1900,6 +1935,7 @@ fn attachment_inventory_excludes_remote_downloads_and_unavailable_placeholders()
     );
     let saved = sender
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "remote image".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![attachment.attachment_id],
@@ -1923,6 +1959,7 @@ fn attachment_inventory_excludes_remote_downloads_and_unavailable_placeholders()
             local.draft_id,
             local.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "offline".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![attachment.attachment_id],
@@ -1959,6 +1996,7 @@ fn accepted_r1_after_r2_save_keeps_r2_pending_on_r1_base() {
             saved.draft_id,
             saved.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "r2".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![],
@@ -2002,6 +2040,7 @@ fn late_r1_acceptance_without_an_echo_cannot_merge_r2_on_an_old_base() {
             adopted.draft_id,
             adopted.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "x b c".into(),
                 recipients: adopted.recipients.clone(),
                 attachment_ids: vec![],
@@ -2015,6 +2054,7 @@ fn late_r1_acceptance_without_an_echo_cannot_merge_r2_on_an_old_base() {
             r1.draft_id,
             r1.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "x b c!".into(),
                 recipients: r1.recipients,
                 attachment_ids: vec![],
@@ -2038,6 +2078,7 @@ fn late_r1_acceptance_without_an_echo_cannot_merge_r2_on_an_old_base() {
             initial.draft_id,
             initial.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "a b y".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![],
@@ -2096,6 +2137,7 @@ fn local_send_retires_the_old_remote_identity_before_a_delayed_acceptance() {
         .unwrap();
     let saved = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "sent offline".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![attachment.attachment_id],
@@ -2134,6 +2176,7 @@ fn local_send_retires_the_old_remote_identity_before_a_delayed_acceptance() {
             cleared.draft_id,
             cleared.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "next".into(),
                 recipients: cleared.recipients,
                 attachment_ids: vec![],
@@ -2205,6 +2248,7 @@ fn expired_dirty_draft_reprepares_images_under_fresh_ids() {
             draft.draft_id,
             draft.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "offline edit".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![old_attachment.attachment_id],
@@ -2271,6 +2315,7 @@ fn expired_draft_with_missing_ciphertext_keeps_unavailable_placeholder() {
             draft.draft_id,
             draft.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "offline edit".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![attachment.attachment_id],
@@ -2427,6 +2472,7 @@ fn duplicate_remote_descriptor_is_reused_but_a_mismatched_id_is_quarantined() {
         .unwrap();
     let saved = sender
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "image".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![attachment.attachment_id],
@@ -2466,6 +2512,7 @@ fn save_new_and_recipient_move_keep_draft_sync_state() {
     let client = unlocked(&config(&dir, "client", &vault), &vault);
     let saved = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "new".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![],
@@ -2476,6 +2523,7 @@ fn save_new_and_recipient_move_keep_draft_sync_state() {
     accept_push(&client, &push, uuid::Uuid::new_v4());
     client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "destination".into(),
             recipients: vec!["+15555550101".into()],
             attachment_ids: vec![],
@@ -2487,6 +2535,7 @@ fn save_new_and_recipient_move_keep_draft_sync_state() {
             saved.draft_id,
             saved.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "moved".into(),
                 recipients: vec!["+15555550101".into()],
                 attachment_ids: vec![],
@@ -2538,6 +2587,7 @@ fn unsupported_sync_cannot_revive_a_retired_draft_identity() {
     let client = unlocked(&client_config, &vault);
     let saved = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "offline".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![],
@@ -2555,6 +2605,7 @@ fn unsupported_sync_cannot_revive_a_retired_draft_identity() {
             cleared.draft_id,
             cleared.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "next".into(),
                 recipients: cleared.recipients,
                 attachment_ids: vec![],
@@ -2574,6 +2625,7 @@ fn matching_sent_terminal_recovers_one_snapshot_command_after_empty_apply() {
     let client = unlocked(&client_config, &vault);
     let saved = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "send snapshot".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![],
@@ -2611,6 +2663,7 @@ fn provisional_sent_push_never_queues_a_local_command() {
     let client = unlocked(&client_config, &vault);
     let saved = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "send snapshot".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![],
@@ -2656,6 +2709,7 @@ fn accepted_snapshot_replay_does_not_clear_a_moved_destination() {
     let client = unlocked(&client_config, &vault);
     let saved = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "before move".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![],
@@ -2675,6 +2729,7 @@ fn accepted_snapshot_replay_does_not_clear_a_moved_destination() {
             saved.draft_id,
             saved.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "moved destination".into(),
                 recipients: vec!["+15555550101".into()],
                 attachment_ids: vec![],
@@ -2705,6 +2760,7 @@ fn send_intent_keeps_r1_snapshot_after_r2_edit_and_rejects_stale_cas() {
     let client = unlocked(&client_config, &vault);
     let saved = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "r1".into(),
             recipients: vec![ADDRESS.into()],
             attachment_ids: vec![],
@@ -2727,6 +2783,7 @@ fn send_intent_keeps_r1_snapshot_after_r2_edit_and_rejects_stale_cas() {
             saved.draft_id,
             saved.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "r2".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![],
@@ -2768,6 +2825,7 @@ fn nonmatching_sent_terminal_keeps_dirty_draft_without_queueing() {
             saved.draft_id,
             saved.revision,
             ComposeDraftUpdate {
+                group_name: None,
                 text: "r2".into(),
                 recipients: vec![ADDRESS.into()],
                 attachment_ids: vec![],
@@ -2842,6 +2900,7 @@ fn intent_reference_prevents_attachment_cleanup_until_abort_and_discard() {
         .unwrap();
     let saved = client
         .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
             text: "held".into(),
             recipients: vec![],
             attachment_ids: vec![attachment.attachment_id],

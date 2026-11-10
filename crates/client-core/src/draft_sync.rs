@@ -6,8 +6,8 @@
 
 use crate::{
     AttachmentId, AttachmentState, CipherObject, Client, CommandId, ComposeDraft, ConversationId,
-    DraftId, DraftSendParts, Error, GatewayRoute, PurposeKey, Store, VaultId, attachment_retention,
-    attachment_row, conversation_match, decode, media,
+    DraftId, DraftSendParts, Error, GatewayRoute, GroupDraftSend, PurposeKey, Store, VaultId,
+    attachment_retention, attachment_row, conversation_match, decode, media,
 };
 use peppy_crypto::{FileKey, decrypt, encrypt};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -33,6 +33,9 @@ struct SendIntentSnapshot {
     route: Option<GatewayRoute>,
     #[serde(default)]
     parts: Option<DraftSendParts>,
+    /// Group fields of a send to two or more recipients; absent for 1:1 intents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    group: Option<GroupDraftSend>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +73,9 @@ pub struct DraftRecordV1 {
     pub route: Option<GatewayRoute>,
     pub attachments: Vec<DraftRecordAttachmentV1>,
     pub authored_at_ms: i64,
+    /// Group name of a draft to two or more members; serialized only when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_name: Option<String>,
 }
 
 impl fmt::Debug for DraftRecordV1 {
@@ -617,6 +623,18 @@ impl Client {
         expected_revision: u64,
         parts: Option<DraftSendParts>,
     ) -> Result<DraftSendGate, Error> {
+        self.begin_draft_send_for_group(draft_id, expected_revision, parts, None)
+    }
+
+    /// Like `begin_draft_send`, and persists the group fields of a send to two or more members
+    /// in the intent, so the remote acceptance sends with them.
+    pub fn begin_draft_send_for_group(
+        &self,
+        draft_id: DraftId,
+        expected_revision: u64,
+        parts: Option<DraftSendParts>,
+        group: Option<GroupDraftSend>,
+    ) -> Result<DraftSendGate, Error> {
         let store = self.lock()?;
         let existing: Option<(String, String)> = store
             .conn
@@ -677,6 +695,11 @@ impl Client {
         }
         crate::compose_references(&store.conn, &draft.attachment_ids)?;
         let attachment_ids = draft.attachment_ids.clone();
+        // The stored draft's name is authoritative, so the accepted send matches the stored draft.
+        let group = group.map(|group| GroupDraftSend {
+            group_name: draft.group_name.clone(),
+            ..group
+        });
         let snapshot = serde_json::to_vec(&SendIntentSnapshot {
             conversation_id: draft.conversation_id,
             text: draft.text,
@@ -684,6 +707,7 @@ impl Client {
             attachment_ids: draft.attachment_ids,
             route: draft.route,
             parts,
+            group,
         })
         .map_err(|_| Error::Database)?;
         store.conn.execute(
@@ -834,11 +858,16 @@ impl Client {
             attachment_ids: snapshot.attachment_ids.clone(),
             route: snapshot.route.clone(),
             revision: expected_revision,
+            group_name: snapshot
+                .group
+                .as_ref()
+                .and_then(|group| group.group_name.clone()),
         };
         if parts.is_some() && parts != snapshot.parts {
             return Err(Error::Conflict);
         }
         let parts = snapshot.parts;
+        let group = snapshot.group;
         drop(store);
         self.send_compose_draft_snapshot(
             draft_id,
@@ -846,6 +875,7 @@ impl Client {
             command_id,
             draft,
             parts.as_ref(),
+            group.as_ref(),
         )?;
         self.lock()?.conn.execute(
             "UPDATE draft_send_intents SET queued=1 WHERE draft_id=?",
@@ -900,15 +930,17 @@ impl Client {
                 attachment_ids: record_attachment_ids(record),
                 route: record.route.clone(),
                 revision: current.revision.checked_add(1).ok_or(Error::Database)?,
+                group_name: record.group_name.clone(),
             };
             tx.execute(
-                "UPDATE compose_drafts SET text=?,recipients=?,attachment_ids=?,route=?,revision=? WHERE draft_id=?",
+                "UPDATE compose_drafts SET text=?,recipients=?,attachment_ids=?,route=?,revision=?,group_name=? WHERE draft_id=?",
                 params![
                     next.text,
                     json_string(&next.recipients)?,
                     json_string(&next.attachment_ids)?,
                     route_json(&next.route)?,
                     revision_i64(next.revision)?,
+                    next.group_name,
                     draft_id.to_string()
                 ],
             )?;
@@ -1164,12 +1196,13 @@ fn apply_head(
             return store_conflict(conn, draft_id, branch_id, &record);
         }
         conn.execute(
-            "UPDATE compose_drafts SET text=?,recipients=?,attachment_ids=?,route=?,revision=revision+1 WHERE draft_id=?",
+            "UPDATE compose_drafts SET text=?,recipients=?,attachment_ids=?,route=?,group_name=?,revision=revision+1 WHERE draft_id=?",
             params![
                 record.text,
                 json_string(&record.recipients)?,
                 json_string(&record_attachment_ids(&record))?,
                 route_json(&record.route)?,
+                record.group_name,
                 draft_id.to_string()
             ],
         )?;
@@ -1222,7 +1255,7 @@ fn insert_adopted(
         |row| row.get(0),
     )?;
     conn.execute(
-        "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,draft_only) VALUES(?,?,?,?,?,?,0,?)",
+        "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,group_name,draft_only) VALUES(?,?,?,?,?,?,0,?,?)",
         params![
             record.draft_id.to_string(),
             conversation.to_string(),
@@ -1230,6 +1263,7 @@ fn insert_adopted(
             json_string(&record.recipients)?,
             json_string(&record_attachment_ids(record))?,
             route_json(&record.route)?,
+            record.group_name,
             i64::from(!has_messages)
         ],
     )?;
@@ -1982,9 +2016,10 @@ impl Client {
                     attachment_ids,
                     route: current.route,
                     revision: 0,
+                    group_name: current.group_name,
                 };
                 remove_terminal_draft(&tx, draft_id)?;
-                tx.execute("INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,draft_only) VALUES(?,?,?,?,?,?,0,0)", params![replacement.draft_id.to_string(), replacement.conversation_id.to_string(), replacement.text, json_string(&replacement.recipients)?, json_string(&replacement.attachment_ids)?, route_json(&replacement.route)?])?;
+                tx.execute("INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,group_name,draft_only) VALUES(?,?,?,?,?,?,0,?,0)", params![replacement.draft_id.to_string(), replacement.conversation_id.to_string(), replacement.text, json_string(&replacement.recipients)?, json_string(&replacement.attachment_ids)?, route_json(&replacement.route)?, replacement.group_name])?;
                 seal_pending(&tx, &replacement, true, vault_id, epoch, &key)?;
                 tx.execute(
                     "UPDATE draft_sync SET notice='restored-after-expiry' WHERE draft_id=?",
@@ -2163,6 +2198,7 @@ fn seal_pending(
         route: draft.route.clone(),
         attachments,
         authored_at_ms: now_ms(),
+        group_name: draft.group_name.clone(),
     };
     let plaintext = Zeroizing::new(serde_json::to_vec(&record).map_err(|_| Error::Database)?);
     let sealed = encrypt(

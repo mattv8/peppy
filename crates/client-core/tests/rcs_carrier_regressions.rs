@@ -114,6 +114,9 @@ fn participant(number: &str, is_self: bool) -> Value {
         "number_present": !number.is_empty(),
         "visible": true,
         "self": is_self,
+        "canonical_address": number,
+        "canonical_address_present": !number.is_empty(),
+        "display_name": "",
     })
 }
 
@@ -137,6 +140,11 @@ fn conversation(
         "visible_non_self_count": visible_non_self,
         "last_message_ms": 0,
         "participants": participants,
+        "name": "",
+        "is_group_chat": visible_non_self > 1,
+        "read_only": false,
+        "invisible_participant_count": 0,
+        "member_digest": "",
     })
 }
 

@@ -174,30 +174,9 @@ pub(crate) fn verify_and_store(
     observation: &RcsMappingObservation,
     now_ms: i64,
 ) -> Result<RcsMappingOutcome, Error> {
-    if !is_fresh(now_ms, observation.observed_at_ms) {
-        return Ok(RcsMappingOutcome::Refused(
-            RcsMappingRefusal::StaleObservation,
-        ));
+    if let Some(refusal) = advance_context(conn, observation, now_ms)? {
+        return Ok(RcsMappingOutcome::Refused(refusal));
     }
-    if observation.canonicalizer_revision != RCS_CANONICALIZER_REVISION {
-        update_context(conn, observation)?;
-        return Ok(RcsMappingOutcome::Refused(
-            RcsMappingRefusal::IneligibleConversation,
-        ));
-    }
-    match update_context(conn, observation)? {
-        ContextUpdate::Retired => {
-            return Ok(RcsMappingOutcome::Refused(
-                RcsMappingRefusal::RetiredContext,
-            ));
-        }
-        ContextUpdate::Changed => invalidate_all_mappings(conn, "context_changed")?,
-        ContextUpdate::Unchanged | ContextUpdate::Advanced => {}
-    }
-    if observation.link_state == RcsLinkState::Linked {
-        record_prior_link(conn)?;
-    }
-    record_accepted_carrier_route(conn, observation, now_ms)?;
     let outcome = verify(conn, observation, now_ms)?;
     let RcsMappingOutcome::Mapped(mapping) = &outcome else {
         if !matches!(
@@ -208,8 +187,52 @@ pub(crate) fn verify_and_store(
         }
         return Ok(outcome);
     };
+    // A conversation is either a 1:1 or a group mapping, never both (B2).
+    if crate::rcs_group::has_group_mapping(conn, mapping.conversation_id)? {
+        return Ok(RcsMappingOutcome::Refused(
+            RcsMappingRefusal::MappingConflict,
+        ));
+    }
     put(conn, mapping)?;
     Ok(outcome)
+}
+
+/// Advances the link context from one observation with the 1:1 rules. `None` means the context is
+/// current; `Some` is the refusal. Shared by 1:1 verification and the group route step.
+fn advance_context(
+    conn: &Connection,
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+) -> Result<Option<RcsMappingRefusal>, Error> {
+    if !is_fresh(now_ms, observation.observed_at_ms) {
+        return Ok(Some(RcsMappingRefusal::StaleObservation));
+    }
+    if observation.canonicalizer_revision != RCS_CANONICALIZER_REVISION {
+        update_context(conn, observation)?;
+        return Ok(Some(RcsMappingRefusal::IneligibleConversation));
+    }
+    match update_context(conn, observation)? {
+        ContextUpdate::Retired => return Ok(Some(RcsMappingRefusal::RetiredContext)),
+        ContextUpdate::Changed => invalidate_all_mappings(conn, "context_changed")?,
+        ContextUpdate::Unchanged | ContextUpdate::Advanced => {}
+    }
+    if observation.link_state == RcsLinkState::Linked {
+        record_prior_link(conn)?;
+    }
+    record_accepted_carrier_route(conn, observation, now_ms)?;
+    Ok(None)
+}
+
+/// The group route step: advances the link context from a route observation exactly as the 1:1
+/// route step does, without a 1:1 mapping verdict. A group-only link has never written this
+/// context, so its confirmed identity comes from here. Returns `false` when the context is not
+/// current. The group proof that follows still checks the same context at the target observation.
+pub(crate) fn advance_group_route_context(
+    conn: &Connection,
+    observation: &RcsMappingObservation,
+    now_ms: i64,
+) -> Result<bool, Error> {
+    Ok(advance_context(conn, observation, now_ms)?.is_none())
 }
 
 fn refusal_code(outcome: &RcsMappingOutcome) -> &'static str {
@@ -469,7 +492,7 @@ fn canonical_e164(identity: &str) -> Option<String> {
     identity.starts_with('+').then_some(identity)
 }
 
-fn native_attestation_is_current(
+pub(crate) fn native_attestation_is_current(
     observation: &RcsMappingObservation,
     now_ms: i64,
     own_identity: &str,
@@ -510,7 +533,7 @@ fn native_attestation_is_current(
         && !outgoing.sim_participant_id.is_empty()
 }
 
-fn native_observation_is_current(
+pub(crate) fn native_observation_is_current(
     observation: &RcsMappingObservation,
     now_ms: i64,
     own_identity: &str,
@@ -554,7 +577,7 @@ fn native_settings_are_current(
             == 1
 }
 
-fn is_fresh(now_ms: i64, observed_at_ms: i64) -> bool {
+pub(crate) fn is_fresh(now_ms: i64, observed_at_ms: i64) -> bool {
     now_ms
         .checked_sub(observed_at_ms)
         .is_some_and(|age| (0..=RCS_MAPPING_FRESHNESS_MS).contains(&age))

@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use std::collections::BTreeSet;
 use tempfile::TempDir;
 
-const CURRENT_SCHEMA_VERSION: i64 = 52;
+const CURRENT_SCHEMA_VERSION: i64 = 53;
 
 fn fixture_path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

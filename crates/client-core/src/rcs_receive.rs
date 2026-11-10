@@ -12,6 +12,25 @@ const MAX_DETECTORS_PER_CONVERSATION: i64 = 1_024;
 const RCS_PROVIDER_GUARD_BAND_MS: i64 = 120_000;
 const RCS_CLAIM_BACKFILL_WINDOW_MS: i64 = 15 * 60 * 1_000;
 
+/// Link-owned lanes for 1:1 conversations, keyed by Google conversation id.
+const LANE_BY_GOOGLE_ONE_TO_ONE: &str = "SELECT o.conversation_id,m.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_conversation_mappings m ON m.peppy_conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=m.google_conversation_id WHERE m.google_conversation_id=? AND m.invalidated_at_ms IS NULL AND o.owner='link'";
+/// Link-owned lanes for group conversations that still receive (Live, Paused, or Proving).
+const LANE_BY_GOOGLE_GROUP: &str = "SELECT o.conversation_id,g.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_group_mapping g ON g.conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=g.google_conversation_id WHERE g.google_conversation_id=? AND g.state IN ('live','paused','proving') AND o.owner='link'";
+/// Every link-owned lane, 1:1 and group, in one list for historical recovery.
+const LINK_OWNED_LANES: &str = "SELECT o.conversation_id,m.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_conversation_mappings m ON m.peppy_conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=m.google_conversation_id WHERE o.owner='link' AND m.invalidated_at_ms IS NULL UNION ALL SELECT o.conversation_id,g.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_group_mapping g ON g.conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=g.google_conversation_id WHERE o.owner='link' AND g.state IN ('live','paused','proving') ORDER BY 1";
+
+fn lane_by_google(
+    conn: &Connection,
+    sql: &str,
+    google_conversation_id: &str,
+) -> Result<Option<(String, String, i64)>, Error> {
+    conn.query_row(sql, [google_conversation_id], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })
+    .optional()
+    .map_err(Into::into)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RcsReceiveOwner {
     Link,
@@ -138,6 +157,18 @@ pub struct RcsProjectedRecord {
     pub tmp_id: Option<String>,
     pub rcs_reported: bool,
     pub e2ee_reported: Option<bool>,
+}
+
+/// Who sent a group observation, as Google reported it. Only group conversations carry this;
+/// a 1:1 observation has none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RcsGroupSender {
+    /// Canonical E.164 address of a visible, non-self participant.
+    Address(String),
+    /// The sender could not be resolved even after one snapshot re-read (I-9).
+    UnknownMember,
+    /// Sent from another device of this vault; valid only for outgoing observations.
+    SelfSent,
 }
 
 /// The acquisition source of an RCS observation. Callers must select this explicitly.
@@ -563,10 +594,11 @@ impl Client {
         ownership_generation: u64,
         record: RcsProjectedRecord,
     ) -> Result<RcsReceiveOutcome, Error> {
-        self.ingest_rcs_projected_record_with_provenance(
+        self.ingest_rcs_receive_observation(
             conversation_id,
             ownership_generation,
             record,
+            None,
             RcsObservationProvenance::Live,
         )
     }
@@ -578,19 +610,23 @@ impl Client {
         record: RcsProjectedRecord,
         provenance: RcsObservationProvenance,
     ) -> Result<RcsReceiveOutcome, Error> {
-        self.ingest_rcs_projected_record_with_provenance(
+        self.ingest_rcs_receive_observation(
             conversation_id,
             ownership_generation,
             record,
+            None,
             provenance,
         )
     }
 
-    fn ingest_rcs_projected_record_with_provenance(
+    /// Ingests one observation. `sender` is required for group conversations and must be absent
+    /// for 1:1 conversations.
+    pub fn ingest_rcs_receive_observation(
         &self,
         conversation_id: ConversationId,
         ownership_generation: u64,
         record: RcsProjectedRecord,
+        sender: Option<RcsGroupSender>,
         provenance: RcsObservationProvenance,
     ) -> Result<RcsReceiveOutcome, Error> {
         if record.google_message_id.is_empty()
@@ -625,6 +661,16 @@ impl Client {
                 RcsReceiveCode::GatewayUnavailable,
             ));
         }
+        let sender_address = match admit_group_sender(
+            &ctx,
+            &tx,
+            conversation_id,
+            &record.direction,
+            sender.as_ref(),
+        )? {
+            Ok(sender_address) => sender_address,
+            Err(code) => return Ok(RcsReceiveOutcome::Rejected(code)),
+        };
         let historical = provenance == RcsObservationProvenance::Historical;
         if historical
             && record
@@ -706,7 +752,7 @@ impl Client {
                     },
                     source_device_id: ctx.device_id,
                     provider_message_id: None,
-                    sender_address: None,
+                    sender_address,
                     recipients: Vec::new(),
                     subject: None,
                     body: record.body,
@@ -792,6 +838,11 @@ impl Client {
         if !unique_current_gateway(&tx, ctx.device_id)? {
             return Ok(RcsReceiveOutcome::Rejected(
                 RcsReceiveCode::GatewayUnavailable,
+            ));
+        }
+        if group_receive_closed(&tx, conversation_id)? {
+            return Ok(RcsReceiveOutcome::Rejected(
+                RcsReceiveCode::ConversationUnproven,
             ));
         }
         let mut message_id: Option<String> = tx.query_row(
@@ -951,6 +1002,11 @@ impl Client {
                 RcsReceiveCode::GatewayUnavailable,
             ));
         }
+        if group_receive_closed(&tx, conversation_id)? {
+            return Ok(RcsRecoveryOutcome::Rejected(
+                RcsReceiveCode::ConversationUnproven,
+            ));
+        }
         let mut state = recovery_state_or_proof_floor(&tx, conversation_id)?;
         update(&mut state);
         write_recovery_state(&tx, conversation_id, Some(&state))?;
@@ -1008,9 +1064,7 @@ impl Client {
             return Err(Error::InvalidRequest("local RCS gateway is unavailable"));
         }
         let rows = {
-            let mut statement = tx.prepare(
-                "SELECT o.conversation_id,m.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_conversation_mappings m ON m.peppy_conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=m.google_conversation_id WHERE o.owner='link' AND m.invalidated_at_ms IS NULL ORDER BY o.conversation_id",
-            )?;
+            let mut statement = tx.prepare(LINK_OWNED_LANES)?;
             statement
                 .query_map([], |row| {
                     Ok((
@@ -1133,6 +1187,20 @@ impl Client {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
+        // Group rows match a receivable group whose roster equals the row's non-own addresses.
+        let group_own = crate::rcs_group::own_addresses(&tx)?;
+        let group_participants = row
+            .addresses
+            .iter()
+            .filter_map(|address| crate::rcs_mapping::canonical_recipient(address))
+            .filter(|address| !group_own.contains(address))
+            .collect::<BTreeSet<_>>();
+        if !group_participants.is_empty() {
+            conversations.extend(crate::rcs_group::receivable_conversations_for_roster(
+                &tx,
+                &group_participants,
+            )?);
+        }
         for (conversation, participant, region, own) in proofs {
             let participants = row
                 .addresses
@@ -1177,11 +1245,13 @@ impl Client {
             tx.commit()?;
             return Ok(provider_route(RcsProviderRouteReason::NotLinkOwned));
         }
-        let mapping = crate::rcs_mapping::get(&tx, conversation_id)?;
+        let linked_google = match crate::rcs_mapping::get(&tx, conversation_id)? {
+            Some(mapping) => Some(mapping.google_conversation_id),
+            None => crate::rcs_group::receivable_mapping(&tx, conversation_id)?
+                .map(|mapping| mapping.google_conversation_id),
+        };
         let owner_google = read_link_owner_google(&tx, conversation_id)?;
-        if mapping.as_ref().is_none_or(|mapping| {
-            owner_google.as_deref() != Some(mapping.google_conversation_id.as_str())
-        }) {
+        if linked_google.is_none() || owner_google != linked_google {
             tx.commit()?;
             return Ok(provider_route(RcsProviderRouteReason::NotLinkOwned));
         }
@@ -1504,13 +1574,10 @@ fn receive_context_in_transaction(
         return Err(Error::InvalidRequest("local RCS gateway is unavailable"));
     }
     after_authority_read();
-    let row: Option<(String, String, i64)> = tx
-        .query_row(
-            "SELECT o.conversation_id,m.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_conversation_mappings m ON m.peppy_conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=m.google_conversation_id WHERE m.google_conversation_id=? AND m.invalidated_at_ms IS NULL AND o.owner='link'",
-            [google_conversation_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()?;
+    let row = match lane_by_google(&tx, LANE_BY_GOOGLE_ONE_TO_ONE, google_conversation_id)? {
+        Some(row) => Some(row),
+        None => lane_by_google(&tx, LANE_BY_GOOGLE_GROUP, google_conversation_id)?,
+    };
     let Some((conversation_id, google_conversation_id, ownership_generation)) = row else {
         tx.commit()?;
         return Ok(None);
@@ -1597,6 +1664,75 @@ fn record_provider_detector_in_transaction(
         params![conversation_key, detector.provider_row_id, detector.provider_thread_id, detector.provider_type, detector.observed_at_ms, detector.observed_generation],
     )?;
     Ok(RcsIdentityOutcome::Recorded)
+}
+
+/// Resolves who sent one observation. The outer `Err` is a database failure; the inner `Err`
+/// rejects the observation. Incoming group messages are attributed only to a current roster
+/// member. Anything else is kept unattributed and pauses the mapping so the next snapshot
+/// re-proves it (I-9, Q8): it is never attributed to another member.
+fn admit_group_sender(
+    ctx: &Ctx<'_>,
+    tx: &Connection,
+    conversation_id: ConversationId,
+    direction: &Direction,
+    sender: Option<&RcsGroupSender>,
+) -> Result<Result<Option<String>, RcsReceiveCode>, Error> {
+    let Some(mapping) = crate::rcs_group::group_mapping(tx, conversation_id)? else {
+        return Ok(match sender {
+            Some(_) => Err(RcsReceiveCode::IdentityConflict),
+            None => Ok(None),
+        });
+    };
+    if !mapping.state.receives() {
+        return Ok(Err(RcsReceiveCode::ConversationUnproven));
+    }
+    Ok(match (direction, sender) {
+        (Direction::Outgoing, None | Some(RcsGroupSender::SelfSent)) => Ok(None),
+        (Direction::Incoming, Some(RcsGroupSender::Address(address)))
+            if crate::rcs_group::roster(tx, conversation_id)?.contains(address) =>
+        {
+            Ok(Some(address.clone()))
+        }
+        (Direction::Incoming, Some(RcsGroupSender::SelfSent)) | (Direction::Outgoing, Some(_)) => {
+            Err(RcsReceiveCode::IdentityConflict)
+        }
+        (Direction::Incoming, _) => {
+            crate::rcs_group::pause_group(
+                tx,
+                ctx,
+                conversation_id,
+                crate::notifications::now_ms(),
+            )?;
+            Ok(None)
+        }
+    })
+}
+
+/// Whether a group conversation has stopped receiving (withdrawn or unlinked).
+fn group_receive_closed(conn: &Connection, conversation_id: ConversationId) -> Result<bool, Error> {
+    Ok(crate::rcs_group::group_mapping(conn, conversation_id)?
+        .is_some_and(|mapping| !mapping.state.receives()))
+}
+
+/// Creates the receive lane for a group at its first link. The lane reuses the 1:1 ownership row
+/// so ingest, identity, recovery, and detector fences are shared. Existing lanes keep their
+/// generation across pauses and re-proofs.
+pub(crate) fn ensure_group_receive_lane(
+    conn: &Connection,
+    conversation_id: ConversationId,
+    now_ms: i64,
+) -> Result<(), Error> {
+    if load_ownership(conn, conversation_id)?.is_some() {
+        return Ok(());
+    }
+    let generation = next_generation(conn, conversation_id)?;
+    write_link_generation(
+        conn,
+        conversation_id,
+        generation,
+        now_ms,
+        now_ms.saturating_sub(RCS_CLAIM_BACKFILL_WINDOW_MS),
+    )
 }
 
 fn unique_current_gateway(conn: &Connection, device_id: DeviceId) -> Result<bool, Error> {
