@@ -116,7 +116,14 @@ export function MediaLightbox({ items: initialItems, initialAttachmentId, initia
   if (removedRemoteOnly) {
     const placeholder = <div data-attachment-storage-removed role="status"><ImageOff size={28} aria-hidden="true" /><span>{attachmentStorageRemovalText(false, peppyCopy).body}</span></div>;
     if (chrome === "window") return <main id="media-viewer-window" data-lightbox data-chrome="window" aria-labelledby="media-viewer-window-title"><h1 id="media-viewer-window-title" className="visually-hidden">Media viewer</h1>{placeholder}<button ref={closeButtonRef} id="lightbox-close-btn" type="button" aria-label="Close media viewer" title="Close" onClick={onDismiss}><X size={18} aria-hidden="true" /></button></main>;
-    return <Modal id="media-lightbox" title="Media viewer" onDismiss={onDismiss} className="media-lightbox" actions={null} windowDragOutside><div data-lightbox>{placeholder}</div></Modal>;
+    return <Modal
+      id="media-lightbox"
+      title="Media viewer"
+      onDismiss={onDismiss}
+      className="media-lightbox"
+      actions={null}
+      windowDragOutside
+    ><div data-lightbox>{placeholder}</div></Modal>;
   }
   const state = mediaState(item, url, pending); const imagePreviewUrl = previewUrl(item.attachment);
   const positionLabel = !previousExhausted || !nextExhausted ? `Image ${index + 1} of at least ${items.length} loaded` : `Image ${index + 1} of ${items.length}`;
@@ -134,5 +141,12 @@ export function MediaLightbox({ items: initialItems, initialAttachmentId, initia
     {actionError && <p role="alert">{actionError}</p>}{removedWithLocalCopy && <p data-attachment-storage-local-copy role="status">{attachmentStorageRemovalText(true, peppyCopy).body}</p>}<div id="lightbox-meta" {...drag}>{formatDateTime(item.message.timestamp)}</div>
   </>;
   if (chrome === "window") return <main id="media-viewer-window" data-lightbox data-chrome="window" aria-labelledby="media-viewer-window-title"><h1 id="media-viewer-window-title" className="visually-hidden">Media viewer</h1>{content}</main>;
-  return <Modal id="media-lightbox" title="Media viewer" onDismiss={onDismiss} className="media-lightbox" actions={null} windowDragOutside><div data-lightbox>{content}</div></Modal>;
+  return <Modal
+    id="media-lightbox"
+    title="Media viewer"
+    onDismiss={onDismiss}
+    className="media-lightbox"
+    actions={null}
+    windowDragOutside
+  ><div data-lightbox>{content}</div></Modal>;
 }
