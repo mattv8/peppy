@@ -276,7 +276,7 @@ jobs:
           mkdir -p ../../dist/android-release
           ./gradlew --console=plain --dependency-verification=strict --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:verifyReleaseManifestSecurity :app:lintSideload :app:assembleSideload :app:verifySideloadGoogleMessagesLink -PpeppyDistribution=direct -PpeppyGoogleMessagesLink=true "${gradle_args[@]}"
           install -m 0644 app/build/outputs/apk/sideload/app-sideload-unsigned.apk ../../dist/android-release/peppy-android-unsigned.apk
-          ./gradlew --console=plain --dependency-verification=strict --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:verifyReleaseManifestSecurity :app:lintRelease :app:bundleRelease :app:mergeReleaseNativeDebugMetadata -PpeppyDistribution=play "${gradle_args[@]}"
+          ./gradlew --console=plain --dependency-verification=strict --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:verifyReleaseManifestSecurity :app:lintRelease :app:bundleRelease :app:mergeReleaseNativeDebugMetadata -PpeppyDistribution=play :app:verifyReleaseGoogleMessagesLink -PpeppyGoogleMessagesLink=true "${gradle_args[@]}"
           install -m 0644 app/build/outputs/bundle/release/app-release.aab ../../dist/android-release/peppy-android-unsigned.aab
           install -m 0644 app/build/outputs/native-debug-symbols/release/native-debug-symbols.zip ../../dist/android-release/peppy-android-native-debug-symbols.zip
       - name: Stop Android Gradle daemon before signing
