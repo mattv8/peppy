@@ -1,6 +1,6 @@
 import type { ClipboardEvent, ReactElement, ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
-import { Check, CircleAlert, Clock, Image, ImageOff, Loader, RotateCcw, X } from "lucide-react";
+import { Check, CircleAlert, Clock, FileText, Film, Image, ImageOff, Loader, Music, RotateCcw, X } from "lucide-react";
 import type { DraftAttachmentState } from "./bridge-contracts";
 
 export type AttachmentLayout = "tiles" | "rows";
@@ -11,9 +11,11 @@ export type Attachment = {
   state: "pending" | "uploading" | "failed" | "ready";
   error?: string;
   previewUrl?: string;
+  mediaType?: string;
   byteSize?: number;
   draftState?: DraftAttachmentState;
   retryable?: boolean;
+  block?: { kind: "heic" | "type" | "size"; text: string };
 };
 
 type AttachmentStatus = {
@@ -62,11 +64,15 @@ function AttachmentPreview({ attachment }: { attachment: Attachment }) {
   useEffect(() => setPreviewFailed(false), [attachment.previewUrl]);
   const state = attachment.draftState ?? attachment.state;
   const unavailable = ["saving", "downloading", "unavailable", "failed", "upload-failed", "download-failed"].includes(state);
+  const icon = attachment.mediaType?.startsWith("video/") ? <Film aria-hidden size={20} />
+    : attachment.mediaType?.startsWith("audio/") ? <Music aria-hidden size={20} />
+      : attachment.mediaType && !attachment.mediaType.startsWith("image/") ? <FileText aria-hidden size={20} />
+        : <Image aria-hidden size={20} />;
   return (
     <div className="attachment-preview">
       {attachment.previewUrl && !previewFailed
         ? <img src={attachment.previewUrl} alt="" onError={() => setPreviewFailed(true)} />
-        : unavailable ? <ImageOff aria-hidden size={20} /> : <Image aria-hidden size={20} />}
+        : unavailable ? <ImageOff aria-hidden size={20} /> : icon}
     </div>
   );
 }
@@ -94,6 +100,8 @@ export function ComposerAttachmentTray({
   const totalSize = attachments.reduce<number | null>((total, attachment) => (
     total === null || attachment.byteSize === undefined ? null : total + attachment.byteSize
   ), 0);
+  const imagesOnly = attachments.every((attachment) => !attachment.mediaType || attachment.mediaType.startsWith("image/"));
+  const noun = imagesOnly ? "image" : "attachment";
   const hasTrayAction = Boolean(onRemoveAttachment) || attachments.some((attachment) => {
     const status = attachmentStatus(attachment);
     return Boolean(onRetryAttachment) && (attachment.retryable || status.retryable);
@@ -131,26 +139,26 @@ export function ComposerAttachmentTray({
     return <section id="attachment-tray-region" data-composer-attachment-tray data-attachment-layout={layout} data-empty aria-label="Attached images"><p className="sr-only" data-attachment-announcement aria-live="polite">{announcement}</p></section>;
   }
   return (
-    <section id="attachment-tray-region" data-composer-attachment-tray data-attachment-layout={layout} aria-label="Attached images">
+    <section id="attachment-tray-region" data-composer-attachment-tray data-attachment-layout={layout} aria-label={`Attached ${imagesOnly ? "images" : "attachments"}`}>
       <header className="attachment-tray-header" data-attachment-tray-header>
-        <span>{attachments.length} {attachments.length === 1 ? "image" : "images"}</span>
+        <span>{attachments.length} {attachments.length === 1 ? noun : `${noun}s`}</span>
         {attachmentHeaderDetail ?? (totalSize !== null && <span>{formatBytes(totalSize)}</span>)}
       </header>
-      <ul id="attachment-tray" data-attachment-layout={layout} aria-label="Image list" onPaste={onPaste} tabIndex={hasTrayAction ? undefined : 0}>
+      <ul id="attachment-tray" data-attachment-layout={layout} aria-label={imagesOnly ? "Image list" : "Attachment list"} onPaste={onPaste} tabIndex={hasTrayAction ? undefined : 0}>
         {attachments.map((attachment) => {
           const status = attachmentStatus(attachment);
           const canRetry = Boolean(onRetryAttachment) && (attachment.retryable || status.retryable);
-          const errorDescription = attachment.error && attachment.error !== status.text ? `attachment-error-${attachment.id}` : undefined;
+          const stateId = attachment.block ? `attachment-state-${attachment.id}` : attachment.error && attachment.error !== status.text ? `attachment-error-${attachment.id}` : undefined;
           return (
-            <li key={attachment.id} data-attachment-id={attachment.id} className="attachment-chip" data-attachment-state={attachment.draftState ?? attachment.state}>
+            <li key={attachment.id} data-attachment-id={attachment.id} className="attachment-chip" data-attachment-state={attachment.draftState ?? attachment.state} data-attachment-block={attachment.block?.kind}>
               <AttachmentPreview attachment={attachment} />
               <div className="attachment-copy">
                 <span className="attachment-name">{attachment.name}</span>
-                <span className="attachment-state">{status.icon}{status.text}</span>
-                {canRetry && <button type="button" className="attachment-retry" aria-label={`Retry ${attachment.name}`} aria-describedby={errorDescription} onClick={() => onRetryAttachment?.(attachment.id)}><RotateCcw size={14} aria-hidden />Retry</button>}
+                <span id={attachment.block ? `attachment-state-${attachment.id}` : undefined} className="attachment-state">{attachment.block ? <><CircleAlert aria-hidden size={12} />{attachment.block.text}</> : <>{status.icon}{status.text}</>}</span>
+                {canRetry && !attachment.block && <button type="button" className="attachment-retry" aria-label={`Retry ${attachment.name}`} aria-describedby={stateId} onClick={() => onRetryAttachment?.(attachment.id)}><RotateCcw size={14} aria-hidden />Retry</button>}
                 {attachment.error && attachment.error !== status.text && <span id={`attachment-error-${attachment.id}`} className="sr-only">{attachment.error}</span>}
               </div>
-              {onRemoveAttachment && <button ref={(button) => { if (button) removeButtons.current.set(attachment.id, button); else removeButtons.current.delete(attachment.id); }} type="button" className="attachment-remove" aria-label={`Remove ${attachment.name}`} aria-describedby={errorDescription} title={`Remove ${attachment.name}`} onClick={() => { onRemoveAttachment(attachment.id); focusAfterRemoval(attachment.id); }}><X size={14} aria-hidden /></button>}
+              {onRemoveAttachment && <button ref={(button) => { if (button) removeButtons.current.set(attachment.id, button); else removeButtons.current.delete(attachment.id); }} type="button" className="attachment-remove" aria-label={`Remove ${attachment.name}`} aria-describedby={stateId} title={`Remove ${attachment.name}`} onClick={() => { onRemoveAttachment(attachment.id); focusAfterRemoval(attachment.id); }}><X size={14} aria-hidden /></button>}
             </li>
           );
         })}

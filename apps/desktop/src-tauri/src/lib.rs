@@ -233,6 +233,7 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "pick_attachments",
     "prepare_pasted_attachment",
     "retry_attachment",
+    "retry_rcs_media_download",
     "save_attachment",
     "request_attachment_download",
     "media_sync_request",
@@ -3359,6 +3360,10 @@ fn safe_suggested_filename(name: &str, media_type: &str) -> String {
         "video/mp4" => "mp4",
         "audio/amr" => "amr",
         "audio/mpeg" => "mp3",
+        "audio/ogg" | "audio/opus" => "ogg",
+        "audio/aac" => "aac",
+        "audio/mp4" | "audio/x-m4a" => "m4a",
+        "audio/wav" => "wav",
         "text/x-vcard" | "text/vcard" => "vcf",
         "application/smil" => "smil",
         "application/pdf" => "pdf",
@@ -3391,6 +3396,12 @@ mod mms_filename_tests {
             ("video/mp4", "mp4"),
             ("audio/amr", "amr"),
             ("audio/mpeg", "mp3"),
+            ("audio/ogg", "ogg"),
+            ("audio/opus", "ogg"),
+            ("audio/aac", "aac"),
+            ("audio/mp4", "m4a"),
+            ("audio/x-m4a", "m4a"),
+            ("audio/wav", "wav"),
             ("text/x-vcard", "vcf"),
             ("text/vcard", "vcf"),
             ("application/smil", "smil"),
@@ -3557,6 +3568,29 @@ async fn retry_attachment(
 }
 
 #[tauri::command]
+async fn retry_rcs_media_download(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    message_id: String,
+    attachment_index: u32,
+) -> BridgeResult<()> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    let message_id = MessageId::from_str(&message_id)
+        .map_err(|_| BridgeError::new("invalid-request", "The message ID is invalid."))?;
+    check_media_preview_window_scope(&state, &session, &window, &message_id.to_string()).await?;
+    let client = session.client.clone();
+    blocking(move || {
+        client
+            .demand_rcs_media_retry_for_attachment(message_id, attachment_index)
+            .map_err(core_error)
+    })
+    .await?;
+    session.notify();
+    Ok(())
+}
+
+#[tauri::command]
 async fn save_attachment(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
@@ -3631,6 +3665,12 @@ fn inline_media_type(media_type: &str) -> Option<&'static str> {
         "video/3gpp" => Some("video/3gpp"),
         "audio/mpeg" => Some("audio/mpeg"),
         "audio/amr" => Some("audio/amr"),
+        "audio/ogg" => Some("audio/ogg"),
+        "audio/opus" => Some("audio/opus"),
+        "audio/aac" => Some("audio/aac"),
+        "audio/mp4" => Some("audio/mp4"),
+        "audio/x-m4a" => Some("audio/x-m4a"),
+        "audio/wav" => Some("audio/wav"),
         _ => None,
     }
 }
@@ -6649,6 +6689,7 @@ pub fn run() {
         pick_attachments,
         prepare_pasted_attachment,
         retry_attachment,
+        retry_rcs_media_download,
         save_attachment,
         request_attachment_download,
         hydrate_media_preview,

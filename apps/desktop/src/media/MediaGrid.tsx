@@ -4,6 +4,7 @@ import { groupMessages, type GalleryAttachment, type GalleryMessage, type Messag
 import { MediaSyncButton, MediaTile, useReturnedToHoldGeneration, type SyncState } from "./MediaTile";
 import { demandTarget, holdNoteText, originalPending, originalView } from "./mediaState";
 import { useMediaActions } from "./MediaActionsContext";
+import { rcsAttachmentIndex } from "../rcs/rcsMediaState";
 import "./media.css";
 import "./media-carousel.css";
 
@@ -112,7 +113,7 @@ function Carousel({ group, onOpen, messageTitle }: { group: MessageGroup; onOpen
   const groupLabel = requestableAttachments.length ? `Sync ${requestableAttachments.length} images` : "Requested";
   return <><div ref={carouselRef} tabIndex={-1} data-media-carousel data-media-group={group.id} data-sync-owner={allHeld ? "group" : undefined} data-sync={groupSyncState} role="region" aria-roledescription="carousel" aria-label={`Images, ${total} total`} data-slide-count={total} data-has-peek={total >= 4 || undefined} data-can-scroll-prev={scrollState.previous || undefined} data-can-scroll-next={scrollState.next || undefined}>
     <div ref={trackRef} className="carousel-track">
-      {group.attachments.map(({ attachment, message }, index) => <div key={`${message.id}:${attachment.id}`} ref={(element) => { slideRefs.current[index] = element; }} data-media-slide data-media-attachment={attachment.id} data-media-message={message.id} data-slide-index={index} role="group" aria-roledescription="slide" aria-label={`${index + 1} of ${total}`} title={messageTitle?.(message)}>
+      {group.attachments.map(({ attachment, message }, index) => <div key={`${message.id}:${attachment.rcsState ? rcsAttachmentIndex(message, attachment) : attachment.id}`} ref={(element) => { slideRefs.current[index] = element; }} data-media-slide data-media-attachment={attachment.id} data-media-message={message.id} data-slide-index={index} role="group" aria-roledescription="slide" aria-label={`${index + 1} of ${total}`} title={messageTitle?.(message)}>
         <MediaTile attachment={attachment} message={message} variant="slide" label={`Photo, ${index + 1} of ${total}`} onOpen={() => onOpen({ attachment, message })} suppressHeldControl={allHeld} prefetchIds={[group.attachments[index + 1] ? demandTarget(group.attachments[index + 1].attachment) : undefined]} bodyRef={bodyRefCallbacks[index]} onBodyKeyDown={(event) => {
           if (event.key === "ArrowLeft" && moveFocus(index, -1)) event.preventDefault();
           if (event.key === "ArrowRight" && moveFocus(index, 1)) event.preventDefault();

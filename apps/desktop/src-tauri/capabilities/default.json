@@ -44,6 +44,7 @@
     "allow-pick-attachments",
     "allow-prepare-pasted-attachment",
     "allow-retry-attachment",
+    "allow-retry-rcs-media-download",
     "allow-save-attachment",
     "allow-request-attachment-download",
     "allow-media-sync-request",

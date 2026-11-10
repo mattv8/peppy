@@ -33,6 +33,7 @@ import {
   Lock,
   LockKeyhole,
   LockOpen,
+  Loader2,
   Modal,
   Info,
   MessageSquare,
@@ -148,7 +149,11 @@ import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, re
 import { MmsGroupBadge, RcsBadge } from "./rcs/RcsBadge";
 import { ConversationRcsNotice } from "./rcs/ConversationRcsNotice";
 import { RcsMessageMeta } from "./rcs/RcsMessageMeta";
-import { rcsSendBlock } from "./rcs/rcsRoute";
+import { currentRcsRoute, rcsDownloadRetryBlock, rcsSendBlock } from "./rcs/rcsRoute";
+import { canRetryRcsDownload, rcsAttachmentIndex, rcsDirection, rcsOutcomeStatus, rcsPlaceholderState } from "./rcs/rcsMediaState";
+import { RcsMediaActionsProvider } from "./rcs/RcsMediaActions";
+import { RcsAttachmentSlot } from "./rcs/RcsAttachmentSlot";
+import { RcsMediaFileRow } from "./rcs/RcsMediaPlaceholder";
 import { useRcsRoute } from "./rcs/useRcsRoute";
 import { TypingAnnouncer, TypingIndicator } from "./typing/TypingIndicator";
 import { useTypingDisplay } from "./typing/useTypingDisplay";
@@ -696,7 +701,8 @@ type RowRegistry = (id: string, row: HTMLElement | null) => void;
 /** Per-send options the group refusal actions use. Omitted = the latest group revision, no duplicate confirmation. */
 type GroupSendOptions = { expectedMemberRevision?: string; groupCreateConfirmDuplicate?: boolean };
 
-function MessageMeta({ message, hideTime = false, onEditResend, onCreateAgain }: { message: MessageView; hideTime?: boolean; onEditResend?(): void; onCreateAgain?(): void }) {
+function MessageMeta({ message: source, hideTime = false, onEditResend, onCreateAgain }: { message: MessageView; hideTime?: boolean; onEditResend?(): void; onCreateAgain?(): void }) {
+  const message = rcsOutcomeStatus(source);
   const { displayedTime, deliveryTimeFallback, deliveryTimeUnavailable } = messageTime(message);
   const formattedTime = formatDateTime(displayedTime);
   const isoTime = isoDateTime(displayedTime);
@@ -718,17 +724,31 @@ function MessageMeta({ message, hideTime = false, onEditResend, onCreateAgain }:
   const statusIcon = message.status === "sent" ? <Check size={10} aria-hidden /> : message.status === "read" ? <CheckCheck size={10} aria-hidden /> : <Clock size={10} aria-hidden />;
   const showTextStatus = !read && !deliveryConfirmed && Boolean(statusLabel) && (!compactStatus || !validTime);
   const showCompactStatus = !deliveryConfirmed && Boolean(compactStatus && validTime);
-  if (!showTextStatus && !showTime && !showCompactStatus && !deliveryConfirmed && !phoneHistory && !read && !message.groupHint) return null;
+  const hasRcsMediaIssues = rcsMessage && (message.attachments.some((attachment) => ["not_sent", "outcome_unknown", "members_changed"].includes(attachment.rcsSendStatus ?? "")) || message.attachments.filter((attachment) => canRetryRcsDownload(attachment.rcsState)).length >= 2);
+  if (!showTextStatus && !showTime && !showCompactStatus && !deliveryConfirmed && !phoneHistory && !read && !message.groupHint && !hasRcsMediaIssues) return null;
   return <div className="message-meta" data-message-meta={message.id} data-status={message.status} aria-live={rcsMessage ? "off" : undefined}>
     {showTextStatus && <span className="message-meta-status">{["failed-before-submit", "failed-confirmed"].includes(message.status!) ? <X size={10} aria-hidden /> : message.status === "unknown" ? <TriangleAlert size={10} aria-hidden /> : statusIcon}{statusLabel}</span>}
-    {read && <RcsMessageMeta messageId={message.id} status={message.status} statusLabel={STATUS_LABEL[message.status!]} groupHint={message.groupHint} />}
+    {read && <RcsMessageMeta messageId={message.id} status={message.status} statusLabel={STATUS_LABEL[message.status!]} groupHint={message.groupHint} attachments={message.attachments} />}
     {(showTextStatus || read) && showTime && <span className="message-meta-separator" aria-hidden>·</span>}
     {showTime && <time dateTime={isoTime}>{formattedTime}</time>}
     {showCompactStatus && <span className="message-meta-status" role="img" aria-label={statusLabel} title={statusLabel}>{statusIcon}</span>}
     {deliveryConfirmed && <span className="message-meta-status" role="img" aria-label={deliveryLabel} title={deliveryLabel}><CheckCheck size={10} aria-hidden /></span>}
     {phoneHistory && <span className="message-meta-status" role="img" aria-label="From phone history" title="From phone history" data-message-phone-icon={message.id}><Smartphone size={10} aria-hidden /></span>}
-    {(rcsMessage || message.groupHint) && !read && <RcsMessageMeta messageId={message.id} status={message.status} rcsReported={message.rcsReported} statusLabel={message.status ? STATUS_LABEL[message.status] : ""} groupHint={message.groupHint} onEditResend={onEditResend} onCreateAgain={onCreateAgain} />}
+    {(rcsMessage || message.groupHint) && !read && <RcsMessageMeta messageId={message.id} status={message.status} rcsReported={message.rcsReported} statusLabel={message.status ? STATUS_LABEL[message.status] : ""} groupHint={message.groupHint} onEditResend={onEditResend} onCreateAgain={onCreateAgain} attachments={message.attachments} />}
   </div>;
+}
+
+function RcsAttachmentStatus({ attachment, visible }: { attachment: AttachmentView; visible: boolean }) {
+  if (!visible || !attachment.rcsSendStatus) return null;
+  const text = attachment.rcsSendStatus === "sending" ? peppyCopy.rcs_media_state_sending
+    : attachment.rcsSendStatus === "sent" ? peppyCopy.rcs_media_state_sent
+      : attachment.rcsSendStatus === "outcome_unknown" ? peppyCopy.rcs_media_state_unknown
+        : peppyCopy.rcs_media_state_not_sent;
+  const icon = attachment.rcsSendStatus === "sending" ? <Loader2 className="tile-action-spinner" size={12} aria-hidden />
+    : attachment.rcsSendStatus === "sent" ? <Check size={12} aria-hidden />
+      : attachment.rcsSendStatus === "outcome_unknown" ? <TriangleAlert size={12} aria-hidden />
+        : <X size={12} aria-hidden />;
+  return <small data-rcs-media-status data-rcs-media-state={attachment.rcsSendStatus}>{icon}{text}</small>;
 }
 
 function showsReactionNoticeMeta(message: MessageView): boolean {
@@ -806,11 +826,14 @@ function MessageList({
   restoreReactionLayout,
   toneOverrides = {},
   onEditGroupResend,
+  onEditRcsUnsent,
   onCreateGroupAgain,
 }: {
   conversation?: ConversationView;
   /** Copies a refused group message's body back into the composer. Nothing is sent. */
   onEditGroupResend?(message: MessageView): void;
+  /** Copies an RCS message's unsent attachments (and its text, when the text carrier was unsent) back into the composer. Nothing is sent. */
+  onEditRcsUnsent?(message: MessageView): void;
   /** Copies an unconfirmed group create's body back into the composer behind its confirmation. Nothing is sent. */
   onCreateGroupAgain?(message: MessageView): void;
   loading: boolean;
@@ -1000,12 +1023,18 @@ function MessageList({
           const group = item.group;
           const message = group.messages[0];
           const reactionNotice = reactions.notices.get(message.id);
-          const imageRun = group.messages.every((candidate) => candidate.transport === "mms" && candidate.attachments.length > 0 && candidate.attachments.every((attachment) => attachment.mediaType.startsWith("image/")));
+          const imageRun = group.messages.every((candidate) => (candidate.transport === "mms" || candidate.transport === "rcs") && candidate.attachments.length > 0 && candidate.attachments.every((attachment) => attachment.mediaType.startsWith("image/")));
           const sender = senderRun(group);
-          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} hideTime={hiddenTimes.has(candidate.id)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} messageTitle={hiddenTimeTitle} senderRun={(candidate) => sender && candidate.id === group.id ? { label: sender.labelNode, avatar: sender.avatar, gutter: showSenderAvatars, ariaName: sender.label.text, start: sender.edge.start, end: sender.edge.end } : undefined} />;
+          const resendFor = (candidate: MessageView) => {
+            const needsMemberReview = candidate.groupHint === "members_changed" || candidate.attachments.some((attachment) => attachment.rcsSendStatus === "members_changed");
+            if (needsMemberReview && onEditGroupResend) return () => onEditGroupResend(candidate);
+            if (onEditRcsUnsent && candidate.attachments.some((attachment) => attachment.rcsSendStatus === "not_sent")) return () => onEditRcsUnsent(candidate);
+            return undefined;
+          };
+          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} hideTime={hiddenTimes.has(candidate.id)} onEditResend={resendFor(candidate)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} messageTitle={hiddenTimeTitle} senderRun={(candidate) => sender && candidate.id === group.id ? { label: sender.labelNode, avatar: sender.avatar, gutter: showSenderAvatars, ariaName: sender.label.text, start: sender.edge.start, end: sender.edge.end } : undefined} />;
           if (reactionNotice) return <ReactionNotice key={message.id} reaction={message} notice={reactionNotice} actorName={actorName} rowRef={(row) => registerRow(message.id, row)} onOpen={onOpenReactionTarget} busy={pendingReactionId === message.id} feedback={reactionFeedback?.reactionId === message.id ? reactionFeedback.message : undefined} meta={showsReactionNoticeMeta(message) ? <MessageMeta message={message} /> : undefined} />;
           const badges = reactions.badges.get(message.id);
-          const chromeless = message.attachments.length > 0 && message.attachments.every((attachment) => attachment.mediaType.startsWith("video/"));
+          const chromeless = message.attachments.length > 0 && message.attachments.every((attachment) => attachment.mediaType.startsWith("video/")) && !message.attachments.some((attachment) => rcsPlaceholderState(attachment));
           const video = chromeless && message.attachments.length === 1 ? message.attachments[0] : undefined;
           const aspectRatio = videoAspectRatio(video?.mediaMeta);
           const bubbleStyle: CSSProperties | undefined = chromeless
@@ -1028,77 +1057,90 @@ function MessageList({
               {!chromeless && message.body && <p><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
               {!chromeless && message.subject && <p className="message-subject">Subject: <bdi>{message.subject}</bdi></p>}
               {message.attachments.map((file) => {
+                const showRcsStatus = message.attachments.some((attachment) => attachment.rcsSendStatus && attachment.rcsSendStatus !== "sent");
                 const copy = publicCopies[file.id];
-                if (originalPending(file)) return <MediaTile key={file.id} attachment={file} message={message} variant="single" onOpen={() => onOpenMedia({ attachment: file, message })} />;
-                const shareable =
-                  file.remoteState !== "removed_by_storage_policy" && file.state === "ready" && file.mediaType.startsWith("image/");
-                if (file.mediaType.startsWith("video/") || file.mediaType.startsWith("audio/")) return <InlineMedia key={file.id} attachment={file} requestOriginal={requestOriginal} checkOriginal={checkOriginal} releaseMedia={releaseMedia} retryKey={mediaRetryKey} />;
-                const removedRemoteOnly = file.remoteState === "removed_by_storage_policy" && !file.localAvailable;
-                const removedWithLocalCopy = file.remoteState === "removed_by_storage_policy" && file.localAvailable;
-                return (
-                  <div
-                    key={file.id}
-                    data-attachment-id={file.id}
-                    className="file-card"
-                  >
-                    {file.previewUrl && (
-                      <img
-                        src={file.previewUrl}
-                        alt={file.name}
-                        onError={(event) => {
-                          event.currentTarget.hidden = true;
-                        }}
-                      />
-                    )}
-                    {file.mediaType.startsWith("image/") ? (
-                      <Image size={16} aria-hidden />
-                    ) : (
-                      <FileText size={16} aria-hidden />
-                    )}
-                    <span><bdi>{file.name}</bdi></span>
-                    <small>
-                      {fileSize(file.byteSize)}{removedRemoteOnly ? "" : ` · ${attachmentState(file)}`}
-                    </small>
-                    {removedRemoteOnly ? <p data-attachment-storage-removed role="status">{attachmentStorageRemovalText(false, peppyCopy).body}</p> : file.retryable && file.transfer && (
-                      <button className="secondary-button" onClick={() => onRetryAttachment(file)} aria-label={`Retry ${file.transfer} for ${file.name}`}>
-                        Retry {file.transfer}
-                      </button>
-                    )}
-                    {removedWithLocalCopy && <p data-attachment-storage-local-copy role="status">{attachmentStorageRemovalText(true, peppyCopy).body}</p>}
-                    {!removedRemoteOnly && (!file.mediaType.startsWith("image/") || file.state === "ready") && (
-                      <button className="secondary-button" onClick={() => onSaveAttachment(file)} aria-label={`Save ${file.name}`}>
-                        Save {file.name}
-                      </button>
-                    )}
-                    {shareable && !copy && (
-                      <button
-                        className="secondary-button"
-                        onClick={() => onPublish(file)}
-                        aria-label={`Create public link for ${file.name}`}
-                      >
-                        Create public link
-                      </button>
-                    )}
-                    {copy && (
-                      <div className="public-copy" data-public-copy-for={file.id}>
-                        <label>
-                          Public link{" "}
-                          <span className="public-link-warning" role="status">
-                            <ShieldAlert size={12} aria-hidden /> Anyone with this
-                            link can view this copy
-                          </span>
-                          <input
-                            readOnly
-                            aria-label={`Public link for ${file.name}`}
-                            value={copy.url}
-                            onFocus={(event) => event.currentTarget.select()}
-                          />
-                        </label>
-                        <small>{expiryText(copy.expiresInSeconds)}</small>
-                      </div>
-                    )}
-                  </div>
-                );
+                const placeholder = rcsPlaceholderState(file);
+                const rcsSlotKey = `${message.id}:${rcsAttachmentIndex(message, file)}`;
+                const renderAttachment = () => {
+                  if (file.rcsState && file.mediaType.startsWith("image/")) return <MediaTile key={rcsSlotKey} attachment={file} message={message} variant="single" onOpen={() => onOpenMedia({ attachment: file, message })} />;
+                  if (placeholder) return <RcsMediaFileRow key={rcsSlotKey} messageId={message.id} attachment={file} attachmentIndex={rcsAttachmentIndex(message, file)} size={file.byteSize > 0 ? fileSize(file.byteSize) : undefined} />;
+                  if (originalPending(file)) return <MediaTile key={file.id} attachment={file} message={message} variant="single" onOpen={() => onOpenMedia({ attachment: file, message })} />;
+                  const shareable =
+                    file.remoteState !== "removed_by_storage_policy" && file.state === "ready" && file.mediaType.startsWith("image/");
+                  if (file.mediaType.startsWith("video/") || file.mediaType.startsWith("audio/")) return <div key={file.id} data-attachment-id={file.id} data-rcs-media-state={file.rcsState ?? file.rcsSendStatus} data-rcs-media-direction={rcsDirection(file)}><InlineMedia attachment={file} requestOriginal={requestOriginal} checkOriginal={checkOriginal} releaseMedia={releaseMedia} retryKey={mediaRetryKey} /><RcsAttachmentStatus attachment={file} visible={showRcsStatus} /></div>;
+                  const removedRemoteOnly = file.remoteState === "removed_by_storage_policy" && !file.localAvailable;
+                  const removedWithLocalCopy = file.remoteState === "removed_by_storage_policy" && file.localAvailable;
+                  return (
+                    <div
+                      key={file.id}
+                      data-attachment-id={file.id}
+                      data-rcs-media-state={file.rcsState ?? file.rcsSendStatus}
+                      data-rcs-media-direction={rcsDirection(file)}
+                      className="file-card"
+                    >
+                      {file.previewUrl && (
+                        <img
+                          src={file.previewUrl}
+                          alt={file.name}
+                          onError={(event) => {
+                            event.currentTarget.hidden = true;
+                          }}
+                        />
+                      )}
+                      {file.mediaType.startsWith("image/") ? (
+                        <Image size={16} aria-hidden />
+                      ) : (
+                        <FileText size={16} aria-hidden />
+                      )}
+                      <span><bdi>{file.name}</bdi></span>
+                      <small>
+                        {fileSize(file.byteSize)}{removedRemoteOnly ? "" : ` · ${attachmentState(file)}`}
+                      </small>
+                      <RcsAttachmentStatus attachment={file} visible={showRcsStatus} />
+                      {removedRemoteOnly ? <p data-attachment-storage-removed role="status">{attachmentStorageRemovalText(false, peppyCopy).body}</p> : file.retryable && file.transfer && !rcsDirection(file) && (
+                        <button className="secondary-button" onClick={() => onRetryAttachment(file)} aria-label={`Retry ${file.transfer} for ${file.name}`}>
+                          Retry {file.transfer}
+                        </button>
+                      )}
+                      {removedWithLocalCopy && <p data-attachment-storage-local-copy role="status">{attachmentStorageRemovalText(true, peppyCopy).body}</p>}
+                      {!removedRemoteOnly && (!file.mediaType.startsWith("image/") || file.state === "ready") && (
+                        <button className="secondary-button" onClick={() => onSaveAttachment(file)} aria-label={`Save ${file.name}`}>
+                          Save {file.name}
+                        </button>
+                      )}
+                      {shareable && !copy && (
+                        <button
+                          className="secondary-button"
+                          onClick={() => onPublish(file)}
+                          aria-label={`Create public link for ${file.name}`}
+                        >
+                          Create public link
+                        </button>
+                      )}
+                      {copy && (
+                        <div className="public-copy" data-public-copy-for={file.id}>
+                          <label>
+                            Public link{" "}
+                            <span className="public-link-warning" role="status">
+                              <ShieldAlert size={12} aria-hidden /> Anyone with this
+                              link can view this copy
+                            </span>
+                            <input
+                              readOnly
+                              aria-label={`Public link for ${file.name}`}
+                              value={copy.url}
+                              onFocus={(event) => event.currentTarget.select()}
+                            />
+                          </label>
+                          <small>{expiryText(copy.expiresInSeconds)}</small>
+                        </div>
+                      )}
+                    </div>
+                  );
+                };
+                return file.rcsState && !file.mediaType.startsWith("image/")
+                  ? <RcsAttachmentSlot key={rcsSlotKey} slotId={rcsSlotKey} phase={file.rcsState}>{renderAttachment()}</RcsAttachmentSlot>
+                  : renderAttachment();
               })}
               {chromeless && message.body && <p data-message-caption><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
               {chromeless && message.subject && <p className="message-subject">Subject: <bdi>{message.subject}</bdi></p>}
@@ -1120,7 +1162,7 @@ function MessageList({
               {sender?.labelNode}
               {sender ? <div className="message-sender-line" data-sender-line>{sender.avatar ?? (showSenderAvatars && <span className="message-sender-gutter" aria-hidden="true" />)}{bubble}</div> : bubble}
               {badges && <ReactionBadges messageId={message.id} badges={badges} actorName={actorName} chipRef={chipRef} />}
-              <MessageMeta message={message} hideTime={hiddenTimes.has(message.id)} onEditResend={onEditGroupResend ? () => onEditGroupResend(message) : undefined} onCreateAgain={onCreateGroupAgain ? () => onCreateGroupAgain(message) : undefined} />
+              <MessageMeta message={message} hideTime={hiddenTimes.has(message.id)} onEditResend={resendFor(message)} onCreateAgain={onCreateGroupAgain ? () => onCreateGroupAgain(message) : undefined} />
             </div>
           );
         })}
@@ -1152,6 +1194,7 @@ export function notificationPersistenceSettings(bridge: Pick<DesktopBridge, "get
 }
 
 function SettingsView({
+  storageRequest = 0,
   mode,
   configuredOrigin,
   origin,
@@ -1204,6 +1247,8 @@ function SettingsView({
   onRequestedSectionConsumed,
   onAccountDeleted,
 }: {
+  /** Changes each time "Free up space" asks for the storage card; 0 when nothing was requested. */
+  storageRequest?: number;
   mode: "hosted" | "self-hosted";
   configuredOrigin?: string;
   origin: string;
@@ -1314,6 +1359,10 @@ function SettingsView({
     actionError?.action === action && <p className="settings-error" role="alert">{actionError.message}</p>;
   const connectionLabel = browserHost ? "Fixed server" : mode === "hosted" ? "Peppy Hosted" : "Self-hosted";
   const hasAccount = (!browserHost && mode === "hosted") || Boolean(browserHost && accountUrl);
+  // Account and billing hold hosted storage; community vaults only show the server quota.
+  useEffect(() => {
+    if (storageRequest > 0) document.getElementById(hasAccount ? "settings-account-billing" : "settings-server")?.scrollIntoView?.({ block: "start" });
+  }, [storageRequest, hasAccount]);
   const sections = [
     { id: "server", label: "Server" },
     { id: "sync", label: "Sync encryption" },
@@ -1941,6 +1990,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (contactNavigation.current) contactNavigation.current(navigate);
     else navigate();
   }, []);
+  // "Free up space" opens Settings and asks it to scroll to its storage card. The request ends when Settings closes.
+  const [storageSettingsRequest, setStorageSettingsRequest] = useState(0);
+  const openStorageSettings = () => {
+    setStorageSettingsRequest((value) => value + 1);
+    setActiveView("settings");
+  };
+  useEffect(() => {
+    if (activeView !== "settings") setStorageSettingsRequest(0);
+  }, [activeView]);
   const revoked = snapshot?.connection.errorCode === "revoked";
   const settingsOpen = !revoked && activeView === "settings";
   const notificationsOpen = !revoked && activeView === "notifications";
@@ -3608,7 +3666,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     locked: Boolean(appLock?.locked),
   });
   const rcsBlock = rcsRoute.block;
-  const mmsRequired = requiresMms(content, active);
+  const rcsRetryBlock = rcsDownloadRetryBlock({ snapshot: snapshot ?? undefined, activeConversationId: active?.id, gatewayId: route.kind === "route" ? route.gateway.id : undefined, nowMs: Date.now(), locked: Boolean(appLock?.locked) });
+  const mmsRequired = !rcsRoute.current && requiresMms(content, active);
   const routeRecipients = recipientCount(content, active);
   const estimateBytes = draftEstimateBytes(content, attachmentViews);
   const mmsPlan = planDraftMms(content, route, attachmentViews);
@@ -4053,7 +4112,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       const blocked = routeProblem(
         chosen,
         latestGateways,
-        requiresMms(current.content, latestConversation),
+        !currentRcsRoute({ snapshot: latestSnapshot ?? undefined, activeConversationId: current.conversationId, gatewayId: chosen.kind === "route" ? chosen.gateway.id : undefined, nowMs: Date.now(), locked: Boolean(appLockRef.current?.locked) }).current && requiresMms(current.content, latestConversation),
         recipientCount(current.content, latestConversation),
         latestMmsPlan,
         latestMmsPlan.kind === "error" ? attachmentViews[latestMmsPlan.imageId ?? ""]?.name : undefined,
@@ -4068,7 +4127,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       const sendContent = { ...current.content, recipientIds: [...current.content.recipientIds], attachmentIds: [...current.content.attachmentIds] };
       const groupSend = sendContent.recipientIds.length > 1 || (latestConversation?.participants?.length ?? 0) > 1;
       // The composer's revision: the caller's (a resend after a refusal), else the latest snapshot's.
-      const expectedMemberRevision = groupSend ? options.expectedMemberRevision ?? latestConversation?.group?.memberRevision : undefined;
+      const reviewedRevision = groupNotice?.kind === "members-changed" && groupNotice.key === current.key ? groupNotice.memberRevision : undefined;
+      const expectedMemberRevision = groupSend ? options.expectedMemberRevision ?? reviewedRevision ?? latestConversation?.group?.memberRevision : undefined;
       const restoreUnsent = async () => {
         const next = store.get(current.key)?.content ?? blankContent();
         await store.edit(current.key, {
@@ -4100,6 +4160,18 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         if (!mountedRef.current || session !== currentSearchSessionKey() || !store.get(current.key)) return;
         if (!result.accepted) {
           await restoreUnsent();
+          if (result.refusedAttachmentIds?.length) {
+            const refused = new Set(result.refusedAttachmentIds);
+            const first = sendContent.attachmentIds.find((id) => refused.has(id));
+            const attachment = first ? attachmentViews[first] : undefined;
+            const heic = attachment && (attachment.mediaType === "image/heic" || attachment.mediaType === "image/heif" || /\.hei[cf]$/i.test(attachment.name));
+            const copy = result.reason === "too_large"
+              ? peppyCopy.rcs_media_refused_size.replace("{name}", attachment?.name ?? "This file").replace("{limit}", "32 MiB")
+              : heic ? peppyCopy.rcs_media_refused_heic.replace("{name}", attachment?.name ?? "This file")
+                : peppyCopy.rcs_media_refused_type.replace("{name}", attachment?.name ?? "This file");
+            setAttachmentViews((views) => Object.fromEntries(Object.entries(views).map(([id, view]) => [id, refused.has(id) ? { ...view, error: result.reason, state: "failed" } : view])));
+            return setComposerNotice(current.key, `${copy} ${peppyCopy.rcs_composer_draft_kept}`, "error", "attachment-feedback");
+          }
           const refusal = groupComposerNotice(result, current.key);
           if (refusal) return setGroupNotice(refusal);
           return setComposerNotice(current.key,
@@ -4657,17 +4729,28 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const openRibbonAction = () => {
     void openAccountManageUrl(systemRibbon?.actionUrl ?? null, browserHost, bridge.open_external_url).then(opened => setRibbonOpenFailed(!opened));
   };
-  const attachments: Attachment[] = content.attachmentIds.map(
-    (id) =>
-      attachmentViews[id] ?? { id, name: "Attached file", state: "pending" },
-  );
+  const attachments: Attachment[] = content.attachmentIds.map((id) => {
+    const attachment = attachmentViews[id] ?? { id, name: "Attached file", state: "pending" };
+    if (!rcsRoute.current) return attachment;
+    const mediaType = attachment.mediaType.toLowerCase();
+    const heic = mediaType === "image/heic" || mediaType === "image/heif" || (!mediaType && /\.hei[cf]$/i.test(attachment.name));
+    const block = heic
+      ? { kind: "heic" as const, text: peppyCopy.rcs_media_chip_heic }
+      : attachment.error === "not_allowed_mime"
+        ? { kind: "type" as const, text: peppyCopy.rcs_media_chip_type }
+      : attachment.byteSize > 32 * 1024 * 1024 || attachment.error === "too_large"
+        ? { kind: "size" as const, text: peppyCopy.rcs_media_chip_size.replace("{limit}", "32 MiB") }
+        : undefined;
+    return { ...attachment, block };
+  });
   const activeDraftView = slot?.id ? draftViews[slot.id] : undefined;
   const failedDraftAttachment = attachments.find((attachment) =>
     attachment.state === "failed" || ["upload-failed", "download-failed", "unavailable"].includes(attachment.draftState ?? ""),
   );
   const draftConflict = Boolean(activeDraftView?.sync?.conflicts.length);
   const syncedOffline = Boolean(serverOffline && activeDraftView?.sync?.sendRequiresConnection);
-  const draftSendBlock = draftConflict ? "resolve the draft conflict before sending"
+  const draftSendBlock = attachments.some((attachment) => attachment.block) ? peppyCopy.rcs_media_reason_blocked
+    : draftConflict ? "resolve the draft conflict before sending"
     : failedDraftAttachment ? `image unavailable: ${failedDraftAttachment.name}`
     : syncedOffline ? "Reconnect to check this draft before sending."
     : undefined;
@@ -4803,11 +4886,19 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const groupBarState = groupNoticeState(active?.group);
   const groupRcsLinked = Boolean(content.gatewayId && snapshot?.rcsStatus?.gateways.some((gateway) => gateway.gatewayId === content.gatewayId && gateway.state === "linked" && gateway.current && gateway.healthy));
   const typingLabel = groupTypingLabel(typing.participants, (address) => displayAddressName(address, resolution));
-  /** A refused group message: its body goes back to the composer, and the user sends it again. */
+  /** Copies the unsent parts of an RCS message back into the composer: the text only when the text carrier (first attachment) was not sent. Nothing is sent. */
+  const restoreUnsentRcs = (message: MessageView) => {
+    if (!slotKey || !active) return;
+    const unsentAttachments = message.attachments.filter((attachment) => attachment.rcsSendStatus === "not_sent" || attachment.rcsSendStatus === "members_changed");
+    const unsent = unsentAttachments.map((attachment) => attachment.id);
+    const partialRcs = message.attachments.some((attachment) => attachment.rcsSendStatus !== undefined);
+    setAttachmentViews((current) => ({ ...current, ...Object.fromEntries(unsentAttachments.map((attachment) => [attachment.id, attachment])) }));
+    edit({ text: !partialRcs || unsentAttachments.some((attachment) => rcsAttachmentIndex(message, attachment) === 0) ? [message.body, content.text].filter(Boolean).join("\n") : content.text, attachmentIds: [...new Set([...content.attachmentIds, ...unsent])] });
+  };
   const editGroupResend = (message: MessageView) => {
     if (!slotKey || groupLeft || !active) return;
-    edit({ text: [message.body, content.text].filter(Boolean).join("\n") });
-    setGroupNotice({ kind: "members-changed", key: slotKey, members: undefined });
+    restoreUnsentRcs(message);
+    setGroupNotice({ kind: "members-changed", key: slotKey, memberRevision: active.group?.memberRevision, members: active.group?.members });
   };
   // The unconfirmed create's body goes back into the composer; the user confirms with "Create it again" there.
   const createGroupAgainFromMessage = (message: MessageView) => {
@@ -5073,7 +5164,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         attachmentLayout={attachmentLayout}
         draftKey={slotKey}
         draftIdentity={composerDraftKey}
-        attachmentHeaderDetail={mmsHeader && route.kind === "route" ? <span className="mms-size-header-detail" data-mms-size-tone={mmsHeader.tone}>
+        attachmentHeaderDetail={rcsRoute.current ? <span>{peppyCopy.rcs_media_tray_limit.replace("{limit}", "32 MiB")}</span> : mmsHeader && route.kind === "route" ? <span className="mms-size-header-detail" data-mms-size-tone={mmsHeader.tone}>
           <span>{mmsHeader.text}</span>
           <MmsSizeHelp
             estimatedSize={fileSize(estimateBytes)}
@@ -5193,6 +5284,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const messages = (
     <MediaActionsProvider publicCopies={publicCopies} onSave={saveGalleryAttachment} onPublish={publishGalleryAttachment} onRetry={(id) => bridge.retry_attachment(id)} requestDownload={(id) => bridge.request_attachment_download(id)} requestMediaSync={bridge.media_sync_request ? attachmentIds => bridge.media_sync_request!(attachmentIds) : undefined} loadOriginal={requestOriginal} releaseMedia={releaseMedia} canCopyImage={browserHost && clipboardImageSupported()} copyNativeImage={copyNativeImage} hydrateMediaPreview={hydrateMediaPreview}>
+      <RcsMediaActionsProvider retryBlock={rcsRetryBlock} retryDownload={(messageId, attachmentIndex) => bridge.retryRcsMediaDownload(messageId, attachmentIndex)} openStorageSettings={openStorageSettings}>
       <div id="tabpanel-messages" role={conversationTabsShown ? "tabpanel" : undefined} aria-labelledby={conversationTabsShown ? "tab-messages" : undefined} hidden={conversationTab !== "messages"}>
       <MessageList
       key={reactionScopeKey}
@@ -5247,6 +5339,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       } }}
       toneOverrides={toneOverrides}
       onEditGroupResend={editGroupResend}
+      onEditRcsUnsent={restoreUnsentRcs}
       onCreateGroupAgain={createGroupAgainFromMessage}
     />
       </div>
@@ -5277,6 +5370,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         }
         return { items: orderedItems, hasNextPage: Boolean(page.nextCursor), cursor: page.nextCursor };
       }} />}
+      </RcsMediaActionsProvider>
     </MediaActionsProvider>
   );
   const panelStatus = snapshot
@@ -5699,6 +5793,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           {mcpAuthorizationId && snapshot?.encryption.state === "unlocked" && snapshot.deviceRole === "owner" && snapshot.sessionScopeId && <McpAuthorizationConsent key={`${snapshot.sessionScopeId}:${mcpAuthorizationId}`} authorizationId={mcpAuthorizationId} browserHost={browserHost} sessionKey={snapshot.sessionScopeId} focusFallback={mainRef} onClose={dismissMcpAuthorization} />}
           {settingsOpen ? (
             <SettingsView
+              storageRequest={storageSettingsRequest}
               mode={mode}
               configuredOrigin={browserHost ? fixedOrigin ?? snapshot?.connection.origin : snapshot?.connection.origin}
               origin={origin}

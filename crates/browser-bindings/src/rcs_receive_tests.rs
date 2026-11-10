@@ -1,19 +1,21 @@
 use super::*;
 use peppy_client_core::{
     ClientConfig, DatabaseKey, Direction, IncomingSms, MmsAcquisitionInput, MmsSource,
-    RcsCapabilityState, RcsLinkStatusEvent, RcsProjectedRecord, RcsProjectedStatus,
-    RcsProviderDetector, RcsStatusApplication,
+    RcsCapabilityState, RcsIncomingAttachment, RcsLinkStatusEvent, RcsMediaSyncState,
+    RcsProjectedRecord, RcsProjectedStatus, RcsProviderDetector, RcsStatusApplication,
 };
 use peppy_crypto::{KeyProfile, create_vault_check_header, derive_root_key};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const PASSPHRASE: &str = "correct horse battery staple";
-const SENTINELS: [&str; 4] = [
+const SENTINELS: [&str; 6] = [
     "google-conversation-sentinel",
     "google-message-sentinel",
     "tmp-sentinel",
     "cursor-sentinel",
+    "browser-google-media-ref-sentinel",
+    "browser-google-media-ref-sentinel-1",
 ];
 
 fn core() -> (tempfile::TempDir, Client, ConversationId, u64, MessageId) {
@@ -68,6 +70,24 @@ fn core() -> (tempfile::TempDir, Client, ConversationId, u64, MessageId) {
                 tmp_id: Some(SENTINELS[2].into()),
                 rcs_reported: true,
                 e2ee_reported: Some(true),
+                attachments: vec![
+                    RcsIncomingAttachment {
+                        original_index: 0,
+                        media_type: "image/jpeg".into(),
+                        display_name: "receipt.jpg".into(),
+                        plaintext_bytes: 42,
+                        too_large: false,
+                        media_ref: "browser-google-media-ref-sentinel".into(),
+                    },
+                    RcsIncomingAttachment {
+                        original_index: 1,
+                        media_type: "application/pdf".into(),
+                        display_name: "invoice.pdf".into(),
+                        plaintext_bytes: 84,
+                        too_large: false,
+                        media_ref: "browser-google-media-ref-sentinel-1".into(),
+                    },
+                ],
             },
         )
         .unwrap();
@@ -109,6 +129,7 @@ fn core() -> (tempfile::TempDir, Client, ConversationId, u64, MessageId) {
                 tmp_id: None,
                 rcs_reported: false,
                 e2ee_reported: None,
+                attachments: vec![],
             },
         )
         .unwrap();
@@ -227,6 +248,67 @@ fn rcs_window_projection_failure_returns_closed_error_without_a_success_view() {
 }
 
 #[test]
+fn retry_rcs_media_download_rejects_a_nonretryable_parent_without_emitting_a_demand() {
+    let (_directory, client, _conversation_id, _generation, message_id) = core();
+    let mut browser = browser(client);
+    let outbox_before = browser.client().unwrap().pending_outbox_count().unwrap();
+    let response: Value = serde_json::from_str(
+        &browser.dispatch(
+            &json!({
+                "command": "retry_rcs_media_download",
+                "args": { "messageId": message_id, "attachmentIndex": 0 }
+            })
+            .to_string(),
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["code"], "core");
+    assert_eq!(
+        browser.client().unwrap().pending_outbox_count().unwrap(),
+        outbox_before
+    );
+}
+
+#[test]
+fn retry_rcs_media_download_emits_one_demand_for_a_retryable_slot() {
+    let (_directory, client, conversation, _, _) = core();
+    let id = client
+        .messages(conversation)
+        .unwrap()
+        .into_iter()
+        .find(|message| message.payload.body == "RCS payload")
+        .unwrap()
+        .payload
+        .record
+        .message_id;
+    client
+        .mark_rcs_media_download_state(id, 0, RcsMediaSyncState::Failed)
+        .unwrap();
+    let mut browser = browser(client);
+    let before = browser.client().unwrap().pending_outbox_count().unwrap();
+    for _ in 0..2 {
+        let response: Value = serde_json::from_str(
+            &browser.dispatch(
+                &json!({
+                    "command": "retry_rcs_media_download",
+                    "args": { "messageId": id, "attachmentIndex": 0 }
+                })
+                .to_string(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(response["ok"], true, "{response}");
+        assert_no_sentinels(&response);
+    }
+    assert_eq!(
+        browser.client().unwrap().pending_outbox_count().unwrap(),
+        before + 1
+    );
+}
+
+#[test]
 fn rcs_snapshot_history_and_window_project_status_without_leaking_identity() {
     let (_directory, client, conversation_id, _, message_id) = core();
     let mut browser = browser(client);
@@ -257,6 +339,79 @@ fn rcs_snapshot_history_and_window_project_status_without_leaking_identity() {
     for value in [&snapshot, &history, &window] {
         assert_no_sentinels(value);
     }
+}
+
+#[test]
+fn browser_projects_incoming_rcs_placeholders_at_their_original_indices() {
+    for state in [
+        RcsMediaSyncState::Downloading,
+        RcsMediaSyncState::QuotaFull,
+        RcsMediaSyncState::Failed,
+        RcsMediaSyncState::Expired,
+    ] {
+        let (_directory, client, conversation_id, _, _) = core();
+        let message_id = client
+            .messages(conversation_id)
+            .unwrap()
+            .into_iter()
+            .find(|message| message.payload.body == "RCS payload")
+            .unwrap()
+            .payload
+            .record
+            .message_id;
+        if state != RcsMediaSyncState::Downloading {
+            client
+                .mark_rcs_media_download_state(message_id, 0, state)
+                .unwrap();
+        }
+        let mut browser = browser(client);
+        let snapshot = dispatch(
+            &mut browser,
+            "snapshot",
+            json!({"conversationId": conversation_id}),
+        );
+        let message = snapshot["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["body"] == "RCS payload")
+            .unwrap();
+        assert_eq!(message["body"], "RCS payload");
+        assert_eq!(message["attachments"][0]["index"], 0);
+        assert_eq!(message["attachments"][0]["rcsState"], state.code());
+        assert_eq!(message["attachments"][0]["name"], "receipt.jpg");
+        assert_eq!(message["attachments"][0]["byteSize"], 42);
+    }
+
+    let (_directory, client, conversation_id, _, _) = core();
+    let message_id = client
+        .messages(conversation_id)
+        .unwrap()
+        .into_iter()
+        .find(|message| message.payload.body == "RCS payload")
+        .unwrap()
+        .payload
+        .record
+        .message_id;
+    client
+        .mark_rcs_media_download_state(message_id, 1, RcsMediaSyncState::QuotaFull)
+        .unwrap();
+    let mut browser = browser(client);
+    let snapshot = dispatch(
+        &mut browser,
+        "snapshot",
+        json!({"conversationId": conversation_id}),
+    );
+    let message = snapshot["conversations"][0]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["body"] == "RCS payload")
+        .unwrap();
+    let attachments = &message["attachments"];
+    assert_eq!(attachments[0]["index"], 0);
+    assert_eq!(attachments[1]["index"], 1);
+    assert_eq!(attachments[1]["rcsState"], "quota_full");
 }
 
 const MATRIX_STATUSES: [(RcsProjectedStatus, &str); 5] = [
@@ -476,6 +631,7 @@ fn browser_rcs_reported_message_without_status_row_preserves_reported_fact() {
                 tmp_id: None,
                 rcs_reported: false,
                 e2ee_reported: None,
+                attachments: vec![],
             },
         )
         .unwrap();
@@ -548,6 +704,7 @@ fn browser_rcs_history_gap_is_projected_after_detector_overflow() {
                 tmp_id: None,
                 rcs_reported: true,
                 e2ee_reported: Some(true),
+                attachments: vec![],
             },
         )
         .unwrap();
@@ -617,6 +774,7 @@ fn rcs_conversation(
                 tmp_id: None,
                 rcs_reported,
                 e2ee_reported: encryption,
+                attachments: vec![],
             },
         )
         .unwrap();

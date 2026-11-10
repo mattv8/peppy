@@ -3,8 +3,9 @@
 use crate::{message_window_view, rcs_receive};
 use peppy_client_core::{
     Client, ClientConfig, ConversationId, DatabaseKey, DeviceId, Direction, KeyProfile, Message,
-    MessageWindowRequest, RcsCapabilityState, RcsLinkStatusEvent, RcsProjectedRecord,
-    RcsProjectedStatus, RcsStatusApplication, VaultCheckHeader, VaultId,
+    MessageWindowRequest, RcsCapabilityState, RcsIncomingAttachment, RcsLinkStatusEvent,
+    RcsMediaSyncState, RcsProjectedRecord, RcsProjectedStatus, RcsStatusApplication,
+    VaultCheckHeader, VaultId,
 };
 use serde_json::Value;
 use std::str::FromStr;
@@ -19,11 +20,14 @@ const GOOGLE_CONVERSATION_SENTINEL: &str = "desktop-api-google-conversation-sent
 const GOOGLE_MESSAGE_SENTINEL: &str = "desktop-api-google-message-sentinel";
 const TMP_ID_SENTINEL: &str = "desktop-api-tmp-sentinel";
 const HISTORY_CURSOR_SENTINEL: &str = "desktop-api-history-cursor-sentinel";
-const SENTINELS: [&str; 4] = [
+const SENTINELS: [&str; 7] = [
     GOOGLE_CONVERSATION_SENTINEL,
     GOOGLE_MESSAGE_SENTINEL,
     TMP_ID_SENTINEL,
     HISTORY_CURSOR_SENTINEL,
+    "desktop-api-google-media-ref-sentinel",
+    "desktop-api-google-media-ref-sentinel-1",
+    "desktop-api-google-media-ref-sentinel-2",
 ];
 const DELIVERED_BODY: &str = "RCS payload";
 const LATEST_BODY: &str = "RCS latest payload";
@@ -87,6 +91,32 @@ fn seeded_client() -> Fixture {
                 tmp_id: Some(TMP_ID_SENTINEL.into()),
                 rcs_reported: true,
                 e2ee_reported: Some(true),
+                attachments: vec![
+                    RcsIncomingAttachment {
+                        original_index: 0,
+                        media_type: "image/jpeg".into(),
+                        display_name: "receipt.jpg".into(),
+                        plaintext_bytes: 42,
+                        too_large: false,
+                        media_ref: "desktop-api-google-media-ref-sentinel".into(),
+                    },
+                    RcsIncomingAttachment {
+                        original_index: 1,
+                        media_type: "application/pdf".into(),
+                        display_name: "invoice.pdf".into(),
+                        plaintext_bytes: 84,
+                        too_large: false,
+                        media_ref: "desktop-api-google-media-ref-sentinel-1".into(),
+                    },
+                    RcsIncomingAttachment {
+                        original_index: 2,
+                        media_type: "image/jpeg".into(),
+                        display_name: "panorama.jpg".into(),
+                        plaintext_bytes: 126,
+                        too_large: true,
+                        media_ref: "desktop-api-google-media-ref-sentinel-2".into(),
+                    },
+                ],
             },
         )
         .unwrap();
@@ -116,6 +146,7 @@ fn seeded_client() -> Fixture {
                 tmp_id: None,
                 rcs_reported: true,
                 e2ee_reported: None,
+                attachments: vec![],
             },
         )
         .unwrap();
@@ -125,6 +156,187 @@ fn seeded_client() -> Fixture {
         client,
         conversation_id,
         ownership_generation: generation,
+    }
+}
+
+#[test]
+fn incoming_rcs_placeholders_project_each_receive_state_without_compressing_indices() {
+    for state in [
+        RcsMediaSyncState::Downloading,
+        RcsMediaSyncState::QuotaFull,
+        RcsMediaSyncState::Failed,
+        RcsMediaSyncState::Expired,
+    ] {
+        let fixture = seeded_client();
+        let messages = fixture.client.messages(fixture.conversation_id).unwrap();
+        let message = find_body(&messages, DELIVERED_BODY);
+        if state != RcsMediaSyncState::Downloading {
+            fixture
+                .client
+                .mark_rcs_media_download_state(message.payload.record.message_id, 0, state)
+                .unwrap();
+        }
+        let view = serde_json::to_value(
+            rcs_receive::message_view(&fixture.client, message, vec![]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(view["body"], DELIVERED_BODY);
+        assert_eq!(view["attachments"][0]["index"], 0);
+        assert_eq!(view["attachments"][0]["rcsState"], state.code());
+        assert_eq!(view["attachments"][0]["name"], "receipt.jpg");
+        assert_eq!(view["attachments"][0]["mediaType"], "image/jpeg");
+        assert_eq!(view["attachments"][0]["byteSize"], 42);
+    }
+
+    let fixture = seeded_client();
+    let messages = fixture.client.messages(fixture.conversation_id).unwrap();
+    let message = find_body(&messages, DELIVERED_BODY);
+    let message_id = message.payload.record.message_id;
+    fixture
+        .client
+        .mark_rcs_media_download_state(message_id, 1, RcsMediaSyncState::QuotaFull)
+        .unwrap();
+    let view =
+        serde_json::to_value(rcs_receive::message_view(&fixture.client, message, vec![]).unwrap())
+            .unwrap();
+    assert_eq!(view["attachments"][0]["index"], 0);
+    assert_eq!(view["attachments"][1]["index"], 1);
+    assert_eq!(view["attachments"][1]["rcsState"], "quota_full");
+    assert_eq!(view["attachments"][2]["index"], 2);
+    assert_eq!(view["attachments"][2]["rcsState"], "too_large");
+}
+
+#[test]
+fn remote_sparse_stored_attachment_projects_beside_failed_and_oversized_slots() {
+    let fixture = seeded_client();
+    let messages = fixture.client.messages(fixture.conversation_id).unwrap();
+    let id = find_body(&messages, DELIVERED_BODY)
+        .payload
+        .record
+        .message_id;
+    fixture
+        .client
+        .mark_rcs_media_download_state(id, 0, RcsMediaSyncState::Failed)
+        .unwrap();
+    let token = match fixture
+        .client
+        .admit_rcs_media_download(id, 1, Some(u64::MAX))
+        .unwrap()
+    {
+        peppy_client_core::ReceiveDownloadAdmission::Held { token } => token,
+        other => panic!("unexpected admission: {other:?}"),
+    };
+    let path = fixture._directory.path().join("invoice.pdf");
+    std::fs::write(&path, [7_u8; 84]).unwrap();
+    let attachment = fixture
+        .client
+        .import_rcs_media_download(id, 1, &token, &path)
+        .unwrap();
+    fixture
+        .client
+        .mark_attachment_uploaded(attachment.attachment_id, &DeviceId::new().to_string())
+        .unwrap();
+    fixture.client.finalize_rcs_media_download(id, 1).unwrap();
+
+    let remote = Client::open(
+        ClientConfig {
+            database_path: fixture._directory.path().join("remote.db"),
+            vault_id: VaultId::from_str(VAULT_ID).unwrap(),
+            device_id: DeviceId::new(),
+        },
+        DatabaseKey::new(&[7; 32]).unwrap(),
+    )
+    .unwrap();
+    remote
+        .unlock(
+            &serde_json::from_str(PROFILE_JSON).unwrap(),
+            &serde_json::from_str(HEADER_JSON).unwrap(),
+            PASSPHRASE,
+        )
+        .unwrap();
+    for (index, envelope) in fixture.client.pending_outbox().unwrap().iter().enumerate() {
+        remote
+            .ingest(envelope, peppy_client_core::Cursor(index as u64 + 1))
+            .unwrap();
+    }
+    assert_eq!(remote.apply_pending(100).unwrap().quarantined, 0);
+    let messages = remote.messages(fixture.conversation_id).unwrap();
+    let message = find_body(&messages, DELIVERED_BODY);
+    let attachments = message
+        .payload
+        .record
+        .attachments
+        .iter()
+        .map(|reference| {
+            crate::attachment_view(
+                &remote.attachment_info(reference.attachment_id).unwrap(),
+                None,
+                Some("fixture-preview".into()),
+            )
+        })
+        .collect();
+    let view =
+        serde_json::to_value(rcs_receive::message_view(&remote, message, attachments).unwrap())
+            .unwrap();
+    let slots = view["attachments"].as_array().unwrap();
+    assert_eq!(slots.len(), 3);
+    assert_eq!(slots[0]["index"], 0);
+    assert_eq!(slots[0]["rcsState"], "failed");
+    assert_eq!(slots[1]["index"], 1);
+    assert_eq!(slots[1]["rcsState"], "stored");
+    assert_eq!(slots[1]["id"], attachment.attachment_id.to_string());
+    assert_eq!(slots[1]["name"], "invoice.pdf");
+    assert_eq!(slots[1]["previewUrl"], "fixture-preview");
+    assert_eq!(slots[2]["index"], 2);
+    assert_eq!(slots[2]["rcsState"], "too_large");
+    assert_no_sentinels("remote sparse media", &view);
+    assert!(remote.pending_rcs_media_receive_tasks().unwrap().is_empty());
+}
+
+#[test]
+fn rcs_media_never_receives_a_carrier_mms_split_plan() {
+    let fixture = seeded_client();
+    for mime in ["application/pdf", "video/mp4", "image/jpeg"] {
+        let path = fixture._directory.path().join("outgoing-media");
+        std::fs::write(&path, vec![7_u8; 1024 * 1024]).unwrap();
+        let attachment = fixture
+            .client
+            .prepare_attachment(&path, mime, "media")
+            .unwrap();
+        let input = crate::compose::DraftInput {
+            id: String::new(),
+            conversation_id: fixture.conversation_id.to_string(),
+            text: "caption".into(),
+            recipient_ids: vec!["+14155552671".into()],
+            attachment_ids: vec![attachment.attachment_id.to_string()],
+            gateway_id: Some(DeviceId::new().to_string()),
+            sim_id: Some("sim".into()),
+            expected_revision: "0".into(),
+            group_name: None,
+            expected_member_revision: None,
+            group_create_confirm_duplicate: None,
+        };
+        let gateway = crate::GatewayView {
+            id: input.gateway_id.clone().unwrap(),
+            name: "Gateway".into(),
+            sim_id: "sim".into(),
+            online: true,
+            simulated: false,
+            supports_sms: true,
+            supports_mms: true,
+            availability: crate::GatewayAvailability::Connected,
+            last_seen_age_seconds: None,
+            presence: None,
+            wake_route: false,
+            capability_note: None,
+            mms_content_version: Some(4),
+            mms_max_bytes: Some(300 * 1024),
+            mms_limit_source: None,
+            mms_max_recipients: None,
+        };
+        let result =
+            crate::compose::prepared_draft_send_parts(&fixture.client, &input, Some(&[gateway]));
+        assert!(matches!(result, Ok(None)));
     }
 }
 

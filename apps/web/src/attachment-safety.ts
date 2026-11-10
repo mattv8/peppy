@@ -1,5 +1,5 @@
 const INLINE_MEDIA_TYPES = new Set([
-  "image/gif", "image/jpeg", "image/png", "image/webp", "video/3gpp", "video/mp4", "audio/amr", "audio/mpeg",
+  "image/gif", "image/jpeg", "image/png", "image/webp", "video/3gpp", "video/mp4", "audio/aac", "audio/amr", "audio/mp4", "audio/mpeg", "audio/ogg", "audio/opus", "audio/wav", "audio/x-m4a",
 ]);
 const MAX_FILENAME_CHARACTERS = 128;
 

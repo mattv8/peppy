@@ -72,6 +72,19 @@ describe("ComposerAttachmentTray", () => {
     expect(screen.queryByText("2 KB")).not.toBeInTheDocument();
   });
 
+  it("keeps blocked attachments removable and describes the block to assistive technology", () => {
+    render(<ComposerAttachmentTray
+      attachments={[{ id: "heic", name: "photo.heic", state: "ready", block: { kind: "heic", text: "Convert HEIC to JPEG" } }]}
+      onRemoveAttachment={() => {}}
+      onFocusTextarea={() => {}}
+    />);
+
+    const chip = document.querySelector<HTMLElement>("[data-attachment-id=heic]")!;
+    const remove = screen.getByRole("button", { name: "Remove photo.heic" });
+    expect(chip).toHaveAttribute("data-attachment-block", "heic");
+    expect(remove).toHaveAccessibleDescription("Convert HEIC to JPEG");
+  });
+
   it("announces status changes and removals but not its initial contents", () => {
     const { container, rerender } = render(<ComposerAttachmentTray attachments={attachments} onFocusTextarea={() => {}} />);
     const liveRegion = container.querySelector("[aria-live=polite]")!;

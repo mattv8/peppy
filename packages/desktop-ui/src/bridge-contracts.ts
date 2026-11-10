@@ -58,7 +58,9 @@ export type MessageStatus = "queued-local" | "server-accepted" | "gateway-persis
 export type AttachmentState = "pending" | "uploading" | "failed" | "ready";
 export type DraftAttachmentState = "saving" | "local" | "waiting" | "uploading" | "uploaded" | "upload-failed" | "downloading" | "download-failed" | "unavailable";
 export const MAX_DRAFT_ATTACHMENTS = 10;
-export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; draftState?: DraftAttachmentState; mediaHold?: "held" | "requested"; mediaMeta?: MediaMetadataView; remoteState?: "available" | "removed_by_storage_policy"; localAvailable?: boolean };
+export type RcsAttachmentState = "downloading" | "stored" | "too_large" | "quota_full" | "failed" | "expired";
+export type RcsSendStatus = "sending" | "sent" | "not_sent" | "outcome_unknown" | "members_changed";
+export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; draftState?: DraftAttachmentState; mediaHold?: "held" | "requested"; mediaMeta?: MediaMetadataView; remoteState?: "available" | "removed_by_storage_policy"; localAvailable?: boolean; rcsState?: RcsAttachmentState; rcsSendStatus?: RcsSendStatus; index?: number };
 export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms" | "rcs"; subject?: string; participants?: string[]; rcsReported?: boolean; oneTimeCode?: string; groupHint?: "members_changed" | "update_required" | "withdrawn" | "create_unknown" | "create_not_rcs" };
 export type MessageWindow = GeneratedMessageWindow<MessageView>;
 export type MediaCursor = { sortAtMs: string; localOrder: string; messageId: string; attachmentPosition: number };
@@ -82,7 +84,7 @@ export type GatewayPresence = { state: "connected" | "seen" | "never"; last_seen
 export type GatewayView = { id: string; name: string; simId: string; online: boolean; simulated: boolean; supportsSms: boolean; supportsMms: boolean; availability?: GatewayAvailability; lastSeenAgeSeconds?: number; presence?: GatewayPresence; wakeRoute?: boolean; capabilityNote?: string; mmsContentVersion?: number; mmsMaxBytes?: number; mmsLimitSource?: "carrier" | "fallback"; mmsMaxRecipients?: number };
 export type DraftConflictView = { branchId: string; text: string; attachmentIds: string[]; recipientIds: string[]; gatewayId?: string; simId?: string };
 export type DraftSyncView = { state: "local-only" | "saving" | "saved-local" | "syncing" | "synced" | "paused" | "failed"; expiresAt: string | null; conflicts: DraftConflictView[]; notice: "restored-after-expiry" | "kept-after-sent" | "updated-from-other-device" | null; sendRequiresConnection: boolean };
-export type SendResultView = { accepted: boolean; status: MessageStatus; reason?: "members_changed" | "update_required" | "withdrawn" | "create_unconfirmed" | "create_not_rcs" | string; revision?: string; parts?: number; group?: { members: string[]; memberRevision: string } };
+export type SendResultView = { accepted: boolean; status: MessageStatus; reason?: "members_changed" | "update_required" | "withdrawn" | "create_unconfirmed" | "create_not_rcs" | string; refusedAttachmentIds?: string[]; revision?: string; parts?: number; group?: { members: string[]; memberRevision: string } };
 export type Draft = { id: string; conversationId: string; text: string; recipientIds: string[]; attachmentIds: string[]; gatewayId?: string; simId?: string; revision: string; groupName?: string; /** Authoritative host views for the draft's attachments. */ attachments?: AttachmentView[]; sync?: DraftSyncView };
 export type PastedImage = { bytes: ArrayBuffer; name: string; mediaType: string };
 /** Successful pasted attachments plus per-file failures. Hosts never discard successful files because another file failed. */
@@ -365,5 +367,6 @@ export interface DesktopBridge {
   enrollment_computer_status(): Promise<ComputerClaimantView>;
   enrollment_confirm_computer(): Promise<ComputerClaimantView>;
   enrollment_cancel_computer(): Promise<ComputerClaimantView | void>;
+  retryRcsMediaDownload(messageId: string, attachmentIndex: number): Promise<void>;
 
 }

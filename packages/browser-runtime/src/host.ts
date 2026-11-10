@@ -236,6 +236,7 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   search_local: { coreCommand: "search_local", mutation: false },
   advance_search_index: { coreCommand: "advance_search_index", mutation: true },
   load_message_window: { coreCommand: "load_message_window", mutation: false },
+  retry_rcs_media_download: { coreCommand: "retry_rcs_media_download", mutation: true },
   media_sync_request: { coreCommand: "media_sync_request", mutation: true },
 };
 

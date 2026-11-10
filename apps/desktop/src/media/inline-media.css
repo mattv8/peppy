@@ -16,6 +16,8 @@
 video[data-inline-media] { display: block; height: auto; object-fit: contain; background: #000; }
 video[data-inline-media][data-media-kind="video"]:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: -2px; }
 audio[data-media-kind="audio"] { width: min(100%, 420px); }
+[data-inline-media][data-media-kind="audio"] { width: min(100%, 420px); padding: 8px; border: 1px solid var(--peppy-border-strong); border-radius: var(--peppy-radius-md); background: var(--peppy-surface-widget); color: var(--peppy-text-primary); }
+[data-inline-media][data-media-kind="audio"] .secondary-button { color: inherit; }
 
 [data-inline-media][data-media-kind="video"]:not(video):not([data-attachment-storage-removed]) { background: linear-gradient(135deg, var(--peppy-surface-active), var(--peppy-surface-hover)); }
 [data-media-kind="video"] > .media-play-trigger { position: absolute; inset: 0; display: grid; align-content: end; justify-items: center; padding: 0 12px 12px; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; }
@@ -45,4 +47,5 @@ audio[data-media-kind="audio"] { width: min(100%, 420px); }
   [data-media-kind="video"] > .media-play-trigger::after { border-left-color: ButtonText; }
   [data-media-kind="video"] > .media-play-trigger:focus-visible, video[data-inline-media][data-media-kind="video"]:focus-visible { outline-color: Highlight; }
   [data-inline-media][data-media-kind="video"] > [data-media-duration], [data-inline-media][data-media-kind="video"] > [role="alert"], [data-inline-media][data-media-kind="video"] > [data-attachment-storage-local-copy] { background: Canvas; color: CanvasText; border: 1px solid CanvasText; }
+  [data-inline-media][data-media-kind="audio"] { background: Canvas; color: CanvasText; border-color: CanvasText; }
 }

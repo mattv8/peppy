@@ -54,11 +54,39 @@
 @media (prefers-reduced-motion: reduce) { [data-media-tile][data-state="loading"] .tile-body, [data-media-tile][data-sync="requesting"] .tile-held { animation: none; } .tile-loading-icon, .tile-action-spinner { animation: none; } [data-media-tile]:hover .tile-body img { transform: none; } .tile-sync, .carousel-sync { transition: none; } .tile-sync:active, .carousel-sync:active { scale: 1; } }
 @media (forced-colors: active) { [data-media-tile][data-state="held"] { outline-color: CanvasText; } [data-tile-actions] button, .tile-sync, .carousel-sync { background: ButtonFace; color: ButtonText; border: 1px solid ButtonText; } [data-media-tile]::after { display: none; } [data-media-tile] .tile-body:focus-visible, [data-media-tile] button:focus-visible { outline: 2px solid Highlight; } .tile-held-icon { color: CanvasText; } .tile-held-note, [data-media-tile] [data-attachment-storage-local-copy] { background: Canvas; color: CanvasText; } }
 [data-media-tile] .tile-removed { padding: 0.75rem; gap: 0.5rem; overflow: hidden; overflow-wrap: anywhere; font-size: 0.8125rem; line-height: 1.3; }
+[data-media-tile] .tile-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.35rem; padding: 0.75rem; cursor: default; overflow-wrap: anywhere; font-size: 0.8125rem; line-height: 1.3; text-align: center; }
+[data-media-tile] .tile-placeholder small { color: var(--peppy-text-secondary); }
+[data-media-tile] .tile-placeholder .secondary-button { flex: 0 0 auto; max-width: 100%; min-height: 28px; height: auto; padding: 4px 8px; white-space: normal; justify-content: center; }
 /* Grid cells are 104-140px square on narrow screens; the full notice must fit without clipping, so the cell placeholder is compact and its decorative icon is hidden. */
 [data-media-tile][data-variant="cell"] .tile-removed { padding: 0.25rem; gap: 0.25rem; font-size: 0.6875rem; line-height: 1.2; }
 [data-media-tile][data-variant="cell"] .tile-removed > svg { display: none; }
+[data-media-tile][data-variant="cell"] .tile-placeholder { gap: 0.25rem; padding: 0.25rem; font-size: 0.6875rem; line-height: 1.2; }
+[data-media-tile][data-variant="cell"] .tile-placeholder > svg { display: none; }
+@media (max-width: 600px) { [data-media-tile][data-variant="slide"] .tile-placeholder > svg { display: none; } }
 [data-attachment-storage-local-copy] { display: block; padding: 0.35rem 0.5rem; font-size: 0.75rem; line-height: 1.25; }
 [data-media-tile][data-state="failed"][data-local-copy] .tile-failed > svg { display: none; }
 [data-media-tile][data-state="failed"][data-local-copy] .tile-retry { top: 50%; transform: translate(-50%, -50%); }
 [data-media-tile][data-variant="cell"][data-state="failed"][data-local-copy] .tile-retry { top: 12px; transform: translateX(-50%); }
 [data-media-tile] [data-attachment-storage-local-copy] { position: absolute; z-index: 1; right: 8px; bottom: 8px; left: 8px; margin: 0; padding: 3px 6px; border-radius: var(--peppy-radius-pill); background: rgba(0,0,0,.55); color: #fff; font-size: 11px; line-height: 1.25; text-align: center; pointer-events: none; }
+[data-media-tile] [data-rcs-media-status] { position: absolute; z-index: 1; right: 8px; bottom: 8px; margin: 0; padding: 3px 6px; border-radius: var(--peppy-radius-pill); background: var(--peppy-surface-widget); color: var(--peppy-text-primary); font-size: 11px; line-height: 1.25; }
+[data-rcs-media-status] { display: inline-flex; align-items: center; gap: 3px; }
+[data-rcs-media-status][data-rcs-media-state="not_sent"], [data-rcs-media-status][data-rcs-media-state="members_changed"] { color: var(--peppy-error-text); }
+[data-rcs-media-status][data-rcs-media-state="outcome_unknown"] { color: var(--peppy-warning-text); }
+@media (forced-colors: active) { [data-rcs-media-status] { color: CanvasText; border: 1px solid CanvasText; background: Canvas; } }
+/* Recovery controls size the placeholder, not the stored image geometry. */
+[data-media-tile][data-rcs-media-state="quota_full"],
+[data-media-tile][data-rcs-media-state="failed"],
+[data-media-tile][data-rcs-media-state="too_large"],
+[data-media-tile][data-rcs-media-state="expired"],
+[data-media-tile][data-rcs-media-state="downloading"] { height: auto; min-height: 160px; max-height: none; aspect-ratio: auto; }
+[data-media-tile] .tile-body.tile-placeholder { position: relative; height: auto; min-height: inherit; box-sizing: border-box; }
+[data-media-tile][data-variant="cell"] .tile-placeholder [id^="rcs-media-detail-"] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+@media (max-width: 600px) { [data-media-tile] .tile-placeholder [id^="rcs-media-detail-"] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); } }
+@media (pointer: coarse) {
+  [data-media-tile] .tile-placeholder .secondary-button, .rcs-media-placeholder .secondary-button, [data-rcs-media-retry-all] .secondary-button { min-width: 44px; min-height: 44px; line-height: normal; }
+}
+[data-media-tile]:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: -2px; }
+@media (forced-colors: active) {
+  [data-media-tile] small[data-rcs-media-status],
+  [data-media-tile] small[data-rcs-media-status][data-rcs-media-state] { color: CanvasText; background: Canvas; border: 1px solid CanvasText; }
+}

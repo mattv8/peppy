@@ -371,7 +371,7 @@ test("Google Messages link copy avoids protocol and maturity claims", () => {
     assert.doesNotMatch(value, maturityPattern, `${key} must use production-ready copy`);
   }
   assert.match(catalog.google_messages_link_help_body, /one-to-one/);
-  assert.match(catalog.google_messages_link_help_body, /Photos and other media are not supported yet\./);
+  assert.match(catalog.google_messages_link_help_body, /Photos, videos, audio and other files up to 32 MiB each work too\./);
 });
 
 test("typing copy describes one-to-one and group RCS typing", () => {

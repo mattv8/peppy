@@ -562,6 +562,43 @@ describe("BrowserBridge", () => {
     bridge.dispose();
   });
 
+  it("normalizes RCS attachment fields from a message-window response", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const window = bridge.load_message_window({ direction: "around", conversationId: "conversation-1", messageId: "message-1" });
+
+    port.reply({
+      id: 1,
+      ok: true,
+      value: {
+        conversationId: "conversation-1",
+        hasOlder: false,
+        hasNewer: false,
+        messages: [{
+          id: "message-1",
+          attachments: [
+            { id: "attachment-valid", rcsState: "failed", rcsSendStatus: "not_sent", index: 0 },
+            { id: "attachment-invalid", rcsState: "invalid", rcsSendStatus: "invalid", index: -1 },
+          ],
+        }],
+      },
+    });
+
+    await expect(window).resolves.toEqual({
+      conversationId: "conversation-1",
+      hasOlder: false,
+      hasNewer: false,
+      messages: [{
+        id: "message-1",
+        attachments: [
+          { id: "attachment-valid", rcsState: "failed", rcsSendStatus: "not_sent", index: 0 },
+          { id: "attachment-invalid" },
+        ],
+      }],
+    });
+    bridge.dispose();
+  });
+
   it("forwards history search commands with only the operation or attempt identity", async () => {
     const port = new TestPort();
     const bridge = new BrowserBridge(port as unknown as MessagePort);

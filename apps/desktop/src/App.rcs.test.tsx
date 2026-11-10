@@ -81,6 +81,41 @@ describe("RCS conversation route", () => {
     expect(document.getElementById("sms-counter")).toBeNull();
   });
 
+  it("does not apply MMS attachment gating to a current RCS route", async () => {
+    snapshot = {
+      ...snapshot,
+      gateways: [{ ...snapshot.gateways[0], supportsMms: false, mmsContentVersion: undefined }],
+      draft: {
+        ...snapshot.draft!,
+        attachmentIds: ["rcs-image"],
+        attachments: [{ id: "rcs-image", name: "photo.jpg", mediaType: "image/jpeg", byteSize: 32 * 1024 * 1024, state: "ready", draftState: "local" }],
+      },
+    };
+    render(<App />);
+
+    await screen.findByRole("textbox", { name: "Message" });
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    expect(document.getElementById("attachment-tray-region")).toHaveTextContent("Up to 32 MiB each");
+    expect(document.getElementById("unavailable-hint")).not.toHaveTextContent(/MMS/);
+  });
+
+  it("restores only a refused RCS attachment after the send is rejected", async () => {
+    const attachment = { id: "rcs-image", name: "photo.jpg", mediaType: "image/jpeg", byteSize: 1, state: "ready" as const, draftState: "local" as const };
+    snapshot = {
+      ...snapshot,
+      draft: { ...snapshot.draft!, text: "Keep this", attachmentIds: [attachment.id], attachments: [attachment] },
+    };
+    const sendDraft = vi.spyOn(bridge, "send_draft").mockResolvedValue({ accepted: false, status: "failed-confirmed", reason: "rejected", refusedAttachmentIds: [attachment.id] });
+    render(<App />);
+
+    await screen.findByRole("textbox", { name: "Message" });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(sendDraft).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" })).toHaveValue("Keep this"));
+    expect(document.querySelector(`[data-attachment-id="${attachment.id}"]`)).toBeInTheDocument();
+  });
+
   it.each([
     ["locked encryption", (next: DesktopSnapshot) => ({ ...next, encryption: { state: "locked" as const } })],
     ["an ineligible conversation", (next: DesktopSnapshot) => ({ ...next, rcsStatus: { ...next.rcsStatus!, eligibilities: [{ ...next.rcsStatus!.eligibilities[0], eligibility: "not_eligible" as const }] } })],
@@ -304,5 +339,65 @@ describe("RCS conversation metadata", () => {
 
     await waitFor(() => expect(document.getElementById("conversation-pane")).toHaveAttribute("data-view", "settings"));
     expect(document.getElementById("conversation-rcs-notice")).toBeNull();
+  });
+});
+
+describe("member-change media recovery", () => {
+  it.each([false, true])("restores definitely unsent original indexes only (mixed=%s), without sending", async (mixed) => {
+    const attachments = [
+      ...(mixed ? [{ id: "already-sent", name: "sent.jpg", mediaType: "image/jpeg", byteSize: 67, state: "ready" as const, index: 0, rcsSendStatus: "sent" as const }, { id: "unknown", name: "unknown.pdf", mediaType: "application/pdf", byteSize: 80, state: "ready" as const, index: 1, rcsSendStatus: "outcome_unknown" as const }] : []),
+      { id: "member-file", name: "review.pdf", mediaType: "application/pdf", byteSize: 2048, state: "ready" as const, index: mixed ? 2 : 0, rcsSendStatus: "members_changed" as const },
+      ...(mixed ? [{ id: "never-sent", name: "rest.pdf", mediaType: "application/pdf", byteSize: 1024, state: "ready" as const, index: 3, rcsSendStatus: "not_sent" as const }] : []),
+    ];
+    snapshot.draft = { ...snapshot.draft!, text: "", attachmentIds: [] };
+    snapshot.conversations = snapshot.conversations.map(c => c.id === snapshot.activeConversationId ? { ...c, participants: ["+15555550101", "+15555550102"], group: { members: ["+15555550101", "+15555550102"], memberRevision: "reviewed-7", state: "live", canCreate: false, createNeedsConfirmation: false }, messages: [{ id: "review-media", revision: "1", sender: "self", body: "Original caption", timestamp: "2026-01-01", transport: "rcs", attachments }] } : c);
+    const sendDraft = vi.spyOn(bridge, "send_draft");
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: peppyCopy.group_message_edit_resend }));
+    await waitFor(() => expect(document.querySelector('#attachment-tray-region [data-attachment-id="member-file"]')).toBeInTheDocument());
+    const tray = document.getElementById("attachment-tray-region")!;
+    expect(tray).toHaveTextContent("review.pdf");
+    expect(tray.querySelector('[data-attachment-id="member-file"] svg.lucide-file-text')).toBeInTheDocument();
+    expect(tray.querySelector('[data-attachment-id="already-sent"]')).toBeNull();
+    expect(tray.querySelector('[data-attachment-id="unknown"]')).toBeNull();
+    if (mixed) expect(tray.querySelector('[data-attachment-id="never-sent"]')).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(mixed ? "" : "Original caption");
+    expect(document.getElementById("composer-group-changed")).toHaveAttribute("data-member-revision", "reviewed-7");
+    expect(document.getElementById("composer-group-changed-members")).toHaveTextContent("+15555550101");
+    expect(sendDraft).not.toHaveBeenCalled();
+  });
+});
+
+describe("incoming RCS attachment replacement focus", () => {
+  it.each([
+    ["image", false, false], ["image", true, false], ["file", false, false], ["file", true, false],
+    ["image", false, true], ["image", true, true], ["file", false, true], ["file", true, true],
+  ] as const)("keeps slot identity for %s, intermediate=%s, user leaves=%s", async (kind, intermediate, userLeaves) => {
+    const messageId = "focus-recovery";
+    const placeholder = { id: "placeholder", index: 3, name: kind === "image" ? "photo.jpg" : "report.pdf", mediaType: kind === "image" ? "image/jpeg" : "application/pdf", byteSize: 128, state: "pending" as const, rcsState: "quota_full" as const };
+    const sibling = { id: "sibling", index: 4, name: "second.jpg", mediaType: "image/jpeg", byteSize: 67, state: "ready" as const, rcsState: "stored" as const, previewUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" };
+    snapshot.conversations = snapshot.conversations.map(c => c.id === snapshot.activeConversationId ? { ...c, messages: [{ id: messageId, revision: "1", sender: "other", body: "Focus recovery", timestamp: "2026-01-01", transport: "rcs", attachments: kind === "image" ? [placeholder, sibling] : [placeholder] }] } : c);
+    render(<App />);
+    const retry = await screen.findByRole("button", { name: /Retry download for/ });
+    retry.focus();
+    const root = retry.closest(kind === "image" ? "[data-media-tile]" : "[data-rcs-attachment-slot]");
+    const transition = async (rcsState: "downloading" | "stored") => {
+      const value = { ...placeholder, rcsState, ...(rcsState === "stored" ? { id: "hosted-original", state: "ready" as const, previewUrl: kind === "image" ? sibling.previewUrl : undefined } : {}) };
+      snapshot.conversations = snapshot.conversations.map(c => c.id === snapshot.activeConversationId ? { ...c, messages: c.messages.map(m => m.id === messageId ? { ...m, revision: String(Number(m.revision) + 1), attachments: kind === "image" ? [value, sibling] : [value] } : m) } : c);
+      await act(async () => { vi.mocked(bridge.subscribe).mock.calls.at(-1)![0](); });
+      await waitFor(() => expect(document.querySelector(`[data-attachment-id="${value.id}"]`) ?? document.querySelector(`[data-media-attachment="${value.id}"]`)).toBeInTheDocument());
+      await waitFor(() => expect(document.querySelector(`[data-rcs-media-state="${rcsState}"]`)).toBeInTheDocument());
+    };
+    if (intermediate) {
+      await transition("downloading");
+      expect(document.activeElement).toBe(root);
+    }
+    const outside = screen.getByRole("textbox", { name: "Message" });
+    if (userLeaves) outside.focus();
+    await transition("stored");
+    const replacement = document.querySelector(kind === "image" ? '[data-media-tile][data-media-attachment="hosted-original"]' : '[data-rcs-attachment-slot]');
+    expect(replacement).toBe(root);
+    if (userLeaves) expect(document.activeElement).toBe(outside);
+    else expect(document.activeElement).toBe(root?.querySelector("button"));
   });
 });

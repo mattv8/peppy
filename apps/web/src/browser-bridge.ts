@@ -14,7 +14,7 @@ import { validateAccountUrl } from "./account-navigation";
 import { beginHostedAuthorization, fetchHostedWebConfig } from "./newhosted-app-auth";
 import { appSessionRenewal } from "./app-session-renewal";
 import { inlineMediaType, safeSuggestedFilename } from "./attachment-safety";
-import { groupDraftFields, normalizeGroupSnapshot, parseSendResult } from "./group-payload";
+import { groupDraftFields, normalizeGroupSnapshot, normalizeMessageWindow, parseSendResult } from "./group-payload";
 
 /** Runs a bridge call whose input validation may throw, reporting the failure as a rejected promise. */
 function callChecked<T>(call: () => Promise<T>): Promise<T> {
@@ -528,7 +528,7 @@ export class BrowserBridge implements DesktopBridge {
   public get_history_search(): Promise<HistorySearchSnapshot> { return this.call("get_history_search"); }
   public start_history_search(input: StartHistorySearchInput): Promise<HistorySearchSnapshot> { return this.call("start_history_search", { operationId: input.operationId }); }
   public cancel_history_search(input: HistorySearchAttemptInput): Promise<HistorySearchSnapshot> { return this.call("cancel_history_search", { attemptId: input.attemptId }); }
-  public load_message_window(input: MessageWindowRequest): Promise<MessageWindow> { return this.call("load_message_window", input); }
+  public load_message_window(input: MessageWindowRequest): Promise<MessageWindow> { return this.call<MessageWindow>("load_message_window", input).then(normalizeMessageWindow); }
   public load_history(conversationId: string, beforeMessageId: string): Promise<HistoryPage> { return this.call("load_history", { conversationId, beforeMessageId }); }
   public save_draft(input: DraftInput): Promise<Draft> { return callChecked(() => this.call<Draft>("save_draft", { input: { ...input, ...groupDraftFields(input) } })); }
   public send_draft(input: SendDraftInput): Promise<SendResultView> { return callChecked(() => this.call<unknown>("send_draft", { input: { ...input, ...groupDraftFields(input) } }).then(parseSendResult)); }
@@ -651,6 +651,11 @@ export class BrowserBridge implements DesktopBridge {
   public resolve_draft_conflict(input: { draftId: string; keepBranchId: string | null }): Promise<Draft> { return this.call("resolve_draft_conflict", input); }
   public acknowledge_draft_notice(draftId: string): Promise<void> { return this.call("acknowledge_draft_notice", { draftId }); }
   public retry_attachment(id: string): Promise<void> { return this.call("retry_attachment", { id }); }
+  public retryRcsMediaDownload(messageId: string, attachmentIndex: number): Promise<void> {
+    if (typeof messageId !== "string" || messageId.length === 0) return Promise.reject(new BrowserBridgeError("invalid-request", "Invalid message ID."));
+    if (!Number.isInteger(attachmentIndex) || attachmentIndex < 0) return Promise.reject(new BrowserBridgeError("invalid-request", "Invalid attachment index."));
+    return this.call("retry_rcs_media_download", { messageId, attachmentIndex });
+  }
   public attachment_retention_state(attachmentId: string): Promise<AttachmentRetentionStateDto> { return this.call("attachment_retention_state", { attachmentId }); }
   public attachment_retention_status(): Promise<AttachmentRetentionStatusResult> { return this.call("attachment_retention_status"); }
   public account_access(): Promise<AccountAccessResult> { return this.call("account_access"); }

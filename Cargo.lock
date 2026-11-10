@@ -2292,6 +2292,7 @@ dependencies = [
  "peppy-crypto",
  "peppy-hosted-api",
  "peppy-hosted-client",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
