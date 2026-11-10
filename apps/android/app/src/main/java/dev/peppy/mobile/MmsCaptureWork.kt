@@ -231,6 +231,7 @@ object MmsCaptureWork {
     private const val HINT_FAILURE_ENQUEUE = 1L
     private const val HINT_FAILURE_RECOVERY = 2L
     internal const val HINT_FAILURE_POSTPROCESS = 3L
+    private const val HINT_FAILURE_CAPTURE = 4L
     internal val hintScheduler = MmsCaptureHintScheduler()
 
     internal fun isManagedData(inputData: Data): Boolean =
@@ -261,6 +262,7 @@ object MmsCaptureWork {
             throw error
         } catch (_: Exception) {
             if (!hintWork) return ListenableWorker.Result.retry()
+            recordHintFailure(HINT_FAILURE_CAPTURE)
             if (consumedHint) MmsCaptureHints.record(context)
             try { enqueue(context) } catch (_: Exception) {
                 recordHintFailure(HINT_FAILURE_RECOVERY)

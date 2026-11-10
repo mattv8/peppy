@@ -1078,13 +1078,22 @@ class MmsCaptureOrchestrationTest {
     @Test fun hintFailureRestoresDurableHintAndReturnsSuccess() {
         val context = hintContext()
         MmsCaptureHints.record(context)
+        val events = java.util.concurrent.CopyOnWriteArrayList<String>()
 
-        val result = MmsCaptureWork.runWorkerPass(context, workDataOf(MmsCaptureWork.HINT_WORK to true)) { _, _ ->
-            throw IOException("provider unavailable")
+        val result = SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+            MmsCaptureWork.runWorkerPass(context, workDataOf(MmsCaptureWork.HINT_WORK to true)) { _, _ ->
+                throw IOException("provider unavailable")
+            }
         }
 
         assertEquals(ListenableWorker.Result.success(), result)
         assertTrue(MmsCaptureHints.consumeProviderChange(context))
+        assertEquals(1, events.count { event ->
+            event.startsWith("event=${SyncTraceEvent.CAPTURE_PROGRESS.code} ") &&
+                traceFields(event)[SyncTraceField.STAGE.code] == SyncDiagnosticStage.MMS &&
+                traceFields(event)[SyncTraceField.COUNT.code] == 4L
+        })
+        assertTrue(events.none { it.contains("provider unavailable") })
     }
 
     @Test fun hintCancellationPropagatesAndRestoresDurableHint() {
