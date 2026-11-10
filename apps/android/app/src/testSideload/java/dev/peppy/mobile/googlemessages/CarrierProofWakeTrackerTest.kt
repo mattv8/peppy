@@ -4,6 +4,18 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class CarrierProofWakeTrackerTest {
+    @Test fun `completed carrier commands release capacity without resetting live command fuses`() {
+        val tracker = CarrierProofWakeTracker()
+        repeat(128) { command ->
+            repeat(3) { tracker.record("command-$command", RcsNativeSendOutcome.CARRIER_ONLY) }
+        }
+
+        tracker.retainPendingCommands(setOf("command-127"))
+
+        assertEquals(CarrierProofWakeAction.WAKE, tracker.record("new-command", RcsNativeSendOutcome.CARRIER_ONLY))
+        assertEquals(CarrierProofWakeAction.PROOF_WINDOW_MISSED, tracker.record("command-127", RcsNativeSendOutcome.CARRIER_ONLY))
+    }
+
     @Test fun `carrier only wakes exactly three times then waits for normal cadence`() {
         val tracker = CarrierProofWakeTracker()
 

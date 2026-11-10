@@ -4,6 +4,11 @@ package dev.peppy.mobile.googlemessages
 internal class CarrierProofWakeTracker(private val maximumWakes: Int = MAXIMUM_WAKES) {
     private val consecutive = LinkedHashMap<String, Int>()
 
+    /** Requires the full pending ledger, never a filtered or bounded native candidate page. */
+    fun retainPendingCommands(commandIds: Set<String>) {
+        consecutive.keys.retainAll(commandIds)
+    }
+
     fun record(commandId: String, outcome: RcsNativeSendOutcome): CarrierProofWakeAction {
         if (outcome != RcsNativeSendOutcome.CARRIER_ONLY) {
             consecutive.remove(commandId)

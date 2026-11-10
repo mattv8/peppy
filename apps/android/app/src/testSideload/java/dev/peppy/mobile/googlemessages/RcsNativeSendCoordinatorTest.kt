@@ -9,6 +9,34 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RcsNativeSendCoordinatorTest {
+    @Test fun `durable refusal schedules its status once while early refusals remain quiet`() {
+        var uploads = 0
+        val rejected = Harness(commitResult = RcsNativeCommitResult.Rejected, onRefusalRecorded = { uploads++ })
+        assertEquals(RcsNativeSendOutcome.REFUSED, rejected.execute())
+        assertEquals(1, rejected.lease.refusalRecords)
+        assertEquals(1, uploads)
+
+        val early = Harness(target = RcsNativeTarget.Unknown, onRefusalRecorded = { uploads++ })
+        assertEquals(RcsNativeSendOutcome.REFUSED, early.execute())
+        assertEquals(0, early.lease.refusalRecords)
+        assertEquals(1, uploads)
+
+        val failedWrite = Harness(commitResult = RcsNativeCommitResult.Rejected, refusalRecorded = false, onRefusalRecorded = { uploads++ })
+        assertEquals(RcsNativeSendOutcome.OUTCOME_UNKNOWN, failedWrite.execute())
+        assertEquals(1, uploads)
+    }
+
+    @Test fun `group commit refusal schedules status and scheduling failure cannot change recorded outcome`() {
+        var uploads = 0
+        val changed = Harness(groupDigest = "digest", commitResult = RcsNativeCommitResult.MembersChanged, onRefusalRecorded = { uploads++ })
+        assertEquals(RcsNativeSendOutcome.MEMBERS_CHANGED, changed.execute())
+        assertEquals(1, uploads)
+
+        val failedWake = Harness(commitResult = RcsNativeCommitResult.Rejected, onRefusalRecorded = { error("scheduler unavailable") })
+        assertEquals(RcsNativeSendOutcome.REFUSED, failedWake.execute())
+        assertEquals(0, failedWake.lease.outcomeUnknownRecords)
+    }
+
     @Test fun `forwards opaque bytes in the required order before a single commit`() {
         val harness = Harness()
         assertEquals(RcsNativeSendOutcome.SUBMITTED, harness.execute())
@@ -318,6 +346,7 @@ class RcsNativeSendCoordinatorTest {
         private val proved: Boolean = true,
         private val groupRouteCurrent: Boolean = true,
         private val guardTarget: RcsNativeTarget? = target,
+        onRefusalRecorded: () -> Unit = {},
         acquire: ((String, () -> Unit) -> RcsNativeCoreLease?)? = null,
         onPrepare: (() -> Unit)? = null,
     ) {
@@ -340,6 +369,7 @@ class RcsNativeSendCoordinatorTest {
             RcsNativeClock { if (++clockCalls == clockThrowsAt) throw IllegalStateException("clock") else nowMs },
             1,
             routeChanges,
+            onRefusalRecorded,
         )
         fun execute() = coordinator.execute(COMMAND)
     }

@@ -11,6 +11,7 @@ internal class RcsNativeSendCoordinator(
     private val clock: RcsNativeClock,
     private val canonicalizerRevision: Int,
     private val routeChangeRevoker: RcsNativeRouteChangeRevoker,
+    private val onRefusalRecorded: () -> Unit = {},
 ) {
     private val executing = AtomicBoolean(false)
 
@@ -153,12 +154,16 @@ internal class RcsNativeSendCoordinator(
         recordGoogleMessagesLinkEvent(DIRECT_SEND_KIND, code, 0L)
     }
 
-    private fun recordRefusal(lease: RcsNativeCoreLease) =
-        if (lease.recordPreEffectRefusal()) RcsNativeSendOutcome.REFUSED else recordOutcomeUnknown(lease)
+    private fun recordRefusal(lease: RcsNativeCoreLease, membersChanged: Boolean = false): RcsNativeSendOutcome {
+        if (!lease.recordPreEffectRefusal(membersChanged)) return recordOutcomeUnknown(lease)
+        runCatching(onRefusalRecorded)
+            .onFailure { recordGoogleMessagesLinkEvent("link", "rcs_callback_failed", 0L) }
+        return if (membersChanged) RcsNativeSendOutcome.MEMBERS_CHANGED else RcsNativeSendOutcome.REFUSED
+    }
 
     /** Go's `members_changed` at commit is a definite not-sent: core fails the attempt and pauses the group. */
     private fun recordMembersChanged(lease: RcsNativeCoreLease) =
-        if (lease.recordPreEffectRefusal(membersChanged = true)) RcsNativeSendOutcome.MEMBERS_CHANGED else recordOutcomeUnknown(lease)
+        recordRefusal(lease, membersChanged = true)
 
     private fun recordOutcomeUnknown(lease: RcsNativeCoreLease?): RcsNativeSendOutcome {
         lease?.recordOutcomeUnknown()

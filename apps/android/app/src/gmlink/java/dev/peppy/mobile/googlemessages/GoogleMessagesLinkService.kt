@@ -116,7 +116,10 @@ class GoogleMessagesLinkService : Service() {
             candidates = {
                 runPendingGroupCreates()
                 NativeGateway.open(applicationContext)
-                    ?.let(::gatewayPendingNativeRcsCommands)
+                    ?.let { client ->
+                        carrierProofWakes.retainPendingCommands(client.pendingCommands().map { it.commandId }.toSet())
+                        gatewayPendingNativeRcsCommands(client)
+                    }
                     .orEmpty()
                     .map { RcsNativeCommand(it.commandId, it.conversationId, it.recipient) }
             },
@@ -166,6 +169,7 @@ class GoogleMessagesLinkService : Service() {
             clock,
             rcsCanonicalizerRevision().toInt(),
             RcsNativeAndroidRouteChangeRevoker(applicationContext),
+            onRefusalRecorded = { GatewayWork.enqueueAfterCapture(applicationContext) },
         ).execute(command).also { outcome ->
             when (carrierProofWakes.record(command.commandId, outcome)) {
                 CarrierProofWakeAction.WAKE -> GatewayWork.enqueueUrgent(applicationContext)
