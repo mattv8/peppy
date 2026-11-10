@@ -28,6 +28,8 @@ internal class RcsReceiveCoordinator(
     private val core: RcsReceiveCore = GeneratedRcsReceiveCore(context.applicationContext),
     private val enabled: () -> Boolean = GoogleMessagesLinkService::nativeRcsEnabled,
     private val bootstrapRequest: (String) -> Unit = GoogleMessagesLinkService::requestTargetedRcsBootstrap,
+    /** One fresh complete snapshot ingest for group records; false when no complete snapshot was available. */
+    private val reconcileGroups: () -> Boolean = GoogleMessagesLinkService::requestRcsGroupReconcile,
 ) : RcsReceiveSink {
     private val locks = ConcurrentHashMap<String, Any>()
     private val sweepLock = Any()
@@ -37,10 +39,17 @@ internal class RcsReceiveCoordinator(
         if (!enabled()) return
         val event = parseLiveEvent(recordJson) ?: return
         val googleId = event.googleConversationId
-        val context = runCatching { core.context(googleId) }.getOrNull() ?: run {
+        var context = runCatching { core.context(googleId) }.getOrNull()
+        if (context == null && event is LiveEvent.Record && reconcileGroups()) {
+            // An unmapped group record: the fresh snapshot may have linked or created its group. Retry once.
+            context = runCatching { core.context(googleId) }.getOrNull()
+        }
+        if (context == null) {
             if (event is LiveEvent.Record) bootstrapRequest(googleId)
             return
         }
+        // Unknown group senders get one snapshot re-read per record before the record is ingested unattributed.
+        if (event is LiveEvent.Record && unknownGroupSender(event.record)) reconcileGroups()
         synchronized(lock(context.conversationId)) {
             if (!enabled()) return
             when (event) {
@@ -51,6 +60,9 @@ internal class RcsReceiveCoordinator(
             }
         }
     }
+
+    private fun unknownGroupSender(record: String): Boolean =
+        runCatching { JSONObject(record).optBoolean("sender_unknown") }.getOrDefault(false)
 
     /**
      * Restart and ready sweep. Skips conversations whose index shows no activity since their watermark, and
@@ -127,6 +139,8 @@ internal class RcsReceiveCoordinator(
         var cursor: String? = hint?.cursor
         var targetMs: Long? = hint?.targetMs
         val usedCursors = HashSet<String>()
+        // One snapshot re-read per conversation traversal, before its first unattributed group record.
+        var rereadDone = false
         repeat(MAX_PAGES) {
             if (!active(cancelled, current)) return RcsRecoveryResult.ABORTED
             val requested = cursor.orEmpty()
@@ -136,6 +150,10 @@ internal class RcsReceiveCoordinator(
             targetMs = pageTarget
             for (record in page.records) {
                 if (!active(cancelled, current)) return RcsRecoveryResult.ABORTED
+                if (record.sentAtMs >= floorMs && !rereadDone && unknownGroupSender(record.json)) {
+                    reconcileGroups()
+                    rereadDone = true
+                }
                 if (record.sentAtMs >= floorMs && ingestAborts(context, record.json)) return RcsRecoveryResult.ABORTED
             }
             for (googleId in page.signalGoogleIds.distinct()) {

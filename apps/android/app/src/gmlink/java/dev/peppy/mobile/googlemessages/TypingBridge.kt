@@ -28,7 +28,8 @@ internal interface TypingCore {
     fun disable()
     fun receiveContext(googleConversationId: String): TypingReceiveContext?
     fun ownedGoogleConversationId(conversationId: String): String?
-    fun seal(conversationId: String, gatewayDeviceId: String, state: NativeTypingState, clock: NativeLiveClock): uniffi.peppy_mobile_bindings.NativeLiveOutbound?
+    /** [participant] is the canonical sender of a group typing event; null for one-to-one. */
+    fun seal(conversationId: String, gatewayDeviceId: String, participant: String?, state: NativeTypingState, clock: NativeLiveClock): uniffi.peppy_mobile_bindings.NativeLiveOutbound?
     fun open(frameJson: String, clock: NativeLiveClock): uniffi.peppy_mobile_bindings.NativeLiveOutcome
 }
 
@@ -55,8 +56,8 @@ private class NativeTypingCore(private val client: uniffi.peppy_mobile_bindings.
     override fun ownedGoogleConversationId(conversationId: String) = client.gatewayRcsLinkOwnedConversations()
         .firstOrNull { it.conversationId == conversationId && it.owner == uniffi.peppy_mobile_bindings.NativeRcsReceiveOwner.LINK }
         ?.googleConversationId
-    override fun seal(conversationId: String, gatewayDeviceId: String, state: NativeTypingState, clock: NativeLiveClock) =
-        client.sealTypingSignalV2(conversationId, gatewayDeviceId, NativeTypingOrigin.GOOGLE_CONTACT, state, clock)
+    override fun seal(conversationId: String, gatewayDeviceId: String, participant: String?, state: NativeTypingState, clock: NativeLiveClock) =
+        client.sealTypingSignalV2(conversationId, gatewayDeviceId, NativeTypingOrigin.GOOGLE_CONTACT, participant, state, clock)
     override fun open(frameJson: String, clock: NativeLiveClock) = client.openTypingSignalV2(frameJson, clock)
 }
 
@@ -156,10 +157,13 @@ internal class TypingBridge(
             }
             val receive = runCatching { current.receiveContext(googleId) }.getOrNull()
                 ?.takeIf { it.linkOwned } ?: return@execute
+            // Go sends `participant` only for a group conversation; core confirms it is a live roster member.
+            val participant = record.optString("participant").takeIf(String::isNotEmpty)
             val frame = runCatching {
                 current.seal(
                     receive.conversationId,
                     deviceId,
+                    participant,
                     state,
                     nativeClock(),
                 )

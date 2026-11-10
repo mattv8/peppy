@@ -111,6 +111,7 @@ class TypingBridgeRealCoreTest : GatewayTestBase() {
             conversationId,
             deviceId,
             NativeTypingOrigin.VAULT_DEVICE,
+            null,
             NativeTypingState.STARTED,
             clock(offset),
         ) ?: return false
@@ -256,7 +257,7 @@ class TypingBridgeRealCoreTest : GatewayTestBase() {
         override fun disable() = client.disableLiveTyping()
         override fun receiveContext(googleConversationId: String): TypingReceiveContext? = null
         override fun ownedGoogleConversationId(conversationId: String) = googleConversationId.takeIf { conversationId == this.conversationId }
-        override fun seal(conversationId: String, gatewayDeviceId: String, state: NativeTypingState, clock: NativeLiveClock): NativeLiveOutbound? = null
+        override fun seal(conversationId: String, gatewayDeviceId: String, participant: String?, state: NativeTypingState, clock: NativeLiveClock): NativeLiveOutbound? = null
         override fun open(frameJson: String, clock: NativeLiveClock): NativeLiveOutcome = client.openTypingSignalV2(frameJson, clock)
     }
 }

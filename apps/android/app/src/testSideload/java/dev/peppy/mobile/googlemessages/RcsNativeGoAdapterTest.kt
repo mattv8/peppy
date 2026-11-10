@@ -41,7 +41,7 @@ class RcsNativeGoAdapterTest {
         }
         val adapter = adapter(handle)
 
-        val prepared = adapter.prepare(COMMAND, 7, ROUTE)
+        val prepared = adapter.prepare(COMMAND, 7, ROUTE, null)
         val route = adapter.bindRoute(prepared.ticketId, RcsNativeContextTuple(1uL, 2uL, 3uL), 4uL, 5)
         val target = adapter.bindTarget(prepared.ticketId, "google", "snapshot")
 
@@ -63,7 +63,7 @@ class RcsNativeGoAdapterTest {
         malformed.forEach { response ->
             val handle = FakeHandle().apply { prepareResponse = response; routeResponse = response; targetResponse = response; factsResponse = response }
             val adapter = adapter(handle)
-            assertThrows(IllegalStateException::class.java) { adapter.prepare(COMMAND, 1, ROUTE) }
+            assertThrows(IllegalStateException::class.java) { adapter.prepare(COMMAND, 1, ROUTE, null) }
             assertThrows(IllegalStateException::class.java) { adapter.bindRoute("ticket", RcsNativeContextTuple(1uL, 1uL, 1uL), 1uL, 1) }
             assertThrows(IllegalStateException::class.java) { adapter.bindTarget("ticket", "google", "snapshot") }
             assertFalse(adapter.bindFacts("ticket", FACTS))
@@ -75,7 +75,7 @@ class RcsNativeGoAdapterTest {
         val handle = FakeHandle().apply { prepareResponse = "{\"code\":\"prepared\",\"ticket_id\":\"$ticket\"}" }
         val adapter = adapter(handle)
 
-        assertThrows(IllegalStateException::class.java) { adapter.prepare(COMMAND, 1, ROUTE) }
+        assertThrows(IllegalStateException::class.java) { adapter.prepare(COMMAND, 1, ROUTE, null) }
 
         assertEquals(listOf(ticket), handle.revoked)
     }
@@ -87,7 +87,7 @@ class RcsNativeGoAdapterTest {
         }
         val adapter = adapter(handle)
 
-        assertThrows(IllegalStateException::class.java) { adapter.prepare(COMMAND, 1, ROUTE) }
+        assertThrows(IllegalStateException::class.java) { adapter.prepare(COMMAND, 1, ROUTE, null) }
 
         assertEquals(listOf(ticket), handle.revoked)
         assertEquals(0, handle.routeCalls)
@@ -101,7 +101,7 @@ class RcsNativeGoAdapterTest {
         }
         val adapter = adapter(handle)
 
-        assertThrows(IllegalStateException::class.java) { adapter.prepare(COMMAND, 1, ROUTE) }
+        assertThrows(IllegalStateException::class.java) { adapter.prepare(COMMAND, 1, ROUTE, null) }
 
         assertEquals(emptyList<String>(), handle.revoked)
     }
@@ -117,7 +117,7 @@ class RcsNativeGoAdapterTest {
         }
         val adapter = adapter(handle)
 
-        assertThrows(IllegalStateException::class.java) { adapter.prepare(COMMAND, 1, ROUTE) }
+        assertThrows(IllegalStateException::class.java) { adapter.prepare(COMMAND, 1, ROUTE, null) }
         assertThrows(IllegalStateException::class.java) { adapter.bindRoute("ticket", RcsNativeContextTuple(1uL, 1uL, 1uL), 1uL, 1) }
         assertThrows(IllegalStateException::class.java) { adapter.bindTarget("ticket", "google", "snapshot") }
         assertFalse(adapter.bindFacts("ticket", FACTS))
@@ -125,7 +125,7 @@ class RcsNativeGoAdapterTest {
 
         handle.prepareResponse = "{\"code\":\"pr\\u0065pared\",\"ticket\\u005fid\":\"123e4567-e89b-12d3-a456-426614174000\",\"candidate_snapshot\":\"\\uD83D\\uDE00\",\"run_incarnation\":\"run\",\"run_generation\":1,\"stream_epoch\":1,\"pairing_evidence_id\":\"pair\"}"
         handle.routeResponse = "{\"code\":\"route\\u005fbound\",\"observation\":\"\\uD83D\\uDE00\"}"
-        val prepared = adapter.prepare(COMMAND, 1, ROUTE)
+        val prepared = adapter.prepare(COMMAND, 1, ROUTE, null)
 
         assertEquals("😀", prepared.candidateSnapshotJson)
         assertEquals("😀", adapter.bindRoute(prepared.ticketId, RcsNativeContextTuple(1uL, 1uL, 1uL), 1uL, 1))
@@ -145,7 +145,7 @@ class RcsNativeGoAdapterTest {
     @Test fun `wrong prepare phase still revokes its known ticket`() {
         val handle = FakeHandle().apply { prepareResponse = prepared().replace("\"prepared\"", "\"target_bound\"") }
         val adapter = adapter(handle)
-        assertThrows(IllegalStateException::class.java) { adapter.prepare(COMMAND, 1, ROUTE) }
+        assertThrows(IllegalStateException::class.java) { adapter.prepare(COMMAND, 1, ROUTE, null) }
         assertEquals(listOf("123e4567-e89b-12d3-a456-426614174000"), handle.revoked)
     }
 
@@ -169,8 +169,8 @@ class RcsNativeGoAdapterTest {
     @Test fun `enforces inner candidate and observation caps without counting outer escapes`() {
         val candidateAtCap = "a".repeat(8 * 1024 * 1024)
         val candidateOverCap = candidateAtCap + "a"
-        assertEquals(candidateAtCap, adapter(FakeHandle().apply { prepareResponse = prepared(candidate = candidateAtCap) }).prepare(COMMAND, 1, ROUTE).candidateSnapshotJson)
-        assertThrows(IllegalStateException::class.java) { adapter(FakeHandle().apply { prepareResponse = prepared(candidate = candidateOverCap) }).prepare(COMMAND, 1, ROUTE) }
+        assertEquals(candidateAtCap, adapter(FakeHandle().apply { prepareResponse = prepared(candidate = candidateAtCap) }).prepare(COMMAND, 1, ROUTE, null).candidateSnapshotJson)
+        assertThrows(IllegalStateException::class.java) { adapter(FakeHandle().apply { prepareResponse = prepared(candidate = candidateOverCap) }).prepare(COMMAND, 1, ROUTE, null) }
 
         val observationAtCap = "\\u003c".repeat(65_536 / 6) + "a".repeat(65_536 % 6)
         val observationOverCap = "a".repeat(65_537)
@@ -197,7 +197,7 @@ class RcsNativeGoAdapterTest {
 
         assertEquals(0, adapter.ownerGeneration())
         assertFalse(adapter.isCurrent())
-        assertThrows(IllegalStateException::class.java) { adapter.prepare(COMMAND, 1, ROUTE) }
+        assertThrows(IllegalStateException::class.java) { adapter.prepare(COMMAND, 1, ROUTE, null) }
         assertEquals(RcsNativeCommitResult.Rejected, adapter.commit("ticket", COMMIT))
         assertEquals(0, handle.prepareCalls)
         assertEquals("", handle.commit)

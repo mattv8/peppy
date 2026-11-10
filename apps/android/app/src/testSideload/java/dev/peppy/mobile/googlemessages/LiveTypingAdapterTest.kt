@@ -214,11 +214,11 @@ class LiveTypingAdapterTest {
         deadline: ULong,
         state: NativeTypingState = NativeTypingState.STARTED,
     ) = NativeLiveAction.GatewayTypingIntent(
-        "peer", token, sequence, "conversation", state, deadline,
+        "peer", token, sequence, "conversation", null, state, deadline,
     )
 
     private fun display(sequence: ULong, deadline: ULong) = NativeLiveAction.Display(
-        "peer", 8UL, sequence, "conversation", NativeTypingState.STARTED, deadline,
+        "peer", 8UL, sequence, "conversation", null, NativeTypingState.STARTED, deadline,
     )
 
     private class FakeClock(var now: ULong) : MonotonicClock {

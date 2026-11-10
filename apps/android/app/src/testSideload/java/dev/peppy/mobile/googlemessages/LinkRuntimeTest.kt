@@ -231,7 +231,7 @@ class LinkRuntimeTest {
                 7UL,
                 null,
                 NativeLiveAction.GatewayTypingIntent(
-                    "peer", 8UL, 1UL, "conversation", NativeTypingState.STARTED, 200UL,
+                    "peer", 8UL, 1UL, "conversation", null, NativeTypingState.STARTED, 200UL,
                 ),
                 null,
             ),

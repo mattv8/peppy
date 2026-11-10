@@ -12,14 +12,17 @@ internal class RcsNativeGoAdapter(private val lease: LinkHandleLease) : RcsNativ
 
     override fun isCurrent(): Boolean = LinkRuntime.ownsObservationLease(lease)
 
-    override fun prepare(command: RcsNativeCommand, canonicalizerRevision: Int, route: RcsNativeRouteEvidence): RcsNativePrepared {
+    override fun prepare(command: RcsNativeCommand, canonicalizerRevision: Int, route: RcsNativeRouteEvidence, expectedMemberDigest: String?): RcsNativePrepared {
         val request = JSONObject()
             .put("command_id", command.commandId)
             .put("canonicalizer_revision", canonicalizerRevision)
             .put("identity_region", route.identityRegion)
             .put("carrier_binding", route.carrierBindingJson())
+            .apply { expectedMemberDigest?.let { put("expected_member_digest", it) } }
             .toString()
         val response = scoped { it.prepareNativeRcs(request) }
+        // Go refuses a group prepare before any ticket exists, so there is nothing to revoke.
+        if (membersChangedOnly(response)) throw RcsNativeMembersChanged()
         var ticketForRevocation: String? = null
         // A response rejected before decoding has no trusted ticket id. Go has no ticket-less revoke, so that slot expires by its 30 s TTL.
         return try {
@@ -60,6 +63,7 @@ internal class RcsNativeGoAdapter(private val lease: LinkHandleLease) : RcsNativ
         if (response == null) RcsNativeCommitResult.Rejected else when (parse(response, SMALL_CAP, setOf("code"))["code"]) {
             "accepted" -> RcsNativeCommitResult.Accepted
             "rejected" -> RcsNativeCommitResult.Rejected
+            "members_changed" -> RcsNativeCommitResult.MembersChanged
             else -> RcsNativeCommitResult.OutcomeUnknown
         }
     } catch (failure: Throwable) {
@@ -79,6 +83,10 @@ internal class RcsNativeGoAdapter(private val lease: LinkHandleLease) : RcsNativ
         preserveInterruption(failure)
         throw NativeRcsRevocationFailure()
     }
+
+    /** Go's only roster refusal at prepare is the exact one-field `{"code":"members_changed"}` reply. */
+    private fun membersChangedOnly(response: String): Boolean =
+        runCatching { parse(response, SMALL_CAP, setOf("code"))["code"] }.getOrNull() == "members_changed"
 
     private fun observation(response: String, code: String): String {
         val parsed = strictParse(response, OBSERVATION_CAP, setOf("code", "observation"))

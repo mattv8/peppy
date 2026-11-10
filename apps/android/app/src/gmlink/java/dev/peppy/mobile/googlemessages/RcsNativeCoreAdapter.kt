@@ -2,19 +2,27 @@ package dev.peppy.mobile.googlemessages
 
 import android.content.Context
 import dev.peppy.mobile.gateway.NativeGateway
+import org.json.JSONObject
+import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeClient
 import uniffi.peppy_mobile_bindings.NativeRcsCommittedSend
+import uniffi.peppy_mobile_bindings.NativeRcsGroupVerification
 import uniffi.peppy_mobile_bindings.NativeRcsMappingVerification
+import uniffi.peppy_mobile_bindings.NativeRcsReceiveOwner
 import uniffi.peppy_mobile_bindings.NativeRcsSendPreparation
 import uniffi.peppy_mobile_bindings.NativeRcsTargetDecision
 import uniffi.peppy_mobile_bindings.gatewayClassifyRcsTarget
 import uniffi.peppy_mobile_bindings.gatewayNextRcsContextTuple
 import uniffi.peppy_mobile_bindings.gatewayNextRcsMappingRevision
 import uniffi.peppy_mobile_bindings.gatewayPrepareNativeRcsSend
+import uniffi.peppy_mobile_bindings.gatewayProvedGroupMemberDigest
+import uniffi.peppy_mobile_bindings.gatewayProvedGroupMemberRevision
 import uniffi.peppy_mobile_bindings.gatewayRecordRcsPreEffectRefusal
 import uniffi.peppy_mobile_bindings.gatewayRecordRcsOutcomeUnknown
 import uniffi.peppy_mobile_bindings.gatewayRecordRcsSubmitted
 import uniffi.peppy_mobile_bindings.gatewayRecordRcsTransportAck
+import uniffi.peppy_mobile_bindings.gatewayVerifyRcsGroupObservation
+import uniffi.peppy_mobile_bindings.gatewayVerifyRcsGroupRoute
 import uniffi.peppy_mobile_bindings.gatewayVerifyRcsMapping
 
 /** Acquires one exact NativeGateway owner; its client is never resolved again. */
@@ -25,6 +33,15 @@ internal class RcsNativeCoreAdapter(
     override fun acquire(ticketId: String, revoker: () -> Unit): RcsNativeCoreLease? {
         val gatewayLease = NativeGateway.acquireRcsSendLease(context, ticketId, revoker) ?: return null
         return NativeRcsCoreLease(GeneratedNativeRcsCorePort(gatewayLease.client), clock, gatewayLease::close)
+    }
+
+    /**
+     * Only a Live group has a digest, read without a preparation or freshness check: the stored proof may be
+     * older than the send window, and the route step and re-proof refresh it before the freshness-checked prepare.
+     */
+    override fun groupMemberDigest(conversationId: String): String? {
+        val client = NativeGateway.open(context) ?: return null
+        return gatewayProvedGroupMemberDigest(client, conversationId)
     }
 }
 
@@ -37,8 +54,12 @@ internal interface NativeRcsCorePort {
     fun prepare(commandId: String, nowMs: Long): NativeRcsPreparationPort
     fun recordTransportAcknowledged(commandId: String, ackAtMs: Long)
     fun recordSubmitted(commandId: String)
-    fun recordPreEffectRefusal(commandId: String, tmpId: String, googleConversationId: String)
+    fun recordPreEffectRefusal(commandId: String, tmpId: String, googleConversationId: String, membersChanged: Boolean)
     fun recordOutcomeUnknown(commandId: String, tmpId: String, googleConversationId: String)
+    fun provedGroupMemberRevision(conversationId: String): ULong? = null
+    fun verifyGroupRoute(observationJson: String, nowMs: Long): Boolean = false
+    fun classifyGroupTarget(conversationId: String, snapshotJson: String): RcsNativeTarget = RcsNativeTarget.Unknown
+    fun verifyGroupObservation(observationJson: String, nowMs: Long): RcsNativeGroupVerification = RcsNativeGroupVerification.Refused
 }
 
 internal interface NativeRcsPreparationPort : AutoCloseable {
@@ -106,12 +127,32 @@ internal class NativeRcsCoreLease(
         port.recordSubmitted(it.commandId)
     }
 
-    override fun recordPreEffectRefusal(): Boolean {
+    override fun provedGroupMemberRevision(conversationId: String): ULong? {
+        requireOpen()
+        return port.provedGroupMemberRevision(conversationId)
+    }
+
+    override fun verifyGroupRoute(exactObservationJson: String): Boolean {
+        requireOpen()
+        return port.verifyGroupRoute(exactObservationJson, clock.wallTimeMs())
+    }
+
+    override fun classifyGroupTarget(conversationId: String, exactSnapshotJson: String): RcsNativeTarget {
+        requireOpen()
+        return port.classifyGroupTarget(conversationId, exactSnapshotJson)
+    }
+
+    override fun verifyGroupObservation(exactObservationJson: String): RcsNativeGroupVerification {
+        requireOpen()
+        return port.verifyGroupObservation(exactObservationJson, clock.wallTimeMs())
+    }
+
+    override fun recordPreEffectRefusal(membersChanged: Boolean): Boolean {
         requireOpen()
         val committed = admitted ?: return false
         if (refusalRecorded) return false
         return try {
-            port.recordPreEffectRefusal(committed.commandId, committed.tmpId, committed.googleConversationId)
+            port.recordPreEffectRefusal(committed.commandId, committed.tmpId, committed.googleConversationId, membersChanged)
             refusalRecorded = true
             true
         } catch (failure: Throwable) {
@@ -191,6 +232,9 @@ internal class NativeRcsCoreLease(
             return try {
                 lease.requireOpen()
                 lease.beginCommitted(commandId, native.begin(observationJson, lease.clock.wallTimeMs()))
+            } catch (_: MobileBindingsException.GroupMembersChanged) {
+                // Core paused the group and admitted nothing; this is a definite refusal, not an unknown outcome.
+                RcsNativeBeginResult.MembersChanged
             } catch (failure: Throwable) {
                 preserveCoreInterruption(failure)
                 RcsNativeBeginResult.DurabilityUnknown
@@ -243,10 +287,33 @@ private class GeneratedNativeRcsCorePort(private val client: NativeClient) : Nat
     override fun prepare(commandId: String, nowMs: Long) = GeneratedNativeRcsPreparationPort(gatewayPrepareNativeRcsSend(client, commandId, nowMs))
     override fun recordTransportAcknowledged(commandId: String, ackAtMs: Long) = gatewayRecordRcsTransportAck(client, commandId, ackAtMs)
     override fun recordSubmitted(commandId: String) = gatewayRecordRcsSubmitted(client, commandId)
-    override fun recordPreEffectRefusal(commandId: String, tmpId: String, googleConversationId: String) =
-        gatewayRecordRcsPreEffectRefusal(client, commandId, tmpId, googleConversationId)
+    override fun recordPreEffectRefusal(commandId: String, tmpId: String, googleConversationId: String, membersChanged: Boolean) =
+        gatewayRecordRcsPreEffectRefusal(client, commandId, tmpId, googleConversationId, membersChanged, System.currentTimeMillis())
     override fun recordOutcomeUnknown(commandId: String, tmpId: String, googleConversationId: String) =
         gatewayRecordRcsOutcomeUnknown(client, commandId, tmpId, googleConversationId)
+
+    override fun provedGroupMemberRevision(conversationId: String) =
+        gatewayProvedGroupMemberRevision(client, conversationId)?.toULongOrNull()
+
+    override fun classifyGroupTarget(conversationId: String, snapshotJson: String): RcsNativeTarget {
+        // The owned group lane names the Google conversation; the candidate snapshot names the token.
+        val googleId = client.gatewayRcsLinkOwnedConversations()
+            .firstOrNull { it.conversationId == conversationId && it.owner == NativeRcsReceiveOwner.LINK }
+            ?.googleConversationId ?: return RcsNativeTarget.Unknown
+        val token = JSONObject(snapshotJson).optString("snapshot_token").takeIf(String::isNotEmpty) ?: return RcsNativeTarget.Unknown
+        return RcsNativeTarget.Found(googleId, token)
+    }
+
+    override fun verifyGroupRoute(observationJson: String, nowMs: Long) = gatewayVerifyRcsGroupRoute(client, observationJson, nowMs)
+
+    override fun verifyGroupObservation(observationJson: String, nowMs: Long) =
+        nativeRcsGroupVerification(gatewayVerifyRcsGroupObservation(client, observationJson, nowMs))
+}
+
+internal fun nativeRcsGroupVerification(value: NativeRcsGroupVerification) = when (value) {
+    NativeRcsGroupVerification.PROVEN -> RcsNativeGroupVerification.Proven
+    NativeRcsGroupVerification.MEMBERS_CHANGED -> RcsNativeGroupVerification.MembersChanged
+    NativeRcsGroupVerification.REFUSED -> RcsNativeGroupVerification.Refused
 }
 
 internal fun nativeRcsMappingVerification(value: NativeRcsMappingVerification) = when (value) {

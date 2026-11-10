@@ -873,6 +873,7 @@ class GoogleMessagesLinkServiceTest {
         override fun seal(
             conversationId: String,
             gatewayDeviceId: String,
+            participant: String?,
             state: NativeTypingState,
             clock: NativeLiveClock,
         ): NativeLiveOutbound? = null
