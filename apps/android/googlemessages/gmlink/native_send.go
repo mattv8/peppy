@@ -16,6 +16,12 @@ const (
 	maxNativePrepareResultBytes  = 6*maxNativeCandidateBytes + 4096
 )
 
+// NativeRcsTargetClassifier synchronously publishes one core classification.
+// Classify must not reenter Go or perform gateway acquisition, network, scheduling, or cleanup.
+type NativeRcsTargetClassifier interface {
+	Classify(candidateSnapshot string) bool
+}
+
 type nativeRcsPrepareResult struct {
 	Code              string `json:"code"`
 	TicketID          string `json:"ticket_id,omitempty"`
@@ -29,6 +35,28 @@ type nativeRcsPrepareResult struct {
 func nativeRcsJSON(result nativeRcsPrepareResult) string {
 	encoded, _ := json.Marshal(result)
 	return string(encoded)
+}
+
+// WithNativeRcsTargetClassification runs the core publication while the prepared ticket remains current.
+func (link *Link) WithNativeRcsTargetClassification(ticketID string, classifier NativeRcsTargetClassifier) (accepted bool) {
+	if classifier == nil {
+		return false
+	}
+
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	defer func() {
+		if recover() != nil {
+			accepted = false
+		}
+	}()
+
+	ticket := link.nativeTicket
+	if !link.nativeTicketCurrentLocked(ticket, ticketID) || ticket.routeObservation == nil || ticket.targetObservation != nil ||
+		link.sendAdmissionInFlight || link.nativeInFlight != nil {
+		return false
+	}
+	return classifier.Classify(string(ticket.candidate))
 }
 
 // PrepareNativeRcs freezes the local facts that later native-send phases must recheck.
