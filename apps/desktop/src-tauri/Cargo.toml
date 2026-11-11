@@ -15,6 +15,7 @@ default = ["self-update"]
 self-update = ["dep:tauri-plugin-updater", "dep:zbus"]
 retained-stack-smoke = []
 dev-local-tls = []
+notification-quick-reply = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -70,7 +71,7 @@ objc = "0.2"
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSString", "NSError", "NSArray", "NSObject", "NSProcessInfo", "NSURL", "NSSet"] }
-objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationSettings", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger", "UNNotificationSound", "UNNotificationAttachment", "UNNotificationAction", "UNNotificationCategory"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationSettings", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger", "UNNotificationSound", "UNNotificationAttachment", "UNNotificationAction", "UNNotificationActionIcon", "UNNotificationCategory"] }
 objc2-service-management = { version = "0.3", default-features = false, features = ["std", "SMAppService"] }
 objc2-authentication-services = { version = "0.3", default-features = false, features = ["std", "block2", "ASFoundation", "ASWebAuthenticationSession", "ASWebAuthenticationSessionCallback"] }
 swift-rs = "1.0.9"
@@ -86,7 +87,7 @@ zbus = { version = "5", default-features = false, features = ["tokio", "p2p"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Official Win32 Credential UI bindings; the dialog uses DO_NOT_PERSIST.
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security_Credentials", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_Registry", "Win32_UI_HiDpi", "Win32_UI_Accessibility", "Foundation", "UI_Notifications", "Data_Xml_Dom", "Win32_System_WinRT"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security_Credentials", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_Registry", "Win32_UI_HiDpi", "Win32_UI_Accessibility", "Foundation", "Foundation_Collections", "UI_Notifications", "Data_Xml_Dom", "Win32_System_WinRT"] }
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }

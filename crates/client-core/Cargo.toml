@@ -65,6 +65,10 @@ name = "one_time_code"
 path = "tests/one_time_code.rs"
 
 [[test]]
+name = "quick_reply"
+path = "tests/quick_reply.rs"
+
+[[test]]
 name = "send_cancellation"
 path = "tests/send_cancellation.rs"
 

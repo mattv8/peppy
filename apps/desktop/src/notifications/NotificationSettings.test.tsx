@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { NotificationSettings } from "./NotificationSettings";
-import { notificationPersistenceSettings } from "../App";
+import { notificationPersistenceSettings, notificationQuickReplySettings } from "../App";
 import { StrictMode } from "react";
 import type { AppFilter, MirroredNotification, NotificationCheck, NotificationPreferences } from "../bridge/bridge";
 import type { NotificationPersistenceSettings } from "@peppy/desktop-ui/bridge-contracts";
@@ -32,6 +32,46 @@ const SYNC_NOTE = /Banner choices apply to every computer and browser in this va
 const persistenceSettings = (value: NotificationPersistenceSettings = { seconds: 5, supported: true }) => ({
   load: vi.fn().mockResolvedValue(value),
   save: vi.fn().mockResolvedValue(undefined),
+});
+const quickReplySettings = (value = { enabled: false, supported: true }) => ({
+  load: vi.fn().mockResolvedValue(value),
+  save: vi.fn().mockResolvedValue(undefined),
+});
+
+it("hides quick reply without a supported adapter and saves only after loading", async () => {
+  const input = props();
+  const settings = quickReplySettings();
+  const { rerender } = render(<NotificationSettings {...input} />);
+  expect(screen.queryByRole("switch", { name: "Quick reply in notifications" })).not.toBeInTheDocument();
+  rerender(<NotificationSettings {...input} quickReplySettings={settings} />);
+  const toggle = await screen.findByRole("switch", { name: "Quick reply in notifications" });
+  expect(toggle).toBeEnabled();
+  fireEvent.click(toggle);
+  await waitFor(() => expect(settings.save).toHaveBeenCalledWith(true));
+});
+
+it("preserves quick reply's applied state after a failed save", async () => {
+  const settings = quickReplySettings({ enabled: true, supported: true });
+  settings.save.mockRejectedValue(new Error("disk"));
+  render(<NotificationSettings {...props()} quickReplySettings={settings} />);
+  const toggle = await screen.findByRole("switch", { name: "Quick reply in notifications" });
+  expect(toggle).toBeChecked();
+  fireEvent.click(toggle);
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not save quick reply settings. Try again.");
+  expect(toggle).toBeChecked();
+});
+
+it("binds quick reply adapter methods to class-based bridges", async () => {
+  class NativeBridge {
+    enabled = false;
+    async get_notification_quick_reply() { return { enabled: this.enabled, supported: true }; }
+    async set_notification_quick_reply(enabled: boolean) { this.enabled = enabled; }
+  }
+  const bridge = new NativeBridge();
+  const adapter = notificationQuickReplySettings(bridge);
+  expect(await adapter?.load()).toEqual({ enabled: false, supported: true });
+  await adapter?.save(true);
+  expect(bridge.enabled).toBe(true);
 });
 
 it("binds persistence adapter methods to class-based bridges", async () => {
@@ -141,9 +181,9 @@ it("explains that banner choices sync to the vault and that permission stays per
   expect(screen.queryByText(LOCKED_NOTE)).not.toBeInTheDocument();
 });
 
-it("keeps the existing mute hint as the only description on unlocked heads toggle", () => {
+it("keeps the locked explanation as the only persistent heads-toggle description", () => {
   render(<NotificationSettings {...props()} />);
-  expect(screen.getByRole("switch", { name: MUTE })).toHaveAttribute("aria-describedby", "notification-mute-with-heads-hint");
+  expect(screen.getByRole("switch", { name: MUTE })).not.toHaveAttribute("aria-describedby");
   expect(screen.getByRole("switch", { name: "SMS/MMS banners" })).not.toHaveAttribute("aria-describedby");
   expect(screen.getByLabelText("Banner preview")).toBeEnabled();
 });
@@ -161,7 +201,7 @@ it("disables vault-synced banner controls while locked and explains why", () => 
   expect(screen.getByRole("switch", { name: "SMS/MMS banners" })).toHaveAttribute("aria-describedby", "notification-banner-locked-note");
   expect(screen.getByRole("switch", { name: "App notification banners" })).toHaveAttribute("aria-describedby", "notification-banner-locked-note");
   expect(screen.getByLabelText("Banner preview")).toHaveAttribute("aria-describedby", "notification-banner-locked-note");
-  expect(screen.getByRole("switch", { name: MUTE })).toHaveAttribute("aria-describedby", "notification-mute-with-heads-hint notification-banner-locked-note");
+  expect(screen.getByRole("switch", { name: MUTE })).toHaveAttribute("aria-describedby", "notification-banner-locked-note");
 });
 
 it("keeps local permission checks and per-app mute controls available while locked", async () => {
@@ -215,7 +255,7 @@ it("shows the chat-head mute toggle only for SMS/MMS banners on platforms with h
   const input = props();
   const { rerender } = render(<NotificationSettings {...input} />);
   expect(screen.getByRole("switch", { name: MUTE })).toBeChecked();
-  expect(screen.getByRole("switch", { name: MUTE })).toHaveAttribute("aria-describedby", "notification-mute-with-heads-hint");
+  expect(screen.getByRole("switch", { name: MUTE })).not.toHaveAttribute("aria-describedby");
   rerender(<NotificationSettings {...input} preferences={{ ...preferences, messageBanners: false }} />);
   expect(screen.queryByRole("switch", { name: MUTE })).not.toBeInTheDocument();
   rerender(<NotificationSettings {...input} headsSupported={false} />);
@@ -379,6 +419,98 @@ it("does not render an empty app rules disclosure", () => {
 
   expect(screen.queryByText("Per-app mirroring")).not.toBeInTheDocument();
   expect(screen.queryByRole("list", { name: "App mirroring filters" })).not.toBeInTheDocument();
+});
+
+it("hides the local group when no local notification setting is available", async () => {
+  const unsupported = quickReplySettings({ enabled: false, supported: false });
+  const { rerender } = render(<NotificationSettings {...props()} />);
+
+  expect(document.querySelector("#notification-local-group")).not.toBeInTheDocument();
+  rerender(<NotificationSettings {...props()} quickReplySettings={unsupported} />);
+  await waitFor(() => expect(document.querySelector("#notification-local-group")).not.toBeInTheDocument());
+});
+
+it("keeps a local load error visible without exposing off-banner local controls", async () => {
+  const input = props();
+  const soundSettings = { load: vi.fn().mockResolvedValue(true), save: vi.fn().mockResolvedValue(undefined) };
+  const durationSettings = persistenceSettings({ seconds: 45, supported: true });
+  const replySettings = quickReplySettings();
+  replySettings.load.mockRejectedValue(new Error("disk"));
+  render(<NotificationSettings {...input} preferences={{ ...preferences, messageBanners: false, mirroredBanners: false }} soundSettings={soundSettings} persistenceSettings={durationSettings} quickReplySettings={replySettings} />);
+
+  const error = await screen.findByRole("alert");
+  const localGroup = document.querySelector("#notification-local-group");
+
+  expect(localGroup).toContainElement(error);
+  expect(screen.queryByRole("switch", { name: "Notification sounds" })).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Banner duration")).not.toBeInTheDocument();
+});
+
+it("associates custom-duration validation with the input inside the local group", async () => {
+  const settings = persistenceSettings({ seconds: 45, supported: true });
+  render(<NotificationSettings {...props()} persistenceSettings={settings} />);
+  const custom = await screen.findByLabelText("Custom banner duration in seconds");
+
+  fireEvent.change(custom, { target: { value: "0" } });
+  fireEvent.blur(custom);
+
+  const error = screen.getByRole("alert", { name: "Invalid custom banner duration" });
+  expect(custom).toHaveAttribute("aria-describedby", "notification-persistence-validation-error");
+  expect(document.querySelector("#notification-local-group")).toContainElement(error);
+});
+
+it("keeps the quick-reply preview consequence with the preview decision", async () => {
+  const settings = quickReplySettings({ enabled: true, supported: true });
+  render(<NotificationSettings {...props()} quickReplySettings={settings} />);
+
+  await screen.findByRole("switch", { name: "Quick reply in notifications" });
+  const hint = document.querySelector<HTMLElement>("#notification-quick-reply-preview-hint");
+
+  expect(screen.getByLabelText("Banner preview")).toHaveAttribute("aria-describedby", "notification-quick-reply-preview-hint");
+  expect(document.querySelector<HTMLElement>("#notification-banner-group")).toContainElement(hint);
+  expect(document.querySelector<HTMLElement>("#notification-local-group")).not.toContainElement(hint);
+});
+
+it("hides the quick-reply preview consequence when the adapter reports unsupported", async () => {
+  const settings = quickReplySettings({ enabled: true, supported: false });
+  render(<NotificationSettings {...props()} quickReplySettings={settings} />);
+
+  await waitFor(() => expect(settings.load).toHaveBeenCalled());
+
+  expect(screen.queryByRole("switch", { name: "Quick reply in notifications" })).not.toBeInTheDocument();
+  expect(document.querySelector("#notification-quick-reply-preview-hint")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("Banner preview")).not.toHaveAttribute("aria-describedby");
+});
+
+it("describes locked local controls with the banner lock note", async () => {
+  const soundSettings = { load: vi.fn().mockResolvedValue(true), save: vi.fn().mockResolvedValue(undefined) };
+  const durationSettings = persistenceSettings({ seconds: 45, supported: true });
+  const input = props();
+  const { rerender } = render(<NotificationSettings {...input} soundSettings={soundSettings} persistenceSettings={durationSettings} />);
+  await screen.findByLabelText("Banner duration");
+
+  rerender(<NotificationSettings {...input} locked soundSettings={soundSettings} persistenceSettings={durationSettings} />);
+
+  expect(screen.getByRole("switch", { name: "Notification sounds" })).toHaveAttribute("aria-describedby", "notification-banner-locked-note");
+  expect(screen.getByLabelText("Banner duration")).toHaveAttribute("aria-describedby", "notification-banner-locked-note");
+  expect(screen.getByLabelText("Custom banner duration in seconds")).toHaveAttribute("aria-describedby", "notification-banner-locked-note");
+});
+
+it("opens help from a locked local setting without changing notification adapters", () => {
+  const input = props();
+  const soundSettings = { load: vi.fn().mockResolvedValue(true), save: vi.fn().mockResolvedValue(undefined) };
+  render(<NotificationSettings {...input} locked soundSettings={soundSettings} />);
+
+  const trigger = screen.getByRole("button", { name: "About notification sounds" });
+  fireEvent.click(trigger);
+
+  expect(screen.getByRole("dialog", { name: "Notification sounds" })).toBeVisible();
+  expect(input.onPreferences).not.toHaveBeenCalled();
+  expect(input.onMute).not.toHaveBeenCalled();
+  expect(input.onPermission).not.toHaveBeenCalled();
+  expect(soundSettings.save).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(trigger).toHaveFocus();
 });
 
 it("hides a saved permission result with banner controls without changing preferences or app rules", async () => {

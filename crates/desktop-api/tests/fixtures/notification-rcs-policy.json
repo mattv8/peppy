@@ -1,0 +1,12 @@
+[
+  {"name":"linked-current-healthy-eligible","gateway":"linked","current":true,"available":true,"healthy":true,"responsive":true,"eligible":"eligible","expected":"allow"},
+  {"name":"expired-link","gateway":"linked","current":true,"available":true,"healthy":true,"responsive":true,"eligible":"eligible","expired":true,"expected":"phone"},
+  {"name":"needs-relink","gateway":"needs_relink","expected":"relink"},
+  {"name":"signed-out","gateway":"signed_out","expected":"relink"},
+  {"name":"unresponsive-phone","gateway":"linked","current":true,"available":true,"healthy":true,"responsive":false,"eligible":"eligible","expected":"phone"},
+  {"name":"unhealthy-phone","gateway":"linked","current":true,"available":true,"healthy":false,"responsive":true,"eligible":"eligible","expected":"phone"},
+  {"name":"observed-unlinked-known-chat","gateway":"unlinked","knownRcs":true,"expected":"allow"},
+  {"name":"non-rcs-chat","gateway":"linked","knownRcs":false,"expected":"allow"},
+  {"name":"group-not-eligible","gateway":"linked","current":true,"available":true,"healthy":true,"responsive":true,"eligible":"not_eligible","expected":"allow"},
+  {"name":"unknown-eligibility","gateway":"linked","current":true,"available":true,"healthy":true,"responsive":true,"expected":"unproven"}
+]

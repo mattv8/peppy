@@ -114,6 +114,15 @@ export type NotificationCheck = { status: NotificationPermissionStatus; testSent
 /** Per-device banner on-screen time; `seconds: null` requests banners stay until dismissed where the platform supports it. Platforms may shorten or ignore it. */
 export type NotificationPersistence = { seconds: number | null };
 export type NotificationPersistenceSettings = NotificationPersistence & { supported: boolean };
+export type NotificationQuickReplySettings = { enabled: boolean; supported: boolean };
+export type NotificationReplyRecovery = {
+  id: string;
+  conversationId: string;
+  body: string;
+  reason: string;
+  state: "ready" | "claimed" | "uncertain";
+};
+export type NotificationReplyRecoveries = { sessionGeneration: string; items: NotificationReplyRecovery[] };
 export const DEFAULT_NOTIFICATION_PERSISTENCE: NotificationPersistence = { seconds: 5 };
 export const MAX_NOTIFICATION_PERSISTENCE_SECONDS = 3600;
 export const notificationPersistence = (value: unknown): NotificationPersistence | undefined => {
@@ -288,6 +297,13 @@ export interface DesktopBridge {
   set_notification_sound?(enabled: boolean): Promise<void>;
   get_notification_persistence?(): Promise<NotificationPersistenceSettings>;
   set_notification_persistence?(value: NotificationPersistence): Promise<void>;
+  get_notification_quick_reply?(): Promise<NotificationQuickReplySettings>;
+  set_notification_quick_reply?(enabled: boolean): Promise<void>;
+  notification_reply_recoveries?(conversationId: string): Promise<NotificationReplyRecoveries>;
+  claim_notification_reply_restore?(input: { id: string; restoreId: string; sessionGeneration: string }): Promise<boolean>;
+  release_notification_reply_restore?(input: { id: string; restoreId: string; sessionGeneration: string }): Promise<void>;
+  ack_notification_reply_restore?(input: { id: string; restoreId: string; sessionGeneration: string }): Promise<void>;
+  discard_notification_reply?(input: { id: string; sessionGeneration: string }): Promise<void>;
   popout_conversation(conversationId: string): Promise<{ headCreated: boolean; warning?: string }>;
   hide_head(conversationId: string): Promise<void>;
   close_composer(): Promise<void>;

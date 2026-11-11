@@ -13,7 +13,7 @@ import {
   type WheelEvent,
 } from "react";
 import { flushSync } from "react-dom";
-import { MAX_DRAFT_ATTACHMENTS, type ConversationFolder, type GatewayAvailability, type LocalSearchHit, type LocalSearchRequest, type OneTimeCodeTarget } from "@peppy/desktop-ui/bridge-contracts";
+import { MAX_DRAFT_ATTACHMENTS, type ConversationFolder, type GatewayAvailability, type LocalSearchHit, type LocalSearchRequest, type NotificationQuickReplySettings, type OneTimeCodeTarget } from "@peppy/desktop-ui/bridge-contracts";
 import {
   AppTitlebar,
   attachmentStorageRemovalText,
@@ -103,6 +103,7 @@ import { dismissibleNotifications, notificationMuteKey, NotificationsView } from
 import { createNotificationActivationDrain, nativeNotificationActivation, type ActivationContext } from "./notifications/notificationActivation";
 import type { NotificationActivation, NotificationActivationTarget } from "@peppy/generated/notification-activation";
 import { NotificationSettings } from "./notifications/NotificationSettings";
+import { DefinitivePreEditRefusal, NotificationReplyRecovery } from "./notifications/NotificationReplyRecovery";
 import { ContactsView, type ContactNavigationGuard, type ContactTarget } from "./contacts/Contacts";
 import { findContactTarget } from "./contacts/contact-target";
 import { useHistorySearch } from "./search/useHistorySearch";
@@ -1314,6 +1315,15 @@ export function notificationPersistenceSettings(bridge: Pick<DesktopBridge, "get
   };
 }
 
+export function notificationQuickReplySettings(bridge: Pick<DesktopBridge, "get_notification_quick_reply" | "set_notification_quick_reply">):
+  { load(): Promise<NotificationQuickReplySettings>; save(enabled: boolean): Promise<void> } | undefined {
+  if (!bridge.get_notification_quick_reply || !bridge.set_notification_quick_reply) return undefined;
+  return {
+    load: () => bridge.get_notification_quick_reply!(),
+    save: enabled => bridge.set_notification_quick_reply!(enabled),
+  };
+}
+
 function SettingsView({
   storageRequest = 0,
   mode,
@@ -1438,6 +1448,7 @@ function SettingsView({
   const scrollEndTimer = useRef<number | undefined>(undefined);
   const [activeSection, setActiveSection] = useState("server");
   const persistenceSettings = useMemo(() => notificationPersistenceSettings(bridge), [bridge]);
+  const quickReplySettings = useMemo(() => notificationQuickReplySettings(bridge), [bridge]);
   const syncText = syncStatusText(encryption);
   const reloadStartupStatus = useCallback(async () => {
     if (!desktop?.startupSupported) return;
@@ -1646,6 +1657,7 @@ function SettingsView({
         soundSettings={!browserHost && bridge.get_notification_sound && bridge.set_notification_sound
           ? { load: bridge.get_notification_sound, save: bridge.set_notification_sound } : undefined}
         persistenceSettings={persistenceSettings}
+        quickReplySettings={!browserHost ? quickReplySettings : undefined}
       />
       <ReactionSettings show={showReactions} onShow={onShowReactions} />
       <section id="settings-theme" className="settings-card" data-settings-section="theme">
@@ -1919,6 +1931,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   useMaximizeButtonRegion({ bridge, enabled: !browserHost && platform === "windows" && !composerConversation });
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
+  const [notificationRecoveryCount, setNotificationRecoveryCount] = useState(0);
   const [conversationTab, setConversationTab] = useState<ConversationTab>("messages");
   const [lightboxItems, setLightboxItems] = useState<GalleryMediaPageItem[] | null>(null);
   const [lightboxAttachmentId, setLightboxAttachmentId] = useState<string>();
@@ -3191,6 +3204,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setContactTarget(undefined);
   }, [appLock?.locked, snapshot?.encryption.state]);
   const renderedSearchSessionKey = currentSearchSessionKey();
+  const notificationRecoveryBridge = useMemo(() => bridge.notification_reply_recoveries && bridge.claim_notification_reply_restore && bridge.release_notification_reply_restore && bridge.ack_notification_reply_restore && bridge.discard_notification_reply
+    ? { load: bridge.notification_reply_recoveries, claim: bridge.claim_notification_reply_restore, release: bridge.release_notification_reply_restore, acknowledge: bridge.ack_notification_reply_restore, discard: bridge.discard_notification_reply }
+    : undefined, []);
   useEffect(() => {
     if (!snapshot) return;
     const unlocked = snapshot.encryption.state === "unlocked" && !appLock?.locked;
@@ -5113,7 +5129,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const visibleDraftNotice = selectDraftNotice(noticeCandidates);
   const localSaveState = slotKey ? store.saveState(slotKey) : "idle";
   const hasDraftConflicts = Boolean(activeDraftView?.sync?.conflicts.length);
-  const statusActive = Boolean(unavailableReason || visibleDraftNotice || activeDraftView?.sync?.notice === "updated-from-other-device" || draftSyncNeedsAttention({ draft: activeDraftView, offline: serverOffline, localSaveState, now: draftStatusNow }));
+  const statusActive = Boolean(notificationRecoveryCount || unavailableReason || visibleDraftNotice || activeDraftView?.sync?.notice === "updated-from-other-device" || draftSyncNeedsAttention({ draft: activeDraftView, offline: serverOffline, localSaveState, now: draftStatusNow }));
   const resolveDraftConflict = async (branchId: string | null): Promise<DraftResolutionResult> => {
     if (resolutionRef.current !== undefined) return { ok: false, message: "A version is already being applied." };
     if (!activeDraftView?.id || !slotKey)
@@ -5326,6 +5342,27 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onAcknowledgeNotice={acknowledgeDraftSyncNotice}
               onAutoAcknowledgeNotice={() => acknowledgeDraftSyncNotice(false)}
             />
+            {!browserHost && !composerConversation && notificationRecoveryBridge && (
+              <NotificationReplyRecovery
+                bridge={notificationRecoveryBridge}
+                conversationId={active?.id}
+                sessionKey={renderedSearchSessionKey}
+                refreshSignal={snapshot}
+                unlocked={snapshot?.encryption.state === "unlocked" && !appLock?.locked}
+                draftText={content.text}
+                onCountChange={setNotificationRecoveryCount}
+                onAppend={async body => {
+                  const session = renderedSearchSessionKey;
+                  if (!slotKey || deletingId === slotKey || resolvingDraftConflict || appLockRef.current?.locked || snapshotRef.current?.encryption.state !== "unlocked" || session !== currentSearchSessionKey()) throw new Error("Draft is unavailable.");
+                  const currentDraft = store.get(slotKey);
+                  const text = currentDraft?.content.text && body ? `${currentDraft.content.text}\n${body}` : `${currentDraft?.content.text ?? ""}${body}`;
+                  if (new TextEncoder().encode(text).byteLength > 64 * 1024) throw new DefinitivePreEditRefusal();
+                  autoAcknowledgeDraftSyncNotice();
+                  const outcome = await store.edit(slotKey, { text });
+                  if (!outcome.ok) throw new Error(outcome.error);
+                }}
+              />
+            )}
           </>
         }
         composerName={title}

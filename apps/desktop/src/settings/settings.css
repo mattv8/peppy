@@ -116,6 +116,115 @@
   width: 100%;
 }
 
+#notification-settings .notification-settings-group {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  justify-items: stretch;
+  padding-top: 16px;
+  margin-top: 8px;
+  border-top: 1px solid var(--peppy-border);
+}
+
+#notification-settings .notification-settings-group > h3 {
+  margin: 0;
+  color: var(--peppy-text-strong);
+  font-size: 13px;
+}
+
+#notification-settings .notification-settings-group > .settings-control-row,
+#notification-settings .notification-settings-group > .settings-disclosure {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+#notification-settings .notification-settings-group > .settings-control-row {
+  min-height: 28px;
+  align-items: center;
+}
+
+#notification-settings .notification-setting-label {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+#notification-settings .notification-setting-label > label {
+  flex: 0 1 auto;
+  overflow-wrap: anywhere;
+}
+
+#notification-settings .notification-setting-help {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+}
+
+#notification-settings #notification-mute-with-heads-row {
+  padding-left: 12px;
+}
+
+#notification-settings #notification-test-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+#notification-settings #notification-test-actions > button {
+  flex: 0 1 auto;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  min-height: 28px;
+  justify-self: start;
+  padding: 4px 10px;
+  line-height: 1.4;
+  white-space: normal;
+}
+
+.notification-settings-help-body {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  color: var(--peppy-text-primary);
+  background: var(--peppy-surface-panel);
+  overflow-wrap: anywhere;
+}
+
+@media (pointer: coarse) {
+  #notification-settings .notification-settings-group > .settings-control-row,
+  #notification-settings .notification-setting-help .info-button,
+  #notification-settings .peppy-modal-actions > button,
+  #notification-settings #notification-test-actions > button,
+  #notification-settings :is(select, #notification-persistence-custom) {
+    min-height: 44px;
+  }
+
+  #notification-settings .settings-switch > input[role="switch"] {
+    inset: auto;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    transform: translate(-50%, -50%);
+  }
+}
+
+@media (forced-colors: active) {
+  #notification-settings .notification-settings-group {
+    border-top-color: CanvasText;
+  }
+
+  .notification-settings-help-body {
+    color: CanvasText;
+    background: Canvas;
+  }
+}
+
 #notification-preview-row,
 #notification-persistence-row,
 #notification-preview,

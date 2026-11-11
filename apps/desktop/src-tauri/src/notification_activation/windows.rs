@@ -1,4 +1,8 @@
-use super::{owner::Signal, PostError};
+use super::{
+    owner::Signal,
+    windows_codec::{self, ActivationAction},
+    ActionAvailability, PostError,
+};
 use crate::notification_icon::{self, Icon, Lease};
 use tauri::{AppHandle, Manager};
 use windows::{
@@ -35,6 +39,7 @@ pub struct Item {
     dismissed: Option<i64>,
     failed: Option<i64>,
     _icon: Option<Lease>,
+    _action_icons: Option<ActionIconLeases>,
 }
 
 impl Drop for Item {
@@ -76,15 +81,25 @@ impl Backend {
     pub fn post(
         &mut self,
         id: &str,
+        presentation_generation: u64,
         title: &str,
         body: &str,
         sound: bool,
         icon: Option<&Icon>,
-        copy_action: bool,
+        actions: ActionAvailability,
         signal: Signal,
     ) -> Result<Item, PostError> {
-        self.post_inner(id, title, body, sound, icon, copy_action, signal)
-            .map_err(|_| PostError::Failed)
+        self.post_inner(
+            id,
+            presentation_generation,
+            title,
+            body,
+            sound,
+            icon,
+            actions,
+            signal,
+        )
+        .map_err(|_| PostError::Failed)
     }
 
     pub fn ensure_authorized(&mut self) -> Result<(), PostError> {
@@ -99,11 +114,12 @@ impl Backend {
     fn post_inner(
         &mut self,
         id: &str,
+        _: u64,
         title: &str,
         body: &str,
         sound: bool,
         icon: Option<&Icon>,
-        copy_action: bool,
+        actions: ActionAvailability,
         signal: Signal,
     ) -> windows::core::Result<Item> {
         let icon = icon.and_then(|icon| notification_icon::materialize(&self.app, icon));
@@ -111,8 +127,9 @@ impl Backend {
             .as_ref()
             .and_then(|lease| url::Url::from_file_path(lease.path()).ok())
             .map(|url| url.to_string());
+        let action_icons = action_icons(&self.app, actions);
         let document = XmlDocument::new()?;
-        document.LoadXml(&HSTRING::from(super::windows_xml::toast_xml(
+        document.LoadXml(&HSTRING::from(super::windows_xml::toast_xml_with_icons(
             title,
             body,
             icon_uri.as_deref(),
@@ -121,7 +138,8 @@ impl Backend {
                 .state::<crate::AppState>()
                 .notifications
                 .persistence(),
-            copy_action,
+            actions,
+            action_icons.as_ref().map(Into::into),
         )))?;
         let toast = ToastNotification::CreateToastNotification(&document)?;
         let tag = HSTRING::from(id);
@@ -134,21 +152,28 @@ impl Backend {
             dismissed: None,
             failed: None,
             _icon: icon,
+            _action_icons: action_icons,
         };
         let activate = signal.clone();
         item.activated = Some(item.toast.Activated(&TypedEventHandler::<
             ToastNotification,
             IInspectable,
         >::new(move |_, args| {
-            if args
+            let args = args
                 .as_ref()
-                .and_then(|args| args.cast::<ToastActivatedEventArgs>().ok())
-                .and_then(|args| args.Arguments().ok())
-                .is_some_and(|arguments| arguments == "copy-code")
-            {
-                activate.copy();
-            } else {
-                activate.click();
+                .and_then(|args| args.cast::<ToastActivatedEventArgs>().ok());
+            let argument = args.as_ref().and_then(windows_codec::action_argument);
+            match windows_codec::parse_action(argument.as_deref()) {
+                Some(ActivationAction::Copy) => activate.copy(),
+                Some(ActivationAction::Reveal) => activate.reveal(),
+                Some(ActivationAction::Reply) => {
+                    // Missing, malformed, and non-string input values fail closed.
+                    if let Some(body) = args.as_ref().and_then(windows_codec::reply_body) {
+                        activate.reply(body);
+                    }
+                }
+                Some(ActivationAction::Click) => activate.click(),
+                None => {}
             }
             Ok(())
         }))?);
@@ -193,6 +218,60 @@ impl Backend {
             .is_ok();
         hidden && removed
     }
+
+    /// A replacement has already been posted under the same tag. Dropping the
+    /// old event registrations is sufficient; removing history here could erase
+    /// the newly posted toast.
+    pub fn retire_replaced(&mut self, item: &Item) -> bool {
+        let _ = item
+            .toast
+            .RemoveActivated(item.activated.unwrap_or_default());
+        let _ = item
+            .toast
+            .RemoveDismissed(item.dismissed.unwrap_or_default());
+        let _ = item.toast.RemoveFailed(item.failed.unwrap_or_default());
+        true
+    }
+}
+
+const SHOW_ICON: &[u8] = include_bytes!("../../icons/notification-actions/show.png");
+const SEND_ICON: &[u8] = include_bytes!("../../icons/notification-actions/send.png");
+const COPY_ICON: &[u8] = include_bytes!("../../icons/notification-actions/copy.png");
+const DISMISS_ICON: &[u8] = include_bytes!("../../icons/notification-actions/dismiss.png");
+
+struct ActionIconLeases {
+    show: Lease,
+    send: Lease,
+    copy: Lease,
+    dismiss: Lease,
+}
+
+impl From<&ActionIconLeases> for super::windows_xml::ActionIconUris<'_> {
+    fn from(leases: &ActionIconLeases) -> Self {
+        let uri = |lease: &Lease| {
+            url::Url::from_file_path(lease.path())
+                .ok()
+                .map(|url| std::borrow::Cow::Owned(url.to_string()))
+        };
+        Self {
+            show: uri(&leases.show).unwrap_or_default(),
+            send: uri(&leases.send).unwrap_or_default(),
+            copy: uri(&leases.copy).unwrap_or_default(),
+            dismiss: uri(&leases.dismiss).unwrap_or_default(),
+        }
+    }
+}
+
+fn action_icons(app: &AppHandle, actions: ActionAvailability) -> Option<ActionIconLeases> {
+    if !actions.copy && !actions.reveal && !actions.reply {
+        return None;
+    }
+    Some(ActionIconLeases {
+        show: notification_icon::materialize_bytes(app, SHOW_ICON)?,
+        send: notification_icon::materialize_bytes(app, SEND_ICON)?,
+        copy: notification_icon::materialize_bytes(app, COPY_ICON)?,
+        dismiss: notification_icon::materialize_bytes(app, DISMISS_ICON)?,
+    })
 }
 
 impl Drop for Backend {
