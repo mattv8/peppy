@@ -160,7 +160,7 @@ fn anchor_rows(
     let mut query = conn.prepare(
         "SELECT m.payload,m.sort_at_ms,m.local_order,m.id,ma.position,ma.attachment_id \
          FROM messages m JOIN message_attachments ma ON ma.message_id=m.id \
-         WHERE m.conversation_id=?1 AND ma.attachment_id=?2 AND (?3 IS NULL OR m.id=?3) \
+         WHERE m.conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND ma.attachment_id=?2 AND (?3 IS NULL OR m.id=?3) \
          ORDER BY m.sort_at_ms,m.local_order,m.id,ma.position LIMIT 2",
     )?;
     query
@@ -185,7 +185,7 @@ fn newer_rows(
     let mut query = conn.prepare(
         "SELECT m.payload,m.sort_at_ms,m.local_order,m.id,ma.position,ma.attachment_id \
          FROM messages m JOIN message_attachments ma ON ma.message_id=m.id \
-         WHERE m.conversation_id=?1 AND (m.sort_at_ms>?2 OR (m.sort_at_ms=?2 AND \
+         WHERE m.conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND (m.sort_at_ms>?2 OR (m.sort_at_ms=?2 AND \
          (m.local_order>?3 OR (m.local_order=?3 AND (m.id>?4 OR (m.id=?4 AND ma.position>?5)))))) \
          ORDER BY m.sort_at_ms,m.local_order,m.id,ma.position LIMIT ?6",
     )?;
@@ -214,7 +214,7 @@ fn older_rows(
     let mut query = conn.prepare(
         "SELECT m.payload,m.sort_at_ms,m.local_order,m.id,ma.position,ma.attachment_id \
          FROM messages m JOIN message_attachments ma ON ma.message_id=m.id \
-         WHERE m.conversation_id=?1 AND (m.sort_at_ms<?2 OR (m.sort_at_ms=?2 AND \
+         WHERE m.conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND (m.sort_at_ms<?2 OR (m.sort_at_ms=?2 AND \
          (m.local_order<?3 OR (m.local_order=?3 AND (m.id<?4 OR (m.id=?4 AND ma.position<?5)))))) \
          ORDER BY m.sort_at_ms DESC,m.local_order DESC,m.id DESC,ma.position DESC LIMIT ?6",
     )?;

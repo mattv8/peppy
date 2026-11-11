@@ -304,12 +304,14 @@ class GatewaySync(
     private val messagingApp: () -> Unit = {},
     /** Fences transport completions from a vault/device binding replaced while the pass was active. */
     private val sessionCurrent: () -> Boolean = { true },
+    /** Reconciles durable cancellation requests after receive/apply and before effects. */
+    private val processPendingSendCancellations: () -> Boolean = { client.processPendingSendCancellations() },
     /** Cancellation fences phases before they admit new permits or invoke host effects. */
     private val effectPermitted: () -> Boolean = { true },
     private val nowMs: () -> Long = { System.currentTimeMillis() },
 ) {
     private enum class GatewayPhase(val code: Long) {
-        RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_PHONE_READS(21), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19), MMS_CLEANUP(BackgroundDiagnostics.MMS_CLEANUP_PHASE), MESSAGING_APP(22),
+        RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), SEND_CANCELLATIONS(23), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_PHONE_READS(21), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19), MMS_CLEANUP(BackgroundDiagnostics.MMS_CLEANUP_PHASE), MESSAGING_APP(22),
     }
     class PassResult(
         val more: Boolean,
@@ -381,6 +383,7 @@ class GatewaySync(
                 phase(GatewayPhase.RECEIVE) { receive() }
                 var applyRemaining = true
                 phase(GatewayPhase.DRAIN_AFTER_RECEIVE) { applyRemaining = drain(); applyRemaining }
+                phase(GatewayPhase.SEND_CANCELLATIONS) { processPendingSendCancellations() }
                 if (!continuingSnapshot && !applyRemaining && client.contactRepairRequired() && client.serverCompactionSupported()) {
                     phase(GatewayPhase.CONTACT_REPAIR) { repairContactProjection() }
                 }
@@ -828,6 +831,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         if (GatewayWork.shouldEnqueueSmsCapture(captureHint, smsReadGranted)) SmsCaptureWork.enqueue(applicationContext)
         // Not enrolled, database unopenable, or shared vault locked: nothing can be synced yet.
         val session = NativeGateway.session(applicationContext) ?: return Result.success()
+        session.client.publishSendCancellationCapability(true)
         val sendGranted = ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.SEND_SMS) ==
             PackageManager.PERMISSION_GRANTED
         val routes = SimRoutes.current()

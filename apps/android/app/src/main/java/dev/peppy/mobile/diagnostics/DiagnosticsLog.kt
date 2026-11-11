@@ -260,7 +260,7 @@ internal class DiagnosticsLog(
         return try {
             if (!shareDirectory.exists() && !shareDirectory.mkdirs()) throw IllegalStateException("share directory unavailable")
             if (shareDirectory.listFiles()?.any { !it.delete() } == true) throw IllegalStateException("unable to clear prior snapshots")
-            val outputFile = File(shareDirectory, "diagnostics-${UUID.randomUUID()}.log")
+            val outputFile = File(shareDirectory, "diagnostics-${UUID.randomUUID()}.log.txt")
             snapshot = outputFile
             var remaining = MAX_TOTAL_BYTES
             BufferedOutputStream(FileOutputStream(outputFile)).use { output ->

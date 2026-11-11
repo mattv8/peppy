@@ -68,7 +68,7 @@ func TestPartialOrCancelledScanNeverProvesCompleteAbsence(t *testing.T) {
 		t.Fatal("refresh did not start")
 	}
 	calls := 0
-	_, code := scanConversationPages(context.Background(), func(_ context.Context, _ *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+	_, code, diagnostic := scanConversationPagesWithDiagnostic(context.Background(), func(_ context.Context, _ *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
 		calls++
 		if calls == 1 {
 			return &gmproto.ListConversationsResponse{Cursor: &gmproto.Cursor{LastItemID: "next"}}, nil
@@ -78,6 +78,9 @@ func TestPartialOrCancelledScanNeverProvesCompleteAbsence(t *testing.T) {
 	if code != "conversation_lookup_failed" {
 		t.Fatalf("scan code = %s", code)
 	}
+	if diagnostic != "rpc_inbox" {
+		t.Fatalf("scan diagnostic = %s", diagnostic)
+	}
 	if code := stage2Code(t, link.ResolveExistingConversation("missing-target")); code != "conversation_lookup_unknown" {
 		t.Fatalf("partial scan lookup code = %s", code)
 	}
@@ -85,11 +88,83 @@ func TestPartialOrCancelledScanNeverProvesCompleteAbsence(t *testing.T) {
 
 func TestRepeatedCursorIsBoundedIncomplete(t *testing.T) {
 	cursor := &gmproto.Cursor{LastItemID: "same", LastItemTimestamp: 42}
-	_, code := scanConversationPages(context.Background(), func(_ context.Context, _ *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+	_, code, diagnostic := scanConversationPagesWithDiagnostic(context.Background(), func(_ context.Context, _ *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
 		return &gmproto.ListConversationsResponse{Cursor: cursor}, nil
 	})
 	if code != "conversation_lookup_incomplete" {
 		t.Fatalf("scan code = %s", code)
+	}
+	if diagnostic != "cursor_repeated" {
+		t.Fatalf("scan diagnostic = %s", diagnostic)
+	}
+}
+
+func TestConversationScanDiagnosticsIdentifySafeRefusal(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		wantCode   string
+		wantReason string
+		load       conversationPageLoader
+	}{
+		{
+			name:       "archive rpc",
+			wantCode:   "conversation_lookup_failed",
+			wantReason: "rpc_archive",
+			load: func(_ context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+				if request.GetFolder() == gmproto.ListConversationsRequest_ARCHIVE {
+					return nil, context.DeadlineExceeded
+				}
+				return &gmproto.ListConversationsResponse{}, nil
+			},
+		},
+		{
+			name:       "missing id",
+			wantCode:   "conversation_lookup_incomplete",
+			wantReason: "missing_id",
+			load: func(_ context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+				if request.GetFolder() == gmproto.ListConversationsRequest_INBOX {
+					return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{{}}}, nil
+				}
+				return &gmproto.ListConversationsResponse{}, nil
+			},
+		},
+		{
+			name:       "conflicting duplicate",
+			wantCode:   "conversation_lookup_incomplete",
+			wantReason: "conflicting_duplicate",
+			load: func(_ context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+				if request.GetFolder() == gmproto.ListConversationsRequest_INBOX {
+					if request.GetCursor() == nil {
+						return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{stage2Conversation("first", stage2Participant("first-target", true, false))}, Cursor: &gmproto.Cursor{LastItemID: "next"}}, nil
+					}
+					return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{stage2Conversation("first", stage2Participant("changed-target", true, false))}}, nil
+				}
+				return &gmproto.ListConversationsResponse{}, nil
+			},
+		},
+		{
+			name:       "invalid cursor",
+			wantCode:   "conversation_lookup_incomplete",
+			wantReason: "cursor_invalid",
+			load: func(_ context.Context, _ *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+				return &gmproto.ListConversationsResponse{Cursor: &gmproto.Cursor{}}, nil
+			},
+		},
+		{
+			name:       "page limit",
+			wantCode:   "conversation_lookup_incomplete",
+			wantReason: "page_limit",
+			load: func(_ context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+				return &gmproto.ListConversationsResponse{Cursor: &gmproto.Cursor{LastItemID: fmt.Sprintf("page-%d", request.GetCursor().GetLastItemTimestamp()+1), LastItemTimestamp: request.GetCursor().GetLastItemTimestamp() + 1}}, nil
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			conversations, code, reason := scanConversationPagesWithDiagnostic(context.Background(), test.load)
+			if conversations != nil || code != test.wantCode || reason != test.wantReason {
+				t.Fatalf("scan = (%+v, %q, %q), want (_, %q, %q)", conversations, code, reason, test.wantCode, test.wantReason)
+			}
+		})
 	}
 }
 
@@ -318,7 +393,7 @@ func TestConversationItemOverflowIsBoundedIncomplete(t *testing.T) {
 		conversations = append(conversations, stage2Conversation(fmt.Sprintf("conversation-%d", index), stage2Participant(fmt.Sprintf("target-%d", index), true, false)))
 	}
 	calls := 0
-	_, code := scanConversationPages(context.Background(), func(_ context.Context, _ *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+	_, code, diagnostic := scanConversationPagesWithDiagnostic(context.Background(), func(_ context.Context, _ *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
 		calls++
 		if calls == 1 {
 			return &gmproto.ListConversationsResponse{Conversations: conversations}, nil
@@ -327,6 +402,9 @@ func TestConversationItemOverflowIsBoundedIncomplete(t *testing.T) {
 	})
 	if code != "conversation_lookup_incomplete" {
 		t.Fatalf("scan code = %s", code)
+	}
+	if diagnostic != "item_limit" {
+		t.Fatalf("scan diagnostic = %s", diagnostic)
 	}
 }
 

@@ -1,5 +1,6 @@
 package dev.peppy.mobile.diagnostics
 
+import android.provider.OpenableColumns
 import androidx.core.content.FileProvider
 import androidx.test.core.app.ApplicationProvider
 import dev.peppy.mobile.BuildConfig
@@ -297,7 +298,7 @@ class DiagnosticsLogTest {
         assertTrue(shareDirectory.listFiles().orEmpty().isEmpty())
     }
 
-    @Test fun actualFileProviderIntegrationProducesContentUri() = runBlocking {
+    @Test fun actualFileProviderIntegrationExposesPlainTextSnapshotMetadata() = runBlocking {
         shareDirectory.mkdirs()
         val fixture = File(shareDirectory, "provider-fixture.log").apply { writeText("fixture") }
         val directUri = FileProvider.getUriForFile(context, "${BuildConfig.APPLICATION_ID}.mms-files", fixture)
@@ -311,6 +312,11 @@ class DiagnosticsLogTest {
         assertEquals("content", directUri.scheme)
         assertEquals("content", uri!!.scheme)
         assertTrue(uri.toString().contains("mms-files"))
+        assertEquals("text/plain", context.contentResolver.getType(uri))
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)!!.use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertTrue(cursor.getString(0).endsWith(".txt"))
+        }
     }
 
     private fun writeOversize(file: File, event: Int) {

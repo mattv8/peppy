@@ -6,6 +6,7 @@ import dev.peppy.mobile.gateway.NativeGateway
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 import uniffi.peppy_mobile_bindings.NativeRcsLinkState
+import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.gatewayRecordRcsExplicitUnlinkCompleted
 
 /** Records content-free link lifecycle on a worker thread before linked status is surfaced. */
@@ -139,6 +140,14 @@ internal object LinkCoreBridge {
                 now,
                 now,
             ) != null
+        }.onFailure { failure ->
+            val reason = when (failure) {
+                is MobileBindingsException.Database -> "database_failed"
+                is MobileBindingsException.KeysUnavailable -> "keys_unavailable"
+                is MobileBindingsException.InvalidRequest -> "invalid_request"
+                else -> "other_failed"
+            }
+            recordGoogleMessagesLinkEvent("link_lifecycle", reason, 0L)
         }.getOrDefault(false)
     }
 
