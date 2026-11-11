@@ -1,7 +1,41 @@
-use crate::{AttachmentView, MessageView, message_view as base_message_view};
-use peppy_client_core::{Client, Direction, Error, Message, RcsMessageStatus, Transport};
+use crate::{AttachmentView, MessageView, SendCancellationView, message_view as base_message_view};
+use peppy_client_core::{
+    Client, Direction, Error, Message, RcsMessageStatus, SendCancellationState, Transport,
+};
 
 const MAX_RCS_MEDIA_ATTACHMENTS: u32 = 10;
+
+fn send_cancellation_view(
+    client: &Client,
+    message: &Message,
+) -> Result<Option<SendCancellationView>, Error> {
+    if message.payload.direction != Direction::Outgoing {
+        return Ok(None);
+    }
+    match client.message_send_cancellation(message.payload.record.message_id) {
+        Ok(view) => Ok(Some(project_send_cancellation(view))),
+        // History and provider-imported rows can have no cancellation source. They remain
+        // ordinary message views rather than failing the whole projection.
+        Err(Error::NotFound) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn project_send_cancellation(
+    view: peppy_client_core::SendCancellationView,
+) -> SendCancellationView {
+    SendCancellationView {
+        state: match view.state {
+            SendCancellationState::None => "none",
+            SendCancellationState::Requested => "requested",
+            SendCancellationState::Confirmed => "confirmed",
+            SendCancellationState::TooLate => "too-late",
+            SendCancellationState::Unknown => "unknown",
+        },
+        can_cancel: view.can_request,
+        requires_gateway_update: view.requires_gateway_update,
+    }
+}
 
 fn incoming_attachments(
     client: &Client,
@@ -98,6 +132,7 @@ pub fn message_view(
         }
     }
     let mut view = base_message_view(message, attachments);
+    view.send_cancellation = send_cancellation_view(client, message)?;
     if !is_rcs && !has_outgoing_rcs_media {
         return Ok(view);
     }
@@ -143,6 +178,37 @@ mod tests {
             DatabaseKey::new(&[7; 32]).unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn cancellation_projection_uses_frozen_wire_states() {
+        for (state, expected) in [
+            (SendCancellationState::None, "none"),
+            (SendCancellationState::Requested, "requested"),
+            (SendCancellationState::Confirmed, "confirmed"),
+            (SendCancellationState::TooLate, "too-late"),
+            (SendCancellationState::Unknown, "unknown"),
+        ] {
+            let view = project_send_cancellation(peppy_client_core::SendCancellationView {
+                state,
+                can_request: true,
+                requires_gateway_update: false,
+            });
+            assert_eq!(view.state, expected);
+            assert!(view.can_cancel);
+            assert!(!view.requires_gateway_update);
+        }
+    }
+
+    #[test]
+    fn incoming_history_without_cancellation_remains_a_valid_view() {
+        let client = client();
+        let mut message = rcs_message(None);
+        message.payload.direction = Direction::Incoming;
+
+        let view = message_view(&client, &message, vec![]).unwrap();
+
+        assert!(view.send_cancellation.is_none());
     }
 
     fn rcs_message(send_state: Option<peppy_client_core::SendState>) -> Message {

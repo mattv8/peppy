@@ -219,7 +219,7 @@ jobs:
         env:
           PEPPY_NATIVE_RCS_KOTLIN_FIXTURE_DIR: ${{ runner.temp }}/rcs-kotlin-carrier-bindings
         run: |
-          timeout --signal=TERM --kill-after=30s 13m ./gradlew --console=plain --dependency-verification=strict :app:compileSideloadUnitTestKotlin :app:testSideloadUnitTest
+          timeout --signal=TERM --kill-after=30s 13m ./gradlew --console=plain --dependency-verification=strict :app:compileSideloadUnitTestKotlin :app:testSideloadUnitTest --rerun
           test -s "$PEPPY_NATIVE_RCS_KOTLIN_FIXTURE_DIR/SubscriptionManagerPhoneNumber.json"
           test -s "$PEPPY_NATIVE_RCS_KOTLIN_FIXTURE_DIR/TelephonyLine1Number.json"
           ./gradlew --console=plain --dependency-verification=strict :libadb:testDebugUnitTest :app:verifyReleaseRestrictedSetupExclusionFixtures

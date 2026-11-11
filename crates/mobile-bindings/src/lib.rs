@@ -13,9 +13,9 @@ use peppy_client_core::{
     MmsPreviewState, MmsProviderIdentityQuarantine, MmsSource, NativeKeyCache, NotificationCapture,
     NotificationCaptureOutcome, NotificationTarget, PermitBlock, PermitDecision,
     PhoneReadCandidate, PhoneReadTransport, ProviderRowRef, QuarantineReason, ReceivedCommand,
-    SendResult, SendState, SenderUnblockOutcome, SmsAcquisitionInput, SmsAcquisitionState,
-    SmsHistoryStatus, SmsReconciliationPlan, SmsScanPlan, SmsSource, Transport, VaultCheckHeader,
-    VaultId,
+    SendCancellationState, SendCancellationView, SendResult, SendState, SenderUnblockOutcome,
+    SmsAcquisitionInput, SmsAcquisitionState, SmsHistoryStatus, SmsReconciliationPlan, SmsScanPlan,
+    SmsSource, Transport, VaultCheckHeader, VaultId,
 };
 use std::{
     fmt,
@@ -609,6 +609,7 @@ pub enum NativePermitState {
     EpochNotActive,
     MediaUnavailable,
     Historical,
+    CancellationRequested,
     RestoreGuarded,
     RouteUnavailable,
     UnknownRoute,
@@ -621,6 +622,22 @@ pub enum NativePermitState {
     GroupCreateNotRcs,
     /// The group create is needed or in flight, or its proof is pending. Nothing was sent.
     GroupCreatePending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeSendCancellationState {
+    None,
+    Requested,
+    Confirmed,
+    TooLate,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeSendCancellationView {
+    pub state: NativeSendCancellationState,
+    pub can_request: bool,
+    pub requires_gateway_update: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -1285,6 +1302,7 @@ fn permit_view(decision: PermitDecision) -> NativePermit {
                 PermitBlock::EpochNotActive => NativePermitState::EpochNotActive,
                 PermitBlock::MediaUnavailable => NativePermitState::MediaUnavailable,
                 PermitBlock::Historical => NativePermitState::Historical,
+                PermitBlock::CancellationRequested => NativePermitState::CancellationRequested,
                 PermitBlock::RestoreGuarded => NativePermitState::RestoreGuarded,
                 PermitBlock::RouteUnavailable => NativePermitState::RouteUnavailable,
                 PermitBlock::UnknownRoute => NativePermitState::UnknownRoute,
@@ -1298,6 +1316,20 @@ fn permit_view(decision: PermitDecision) -> NativePermit {
             command: None,
             existing_send_state: None,
         },
+    }
+}
+
+fn send_cancellation_view(view: SendCancellationView) -> NativeSendCancellationView {
+    NativeSendCancellationView {
+        state: match view.state {
+            SendCancellationState::None => NativeSendCancellationState::None,
+            SendCancellationState::Requested => NativeSendCancellationState::Requested,
+            SendCancellationState::Confirmed => NativeSendCancellationState::Confirmed,
+            SendCancellationState::TooLate => NativeSendCancellationState::TooLate,
+            SendCancellationState::Unknown => NativeSendCancellationState::Unknown,
+        },
+        can_request: view.can_request,
+        requires_gateway_update: view.requires_gateway_update,
     }
 }
 
@@ -3745,6 +3777,41 @@ impl NativeClient {
         with_client(&self.client, |client| client.begin_send_attempt(command_id)).map(permit_view)
     }
 
+    pub fn message_send_cancellation(
+        &self,
+        message_id: String,
+    ) -> Result<NativeSendCancellationView, MobileBindingsError> {
+        let message_id = parse_id(&message_id)?;
+        with_client(&self.client, |client| {
+            client.message_send_cancellation(message_id)
+        })
+        .map(send_cancellation_view)
+    }
+
+    pub fn request_send_cancellation(
+        &self,
+        message_id: String,
+    ) -> Result<NativeSendCancellationView, MobileBindingsError> {
+        let message_id = parse_id(&message_id)?;
+        with_client(&self.client, |client| {
+            client.request_send_cancellation(message_id)
+        })
+        .map(send_cancellation_view)
+    }
+
+    pub fn publish_send_cancellation_capability(
+        &self,
+        supported: bool,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.publish_send_cancellation_capability(supported)
+        })
+    }
+
+    pub fn process_pending_send_cancellations(&self) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, Client::process_pending_send_cancellations)
+    }
+
     pub fn record_send_result(
         &self,
         command_id: String,
@@ -4006,6 +4073,10 @@ mod tests {
             (
                 PermitBlock::CarrierOnlyProofUnavailable,
                 NativePermitState::CarrierOnlyProofUnavailable,
+            ),
+            (
+                PermitBlock::CancellationRequested,
+                NativePermitState::CancellationRequested,
             ),
             (
                 PermitBlock::GroupRefused(SendRefusalReason::UpdateRequired),

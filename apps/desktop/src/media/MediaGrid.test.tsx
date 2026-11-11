@@ -21,6 +21,29 @@ describe("MediaGrid", () => {
     expect(view.container.querySelector('[data-message-group="1"]')).toBeInTheDocument();
   });
 
+  it("puts each eligible image control inside its message content boundary", () => {
+    const view = render(<MediaGrid messages={[message("1"), message("2")]} onOpen={vi.fn()} hasMessageAction={() => true} renderMessageAction={(value) => <button data-cancellation-action={value.id}>Cancel {value.id}</button>} />);
+
+    for (const id of ["1", "2"]) {
+      const content = view.container.querySelector(`[data-media-message-content="${id}"]`)!;
+      expect(content).toContainElement(screen.getByRole("button", { name: `Cancel ${id}` }));
+      expect(content.querySelector("[data-media-tile]")).toBeInTheDocument();
+      expect(content).toHaveAttribute("aria-label", "1 image");
+    }
+  });
+
+  it("splits mixed actionable and sent grouped images while preserving the action message identity", () => {
+    const onCancel = vi.fn();
+    const view = render(<MediaGrid messages={[message("1"), message("2")]} onOpen={vi.fn()} hasMessageAction={(value) => value.id === "2"} renderMessageAction={(value) => value.id === "2" ? <button onClick={() => onCancel(value.id)}>Cancel {value.id}</button> : undefined} />);
+
+    expect(view.container.querySelector('[data-media-message-content="1"] [data-media-tile]')).toBeInTheDocument();
+    const secondContent = view.container.querySelector('[data-media-message-content="2"]')!;
+    fireEvent.click(screen.getByRole("button", { name: "Cancel 2" }));
+    expect(onCancel).toHaveBeenCalledWith("2");
+    expect(secondContent).toContainElement(screen.getByRole("button", { name: "Cancel 2" }));
+    expect(view.container.querySelector("[data-media-carousel]")).toBeNull();
+  });
+
   it("uses the supplied renderer for media captions", () => {
     render(<MediaGrid messages={[message("1", "Read https://peppy.pro/docs")]} onOpen={vi.fn()} renderCaption={(value) => <MessageText text={value.body} />} />);
     expect(screen.getByRole("link", { name: "https://peppy.pro/docs" })).toHaveAttribute("href", "https://peppy.pro/docs");

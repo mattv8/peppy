@@ -122,6 +122,7 @@ class GatewaySyncTest : GatewayTestBase() {
         nowMs: () -> Long = { System.currentTimeMillis() },
         sessionCurrent: () -> Boolean = { true },
         effectPermitted: () -> Boolean = { true },
+        processPendingSendCancellations: () -> Boolean = { false },
     ) = GatewaySync(
         client, GatewayHttp(server.origin, TEST_TOKEN), state, deviceId,
         dispatch = dispatch,
@@ -131,6 +132,7 @@ class GatewaySyncTest : GatewayTestBase() {
         contactPhotos = contactPhotos,
         sessionCurrent = sessionCurrent,
         effectPermitted = effectPermitted,
+        processPendingSendCancellations = processPendingSendCancellations,
         nowMs = nowMs,
     )
 
@@ -143,6 +145,24 @@ class GatewaySyncTest : GatewayTestBase() {
         val json = JSONObject(envelope)
         assertEquals(deviceId, json.getString("producer_device_id"))
         assertEquals("event", json.getString("purpose"))
+    }
+
+    @Test
+    fun pendingCancellationProcessingRunsAfterApplyBeforeDispatch() {
+        val client = live()
+        val phases = mutableListOf<String>()
+        val recordingClient = object : NativeClientInterface by client {
+            override fun applyPending(limit: ULong) = client.applyPending(limit).also { phases += "apply" }
+        }
+
+        sync(
+            recordingClient,
+            dispatch = { phases += "dispatch"; DispatchSummary(0, 0, 0, false) },
+            processPendingSendCancellations = { phases += "cancellation"; false },
+        ).run()
+
+        assertTrue(phases.indexOf("apply") < phases.indexOf("cancellation"))
+        assertTrue(phases.indexOf("cancellation") < phases.indexOf("dispatch"))
     }
 
     @Test

@@ -876,6 +876,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func markSeen(messageId: String) throws  -> Bool
     
+    func messageSendCancellation(messageId: String) throws  -> NativeSendCancellationView
+    
     func messages(conversationId: String) throws  -> [NativeMessage]
     
     func migrateMmsBackfillState(generation: String, scope: String, legacy: NativeMmsLegacyBackfillState) throws 
@@ -1006,11 +1008,15 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func prepareContactPhoto(path: String) throws  -> NativeAttachmentInfo
     
+    func processPendingSendCancellations() throws  -> Bool
+    
     /**
      * Android-only local admission: provider UUIDs stay local while core maps
      * them to the protocol's decimal control generation.
      */
     func publishMessageHistoryCaptureSource(facts: NativeMessageHistorySourceFacts) throws  -> String
+    
+    func publishSendCancellationCapability(supported: Bool) throws 
     
     func publishSenderBlocklist(numbers: [String]?, canUnblock: Bool) throws  -> Bool
     
@@ -1092,6 +1098,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func requestMmsProviderRescan(generation: String, scope: String, observedMaxId: String) throws  -> Bool
     
     func requestMmsRecheck(generation: String, scope: String, limit: UInt64) throws  -> UInt64
+    
+    func requestSendCancellation(messageId: String) throws  -> NativeSendCancellationView
     
     func restoreContactJson(input: String) throws  -> String
     
@@ -2269,6 +2277,16 @@ open func markSeen(messageId: String)throws  -> Bool  {
 })
 }
     
+open func messageSendCancellation(messageId: String)throws  -> NativeSendCancellationView  {
+    return try  FfiConverterTypeNativeSendCancellationView_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_message_send_cancellation(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),uniffiCallStatus
+    )
+})
+}
+    
 open func messages(conversationId: String)throws  -> [NativeMessage]  {
     return try  FfiConverterSequenceTypeNativeMessage.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2763,6 +2781,15 @@ open func prepareContactPhoto(path: String)throws  -> NativeAttachmentInfo  {
 })
 }
     
+open func processPendingSendCancellations()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_process_pending_send_cancellations(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
     /**
      * Android-only local admission: provider UUIDs stay local while core maps
      * them to the protocol's decimal control generation.
@@ -2775,6 +2802,15 @@ open func publishMessageHistoryCaptureSource(facts: NativeMessageHistorySourceFa
         FfiConverterTypeNativeMessageHistorySourceFacts_lower(facts),uniffiCallStatus
     )
 })
+}
+    
+open func publishSendCancellationCapability(supported: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_send_cancellation_capability(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(supported),uniffiCallStatus
+    )
+}
 }
     
 open func publishSenderBlocklist(numbers: [String]?, canUnblock: Bool)throws  -> Bool  {
@@ -3081,6 +3117,16 @@ open func requestMmsRecheck(generation: String, scope: String, limit: UInt64)thr
         FfiConverterString.lower(generation),
         FfiConverterString.lower(scope),
         FfiConverterUInt64.lower(limit),uniffiCallStatus
+    )
+})
+}
+    
+open func requestSendCancellation(messageId: String)throws  -> NativeSendCancellationView  {
+    return try  FfiConverterTypeNativeSendCancellationView_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_send_cancellation(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),uniffiCallStatus
     )
 })
 }
@@ -11192,6 +11238,64 @@ public func FfiConverterTypeNativeRcsUnlinkCutoverGenerations_lower(_ value: Nat
 }
 
 
+public struct NativeSendCancellationView: Equatable, Hashable {
+    public var state: NativeSendCancellationState
+    public var canRequest: Bool
+    public var requiresGatewayUpdate: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(state: NativeSendCancellationState, canRequest: Bool, requiresGatewayUpdate: Bool) {
+        self.state = state
+        self.canRequest = canRequest
+        self.requiresGatewayUpdate = requiresGatewayUpdate
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeSendCancellationView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeSendCancellationView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSendCancellationView {
+        return
+            try NativeSendCancellationView(
+                state: FfiConverterTypeNativeSendCancellationState.read(from: &buf), 
+                canRequest: FfiConverterBool.read(from: &buf), 
+                requiresGatewayUpdate: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeSendCancellationView, into buf: inout [UInt8]) {
+        FfiConverterTypeNativeSendCancellationState.write(value.state, into: &buf)
+        FfiConverterBool.write(value.canRequest, into: &buf)
+        FfiConverterBool.write(value.requiresGatewayUpdate, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSendCancellationView_lift(_ buf: RustBuffer) throws -> NativeSendCancellationView {
+    return try FfiConverterTypeNativeSendCancellationView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSendCancellationView_lower(_ value: NativeSendCancellationView) -> RustBuffer {
+    return FfiConverterTypeNativeSendCancellationView.lower(value)
+}
+
+
 public struct NativeSenderUnblockWork: Equatable, Hashable {
     public var requestId: String
     public var numbers: [String]
@@ -15156,6 +15260,7 @@ public enum NativePermitState: Equatable, Hashable {
     case epochNotActive
     case mediaUnavailable
     case historical
+    case cancellationRequested
     case restoreGuarded
     case routeUnavailable
     case unknownRoute
@@ -15205,27 +15310,29 @@ public struct FfiConverterTypeNativePermitState: FfiConverterRustBuffer {
         
         case 7: return .historical
         
-        case 8: return .restoreGuarded
+        case 8: return .cancellationRequested
         
-        case 9: return .routeUnavailable
+        case 9: return .restoreGuarded
         
-        case 10: return .unknownRoute
+        case 10: return .routeUnavailable
         
-        case 11: return .mappingUnproven
+        case 11: return .unknownRoute
         
-        case 12: return .carrierOnlyProofUnavailable
+        case 12: return .mappingUnproven
         
-        case 13: return .groupMembersChanged
+        case 13: return .carrierOnlyProofUnavailable
         
-        case 14: return .groupUpdateRequired
+        case 14: return .groupMembersChanged
         
-        case 15: return .groupWithdrawn
+        case 15: return .groupUpdateRequired
         
-        case 16: return .groupCreateUnconfirmed
+        case 16: return .groupWithdrawn
         
-        case 17: return .groupCreateNotRcs
+        case 17: return .groupCreateUnconfirmed
         
-        case 18: return .groupCreatePending
+        case 18: return .groupCreateNotRcs
+        
+        case 19: return .groupCreatePending
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -15263,48 +15370,52 @@ public struct FfiConverterTypeNativePermitState: FfiConverterRustBuffer {
             writeInt(&buf, Int32(7))
         
         
-        case .restoreGuarded:
+        case .cancellationRequested:
             writeInt(&buf, Int32(8))
         
         
-        case .routeUnavailable:
+        case .restoreGuarded:
             writeInt(&buf, Int32(9))
         
         
-        case .unknownRoute:
+        case .routeUnavailable:
             writeInt(&buf, Int32(10))
         
         
-        case .mappingUnproven:
+        case .unknownRoute:
             writeInt(&buf, Int32(11))
         
         
-        case .carrierOnlyProofUnavailable:
+        case .mappingUnproven:
             writeInt(&buf, Int32(12))
         
         
-        case .groupMembersChanged:
+        case .carrierOnlyProofUnavailable:
             writeInt(&buf, Int32(13))
         
         
-        case .groupUpdateRequired:
+        case .groupMembersChanged:
             writeInt(&buf, Int32(14))
         
         
-        case .groupWithdrawn:
+        case .groupUpdateRequired:
             writeInt(&buf, Int32(15))
         
         
-        case .groupCreateUnconfirmed:
+        case .groupWithdrawn:
             writeInt(&buf, Int32(16))
         
         
-        case .groupCreateNotRcs:
+        case .groupCreateUnconfirmed:
             writeInt(&buf, Int32(17))
         
         
-        case .groupCreatePending:
+        case .groupCreateNotRcs:
             writeInt(&buf, Int32(18))
+        
+        
+        case .groupCreatePending:
+            writeInt(&buf, Int32(19))
         
         }
     }
@@ -16490,6 +16601,93 @@ public func FfiConverterTypeNativeRemoteAttachmentState_lift(_ buf: RustBuffer) 
 #endif
 public func FfiConverterTypeNativeRemoteAttachmentState_lower(_ value: NativeRemoteAttachmentState) -> RustBuffer {
     return FfiConverterTypeNativeRemoteAttachmentState.lower(value)
+}
+
+
+
+
+public enum NativeSendCancellationState: Equatable, Hashable {
+    
+    case none
+    case requested
+    case confirmed
+    case tooLate
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeSendCancellationState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeSendCancellationState: FfiConverterRustBuffer {
+    typealias SwiftType = NativeSendCancellationState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSendCancellationState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .none
+        
+        case 2: return .requested
+        
+        case 3: return .confirmed
+        
+        case 4: return .tooLate
+        
+        case 5: return .unknown
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeSendCancellationState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .none:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .requested:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .confirmed:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .tooLate:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSendCancellationState_lift(_ buf: RustBuffer) throws -> NativeSendCancellationState {
+    return try FfiConverterTypeNativeSendCancellationState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSendCancellationState_lower(_ value: NativeSendCancellationState) -> RustBuffer {
+    return FfiConverterTypeNativeSendCancellationState.lower(value)
 }
 
 
@@ -19830,6 +20028,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mark_seen() != 64544) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_message_send_cancellation() != 58304) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_messages() != 31771) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19962,7 +20163,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_contact_photo() != 6113) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_process_pending_send_cancellations() != 36318) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_message_history_capture_source() != 6609) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_send_cancellation_capability() != 8795) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_sender_blocklist() != 19267) {
@@ -20044,6 +20251,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_mms_recheck() != 20669) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_send_cancellation() != 9983) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_restore_contact_json() != 61758) {

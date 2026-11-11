@@ -172,7 +172,7 @@ export type DesktopBridge = Omit<SharedDesktopBridge, "enrollment_discover"> & {
 
 const fixtureMessages: MessageView[] = [
   { id: "message-aurora-1", revision: "1", sender: "other", body: "Can you send over the estimate?", timestamp: "1788434460000", attachments: [] },
-  { id: "message-aurora-2", revision: "2", sender: "self", body: "I'll have it to you shortly.", timestamp: "1788434580000", status: "sent", statusAt: "1788434640000", attachments: [{ id: "attachment-aurora-1", name: "fixture-photo.png", mediaType: "image/png", byteSize: 67, state: "ready", previewUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" }] },
+  { id: "message-aurora-2", revision: "2", sender: "self", body: "I'll have it to you shortly.\nIt was received by the phone and can still be cancelled.", timestamp: "1788434580000", status: "gateway-persisted", statusAt: "1788434640000", subject: "Fixture subject", attachments: [{ id: "attachment-aurora-1", name: "fixture-photo.png", mediaType: "image/png", byteSize: 67, state: "ready", previewUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" }], sendCancellation: { state: "none", canCancel: true, requiresGatewayUpdate: false } },
   { id: "message-aurora-3", revision: "1", sender: "other", body: "Your verification code is 482913.", oneTimeCode: "482913", timestamp: "1788434700000", attachments: [] },
 ];
 const fixtureReactionMessages: MessageView[] = [
@@ -384,6 +384,18 @@ export const fixtureBridge: DesktopBridge = {
   start_history_search: async (): Promise<HistorySearchSnapshot> => ({ state: "blocked", reason: "unsupported", canSearchFurther: false, progressVersion: "0", indexVersion: "0" }),
   cancel_history_search: async (): Promise<HistorySearchSnapshot> => ({ state: "cancelled", canSearchFurther: false, progressVersion: "0", indexVersion: "0" }),
   load_message_window: async input => fixtureMessageWindow(input),
+  cancel_send: async ({ messageId }) => {
+    for (const conversation of fixtureSnapshot.conversations) {
+      const index = conversation.messages.findIndex(message => message.id === messageId);
+      if (index < 0) continue;
+      const message = conversation.messages[index];
+      if (!message.sendCancellation?.canCancel) return message.sendCancellation ?? { state: "unknown", canCancel: false, requiresGatewayUpdate: false };
+      const sendCancellation = { ...message.sendCancellation, state: "requested" as const, canCancel: false };
+      conversation.messages[index] = { ...message, sendCancellation };
+      return sendCancellation;
+    }
+    return { state: "unknown", canCancel: false, requiresGatewayUpdate: false };
+  },
   open_external_url: async url => { if (!/^(https?:\/\/|cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?)/.test(url)) throw fixtureError("invalid-request", "The URL is invalid."); },
   open_mcp_oauth_redirect: async url => { if (!/^(?:https?:\/\/|(?:vscode|vscode-insiders|cursor|windsurf|jetbrains):\/\/[^/?#@]+(?:[/?]|$))/.test(url)) throw fixtureError("invalid-request", "The URL is invalid."); },
   load_history: async (conversationId, beforeMessageId) => {
@@ -745,6 +757,7 @@ export const tauriBridge: DesktopBridge = {
   send_typing: ({ conversationId, state }) => invoke("send_typing", { conversationId, state }),
   set_typing_sharing: ({ enabled }) => invoke("set_typing_sharing", { enabled }),
   set_conversation_tone: (seed, paletteIndex) => invoke("set_conversation_tone", { seed, paletteIndex }),
+  cancel_send: ({ messageId }) => invoke("cancel_send", { messageId }),
   async window(action) { const w = (await import("@tauri-apps/api/window")).getCurrentWindow(); if (action === "minimize") await w.minimize(); else if (action === "maximize") await w.toggleMaximize(); else await w.close(); },
 };
 

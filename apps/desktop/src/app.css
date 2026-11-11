@@ -624,6 +624,59 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   border-radius: var(--peppy-radius-md, 8px);
 }
 .message-row.self .message-bubble[data-chromeless] { align-items: flex-end; }
+.message-bubble:has(> [data-message-cancel]),
+[data-media-message-action]:has(> [data-message-cancel]) {
+  --message-cancel-target: 28px;
+  position: relative;
+  min-block-size: calc(var(--message-cancel-target) + 8px);
+  padding-inline-end: calc(var(--message-cancel-target) + 12px);
+}
+[data-media-message-action]:has(> [data-message-cancel]) { display: block; }
+[data-message-cancel] {
+  position: absolute;
+  inset-block-start: 4px;
+  inset-inline-end: 4px;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--peppy-radius-sm);
+  background: transparent;
+  color: inherit;
+}
+[data-message-cancel]:hover:not(:disabled) {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+[data-message-cancel]:active:not(:disabled) {
+  background: color-mix(in srgb, currentColor 20%, transparent);
+}
+[data-message-cancel]:disabled { opacity: .55; cursor: not-allowed; }
+[data-message-cancel]:focus-visible,
+[data-message-cancellation]:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+[data-message-cancellation] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+@media (pointer: coarse) {
+  .message-bubble:has(> [data-message-cancel]),
+  [data-media-message-action]:has(> [data-message-cancel]) { --message-cancel-target: 44px; }
+  [data-message-cancel] { width: 44px; height: 44px; }
+}
+@media (forced-colors: active) {
+  [data-message-cancel]:focus-visible,
+  [data-message-cancellation]:focus-visible { outline-color: Highlight; }
+  [data-message-cancel]:disabled { color: GrayText; opacity: 1; }
+}
 .message-bubble p {
   margin: 0 0 6px;
   white-space: pre-wrap;
