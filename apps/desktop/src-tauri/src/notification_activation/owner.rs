@@ -642,6 +642,9 @@ mod tests {
         callbacks: HashMap<String, Signal>,
         sounds: Vec<bool>,
         copy_actions: Vec<bool>,
+        popup_actions: Vec<ActionAvailability>,
+        titles: Vec<String>,
+        bodies: Vec<String>,
         icons: Vec<&'static str>,
         log: Arc<Mutex<Vec<String>>>,
         fail_post: bool,
@@ -677,8 +680,8 @@ mod tests {
             &mut self,
             id: &str,
             _: u64,
-            _: &str,
-            _: &str,
+            title: &str,
+            body: &str,
             sound: bool,
             icon: Option<&crate::notification_icon::Icon>,
             actions: ActionAvailability,
@@ -686,6 +689,9 @@ mod tests {
         ) -> Result<TestItem, PostError> {
             self.post_attempts.fetch_add(1, Ordering::AcqRel);
             self.copy_actions.push(actions.copy);
+            self.popup_actions.push(actions);
+            self.titles.push(title.into());
+            self.bodies.push(body.into());
             self.sounds.push(sound);
             self.icons.push(match icon {
                 None => "none",
@@ -777,6 +783,127 @@ mod tests {
             handler,
         });
         post
+    }
+
+    #[test]
+    fn synthetic_test_presentations_have_unique_identities_and_terminal_cleanup() {
+        let mut registry = registry();
+        let full = super::super::test_notification::presentation(
+            super::super::test_notification::TestPrivacy::Full,
+        );
+        let hidden = super::super::test_notification::presentation(
+            super::super::test_notification::TestPrivacy::Hidden,
+        );
+        let first_id = super::super::test_notification::request_id();
+        let second_id = super::super::test_notification::request_id();
+        assert_ne!(first_id, second_id);
+        let delivered = Arc::new(AtomicUsize::new(0));
+        for (id, presentation) in [(&first_id, full), (&second_id, hidden)] {
+            let delivered = delivered.clone();
+            let post = Post {
+                activation: Some(NotificationActivation {
+                    request_id: id.clone(),
+                    session_generation: "synthetic".into(),
+                    destination: Destination::Main,
+                }),
+                cancel: CancellationToken::new(),
+                title: presentation.title.into(),
+                body: presentation.body.into(),
+                sound: false,
+                icon: Some(crate::notification_icon::Icon::Message),
+                copy: None,
+                popup_actions: Some(PopupActions {
+                    reveal: presentation.reveal,
+                    reply: !presentation.reveal,
+                    handler: Arc::new(move |_| {
+                        delivered.fetch_add(1, Ordering::AcqRel);
+                    }),
+                }),
+            };
+            registry
+                .post_versioned(
+                    post,
+                    PopupVersion {
+                        request_id: id.clone(),
+                        presentation_generation: 1,
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            registry.backend.titles,
+            vec!["Peppy test message", "New notification"]
+        );
+        assert_eq!(
+            registry.backend.bodies,
+            vec!["This is a test message. Reply here to try quick reply.", ""]
+        );
+        assert!(!registry.backend.popup_actions[0].copy);
+        assert!(!registry.backend.popup_actions[0].reveal);
+        assert!(registry.backend.popup_actions[0].reply);
+        assert!(!registry.backend.popup_actions[1].copy);
+        assert!(registry.backend.popup_actions[1].reveal);
+        assert!(!registry.backend.popup_actions[1].reply);
+
+        registry.entries[0]
+            .signal
+            .reply("ignored test reply".into());
+        registry.entries[1].signal.reveal();
+        for (_, _, _, _, action) in registry.reconcile() {
+            let (handler, action) = action.unwrap();
+            handler(action);
+        }
+        assert_eq!(delivered.load(Ordering::Acquire), 2);
+        assert_eq!(
+            registry.entries.len(),
+            1,
+            "Reveal keeps the hidden version for replacement"
+        );
+
+        let replacement = PopupVersion {
+            request_id: second_id.clone(),
+            presentation_generation: 2,
+        };
+        let delivered_after_reveal = delivered.clone();
+        registry
+            .replace(
+                &PopupVersion {
+                    request_id: second_id.clone(),
+                    presentation_generation: 1,
+                },
+                Post {
+                    activation: Some(NotificationActivation {
+                        request_id: second_id,
+                        session_generation: "synthetic".into(),
+                        destination: Destination::Main,
+                    }),
+                    cancel: CancellationToken::new(),
+                    title: full.title.into(),
+                    body: full.body.into(),
+                    sound: false,
+                    icon: Some(crate::notification_icon::Icon::Message),
+                    copy: None,
+                    popup_actions: Some(PopupActions {
+                        reveal: false,
+                        reply: true,
+                        handler: Arc::new(move |_| {
+                            delivered_after_reveal.fetch_add(1, Ordering::AcqRel);
+                        }),
+                    }),
+                },
+                replacement,
+            )
+            .unwrap();
+        registry.entries[0].signal.reply("ignored again".into());
+        for (_, _, _, _, action) in registry.reconcile() {
+            let (handler, action) = action.unwrap();
+            handler(action);
+        }
+        assert_eq!(delivered.load(Ordering::Acquire), 3);
+        assert!(
+            registry.entries.is_empty(),
+            "terminal synthetic popups must retire"
+        );
     }
 
     #[test]

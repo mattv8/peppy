@@ -14,6 +14,7 @@ mod macos;
 mod owner;
 pub(crate) mod quick_reply;
 mod recovery_store;
+mod test_notification;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(any(target_os = "windows", test))]
@@ -151,6 +152,13 @@ pub fn post(
 }
 
 pub fn post_test(app: &tauri::AppHandle, title: &str, body: &str) -> Result<(), ()> {
+    if test_notification::post(app).is_ok_and(|posted| posted) {
+        return Ok(());
+    }
+    post_ordinary_test(app, title, body)
+}
+
+fn post_ordinary_test(app: &tauri::AppHandle, title: &str, body: &str) -> Result<(), ()> {
     post_with_activation(
         app,
         None,
