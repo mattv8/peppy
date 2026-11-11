@@ -1,4 +1,4 @@
-use super::owner::ActionAvailability;
+use super::ActionAvailability;
 use crate::notification_persistence::NotificationPersistence;
 
 pub(crate) fn toast_xml(
@@ -150,8 +150,7 @@ fn xml_1_0(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{toast_xml, toast_xml_with_icons, ActionIconUris};
-    use crate::notification_activation::owner::ActionAvailability;
+    use super::{toast_xml, toast_xml_with_icons, ActionAvailability, ActionIconUris};
     use crate::notification_persistence::NotificationPersistence;
 
     #[test]

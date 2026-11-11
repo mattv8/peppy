@@ -276,22 +276,6 @@ struct Registry<B: Backend> {
     wake: SyncSender<Command>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ActionAvailability {
-    pub copy: bool,
-    pub reveal: bool,
-    pub reply: bool,
-}
-
-impl From<bool> for ActionAvailability {
-    fn from(copy: bool) -> Self {
-        Self {
-            copy,
-            ..Self::default()
-        }
-    }
-}
-
 impl<B: Backend> Registry<B> {
     #[cfg(test)]
     fn post(&mut self, post: Post) -> Result<(), PostError> {

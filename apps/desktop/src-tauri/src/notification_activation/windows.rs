@@ -1,6 +1,7 @@
 use super::{
-    owner::{ActionAvailability, Signal},
-    PostError,
+    owner::Signal,
+    windows_codec::{self, ActivationAction},
+    ActionAvailability, PostError,
 };
 use crate::notification_icon::{self, Icon, Lease};
 use tauri::{AppHandle, Manager};
@@ -161,26 +162,18 @@ impl Backend {
             let args = args
                 .as_ref()
                 .and_then(|args| args.cast::<ToastActivatedEventArgs>().ok());
-            match args
-                .as_ref()
-                .and_then(|args| args.Arguments().ok())
-                .as_deref()
-            {
-                Some("copy-code") => activate.copy(),
-                Some("reveal") => activate.reveal(),
-                Some("reply") => {
-                    // The Windows binding exposes UserInput only with
-                    // Foundation_Collections. Missing/non-string values fail closed.
-                    if let Some(body) = args
-                        .and_then(|args| args.UserInput().ok())
-                        .and_then(|input| input.Lookup(&HSTRING::from("reply")).ok())
-                        .and_then(|value| value.to_string().ok())
-                    {
+            let argument = args.as_ref().and_then(windows_codec::action_argument);
+            match windows_codec::parse_action(argument.as_deref()) {
+                Some(ActivationAction::Copy) => activate.copy(),
+                Some(ActivationAction::Reveal) => activate.reveal(),
+                Some(ActivationAction::Reply) => {
+                    // Missing, malformed, and non-string input values fail closed.
+                    if let Some(body) = args.as_ref().and_then(windows_codec::reply_body) {
                         activate.reply(body);
                     }
                 }
-                Some("") | None => activate.click(),
-                Some(_) => {}
+                Some(ActivationAction::Click) => activate.click(),
+                None => {}
             }
             Ok(())
         }))?);

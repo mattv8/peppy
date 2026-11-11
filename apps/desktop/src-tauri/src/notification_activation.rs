@@ -8,6 +8,9 @@ use peppy_desktop_api::{
 use std::sync::{atomic::Ordering, Arc, Mutex};
 use tauri::{Emitter, Manager};
 
+mod action_availability;
+use action_availability::ActionAvailability;
+
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -17,6 +20,8 @@ mod recovery_store;
 mod test_notification;
 #[cfg(target_os = "windows")]
 mod windows;
+#[cfg(any(target_os = "windows", test))]
+mod windows_codec;
 #[cfg(any(target_os = "windows", test))]
 mod windows_xml;
 

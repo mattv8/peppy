@@ -1,7 +1,4 @@
-use super::{
-    owner::{ActionAvailability, Signal},
-    PostError,
-};
+use super::{owner::Signal, ActionAvailability, PostError};
 use crate::notification_icon::{self, Icon, Lease};
 use block2::{DynBlock, RcBlock};
 use objc2::{
