@@ -1,0 +1,18 @@
+#notification-reply-recovery-status { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 12px; }
+#notification-reply-recovery-panel { display: grid; gap: 8px; }
+#notification-reply-recovery-text { white-space: pre-wrap; overflow-wrap: anywhere; max-block-size: 18rem; overflow: auto; padding: 8px; background: var(--peppy-surface-widget); border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-sm); }
+#notification-reply-recovery-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+#notification-reply-recovery-list { display: grid; gap: 8px; padding: 0; list-style: none; }
+#notification-reply-recovery-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#notification-reply-recovery-list li > span { min-width: 0; overflow-wrap: anywhere; }
+#notification-reply-recovery-list .secondary-button { flex: none; white-space: nowrap; }
+.peppy-modal-panel.notification-reply-recovery-modal { width: min(720px, 100%); }
+@media (max-height: 420px) {
+  .peppy-modal-panel.notification-reply-recovery-modal { max-height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+  .notification-reply-recovery-modal > .peppy-modal-title,
+  .notification-reply-recovery-modal > .peppy-modal-actions { flex: none; }
+  .notification-reply-recovery-modal #notification-reply-recovery-panel { flex: 1 1 auto; min-height: 0; overflow: auto; }
+  .notification-reply-recovery-modal #notification-reply-recovery-actions { position: sticky; bottom: 0; background: var(--peppy-surface-panel); padding-block: 8px; }
+  .notification-reply-recovery-modal .peppy-modal-actions { background: var(--peppy-surface-panel); }
+}
+@media (pointer: coarse) { #notification-reply-recovery-status button, #notification-reply-recovery-dialog button { min-height: 48px; } }

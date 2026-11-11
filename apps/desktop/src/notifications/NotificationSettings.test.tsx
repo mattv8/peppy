@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { NotificationSettings } from "./NotificationSettings";
-import { notificationPersistenceSettings } from "../App";
+import { notificationPersistenceSettings, notificationQuickReplySettings } from "../App";
 import { StrictMode } from "react";
 import type { AppFilter, MirroredNotification, NotificationCheck, NotificationPreferences } from "../bridge/bridge";
 import type { NotificationPersistenceSettings } from "@peppy/desktop-ui/bridge-contracts";
@@ -32,6 +32,46 @@ const SYNC_NOTE = /Banner choices apply to every computer and browser in this va
 const persistenceSettings = (value: NotificationPersistenceSettings = { seconds: 5, supported: true }) => ({
   load: vi.fn().mockResolvedValue(value),
   save: vi.fn().mockResolvedValue(undefined),
+});
+const quickReplySettings = (value = { enabled: false, supported: true }) => ({
+  load: vi.fn().mockResolvedValue(value),
+  save: vi.fn().mockResolvedValue(undefined),
+});
+
+it("hides quick reply without a supported adapter and saves only after loading", async () => {
+  const input = props();
+  const settings = quickReplySettings();
+  const { rerender } = render(<NotificationSettings {...input} />);
+  expect(screen.queryByRole("switch", { name: "Quick reply in notifications" })).not.toBeInTheDocument();
+  rerender(<NotificationSettings {...input} quickReplySettings={settings} />);
+  const toggle = await screen.findByRole("switch", { name: "Quick reply in notifications" });
+  expect(toggle).toBeEnabled();
+  fireEvent.click(toggle);
+  await waitFor(() => expect(settings.save).toHaveBeenCalledWith(true));
+});
+
+it("preserves quick reply's applied state after a failed save", async () => {
+  const settings = quickReplySettings({ enabled: true, supported: true });
+  settings.save.mockRejectedValue(new Error("disk"));
+  render(<NotificationSettings {...props()} quickReplySettings={settings} />);
+  const toggle = await screen.findByRole("switch", { name: "Quick reply in notifications" });
+  expect(toggle).toBeChecked();
+  fireEvent.click(toggle);
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not save quick reply settings. Try again.");
+  expect(toggle).toBeChecked();
+});
+
+it("binds quick reply adapter methods to class-based bridges", async () => {
+  class NativeBridge {
+    enabled = false;
+    async get_notification_quick_reply() { return { enabled: this.enabled, supported: true }; }
+    async set_notification_quick_reply(enabled: boolean) { this.enabled = enabled; }
+  }
+  const bridge = new NativeBridge();
+  const adapter = notificationQuickReplySettings(bridge);
+  expect(await adapter?.load()).toEqual({ enabled: false, supported: true });
+  await adapter?.save(true);
+  expect(bridge.enabled).toBe(true);
 });
 
 it("binds persistence adapter methods to class-based bridges", async () => {

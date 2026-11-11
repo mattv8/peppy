@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { DEFAULT_NOTIFICATION_PERSISTENCE, MAX_NOTIFICATION_PERSISTENCE_SECONDS, notificationPersistence, type NotificationPersistence, type NotificationPersistenceSettings } from "@peppy/desktop-ui/bridge-contracts";
+import { DEFAULT_NOTIFICATION_PERSISTENCE, MAX_NOTIFICATION_PERSISTENCE_SECONDS, notificationPersistence, type NotificationPersistence, type NotificationPersistenceSettings, type NotificationQuickReplySettings } from "@peppy/desktop-ui/bridge-contracts";
 import type { AppFilter, MirroredNotification, NotificationCheck, NotificationPreferences } from "../bridge/bridge";
 import { notificationAppName, notificationTuple, notificationSourceName } from "./Notifications";
 
@@ -23,7 +23,7 @@ function permissionMessage(check: NotificationCheck): string {
     : "This system doesn't report Peppy's notification permission, and the test notification could not be sent.";
 }
 
-export function NotificationSettings({ notifications, filters, sources, preferences, headsSupported, locked, soundSettings, persistenceSettings, onPreferences, onMute, onPermission, onOpenSettings }: {
+export function NotificationSettings({ notifications, filters, sources, preferences, headsSupported, locked, soundSettings, persistenceSettings, quickReplySettings, onPreferences, onMute, onPermission, onOpenSettings }: {
   notifications: MirroredNotification[];
   filters: AppFilter[];
   sources: { id: string; name: string }[];
@@ -32,6 +32,7 @@ export function NotificationSettings({ notifications, filters, sources, preferen
   locked: boolean;
   soundSettings?: { load(): Promise<boolean>; save(enabled: boolean): Promise<void> };
   persistenceSettings?: { load(): Promise<NotificationPersistenceSettings>; save(value: NotificationPersistence): Promise<void> };
+  quickReplySettings?: { load(): Promise<NotificationQuickReplySettings>; save(enabled: boolean): Promise<void> };
   onPreferences(value: NotificationPreferences): Promise<void>;
   onMute(filter: AppFilter): Promise<void>;
   onPermission(): Promise<NotificationCheck | void>;
@@ -50,6 +51,9 @@ export function NotificationSettings({ notifications, filters, sources, preferen
   const [customInvalid, setCustomInvalid] = useState(false);
   const [persistenceError, setPersistenceError] = useState("");
   const [persistenceLoadError, setPersistenceLoadError] = useState("");
+  const [quickReply, setQuickReply] = useState<NotificationQuickReplySettings>();
+  const [quickReplyPending, setQuickReplyPending] = useState(false);
+  const [quickReplyError, setQuickReplyError] = useState("");
   const lastFinitePersistence = useRef(DEFAULT_PERSISTENCE_SECONDS);
   const persistenceSavePending = useRef(false);
   const persistenceSaveToken = useRef(0);
@@ -74,6 +78,19 @@ export function NotificationSettings({ notifications, filters, sources, preferen
     return () => { current = false; };
   }, [loadSound, locked]);
   const loadPersistence = persistenceSettings?.load;
+  const loadQuickReply = quickReplySettings?.load;
+  useEffect(() => {
+    let current = true;
+    setQuickReply(undefined);
+    setQuickReplyError("");
+    if (!loadQuickReply || locked) return () => { current = false; };
+    void loadQuickReply().then(value => {
+      if (current) setQuickReply(value);
+    }).catch(() => {
+      if (current) setQuickReplyError("Could not load quick reply settings. Reopen Settings to try again.");
+    });
+    return () => { current = false; };
+  }, [loadQuickReply, locked]);
   const persistenceLoadAdapter = useRef<typeof loadPersistence>(undefined);
   useEffect(() => {
     let current = true;
@@ -283,7 +300,7 @@ export function NotificationSettings({ notifications, filters, sources, preferen
         {soundSettings && <p id="notification-sounds-hint" className="settings-note">Play the system notification sound on this computer. System volume and Focus or Do Not Disturb still apply.</p>}
         <div id="notification-preview-row" className="settings-control-row">
           <label htmlFor="notification-preview">Banner preview</label>
-          <select id="notification-preview" value={previewMode} disabled={busy || locked} aria-describedby={lockedNoteId}
+          <select id="notification-preview" value={previewMode} disabled={busy || locked} aria-describedby={[lockedNoteId, quickReply?.enabled ? "notification-quick-reply-preview-hint" : undefined].filter(Boolean).join(" ") || undefined}
             onChange={event => {
               const selection = event.target.value;
               savePreferences({ ...preferences, preview: selection === "full" ? "full" : "hidden", showSource: selection === "source" });
@@ -293,6 +310,32 @@ export function NotificationSettings({ notifications, filters, sources, preferen
             <option value="hidden">Hidden — generic banner only</option>
           </select>
         </div>
+        {quickReplySettings && quickReply?.supported !== false && <>
+          <div id="notification-quick-reply-row" className="settings-control-row" aria-busy={quickReplyPending || (quickReply === undefined && !quickReplyError) || undefined}>
+            <label htmlFor="notification-quick-reply-toggle">Quick reply in notifications</label>
+            <span className="settings-switch">
+              <input id="notification-quick-reply-toggle" type="checkbox" role="switch" checked={quickReply?.enabled ?? false} aria-checked={quickReply?.enabled ?? false}
+                disabled={busy || locked || quickReplyPending || quickReply === undefined} aria-describedby={`notification-quick-reply-hint${lockedNoteId ? ` ${lockedNoteId}` : ""}`}
+                onChange={event => {
+                  if (!quickReply || quickReplyPending || locked) return;
+                  const enabled = event.target.checked;
+                  setQuickReplyPending(true);
+                  setQuickReplyError("");
+                  void quickReplySettings.save(enabled).then(() => setQuickReply({ ...quickReply, enabled })).catch(() => {
+                    setQuickReplyError("Could not save quick reply settings. Try again.");
+                  }).finally(() => setQuickReplyPending(false));
+                }} />
+              <span aria-hidden />
+            </span>
+          </div>
+          <p id="notification-quick-reply-hint" className="settings-note">Reply to messages from notifications on this computer. Not available while Peppy is locked. This setting applies only to this computer.</p>
+          {quickReplyPending && <p role="status">Saving quick reply setting…</p>}
+          {quickReply === undefined && !quickReplyError && <p role="status">Loading quick reply setting…</p>}
+          {quickReply?.enabled && <p id="notification-quick-reply-preview-hint" className="settings-note">
+            {previewMode === "full" ? "Show the sender and message, with quick reply." : previewMode === "source" ? "Show who it is from. Choose Show message to reveal a message and reply." : "Show a generic banner. Choose Show message to reveal a message and reply."} Quick reply applies to message banners, not mirrored app notifications.
+          </p>}
+          {quickReplyError && <p id="notification-quick-reply-error" className="settings-error" role="alert">{quickReplyError}</p>}
+        </>}
         {persistenceSettings && persistenceLoadError && !persistenceSupported && <p id="notification-persistence-load-error" className="settings-note" role="alert">{persistenceLoadError}</p>}
         {persistenceSettings && persistenceSupported && persistence && <div id="notification-persistence-row" className="settings-control-row" data-persistence-mode={persistenceSelection}>
           <label htmlFor="notification-persistence">Banner duration</label>

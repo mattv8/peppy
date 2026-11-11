@@ -29,6 +29,9 @@ import type {
   NotificationCheck,
   NotificationPersistence,
   NotificationPersistenceSettings,
+  NotificationQuickReplySettings,
+  NotificationReplyRecovery,
+  NotificationReplyRecoveries,
   NotificationPermissionStatus,
   ContactBookState,
   BookCapabilities,
@@ -114,6 +117,9 @@ export {
   type NotificationCheck,
   type NotificationPersistence,
   type NotificationPersistenceSettings,
+  type NotificationQuickReplySettings,
+  type NotificationReplyRecovery,
+  type NotificationReplyRecoveries,
   type NotificationPermissionStatus,
   type ContactBookState,
   type BookCapabilities,
@@ -365,6 +371,7 @@ const fixtureSave = (input: DraftInput): Draft => {
 };
 let fixtureNotificationSound = false;
 let fixtureNotificationPersistence: NotificationPersistence = { seconds: 5 };
+let fixtureNotificationQuickReply = false;
 export const fixtureBridge: DesktopBridge = {
   load_state: async (conversationId, historyFromMessageId, options) => {
     const active = conversationId && fixtureConversationIds().includes(conversationId) ? conversationId : fixtureSnapshot.activeConversationId!;
@@ -501,6 +508,13 @@ export const fixtureBridge: DesktopBridge = {
   set_notification_sound: async enabled => { fixtureNotificationSound = enabled; },
   get_notification_persistence: async () => ({ ...fixtureNotificationPersistence, supported: true }),
   set_notification_persistence: async value => { fixtureNotificationPersistence = value; },
+  get_notification_quick_reply: async () => ({ enabled: fixtureNotificationQuickReply, supported: true }),
+  set_notification_quick_reply: async enabled => { fixtureNotificationQuickReply = enabled; },
+  notification_reply_recoveries: async () => ({ sessionGeneration: "fixture", items: [] }),
+  claim_notification_reply_restore: async () => false,
+  release_notification_reply_restore: async () => undefined,
+  ack_notification_reply_restore: async () => undefined,
+  discard_notification_reply: async () => undefined,
   popout_conversation: async conversationId => {
     if (!fixtureConversationIds().includes(conversationId)) throw fixtureError("not-found", "The requested conversation was not found.");
     fixtureSnapshot.head = { ...fixtureSnapshot.head, enabled: true, capability: "unconfirmed", pinnedConversationIds: [...new Set([...(fixtureSnapshot.head.pinnedConversationIds ?? []), conversationId])] };
@@ -708,6 +722,13 @@ export const tauriBridge: DesktopBridge = {
   open_store_subscriptions: () => invoke("open_store_subscriptions"),
   set_notification_sound: enabled => invoke("set_notification_sound", { enabled }),
   set_notification_persistence: value => invoke("set_notification_persistence", { value }),
+  get_notification_quick_reply: () => invoke("get_notification_quick_reply"),
+  set_notification_quick_reply: enabled => invoke("set_notification_quick_reply", { enabled }),
+  notification_reply_recoveries: conversationId => invoke("notification_reply_recoveries", { conversationId }),
+  claim_notification_reply_restore: input => invoke("claim_notification_reply_restore", { input }),
+  release_notification_reply_restore: input => invoke("release_notification_reply_restore", { input }),
+  ack_notification_reply_restore: input => invoke("ack_notification_reply_restore", { input }),
+  discard_notification_reply: input => invoke("discard_notification_reply", { input }),
   media_sync_request: attachmentIds => invoke("media_sync_request", { attachmentIds }),
   open_media_viewer: (conversationId, attachmentId, messageId) => invoke("open_media_viewer", { conversationId, attachmentId, messageId }),
   media_page_around: (conversationId, attachmentId, messageId, limit) => invoke("media_page_around", { conversationId, attachmentId, messageId, limit }),
