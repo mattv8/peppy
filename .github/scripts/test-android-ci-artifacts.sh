@@ -97,6 +97,15 @@ done
 debug_block=$(job_block android-debug-unit-tests)
 sideload_block=$(job_block android-sideload-unit-tests)
 lint_block=$(job_block android-lint-and-assembly)
+# Job limits must stay above setup plus each watched step's hard cap.
+if ! grep -Fq 'run-with-jvm-watchdog.sh 180 780' <<< "$debug_block" || ! grep -Fq 'timeout-minutes: 20' <<< "$debug_block"; then
+  echo 'debug unit tests must use the 180 s stall / 780 s cap watchdog inside a 20-minute job' >&2
+  exit 1
+fi
+if ! grep -Fq 'run-with-jvm-watchdog.sh 300 1080' <<< "$sideload_block" || ! grep -Fq 'timeout-minutes: 25' <<< "$sideload_block"; then
+  echo 'sideload unit tests must use the 300 s stall / 1080 s cap watchdog inside a 25-minute job' >&2
+  exit 1
+fi
 if grep -Fq 'peppyGoogleMessagesLink' <<< "$debug_block" || grep -Fq 'peppyGoogleMessagesLink' <<< "$sideload_block"; then
   echo 'debug and sideload unit test jobs must use the default-off Google Messages link setting' >&2
   exit 1

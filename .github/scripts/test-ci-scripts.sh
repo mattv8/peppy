@@ -213,6 +213,7 @@ expect_failure env "${gate_env[@]}" GITHUB_STEP_SUMMARY="$summary" RUST_REQUIRED
 expect_output "$summary" '| job | required | result |'
 
 echo 'CI script tests passed'
+bash "$SCRIPT_DIR/test-run-with-jvm-watchdog.sh"
 bash "$SCRIPT_DIR/test-hosted-production-handoff.sh"
 bash "$SCRIPT_DIR/test-platform-companion-notify.sh"
 bash "$SCRIPT_DIR/test-release-context-guard.sh"
