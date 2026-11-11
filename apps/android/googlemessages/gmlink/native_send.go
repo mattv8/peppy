@@ -63,33 +63,36 @@ func (link *Link) WithNativeRcsTargetClassification(ticketID string, classifier 
 // It performs no network operation.
 func (link *Link) PrepareNativeRcs(requestJSON string) string {
 	if len(requestJSON) > maxNativeRcsPrepareJSONBytes || !utf8.ValidString(requestJSON) {
-		return nativeRcsJSON(nativeRcsPrepareResult{Code: "invalid_request"})
+		return link.nativePrepareResult("invalid_request", "invalid_request")
 	}
 	request, ok := decodeNativeRcsPrepare(requestJSON)
 	if !ok || !validNativeRcsPrepare(request) {
-		return nativeRcsJSON(nativeRcsPrepareResult{Code: "invalid_request"})
+		return link.nativePrepareResult("invalid_request", "invalid_request")
 	}
 
 	link.mu.Lock()
-	defer link.mu.Unlock()
 	now := link.nowForTicketLocked()
 	if link.preparedTicket != nil && !now.Before(link.preparedTicket.expiresAt) {
 		link.clearPreparedTicketLocked()
 	}
 	link.expireNativeTicketLocked(now)
 	if link.nativeTicket != nil || link.nativeInFlight != nil || link.preparedTicket != nil || link.sendAdmissionInFlight {
-		return nativeRcsJSON(nativeRcsPrepareResult{Code: "busy"})
+		link.mu.Unlock()
+		return link.nativePrepareResult("busy", "busy")
 	}
-	if !link.nativePrepareAllowedLocked() {
-		return nativeRcsJSON(nativeRcsPrepareResult{Code: "rejected"})
+	if reason := link.nativePrepareFailureReasonLocked(); reason != "prepared" {
+		link.mu.Unlock()
+		return link.nativePrepareResult("rejected", reason)
 	}
 	selected := uniqueEnabledRcsCard(link.settings)
 	if selected == nil {
-		return nativeRcsJSON(nativeRcsPrepareResult{Code: "rejected"})
+		link.mu.Unlock()
+		return link.nativePrepareResult("rejected", "sim_unavailable")
 	}
 	candidate := []byte(link.conversationCandidateSnapshotLocked())
 	if len(candidate) > maxNativeCandidateBytes {
-		return nativeRcsJSON(nativeRcsPrepareResult{Code: "rejected"})
+		link.mu.Unlock()
+		return link.nativePrepareResult("rejected", "candidate_too_large")
 	}
 	ticket := &nativeRcsTicket{
 		id:              uuid.NewString(),
@@ -112,12 +115,25 @@ func (link *Link) PrepareNativeRcs(requestJSON string) string {
 		RunIncarnation: ticket.runIncarnation, RunGeneration: ticket.generation,
 		StreamEpoch: ticket.streamEpoch, PairingEvidenceID: ticket.pairingEvidence,
 	}
-	encoded, _ := json.Marshal(result)
-	if len(encoded) > maxNativePrepareResultBytes {
-		return nativeRcsJSON(nativeRcsPrepareResult{Code: "rejected"})
+	encoded, fits := nativePreparedResultJSON(result)
+	if !fits {
+		link.mu.Unlock()
+		return link.nativePrepareResult("rejected", "result_too_large")
 	}
 	link.nativeTicket = ticket
+	link.mu.Unlock()
+	link.emit("native_prepare", "prepared", 0)
 	return string(encoded)
+}
+
+func (link *Link) nativePrepareResult(code, reason string) string {
+	link.emit("native_prepare", reason, 0)
+	return nativeRcsJSON(nativeRcsPrepareResult{Code: code})
+}
+
+func nativePreparedResultJSON(result nativeRcsPrepareResult) (string, bool) {
+	encoded, _ := json.Marshal(result)
+	return string(encoded), len(encoded) <= maxNativePrepareResultBytes
 }
 
 func validNativeRcsPrepare(request nativeRcsPrepareRequest) bool {
@@ -138,12 +154,41 @@ func validNativeText(value string) bool {
 	return value != "" && len(value) <= maxOpaqueIDBytes && utf8.ValidString(value)
 }
 
-func (link *Link) nativePrepareAllowedLocked() bool {
-	return !link.closed && link.state == stateLinked && link.running && link.hasSendVerificationLocked() &&
-		link.runGeneration == link.generation && link.conversationIndexComplete &&
-		link.conversationIndexGeneration == link.generation && link.conversationIndexStreamEpoch == link.streamEpoch &&
-		link.pendingConversationEvents == 0 && link.settings != nil && !link.settingsAt.IsZero() &&
-		link.settingsStreamEpoch == link.streamEpoch && validNativeUUID(link.runIncarnationID) && validNativeUUID(link.pairingEvidenceID)
+func (link *Link) nativePrepareFailureReasonLocked() string {
+	if link.closed || link.state != stateLinked || !link.running {
+		return "link_unavailable"
+	}
+	if !link.hasSendVerificationLocked() {
+		return "send_unverified"
+	}
+	if link.runGeneration != link.generation {
+		return "run_stale"
+	}
+	if !link.conversationIndexComplete {
+		return "index_incomplete"
+	}
+	if link.conversationIndexGeneration != link.generation {
+		return "index_generation"
+	}
+	if link.conversationIndexStreamEpoch != link.streamEpoch {
+		return "index_epoch"
+	}
+	if link.pendingConversationEvents != 0 {
+		return "pending_events"
+	}
+	if link.settings == nil {
+		return "settings_missing"
+	}
+	if link.settingsAt.IsZero() || link.settingsStreamEpoch != link.streamEpoch {
+		return "settings_stale"
+	}
+	if !validNativeUUID(link.runIncarnationID) {
+		return "run_evidence_invalid"
+	}
+	if !validNativeUUID(link.pairingEvidenceID) {
+		return "pairing_evidence_invalid"
+	}
+	return "prepared"
 }
 
 func uniqueEnabledRcsCard(settings *gmproto.Settings) *gmproto.SIMCard {

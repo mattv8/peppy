@@ -290,6 +290,30 @@ class RcsNativeSendCoordinatorTest {
         assertEquals(listOf(79L, 80L, 81L, 82L, 86L), records.map { it.substringAfterLast("29=").toLong() })
     }
 
+    @Test fun `previously generic refusals identify the failed gate without recording inputs`() {
+        val cases = listOf(
+            Harness(initialRoute = null) to 89L,
+            Harness(ownerGeneration = 0L) to 90L,
+            Harness(currentAtStart = false) to 90L,
+            Harness(invalidPrepared = true) to 91L,
+            Harness(factoryReturnsNull = true) to 92L,
+            Harness(targetVerification = RcsNativeMappingVerification.Refused) to 93L,
+            Harness(bindFacts = false) to 94L,
+            Harness(refreshedRoute = ROUTE.copy(ownNumberRaw = "private-own-number")) to 95L,
+            Harness(onPrepare = { throw IllegalStateException("private-google-response") }) to 96L,
+            Harness(bindTargetFailure = true) to 97L,
+            Harness(prepareFailure = true) to 98L,
+        )
+        cases.forEach { (harness, reason) ->
+            val records = mutableListOf<String>()
+            SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+                assertEquals(RcsNativeSendOutcome.REFUSED, harness.execute())
+            }
+            assertEquals(listOf("event=27 session=1 timestamp_ms=10 trace=0 29=$reason"), records)
+            assertEquals(0, harness.go.commitCalls)
+        }
+    }
+
     @Test fun `group members changed before any admission refuses with no commit and no ledger row`() {
         listOf(
             Harness(groupDigest = "digest", groupVerification = RcsNativeGroupVerification.MembersChanged),
@@ -349,7 +373,7 @@ class RcsNativeSendCoordinatorTest {
             Harness(factoryReturnsNull = true).execute()
         }
         // members_changed (group, prepare), lease_refused (group), direct_send_refused (1:1 lease refusal).
-        assertEquals(listOf(69L, 77L, 0L), records.map { it.substringAfterLast("29=").toLong() })
+        assertEquals(listOf(69L, 77L, 92L), records.map { it.substringAfterLast("29=").toLong() })
     }
 
     private fun retiredLease() = FakeLease()
@@ -381,12 +405,17 @@ class RcsNativeSendCoordinatorTest {
         private val groupRouteCurrent: Boolean = true,
         private val guardTarget: RcsNativeTarget? = target,
         private val beforeEffectRecorded: Boolean = true,
+        private val initialRoute: RcsNativeRouteEvidence? = ROUTE,
+        private val ownerGeneration: Long = 1L,
+        private val currentAtStart: Boolean = true,
+        private val targetVerification: RcsNativeMappingVerification = RcsNativeMappingVerification.Mapped,
         onRefusalRecorded: () -> Unit = {},
         acquire: ((String, () -> Unit) -> RcsNativeCoreLease?)? = null,
         onPrepare: (() -> Unit)? = null,
     ) {
         val go = FakeGo(bindTargetFailure, bindFacts, commitFailure, commitResult, invalidPrepared, currentAfterBegin, onPrepare, prepareMembersChanged) { guardTarget }
-        val lease = FakeLease(routeVerification, target, bindFacts, prepareFailure, beginFailure, refusalRecorded, acknowledged, groupVerification, beginMembersChanged, proved, groupRouteCurrent, beforeEffectRecorded)
+            .also { it.initialOwnerGeneration = ownerGeneration; it.currentAtStart = currentAtStart }
+        val lease = FakeLease(routeVerification, target, bindFacts, prepareFailure, beginFailure, refusalRecorded, acknowledged, groupVerification, beginMembersChanged, proved, groupRouteCurrent, beforeEffectRecorded, targetVerification)
         private var reads = 0
         private var clockCalls = 0
         val coordinator = RcsNativeSendCoordinator(
@@ -397,7 +426,7 @@ class RcsNativeSendCoordinatorTest {
                 override fun groupMemberDigest(conversationId: String): String? = groupDigest
             },
             RcsNativeRouteReader {
-                if (reads++ == 0) ROUTE else refreshedRoute.also {
+                if (reads++ == 0) initialRoute else refreshedRoute.also {
                     if (fireRouteChangeAfterFinalRead) (routeChanges as FakeRouteChangeRevoker).fire()
                 }
             },
@@ -425,8 +454,10 @@ class RcsNativeSendCoordinatorTest {
         var lastDigest: String? = null; var routeRevision: ULong? = null; var bound = 0
         private var currentCalls = 0
         private var ticketRevoked = false
-        override fun ownerGeneration() = 1L
-        override fun isCurrent() = ++currentCalls == 1 || currentAfterBegin
+        var initialOwnerGeneration = 1L
+        var currentAtStart = true
+        override fun ownerGeneration() = initialOwnerGeneration
+        override fun isCurrent() = if (++currentCalls == 1) currentAtStart else currentAfterBegin
         override fun prepare(command: RcsNativeCommand, canonicalizerRevision: Int, route: RcsNativeRouteEvidence, expectedMemberDigest: String?): RcsNativePrepared {
             prepares++; lastDigest = expectedMemberDigest; ticketRevoked = false; onPrepare?.invoke()
             if (prepareMembersChanged) throw RcsNativeMembersChanged()
@@ -464,6 +495,7 @@ class RcsNativeSendCoordinatorTest {
         private val proved: Boolean = true,
         private val groupRouteCurrent: Boolean = true,
         private val beforeEffectRecorded: Boolean = true,
+        private val targetVerification: RcsNativeMappingVerification = RcsNativeMappingVerification.Mapped,
     ) : RcsNativeCoreLease {
         var classifiedSnapshot = ""; val verified = mutableListOf<String>(); val groupRouteVerified = mutableListOf<String>(); val groupVerified = mutableListOf<String>(); var begun = ""; var coreCalls = 0; var closes = 0; var preparationCloses = 0; var committedCloses = 0; var refusalRecords = 0; var outcomeUnknownRecords = 0; var beginCalls = 0; var acknowledgements = 0; var beforeEffectCalls = 0
         val refusalMembersChangedLog = mutableListOf<Boolean>()
@@ -473,7 +505,7 @@ class RcsNativeSendCoordinatorTest {
         override fun verifyGroupObservation(exactObservationJson: String): RcsNativeGroupVerification { groupVerified += exactObservationJson; coreCalls++; return groupVerification }
         override fun nextContextTuple(runIncarnation: String, runGeneration: ULong, streamEpoch: ULong, pairingEvidenceId: String) = RcsNativeContextTuple(1u, 1u, 1u).also { coreCalls++ }
         override fun nextMappingRevision(conversationId: String) = 1uL.also { coreCalls++ }
-        override fun verifyMapping(exactObservationJson: String): RcsNativeMappingVerification { verified += exactObservationJson; coreCalls++; return if (exactObservationJson == ROUTE_OBSERVATION) routeVerification else RcsNativeMappingVerification.Mapped }
+        override fun verifyMapping(exactObservationJson: String): RcsNativeMappingVerification { verified += exactObservationJson; coreCalls++; return if (exactObservationJson == ROUTE_OBSERVATION) routeVerification else targetVerification }
         override fun classifyTarget(conversationId: String, recipient: String, exactSnapshotJson: String) = target.also { classifiedSnapshot = exactSnapshotJson; coreCalls++ }
         override fun prepare(commandId: String, nowMs: Long): RcsNativePreparation {
             coreCalls++; if (prepareFailure) throw IllegalStateException("prepare")

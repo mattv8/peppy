@@ -36,39 +36,50 @@ internal class RcsNativeSendCoordinator(
         var ticketOutstanding = false
         var routeChangeRegistration: AutoCloseable? = null
         try {
+            trace.reason = "route_unavailable"
             val route = routeReader.currentRoute() ?: return RcsNativeSendOutcome.REFUSED
+            trace.reason = "owner_not_current"
             if (go.ownerGeneration() <= 0 || !go.isCurrent()) return RcsNativeSendOutcome.REFUSED
+            trace.reason = "group_context_failed"
             val observedAtMs = clock.wallTimeMs()
             // A Live group passes its stored member digest to Go as advisory input; a 1:1 target passes null.
             val groupDigest = coreLeaseFactory.groupMemberDigest(command.conversationId)
             // Group identity is known before prepare, so prepare-time and lease refusals carry group codes.
             val group = groupDigest != null
             trace.group = group
+            trace.reason = "prepare_failed"
             val prepared = go.prepare(command, canonicalizerRevision, route, groupDigest).also {
                 ticketId = it.ticketId
                 ticketOutstanding = it.ticketId.isNotEmpty()
             }
-            if (!prepared.valid()) return RcsNativeSendOutcome.REFUSED
+            if (!prepared.valid()) return trace.refused("prepare_invalid")
+            trace.reason = "lease_failed"
             routeChangeRegistration = routeChangeRevoker.register(route) { go.revoke(prepared.ticketId) }
             lease = coreLeaseFactory.acquire(prepared.ticketId) { go.revoke(prepared.ticketId) }
                 ?: return trace.refused("lease_refused")
 
+            trace.reason = "context_failed"
             val tuple = lease.nextContextTuple(prepared.runIncarnation, prepared.runGeneration, prepared.streamEpoch, prepared.pairingEvidenceId)
             // A group binds the proved revision; its proof time is refreshed by the re-proof below, not by a new revision.
-            val revision = if (group) lease.provedGroupMemberRevision(command.conversationId) ?: return RcsNativeSendOutcome.REFUSED
+            val revision = if (group) lease.provedGroupMemberRevision(command.conversationId) ?: return trace.refused("group_not_proved")
                 else lease.nextMappingRevision(command.conversationId)
+            trace.reason = "route_binding_failed"
             val routeObservation = go.bindRoute(prepared.ticketId, tuple, revision, observedAtMs)
             // Both targets advance the same link context; only the 1:1 route is verified as a mapping.
+            trace.reason = "mapping_failed"
             val routeCurrent = if (group) lease.verifyGroupRoute(routeObservation)
                 else lease.verifyMapping(routeObservation) == RcsNativeMappingVerification.GoogleConversationAmbiguous
             if (!routeCurrent) return trace.refused("route_not_current")
+            trace.reason = "classification_failed"
             val target = if (group) lease.classifyGroupTarget(command.conversationId, prepared.candidateSnapshotJson)
                 else go.classifyTarget(prepared.ticketId) { snapshot ->
                     lease.classifyTarget(command.conversationId, command.recipient, snapshot)
                 } ?: return trace.refused("target_refused")
             if (target is RcsNativeTarget.CarrierOnly && !group) return RcsNativeSendOutcome.CARRIER_ONLY
             if (target !is RcsNativeTarget.Found) return trace.refused("target_refused")
+            trace.reason = "target_binding_failed"
             val observation = go.bindTarget(prepared.ticketId, target.googleConversationId, target.snapshotToken)
+            trace.reason = "mapping_failed"
             if (group) {
                 // Core pauses the group on a roster change and admitted nothing, so there is no ledger row to refuse.
                 when (lease.verifyGroupObservation(observation)) {
@@ -77,10 +88,11 @@ internal class RcsNativeSendCoordinator(
                     RcsNativeGroupVerification.Refused -> return trace.refused("proof_refused")
                 }
             } else if (lease.verifyMapping(observation) != RcsNativeMappingVerification.Mapped) {
-                return RcsNativeSendOutcome.REFUSED
+                return trace.refused("target_mapping_refused")
             }
+            trace.reason = "facts_failed"
             preparation = lease.prepare(command.commandId, clock.wallTimeMs())
-            if (!go.bindFacts(prepared.ticketId, preparation.factsJson)) return RcsNativeSendOutcome.REFUSED
+            if (!go.bindFacts(prepared.ticketId, preparation.factsJson)) return trace.refused("facts_refused")
             val beginTimestamp = clock.wallTimeMs()
             val began = try {
                 preparation.begin(observation, beginTimestamp)
@@ -98,8 +110,10 @@ internal class RcsNativeSendCoordinator(
             }
             committed = commitHandle
             admitted = true
+            trace.reason = "route_recheck_failed"
             val refreshed = routeReader.currentRoute()
             if (refreshed == null || !route.sameIdentity(refreshed) || !fresh(clock.wallTimeMs(), refreshed.observedAtMs) || !go.isCurrent()) {
+                trace.reason = "route_recheck_refused"
                 return recordRefusal(lease)
             }
             if (!lease.beforeEffect()) return recordOutcomeUnknown(lease)

@@ -95,7 +95,7 @@ internal object LiveTransport {
     internal fun add(left: Long, right: Long): Long = try { Math.addExact(left, right) } catch (_: ArithmeticException) { throw LiveRejected() }
 }
 
-private val SERVER_HELLO = Regex("""\{\s*"type"\s*:\s*"hello"\s*,\s*"protocol_version"\s*:\s*2\s*,\s*"max_ttl_ms"\s*:\s*15000\s*,\s*"max_ciphertext_bytes"\s*:\s*5400\s*} """.trim())
+private val SERVER_HELLO = Regex("""\{\s*"type"\s*:\s*"hello"\s*,\s*"protocol_version"\s*:\s*2\s*,\s*"max_ttl_ms"\s*:\s*15000\s*,\s*"max_ciphertext_bytes"\s*:\s*5400\s*\} """.trim())
 
 internal enum class MembershipRole { OWNER, GATEWAY, DEVICE }
 internal data class MembershipDevice(val deviceId: String, val revoked: Boolean, val keyEpoch: Long, val role: MembershipRole)

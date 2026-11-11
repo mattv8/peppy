@@ -334,6 +334,7 @@ class GoogleMessagesLinkService : Service() {
 
     /** Coalesces readiness work; only full ownership bootstrap observes the five-minute throttle. */
     private fun requestRcsBootstrap() {
+        recordGoogleMessagesLinkEvent("readiness", "requested", 0L)
         targetedBootstrap.kick()
         val schedule = synchronized(readinessLock) {
             if (readinessScheduled) {
@@ -372,7 +373,10 @@ class GoogleMessagesLinkService : Service() {
 
     private fun runRcsReadinessPass() {
         val generation = lifecycleGeneration
-        val bootstrap = currentBootstrap(generation) ?: return
+        val bootstrap = currentBootstrap(generation) ?: run {
+            recordGoogleMessagesLinkEvent("readiness", "bootstrap_unavailable", 0L)
+            return
+        }
         if (!refreshConversationIndex(bootstrapLease)) return
         reconcileRcsGroups(bootstrapLease)
         val now = testHooks.currentTimeMillis()
@@ -439,7 +443,16 @@ class GoogleMessagesLinkService : Service() {
     /** Refresh is serialized by the bootstrap executor; a pending-event refusal gets one retry, never a loop. */
     private fun refreshConversationIndex(lease: LinkHandleLease?): Boolean {
         val handle = lease?.handle ?: return false
-        val refresh = { runCatching { handle.refreshConversationIndex() }.getOrDefault("{\"code\":\"unavailable\"}") }
+        val refresh = {
+            runCatching { handle.refreshConversationIndex() }.getOrDefault("{\"code\":\"unavailable\"}").also { response ->
+                val reason = when {
+                    response.contains("\"code\":\"ok\"") -> "refresh_ok"
+                    response.contains("pending") -> "refresh_pending"
+                    else -> "refresh_other"
+                }
+                recordGoogleMessagesLinkEvent("readiness", reason, 0L)
+            }
+        }
         val first = refresh()
         if (first.contains("\"code\":\"ok\"")) return true
         if (!first.contains("pending")) return false
@@ -814,12 +827,14 @@ class GoogleMessagesLinkService : Service() {
         internal fun requestRcsGroupReconcile(): Boolean = active?.reconcileRcsGroupsFromLease() ?: false
         fun cancelAttention(context: Context) { NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID) }
         internal fun onLinkEvent(kind: String, code: String) {
+            if (kind == "native_prepare" || kind == "conversation_refresh" || kind == "conversation_scan" || kind == "conversation_rpc") return
             active?.let { service ->
                 runCatching {
                     val connectionReady = kind == "conn" && code in setOf("ready", "recovered")
                     val indexStale = kind == "index" && code == "stale"
                     val publishesEligibility = connectionReady || indexStale || (kind == "conversation" && code == "updated")
                     val lifecycleRecorded = !publishesEligibility || service.recordCurrentLifecycleAfterEvent()
+                    if (publishesEligibility && !lifecycleRecorded) recordGoogleMessagesLinkEvent("readiness", "lifecycle_refused", 0L)
                     if (connectionReady) {
                         service.backoff.reset()
                     }

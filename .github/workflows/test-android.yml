@@ -189,6 +189,10 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.27.3'
+          cache: false
       - name: Install Android runtime dependencies
         run: |
           sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libssl-dev libsodium-dev
@@ -212,9 +216,20 @@ jobs:
       - run: .github/scripts/android-ci-artifacts.sh install-artifact android-native-artifacts . "$GITHUB_SHA" debug
       - name: Run Android sideload unit tests and dependency boundaries
         working-directory: apps/android
+        env:
+          PEPPY_NATIVE_RCS_KOTLIN_FIXTURE_DIR: ${{ runner.temp }}/rcs-kotlin-carrier-bindings
         run: |
           timeout --signal=TERM --kill-after=30s 13m ./gradlew --console=plain --dependency-verification=strict :app:compileSideloadUnitTestKotlin :app:testSideloadUnitTest
+          test -s "$PEPPY_NATIVE_RCS_KOTLIN_FIXTURE_DIR/SubscriptionManagerPhoneNumber.json"
+          test -s "$PEPPY_NATIVE_RCS_KOTLIN_FIXTURE_DIR/TelephonyLine1Number.json"
           ./gradlew --console=plain --dependency-verification=strict :libadb:testDebugUnitTest :app:verifyReleaseRestrictedSetupExclusionFixtures
+      - name: Verify Kotlin carrier bindings against native Go preparation
+        working-directory: apps/android/googlemessages
+        env:
+          PEPPY_NATIVE_RCS_KOTLIN_FIXTURE_DIR: ${{ runner.temp }}/rcs-kotlin-carrier-bindings
+        run: |
+          ./prepare-libgm.sh
+          go test -race ./gmlink -run '^TestNativePrepareAcceptsKotlinCarrierBindings$' -count=1
       - name: Preserve Android sideload unit test failure reports
         if: ${{ failure() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

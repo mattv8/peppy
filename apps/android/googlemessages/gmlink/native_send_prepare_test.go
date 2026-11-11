@@ -217,6 +217,108 @@ func TestNativeSendPrepareRefusalMatrix(t *testing.T) {
 	}
 }
 
+func TestNativeSendPrepareEmitsOneFixedFirstFailureDiagnostic(t *testing.T) {
+	cases := []struct {
+		name       string
+		request    string
+		mutate     func(*Link)
+		wantResult string
+		wantReason string
+	}{
+		{name: "invalid_request", request: `{"command_id":"bad"}`, wantResult: "invalid_request", wantReason: "invalid_request"},
+		{name: "busy", mutate: func(link *Link) { link.nativeInFlight = &nativeRcsInFlight{ticketID: "other"} }, wantResult: "busy", wantReason: "busy"},
+		{name: "link_unavailable", mutate: func(link *Link) { link.state = "unlinked" }, wantResult: "rejected", wantReason: "link_unavailable"},
+		{name: "send_unverified", mutate: func(link *Link) { link.ownerVerification = nil }, wantResult: "rejected", wantReason: "send_unverified"},
+		{name: "run_stale", mutate: func(link *Link) { link.runGeneration++ }, wantResult: "rejected", wantReason: "run_stale"},
+		{name: "index_incomplete", mutate: func(link *Link) { link.conversationIndexComplete = false }, wantResult: "rejected", wantReason: "index_incomplete"},
+		{name: "index_generation", mutate: func(link *Link) { link.conversationIndexGeneration++ }, wantResult: "rejected", wantReason: "index_generation"},
+		{name: "index_epoch", mutate: func(link *Link) { link.conversationIndexStreamEpoch++ }, wantResult: "rejected", wantReason: "index_epoch"},
+		{name: "pending_events", mutate: func(link *Link) { link.pendingConversationEvents = 1 }, wantResult: "rejected", wantReason: "pending_events"},
+		{name: "settings_missing", mutate: func(link *Link) { link.settings = nil }, wantResult: "rejected", wantReason: "settings_missing"},
+		{name: "settings_stale", mutate: func(link *Link) { link.settingsAt = time.Time{} }, wantResult: "rejected", wantReason: "settings_stale"},
+		{name: "run_evidence_invalid", mutate: func(link *Link) { link.runIncarnationID = "" }, wantResult: "rejected", wantReason: "run_evidence_invalid"},
+		{name: "pairing_evidence_invalid", mutate: func(link *Link) { link.pairingEvidenceID = "" }, wantResult: "rejected", wantReason: "pairing_evidence_invalid"},
+		{name: "sim_unavailable", mutate: func(link *Link) { link.settings.SIMCards[0].RCSChats.Enabled = false }, wantResult: "rejected", wantReason: "sim_unavailable"},
+		{name: "prepared", wantResult: "prepared", wantReason: "prepared"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			link, cleanup, request := nativePrepareFixture(t)
+			defer cleanup()
+			if tc.request != "" {
+				request = tc.request
+			}
+			if tc.mutate != nil {
+				link.mu.Lock()
+				tc.mutate(link)
+				link.mu.Unlock()
+			}
+			host := link.host.(*safetyHost)
+			countNativePrepareEvents := func() int {
+				host.mu.Lock()
+				defer host.mu.Unlock()
+				count := 0
+				for _, event := range host.events {
+					if event.kind == "native_prepare" {
+						count++
+					}
+				}
+				return count
+			}
+			allBefore := countNativePrepareEvents()
+			before := host.countEvent("native_prepare", tc.wantReason)
+			if got := stage2Code(t, link.PrepareNativeRcs(request)); got != tc.wantResult {
+				t.Fatalf("result = %q, want %q", got, tc.wantResult)
+			}
+			host.awaitEvent(t, "native_prepare", tc.wantReason)
+			if got := countNativePrepareEvents(); got != allBefore+1 {
+				t.Fatalf("native_prepare event count = %d, want %d", got, allBefore+1)
+			}
+			if got := host.countEvent("native_prepare", tc.wantReason); got != before+1 {
+				t.Fatalf("diagnostic count = %d, want %d", got, before+1)
+			}
+		})
+	}
+}
+
+func TestNativeSendPrepareDiagnosticsUseOnlyApprovedFixedCodes(t *testing.T) {
+	approved := []string{
+		"invalid_request", "busy", "link_unavailable", "send_unverified", "run_stale", "index_incomplete",
+		"index_generation", "index_epoch", "pending_events", "settings_missing", "settings_stale", "run_evidence_invalid",
+		"pairing_evidence_invalid", "sim_unavailable", "candidate_too_large", "result_too_large", "prepared",
+	}
+	for _, code := range approved {
+		if !isEventCode("native_prepare", code) {
+			t.Fatalf("native_prepare code %q is not in the closed event vocabulary", code)
+		}
+	}
+}
+
+func TestNativeSendPrepareOversizeDiagnosticReasons(t *testing.T) {
+	t.Run("candidate_too_large", func(t *testing.T) {
+		link, cleanup, request := nativePrepareFixture(t)
+		defer cleanup()
+		link.mu.Lock()
+		link.conversationRecords["oversize"] = &gmproto.Conversation{Name: strings.Repeat("x", maxNativeCandidateBytes)}
+		link.mu.Unlock()
+		host := link.host.(*safetyHost)
+		if got := stage2Code(t, link.PrepareNativeRcs(request)); got != "rejected" {
+			t.Fatalf("result = %q, want rejected", got)
+		}
+		host.awaitEvent(t, "native_prepare", "candidate_too_large")
+	})
+
+	t.Run("result_too_large", func(t *testing.T) {
+		result := nativeRcsPrepareResult{
+			Code:              "prepared",
+			CandidateSnapshot: strings.Repeat("x", maxNativePrepareResultBytes),
+		}
+		if _, fits := nativePreparedResultJSON(result); fits {
+			t.Fatal("result larger than the response budget fit")
+		}
+	})
+}
+
 func TestNativeSendCurrentnessDetectsFrozenStateDrift(t *testing.T) {
 	link, cleanup, request := nativePrepareFixture(t)
 	defer cleanup()
