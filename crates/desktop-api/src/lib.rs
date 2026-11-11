@@ -283,6 +283,16 @@ pub struct MessageView {
     pub participants: Option<Vec<String>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rcs_reported: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_cancellation: Option<SendCancellationView>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendCancellationView {
+    pub state: &'static str,
+    pub can_cancel: bool,
+    pub requires_gateway_update: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -768,6 +778,7 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
             (!values.is_empty()).then_some(values)
         },
         rcs_reported: false,
+        send_cancellation: None,
     }
 }
 

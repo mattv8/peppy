@@ -593,38 +593,46 @@ func (link *Link) CheckHealth() int64 {
 // It requires runtime-minted index verification for the current stream.
 func (link *Link) RefreshConversationIndex() string {
 	if !link.hasM2Verification() {
+		link.emit("conversation_refresh", "verification_unavailable", 0)
 		return refreshConversationIndexJSON("m2_verification_required")
 	}
 	link.rpcMu.Lock()
 	defer link.rpcMu.Unlock()
 	client, runCtx, generation, streamEpoch, ok := link.activeRuntime()
 	if !ok {
+		link.emit("conversation_refresh", "runtime_unavailable", 0)
 		return refreshConversationIndexJSON("link_unavailable")
 	}
 	if !link.hasM2Verification() {
+		link.emit("conversation_refresh", "verification_unavailable", 0)
 		return refreshConversationIndexJSON("m2_verification_required")
 	}
 	if link.hasPendingConversationEvents() {
+		link.emit("conversation_refresh", "pending_events", 0)
 		return refreshConversationIndexJSON("pending_conversation_events")
 	}
 	indexRevision, started := link.beginConversationIndexRefreshFor(generation, streamEpoch)
 	if !started {
+		link.emit("conversation_refresh", "publication_stale", 0)
 		return refreshConversationIndexJSON("conversation_lookup_stale")
 	}
-	ctx, cancel := context.WithTimeout(runCtx, conversationTimeout)
+	ctx, cancel := context.WithTimeout(runCtx, conversationScanTimeout)
 	defer cancel()
-	conversations, code := scanConversationPages(ctx, func(ctx context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
-		return client.ListConversations(ctx, request)
+	conversations, code, diagnostic := scanConversationPagesWithDiagnostic(ctx, func(ctx context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+		return link.loadConversationPageWithDiagnostics(ctx, generation, request, client.ListConversations)
 	})
 	if code != "" {
+		link.emit("conversation_refresh", diagnostic, 0)
 		if ctx.Err() == context.Canceled {
 			return refreshConversationIndexJSON("cancelled")
 		}
 		return refreshConversationIndexJSON(code)
 	}
 	if !link.replaceConversationIndexForContext(ctx, generation, streamEpoch, indexRevision, conversations) {
+		link.emit("conversation_refresh", "publication_stale", 0)
 		return refreshConversationIndexJSON("conversation_lookup_stale")
 	}
+	link.emit("conversation_refresh", "refreshed", 0)
 	return refreshConversationIndexJSON("ok")
 }
 
@@ -954,6 +962,7 @@ func (link *Link) Status() string {
 func (link *Link) newClient(auth *libgm.AuthData, persist func() error, owner uint64) *libgm.Client {
 	stop := func(code string) { link.transportStopFor(owner, code) }
 	client := libgm.NewClient(auth, nil, zerolog.Nop(), newGuardedSettings(auth, persist, stop))
+	link.observeRPCDiagnostics(client, owner)
 	client.SetEventHandler(func(event any) { link.queueEventFor(owner, event) })
 	return client
 }
@@ -962,6 +971,7 @@ func (link *Link) newRuntimeClient(auth *libgm.AuthData, generation uint64) *lib
 	persist := func() error { return link.persistRuntimeAuth(generation, auth) }
 	stop := func(code string) { link.transportStopFor(generation, code) }
 	client := libgm.NewClient(auth, nil, zerolog.Nop(), newGuardedSettings(auth, persist, stop))
+	link.observeRPCDiagnostics(client, generation)
 	client.SetEventHandler(func(event any) {
 		if _, ok := event.(*events.AuthTokenRefreshed); ok {
 			revision, snapshot, err := link.captureRuntimeAuth(auth)

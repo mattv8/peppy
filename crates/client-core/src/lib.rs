@@ -66,6 +66,10 @@ pub mod one_time_code;
 mod quick_reply;
 mod rcs_group;
 mod rcs_group_create;
+#[cfg(test)]
+mod send_cancellation_decoder_recovery_tests;
+#[cfg(test)]
+mod send_cancellation_validation_tests;
 mod sender_blocklist;
 #[cfg(feature = "test-support")]
 mod test_support;
@@ -209,8 +213,8 @@ pub use vault_identity::{
 };
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 57;
-const PENDING_COMMAND_ELIGIBILITY: &str = "a.command_id IS NULL AND l.historical=0 AND l.retired=0 AND l.subscription_id<>'' AND l.key_epoch=? AND NOT EXISTS(SELECT 1 FROM rcs_media_send_ledger m WHERE m.command_id=l.command_id)";
+const SCHEMA_VERSION: i64 = 59;
+const PENDING_COMMAND_ELIGIBILITY: &str = "a.command_id IS NULL AND l.historical=0 AND l.retired=0 AND l.subscription_id<>'' AND l.key_epoch=? AND NOT EXISTS(SELECT 1 FROM rcs_media_send_ledger m WHERE m.command_id=l.command_id) AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.command_id=l.command_id AND x.target_gateway_id=? AND x.state IN ('requested','confirmed'))";
 #[cfg(test)]
 thread_local! {
     static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -579,6 +583,20 @@ pub enum PrivatePayload {
         /// ordinary status events, so older payloads and events are unchanged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<SendRefusalReason>,
+    },
+    SendCancellationRequest {
+        message_id: MessageId,
+        command_id: CommandId,
+        target_gateway_id: DeviceId,
+    },
+    SendCancellationResult {
+        message_id: MessageId,
+        command_id: CommandId,
+        target_gateway_id: DeviceId,
+        state: SendCancellationState,
+    },
+    SendCancellationCapability {
+        supported: bool,
     },
     ReadState {
         message_id: MessageId,
@@ -1043,6 +1061,22 @@ pub struct ReceivedCommand {
     pub subscription_id: String,
     pub message: MessagePayload,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SendCancellationState {
+    None,
+    Requested,
+    Confirmed,
+    TooLate,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SendCancellationView {
+    pub state: SendCancellationState,
+    pub can_request: bool,
+    pub requires_gateway_update: bool,
+}
 /// A received send command awaiting route-neutral automatic admission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingAutomaticCommand {
@@ -1083,6 +1117,8 @@ pub enum PermitBlock {
     MediaUnavailable,
     /// Learned from a snapshot/history import; never executable, requires reconciliation.
     Historical,
+    /// A durable send-cancellation request fenced this command before admission.
+    CancellationRequested,
     /// This gateway was restored from backup/import; no new carrier work may start.
     RestoreGuarded,
     /// The command belongs to a linked transport and cannot reach the carrier executor.
@@ -4778,7 +4814,7 @@ impl Client {
             "SELECT l.command_id,l.subscription_id,l.payload FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE {PENDING_COMMAND_ELIGIBILITY} ORDER BY l.local_order"
         ))?;
         let rows = query
-            .query_map(params![active], |r| {
+            .query_map(params![active, s.config.device_id.to_string()], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -4817,7 +4853,7 @@ impl Client {
                 &format!(
                     "SELECT l.payload FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE l.command_id=? AND {PENDING_COMMAND_ELIGIBILITY}"
                 ),
-                params![command_id.to_string(), active],
+                params![command_id.to_string(), active, s.config.device_id.to_string()],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
@@ -4887,10 +4923,10 @@ impl Client {
             return Ok(Vec::new());
         };
         let mut query = s.conn.prepare(
-            "SELECT l.command_id,l.subscription_id,l.payload FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE a.command_id IS NULL AND l.historical=0 AND l.retired=0 AND l.key_epoch=? AND NOT EXISTS(SELECT 1 FROM rcs_media_send_ledger m WHERE m.command_id=l.command_id) ORDER BY l.local_order",
+            "SELECT l.command_id,l.subscription_id,l.payload FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE a.command_id IS NULL AND l.historical=0 AND l.retired=0 AND l.key_epoch=? AND NOT EXISTS(SELECT 1 FROM rcs_media_send_ledger m WHERE m.command_id=l.command_id) AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.command_id=l.command_id AND x.target_gateway_id=? AND x.state IN ('requested','confirmed')) ORDER BY l.local_order",
         )?;
         let rows = query
-            .query_map(params![active], |row| {
+            .query_map(params![active, s.config.device_id.to_string()], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -4908,6 +4944,176 @@ impl Client {
                 })
             })
             .collect()
+    }
+
+    pub fn message_send_cancellation(
+        &self,
+        message_id: MessageId,
+    ) -> Result<SendCancellationView, Error> {
+        let store = self.lock()?;
+        cancellation_view(&store.conn, store.active_epoch, message_id)
+    }
+
+    pub fn request_send_cancellation(
+        &self,
+        message_id: MessageId,
+    ) -> Result<SendCancellationView, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let epoch = ctx.active_epoch.ok_or(Error::KeysUnavailable)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(view) = cancellation_row(&tx, message_id)? {
+            tx.commit()?;
+            return Ok(view);
+        }
+        let command: (String, String) = tx.query_row(
+            "SELECT command_id,gateway_device_id FROM commands WHERE message_id=? ORDER BY command_id LIMIT 1",
+            [message_id.to_string()], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?.ok_or(Error::NotFound)?;
+        let command_id = CommandId::from_str(&command.0).map_err(|_| Error::Database)?;
+        let target_gateway_id = DeviceId::from_str(&command.1).map_err(|_| Error::Database)?;
+        if !cancellation_request_eligible(&tx, command_id)? {
+            tx.commit()?;
+            return Ok(SendCancellationView {
+                state: SendCancellationState::TooLate,
+                can_request: false,
+                requires_gateway_update: false,
+            });
+        }
+        let supported: Option<bool> = tx.query_row(
+            "SELECT supported FROM send_cancellation_capabilities WHERE device_id=? AND key_epoch=?",
+            params![target_gateway_id.to_string(), epoch], |row| row.get(0),
+        ).optional()?;
+        if supported != Some(true) {
+            tx.commit()?;
+            return Ok(SendCancellationView {
+                state: SendCancellationState::None,
+                can_request: false,
+                requires_gateway_update: true,
+            });
+        }
+        tx.execute(
+            "INSERT INTO send_cancellations(message_id,command_id,target_gateway_id,state) VALUES(?,?,?,'requested')",
+            params![message_id.to_string(), command_id.to_string(), target_gateway_id.to_string()],
+        )?;
+        enqueue(
+            &tx,
+            &ctx,
+            EnvelopePurpose::Event,
+            None,
+            None,
+            &PrivatePayload::SendCancellationRequest {
+                message_id,
+                command_id,
+                target_gateway_id,
+            },
+        )?;
+        tx.commit()?;
+        Ok(SendCancellationView {
+            state: SendCancellationState::Requested,
+            can_request: false,
+            requires_gateway_update: false,
+        })
+    }
+
+    pub fn publish_send_cancellation_capability(&self, supported: bool) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let epoch = ctx.active_epoch.ok_or(Error::KeysUnavailable)?;
+        let previous: Option<bool> = tx.query_row(
+            "SELECT supported FROM send_cancellation_capabilities WHERE device_id=? AND key_epoch=?", params![ctx.device_id.to_string(), epoch], |row| row.get(0),
+        ).optional()?;
+        if previous != Some(supported) {
+            let (_, sequence) = enqueue(
+                &tx,
+                &ctx,
+                EnvelopePurpose::Event,
+                None,
+                None,
+                &PrivatePayload::SendCancellationCapability { supported },
+            )?;
+            tx.execute(
+                "INSERT INTO send_cancellation_capabilities(device_id,supported,key_epoch,producer_sequence) \
+                 VALUES(?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET \
+                 supported=excluded.supported,key_epoch=excluded.key_epoch, \
+                 producer_sequence=excluded.producer_sequence",
+                params![ctx.device_id.to_string(), supported, epoch, sequence as i64],
+            )?;
+        }
+        Ok(tx.commit()?)
+    }
+
+    pub fn process_pending_send_cancellations(&self) -> Result<bool, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let rows = tx.prepare("SELECT message_id,command_id FROM send_cancellations WHERE target_gateway_id=? AND state='requested'")?
+            .query_map([ctx.device_id.to_string()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut progressed = false;
+        for (message, command) in rows {
+            let message_id = MessageId::from_str(&message).map_err(|_| Error::Database)?;
+            let command_id = CommandId::from_str(&command).map_err(|_| Error::Database)?;
+            let binding: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT message_id,gateway_device_id FROM commands WHERE command_id=?",
+                    [command_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((bound_message, bound_gateway)) = binding else {
+                // A request may precede its original. It is a fence, not an authorization to
+                // acknowledge an otherwise unbound command.
+                continue;
+            };
+            if bound_message != message || bound_gateway != ctx.device_id.to_string() {
+                return Err(Error::InvalidRequest("send cancellation binding"));
+            }
+            let ledger: Option<(u32, bool)> = tx
+                .query_row(
+                    "SELECT key_epoch,historical FROM command_ledger WHERE command_id=?",
+                    [command_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((key_epoch, historical)) = ledger else {
+                continue;
+            };
+            if historical || restore_guarded(&tx)? || ctx.active_epoch != Some(key_epoch) {
+                continue;
+            }
+            let media_attempted: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM rcs_media_send_ledger WHERE command_id=? AND (permit_at_ms IS NOT NULL OR state IN ('admitted','committed','submitted','outcome_unknown','accepted')))",
+                [command_id.to_string()],
+                |row| row.get(0),
+            )?;
+            let state = match attempt_state(&tx, command_id)? {
+                None if !media_attempted => SendCancellationState::Confirmed,
+                Some(SendState::OutcomeUnknown) => SendCancellationState::Unknown,
+                Some(_) | None => SendCancellationState::TooLate,
+            };
+            tx.execute(
+                "UPDATE send_cancellations SET state=? WHERE message_id=?",
+                params![cancellation_state_code(state), message],
+            )?;
+            enqueue(
+                &tx,
+                &ctx,
+                EnvelopePurpose::Event,
+                None,
+                None,
+                &PrivatePayload::SendCancellationResult {
+                    message_id,
+                    command_id,
+                    target_gateway_id: ctx.device_id,
+                    state,
+                },
+            )?;
+            progressed = true;
+        }
+        tx.commit()?;
+        Ok(progressed)
     }
 
     /// Durably records an attempt before the native host touches the carrier API.
@@ -4938,6 +5144,9 @@ impl Client {
         // Known attempts keep reporting their recorded (or unknown) outcome.
         if let Some(state) = attempt_state(&tx, command_id)? {
             return Ok(PermitDecision::AlreadyAttempted(state));
+        }
+        if cancellation_fenced(&tx, command_id, &ctx.device_id)? {
+            return Ok(PermitDecision::Blocked(PermitBlock::CancellationRequested));
         }
         if !rcs_media::ledger_rows(&tx, command_id)?.is_empty() {
             return Ok(PermitDecision::Blocked(
@@ -5058,7 +5267,11 @@ impl Client {
     ) -> Result<NativeRcsPreparation, Error> {
         let mut guard = self.lock()?;
         let active = guard.active_epoch;
+        let gateway_id = guard.config.device_id;
         let tx = guard.conn.transaction()?;
+        if cancellation_fenced(&tx, command_id, &gateway_id)? {
+            return Err(Error::InvalidRequest("send cancellation requested"));
+        }
         let message = unattempted_rcs_message(&tx, active, command_id, true)?;
         require_native_rcs_body(&message.message.body)?;
         if rcs_group::group_mapping(&tx, message.message.record.conversation_id)?.is_some() {
@@ -5100,6 +5313,9 @@ impl Client {
         let active = guard.active_epoch;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if cancellation_fenced(&tx, command_id, &ctx.device_id)? {
+            return Err(Error::InvalidRequest("send cancellation requested"));
+        }
         let request = NativeRcsAdmissionRequest {
             active_epoch: active,
             command_id,
@@ -5142,8 +5358,12 @@ impl Client {
     ) -> Result<NativeRcsPreparation, Error> {
         let mut guard = self.lock()?;
         let active = guard.active_epoch;
+        let gateway_id = guard.config.device_id;
         let (conn, _) = guard.parts();
         let tx = conn.transaction()?;
+        if cancellation_fenced(&tx, command_id, &gateway_id)? {
+            return Err(Error::InvalidRequest("send cancellation requested"));
+        }
         let message = unattempted_rcs_media_message(&tx, active, command_id)?;
         let media = rcs_media::prepared_media(&tx, command_id, attachment_index)?;
         let preparation =
@@ -5505,9 +5725,13 @@ impl Client {
     ) -> Result<RcsPermit, Error> {
         let mut guard = self.lock()?;
         let active = guard.active_epoch;
+        let gateway_id = guard.config.device_id;
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if cancellation_fenced(&tx, command_id, &gateway_id)? {
+            return Err(Error::InvalidRequest("send cancellation requested"));
+        }
         admit_rcs_send(tx, active, command_id, None, observation, now_ms)
     }
 
@@ -5611,6 +5835,11 @@ impl Client {
         };
         if let Some(state) = attempt_state(&tx, command_id)? {
             return Ok(AutomaticPermitDecision::AlreadyAttempted(state));
+        }
+        if cancellation_fenced(&tx, command_id, &ctx.device_id)? {
+            return Ok(AutomaticPermitDecision::Blocked(
+                PermitBlock::CancellationRequested,
+            ));
         }
         if !rcs_media::ledger_rows(&tx, command_id)?.is_empty() {
             return Ok(AutomaticPermitDecision::Blocked(
@@ -6092,7 +6321,7 @@ impl Client {
     pub fn list_conversations(&self) -> Result<Vec<Conversation>, Error> {
         let s = self.lock()?;
         let mut query = s.conn.prepare(
-            &format!("WITH newest AS (SELECT conversation_id,SUM(seen=0) AS unread,MAX(sort_at_ms) AS sort_at_ms FROM messages GROUP BY conversation_id) SELECT c.conversation_id,c.unread,COALESCE(p.pinned,0),{} FROM newest c LEFT JOIN conversation_pins p ON p.conversation_id=c.conversation_id LEFT JOIN conversation_folders f ON f.conversation_id=c.conversation_id ORDER BY c.sort_at_ms DESC,(SELECT MAX(n.local_order) FROM messages n WHERE n.conversation_id=c.conversation_id AND n.sort_at_ms=c.sort_at_ms) DESC", conversation_folders::effective_folder_sql("c.sort_at_ms")),
+            &format!("WITH newest AS (SELECT conversation_id,SUM(seen=0) AS unread,MAX(sort_at_ms) AS sort_at_ms FROM messages m WHERE NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') GROUP BY conversation_id) SELECT c.conversation_id,c.unread,COALESCE(p.pinned,0),{} FROM newest c LEFT JOIN conversation_pins p ON p.conversation_id=c.conversation_id LEFT JOIN conversation_folders f ON f.conversation_id=c.conversation_id ORDER BY c.sort_at_ms DESC,(SELECT MAX(n.local_order) FROM messages n WHERE n.conversation_id=c.conversation_id AND n.sort_at_ms=c.sort_at_ms AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=n.id AND x.state='confirmed')) DESC", conversation_folders::effective_folder_sql("c.sort_at_ms")),
         )?;
         let rows = query
             .query_map([], |r| {
@@ -6254,7 +6483,7 @@ impl Client {
         }
         let store = self.lock()?;
         let mut query = store.conn.prepare(
-            "SELECT m.payload,m.sort_at_ms,m.local_order,m.id,ma.position,ma.attachment_id FROM messages m JOIN message_attachments ma ON ma.message_id=m.id WHERE m.conversation_id=?1 AND (?2 IS NULL OR m.sort_at_ms < ?2 OR (m.sort_at_ms=?2 AND (m.local_order < ?3 OR (m.local_order=?3 AND (m.id < ?4 OR (m.id=?4 AND ma.position < ?5)))))) ORDER BY m.sort_at_ms DESC,m.local_order DESC,m.id DESC,ma.position DESC LIMIT ?6",
+            "SELECT m.payload,m.sort_at_ms,m.local_order,m.id,ma.position,ma.attachment_id FROM messages m JOIN message_attachments ma ON ma.message_id=m.id WHERE m.conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND (?2 IS NULL OR m.sort_at_ms < ?2 OR (m.sort_at_ms=?2 AND (m.local_order < ?3 OR (m.local_order=?3 AND (m.id < ?4 OR (m.id=?4 AND ma.position < ?5)))))) ORDER BY m.sort_at_ms DESC,m.local_order DESC,m.id DESC,ma.position DESC LIMIT ?6",
         )?;
         let rows = query
             .query_map(
@@ -7651,7 +7880,7 @@ pub(crate) fn media_metadata_for(
     attachment_id: AttachmentId,
 ) -> Result<Option<MediaMetadata>, Error> {
     let row: Option<MediaMetaColumns> = conn.query_row(
-        "SELECT width,height,duration_ms,thumbnail_attachment_id FROM message_media_meta WHERE message_id=? AND attachment_id=?",
+        "SELECT width,height,duration_ms,thumbnail_attachment_id FROM message_media_meta WHERE message_id=? AND attachment_id=? AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=message_media_meta.message_id AND x.state='confirmed')",
         params![message_id.to_string(), attachment_id.to_string()],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     ).optional()?;
@@ -7829,18 +8058,203 @@ macro_rules! message_select {
 }
 // Every history read uses one total order: the non-null `sort_at_ms` key (actual provider time
 // when known, otherwise local insertion time), then `local_order` as a deterministic tiebreak.
-const MESSAGE_FULL_SELECT: &str =
-    message_select!("WHERE m.conversation_id=? ORDER BY m.sort_at_ms,m.local_order");
-const LATEST_MESSAGE_SELECT: &str = message_select!(
-    "WHERE m.conversation_id=? ORDER BY m.sort_at_ms DESC,m.local_order DESC LIMIT 1"
+const MESSAGE_FULL_SELECT: &str = message_select!(
+    "WHERE m.conversation_id=? AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') ORDER BY m.sort_at_ms,m.local_order"
 );
-const MESSAGE_BY_ID_SELECT: &str = message_select!("WHERE m.id=? LIMIT 1");
+const LATEST_MESSAGE_SELECT: &str = message_select!(
+    "WHERE m.conversation_id=? AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') ORDER BY m.sort_at_ms DESC,m.local_order DESC LIMIT 1"
+);
+const MESSAGE_BY_ID_SELECT: &str = message_select!(
+    "WHERE m.id=? AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') LIMIT 1"
+);
 const MESSAGE_PAGE_SELECT: &str = message_select!(
-    "WHERE m.conversation_id=?1 AND (?2 IS NULL OR m.sort_at_ms < ?2 OR (m.sort_at_ms = ?2 AND m.local_order < ?3)) ORDER BY m.sort_at_ms DESC,m.local_order DESC LIMIT ?4"
+    "WHERE m.conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND (?2 IS NULL OR m.sort_at_ms < ?2 OR (m.sort_at_ms = ?2 AND m.local_order < ?3)) ORDER BY m.sort_at_ms DESC,m.local_order DESC LIMIT ?4"
 );
 const MESSAGE_SINCE_SELECT: &str = message_select!(
-    "WHERE m.conversation_id=?1 AND (m.sort_at_ms > ?2 OR (m.sort_at_ms = ?2 AND m.local_order >= ?3)) ORDER BY m.sort_at_ms,m.local_order"
+    "WHERE m.conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND (m.sort_at_ms > ?2 OR (m.sort_at_ms = ?2 AND m.local_order >= ?3)) ORDER BY m.sort_at_ms,m.local_order"
 );
+
+fn cancellation_state_code(state: SendCancellationState) -> &'static str {
+    match state {
+        SendCancellationState::None => "none",
+        SendCancellationState::Requested => "requested",
+        SendCancellationState::Confirmed => "confirmed",
+        SendCancellationState::TooLate => "too_late",
+        SendCancellationState::Unknown => "unknown",
+    }
+}
+
+fn cancellation_state(value: &str) -> Result<SendCancellationState, Error> {
+    match value {
+        "requested" => Ok(SendCancellationState::Requested),
+        "confirmed" => Ok(SendCancellationState::Confirmed),
+        "too_late" => Ok(SendCancellationState::TooLate),
+        "unknown" => Ok(SendCancellationState::Unknown),
+        _ => Err(Error::Database),
+    }
+}
+
+fn cancellation_row(
+    conn: &Connection,
+    message_id: MessageId,
+) -> Result<Option<SendCancellationView>, Error> {
+    conn.query_row(
+        "SELECT state,target_gateway_id FROM send_cancellations WHERE message_id=?",
+        [message_id.to_string()],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )
+    .optional()?
+    .map(|(state, target)| {
+        let state = cancellation_state(&state)?;
+        let supported: Option<bool> = conn
+            .query_row(
+                "SELECT supported FROM send_cancellation_capabilities WHERE device_id=?",
+                [target],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(SendCancellationView {
+            state,
+            can_request: false,
+            requires_gateway_update: supported != Some(true),
+        })
+    })
+    .transpose()
+}
+
+fn cancellation_view(
+    conn: &Connection,
+    active_epoch: Option<u32>,
+    message_id: MessageId,
+) -> Result<SendCancellationView, Error> {
+    if let Some(view) = cancellation_row(conn, message_id)? {
+        return Ok(view);
+    }
+    let Some(active_epoch) = active_epoch else {
+        return Ok(SendCancellationView {
+            state: SendCancellationState::None,
+            can_request: false,
+            requires_gateway_update: false,
+        });
+    };
+    let target: Option<(String, String)> = conn.query_row("SELECT command_id,gateway_device_id FROM commands WHERE message_id=? ORDER BY command_id LIMIT 1", [message_id.to_string()], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+    let eligible = target
+        .as_ref()
+        .map(|(command, _)| cancellation_request_eligible(conn, parse(command)?))
+        .transpose()?
+        .unwrap_or(false);
+    let supported = target.as_ref().map(|(_, target)| conn.query_row("SELECT supported FROM send_cancellation_capabilities WHERE device_id=? AND key_epoch=?", params![target, active_epoch], |row| row.get::<_, bool>(0)).optional()).transpose()?.flatten();
+    Ok(SendCancellationView {
+        state: SendCancellationState::None,
+        can_request: eligible && supported == Some(true),
+        requires_gateway_update: eligible && target.is_some() && supported != Some(true),
+    })
+}
+
+fn cancellation_request_eligible(conn: &Connection, command_id: CommandId) -> Result<bool, Error> {
+    let locally_submitted = matches!(
+        attempt_state(conn, command_id)?,
+        Some(SendState::SubmittedToOs | SendState::Sent | SendState::Delivered)
+    );
+    let remotely_submitted: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM send_status s JOIN commands c ON c.command_id=s.command_id WHERE s.command_id=? AND s.producer_device_id=c.gateway_device_id AND s.state IN ('submitted','sent','delivered'))",
+        [command_id.to_string()],
+        |row| row.get(0),
+    )?;
+    let media_submitted: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rcs_media_send_ledger WHERE command_id=? AND state IN ('submitted','accepted'))",
+        [command_id.to_string()],
+        |row| row.get(0),
+    )?;
+    Ok(!locally_submitted && !remotely_submitted && !media_submitted)
+}
+
+fn cancellation_fenced(
+    conn: &Connection,
+    command_id: CommandId,
+    gateway_id: &DeviceId,
+) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM send_cancellations WHERE command_id=? AND target_gateway_id=? AND state IN ('requested','confirmed'))",
+        params![command_id.to_string(), gateway_id.to_string()],
+        |row| row.get(0),
+    ).map_err(Into::into)
+}
+
+/// Reconciles cancellation records that arrived before their command. A provisional record is
+/// deliberately not authoritative until the command proves all three durable identities.
+fn reconcile_cancellation_binding(
+    conn: &Connection,
+    message_id: MessageId,
+    command_id: CommandId,
+    gateway_id: DeviceId,
+) -> Result<bool, Error> {
+    let existing: Option<(String, String)> = conn
+        .query_row(
+            "SELECT command_id,target_gateway_id FROM send_cancellations WHERE message_id=?",
+            [message_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((stored_command, stored_gateway)) = existing else {
+        return Ok(true);
+    };
+    if stored_command != command_id.to_string() || stored_gateway != gateway_id.to_string() {
+        return Ok(false);
+    }
+    conn.execute(
+        "UPDATE send_cancellations SET state=COALESCE(staged_state,state),staged_state=NULL,bound=1 WHERE message_id=?",
+        [message_id.to_string()],
+    )?;
+    Ok(true)
+}
+
+fn apply_cancellation_capability(
+    conn: &Connection,
+    producer: DeviceId,
+    key_epoch: u32,
+    producer_sequence: u64,
+    supported: bool,
+) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO send_cancellation_capabilities(device_id,supported,key_epoch,producer_sequence) \
+         VALUES(?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET \
+         supported=excluded.supported,key_epoch=excluded.key_epoch, \
+         producer_sequence=excluded.producer_sequence \
+         WHERE excluded.key_epoch > send_cancellation_capabilities.key_epoch \
+         OR (excluded.key_epoch = send_cancellation_capabilities.key_epoch \
+         AND excluded.producer_sequence > send_cancellation_capabilities.producer_sequence)",
+        params![producer.to_string(), supported, key_epoch, producer_sequence as i64],
+    )?;
+    Ok(())
+}
+
+fn stage_cancellation_request(
+    conn: &Connection,
+    message_id: MessageId,
+    command_id: CommandId,
+    target_gateway_id: DeviceId,
+    bound: bool,
+) -> Result<bool, Error> {
+    Ok(conn.execute(
+        "INSERT INTO send_cancellations(message_id,command_id,target_gateway_id,state,bound) VALUES(?,?,?,'requested',?) ON CONFLICT(message_id) DO UPDATE SET bound=excluded.bound WHERE send_cancellations.command_id=excluded.command_id AND send_cancellations.target_gateway_id=excluded.target_gateway_id",
+        params![message_id.to_string(), command_id.to_string(), target_gateway_id.to_string(), bound],
+    )? != 0)
+}
+
+fn stage_cancellation_result(
+    conn: &Connection,
+    message_id: MessageId,
+    command_id: CommandId,
+    target_gateway_id: DeviceId,
+    state: SendCancellationState,
+    bound: bool,
+) -> Result<bool, Error> {
+    Ok(conn.execute(
+        "INSERT INTO send_cancellations(message_id,command_id,target_gateway_id,state,staged_state,bound) VALUES(?,?,?,CASE WHEN ? THEN ? ELSE 'requested' END,CASE WHEN ? THEN NULL ELSE ? END,?) ON CONFLICT(message_id) DO UPDATE SET state=CASE WHEN excluded.bound THEN excluded.state ELSE send_cancellations.state END, staged_state=CASE WHEN excluded.bound THEN NULL ELSE excluded.staged_state END, bound=MAX(send_cancellations.bound,excluded.bound) WHERE send_cancellations.command_id=excluded.command_id AND send_cancellations.target_gateway_id=excluded.target_gateway_id AND ((send_cancellations.state='requested' AND (send_cancellations.staged_state IS NULL OR send_cancellations.staged_state=excluded.staged_state)) OR (send_cancellations.state=excluded.state AND send_cancellations.staged_state IS NULL AND send_cancellations.bound=1))",
+        params![message_id.to_string(), command_id.to_string(), target_gateway_id.to_string(), bound, cancellation_state_code(state), bound, cancellation_state_code(state), bound],
+    )? != 0)
+}
 
 type StoredMessage = (
     String,
@@ -8166,7 +8580,19 @@ CREATE TABLE send_status(command_id TEXT NOT NULL, producer_device_id TEXT NOT N
 CREATE TABLE command_ledger(local_order INTEGER PRIMARY KEY AUTOINCREMENT, command_id TEXT NOT NULL UNIQUE,
   key_epoch INTEGER NOT NULL, subscription_id TEXT NOT NULL, payload TEXT NOT NULL);
 CREATE TABLE attempts(command_id TEXT PRIMARY KEY REFERENCES command_ledger(command_id), state TEXT NOT NULL);
+CREATE TABLE send_cancellations(message_id TEXT PRIMARY KEY, command_id TEXT NOT NULL,
+ target_gateway_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('requested','confirmed','too_late','unknown')),
+ staged_state TEXT CHECK(staged_state IN ('confirmed','too_late','unknown')), bound INTEGER NOT NULL DEFAULT 1);
+CREATE INDEX send_cancellations_command ON send_cancellations(command_id,target_gateway_id);
+CREATE TABLE send_cancellation_capabilities(device_id TEXT PRIMARY KEY, supported INTEGER NOT NULL, key_epoch INTEGER NOT NULL, producer_sequence INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE drafts(conversation_id TEXT PRIMARY KEY, content TEXT NOT NULL, revision INTEGER NOT NULL);
+";
+
+const SEND_CANCELLATION_MIGRATION_58: &str = "
+CREATE TABLE IF NOT EXISTS send_cancellations(message_id TEXT PRIMARY KEY, command_id TEXT NOT NULL,
+ target_gateway_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('requested','confirmed','too_late','unknown')));
+CREATE INDEX IF NOT EXISTS send_cancellations_command ON send_cancellations(command_id,target_gateway_id);
+CREATE TABLE IF NOT EXISTS send_cancellation_capabilities(device_id TEXT PRIMARY KEY, supported INTEGER NOT NULL, key_epoch INTEGER NOT NULL);
 ";
 
 /// Version 4 -> 5: cutover retirement marker, native key-cache checks, compose drafts.
@@ -9001,6 +9427,24 @@ pub(crate) fn add_column_if_missing(
     Ok(())
 }
 
+fn apply_send_cancellation_migration_59(conn: &Connection) -> Result<(), Error> {
+    add_column_if_missing(
+        conn,
+        "send_cancellations",
+        "staged_state TEXT CHECK(staged_state IN ('confirmed','too_late','unknown'))",
+    )?;
+    add_column_if_missing(
+        conn,
+        "send_cancellations",
+        "bound INTEGER NOT NULL DEFAULT 1",
+    )?;
+    add_column_if_missing(
+        conn,
+        "send_cancellation_capabilities",
+        "producer_sequence INTEGER NOT NULL DEFAULT 0",
+    )
+}
+
 /// Adds each schema-53 column that is not yet present.
 fn apply_group_columns_migration(conn: &Connection) -> Result<(), Error> {
     for (table, definition) in GROUP_COLUMNS_53 {
@@ -9052,7 +9496,7 @@ fn repair_notification_reply_spike(conn: &mut Connection) -> Result<(), Error> {
 }
 /// Decoder revision seven replays applied LWW events after older clients consumed them as unknown.
 // Revision 8 reprojects retained control wires that older clients consumed as unknown.
-const DECODER_REVISION: &str = "11";
+const DECODER_REVISION: &str = "12";
 
 fn apply_database_key(conn: &Connection, key: &DatabaseKey) -> Result<(), Error> {
     let mut hex = Zeroizing::new(String::with_capacity(64));
@@ -9167,6 +9611,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(RCS_MEDIA_RECEIVE_LOCAL_MIGRATION_55)?;
             apply_rcs_media_receive_metadata_migration(&tx)?;
             tx.execute_batch(RCS_MEDIA_DEFERRED_STATE_MIGRATION_57)?;
+            tx.execute_batch(SEND_CANCELLATION_MIGRATION_58)?;
             tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
@@ -9176,7 +9621,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=56)) => {
+        Some(version @ (4..=58)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -9316,6 +9761,10 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
                 apply_rcs_media_receive_metadata_migration(&tx)?;
             }
             tx.execute_batch(RCS_MEDIA_DEFERRED_STATE_MIGRATION_57)?;
+            tx.execute_batch(SEND_CANCELLATION_MIGRATION_58)?;
+            if version <= 58 {
+                apply_send_cancellation_migration_59(&tx)?;
+            }
             tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
@@ -9401,13 +9850,13 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
     };
     let mut after = i64::MIN;
     loop {
-        let rows: Vec<(i64, String, Vec<u8>)> = {
+        let rows: Vec<(i64, String, Vec<u8>, bool)> = {
             let mut query = conn.prepare(
-                "SELECT cursor,status,wire FROM journal WHERE key_epoch=? AND cursor>? AND ((status='quarantined' AND reason='invalid_payload') OR status='applied') ORDER BY cursor LIMIT 256",
+                "SELECT cursor,status,wire,historical FROM journal WHERE key_epoch=? AND cursor>? AND ((status='quarantined' AND reason='invalid_payload') OR status='applied') ORDER BY cursor LIMIT 256",
             )?;
             query
                 .query_map(params![epoch, after], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
                 })?
                 .collect::<Result<_, _>>()?
         };
@@ -9415,7 +9864,7 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
             break;
         }
         after = rows.last().expect("nonempty recovery page").0;
-        for (cursor, status, wire) in rows {
+        for (cursor, status, wire, historical) in rows {
             let Some(envelope) = parse_wire(&wire) else {
                 continue;
             };
@@ -9464,6 +9913,19 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                 conn.execute(
                     "UPDATE journal SET status='quarantined',reason='authentication_failed' WHERE cursor=?",
                     params![cursor],
+                )?;
+                continue;
+            }
+            if matches!(
+                &payload,
+                PrivatePayload::SendCancellationCapability { .. }
+                    | PrivatePayload::SendCancellationRequest { .. }
+                    | PrivatePayload::SendCancellationResult { .. }
+            ) && !storage_sequence_fits(envelope.producer_sequence.0)
+            {
+                conn.execute(
+                    "UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?",
+                    [cursor],
                 )?;
                 continue;
             }
@@ -9823,6 +10285,81 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                         envelope.compaction.as_ref(),
                     )?;
                 }
+                ("applied", PrivatePayload::SendCancellationCapability { supported }) => {
+                    apply_cancellation_capability(
+                        conn,
+                        envelope.producer_device_id,
+                        envelope.key_epoch,
+                        envelope.producer_sequence.0,
+                        supported,
+                    )?;
+                }
+                (
+                    "applied",
+                    PrivatePayload::SendCancellationRequest {
+                        message_id,
+                        command_id,
+                        target_gateway_id,
+                    },
+                ) => {
+                    let binding: Option<(String, String)> = conn
+                        .query_row(
+                            "SELECT message_id,gateway_device_id FROM commands WHERE command_id=?",
+                            [command_id.to_string()],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()?;
+                    if binding.as_ref().is_some_and(|(message, gateway)| {
+                        message != &message_id.to_string()
+                            || gateway != &target_gateway_id.to_string()
+                    }) || !stage_cancellation_request(
+                        conn,
+                        message_id,
+                        command_id,
+                        target_gateway_id,
+                        binding.is_some(),
+                    )? {
+                        conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", [cursor])?;
+                    }
+                }
+                (
+                    "applied",
+                    PrivatePayload::SendCancellationResult {
+                        message_id,
+                        command_id,
+                        target_gateway_id,
+                        state,
+                    },
+                ) if !historical => {
+                    let binding: Option<(String, String)> = conn
+                        .query_row(
+                            "SELECT message_id,gateway_device_id FROM commands WHERE command_id=?",
+                            [command_id.to_string()],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()?;
+                    if !matches!(
+                        state,
+                        SendCancellationState::Confirmed
+                            | SendCancellationState::TooLate
+                            | SendCancellationState::Unknown
+                    ) || envelope.producer_device_id != target_gateway_id
+                        || binding.as_ref().is_some_and(|(message, gateway)| {
+                            message != &message_id.to_string()
+                                || gateway != &target_gateway_id.to_string()
+                        })
+                        || !stage_cancellation_result(
+                            conn,
+                            message_id,
+                            command_id,
+                            target_gateway_id,
+                            state,
+                            binding.is_some(),
+                        )?
+                    {
+                        conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", [cursor])?;
+                    }
+                }
                 // Commands, notification effects, unknown/malformed records, and foreign identities
                 // are deliberately unchanged by decoder recovery.
                 _ => {}
@@ -10062,6 +10599,9 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
             | "rcs_media_demand"
             | "send_mms_command"
             | "send_status"
+            | "send_cancellation_request"
+            | "send_cancellation_result"
+            | "send_cancellation_capability"
             | "read_state"
             | "notification_posted"
             | "notification_removed"
@@ -10199,6 +10739,87 @@ fn apply_record(
                 envelope.producer_sequence.0,
             )? {
                 return Ok(Some(Q::InvalidPayload));
+            }
+        }
+        (EnvelopePurpose::Event, PrivatePayload::SendCancellationCapability { supported }) => {
+            apply_cancellation_capability(
+                conn,
+                producer,
+                envelope.key_epoch,
+                envelope.producer_sequence.0,
+                supported,
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::SendCancellationRequest {
+                message_id,
+                command_id,
+                target_gateway_id,
+            },
+        ) => {
+            let command: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT message_id,gateway_device_id FROM commands WHERE command_id=?",
+                    [command_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if command.as_ref().is_some_and(|(message, gateway)| {
+                message != &message_id.to_string() || gateway != &target_gateway_id.to_string()
+            }) {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            if !stage_cancellation_request(
+                conn,
+                message_id,
+                command_id,
+                target_gateway_id,
+                command.is_some(),
+            )? {
+                return Ok(Some(Q::PayloadConflict));
+            }
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::SendCancellationResult {
+                message_id,
+                command_id,
+                target_gateway_id,
+                state,
+            },
+        ) => {
+            if !matches!(
+                state,
+                SendCancellationState::Confirmed
+                    | SendCancellationState::TooLate
+                    | SendCancellationState::Unknown
+            ) || producer != target_gateway_id
+            {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            let binding: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT message_id,gateway_device_id FROM commands WHERE command_id=?",
+                    [command_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if binding.as_ref().is_some_and(|(message, gateway)| {
+                message != &message_id.to_string() || gateway != &target_gateway_id.to_string()
+            }) {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            let bound = binding.is_some();
+            if !stage_cancellation_result(
+                conn,
+                message_id,
+                command_id,
+                target_gateway_id,
+                state,
+                bound,
+            )? {
+                return Ok(Some(Q::PayloadConflict));
             }
         }
         (
@@ -10388,6 +11009,12 @@ fn apply_record(
             };
             if !store_remote_media(conn, &media)?
                 || insert_message(conn, &message)? == Inserted::Conflict
+                || !reconcile_cancellation_binding(
+                    conn,
+                    message.record.message_id,
+                    command_id,
+                    gateway_device_id,
+                )?
                 || !record_command(
                     conn,
                     command_id,
@@ -15784,6 +16411,7 @@ mod tests {
             "CREATE TABLE messages(local_order INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, conversation_id TEXT NOT NULL, payload TEXT NOT NULL, seen INTEGER NOT NULL, sort_at_ms INTEGER NOT NULL); \
              CREATE TABLE commands(command_id TEXT PRIMARY KEY, message_id TEXT NOT NULL, gateway_device_id TEXT NOT NULL); \
              CREATE TABLE send_status(command_id TEXT NOT NULL, producer_device_id TEXT NOT NULL, producer_sequence INTEGER NOT NULL, state TEXT NOT NULL, status_at_ms INTEGER, refusal_reason TEXT, PRIMARY KEY(command_id, producer_device_id)); \
+             CREATE TABLE send_cancellations(message_id TEXT PRIMARY KEY, command_id TEXT NOT NULL, target_gateway_id TEXT NOT NULL, state TEXT NOT NULL); \
              CREATE TABLE outbox(command_id TEXT UNIQUE, state TEXT NOT NULL);",
         )
         .unwrap();
@@ -15821,6 +16449,23 @@ mod tests {
         assert_eq!(selected.2.as_deref(), Some(state_code(SendState::Sent)));
         assert_eq!(selected.3, Some(10));
         assert_eq!(selected.4, None);
+    }
+
+    #[test]
+    fn cancellation_migration_59_converges_on_a_partially_upgraded_layout() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE send_cancellations(message_id TEXT PRIMARY KEY, command_id TEXT NOT NULL, target_gateway_id TEXT NOT NULL, state TEXT NOT NULL, staged_state TEXT CHECK(staged_state IN ('confirmed','too_late','unknown'))); \
+             CREATE TABLE send_cancellation_capabilities(device_id TEXT PRIMARY KEY, supported INTEGER NOT NULL, key_epoch INTEGER NOT NULL, producer_sequence INTEGER NOT NULL DEFAULT 0);",
+        )
+        .unwrap();
+        apply_send_cancellation_migration_59(&conn).unwrap();
+        apply_send_cancellation_migration_59(&conn).unwrap();
+        assert!(column_exists(&conn, "send_cancellations", "staged_state").unwrap());
+        assert!(column_exists(&conn, "send_cancellations", "bound").unwrap());
+        assert!(
+            column_exists(&conn, "send_cancellation_capabilities", "producer_sequence").unwrap()
+        );
     }
 
     #[test]

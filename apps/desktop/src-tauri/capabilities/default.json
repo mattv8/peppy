@@ -37,6 +37,7 @@
     "allow-resolve-draft-conflict",
     "allow-acknowledge-draft-notice",
     "allow-send-draft",
+    "allow-cancel-send",
     "allow-send-typing",
     "allow-set-typing-sharing",
     "allow-mark-seen",

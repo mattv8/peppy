@@ -993,6 +993,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mark_seen(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_message_send_cancellation(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_messages(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_migrate_mms_backfill_state(
@@ -1081,7 +1083,11 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_contact_photo(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_process_pending_send_cancellations(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_message_history_capture_source(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_send_cancellation_capability(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_sender_blocklist(
     ): Int
@@ -1136,6 +1142,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_mms_provider_rescan(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_mms_recheck(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_send_cancellation(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_restore_contact_json(
     ): Int
@@ -1587,6 +1595,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_mark_seen(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_message_send_cancellation(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_messages(`ptr`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_migrate_mms_backfill_state(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`legacy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1675,8 +1685,12 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_prepare_contact_photo(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_process_pending_send_cancellations(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_message_history_capture_source(`ptr`: Long,`facts`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_send_cancellation_capability(`ptr`: Long,`supported`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_sender_blocklist(`ptr`: Long,`numbers`: RustBuffer.ByValue,`canUnblock`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_rcs_eligibility_projection(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`gatewayDeviceId`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1731,6 +1745,8 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_mms_recheck(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_send_cancellation(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_restore_contact_json(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_save_compose_draft(`ptr`: Long,`draftId`: RustBuffer.ByValue,`expectedRevision`: Long,`update`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2755,6 +2771,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mark_seen() and 0xFFFF) != 64544) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_message_send_cancellation() and 0xFFFF) != 58304) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_messages() and 0xFFFF) != 31771) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2887,7 +2906,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_contact_photo() and 0xFFFF) != 6113) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_process_pending_send_cancellations() and 0xFFFF) != 36318) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_message_history_capture_source() and 0xFFFF) != 6609) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_send_cancellation_capability() and 0xFFFF) != 8795) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_sender_blocklist() and 0xFFFF) != 19267) {
@@ -2969,6 +2994,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_mms_recheck() and 0xFFFF) != 20669) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_send_cancellation() and 0xFFFF) != 9983) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_restore_contact_json() and 0xFFFF) != 61758) {
@@ -4056,6 +4084,8 @@ public interface NativeClientInterface {
     
     fun `markSeen`(`messageId`: kotlin.String): kotlin.Boolean
     
+    fun `messageSendCancellation`(`messageId`: kotlin.String): NativeSendCancellationView
+    
     fun `messages`(`conversationId`: kotlin.String): List<NativeMessage>
     
     fun `migrateMmsBackfillState`(`generation`: kotlin.String, `scope`: kotlin.String, `legacy`: NativeMmsLegacyBackfillState)
@@ -4186,11 +4216,15 @@ public interface NativeClientInterface {
     
     fun `prepareContactPhoto`(`path`: kotlin.String): NativeAttachmentInfo
     
+    fun `processPendingSendCancellations`(): kotlin.Boolean
+    
     /**
      * Android-only local admission: provider UUIDs stay local while core maps
      * them to the protocol's decimal control generation.
      */
     fun `publishMessageHistoryCaptureSource`(`facts`: NativeMessageHistorySourceFacts): kotlin.String
+    
+    fun `publishSendCancellationCapability`(`supported`: kotlin.Boolean)
     
     fun `publishSenderBlocklist`(`numbers`: List<kotlin.String>?, `canUnblock`: kotlin.Boolean): kotlin.Boolean
     
@@ -4272,6 +4306,8 @@ public interface NativeClientInterface {
     fun `requestMmsProviderRescan`(`generation`: kotlin.String, `scope`: kotlin.String, `observedMaxId`: kotlin.String): kotlin.Boolean
     
     fun `requestMmsRecheck`(`generation`: kotlin.String, `scope`: kotlin.String, `limit`: kotlin.ULong): kotlin.ULong
+    
+    fun `requestSendCancellation`(`messageId`: kotlin.String): NativeSendCancellationView
     
     fun `restoreContactJson`(`input`: kotlin.String): kotlin.String
     
@@ -5935,6 +5971,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `messageSendCancellation`(`messageId`: kotlin.String): NativeSendCancellationView {
+            return FfiConverterTypeNativeSendCancellationView.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_message_send_cancellation(
+        it,
+        
+        FfiConverterString.lower(`messageId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `messages`(`conversationId`: kotlin.String): List<NativeMessage> {
             return FfiConverterSequenceTypeNativeMessage.lift(
     callWithHandle {
@@ -6648,6 +6699,20 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `processPendingSendCancellations`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_process_pending_send_cancellations(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
     /**
      * Android-only local admission: provider UUIDs stay local while core maps
      * them to the protocol's decimal control generation.
@@ -6664,6 +6729,20 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     }
     )
     }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `publishSendCancellationCapability`(`supported`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_send_cancellation_capability(
+        it,
+        
+        FfiConverterBoolean.lower(`supported`),_status)
+}
+    }
+    
     
 
     
@@ -7103,6 +7182,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         FfiConverterString.lower(`generation`),
         FfiConverterString.lower(`scope`),
         FfiConverterULong.lower(`limit`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `requestSendCancellation`(`messageId`: kotlin.String): NativeSendCancellationView {
+            return FfiConverterTypeNativeSendCancellationView.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_send_cancellation(
+        it,
+        
+        FfiConverterString.lower(`messageId`),_status)
 }
     }
     )
@@ -15695,6 +15789,49 @@ public object FfiConverterTypeNativeRcsUnlinkCutoverGenerations: FfiConverterRus
 
 
 
+data class NativeSendCancellationView (
+    var `state`: NativeSendCancellationState
+    , 
+    var `canRequest`: kotlin.Boolean
+    , 
+    var `requiresGatewayUpdate`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeSendCancellationView: FfiConverterRustBuffer<NativeSendCancellationView> {
+    override fun read(buf: ByteBuffer): NativeSendCancellationView {
+        return NativeSendCancellationView(
+            FfiConverterTypeNativeSendCancellationState.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeSendCancellationView) = (
+            FfiConverterTypeNativeSendCancellationState.allocationSize(value.`state`) +
+            FfiConverterBoolean.allocationSize(value.`canRequest`) +
+            FfiConverterBoolean.allocationSize(value.`requiresGatewayUpdate`)
+    )
+
+    override fun write(value: NativeSendCancellationView, buf: ByteBuffer) {
+            FfiConverterTypeNativeSendCancellationState.write(value.`state`, buf)
+            FfiConverterBoolean.write(value.`canRequest`, buf)
+            FfiConverterBoolean.write(value.`requiresGatewayUpdate`, buf)
+    }
+}
+
+
+
 data class NativeSenderUnblockWork (
     var `requestId`: kotlin.String
     , 
@@ -18716,6 +18853,7 @@ enum class NativePermitState {
     EPOCH_NOT_ACTIVE,
     MEDIA_UNAVAILABLE,
     HISTORICAL,
+    CANCELLATION_REQUESTED,
     RESTORE_GUARDED,
     ROUTE_UNAVAILABLE,
     UNKNOWN_ROUTE,
@@ -19554,6 +19692,43 @@ public object FfiConverterTypeNativeRemoteAttachmentState: FfiConverterRustBuffe
     override fun allocationSize(value: NativeRemoteAttachmentState) = 4UL
 
     override fun write(value: NativeRemoteAttachmentState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class NativeSendCancellationState {
+    
+    NONE,
+    REQUESTED,
+    CONFIRMED,
+    TOO_LATE,
+    UNKNOWN;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeSendCancellationState: FfiConverterRustBuffer<NativeSendCancellationState> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeSendCancellationState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeSendCancellationState) = 4UL
+
+    override fun write(value: NativeSendCancellationState, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }

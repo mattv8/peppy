@@ -181,6 +181,7 @@ import { createSeenReactionLedger, linkReactions, locateReactionTarget, NO_REACT
 import { normalizeReactionText, quoteMatches } from "./reactions/parse";
 import { FALLBACK_ERROR, errorCode, errorText } from "./bridge/bridgeErrors";
 import { OneTimeCodeButton } from "./one-time-code/OneTimeCodeButton";
+import { CancelSendControl, SendCancellationPending } from "./messages/CancelSendControl";
 import {
   DraftStore,
   blankContent,
@@ -209,6 +210,13 @@ type RefreshRequest = {
 
 type ActionNotice = Omit<AppNotice, "source">;
 type ComposerFeedback = { key: string; message: string; severity: AppNotice["severity"]; kind?: "attachment-feedback" };
+type LocalCancellationState = "requested" | "too-late" | "unknown" | "failed";
+type CancellationState = NonNullable<MessageView["sendCancellation"]>["state"];
+
+export function cancellationDisplayState(authoritative: CancellationState | undefined, local: LocalCancellationState | undefined): CancellationState | LocalCancellationState | undefined {
+  if (local === "too-late" || local === "unknown" || (local === "failed" && authoritative !== "requested")) return local;
+  return authoritative && authoritative !== "none" ? authoritative : local;
+}
 type DraftNoticeState = { key: string; event: DraftNoticeEvent | "stale-send" | "send-failed" | "loading"; sequence: number; detail?: string; persistent?: boolean };
 type PinFocusRestoreIntent = {
   conversationId: string;
@@ -216,6 +224,33 @@ type PinFocusRestoreIntent = {
   userMovedFocus: boolean;
   dispose(): void;
 };
+type CancellationFocusIntent = {
+  origin: HTMLElement;
+  userMovedFocus: boolean;
+  dispose(): void;
+};
+
+function watchCancellationFocus(origin: HTMLElement | null): CancellationFocusIntent | undefined {
+  if (!origin) return;
+  const intent: CancellationFocusIntent = {
+    origin,
+    userMovedFocus: false,
+    dispose: () => {
+      document.removeEventListener("focusin", watchFocus);
+      document.removeEventListener("pointerdown", watchPointer);
+    },
+  };
+  function watchFocus(event: FocusEvent) {
+    if (event.target instanceof HTMLElement && event.target !== document.body && event.target !== intent.origin)
+      intent.userMovedFocus = true;
+  }
+  function watchPointer(event: PointerEvent) {
+    if (!(event.target instanceof Node) || !intent.origin.contains(event.target)) intent.userMovedFocus = true;
+  }
+  document.addEventListener("focusin", watchFocus);
+  document.addEventListener("pointerdown", watchPointer);
+  return intent;
+}
 
 const MMS_WARNING_THRESHOLD = 0.8;
 const DEFAULT_MMS_LIMIT_BYTES = 300 * 1024;
@@ -885,6 +920,84 @@ function MessageList({
 }) {
   const reactions = useMemo(() => showReactions && conversation ? linkReactions(conversation.messages) : NO_REACTIONS, [showReactions, conversation?.messages]);
   const [focusedNoticeId, setFocusedNoticeId] = useState<string>();
+  const [cancellingMessageIds, setCancellingMessageIds] = useState<ReadonlySet<string>>(new Set());
+  const [localCancellationStates, setLocalCancellationStates] = useState<ReadonlyMap<string, LocalCancellationState>>(new Map());
+  const cancellingMessageIdsRef = useRef(new Set<string>());
+  const cancellationRequestIds = useRef(new Map<string, number>());
+  const cancellationFocusIntents = useRef(new Map<string, CancellationFocusIntent>());
+  const cancellationViewGeneration = useRef(0);
+  const cancellationStates = useRef(new Map<string, CancellationState | undefined>());
+  useEffect(() => {
+    cancellationViewGeneration.current += 1;
+    return () => {
+      cancellationViewGeneration.current += 1;
+      cancellationRequestIds.current.clear();
+      cancellingMessageIdsRef.current.clear();
+      cancellationFocusIntents.current.forEach((intent) => intent.dispose());
+      cancellationFocusIntents.current.clear();
+    };
+  }, [conversation?.id]);
+  cancellationStates.current = new Map(conversation?.messages.map((message) => [message.id, message.sendCancellation?.state]) ?? []);
+  const cancellationState = (message: MessageView) => {
+    return cancellationDisplayState(message.sendCancellation?.state, localCancellationStates.get(message.id));
+  };
+  const hasCancellationAction = (message: MessageView) => {
+    const state = cancellationState(message);
+    return state === "requested" || state === "too-late" || state === "unknown" || state === "failed" || Boolean(message.sender === "self" && message.sendCancellation?.canCancel && bridge.cancel_send);
+  };
+  const requestSendCancellation = async (message: MessageView) => {
+    if (!bridge.cancel_send || cancellingMessageIdsRef.current.has(message.id)) return;
+    const focusIntent = watchCancellationFocus(document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    const requestId = (cancellationRequestIds.current.get(message.id) ?? 0) + 1;
+    const viewGeneration = cancellationViewGeneration.current;
+    cancellationRequestIds.current.set(message.id, requestId);
+    if (focusIntent) cancellationFocusIntents.current.set(message.id, focusIntent);
+    cancellingMessageIdsRef.current.add(message.id);
+    setCancellingMessageIds(new Set(cancellingMessageIdsRef.current));
+    let replacementFocusPending = false;
+    try {
+      const cancellation = await bridge.cancel_send({ messageId: message.id });
+      const currentState = cancellationStates.current.get(message.id);
+      if (cancellationViewGeneration.current !== viewGeneration || cancellationRequestIds.current.get(message.id) !== requestId || currentState === "confirmed" || currentState === "too-late" || currentState === "unknown") return;
+      if (cancellation.state === "requested") {
+        setLocalCancellationStates(states => new Map(states).set(message.id, "requested"));
+        replacementFocusPending = true;
+        requestAnimationFrame(() => {
+          const ownsIntent = cancellationFocusIntents.current.get(message.id) === focusIntent;
+          const activeElement = document.activeElement;
+          const canRestoreFocus = focusIntent && !focusIntent.userMovedFocus && (activeElement === focusIntent.origin || activeElement === document.body);
+          if (ownsIntent) cancellationFocusIntents.current.delete(message.id);
+          focusIntent?.dispose();
+          if (cancellationViewGeneration.current === viewGeneration && cancellationRequestIds.current.get(message.id) === requestId && canRestoreFocus)
+            document.querySelector<HTMLElement>(`[data-message-cancellation="${message.id}"]`)?.focus();
+        });
+      } else if (cancellation.state === "too-late" || cancellation.state === "unknown") {
+        const terminalState = cancellation.state;
+        setLocalCancellationStates(states => new Map(states).set(message.id, terminalState));
+      }
+    } catch {
+      if (cancellationViewGeneration.current === viewGeneration && cancellationRequestIds.current.get(message.id) === requestId)
+        setLocalCancellationStates(states => new Map(states).set(message.id, "failed"));
+    } finally {
+      if (cancellationViewGeneration.current !== viewGeneration || cancellationRequestIds.current.get(message.id) !== requestId) return;
+      if (!replacementFocusPending) {
+        if (cancellationFocusIntents.current.get(message.id) === focusIntent) cancellationFocusIntents.current.delete(message.id);
+        focusIntent?.dispose();
+      }
+      cancellingMessageIdsRef.current.delete(message.id);
+      setCancellingMessageIds(new Set(cancellingMessageIdsRef.current));
+    }
+  };
+  useEffect(() => {
+    setLocalCancellationStates((states) => {
+      const next = new Map(states);
+      conversation?.messages.forEach((message) => {
+        const authoritative = message.sendCancellation?.state;
+        if (authoritative === "confirmed" || authoritative === "too-late" || authoritative === "unknown" || (authoritative === "requested" && next.get(message.id) === "requested")) next.delete(message.id);
+      });
+      return next;
+    });
+  }, [conversation?.messages]);
   const chipRef = useSeenBadges({
     ...badgeObservation,
     badges: [...reactions.badges].flatMap(([id, badges]) => badges.map(badge => ({ key: JSON.stringify([id, badge.emoji]), reactionIds: badge.reactionIds }))),
@@ -945,7 +1058,7 @@ function MessageList({
       </div>
     );
   const conversationToneSeed = conversationAvatar({ id: conversation.id, name: conversation.name, participants: conversation.participants, recipientless: conversation.recipientlessDraft }).seed;
-  const visualMessages = conversation.messages.filter(message => !suppressed.has(message.id));
+  const visualMessages = conversation.messages.filter(message => message.sendCancellation?.state !== "confirmed" && !suppressed.has(message.id));
   const timeIsShown = (message: MessageView) => {
     const displayedTime = messageTime(message).displayedTime;
     return Boolean(formatDateTime(displayedTime) && isoDateTime(displayedTime));
@@ -1019,7 +1132,7 @@ function MessageList({
       <div id="message-list-content" aria-live={suppressHistoryAnnouncements ? "off" : undefined}>
         {conversation.messages.filter(message => suppressed.has(message.id)).map(message => <ReactionNotice key={message.id} reaction={message} notice={reactions.notices.get(message.id)!} actorName={actorName} rowRef={row => registerRow(message.id, row)} onOpen={onOpenReactionTarget} suppressedHint />)}
         {historyExhausted && <p id="history-beginning-marker" className="history-load-band" data-history-state="beginning">Beginning of conversation</p>}
-        {!conversation.messages.length && <p>Start the conversation.</p>}
+        {!visualMessages.length && <p>Start the conversation.</p>}
         {timeline.map((item) => {
           if (item.kind === "notice") return <GroupNotice key={item.id} notice={item.notice} displayName={(address) => displayAddressName(address, resolution)} />;
           const group = item.group;
@@ -1033,10 +1146,13 @@ function MessageList({
             if (onEditRcsUnsent && candidate.attachments.some((attachment) => attachment.rcsSendStatus === "not_sent")) return () => onEditRcsUnsent(candidate);
             return undefined;
           };
-          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} hideTime={hiddenTimes.has(candidate.id)} onEditResend={resendFor(candidate)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} messageTitle={hiddenTimeTitle} senderRun={(candidate) => sender && candidate.id === group.id ? { label: sender.labelNode, avatar: sender.avatar, gutter: showSenderAvatars, ariaName: sender.label.text, start: sender.edge.start, end: sender.edge.end } : undefined} />;
+          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} hideTime={hiddenTimes.has(candidate.id)} onEditResend={resendFor(candidate)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} hasMessageAction={hasCancellationAction} renderMessageAction={(candidate) => cancellationState(candidate) === "requested" ? <SendCancellationPending messageId={candidate.id} waitingForPhone /> : cancellationState(candidate) === "too-late" || cancellationState(candidate) === "unknown" || cancellationState(candidate) === "failed" ? <span data-message-cancellation-notice={candidate.id} role="status">{cancellationState(candidate) === "too-late" ? "Cancellation was too late." : cancellationState(candidate) === "unknown" ? "Cancellation status is unknown." : "Could not request cancellation."}</span> : candidate.sender === "self" && candidate.sendCancellation?.canCancel && bridge.cancel_send ? <CancelSendControl messageId={candidate.id} disabled={cancellingMessageIds.has(candidate.id)} onCancel={() => void requestSendCancellation(candidate)} /> : undefined} isMessagePending={(candidate) => cancellationState(candidate) === "requested"} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} messageTitle={hiddenTimeTitle} senderRun={(candidate) => sender && candidate.id === group.id ? { label: sender.labelNode, avatar: sender.avatar, gutter: showSenderAvatars, ariaName: sender.label.text, start: sender.edge.start, end: sender.edge.end } : undefined} />;
           if (reactionNotice) return <ReactionNotice key={message.id} reaction={message} notice={reactionNotice} actorName={actorName} rowRef={(row) => registerRow(message.id, row)} onOpen={onOpenReactionTarget} busy={pendingReactionId === message.id} feedback={reactionFeedback?.reactionId === message.id ? reactionFeedback.message : undefined} meta={showsReactionNoticeMeta(message) ? <MessageMeta message={message} /> : undefined} />;
           const badges = reactions.badges.get(message.id);
           const chromeless = message.attachments.length > 0 && message.attachments.every((attachment) => attachment.mediaType.startsWith("video/")) && !message.attachments.some((attachment) => rcsPlaceholderState(attachment));
+          const messageCancellationState = cancellationState(message);
+          const cancellationPending = messageCancellationState === "requested";
+          const cancellationNotice = messageCancellationState === "too-late" ? "Cancellation was too late." : messageCancellationState === "unknown" ? "Cancellation status is unknown." : messageCancellationState === "failed" ? "Could not request cancellation." : undefined;
           const video = chromeless && message.attachments.length === 1 ? message.attachments[0] : undefined;
           const aspectRatio = videoAspectRatio(video?.mediaMeta);
           const bubbleStyle: CSSProperties | undefined = chromeless
@@ -1056,8 +1172,10 @@ function MessageList({
               title={hiddenTimeTitle(message)}
             >
               {sender && <span className="sr-only">From {sender.label.text}: </span>}
-              {!chromeless && message.body && <p><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
-              {!chromeless && message.subject && <p className="message-subject">Subject: <bdi>{message.subject}</bdi></p>}
+              {cancellationPending ? <SendCancellationPending messageId={message.id} waitingForPhone /> : <>
+                {message.sender === "self" && message.sendCancellation?.canCancel && bridge.cancel_send && <CancelSendControl messageId={message.id} disabled={cancellingMessageIds.has(message.id)} onCancel={() => void requestSendCancellation(message)} />}
+                {!chromeless && message.body && <p><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
+                {!chromeless && message.subject && <p className="message-subject">Subject: <bdi>{message.subject}</bdi></p>}
               {message.attachments.map((file) => {
                 const showRcsStatus = message.attachments.some((attachment) => attachment.rcsSendStatus && attachment.rcsSendStatus !== "sent");
                 const copy = publicCopies[file.id];
@@ -1144,8 +1262,10 @@ function MessageList({
                   ? <RcsAttachmentSlot key={rcsSlotKey} slotId={rcsSlotKey} phase={file.rcsState}>{renderAttachment()}</RcsAttachmentSlot>
                   : renderAttachment();
               })}
-              {chromeless && message.body && <p data-message-caption><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
-              {chromeless && message.subject && <p className="message-subject">Subject: <bdi>{message.subject}</bdi></p>}
+                {chromeless && message.body && <p data-message-caption><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
+                {chromeless && message.subject && <p className="message-subject">Subject: <bdi>{message.subject}</bdi></p>}
+              </>}
+              {cancellationNotice && <span data-message-cancellation-notice={message.id} role="status">{cancellationNotice}</span>}
               {message.sender === "other" && message.oneTimeCode && conversation?.folder !== "spam" && (
                 <OneTimeCodeButton key={`${message.id}:${message.oneTimeCode}`} variant="message" hookId={message.id} target={{ kind: "message", messageId: message.id }} code={message.oneTimeCode} onCopy={onCopyOneTimeCode} />
               )}

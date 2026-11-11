@@ -69,6 +69,71 @@ fn quick_reply_reconciles_after_sealing_and_acknowledgement() {
 }
 
 #[test]
+fn quick_reply_reconciles_a_confirmed_cancellation_without_requeueing() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let sender_config = config(&directory, "quick-reply-cancel-sender", &vault);
+    let gateway_config = config(&directory, "quick-reply-cancel-gateway", &vault);
+    let sender = unlocked(&sender_config, &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let received = sender
+        .capture_incoming(incoming("hello", "quick-reply-cancel-1"))
+        .unwrap();
+    let input = QuickReplyInput {
+        command_id: CommandId::new(),
+        conversation_id: received.conversation_id,
+        body: "reply".into(),
+        route: route(&gateway_config),
+        expected_transport: Transport::Sms,
+        expected_member_revision: None,
+    };
+    let queued = sender.queue_quick_reply(input.clone()).unwrap();
+    let mut server = Server::default();
+    server.upload(&sender);
+    server.sync(&gateway);
+    gateway.publish_send_cancellation_capability(true).unwrap();
+    server.upload(&gateway);
+    server.sync(&sender);
+    sender.request_send_cancellation(queued.message_id).unwrap();
+    server.upload(&sender);
+    server.sync(&gateway);
+    assert!(gateway.process_pending_send_cancellations().unwrap());
+    server.upload(&gateway);
+    server.sync(&sender);
+    drop(sender);
+    let sender = unlocked(&sender_config, &vault);
+
+    assert_eq!(
+        sender
+            .message_send_cancellation(queued.message_id)
+            .unwrap()
+            .state,
+        SendCancellationState::Confirmed
+    );
+    assert!(sender.message_by_id(queued.message_id).unwrap().is_none());
+    let messages_before = sender.messages(received.conversation_id).unwrap();
+    let outbox_before = sender.pending_outbox().unwrap();
+
+    assert_eq!(
+        sender.reconcile_quick_reply(&input).unwrap(),
+        Some(queued.clone())
+    );
+    assert_eq!(sender.queue_quick_reply(input.clone()).unwrap(), queued);
+    assert_eq!(
+        sender.queue_quick_reply(QuickReplyInput {
+            body: "changed".into(),
+            ..input
+        }),
+        Err(Error::ExistingCommandConflict)
+    );
+    assert_eq!(
+        sender.messages(received.conversation_id).unwrap(),
+        messages_before
+    );
+    assert_eq!(sender.pending_outbox().unwrap(), outbox_before);
+}
+
+#[test]
 fn quick_reply_preserves_a_populated_compose_draft() {
     let directory = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();

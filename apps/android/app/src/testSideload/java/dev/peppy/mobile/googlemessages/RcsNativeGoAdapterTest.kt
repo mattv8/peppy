@@ -280,6 +280,59 @@ class RcsNativeGoAdapterTest {
         return RcsNativeGoAdapter(lease(handle))
     }
 
+    @Test fun `prepare diagnostics distinguish exact refusals from malformed and bridge failures`() {
+        val responses = listOf(
+            "{\"code\":\"busy\"}" to 136L,
+            "{\"code\":\"invalid_request\"}" to 137L,
+            "{\"code\":\"rejected\"}" to 138L,
+            "{\"code\":\"members_changed\"}" to 139L,
+            "{\"code\":\"private-google-error\"}" to 141L,
+            "{\"code\":\"rejected\",\"extra\":\"private-recipient\"}" to 141L,
+        )
+        responses.forEach { (response, reason) ->
+            val handle = FakeHandle().apply { prepareResponse = response }
+            val port = adapter(handle)
+            val records = mutableListOf<String>()
+            dev.peppy.mobile.diagnostics.SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+                assertThrows(RuntimeException::class.java) { port.prepare(COMMAND, 1, ROUTE, null) }
+            }
+            assertEquals(listOf("event=27 session=1 timestamp_ms=10 trace=0 29=$reason"), records)
+            assertTrue(handle.revoked.isEmpty())
+        }
+        val port = adapter(FakeHandle().apply { throwPrepare = true })
+        val records = mutableListOf<String>()
+        dev.peppy.mobile.diagnostics.SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            assertThrows(IllegalStateException::class.java) { port.prepare(COMMAND, 1, ROUTE, null) }
+        }
+        assertEquals(listOf("event=27 session=1 timestamp_ms=10 trace=0 29=142"), records)
+    }
+
+    @Test fun `a decoded preparation records only its fixed success code`() {
+        val port = adapter(FakeHandle())
+        val records = mutableListOf<String>()
+        dev.peppy.mobile.diagnostics.SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            assertEquals(CANDIDATE, port.prepare(COMMAND, 1, ROUTE, null).candidateSnapshotJson)
+        }
+        assertEquals(listOf("event=27 session=1 timestamp_ms=10 trace=0 29=140"), records)
+    }
+
+    @Test fun `carrier binding sources use the canonical Rust and Go wire enum names`() {
+        val sources = listOf(
+            RcsNativeOwnNumberSource.SubscriptionManagerPhoneNumber,
+            RcsNativeOwnNumberSource.TelephonyLine1Number,
+        )
+        val actual = sources.map { source ->
+            val handle = FakeHandle()
+            adapter(handle).prepare(COMMAND, 1, ROUTE.copy(ownNumberSource = source), null)
+            System.getenv("PEPPY_NATIVE_RCS_KOTLIN_FIXTURE_DIR")?.let { path ->
+                val directory = java.io.File(path).also { it.mkdirs() }
+                java.io.File(directory, "${source.name}.json").writeText(handle.prepareRequest)
+            }
+            org.json.JSONObject(handle.prepareRequest).getJSONObject("carrier_binding").getString("own_number_source")
+        }
+        assertEquals(listOf("SubscriptionManagerPhoneNumber", "TelephonyLine1Number"), actual)
+    }
+
     private fun lease(handle: FakeHandle): LinkHandleLease {
         LinkRuntimeTestHooks.engine = object : LinkEngine {
             override val available = true
@@ -293,10 +346,12 @@ class RcsNativeGoAdapterTest {
         var factsResponse = "{\"code\":\"facts_bound\"}"; var commitResponse = "{\"code\":\"accepted\"}"; var revokeResponse = "{\"code\":\"revoked\"}"; var throwCommit = false; var throwRevoke = false
         var prepareCalls = 0; var routeCalls = 0; var facts = ""; var commit = ""; val revoked = mutableListOf<String>(); var onBindTarget: (() -> Unit)? = null
         var interruptedPhase: String? = null
+        var throwPrepare = false
+        var prepareRequest = ""
         var guarded = false; var guardCalls = 0; var guardedTicket = ""; var guardedSnapshot = CANDIDATE
         override fun pair(cookiesJson: ByteArray) = Unit; override fun relink() = Unit; override fun run() = Unit; override fun checkHealth() = 0L; override fun unlink() = Unit; override fun stop() = Unit; override fun close() = Unit; override fun status() = ""
         override fun ownerGeneration() = 1L
-        override fun prepareNativeRcs(requestJson: String) = prepareResponse.also { prepareCalls++ }
+        override fun prepareNativeRcs(requestJson: String) = prepareResponse.also { prepareCalls++; prepareRequest = requestJson; if (throwPrepare) throw IllegalStateException("private-bridge-error") }
         override fun bindNativeRcsRoute(ticketId: String, linkGeneration: Long, sessionGeneration: Long, contextRevision: Long, mappingRevision: Long, observedAtMs: Long) = routeResponse.also { routeCalls++ }
         override fun withNativeRcsTargetClassification(ticketId: String, classifier: NativeRcsTargetClassifier): Boolean {
             guardCalls++; guardedTicket = ticketId

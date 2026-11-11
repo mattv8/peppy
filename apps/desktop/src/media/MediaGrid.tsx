@@ -14,6 +14,9 @@ export type MediaGridProps = {
   renderMessageMeta?(message: GalleryMessage): ReactNode;
   messageRef?(message: GalleryMessage): RefCallback<HTMLElement> | undefined;
   renderCaption?(message: GalleryMessage): ReactNode;
+  renderMessageAction?(message: GalleryMessage): ReactNode;
+  hasMessageAction?(message: GalleryMessage): boolean;
+  isMessagePending?(message: GalleryMessage): boolean;
   messageTitle?(message: GalleryMessage): string | undefined;
   senderRun?(group: MessageGroup): { label?: ReactNode; avatar?: ReactNode; gutter: boolean; ariaName?: string; start: boolean; end: boolean } | undefined;
 };
@@ -127,15 +130,19 @@ function Carousel({ group, onOpen, messageTitle }: { group: MessageGroup; onOpen
   </div>{allHeld && <p id={holdNoteId} data-group-hold-note aria-live="off"><WifiOff size={12} aria-hidden="true" />{groupStatus}</p>}</>;
 }
 
-function Group({ group, onOpen, renderMessageMeta, messageRef, renderCaption, messageTitle, senderRun }: { group: MessageGroup; onOpen: MediaGridProps["onOpen"]; renderMessageMeta?: MediaGridProps["renderMessageMeta"]; messageRef?: MediaGridProps["messageRef"]; renderCaption?: MediaGridProps["renderCaption"]; messageTitle?: MediaGridProps["messageTitle"]; senderRun?: MediaGridProps["senderRun"] }) {
+function Group({ group, onOpen, renderMessageMeta, messageRef, renderCaption, renderMessageAction, isMessagePending, messageTitle, senderRun }: { group: MessageGroup; onOpen: MediaGridProps["onOpen"]; renderMessageMeta?: MediaGridProps["renderMessageMeta"]; messageRef?: MediaGridProps["messageRef"]; renderCaption?: MediaGridProps["renderCaption"]; renderMessageAction?: MediaGridProps["renderMessageAction"]; isMessagePending?: MediaGridProps["isMessagePending"]; messageTitle?: MediaGridProps["messageTitle"]; senderRun?: MediaGridProps["senderRun"] }) {
   const finalMessage = group.messages.at(-1);
   const isGrouped = group.messages.length > 1 || group.attachments.length > 1;
   const onlyAttachment = group.attachments[0];
   const sender = senderRun?.(group);
-  const article = <article data-grouped={isGrouped || undefined} data-sender={group.messages[0].sender} data-sender-address={group.messages[0].senderAddress} aria-label={sender?.ariaName ? `${group.attachments.length} images from ${sender.ariaName}` : `${group.attachments.length} images`} title={group.attachments.length === 1 && onlyAttachment ? messageTitle?.(onlyAttachment.message) : undefined}>
-      {group.attachments.length === 1 && onlyAttachment ? <MediaTile attachment={onlyAttachment.attachment} message={onlyAttachment.message} variant="single" onOpen={() => onOpen(onlyAttachment)} /> : <Carousel group={group} onOpen={onOpen} messageTitle={messageTitle} />}
-      {finalMessage?.body && <p data-group-caption>{renderCaption?.(finalMessage) ?? finalMessage.body}</p>}
-      {finalMessage?.subject && <p data-group-subject>Subject: {finalMessage.subject}</p>}
+  const imageLabel = `${group.attachments.length} image${group.attachments.length === 1 ? "" : "s"}`;
+  const article = <article className="message-bubble" data-media-message-content={group.id} data-grouped={isGrouped || undefined} data-sender={group.messages[0].sender} data-sender-address={group.messages[0].senderAddress} aria-label={sender?.ariaName ? `${imageLabel} from ${sender.ariaName}` : imageLabel} title={group.attachments.length === 1 && onlyAttachment ? messageTitle?.(onlyAttachment.message) : undefined}>
+      {group.messages.map((message) => <span key={message.id} data-media-message-action={message.id}>{renderMessageAction?.(message)}</span>)}
+      {!isMessagePending?.(group.messages[0]) && <>
+        {group.attachments.length === 1 && onlyAttachment ? <MediaTile attachment={onlyAttachment.attachment} message={onlyAttachment.message} variant="single" onOpen={() => onOpen(onlyAttachment)} /> : <Carousel group={group} onOpen={onOpen} messageTitle={messageTitle} />}
+        {finalMessage?.body && <p data-group-caption>{renderCaption?.(finalMessage) ?? finalMessage.body}</p>}
+        {finalMessage?.subject && <p data-group-subject>Subject: {finalMessage.subject}</p>}
+      </>}
     </article>;
   return <div className={`message-row ${group.messages[0].sender}`} data-message-group={group.id} data-media-group={group.id} data-sender={group.messages[0].sender} data-sender-gutter={sender?.gutter ? "" : undefined} data-sender-run-start={sender?.start ? "" : undefined} data-sender-run-end={sender?.end ? "" : undefined}>
     {sender?.label}
@@ -145,5 +152,6 @@ function Group({ group, onOpen, renderMessageMeta, messageRef, renderCaption, me
 }
 
 export function MediaGrid(props: MediaGridProps) {
-  return <section data-media-message-grid>{groupMessages(props.messages).map((group) => <Group key={group.id} group={group} {...props} />)}</section>;
+  const groups = groupMessages(props.messages).flatMap((group) => group.messages.length > 1 && group.messages.some((message) => props.hasMessageAction?.(message)) ? group.messages.map((message) => ({ id: message.id, messages: [message], attachments: message.attachments.map((attachment) => ({ attachment, message })) })) : [group]);
+  return <section data-media-message-grid>{groups.map((group) => <Group key={group.id} group={group} {...props} />)}</section>;
 }

@@ -13,11 +13,13 @@ import (
 )
 
 const (
-	conversationPageSize   = 25
-	conversationPageLimit  = 20
-	conversationItemLimit  = conversationPageSize * conversationPageLimit * 3
-	conversationTimeout    = 30 * time.Second
-	conversationEventLimit = 128
+	conversationPageSize       = 25
+	conversationTotalPageLimit = 60
+	conversationItemLimit      = 1500
+	conversationTimeout        = 30 * time.Second
+	conversationPageTimeout    = 30 * time.Second
+	conversationScanTimeout    = 5 * time.Minute
+	conversationEventLimit     = 128
 )
 
 const (
@@ -259,8 +261,14 @@ func (link *Link) getConversation(ctx context.Context, client *libgm.Client, id 
 }
 
 func scanConversationPages(ctx context.Context, load conversationPageLoader) ([]*gmproto.Conversation, string) {
+	conversations, code, _ := scanConversationPagesWithDiagnostic(ctx, load)
+	return conversations, code
+}
+
+func scanConversationPagesWithDiagnostic(ctx context.Context, load conversationPageLoader) ([]*gmproto.Conversation, string, string) {
 	byID := make(map[string]*gmproto.Conversation)
 	var order []string
+	pages := 0
 	folders := []gmproto.ListConversationsRequest_Folder{
 		gmproto.ListConversationsRequest_INBOX,
 		gmproto.ListConversationsRequest_ARCHIVE,
@@ -269,48 +277,64 @@ func scanConversationPages(ctx context.Context, load conversationPageLoader) ([]
 	for _, folder := range folders {
 		seenCursors := make(map[string]struct{})
 		var cursor *gmproto.Cursor
-		for page := 0; page < conversationPageLimit; page++ {
-			if ctx.Err() != nil {
-				return nil, "conversation_lookup_failed"
+		for {
+			if pages == conversationTotalPageLimit {
+				return nil, "conversation_lookup_incomplete", "page_limit"
 			}
-			response, err := load(ctx, &gmproto.ListConversationsRequest{Count: conversationPageSize, Folder: folder, Cursor: cursor})
-			if err != nil || response == nil || ctx.Err() != nil {
-				return nil, "conversation_lookup_failed"
+			if ctx.Err() != nil {
+				return nil, "conversation_lookup_failed", "cancelled"
+			}
+			pages++
+			pageCtx, cancel := context.WithTimeout(ctx, conversationPageTimeout)
+			response, err := load(pageCtx, &gmproto.ListConversationsRequest{Count: conversationPageSize, Folder: folder, Cursor: cursor})
+			pageErr := pageCtx.Err()
+			cancel()
+			if ctx.Err() != nil {
+				return nil, "conversation_lookup_failed", "cancelled"
+			}
+			if pageErr != nil {
+				return nil, "conversation_lookup_failed", conversationRefreshRPCDiagnostic(folder)
+			}
+			if err != nil || response == nil {
+				return nil, "conversation_lookup_failed", conversationRefreshRPCDiagnostic(folder)
 			}
 			for _, conversation := range response.GetConversations() {
 				cloned := cloneConversation(conversation)
 				if cloned == nil || cloned.GetConversationID() == "" {
-					return nil, "conversation_lookup_incomplete"
+					return nil, "conversation_lookup_incomplete", "missing_id"
 				}
 				id := cloned.GetConversationID()
 				if existing, exists := byID[id]; exists {
 					if !proto.Equal(existing, cloned) {
-						return nil, "conversation_lookup_incomplete"
+						return nil, "conversation_lookup_incomplete", "conflicting_duplicate"
 					}
 					continue
 				}
 				if len(byID) >= conversationItemLimit {
-					return nil, "conversation_lookup_incomplete"
+					return nil, "conversation_lookup_incomplete", "item_limit"
 				}
 				order = append(order, id)
 				byID[id] = cloned
 			}
 			next := response.GetCursor()
 			if next == nil {
+				if len(response.GetCursorBytes()) != 0 {
+					return nil, "conversation_lookup_incomplete", "cursor_invalid"
+				}
 				break
 			}
 			encoded, err := proto.MarshalOptions{Deterministic: true}.Marshal(next)
 			if err != nil || len(encoded) == 0 {
-				return nil, "conversation_lookup_incomplete"
+				return nil, "conversation_lookup_incomplete", "cursor_invalid"
 			}
 			key := string(encoded)
 			if _, repeated := seenCursors[key]; repeated {
-				return nil, "conversation_lookup_incomplete"
+				return nil, "conversation_lookup_incomplete", "cursor_repeated"
 			}
 			seenCursors[key] = struct{}{}
 			cursor, _ = proto.Clone(next).(*gmproto.Cursor)
-			if page == conversationPageLimit-1 {
-				return nil, "conversation_lookup_incomplete"
+			if pages == conversationTotalPageLimit {
+				return nil, "conversation_lookup_incomplete", "page_limit"
 			}
 		}
 	}
@@ -318,7 +342,18 @@ func scanConversationPages(ctx context.Context, load conversationPageLoader) ([]
 	for _, id := range order {
 		conversations = append(conversations, byID[id])
 	}
-	return conversations, ""
+	return conversations, "", ""
+}
+
+func conversationRefreshRPCDiagnostic(folder gmproto.ListConversationsRequest_Folder) string {
+	switch folder {
+	case gmproto.ListConversationsRequest_ARCHIVE:
+		return "rpc_archive"
+	case gmproto.ListConversationsRequest_SPAM_BLOCKED:
+		return "rpc_spam"
+	default:
+		return "rpc_inbox"
+	}
 }
 
 func cloneConversation(conversation *gmproto.Conversation) *gmproto.Conversation {

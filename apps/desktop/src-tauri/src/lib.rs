@@ -94,7 +94,9 @@ use credentials::{
     check_origin_binding, ensure_database_key, load_config, parse_credential, save_config,
     store_credential, HostConfig,
 };
-use dto::{DraftView, Head, HistoryPage, PublicCopyView, SendResultView, Snapshot};
+use dto::{
+    DraftView, Head, HistoryPage, PublicCopyView, SendCancellationView, SendResultView, Snapshot,
+};
 use error::{core_error, BridgeError, BridgeResult};
 use notifications::{NotificationPreferences, NotificationSettings, NotificationView};
 use peppy_client_core::{
@@ -226,6 +228,7 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "open_external_url",
     "save_draft",
     "send_draft",
+    "cancel_send",
     "send_typing",
     "set_typing_sharing",
     "mark_seen",
@@ -256,12 +259,12 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
 
 #[cfg(test)]
 #[test]
-fn typing_commands_are_acl_granted_to_main_and_composer_windows() {
+fn cancellation_command_is_acl_granted_to_main_and_composer_windows() {
     const APP_MANIFEST: &str = include_str!("../build.rs");
     const MAIN_CAPABILITY: &str = include_str!("../capabilities/default.json");
     const COMPOSER_CAPABILITY: &str = include_str!("../capabilities/composer.json");
 
-    for command in ["send_typing", "set_typing_sharing"] {
+    for command in ["send_typing", "set_typing_sharing", "cancel_send"] {
         assert!(
             APP_MANIFEST.contains(&format!("\"{command}\",")),
             "{command} must be declared in the app manifest"
@@ -2979,6 +2982,100 @@ async fn send_draft(
         );
     }
     result
+}
+
+#[tauri::command]
+async fn cancel_send(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    message_id: String,
+) -> BridgeResult<SendCancellationView> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    let message_id = MessageId::from_str(&message_id)
+        .map_err(|_| BridgeError::new("invalid-message", "The message ID is invalid."))?;
+    let conversation = if window.label() == tray::MAIN {
+        None
+    } else {
+        let source = tray::composer_conversation(window.label()).ok_or_else(window_error)?;
+        effective_composer_conversation(
+            &state,
+            window.label(),
+            &session,
+            Some(&source.to_string()),
+        )?
+    };
+    let request_session = session.clone();
+    let result = blocking(move || {
+        request_send_cancellation_scoped(&request_session, message_id, conversation)
+    })
+    .await?;
+    session.request_work();
+    session.notify();
+    Ok(SendCancellationView {
+        state: match result.state {
+            peppy_client_core::SendCancellationState::None => "none",
+            peppy_client_core::SendCancellationState::Requested => "requested",
+            peppy_client_core::SendCancellationState::Confirmed => "confirmed",
+            peppy_client_core::SendCancellationState::TooLate => "too-late",
+            peppy_client_core::SendCancellationState::Unknown => "unknown",
+        },
+        can_cancel: result.can_request,
+        requires_gateway_update: result.requires_gateway_update,
+    })
+}
+
+fn request_send_cancellation_scoped(
+    session: &Session,
+    message_id: MessageId,
+    conversation: Option<ConversationId>,
+) -> BridgeResult<peppy_client_core::SendCancellationView> {
+    if let Some(conversation) = conversation {
+        let belongs = session
+            .client
+            .messages_belong_to_conversation(conversation, &[message_id])
+            .map_err(core_error)?;
+        if !belongs {
+            return Err(BridgeError::new(
+                "window-context",
+                "A composer window can only cancel messages in its own conversation.",
+            ));
+        }
+    }
+    session
+        .client
+        .request_send_cancellation(message_id)
+        .map_err(core_error)
+}
+
+#[cfg(test)]
+mod cancellation_command_tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_session_guard_rejects_a_message_outside_the_composer_window() {
+        let fixture = crate::tests::fixture();
+        let session = crate::tests::open(&fixture, &fixture.binding, &[]);
+
+        let error = request_send_cancellation_scoped(
+            &session,
+            MessageId::new(),
+            Some(ConversationId::new()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "window-context");
+    }
+
+    #[test]
+    fn cancellation_main_window_request_reaches_core() {
+        let fixture = crate::tests::fixture();
+        let session = crate::tests::open(&fixture, &fixture.binding, &[]);
+
+        let error = request_send_cancellation_scoped(&session, MessageId::new(), None).unwrap_err();
+
+        assert_ne!(error.code, "window-context");
+    }
 }
 
 #[tauri::command]
@@ -6766,6 +6863,7 @@ pub fn run() {
         resolve_draft_conflict,
         acknowledge_draft_notice,
         send_draft,
+        cancel_send,
         live_typing::send_typing,
         live_typing::set_typing_sharing,
         mark_seen,

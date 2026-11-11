@@ -408,6 +408,21 @@ class GoogleMessagesLinkServiceTest {
         controller.destroy()
     }
 
+    @Test fun `diagnostic callbacks never schedule typing readiness or notification work`() {
+        val executor = QueueExecutor()
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            notificationExecutor = executor, typingExecutor = executor,
+            bootstrapExecutor = executor, eligibilityExecutor = executor,
+        )
+        installEngine(StatusHandle(UNLINKED_STATUS))
+        val controller = Robolectric.buildService(GoogleMessagesLinkService::class.java).create()
+        listOf("native_prepare", "conversation_refresh", "conversation_scan", "conversation_rpc").forEach { kind ->
+            GoogleMessagesLinkService.onLinkEvent(kind, "fixed_diagnostic")
+        }
+        assertEquals(0, executor.size)
+        controller.destroy()
+    }
+
     @Test
     fun `link events record refreshed capability facts while Run blocks`() {
         val handle = MutableStatusRunHandle()

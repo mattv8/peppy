@@ -10,13 +10,26 @@ import (
 )
 
 func TestConversationFacadeRequiresVerification(t *testing.T) {
-	link, _ := openSafetyLink(t, nil)
+	link, host := openSafetyLink(t, nil)
 	if result := link.RefreshConversationIndex(); result != `{"code":"unavailable"}` {
 		t.Fatalf("RefreshConversationIndex result = %s", result)
 	}
+	host.awaitEvent(t, "conversation_refresh", "verification_unavailable")
 	for _, result := range []string{link.GetConversation("synthetic-conversation"), link.ResolveExistingConversation("synthetic-target")} {
 		if !strings.Contains(result, `"code":"m2_verification_required"`) {
 			t.Fatalf("result = %s", result)
+		}
+	}
+}
+
+func TestConversationRefreshDiagnosticsUseClosedCodes(t *testing.T) {
+	for _, code := range []string{
+		"verification_unavailable", "runtime_unavailable", "pending_events", "rpc_inbox", "rpc_archive", "rpc_spam",
+		"missing_id", "conflicting_duplicate", "cursor_invalid", "cursor_repeated", "page_limit", "item_limit",
+		"publication_stale", "refreshed", "cancelled",
+	} {
+		if !isEventCode("conversation_refresh", code) {
+			t.Fatalf("conversation refresh diagnostic %q is not listed", code)
 		}
 	}
 }

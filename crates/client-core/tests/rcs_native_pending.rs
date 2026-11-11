@@ -125,7 +125,11 @@ impl Fixture {
     }
 
     fn queue(&mut self) -> CommandId {
-        let command_id = self
+        self.queue_with_message().command_id
+    }
+
+    fn queue_with_message(&mut self) -> QueuedSend {
+        let queued = self
             .sender
             .queue_send(
                 OutgoingSms {
@@ -137,11 +141,10 @@ impl Fixture {
                     gateway_device_id: self.gateway_config.device_id,
                 },
             )
-            .unwrap()
-            .command_id;
+            .unwrap();
         self.server.upload(&self.sender);
         self.server.sync(&self.gateway);
-        command_id
+        queued
     }
 
     fn queue_carrier_for(&mut self, conversation_id: ConversationId, peer: &str) -> CommandId {
@@ -407,6 +410,32 @@ fn native_candidates_prioritize_explicit_commands_within_the_combined_page_cap()
     assert_eq!(pending.len(), 100);
     assert_eq!(&pending[..96], explicit.as_slice());
     assert_eq!(&pending[96..], &carrier[..4]);
+}
+
+#[test]
+fn requested_cancellations_do_not_starve_later_native_candidates() {
+    let mut fixture = Fixture::new();
+    fixture
+        .gateway
+        .publish_send_cancellation_capability(true)
+        .unwrap();
+    fixture.server.upload(&fixture.gateway);
+    fixture.server.sync(&fixture.sender);
+
+    let cancelled = (0..100)
+        .map(|_| fixture.queue_with_message())
+        .collect::<Vec<_>>();
+    for queued in cancelled {
+        fixture
+            .sender
+            .request_send_cancellation(queued.message_id)
+            .unwrap();
+    }
+    fixture.server.upload(&fixture.sender);
+    fixture.server.sync(&fixture.gateway);
+
+    let valid = fixture.queue();
+    assert_eq!(pending_ids(&fixture.gateway), vec![valid]);
 }
 
 #[test]

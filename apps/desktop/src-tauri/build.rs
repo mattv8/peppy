@@ -28,6 +28,7 @@ const COMMANDS: &[&str] = &[
     "resolve_draft_conflict",
     "acknowledge_draft_notice",
     "send_draft",
+    "cancel_send",
     "send_typing",
     "set_typing_sharing",
     "mark_seen",

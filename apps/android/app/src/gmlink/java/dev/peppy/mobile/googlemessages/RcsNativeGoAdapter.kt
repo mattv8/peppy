@@ -2,6 +2,7 @@ package dev.peppy.mobile.googlemessages
 
 import android.util.JsonReader
 import android.util.JsonToken
+import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
 import java.io.StringReader
 import java.util.UUID
 import org.json.JSONObject
@@ -20,9 +21,19 @@ internal class RcsNativeGoAdapter(private val lease: LinkHandleLease) : RcsNativ
             .put("carrier_binding", route.carrierBindingJson())
             .apply { expectedMemberDigest?.let { put("expected_member_digest", it) } }
             .toString()
-        val response = scoped { it.prepareNativeRcs(request) }
-        // Go refuses a group prepare before any ticket exists, so there is nothing to revoke.
-        if (membersChangedOnly(response)) throw RcsNativeMembersChanged()
+        val response = try {
+            scoped { it.prepareNativeRcs(request) }
+        } catch (failure: Throwable) {
+            preserveInterruption(failure)
+            recordGoogleMessagesLinkEvent("prepare_reply", "bridge_failed", 0L)
+            throw failure
+        }
+        prepareRefusalCode(response)?.let { code ->
+            recordGoogleMessagesLinkEvent("prepare_reply", code, 0L)
+            // Exact one-field refusals carry no ticket that could be revoked.
+            if (code == "members_changed") throw RcsNativeMembersChanged()
+            throw NativeRcsRefusal()
+        }
         var ticketForRevocation: String? = null
         // A response rejected before decoding has no trusted ticket id. Go has no ticket-less revoke, so that slot expires by its 30 s TTL.
         return try {
@@ -35,9 +46,12 @@ internal class RcsNativeGoAdapter(private val lease: LinkHandleLease) : RcsNativ
             if (parsed["code"] != "prepared") throw NativeRcsRefusal()
             val ticket = parsed.string("ticket_id") ?: throw NativeRcsRefusal()
             val candidate = parsed.string("candidate_snapshot")?.takeIf(::withinCandidateCap) ?: throw NativeRcsRefusal()
-            RcsNativePrepared(ticket, candidate, parsed.string("run_incarnation") ?: throw NativeRcsRefusal(), parsed.uint64("run_generation") ?: throw NativeRcsRefusal(), parsed.uint64("stream_epoch") ?: throw NativeRcsRefusal(), parsed.string("pairing_evidence_id") ?: throw NativeRcsRefusal())
+            RcsNativePrepared(ticket, candidate, parsed.string("run_incarnation") ?: throw NativeRcsRefusal(), parsed.uint64("run_generation") ?: throw NativeRcsRefusal(), parsed.uint64("stream_epoch") ?: throw NativeRcsRefusal(), parsed.string("pairing_evidence_id") ?: throw NativeRcsRefusal()).also {
+                recordGoogleMessagesLinkEvent("prepare_reply", "prepared", 0L)
+            }
         } catch (failure: Throwable) {
             preserveInterruption(failure)
+            recordGoogleMessagesLinkEvent("prepare_reply", "decode_failed", 0L)
             ticketForRevocation?.let(::revoke)
             throw failure
         }
@@ -105,9 +119,10 @@ internal class RcsNativeGoAdapter(private val lease: LinkHandleLease) : RcsNativ
         throw NativeRcsRevocationFailure()
     }
 
-    /** Go's only roster refusal at prepare is the exact one-field `{"code":"members_changed"}` reply. */
-    private fun membersChangedOnly(response: String): Boolean =
-        runCatching { parse(response, SMALL_CAP, setOf("code"))["code"] }.getOrNull() == "members_changed"
+    /** Only exact one-field replies from the closed Go refusal vocabulary are classified. */
+    private fun prepareRefusalCode(response: String): String? =
+        runCatching { parse(response, SMALL_CAP, setOf("code"))["code"] }.getOrNull()
+            ?.takeIf { it in setOf("busy", "invalid_request", "rejected", "members_changed") }
 
     private fun observation(response: String, code: String): String {
         val parsed = strictParse(response, OBSERVATION_CAP, setOf("code", "observation"))
@@ -147,8 +162,8 @@ internal fun RcsNativeRouteEvidence.carrierBindingJson(): JSONObject = JSONObjec
     .put("android_subscription_id", subscriptionId)
     .put("own_number_raw", ownNumberRaw)
     .put("own_number_source", when (ownNumberSource) {
-        RcsNativeOwnNumberSource.SubscriptionManagerPhoneNumber -> "subscription_manager_phone_number"
-        RcsNativeOwnNumberSource.TelephonyLine1Number -> "telephony_line1_number"
+        RcsNativeOwnNumberSource.SubscriptionManagerPhoneNumber -> "SubscriptionManagerPhoneNumber"
+        RcsNativeOwnNumberSource.TelephonyLine1Number -> "TelephonyLine1Number"
     })
     .put("route_observed_at_ms", observedAtMs)
 

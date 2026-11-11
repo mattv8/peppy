@@ -7,6 +7,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowLog
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -42,6 +43,56 @@ class GoogleMessagesLinkDiagnosticsTest {
         "direct_send" to "target_refused", "direct_send" to "proof_refused", "direct_send" to "begin_refused",
         "direct_send" to "commit_rejected", "direct_send" to "outcome_unknown", "direct_send" to "refused",
         "direct_send" to "proof_window_missed",
+        "direct_send" to "route_unavailable", "direct_send" to "owner_not_current",
+        "direct_send" to "prepare_invalid", "direct_send" to "lease_refused",
+        "direct_send" to "target_mapping_refused", "direct_send" to "facts_refused",
+        "direct_send" to "route_recheck_refused", "direct_send" to "prepare_failed",
+        "direct_send" to "target_binding_failed", "direct_send" to "facts_failed",
+        "direct_send" to "group_context_failed", "direct_send" to "lease_failed",
+        "direct_send" to "context_failed", "direct_send" to "route_binding_failed",
+        "direct_send" to "classification_failed", "direct_send" to "mapping_failed",
+        "direct_send" to "route_recheck_failed",
+        "group_send" to "group_not_proved", "group_send" to "prepare_invalid",
+        "group_send" to "facts_refused", "group_send" to "route_recheck_refused",
+        "group_send" to "prepare_failed", "group_send" to "target_binding_failed",
+        "group_send" to "facts_failed", "group_send" to "lease_failed",
+        "group_send" to "context_failed", "group_send" to "route_binding_failed",
+        "group_send" to "classification_failed", "group_send" to "mapping_failed",
+        "group_send" to "route_recheck_failed",
+        "native_prepare" to "invalid_request", "native_prepare" to "busy",
+        "native_prepare" to "link_unavailable", "native_prepare" to "send_unverified",
+        "native_prepare" to "run_stale", "native_prepare" to "index_incomplete",
+        "native_prepare" to "index_generation", "native_prepare" to "index_epoch",
+        "native_prepare" to "pending_events", "native_prepare" to "settings_missing",
+        "native_prepare" to "settings_stale", "native_prepare" to "run_evidence_invalid",
+        "native_prepare" to "pairing_evidence_invalid", "native_prepare" to "sim_unavailable",
+        "native_prepare" to "candidate_too_large", "native_prepare" to "result_too_large",
+        "native_prepare" to "prepared",
+        "prepare_reply" to "busy", "prepare_reply" to "invalid_request",
+        "prepare_reply" to "rejected", "prepare_reply" to "members_changed",
+        "prepare_reply" to "prepared", "prepare_reply" to "decode_failed",
+        "prepare_reply" to "bridge_failed",
+        "readiness" to "requested", "readiness" to "bootstrap_unavailable",
+        "readiness" to "refresh_ok", "readiness" to "refresh_pending",
+        "readiness" to "refresh_other", "readiness" to "lifecycle_refused",
+        "conversation_refresh" to "verification_unavailable", "conversation_refresh" to "runtime_unavailable",
+        "conversation_refresh" to "pending_events", "conversation_refresh" to "rpc_inbox",
+        "conversation_refresh" to "rpc_archive", "conversation_refresh" to "rpc_spam",
+        "conversation_refresh" to "missing_id", "conversation_refresh" to "conflicting_duplicate",
+        "conversation_refresh" to "cursor_invalid", "conversation_refresh" to "cursor_repeated",
+        "conversation_refresh" to "page_limit", "conversation_refresh" to "item_limit",
+        "conversation_refresh" to "publication_stale", "conversation_refresh" to "refreshed",
+        "conversation_refresh" to "cancelled",
+        "link_lifecycle" to "database_failed", "link_lifecycle" to "keys_unavailable",
+        "link_lifecycle" to "invalid_request", "link_lifecycle" to "other_failed",
+        "conversation_scan" to "inbox_start", "conversation_scan" to "archive_start", "conversation_scan" to "spam_start",
+        "conversation_scan" to "inbox_ok", "conversation_scan" to "archive_ok", "conversation_scan" to "spam_ok",
+        "conversation_scan" to "inbox_error", "conversation_scan" to "archive_error", "conversation_scan" to "spam_error",
+        "conversation_rpc" to "list_annotation", "conversation_rpc" to "list_normal",
+        "conversation_rpc" to "list_http_accepted", "conversation_rpc" to "list_http_failed",
+        "conversation_rpc" to "list_unencrypted_ignored", "conversation_rpc" to "list_waiter_matched",
+        "conversation_rpc" to "list_waiter_unmatched", "conversation_rpc" to "list_session_missing",
+        "conversation_rpc" to "rpc_decrypt_failed",
     )
 
     @Test fun everyPairRecordsOnlyItsStableNumericReason() {
@@ -49,7 +100,7 @@ class GoogleMessagesLinkDiagnosticsTest {
         SyncDiagnostics.withTestConfiguration(true, { 10L }, { error("CPU unused") }, records::add) {
             stablePairs.forEach { (kind, code) -> recordGoogleMessagesLinkEvent(kind, code, Long.MAX_VALUE) }
         }
-		assertEquals(88, records.size)
+		assertEquals(185, records.size)
         records.forEachIndexed { index, record ->
             assertEquals("event=27 session=1 timestamp_ms=10 trace=0 29=${index + 1}", record)
         }
@@ -84,6 +135,23 @@ class GoogleMessagesLinkDiagnosticsTest {
         SyncDiagnostics.withTestConfiguration(false, { error("clock unused") }, { error("CPU unused") }, { error("sink unused") }) {
             recordGoogleMessagesLinkEvent("link", "pair_ok", 1L)
         }
+    }
+
+    @Test fun enabledLogcatMirrorContainsOnlyTheFixedNumericReason() {
+        ShadowLog.clear()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, {}) {
+            recordGoogleMessagesLinkEvent("direct_send", "prepare_failed", Long.MAX_VALUE)
+            recordGoogleMessagesLinkEvent("private-recipient", "private-error", Long.MIN_VALUE)
+        }
+        assertEquals(listOf("reason=96", "reason=0"), ShadowLog.getLogsForTag("PeppyRcsDiagnostics").map { it.msg })
+    }
+
+    @Test fun disabledDiagnosticsNeverMirrorToLogcat() {
+        ShadowLog.clear()
+        SyncDiagnostics.withTestConfiguration(false, { error("clock unused") }, { 0L }, {}) {
+            recordGoogleMessagesLinkEvent("direct_send", "prepare_failed", 1L)
+        }
+        assertTrue(ShadowLog.getLogsForTag("PeppyRcsDiagnostics").isEmpty())
     }
 
     @Test fun throwingSinkCannotEscapeTheRecorder() {

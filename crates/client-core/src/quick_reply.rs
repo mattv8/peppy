@@ -1,7 +1,7 @@
 use crate::{
     Client, CommandId, Connection, ConversationId, DeviceId, Error, GatewayRoute, MessageId,
-    MessagePayload, QueuedSend, Transport, classify_outgoing_transport, decode, message_from_row,
-    notifications, parse, queue_message, rcs_group, require_subscription, validate_outgoing,
+    MessagePayload, QueuedSend, Transport, classify_outgoing_transport, decode, notifications,
+    parse, queue_message, rcs_group, require_subscription, validate_outgoing,
     validate_outgoing_mms_content,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior};
@@ -189,17 +189,15 @@ fn existing_queued_send(
     let (message_id, gateway_device_id, envelope_id, route) =
         existing.ok_or(Error::ExistingCommandConflict)?;
     let message_id: MessageId = parse(&message_id)?;
-    let payload = conn
+    let payload: String = conn
         .query_row(
-            crate::MESSAGE_BY_ID_SELECT,
+            "SELECT payload FROM messages WHERE id=?",
             [message_id.to_string()],
-            crate::message_row,
+            |row| row.get(0),
         )
         .optional()?
-        .map(|row| message_from_row(conn, row))
-        .transpose()?
-        .ok_or(Error::Database)?
-        .payload;
+        .ok_or(Error::Database)?;
+    let payload: MessagePayload = crate::decode(payload.as_bytes())?;
     let expected_gateway = match &input.route {
         GatewayRoute::Carrier {
             gateway_device_id, ..
