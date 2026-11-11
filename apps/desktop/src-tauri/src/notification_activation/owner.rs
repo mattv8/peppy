@@ -212,6 +212,9 @@ type DeliveredNotification = (
 trait Backend {
     type Item;
     fn ensure_authorized(&mut self) -> Result<(), PostError>;
+    fn ensure_replacement_authorized(&mut self) -> Result<(), PostError> {
+        self.ensure_authorized()
+    }
     #[allow(clippy::too_many_arguments)]
     fn post(
         &mut self,
@@ -261,6 +264,18 @@ impl Backend for platform::Backend {
     fn ensure_authorized(&mut self) -> Result<(), PostError> {
         platform::Backend::ensure_authorized(self)
     }
+    fn ensure_replacement_authorized(&mut self) -> Result<(), PostError> {
+        // A replacement follows an authorized post. Skip the blocking settings
+        // read on the owner thread; revocation still fails the native add.
+        #[cfg(target_os = "macos")]
+        {
+            Ok(())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.ensure_authorized()
+        }
+    }
     fn remove(&mut self, item: &Self::Item) -> bool {
         self.remove(item)
     }
@@ -293,10 +308,23 @@ impl<B: Backend> Registry<B> {
     }
 
     fn post_versioned(&mut self, post: Post, version: PopupVersion) -> Result<(), PostError> {
+        self.post_versioned_with_authorization(post, version, false)
+    }
+
+    fn post_versioned_with_authorization(
+        &mut self,
+        post: Post,
+        version: PopupVersion,
+        replacement: bool,
+    ) -> Result<(), PostError> {
         if post.cancel.is_cancelled() {
             return Err(PostError::Failed);
         }
-        self.backend.ensure_authorized()?;
+        if replacement {
+            self.backend.ensure_replacement_authorized()?;
+        } else {
+            self.backend.ensure_authorized()?;
+        }
         if self.entries.len() == CAPACITY {
             if !self.backend.remove(&self.entries.front().unwrap().handle) {
                 return Err(PostError::Failed);
@@ -364,7 +392,7 @@ impl<B: Backend> Registry<B> {
             .entries
             .remove(index)
             .expect("replacement entry exists");
-        if let Err(error) = self.post_versioned(post, replacement) {
+        if let Err(error) = self.post_versioned_with_authorization(post, replacement, true) {
             self.entries.insert(index, old);
             return Err(error);
         }
@@ -643,6 +671,9 @@ mod tests {
         lease_paths: Arc<Mutex<Vec<std::path::PathBuf>>>,
         callback_leases: Option<Arc<Mutex<HashMap<String, crate::notification_icon::Lease>>>>,
         posted_signals: Option<SyncSender<Signal>>,
+        full_authorization_checks: usize,
+        replacement_authorization_checks: usize,
+        replacement_authorization_error: Option<PostError>,
     }
     struct TestItem {
         id: String,
@@ -657,7 +688,12 @@ mod tests {
     impl Backend for TestBackend {
         type Item = TestItem;
         fn ensure_authorized(&mut self) -> Result<(), PostError> {
+            self.full_authorization_checks += 1;
             Ok(())
+        }
+        fn ensure_replacement_authorized(&mut self) -> Result<(), PostError> {
+            self.replacement_authorization_checks += 1;
+            self.replacement_authorization_error.map_or(Ok(()), Err)
         }
         #[allow(clippy::too_many_arguments)]
         fn post(
@@ -943,6 +979,92 @@ mod tests {
         let (handler, action) = delivered_actions[0].4.clone().unwrap();
         handler(action);
         assert_eq!(delivered.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn replacement_uses_replacement_authorization_check() {
+        let mut registry = registry();
+        let initial = PopupVersion {
+            request_id: "message".into(),
+            presentation_generation: 1,
+        };
+        registry.post_versioned(post(1), initial.clone()).unwrap();
+
+        registry
+            .replace(
+                &initial,
+                post(1),
+                PopupVersion {
+                    request_id: "message".into(),
+                    presentation_generation: 2,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(registry.backend.full_authorization_checks, 1);
+        assert_eq!(registry.backend.replacement_authorization_checks, 1);
+    }
+
+    #[test]
+    fn initial_post_uses_full_authorization_check() {
+        let mut registry = registry();
+
+        registry.post(post(1)).unwrap();
+
+        assert_eq!(registry.backend.full_authorization_checks, 1);
+        assert_eq!(registry.backend.replacement_authorization_checks, 0);
+    }
+
+    #[test]
+    fn replacement_not_allowed_restores_old_entry() {
+        let mut registry = registry();
+        let initial = PopupVersion {
+            request_id: "message".into(),
+            presentation_generation: 1,
+        };
+        registry.post_versioned(post(1), initial.clone()).unwrap();
+        registry.backend.replacement_authorization_error = Some(PostError::NotAllowed);
+
+        assert_eq!(
+            registry.replace(
+                &initial,
+                post(1),
+                PopupVersion {
+                    request_id: "message".into(),
+                    presentation_generation: 2,
+                },
+            ),
+            Err(PostError::NotAllowed)
+        );
+        assert_eq!(registry.entries.len(), 1);
+        assert_eq!(registry.entries[0].version, initial);
+    }
+
+    #[test]
+    fn replacement_native_not_allowed_restores_old_entry_and_callback() {
+        let mut registry = registry();
+        registry.backend.post_outcomes = VecDeque::from([Ok(()), Err(PostError::NotAllowed)]);
+        let initial = PopupVersion {
+            request_id: "message".into(),
+            presentation_generation: 1,
+        };
+        registry.post_versioned(post(1), initial.clone()).unwrap();
+
+        assert_eq!(
+            registry.replace(
+                &initial,
+                post(1),
+                PopupVersion {
+                    request_id: "message".into(),
+                    presentation_generation: 2,
+                },
+            ),
+            Err(PostError::NotAllowed)
+        );
+        assert_eq!(registry.entries.len(), 1);
+        assert_eq!(registry.entries[0].version, initial);
+        assert_eq!(registry.entries[0].signal.event.load(Ordering::Acquire), 0);
+        assert!(registry.backend.callbacks.contains_key("message"));
     }
 
     #[test]
