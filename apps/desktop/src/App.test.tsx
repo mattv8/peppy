@@ -3046,7 +3046,7 @@ describe("new-recipient drafts", () => {
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Draft not saved. Your text is kept.",
+      "Error saving draft.",
     );
     expect(document.querySelector('[data-recipient-id="+12025550100"]')).toBeInTheDocument();
 
@@ -3355,18 +3355,46 @@ describe("draft durability", () => {
   it("shows a quiet retry notice when saving the active draft fails", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
     host.failSaves = { code: "io", message: "Disk full." };
 
     type("kept locally");
 
     const notice = await screen.findByRole("alert");
     expect(notice).toHaveAttribute("data-draft-notice");
+    expect(notice).toHaveTextContent("Error saving draft.");
+    expect(notice.closest("#composer-inline-status")).not.toBeNull();
+    expect(within(document.getElementById("composer-inline-status")!).getAllByText("Error saving draft.")).toHaveLength(1);
+    expect(document.getElementById("composer-status-row")).toHaveAttribute("hidden");
     expect(within(notice).getByRole("button", { name: "Retry" })).toBeEnabled();
+  });
+
+  it("keeps a distinct draft sync failure alongside a save-failed notice", async () => {
+    host.drafts.set("aurora", {
+      id: "draft-aurora",
+      conversationId: "aurora",
+      text: "stored",
+      recipientIds: [],
+      attachmentIds: [],
+      revision: "1",
+      sync: { state: "failed", expiresAt: null, conflicts: [], notice: null, sendRequiresConnection: false },
+    });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    host.failSaves = { code: "io", message: "Disk full." };
+
+    type("kept locally");
+
+    const inlineStatus = document.getElementById("composer-inline-status")!;
+    expect(await within(inlineStatus).findByText("Error saving draft.")).toBeInTheDocument();
+    expect(within(inlineStatus).getAllByText("Error saving draft.")).toHaveLength(1);
+    expect(within(inlineStatus).getByText("Draft sync failed.")).toBeInTheDocument();
   });
 
   it("keeps ordinary autosaves quiet with no saved notice", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
+    expect(document.getElementById("composer-inline-status")).toBeEmptyDOMElement();
 
     type("first quiet edit");
     await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("first quiet edit"));
@@ -3530,7 +3558,7 @@ describe("draft durability", () => {
     type("latest text");
     const saveFailure = await screen.findByRole("alert");
     expect(saveFailure).toHaveAttribute("data-draft-notice", "save-failed");
-    expect(saveFailure).toHaveTextContent("Draft not saved. Your text is kept.");
+    expect(saveFailure).toHaveTextContent("Error saving draft.");
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     expect(bridge.send_draft).not.toHaveBeenCalled();
     expect(screen.getByRole("alert")).toHaveAttribute("data-draft-notice", "save-failed");
@@ -4024,7 +4052,7 @@ describe("draft durability", () => {
 
     const failure = await screen.findByRole("alert");
     expect(failure).toHaveAttribute("data-draft-notice", "save-failed");
-    expect(failure).toHaveTextContent("Draft not saved. Your text is kept.");
+    expect(failure).toHaveTextContent("Error saving draft.");
     expect(within(failure).getByRole("button", { name: "Retry" })).toBeEnabled();
     expect(message()).toHaveValue("mine");
     expect(host.drafts.get("aurora")).toMatchObject({ text: "other window", simId: "sim-1" });
@@ -4328,7 +4356,7 @@ describe("draft durability", () => {
     await waitFor(() => expect(bridge.acknowledge_lifecycle).toHaveBeenCalledWith("close-with-river-failure", false));
     expect(document.querySelector("[data-header-title]")).toHaveTextContent("River");
     const draftFailure = document.querySelector<HTMLElement>("[data-draft-notice='save-failed']")!;
-    expect(draftFailure).toHaveTextContent("Draft not saved. Your text is kept.");
+    expect(draftFailure).toHaveTextContent("Error saving draft.");
     expect(within(draftFailure).getByRole("button", { name: "Retry" })).toBeEnabled();
   });
 
@@ -4540,8 +4568,12 @@ describe("composer window", () => {
     });
     expect(pill).toHaveAttribute("title", "Phone: choose this phone and SIM in the main window.");
     expect(pill).toHaveAttribute("data-gateway-availability", "connected");
-    expect(pill).toHaveTextContent("SIM 2");
-    expect(pill).toHaveTextContent("Online");
+    expect(pill.querySelector("[data-head-route-sim]")).toHaveTextContent("SIM 2");
+    expect(pill.querySelector("[data-head-route-sim]")).toHaveAttribute("data-route-badge", "sim");
+    expect(pill.querySelector("[data-head-route-state]")).toHaveTextContent("Online");
+    expect(pill.querySelector("[data-head-route-state]")).toHaveAttribute("data-route-badge", "status");
+    expect(pill.querySelector("[data-head-route-state]")).toHaveAttribute("data-gateway-availability", "connected");
+    expect(pill.querySelector("[data-head-route-separator]")).not.toBeInTheDocument();
     expect(pill.querySelector("[aria-hidden]")).not.toBeInTheDocument();
     expect(document.getElementById("head-panel-route-description")).toHaveTextContent("Phone, SIM 2. Phone and SIM are selected in the main window.");
     expect(screen.queryByRole("combobox", { name: "Phone" })).not.toBeInTheDocument();
@@ -4633,7 +4665,8 @@ describe("composer window", () => {
       if (routeCase.draft) host.drafts.set("aurora", routeCase.draft);
       openComposerWindow("aurora", true);
       render(<App />);
-      await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent(routeCase.label.replace(" · ", "·")));
+      await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent(routeCase.label.replace(" · ", "")));
+      expect(document.querySelector("[data-head-route-separator]")).not.toBeInTheDocument();
       expect(screen.queryByRole("combobox", { name: "Phone" })).not.toBeInTheDocument();
     }
   });

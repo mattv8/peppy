@@ -1415,6 +1415,7 @@ export function Composer({
   onRemoveAttachment,
   unavailableReason,
   gatewaySlot,
+  inlineStatusSlot,
   bannerSlot,
   statusSlot,
   statusActive = false,
@@ -1446,6 +1447,7 @@ export function Composer({
   onRemoveAttachment?(id: string): void;
   unavailableReason?: string;
   gatewaySlot?: ReactNode;
+  inlineStatusSlot?: ReactNode;
   bannerSlot?: ReactNode;
   statusSlot?: ReactNode;
   statusActive?: boolean;
@@ -1482,7 +1484,7 @@ export function Composer({
   const hasContent = Boolean(draft.trim()) || attachments.length > 0;
   const canSend = sendSupported && !readOnly && hasContent;
   const counter = !attachments.length ? smsCounter(draft) : null;
-  const fallbackShown = !sendSupported && !gatewaySlot && !statusSlot;
+  const fallbackShown = !sendSupported && !gatewaySlot && !inlineStatusSlot && !statusSlot;
   if (logicalDraftIdentity !== previousDraftIdentityRef.current) {
     previousDraftIdentityRef.current = logicalDraftIdentity;
     previousDraftRef.current = draft;
@@ -1651,6 +1653,7 @@ export function Composer({
           <Paperclip size={16} aria-hidden />
         </button>
         {gatewaySlot}
+        {inlineStatusSlot && <div id="composer-inline-status">{inlineStatusSlot}</div>}
         <div id="composer-typing-slot" className="composer-toolbar-spacer">{typingSlot}</div>
         {!hideSmsCounter && counter && (
           <span id="sms-counter" aria-live="polite" aria-label="SMS character count">

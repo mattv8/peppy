@@ -194,7 +194,7 @@ import {
   type DraftNoticeEvent,
 } from "./drafts/DraftStore";
 import { DraftNotice } from "./drafts/DraftNotice";
-import { DraftSyncStatus, draftSyncNeedsAttention, useDraftExpiryClock } from "./drafts/DraftSyncStatus";
+import { DraftSyncStatus } from "./drafts/DraftSyncStatus";
 import type { DraftResolutionResult } from "./drafts/DraftConflictReviewDialog";
 import { selectDraftNotice, type DraftNoticeCandidate } from "./drafts/draftNoticeModel";
 import { MmsSizeHelp } from "./drafts/MmsSizeHelp";
@@ -523,7 +523,7 @@ function availabilityLabel(gateway: GatewayView, accountReadOnly = false): strin
   switch (gatewayAvailability(gateway)) {
     case "delayed": {
       const seen = gateway.lastSeenAgeSeconds !== undefined ? `Last seen ${formatAge(gateway.lastSeenAgeSeconds)} ago` : "Last seen";
-      return accountReadOnly ? `${peppyCopy.account_send_paused_status} · ${seen}` : seen;
+      return accountReadOnly ? `${peppyCopy.account_send_paused_status}, ${seen}` : seen;
     }
     case "offline": return "Not responding";
     case "never_connected": return "Never connected";
@@ -710,11 +710,11 @@ function headRoutePresentation(route: RouteChoice, gateways: GatewayView[], acco
   let state: string;
   switch (gatewayAvailability(route.gateway)) {
     case "connected": state = "Online"; break;
-    case "delayed": state = accountReadOnly ? `${peppyCopy.account_send_paused_status} · ${seenText(route.gateway)}` : seenText(route.gateway); break;
+    case "delayed": state = accountReadOnly ? `${peppyCopy.account_send_paused_status}, ${seenText(route.gateway)}` : seenText(route.gateway); break;
     case "offline": state = "Not responding"; break;
     default: state = availabilityLabel(route.gateway, accountReadOnly);
   }
-  return { sim: simLabel, state, label: `${simLabel} · ${state}` };
+  return { sim: simLabel, state, label: `${simLabel}, ${state}` };
 }
 
 function HeadRoutePill({ content, gateways, accountReadOnly = false }: { content: DraftContent; gateways: GatewayView[]; accountReadOnly?: boolean }) {
@@ -727,7 +727,7 @@ function HeadRoutePill({ content, gateways, accountReadOnly = false }: { content
     ? `${route.gateway.name}, ${sim ?? state}. Phone and SIM are selected in the main window.`
     : "Choose a phone and SIM in the main window.";
   return <section id="head-panel-route-section" aria-label="Phone and SIM" aria-describedby="head-panel-route-description" data-route-state={route.kind === "route" ? gatewayAvailability(route.gateway) : route.kind}>
-    <span id="head-panel-route" className="head-panel-route" title={tooltip} data-gateway-availability={route.kind === "route" ? gatewayAvailability(route.gateway) : undefined}>{sim && <span data-head-route-sim>{sim}</span>}{sim && <span data-head-route-separator>·</span>}<span data-head-route-state>{state}</span></span>
+    <span id="head-panel-route" className="head-panel-route" title={tooltip} data-gateway-availability={route.kind === "route" ? gatewayAvailability(route.gateway) : undefined}>{sim && <span data-head-route-sim data-route-badge="sim">{sim}</span>}<span data-head-route-state data-route-badge="status" data-gateway-availability={route.kind === "route" ? gatewayAvailability(route.gateway) : undefined}>{state}</span></span>
     <span id="head-panel-route-description" className="visually-hidden">{description}</span>
     <span className="visually-hidden" role="status" aria-live="polite">{label}</span>
   </section>;
@@ -4833,7 +4833,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const accountIdentityKey = snapshot ? `${snapshot.connection.origin ?? ""}|${snapshot.sessionScopeId ?? ""}` : null;
   const accountNotice = useAccountNotice(accountIdentityKey);
   const [ribbonOpenFailed, setRibbonOpenFailed] = useState(false);
-  const draftStatusNow = useDraftExpiryClock(slot?.id ? draftViews[slot.id]?.sync?.expiresAt : undefined);
 
   /* Locked snapshots carry no conversations, contacts, or notifications, so nothing else renders. */
   if (!browserHost && (lockCode === "app-locked" || lockCode === "secure-store-unavailable" || lockCode === "app-lock-checking"))
@@ -5047,6 +5046,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setGroupNotice({ kind: "create-unconfirmed", key: slotKey });
   };
   const composerGroupNotice = groupNotice && groupNotice.key === slotKey ? groupNotice : null;
+  const hasGroupStatusNotices = Boolean(
+    (sending && isNewConversation && content.recipientIds.length > 1)
+    || composerGroupNotice
+    || groupLeft,
+  );
   const groupStatusNotices = <>
     {sending && isNewConversation && content.recipientIds.length > 1 && <GroupCreateProgress />}
     {composerGroupNotice?.kind === "members-changed" && <GroupMembersChangedNotice
@@ -5129,7 +5133,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const visibleDraftNotice = selectDraftNotice(noticeCandidates);
   const localSaveState = slotKey ? store.saveState(slotKey) : "idle";
   const hasDraftConflicts = Boolean(activeDraftView?.sync?.conflicts.length);
-  const statusActive = Boolean(notificationRecoveryCount || unavailableReason || visibleDraftNotice || activeDraftView?.sync?.notice === "updated-from-other-device" || draftSyncNeedsAttention({ draft: activeDraftView, offline: serverOffline, localSaveState, now: draftStatusNow }));
+  const draftSyncLocalSaveState = visibleDraftNotice?.kind === "save-failed" ? "idle" : localSaveState;
+  const statusActive = Boolean(
+    notificationRecoveryCount
+    || (unavailableReason && !hasDraftConflicts)
+    || rcsBlock.kind !== "none"
+    || hasGroupStatusNotices
+    || (mmsLimitShown && route.kind === "route"),
+  );
   const resolveDraftConflict = async (branchId: string | null): Promise<DraftResolutionResult> => {
     if (resolutionRef.current !== undefined) return { ok: false, message: "A version is already being applied." };
     if (!activeDraftView?.id || !slotKey)
@@ -5331,17 +5342,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 {fileSize(estimateBytes)} used · {fileSize(route.gateway.mmsMaxBytes ?? DEFAULT_MMS_LIMIT_BYTES)} limit ({route.gateway.mmsLimitSource === "carrier" ? "carrier" : "fallback"}) · up to {Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)} recipients
               </span>
             )}
-            <DraftNotice notice={visibleDraftNotice} noticeKey={slotKey} onAction={onDraftNoticeAction} busy={sending || noticeActionBusy} />
-            <DraftSyncStatus
-              draft={activeDraftView}
-              local={content}
-              attachments={attachmentViews}
-              offline={serverOffline}
-              localSaveState={localSaveState}
-              onResolveConflict={resolveDraftConflict}
-              onAcknowledgeNotice={acknowledgeDraftSyncNotice}
-              onAutoAcknowledgeNotice={() => acknowledgeDraftSyncNotice(false)}
-            />
             {!browserHost && !composerConversation && notificationRecoveryBridge && (
               <NotificationReplyRecovery
                 bridge={notificationRecoveryBridge}
@@ -5365,6 +5365,19 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             )}
           </>
         }
+        inlineStatusSlot={<>
+          <DraftNotice notice={visibleDraftNotice} noticeKey={slotKey} onAction={onDraftNoticeAction} busy={sending || noticeActionBusy} />
+          <DraftSyncStatus
+            draft={activeDraftView}
+            local={content}
+            attachments={attachmentViews}
+            offline={serverOffline}
+            localSaveState={draftSyncLocalSaveState}
+            onResolveConflict={resolveDraftConflict}
+            onAcknowledgeNotice={acknowledgeDraftSyncNotice}
+            onAutoAcknowledgeNotice={() => acknowledgeDraftSyncNotice(false)}
+          />
+        </>}
         composerName={title}
         composerUserSized={composerHeight !== null}
         maxAutoGrowHeight={maxAutoGrowHeight}

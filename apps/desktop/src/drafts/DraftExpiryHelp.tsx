@@ -15,7 +15,7 @@ export function DraftExpiryHelp({ draftId, label, nearExpiry }: DraftExpiryHelpP
     setHelpOpen(false);
   }, [draftId]);
   return <>
-    <span data-draft-expiry-warning={nearExpiry || undefined}><span>{label}</span><button id="draft-expiry-info-button" data-draft-expiry-info-button type="button" aria-label="About draft expiry" aria-haspopup="dialog" title="About draft expiry" onClick={(event) => { opener.current = event.currentTarget; composerTextarea.current = event.currentTarget.closest("#composer-field")?.querySelector<HTMLTextAreaElement>("#composer-textarea") ?? null; setHelpOpen(true); }}><Info size={16} aria-hidden="true" /></button></span>
+    <span data-draft-expiry-warning={nearExpiry || undefined}><span data-inline-status-message title={label}>{label}</span><button id="draft-expiry-info-button" data-draft-expiry-info-button type="button" aria-label="About draft expiry" aria-haspopup="dialog" title="About draft expiry" onClick={(event) => { opener.current = event.currentTarget; composerTextarea.current = event.currentTarget.closest("#composer-field")?.querySelector<HTMLTextAreaElement>("#composer-textarea") ?? null; setHelpOpen(true); }}><Info size={16} aria-hidden="true" /></button></span>
     {helpOpen && <div id="draft-expiry-help" onKeyDownCapture={(event) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
