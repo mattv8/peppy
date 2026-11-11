@@ -824,9 +824,15 @@ mod tests {
         );
         assert!(!registry.backend.popup_actions[0].copy);
         assert!(!registry.backend.popup_actions[0].reveal);
-        assert!(registry.backend.popup_actions[0].reply);
+        assert_eq!(
+            registry.backend.popup_actions[0].reply,
+            cfg!(feature = "notification-quick-reply")
+        );
         assert!(!registry.backend.popup_actions[1].copy);
-        assert!(registry.backend.popup_actions[1].reveal);
+        assert_eq!(
+            registry.backend.popup_actions[1].reveal,
+            cfg!(feature = "notification-quick-reply")
+        );
         assert!(!registry.backend.popup_actions[1].reply);
 
         registry.entries[0]
