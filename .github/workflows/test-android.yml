@@ -119,7 +119,7 @@ jobs:
   android-debug-unit-tests:
     needs: android-native-preparation
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -155,17 +155,7 @@ jobs:
         run: ./gradlew --console=plain --dependency-verification=strict :app:compileDebugUnitTestKotlin :app:prepareRobolectricDependencies
       - name: Run Android debug unit tests
         working-directory: apps/android
-        run: |
-          dump_threads() {
-            sleep 420
-            echo "::error::Android unit tests exceeded 7 minutes; dumping JVM threads"
-            jcmd -l || true
-            jcmd -l | awk '$2 !~ /JCmd/ { print $1 }' | while read -r pid; do jcmd "$pid" Thread.print || true; done
-          }
-          dump_threads &
-          watchdog_pid=$!
-          trap 'pkill -P "$watchdog_pid" 2>/dev/null || true; kill "$watchdog_pid" 2>/dev/null || true' EXIT
-          timeout --signal=TERM --kill-after=30s 8m ./gradlew --console=plain --dependency-verification=strict :app:testDebugUnitTest
+        run: ../../.github/scripts/run-with-jvm-watchdog.sh 180 780 -- ./gradlew --console=plain --dependency-verification=strict :app:testDebugUnitTest
       - name: Preserve Android debug unit test failure reports
         if: ${{ failure() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -180,7 +170,7 @@ jobs:
   android-sideload-unit-tests:
     needs: android-native-preparation
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -219,7 +209,7 @@ jobs:
         env:
           PEPPY_NATIVE_RCS_KOTLIN_FIXTURE_DIR: ${{ runner.temp }}/rcs-kotlin-carrier-bindings
         run: |
-          timeout --signal=TERM --kill-after=30s 13m ./gradlew --console=plain --dependency-verification=strict :app:compileSideloadUnitTestKotlin :app:testSideloadUnitTest --rerun
+          ../../.github/scripts/run-with-jvm-watchdog.sh 300 1080 -- ./gradlew --console=plain --dependency-verification=strict :app:compileSideloadUnitTestKotlin :app:testSideloadUnitTest --rerun
           test -s "$PEPPY_NATIVE_RCS_KOTLIN_FIXTURE_DIR/SubscriptionManagerPhoneNumber.json"
           test -s "$PEPPY_NATIVE_RCS_KOTLIN_FIXTURE_DIR/TelephonyLine1Number.json"
           ./gradlew --console=plain --dependency-verification=strict :libadb:testDebugUnitTest :app:verifyReleaseRestrictedSetupExclusionFixtures
