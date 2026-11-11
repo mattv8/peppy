@@ -398,6 +398,14 @@ Update participating clients before you enable Android notification mirroring. O
 
 The desktop shows a notification feed, app mutes, and dismissals. Phone dismissals sync through the vault. Desktop dismissal requests wait for the phone's next sync and Android background scheduling can delay them by 15 minutes or more; this is not an immediate remote-control channel. Group summaries can remain on the phone after their children are dismissed. The feed keeps up to 1,000 active notifications; bulk dismissal handles up to 100 at a time. Native banner behavior depends on OS permissions and settings.
 
+#### Experimental desktop quick reply
+
+Native notification replies are gated behind the non-default desktop Cargo feature `notification-quick-reply` while macOS and Windows runtime qualification is pending. Normal builds do not show the setting. In a feature-enabled build with an available native notification backend, **Settings → Notification mirroring → Quick reply in notifications** is off by default and applies only to that computer.
+
+Full message previews offer quick reply; hidden and sender-only previews offer **Show message** first. Windows provides an inline input, while macOS opens its system input through **Reply**. The OS controls action placement and expansion. Mirrored app notifications and summary banners do not gain reply actions. Peppy must be unlocked, and reply routing follows the existing phone/SIM, group and RCS restrictions.
+
+A notification reply does not send or replace an existing draft. Rejected replies can be reviewed from **Unsent notification replies** beside the conversation composer and explicitly added to the draft. These recovery items are kept only while Peppy stays unlocked and running; they are not durable drafts. A queued reply is not proof of carrier delivery. Replies with uncertain outcomes must not be resent until their status is resolved.
+
 ### Drafts and attachment limits
 
 - A draft expires 30 days after the server accepts an authored edit. Expiry closes the draft, clears the sealed bytes of its revisions, and deletes only private draft attachments that no message record, sent-message history, hold, or public copy still uses. Sent MMS media stays protected.
