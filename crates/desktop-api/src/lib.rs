@@ -25,6 +25,7 @@ pub mod images;
 pub mod mms_plan;
 pub mod notification_activation;
 pub use notification_activation::*;
+pub mod quick_reply;
 pub mod rcs_status;
 pub use rcs_status::*;
 pub mod search;

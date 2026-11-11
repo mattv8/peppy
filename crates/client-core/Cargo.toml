@@ -64,6 +64,10 @@ path = "tests/rcs_carrier_regressions.rs"
 name = "one_time_code"
 path = "tests/one_time_code.rs"
 
+[[test]]
+name = "quick_reply"
+path = "tests/quick_reply.rs"
+
 [dependencies]
 base64.workspace = true
 peppy-crypto.workspace = true

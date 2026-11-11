@@ -120,7 +120,7 @@ fn parse_route(gateway: &str, sim: &str) -> Result<GatewayRoute, ComposeError> {
         subscription_id: sim.to_owned(),
     })
 }
-fn gateway_sendable(gateway: &GatewayView) -> Result<(), ComposeError> {
+pub(crate) fn gateway_sendable(gateway: &GatewayView) -> Result<(), ComposeError> {
     let (code, message) = match gateway.availability {
         GatewayAvailability::Offline => (
             "gateway-offline",

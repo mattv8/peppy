@@ -63,6 +63,7 @@ mod message_history_requests;
 mod message_origin;
 mod notification_preferences;
 pub mod one_time_code;
+mod quick_reply;
 mod rcs_group;
 mod rcs_group_create;
 mod sender_blocklist;
@@ -93,6 +94,7 @@ mod phone_read;
 mod rcs_capability;
 mod rcs_mapping;
 mod rcs_media;
+pub use quick_reply::{QuickReplyContext, QuickReplyInput};
 pub use rcs_media::PendingReceiveTask;
 pub use rcs_media::{RcsMediaReceiveView, ReceiveDownloadAdmission};
 mod rcs_native;
@@ -336,6 +338,8 @@ pub enum Error {
     InvalidCursor,
     #[error("a different record is already journaled at this cursor")]
     Conflict,
+    #[error("an existing command has different quick-reply input")]
+    ExistingCommandConflict,
     #[error("not found")]
     NotFound,
     #[error("stale draft; current revision is {current_revision}")]
@@ -4160,6 +4164,15 @@ fn validate_outgoing_mms(
     subject: Option<&str>,
     route: &GatewayRoute,
 ) -> Result<(), Error> {
+    validate_outgoing_mms_content(recipients, body, attachments, subject)?;
+    require_subscription(route)
+}
+fn validate_outgoing_mms_content(
+    recipients: &[String],
+    body: &str,
+    attachments: &[AttachmentId],
+    subject: Option<&str>,
+) -> Result<(), Error> {
     if recipients.is_empty() || recipients.len() > MAX_MMS_RECIPIENTS {
         return Err(Error::InvalidRequest("MMS requires 1..=20 recipients"));
     }
@@ -4173,7 +4186,7 @@ fn validate_outgoing_mms(
     if subject.is_some_and(|subject| subject.len() > MAX_BODY_BYTES) {
         return Err(Error::InvalidRequest("subject"));
     }
-    require_subscription(route)
+    Ok(())
 }
 fn require_subscription(route: &GatewayRoute) -> Result<(), Error> {
     let GatewayRoute::Carrier {
