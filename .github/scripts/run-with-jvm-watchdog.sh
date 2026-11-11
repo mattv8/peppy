@@ -45,7 +45,7 @@ dump_threads() {
   done || true
 }
 
-# shellcheck disable=SC2329 # Invoked by the EXIT trap below.
+# shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap; diagnostic differs between ShellCheck 0.9 and 0.11.
 cleanup() {
   if [[ -n $watchdog_pid ]]; then
     kill "$watchdog_pid" 2>/dev/null || true
