@@ -1,11 +1,14 @@
-use super::{owner::Signal, PostError};
+use super::{
+    owner::{ActionAvailability, Signal},
+    PostError,
+};
 use crate::notification_icon::{self, Icon, Lease};
 use block2::{DynBlock, RcBlock};
 use objc2::{
     define_class, msg_send, rc::Retained, runtime::ProtocolObject, AnyThread, DefinedClass,
 };
 use objc2_foundation::{
-    NSArray, NSBundle, NSError, NSObject, NSObjectProtocol, NSSet, NSString, NSURL,
+    NSArray, NSBundle, NSError, NSObject, NSObjectProtocol, NSProcessInfo, NSSet, NSString, NSURL,
 };
 use objc2_user_notifications::*;
 use std::{
@@ -23,6 +26,11 @@ const UN_ERROR_CODE_NOTIFICATIONS_NOT_ALLOWED: isize = 1;
 /// Registered once in `prepare`; posts opt in by category, and the action id is the only payload.
 const COPY_CATEGORY: &str = "peppy.one-time-code";
 const COPY_ACTION: &str = "copy-code";
+const REVEAL_ACTION: &str = "reveal";
+const REPLY_ACTION: &str = "reply";
+const REVEAL_CATEGORY: &str = "peppy.quick-reveal";
+const REPLY_CATEGORY: &str = "peppy.quick-reply";
+const COPY_REPLY_CATEGORY: &str = "peppy.quick-copy-reply";
 
 fn notification_content(
     title: &str,
@@ -97,6 +105,21 @@ define_class!(
                     .isEqualToString(&NSString::from_str(COPY_ACTION))
                 {
                     signal.copy();
+                } else if response
+                    .actionIdentifier()
+                    .isEqualToString(&NSString::from_str(REVEAL_ACTION))
+                {
+                    signal.reveal();
+                } else if response
+                    .actionIdentifier()
+                    .isEqualToString(&NSString::from_str(REPLY_ACTION))
+                {
+                    // A forged/malformed action must not reinterpret a normal
+                    // response as text input.
+                    if let Some(input) = response.downcast_ref::<UNTextInputNotificationResponse>()
+                    {
+                        signal.reply(input.userText().to_string());
+                    }
                 } else if unsafe {
                     response
                         .actionIdentifier()
@@ -134,27 +157,117 @@ pub fn prepare() -> Option<Signals> {
         unsafe { msg_send![super(Delegate::alloc().set_ivars(signals.clone())), init] };
     let center = UNUserNotificationCenter::currentNotificationCenter();
     center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-    register_copy_category(&center);
+    register_categories(&center);
     DELEGATE.with(|slot| *slot.borrow_mut() = Some(delegate));
     Some(signals)
 }
 
 /// The Copy action is a background action (no foreground option), so it never brings Peppy forward.
-fn register_copy_category(center: &UNUserNotificationCenter) {
-    let action = UNNotificationAction::actionWithIdentifier_title_options(
-        &NSString::from_str(COPY_ACTION),
-        &NSString::from_str("Copy code"),
-        UNNotificationActionOptionNone,
-    );
-    let actions = NSArray::from_retained_slice(&[action]);
+fn register_categories(center: &UNUserNotificationCenter) {
+    let copy_action = action(COPY_ACTION, "Copy code", "doc.on.doc");
+    let actions = NSArray::from_retained_slice(std::slice::from_ref(&copy_action));
     let intents: Retained<NSArray<NSString>> = NSArray::new();
-    let category = UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
-        &NSString::from_str(COPY_CATEGORY),
-        &actions,
+    let copy_category =
+        UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
+            &NSString::from_str(COPY_CATEGORY),
+            &actions,
+            &intents,
+            UNNotificationCategoryOptionNone,
+        );
+    let reveal = category(
+        REVEAL_CATEGORY,
+        vec![action(REVEAL_ACTION, "Show message", "chevron.down")],
         &intents,
-        UNNotificationCategoryOptionNone,
     );
-    center.setNotificationCategories(&NSSet::from_retained_slice(&[category]));
+    let reply = category(REPLY_CATEGORY, vec![reply_action().into_super()], &intents);
+    let copy_reply = category(
+        COPY_REPLY_CATEGORY,
+        vec![copy_action, reply_action().into_super()],
+        &intents,
+    );
+    center.setNotificationCategories(&NSSet::from_retained_slice(&[
+        copy_category,
+        reveal,
+        reply,
+        copy_reply,
+    ]));
+}
+
+fn category(
+    identifier: &str,
+    actions: Vec<Retained<UNNotificationAction>>,
+    intents: &NSArray<NSString>,
+) -> Retained<UNNotificationCategory> {
+    let actions = NSArray::from_retained_slice(&actions);
+    UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
+        &NSString::from_str(identifier),
+        &actions,
+        intents,
+        UNNotificationCategoryOptionNone,
+    )
+}
+
+fn category_for(actions: ActionAvailability) -> Option<&'static str> {
+    match (actions.copy, actions.reveal, actions.reply) {
+        (_, true, false) => Some(REVEAL_CATEGORY),
+        (true, false, true) => Some(COPY_REPLY_CATEGORY),
+        (false, false, true) => Some(REPLY_CATEGORY),
+        _ => None,
+    }
+}
+
+fn action(identifier: &str, title: &str, symbol: &str) -> Retained<UNNotificationAction> {
+    let identifier = NSString::from_str(identifier);
+    let title = NSString::from_str(title);
+    if macos12_or_later() {
+        let icon = UNNotificationActionIcon::iconWithSystemImageName(&NSString::from_str(symbol));
+        UNNotificationAction::actionWithIdentifier_title_options_icon(
+            &identifier,
+            &title,
+            UNNotificationActionOptionNone,
+            Some(&icon),
+        )
+    } else {
+        UNNotificationAction::actionWithIdentifier_title_options(
+            &identifier,
+            &title,
+            UNNotificationActionOptionNone,
+        )
+    }
+}
+
+fn reply_action() -> Retained<UNTextInputNotificationAction> {
+    let identifier = NSString::from_str(REPLY_ACTION);
+    let title = NSString::from_str("Reply");
+    let send = NSString::from_str("Send");
+    let placeholder = NSString::from_str("Type a reply");
+    if macos12_or_later() {
+        let icon =
+            UNNotificationActionIcon::iconWithSystemImageName(&NSString::from_str("arrow.up"));
+        UNTextInputNotificationAction::actionWithIdentifier_title_options_icon_textInputButtonTitle_textInputPlaceholder(
+            &identifier,
+            &title,
+            UNNotificationActionOptions::AuthenticationRequired,
+            Some(&icon),
+            &send,
+            &placeholder,
+        )
+    } else {
+        UNTextInputNotificationAction::actionWithIdentifier_title_options_textInputButtonTitle_textInputPlaceholder(
+            &identifier,
+            &title,
+            UNNotificationActionOptions::AuthenticationRequired,
+            &send,
+            &placeholder,
+        )
+    }
+}
+
+fn macos12_or_later() -> bool {
+    NSProcessInfo::processInfo()
+        .operatingSystemVersion()
+        .majorVersion
+        >= 12
 }
 
 pub struct Backend {
@@ -203,11 +316,12 @@ impl Backend {
     pub fn post(
         &mut self,
         id: &str,
+        presentation_generation: u64,
         title: &str,
         body: &str,
         sound: bool,
         icon: Option<&Icon>,
-        copy_action: bool,
+        actions: ActionAvailability,
         signal: Signal,
     ) -> Result<Item, PostError> {
         // UN owns completion blocks until posting finishes. Removing a request
@@ -217,10 +331,15 @@ impl Backend {
             let icon =
                 content_icon(icon).and_then(|icon| notification_icon::materialize(&self.app, icon));
             let content = notification_content(title, body, sound, icon.as_ref());
-            if copy_action {
+            if let Some(category) = category_for(actions) {
+                content.setCategoryIdentifier(&NSString::from_str(category));
+            } else if actions.copy {
                 content.setCategoryIdentifier(&NSString::from_str(COPY_CATEGORY));
             }
-            let identifier = NSString::from_str(id);
+            // The original request identifies the callback generation. A reused
+            // logical id alone cannot distinguish a delayed old response.
+            let presentation_id = format!("{id}:{presentation_generation}");
+            let identifier = NSString::from_str(&presentation_id);
             let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
                 &identifier,
                 &content,
@@ -229,9 +348,9 @@ impl Backend {
             self.signals
                 .lock()
                 .unwrap()
-                .insert(id.into(), signal.clone());
+                .insert(presentation_id.clone(), signal.clone());
             let item = Item {
-                id: id.to_owned(),
+                id: presentation_id,
                 retiring: Arc::new(AtomicBool::new(false)),
                 _icon: icon,
             };
@@ -300,6 +419,10 @@ impl Backend {
                 self.signals.lock().unwrap().remove(id);
             },
         )
+    }
+
+    pub fn retire_replaced(&mut self, item: &Item) -> bool {
+        self.remove(item)
     }
 }
 
@@ -403,6 +526,33 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn notification_macos_enhanced_categories_match_action_phase_and_copy() {
+        assert_eq!(
+            category_for(ActionAvailability {
+                reveal: true,
+                ..Default::default()
+            }),
+            Some(REVEAL_CATEGORY)
+        );
+        assert_eq!(
+            category_for(ActionAvailability {
+                reply: true,
+                ..Default::default()
+            }),
+            Some(REPLY_CATEGORY)
+        );
+        assert_eq!(
+            category_for(ActionAvailability {
+                copy: true,
+                reply: true,
+                ..Default::default()
+            }),
+            Some(COPY_REPLY_CATEGORY)
+        );
+        assert_eq!(category_for(ActionAvailability::from(true)), None);
     }
 
     #[test]

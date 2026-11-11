@@ -1,3 +1,4 @@
+use super::owner::ActionAvailability;
 use crate::notification_persistence::NotificationPersistence;
 
 pub(crate) fn toast_xml(
@@ -6,8 +7,21 @@ pub(crate) fn toast_xml(
     icon_uri: Option<&str>,
     audio: &str,
     persistence: NotificationPersistence,
-    copy_action: bool,
+    actions: impl Into<ActionAvailability>,
 ) -> String {
+    toast_xml_with_icons(title, body, icon_uri, audio, persistence, actions, None)
+}
+
+pub(crate) fn toast_xml_with_icons(
+    title: &str,
+    body: &str,
+    icon_uri: Option<&str>,
+    audio: &str,
+    persistence: NotificationPersistence,
+    actions: impl Into<ActionAvailability>,
+    action_icons: Option<ActionIconUris<'_>>,
+) -> String {
+    let actions = actions.into();
     let icon = icon_uri.map_or_else(String::new, |uri| {
         format!(
             "<image placement=\"appLogoOverride\" src=\"{}\"/>",
@@ -16,28 +30,96 @@ pub(crate) fn toast_xml(
     });
     // Indefinite banners keep the system dismiss action. Every action lives in this one
     // `<actions>` element, so a copy action never duplicates it.
+    let icons = action_icons.filter(|icons| icons.all_valid());
     let (attributes, dismiss) = match persistence.seconds {
-        Some(seconds) if seconds <= 7 => (" duration=\"short\"", ""),
-        Some(_) => (" duration=\"long\"", ""),
+        Some(seconds) if seconds <= 7 => (" duration=\"short\"", String::new()),
+        Some(_) => (" duration=\"long\"", String::new()),
         None => (
             " scenario=\"reminder\"",
-            "<action content=\"\" arguments=\"dismiss\" activationType=\"system\"/>",
+            action(
+                "",
+                "dismiss",
+                "system",
+                icons.as_ref().map(|icons| icons.dismiss.as_ref()),
+            ),
         ),
     };
-    let copy = if copy_action {
-        "<action content=\"Copy code\" arguments=\"copy-code\" activationType=\"foreground\"/>"
+    let copy = if actions.copy {
+        action(
+            "Copy code",
+            "copy-code",
+            "foreground",
+            icons.as_ref().map(|icons| icons.copy.as_ref()),
+        )
     } else {
-        ""
+        String::new()
     };
-    let actions = if dismiss.is_empty() && copy.is_empty() {
+    let reveal = if actions.reveal {
+        action(
+            "Show message",
+            "reveal",
+            "foreground",
+            icons.as_ref().map(|icons| icons.show.as_ref()),
+        )
+    } else {
+        String::new()
+    };
+    let reply = if actions.reply {
+        format!(
+            "<input id=\"reply\" type=\"text\" placeHolderContent=\"Type a reply\"/>{}",
+            action(
+                "Send",
+                "reply",
+                "foreground",
+                icons.as_ref().map(|icons| icons.send.as_ref())
+            )
+            .replace("/>", " hint-inputId=\"reply\"/>")
+        )
+    } else {
+        String::new()
+    };
+    let actions = if dismiss.is_empty() && copy.is_empty() && reveal.is_empty() && reply.is_empty()
+    {
         String::new()
     } else {
-        format!("<actions>{dismiss}{copy}</actions>")
+        format!("<actions>{dismiss}{copy}{reveal}{reply}</actions>")
     };
     format!(
         "<toast{attributes}><visual><binding template=\"ToastGeneric\">{icon}<text>{}</text><text>{}</text></binding></visual>{audio}{actions}</toast>",
         escape_text(title),
         escape_text(body),
+    )
+}
+
+pub(crate) struct ActionIconUris<'a> {
+    pub show: std::borrow::Cow<'a, str>,
+    pub send: std::borrow::Cow<'a, str>,
+    pub copy: std::borrow::Cow<'a, str>,
+    pub dismiss: std::borrow::Cow<'a, str>,
+}
+
+impl ActionIconUris<'_> {
+    fn all_valid(&self) -> bool {
+        [
+            self.show.as_ref(),
+            self.send.as_ref(),
+            self.copy.as_ref(),
+            self.dismiss.as_ref(),
+        ]
+        .iter()
+        .all(|uri| uri.starts_with("file:"))
+    }
+}
+
+fn action(content: &str, arguments: &str, activation_type: &str, icon_uri: Option<&str>) -> String {
+    let image = icon_uri
+        .map(|uri| format!(" imageUri=\"{}\"", escape_attribute(uri)))
+        .unwrap_or_default();
+    format!(
+        "<action content=\"{}\" arguments=\"{}\" activationType=\"{}\"{image}/>",
+        escape_attribute(content),
+        escape_attribute(arguments),
+        activation_type
     )
 }
 
@@ -68,7 +150,8 @@ fn xml_1_0(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::toast_xml;
+    use super::{toast_xml, toast_xml_with_icons, ActionIconUris};
+    use crate::notification_activation::owner::ActionAvailability;
     use crate::notification_persistence::NotificationPersistence;
 
     #[test]
@@ -183,6 +266,81 @@ mod tests {
             ),
             "<toast scenario=\"reminder\"><visual><binding template=\"ToastGeneric\"><text></text><text></text></binding></visual><actions><action content=\"\" arguments=\"dismiss\" activationType=\"system\"/><action content=\"Copy code\" arguments=\"copy-code\" activationType=\"foreground\"/></actions></toast>"
         );
+    }
+
+    #[test]
+    fn reply_and_copy_share_one_actions_container_for_finite_and_reminder_toasts() {
+        for persistence in [
+            NotificationPersistence { seconds: Some(60) },
+            NotificationPersistence { seconds: None },
+        ] {
+            let xml = toast_xml(
+                "",
+                "",
+                None,
+                "",
+                persistence,
+                super::ActionAvailability {
+                    copy: true,
+                    reveal: false,
+                    reply: true,
+                },
+            );
+            assert_eq!(xml.matches("<actions>").count(), 1);
+            assert!(xml.contains(
+                "<input id=\"reply\" type=\"text\" placeHolderContent=\"Type a reply\"/>"
+            ));
+            assert!(xml.contains("content=\"Send\" arguments=\"reply\" activationType=\"foreground\" hint-inputId=\"reply\""));
+            assert!(xml.contains("content=\"Copy code\" arguments=\"copy-code\""));
+            if persistence.seconds.is_none() {
+                assert!(xml.contains("arguments=\"dismiss\" activationType=\"system\""));
+            }
+        }
+    }
+
+    #[test]
+    fn action_icons_are_emitted_only_when_every_button_has_a_file_uri() {
+        let icons = ActionIconUris {
+            show: "file:///show.png".into(),
+            send: "file:///send.png".into(),
+            copy: "file:///copy.png".into(),
+            dismiss: "file:///dismiss.png".into(),
+        };
+        let xml = toast_xml_with_icons(
+            "",
+            "",
+            None,
+            "",
+            NotificationPersistence { seconds: None },
+            ActionAvailability {
+                copy: true,
+                reveal: true,
+                reply: true,
+            },
+            Some(icons),
+        );
+        for uri in ["show", "send", "copy", "dismiss"] {
+            assert!(xml.contains(&format!("imageUri=\"file:///{uri}.png\"")));
+        }
+        let plain = toast_xml_with_icons(
+            "",
+            "",
+            None,
+            "",
+            NotificationPersistence { seconds: Some(60) },
+            ActionAvailability {
+                reveal: true,
+                ..ActionAvailability::default()
+            },
+            Some(ActionIconUris {
+                show: "not-a-file".into(),
+                send: "file:///send.png".into(),
+                copy: "file:///copy.png".into(),
+                dismiss: "file:///dismiss.png".into(),
+            }),
+        );
+        assert!(!plain.contains("imageUri="));
+        assert!(plain.contains("content=\"Show message\""));
     }
 
     #[test]

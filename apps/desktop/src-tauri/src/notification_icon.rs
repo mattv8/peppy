@@ -48,6 +48,13 @@ pub(crate) fn materialize(app: &AppHandle, icon: &Icon) -> Option<Lease> {
     files::materialize(&root, bytes)
 }
 
+/// Materializes maintained native action artwork for a callback lifetime.
+#[cfg(target_os = "windows")]
+pub(crate) fn materialize_bytes(app: &AppHandle, bytes: &[u8]) -> Option<Lease> {
+    let root = app.path().app_data_dir().ok()?.join("notification-icons");
+    files::materialize(&root, bytes)
+}
+
 pub(crate) fn recover_at_startup(app: &AppHandle) {
     if let Ok(root) = app.path().app_data_dir() {
         files::recover(&root.join("notification-icons"));

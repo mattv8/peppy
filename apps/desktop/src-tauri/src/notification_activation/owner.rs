@@ -25,8 +25,10 @@ pub(super) const PLATFORM_TIMEOUT: std::time::Duration = std::time::Duration::fr
 const CLICK: u64 = 1;
 const RETIRE: u64 = 2;
 const COPY: u64 = 4;
-const EVENT_MASK: u64 = 0b111;
-const SEQUENCE_SHIFT: u32 = 3;
+const REVEAL: u64 = 8;
+const REPLY: u64 = 16;
+const EVENT_MASK: u64 = 0b1_1111;
+const SEQUENCE_SHIFT: u32 = 5;
 
 pub struct Post {
     pub activation: Option<NotificationActivation>,
@@ -37,11 +39,23 @@ pub struct Post {
     pub icon: Option<crate::notification_icon::Icon>,
     /// Copy target for the popup's Copy action. The OS carries only the post id.
     pub copy: Option<OneTimeCodeTarget>,
+    /// Optional native-only action capability. The callback owns any host reservation.
+    pub popup_actions: Option<PopupActions>,
+}
+
+/// Identifies one presentation of a logical notification request. A replacement
+/// must present a fresh generation; callbacks for an earlier generation fail
+/// closed even when the OS reuses the request tag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PopupVersion {
+    pub request_id: String,
+    pub presentation_generation: u64,
 }
 
 #[derive(Clone)]
 pub struct Signal {
     event: Arc<AtomicU64>,
+    popup_action: Arc<Mutex<Option<PopupAction>>>,
     sequence: Arc<AtomicU64>,
     wake: SyncSender<Command>,
 }
@@ -55,6 +69,15 @@ impl Signal {
     }
     pub fn copy(&self) {
         self.set(COPY);
+    }
+    pub fn reveal(&self) {
+        self.set_popup(REVEAL, PopupAction::Reveal);
+    }
+    pub fn reply(&self, body: String) {
+        if body.len() > MAX_REPLY_BYTES || body.trim().is_empty() {
+            return;
+        }
+        self.set_popup(REPLY, PopupAction::Reply(body));
     }
     #[cfg(any(target_os = "windows", test))]
     pub fn dismissed(&self, timed_out: bool) {
@@ -73,10 +96,33 @@ impl Signal {
         );
         let _ = self.wake.try_send(Command::Wake);
     }
+    fn set_popup(&self, event: u64, action: PopupAction) {
+        let mut popup_action = self.popup_action.lock().unwrap();
+        let sequence = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
+        if self
+            .event
+            .compare_exchange(
+                0,
+                (sequence << SEQUENCE_SHIFT) | event,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            *popup_action = Some(action);
+            let _ = self.wake.try_send(Command::Wake);
+        }
+    }
 }
 
 enum Command {
-    Post(Box<Post>, SyncSender<Result<(), PostError>>),
+    Post(Box<Post>, PopupVersion, SyncSender<Result<(), PostError>>),
+    Replace(
+        PopupVersion,
+        Box<Post>,
+        PopupVersion,
+        SyncSender<Result<(), PostError>>,
+    ),
     Wake,
 }
 
@@ -88,9 +134,23 @@ pub struct Acceptance {
     wake: SyncSender<Command>,
     stopped: Arc<AtomicBool>,
     accepted: bool,
+    version: PopupVersion,
 }
 
 impl Acceptance {
+    pub(crate) fn version(&self) -> PopupVersion {
+        self.version.clone()
+    }
+
+    /// Lets callers use the same acceptance chain for an initial post and a
+    /// versioned replacement after the latter has been admitted synchronously.
+    pub(crate) fn and_then<T>(
+        self,
+        wait: impl FnOnce(Self) -> Result<T, PostError>,
+    ) -> Result<T, PostError> {
+        wait(self)
+    }
+
     pub fn wait(self) -> Result<(), PostError> {
         self.wait_for(ACCEPTANCE_TIMEOUT)
     }
@@ -126,15 +186,28 @@ pub struct Owner {
     sender: SyncSender<Command>,
     stopped: Arc<AtomicBool>,
     thread: std::thread::JoinHandle<()>,
+    generations: AtomicU64,
 }
 
 struct Entry<T> {
+    version: PopupVersion,
+    revealing: bool,
     activation: Option<NotificationActivation>,
     cancel: CancellationToken,
     signal: Signal,
     copy: Option<OneTimeCodeTarget>,
+    popup_actions: Option<PopupActions>,
     handle: T,
 }
+
+type DeliveredPopupAction = (Arc<dyn Fn(PopupAction) + Send + Sync>, PopupAction);
+type DeliveredNotification = (
+    u64,
+    NotificationActivation,
+    CancellationToken,
+    Option<OneTimeCodeTarget>,
+    Option<DeliveredPopupAction>,
+);
 
 trait Backend {
     type Item;
@@ -143,14 +216,20 @@ trait Backend {
     fn post(
         &mut self,
         id: &str,
+        presentation_generation: u64,
         title: &str,
         body: &str,
         sound: bool,
         icon: Option<&crate::notification_icon::Icon>,
-        copy_action: bool,
+        actions: ActionAvailability,
         signal: Signal,
     ) -> Result<Self::Item, PostError>;
     fn remove(&mut self, item: &Self::Item) -> bool;
+    /// Drops callbacks for an item superseded by a freshly posted replacement.
+    /// Windows must not remove history for this path because its tag is shared.
+    fn retire_replaced(&mut self, item: &Self::Item) -> bool {
+        self.remove(item)
+    }
 }
 
 impl Backend for platform::Backend {
@@ -159,20 +238,34 @@ impl Backend for platform::Backend {
     fn post(
         &mut self,
         id: &str,
+        presentation_generation: u64,
         title: &str,
         body: &str,
         sound: bool,
         icon: Option<&crate::notification_icon::Icon>,
-        copy_action: bool,
+        actions: ActionAvailability,
         signal: Signal,
     ) -> Result<Self::Item, PostError> {
-        platform::Backend::post(self, id, title, body, sound, icon, copy_action, signal)
+        platform::Backend::post(
+            self,
+            id,
+            presentation_generation,
+            title,
+            body,
+            sound,
+            icon,
+            actions,
+            signal,
+        )
     }
     fn ensure_authorized(&mut self) -> Result<(), PostError> {
         platform::Backend::ensure_authorized(self)
     }
     fn remove(&mut self, item: &Self::Item) -> bool {
         self.remove(item)
+    }
+    fn retire_replaced(&mut self, item: &Self::Item) -> bool {
+        platform::Backend::retire_replaced(self, item)
     }
 }
 
@@ -183,8 +276,39 @@ struct Registry<B: Backend> {
     wake: SyncSender<Command>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ActionAvailability {
+    pub copy: bool,
+    pub reveal: bool,
+    pub reply: bool,
+}
+
+impl From<bool> for ActionAvailability {
+    fn from(copy: bool) -> Self {
+        Self {
+            copy,
+            ..Self::default()
+        }
+    }
+}
+
 impl<B: Backend> Registry<B> {
+    #[cfg(test)]
     fn post(&mut self, post: Post) -> Result<(), PostError> {
+        let request_id = post.activation.as_ref().map_or_else(
+            || uuid::Uuid::new_v4().simple().to_string(),
+            |activation| activation.request_id.clone(),
+        );
+        self.post_versioned(
+            post,
+            PopupVersion {
+                request_id,
+                presentation_generation: 1,
+            },
+        )
+    }
+
+    fn post_versioned(&mut self, post: Post, version: PopupVersion) -> Result<(), PostError> {
         if post.cancel.is_cancelled() {
             return Err(PostError::Failed);
         }
@@ -197,61 +321,118 @@ impl<B: Backend> Registry<B> {
         }
         let signal = Signal {
             event: Arc::new(AtomicU64::new(0)),
+            popup_action: Arc::new(Mutex::new(None)),
             sequence: self.sequence.clone(),
             wake: self.wake.clone(),
         };
-        let request_id = post.activation.as_ref().map_or_else(
-            || uuid::Uuid::new_v4().simple().to_string(),
-            |activation| activation.request_id.clone(),
-        );
         let handle = self.backend.post(
-            &request_id,
+            &version.request_id,
+            version.presentation_generation,
             &post.title,
             &post.body,
             post.sound,
             post.icon.as_ref(),
-            post.copy.is_some(),
+            ActionAvailability {
+                copy: post.copy.is_some(),
+                reveal: post
+                    .popup_actions
+                    .as_ref()
+                    .is_some_and(|actions| actions.enabled() && actions.reveal),
+                reply: post
+                    .popup_actions
+                    .as_ref()
+                    .is_some_and(|actions| actions.enabled() && actions.reply),
+            },
             signal.clone(),
         )?;
         self.entries.push_back(Entry {
+            version,
+            revealing: false,
             activation: post.activation,
             cancel: post.cancel,
             signal,
             copy: post.copy,
+            popup_actions: post.popup_actions,
             handle,
         });
         Ok(())
     }
 
+    fn replace(
+        &mut self,
+        expected: &PopupVersion,
+        post: Post,
+        replacement: PopupVersion,
+    ) -> Result<(), PostError> {
+        if replacement.request_id != expected.request_id
+            || replacement.presentation_generation <= expected.presentation_generation
+        {
+            return Err(PostError::Failed);
+        }
+        let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.version == *expected)
+        else {
+            return Err(PostError::Failed);
+        };
+        let old = self
+            .entries
+            .remove(index)
+            .expect("replacement entry exists");
+        if let Err(error) = self.post_versioned(post, replacement) {
+            self.entries.insert(index, old);
+            return Err(error);
+        }
+        let fresh = self.entries.pop_back().expect("replacement was posted");
+        self.entries.insert(index, fresh);
+        // The fresh entry was registered before retiring old callbacks. Never run
+        // ordinary cleanup here: it may delete the replacement sharing this tag.
+        let _ = self.backend.retire_replaced(&old.handle);
+        Ok(())
+    }
+
     /// Returns each delivered terminal event in sequence order. `None` is a click
     /// (navigation); `Some(target)` is a Copy action that must never navigate.
-    fn reconcile(
-        &mut self,
-    ) -> Vec<(
-        u64,
-        NotificationActivation,
-        CancellationToken,
-        Option<OneTimeCodeTarget>,
-    )> {
+    fn reconcile(&mut self) -> Vec<DeliveredNotification> {
         let mut delivered = Vec::new();
         let mut index = 0;
         while index < self.entries.len() {
-            let entry = &self.entries[index];
+            let entry = &mut self.entries[index];
+            if entry.revealing && !entry.cancel.is_cancelled() {
+                index += 1;
+                continue;
+            }
             let event = entry.signal.event.load(Ordering::Acquire);
             if event != 0 || entry.cancel.is_cancelled() {
                 if !entry.cancel.is_cancelled() {
-                    if let Some(action) = delivery(event, &entry.copy) {
+                    if let Some((copy, popup_action)) = delivery(event, &entry.copy, &entry.signal)
+                    {
+                        let is_reveal = matches!(popup_action, Some(PopupAction::Reveal));
+                        if is_reveal {
+                            entry.revealing = true;
+                        }
                         if let Some(activation) = &entry.activation {
                             delivered.push((
                                 event >> SEQUENCE_SHIFT,
                                 activation.clone(),
                                 entry.cancel.clone(),
-                                action,
+                                copy,
+                                popup_action.and_then(|action| {
+                                    entry
+                                        .popup_actions
+                                        .as_ref()
+                                        .map(|actions| (actions.handler.clone(), action))
+                                }),
                             ));
                         }
                         // Cleanup failure must not suppress a genuine click or copy or replay
                         // it on the next wake. Keep its registration until removal succeeds.
                         entry.signal.event.store(event | RETIRE, Ordering::Release);
+                        if is_reveal {
+                            index += 1;
+                            continue;
+                        }
                     }
                 }
                 if !self.backend.remove(&entry.handle) {
@@ -263,17 +444,29 @@ impl<B: Backend> Registry<B> {
                 index += 1;
             }
         }
-        delivered.sort_by_key(|(sequence, _, _, _)| *sequence);
+        delivered.sort_by_key(|(sequence, _, _, _, _)| *sequence);
         delivered
     }
 }
 
 /// Maps a stored terminal event to its delivery. A retired event carries RETIRE in the
 /// mask, so it matches neither arm and is never delivered as a click or a copy.
-fn delivery(event: u64, copy: &Option<OneTimeCodeTarget>) -> Option<Option<OneTimeCodeTarget>> {
+fn delivery(
+    event: u64,
+    copy: &Option<OneTimeCodeTarget>,
+    signal: &Signal,
+) -> Option<(Option<OneTimeCodeTarget>, Option<PopupAction>)> {
     match event & EVENT_MASK {
-        CLICK => Some(None),
-        COPY => copy.clone().map(Some),
+        CLICK => Some((None, Some(PopupAction::Open))),
+        COPY => copy
+            .clone()
+            .map(|target| (Some(target), Some(PopupAction::Copy))),
+        REVEAL | REPLY => signal
+            .popup_action
+            .lock()
+            .unwrap()
+            .take()
+            .map(|action| (None, Some(action))),
         _ => None,
     }
 }
@@ -297,17 +490,31 @@ fn serve<B: Backend>(
         if stop.load(Ordering::Acquire) {
             break;
         }
-        for (sequence, activation, cancel, copy) in registry.reconcile() {
-            activate(sequence, activation, cancel, copy);
+        for (sequence, activation, cancel, copy, popup_action) in registry.reconcile() {
+            let activates_existing_flow = popup_action
+                .as_ref()
+                .is_none_or(|(_, action)| matches!(action, PopupAction::Open | PopupAction::Copy));
+            if let Some((handler, action)) = popup_action {
+                let _ = std::thread::Builder::new()
+                    .name("notification-popup-action".into())
+                    .spawn(move || handler(action));
+            }
+            if activates_existing_flow {
+                activate(sequence, activation, cancel, copy);
+            }
         }
-        if let Command::Post(post, reply) = command {
-            let result = registry.post(*post);
-            let _ = reply.try_send(if stop.load(Ordering::Acquire) {
-                Err(PostError::Failed)
-            } else {
-                result
-            });
-        }
+        let (result, reply) = match command {
+            Command::Post(post, version, reply) => (registry.post_versioned(*post, version), reply),
+            Command::Replace(expected, post, replacement, reply) => {
+                (registry.replace(&expected, *post, replacement), reply)
+            }
+            Command::Wake => continue,
+        };
+        let _ = reply.try_send(if stop.load(Ordering::Acquire) {
+            Err(PostError::Failed)
+        } else {
+            result
+        });
     }
 }
 
@@ -344,6 +551,7 @@ impl Owner {
             sender,
             stopped,
             thread,
+            generations: AtomicU64::new(0),
         })
     }
 
@@ -352,6 +560,13 @@ impl Owner {
             return Err(PostError::Failed);
         }
         post.cancel = post.cancel.child_token();
+        let version = PopupVersion {
+            request_id: post.activation.as_ref().map_or_else(
+                || uuid::Uuid::new_v4().simple().to_string(),
+                |activation| activation.request_id.clone(),
+            ),
+            presentation_generation: self.generations.fetch_add(1, Ordering::AcqRel) + 1,
+        };
         let (reply, result) = mpsc::sync_channel(1);
         let acceptance = Acceptance {
             result,
@@ -359,9 +574,48 @@ impl Owner {
             wake: self.sender.clone(),
             stopped: self.stopped.clone(),
             accepted: false,
+            version: version.clone(),
         };
         self.sender
-            .try_send(Command::Post(Box::new(post), reply))
+            .try_send(Command::Post(Box::new(post), version, reply))
+            .map_err(|_| PostError::Failed)?;
+        Ok(acceptance)
+    }
+
+    pub(crate) fn replace(
+        &self,
+        expected: PopupVersion,
+        mut post: Post,
+    ) -> Result<Acceptance, PostError> {
+        if self.stopped.load(Ordering::Acquire)
+            || post
+                .activation
+                .as_ref()
+                .is_none_or(|activation| activation.request_id != expected.request_id)
+        {
+            return Err(PostError::Failed);
+        }
+        post.cancel = post.cancel.child_token();
+        let replacement = PopupVersion {
+            request_id: expected.request_id.clone(),
+            presentation_generation: self.generations.fetch_add(1, Ordering::AcqRel) + 1,
+        };
+        let (reply, result) = mpsc::sync_channel(1);
+        let acceptance = Acceptance {
+            result,
+            cancel: post.cancel.clone(),
+            wake: self.sender.clone(),
+            stopped: self.stopped.clone(),
+            accepted: false,
+            version: replacement.clone(),
+        };
+        self.sender
+            .try_send(Command::Replace(
+                expected,
+                Box::new(post),
+                replacement,
+                reply,
+            ))
             .map_err(|_| PostError::Failed)?;
         Ok(acceptance)
     }
@@ -401,6 +655,7 @@ mod tests {
         post_attempts: Arc<AtomicUsize>,
         lease_paths: Arc<Mutex<Vec<std::path::PathBuf>>>,
         callback_leases: Option<Arc<Mutex<HashMap<String, crate::notification_icon::Lease>>>>,
+        posted_signals: Option<SyncSender<Signal>>,
     }
     struct TestItem {
         id: String,
@@ -421,15 +676,16 @@ mod tests {
         fn post(
             &mut self,
             id: &str,
+            _: u64,
             _: &str,
             _: &str,
             sound: bool,
             icon: Option<&crate::notification_icon::Icon>,
-            copy_action: bool,
+            actions: ActionAvailability,
             signal: Signal,
         ) -> Result<TestItem, PostError> {
             self.post_attempts.fetch_add(1, Ordering::AcqRel);
-            self.copy_actions.push(copy_action);
+            self.copy_actions.push(actions.copy);
             self.sounds.push(sound);
             self.icons.push(match icon {
                 None => "none",
@@ -466,6 +722,9 @@ mod tests {
                 }
             }
             self.callbacks.insert(id.into(), signal);
+            if let Some(posted_signals) = &self.posted_signals {
+                let _ = posted_signals.try_send(self.callbacks[id].clone());
+            }
             Ok(TestItem {
                 id: id.into(),
                 log: self.log.clone(),
@@ -506,6 +765,231 @@ mod tests {
             sound: false,
             icon: Some(crate::notification_icon::Icon::Message),
             copy: None,
+            popup_actions: None,
+        }
+    }
+
+    fn popup_post(id: usize, handler: Arc<dyn Fn(PopupAction) + Send + Sync>) -> Post {
+        let mut post = post(id);
+        post.popup_actions = Some(PopupActions {
+            reveal: true,
+            reply: false,
+            handler,
+        });
+        post
+    }
+
+    #[test]
+    fn replacement_fences_old_callback_and_preserves_fresh_generation() {
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let first_delivered = delivered.clone();
+        let second_delivered = delivered.clone();
+        let mut registry = registry();
+        let first = PopupVersion {
+            request_id: "message".into(),
+            presentation_generation: 1,
+        };
+        registry
+            .post_versioned(
+                popup_post(
+                    1,
+                    Arc::new(move |_| {
+                        first_delivered.fetch_add(1, Ordering::AcqRel);
+                    }),
+                ),
+                first.clone(),
+            )
+            .unwrap();
+        let stale = registry.entries[0].signal.clone();
+        let fresh = PopupVersion {
+            request_id: "message".into(),
+            presentation_generation: 2,
+        };
+        registry
+            .replace(
+                &first,
+                popup_post(
+                    1,
+                    Arc::new(move |_| {
+                        second_delivered.fetch_add(1, Ordering::AcqRel);
+                    }),
+                ),
+                fresh,
+            )
+            .unwrap();
+
+        stale.reveal();
+        assert!(registry.reconcile().is_empty());
+        registry.entries[0].signal.reveal();
+        let delivered_actions = registry.reconcile();
+        assert_eq!(delivered_actions.len(), 1);
+        let (handler, action) = delivered_actions[0].4.clone().unwrap();
+        handler(action);
+        assert_eq!(delivered.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn replacement_rejects_stale_or_same_generation() {
+        let mut registry = registry();
+        let version = PopupVersion {
+            request_id: "message".into(),
+            presentation_generation: 3,
+        };
+        registry
+            .post_versioned(popup_post(1, Arc::new(|_| {})), version.clone())
+            .unwrap();
+        assert_eq!(
+            registry.replace(&version, popup_post(1, Arc::new(|_| {})), version.clone()),
+            Err(PostError::Failed)
+        );
+        assert_eq!(registry.entries.len(), 1);
+    }
+
+    #[test]
+    fn reveal_callback_keeps_its_version_registered_until_replacement() {
+        let (posted, signals) = mpsc::sync_channel(1);
+        let (actions, received) = mpsc::sync_channel(1);
+        let owner = test_owner(
+            TestBackend {
+                posted_signals: Some(posted),
+                ..Default::default()
+            },
+            0,
+        );
+        let acceptance = owner
+            .submit(popup_post(
+                1,
+                Arc::new(move |action| actions.send(action).unwrap()),
+            ))
+            .unwrap();
+        let version = acceptance.version();
+        acceptance.wait().unwrap();
+
+        signals.recv_timeout(PLATFORM_TIMEOUT).unwrap().reveal();
+        assert_eq!(
+            received.recv_timeout(PLATFORM_TIMEOUT).unwrap(),
+            PopupAction::Reveal
+        );
+        owner
+            .replace(version, popup_post(1, Arc::new(|_| {})))
+            .unwrap()
+            .wait()
+            .unwrap();
+        owner.stop();
+    }
+
+    #[test]
+    fn failed_reveal_lookup_cancellation_retires_owner_and_releases_reservation() {
+        let recovery = Arc::new(super::super::recovery_store::RecoveryStore::new(1));
+        let reservation = recovery.reserve().unwrap();
+        let (posted, signals) = mpsc::sync_channel(1);
+        let (revealed, reveal_received) = mpsc::sync_channel(1);
+        let (retired, retirement) = mpsc::sync_channel(1);
+        let owner = test_owner(
+            TestBackend {
+                posted_signals: Some(posted),
+                retired: Some(retired),
+                ..Default::default()
+            },
+            0,
+        );
+        let original = popup_post(
+            1,
+            Arc::new(move |_| {
+                let _reservation = &reservation;
+                revealed.send(()).unwrap();
+            }),
+        );
+        let cancellation = original.cancel.clone();
+        let acceptance = owner.submit(original).unwrap();
+        acceptance.wait().unwrap();
+
+        signals.recv_timeout(PLATFORM_TIMEOUT).unwrap().reveal();
+        reveal_received.recv_timeout(PLATFORM_TIMEOUT).unwrap();
+        cancellation.cancel();
+        owner.wake();
+
+        retirement.recv_timeout(PLATFORM_TIMEOUT).unwrap();
+        owner.stop();
+        assert!(recovery.reserve().is_some());
+    }
+
+    #[test]
+    fn failed_reveal_replacement_cancellation_retires_owner_and_releases_reservation() {
+        let recovery = Arc::new(super::super::recovery_store::RecoveryStore::new(1));
+        let reservation = recovery.reserve().unwrap();
+        let (posted, signals) = mpsc::sync_channel(1);
+        let (revealed, reveal_received) = mpsc::sync_channel(1);
+        let (retired, retirement) = mpsc::sync_channel(1);
+        let owner = test_owner(
+            TestBackend {
+                post_outcomes: VecDeque::from([Ok(()), Err(PostError::Failed)]),
+                posted_signals: Some(posted),
+                retired: Some(retired),
+                ..Default::default()
+            },
+            0,
+        );
+        let original = popup_post(
+            1,
+            Arc::new(move |_| {
+                let _reservation = &reservation;
+                revealed.send(()).unwrap();
+            }),
+        );
+        let cancellation = original.cancel.clone();
+        let acceptance = owner.submit(original).unwrap();
+        let version = acceptance.version();
+        acceptance.wait().unwrap();
+
+        signals.recv_timeout(PLATFORM_TIMEOUT).unwrap().reveal();
+        reveal_received.recv_timeout(PLATFORM_TIMEOUT).unwrap();
+        assert!(owner
+            .replace(version, popup_post(1, Arc::new(|_| {})))
+            .unwrap()
+            .wait()
+            .is_err());
+
+        cancellation.cancel();
+        owner.wake();
+        retirement.recv_timeout(PLATFORM_TIMEOUT).unwrap();
+        owner.stop();
+        assert!(recovery.reserve().is_some());
+    }
+
+    #[test]
+    fn replacement_at_capacity_preserves_the_replaced_slot_and_rolls_back_on_failure() {
+        for index in [0, CAPACITY / 2, CAPACITY - 1] {
+            let mut registry = registry();
+            for id in 0..CAPACITY {
+                registry.post(post(id)).unwrap();
+            }
+            let expected = registry.entries[index].version.clone();
+            let replacement = PopupVersion {
+                request_id: expected.request_id.clone(),
+                presentation_generation: 2,
+            };
+            registry
+                .replace(&expected, post(index), replacement.clone())
+                .unwrap();
+            assert_eq!(registry.entries.len(), CAPACITY);
+            assert_eq!(registry.entries[index].version, replacement);
+
+            registry.backend.fail_post = true;
+            let expected = registry.entries[index].version.clone();
+            assert_eq!(
+                registry.replace(
+                    &expected,
+                    post(index),
+                    PopupVersion {
+                        request_id: expected.request_id.clone(),
+                        presentation_generation: 3,
+                    },
+                ),
+                Err(PostError::Failed)
+            );
+            assert_eq!(registry.entries.len(), CAPACITY);
+            assert_eq!(registry.entries[index].version, expected);
         }
     }
 
@@ -542,6 +1026,7 @@ mod tests {
             sound: true,
             icon: Some(crate::notification_icon::Icon::Message),
             copy: None,
+            popup_actions: None,
         }
     }
 
@@ -791,6 +1276,7 @@ mod tests {
             sender,
             stopped,
             thread,
+            generations: AtomicU64::new(0),
         }
     }
 
@@ -875,6 +1361,7 @@ mod tests {
                         body,
                         icon,
                         copy: None,
+                        popup_actions: None,
                     })
                     .and_then(Acceptance::wait)
             },
@@ -1186,6 +1673,7 @@ mod tests {
                     body,
                     icon,
                     copy: None,
+                    popup_actions: None,
                 })?;
                 observing.recv_timeout(PLATFORM_TIMEOUT).unwrap();
                 receipt.wait_for(std::time::Duration::ZERO)
@@ -1351,7 +1839,7 @@ mod tests {
         assert_eq!(
             clicks
                 .iter()
-                .map(|(_, value, _, _)| value.request_id.as_str())
+                .map(|(_, value, _, _, _)| value.request_id.as_str())
                 .collect::<Vec<_>>(),
             ["1", "0"]
         );
@@ -1452,7 +1940,7 @@ mod tests {
         assert_eq!(
             delivered
                 .iter()
-                .map(|(_, value, _, copy)| (value.request_id.as_str(), copy.is_some()))
+                .map(|(_, value, _, copy, _)| (value.request_id.as_str(), copy.is_some()))
                 .collect::<Vec<_>>(),
             [("1", false), ("0", true)]
         );
