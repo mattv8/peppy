@@ -635,16 +635,28 @@ impl Client {
         parts: Option<DraftSendParts>,
         group: Option<GroupDraftSend>,
     ) -> Result<DraftSendGate, Error> {
-        let store = self.lock()?;
-        let existing: Option<(String, String)> = store
+        let mut store = self.lock()?;
+        let existing: Option<(String, String, i64, Vec<u8>)> = store
             .conn
             .query_row(
-                "SELECT revision_id,command_id FROM draft_send_intents WHERE draft_id=?",
+                "SELECT revision_id,command_id,queued,sealed_snapshot FROM draft_send_intents WHERE draft_id=?",
                 [draft_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
-        if let Some((revision_id, command_id)) = existing {
+        if let Some((revision_id, command_id, queued, snapshot)) = existing {
+            if queued == 0 {
+                let snapshot: SendIntentSnapshot =
+                    serde_json::from_slice(&snapshot).map_err(|_| Error::Database)?;
+                let tx = store.conn.transaction()?;
+                for attachment_id in &snapshot.attachment_ids {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO draft_media_references(kind,owner_id,attachment_id) VALUES('intent',?,?)",
+                        params![command_id, attachment_id.to_string()],
+                    )?;
+                }
+                tx.commit()?;
+            }
             return Ok(DraftSendGate {
                 remote: Some(RemoteDraftSend {
                     draft_id,
@@ -710,16 +722,18 @@ impl Client {
             group,
         })
         .map_err(|_| Error::Database)?;
-        store.conn.execute(
-                "INSERT INTO draft_send_intents(draft_id,revision_id,command_id,expected_revision,sealed_snapshot,queued) VALUES(?,?,?,?,?,0)",
-                params![draft_id.to_string(), revision_id.to_string(), command_id.to_string(), i64::try_from(expected_revision).map_err(|_| Error::Database)?, snapshot],
+        let tx = store.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO draft_send_intents(draft_id,revision_id,command_id,expected_revision,sealed_snapshot,queued) VALUES(?,?,?,?,?,0)",
+            params![draft_id.to_string(), revision_id.to_string(), command_id.to_string(), i64::try_from(expected_revision).map_err(|_| Error::Database)?, snapshot],
         )?;
-        add_media_references(
-            &store.conn,
-            "intent",
-            &command_id.to_string(),
-            &attachment_ids,
-        )?;
+        for attachment_id in &attachment_ids {
+            tx.execute(
+                "INSERT OR IGNORE INTO draft_media_references(kind,owner_id,attachment_id) VALUES('intent',?,?)",
+                params![command_id.to_string(), attachment_id.to_string()],
+            )?;
+        }
+        tx.commit()?;
         Ok(DraftSendGate {
             remote: Some(RemoteDraftSend {
                 draft_id,
@@ -1086,6 +1100,42 @@ impl Client {
         ids.into_iter()
             .map(|id| Ok((id, attachment_state(&store, id, sync_enabled)?)))
             .collect()
+    }
+}
+
+/// Restores the durable pins for interrupted pre-transaction intent creation before callers can
+/// discard ciphertext. Snapshot contents, rather than the mutable compose row, remain authority.
+pub(crate) fn repair_unqueued_intent_media_references(conn: &mut Connection) -> Result<(), Error> {
+    const REPAIR_BATCH: usize = 100;
+    let mut after = String::new();
+    loop {
+        let tx = conn.transaction()?;
+        let intents = {
+            let mut statement = tx.prepare(
+                "SELECT command_id,sealed_snapshot FROM draft_send_intents WHERE queued=0 AND command_id>? ORDER BY command_id LIMIT ?",
+            )?;
+            statement
+                .query_map(params![after, REPAIR_BATCH as i64], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let Some((last_command_id, _)) = intents.last() else {
+            tx.commit()?;
+            return Ok(());
+        };
+        after = last_command_id.clone();
+        for (command_id, snapshot) in intents {
+            let snapshot: SendIntentSnapshot =
+                serde_json::from_slice(&snapshot).map_err(|_| Error::Database)?;
+            for attachment_id in snapshot.attachment_ids {
+                tx.execute(
+                    "INSERT OR IGNORE INTO draft_media_references(kind,owner_id,attachment_id) VALUES('intent',?,?)",
+                    params![command_id, attachment_id.to_string()],
+                )?;
+            }
+        }
+        tx.commit()?;
     }
 }
 
@@ -1584,6 +1634,9 @@ fn try_merge_head(
     let Some(text) = merge_text(&base.text, &local.text, &remote.text) else {
         return Ok(false);
     };
+    if text.len() > 64 * 1024 {
+        return Ok(false);
+    }
     let next = ComposeDraft {
         text,
         revision: local.revision.checked_add(1).ok_or(Error::Database)?,
@@ -1858,8 +1911,8 @@ fn keep_local_after_terminal(
     // but keep its loaded content and resurrection mapping in this transaction.
     remove_terminal_draft(conn, draft_id)?;
     conn.execute(
-        "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,draft_only) VALUES(?,?,?,?,?,?,0,0)",
-        params![replacement.to_string(), draft.conversation_id.to_string(), draft.text, json_string(&draft.recipients)?, json_string(&draft.attachment_ids)?, route_json(&draft.route)?],
+        "INSERT INTO compose_drafts(draft_id,conversation_id,group_name,text,recipients,attachment_ids,route,revision,draft_only) VALUES(?,?,?,?,?,?,?,0,0)",
+        params![replacement.to_string(), draft.conversation_id.to_string(), draft.group_name, draft.text, json_string(&draft.recipients)?, json_string(&draft.attachment_ids)?, route_json(&draft.route)?],
     )?;
     conn.execute(
         "INSERT INTO draft_sync(draft_id,state,notice) VALUES(?,'local_only',?)",

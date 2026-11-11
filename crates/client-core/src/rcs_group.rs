@@ -2748,6 +2748,7 @@ mod tests {
             sent_at_ms: None,
             ordered_at_ms: None,
             mms_context: None,
+            rcs_capture: false,
         };
         let store = group.gateway.client.lock().unwrap();
         let epoch = store.active_epoch.unwrap();

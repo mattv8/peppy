@@ -15,6 +15,7 @@ import java.security.MessageDigest
 internal class MmsImageFitter(
     private val root: File,
     private val beforePreparation: (() -> Boolean)? = null,
+    private val publishMetadata: ((File, File) -> Unit)? = null,
     private val encoder: ((File, Int, Int, File) -> File)? = null,
 ) {
     fun fit(
@@ -29,7 +30,7 @@ internal class MmsImageFitter(
         load(directory, fingerprint, parts)?.let { cached ->
             when (fits(cached, maximumPduBytes, measure)) {
                 true -> return MmsFitResult.Fitted(cached)
-                null -> return MmsFitResult.Transient
+                null -> return transient(directory)
                 false -> Unit
             }
             directory.deleteRecursively()
@@ -101,8 +102,8 @@ internal class MmsImageFitter(
         }
         return if (runCatching {
             temporary.writeText(body)
-            Files.move(temporary.toPath(), metadata.toPath(), ATOMIC_MOVE, REPLACE_EXISTING)
-        }.isSuccess) MmsFitResult.Fitted(parts) else MmsFitResult.Transient
+            publishMetadata?.invoke(temporary, metadata) ?: Files.move(temporary.toPath(), metadata.toPath(), ATOMIC_MOVE, REPLACE_EXISTING)
+        }.isSuccess) MmsFitResult.Fitted(parts) else transient(directory)
     }
 
     private fun load(directory: File, fingerprint: String, current: List<MmsFitPart>): List<MmsFitPart>? = runCatching {

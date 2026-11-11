@@ -19,7 +19,7 @@ var eventCodes = []eventCode{
 	{"conn", "ready"}, {"conn", "temporary_error"}, {"conn", "recovered"},
 	{"conn", "phone_not_responding"}, {"conn", "phone_responding"}, {"conn", "no_data"},
 	{"browser", "active"}, {"browser", "inactive"},
-	{"session", "active_session_set"},
+	{"session", "active_session_set"}, {"session", "refresh_requested"},
 	{"health", "ok"}, {"health", "failed"},
 	{"conversation", "updated"},
 	{"index", "stale"},

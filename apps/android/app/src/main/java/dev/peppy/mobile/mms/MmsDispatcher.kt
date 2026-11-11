@@ -16,6 +16,7 @@ import dev.peppy.mobile.mms.pdu.MmsRecipient
 import dev.peppy.mobile.mms.pdu.MmsRecipientKind
 import dev.peppy.mobile.sms.DispatchSummary
 import dev.peppy.mobile.sms.SmsDispatcher
+import dev.peppy.mobile.sms.isCarrierOnlyProofBlocked
 import dev.peppy.mobile.telephony.SimRoute
 import dev.peppy.mobile.telephony.SimRoutes
 import dev.peppy.mobile.telephony.subscriptionSmsManager
@@ -45,6 +46,7 @@ class MmsDispatcher(
 ) {
     fun dispatch(limit: Int = SmsDispatcher.MAX_COMMANDS_PER_RUN): DispatchSummary = synchronized(DISPATCH_LOCK) {
         var submitted = 0; var refused = 0; var waiting = 0; var permits = 0; var fitPreparations = 0; var more = false
+        var carrierOnlyProofBlocked = 0
         val blockedThreads = mutableSetOf<String>()
         fun waitForEarlier(thread: String?) { waiting++; thread?.let(blockedThreads::add) }
         for (pending in client.pendingCommands()) {
@@ -107,7 +109,11 @@ class MmsDispatcher(
             }
             val permit = client.beginSendAttempt(pending.commandId)
             val command = permit.command
-            if (permit.state != NativePermitState.PERMIT || command?.commandId != pending.commandId) { callbacks.deletePrepared(pending.commandId); waitForEarlier(thread); continue }
+            if (permit.state != NativePermitState.PERMIT || command?.commandId != pending.commandId) {
+                // A text waiting on the link's carrier-only proof is reported so the link is asked for it.
+                if (isCarrierOnlyProofBlocked(permit.state)) carrierOnlyProofBlocked++
+                callbacks.deletePrepared(pending.commandId); waitForEarlier(thread); continue
+            }
             permits++
             if (!callbacks.register(command.commandId)) { record(command.commandId, NativeSendResult.FAILED_BEFORE_SUBMISSION); callbacks.deletePrepared(command.commandId); refused++; continue }
             try { carrier.send(route.subscriptionId, uri, sent) }
@@ -116,7 +122,7 @@ class MmsDispatcher(
             catch (_: RuntimeException) { continue }
             record(command.commandId, NativeSendResult.SUBMITTED); submitted++
         }
-        return DispatchSummary(submitted, refused, waiting, more)
+        return DispatchSummary(submitted, refused, waiting, more, carrierOnlyProofBlocked)
     }
     private fun compose(commandId: String, message: uniffi.peppy_mobile_bindings.NativeMessage, cap: MmsLimits, output: File, beforePreparation: () -> Boolean): File {
         val handles = mutableListOf<uniffi.peppy_mobile_bindings.NativePlaintextHandle>()

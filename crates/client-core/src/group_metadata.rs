@@ -677,12 +677,13 @@ fn lww_wins(revision: u64, writer: &str, current_revision: u64, current_writer: 
 }
 
 fn valid(metadata: &ConversationGroupMetadata, producer: DeviceId) -> bool {
-    metadata.name_logical_revision > 0
-        && metadata.members_logical_revision > 0
-        && metadata.member_revision > 0
+    let valid_revision = |revision| (1..=i64::MAX as u64).contains(&revision);
+    valid_revision(metadata.name_logical_revision)
+        && valid_revision(metadata.members_logical_revision)
+        && valid_revision(metadata.member_revision)
         && metadata.observed_at_ms >= 0
         && metadata.link.as_ref().is_none_or(|link| {
-            link.logical_revision > 0 && canonical_device(&link.writer_device_id)
+            valid_revision(link.logical_revision) && canonical_device(&link.writer_device_id)
         })
         && metadata.writer_device_id == producer.to_string()
         && canonical_device(&metadata.writer_device_id)
@@ -700,6 +701,30 @@ fn valid(metadata: &ConversationGroupMetadata, producer: DeviceId) -> bool {
             .name
             .as_ref()
             .is_none_or(|name| !name.is_empty() && name.len() <= 256)
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_logical_revisions_that_sqlite_cannot_represent() {
+        let producer = DeviceId::new();
+        let metadata = ConversationGroupMetadata {
+            conversation_id: ConversationId::new(),
+            name: None,
+            name_logical_revision: i64::MAX as u64 + 1,
+            name_writer_device_id: producer.to_string(),
+            members: Vec::new(),
+            members_logical_revision: 1,
+            members_writer_device_id: producer.to_string(),
+            member_revision: 1,
+            observed_at_ms: 0,
+            writer_device_id: producer.to_string(),
+            link: None,
+        };
+        assert!(!valid(&metadata, producer));
+    }
 }
 
 /// A writer field must be the canonical text of a device id, so equal writers always compare equal.

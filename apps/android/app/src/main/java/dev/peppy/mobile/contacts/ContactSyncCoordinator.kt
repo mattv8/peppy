@@ -96,6 +96,7 @@ internal class ContactSyncCoordinator(
     // ---- pass -----------------------------------------------------------------------------------
 
     fun run(charging: Boolean, forceFull: Boolean = false): ContactPassReport {
+        recoverPhotoScratch()
         val selection = core.contactBookSelection()
         if (selection is NativeContactBookSelection.Wait) {
             return ContactPassReport(ContactPassReport.Outcome.WAITING)
@@ -373,6 +374,12 @@ internal class ContactSyncCoordinator(
         }
     }
 
+    private fun recoverPhotoScratch() {
+        photoTempDirectory.listFiles()?.forEach { file ->
+            if (file.isFile && PHOTO_SCRATCH.matches(file.name) && file.lastModified() < System.currentTimeMillis() - PHOTO_SCRATCH_RETAIN_MILLIS) file.delete()
+        }
+    }
+
     /** Provider identity of the aggregate's chosen photo row, or null when it has none. */
     private fun photoFingerprint(contact: Contact): String? {
         val row = contact.photoDataId?.let { id -> contact.fields.firstOrNull { it.kind == Kind.PHOTO && it.dataId == id } } ?: return null
@@ -633,7 +640,9 @@ internal class ContactSyncCoordinator(
         if (photoOp?.optString("op") == "set") {
             val bytes = photoBytes(photoOp) ?: return Outcome.Failed("photo_unavailable")
             val raw = plan.photoRaw ?: return Outcome.Failed("read_only_account")
-            plan.photos[raw] = PhotoOp.Write(bytes)
+            val existing = contact.fields.firstOrNull { it.rawContactId == raw && it.kind == Kind.PHOTO }
+            val rawVersion = contact.sources.firstOrNull { it.rawContactId == raw }?.version ?: return Outcome.Failed(STALE)
+            plan.photos[raw] = PhotoOp.Write(bytes, existing?.dataId, existing?.version, rawVersion)
             photoRaw = raw
         }
         // Only the captured raws (== the fresh aggregate's raws) are ever written.
@@ -853,6 +862,8 @@ internal class ContactSyncCoordinator(
         const val FORCED_REPAIR_MS = 36L * 60 * 60 * 1000
         const val STALE = "stale_item"
         val OPEN_STATES = setOf("requested", "approved", "applying", "outcome_unknown")
+        private val PHOTO_SCRATCH = Regex("contact-photo-[0-9a-fA-F-]{36}\\.img")
+        private const val PHOTO_SCRATCH_RETAIN_MILLIS = 60L * 60 * 1000
     }
 }
 

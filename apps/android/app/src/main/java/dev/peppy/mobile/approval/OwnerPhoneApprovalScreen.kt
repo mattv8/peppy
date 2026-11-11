@@ -121,6 +121,7 @@ internal fun OwnerPhoneApprovalScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var method by remember { mutableStateOf(OwnerPhoneMethod.TRANSFER) }
     var codesMatch by remember { mutableStateOf(false) }
+    var acknowledgedClaim by remember { mutableStateOf<VerificationClaim?>(null) }
     var busy by remember { mutableStateOf(false) }
     var busyLabel by remember { mutableStateOf<Int?>(null) }
     // Plain remember only: a revealed secret is never saved across recreation.
@@ -132,7 +133,11 @@ internal fun OwnerPhoneApprovalScreen(
             is OwnerPhoneApprovalHost.Result.View -> {
                 view = next
                 error = null
-                if (next.status.stage != OwnerPhoneStage.VERIFY) codesMatch = false
+                val nextClaim = next.status.verificationClaim()
+                if (nextClaim == null || nextClaim != acknowledgedClaim) {
+                    codesMatch = false
+                    acknowledgedClaim = null
+                }
                 if (next.status.stage != OwnerPhoneStage.WAITING) revealed = null
             }
             is OwnerPhoneApprovalHost.Result.Failed -> error = next.code
@@ -160,20 +165,23 @@ internal fun OwnerPhoneApprovalScreen(
             }
         }
     }
-    fun approve() = launch(R.string.peppy_production_pairing_approving) {
-        when (val next = host.approve(prompt)) {
-            // Cancelling the fallback dialog leaves the verify stage unchanged.
-            OwnerPhoneApprovalHost.Result.Cancelled -> host.poll()
-            else -> next
+    fun approve() {
+        if (!canApproveOwnerPhoneClaim(view?.status, acknowledgedClaim, codesMatch, busy)) return
+        launch(R.string.peppy_production_pairing_approving) {
+            when (val next = host.approve(prompt)) {
+                // Cancelling the fallback dialog leaves the verify stage unchanged.
+                OwnerPhoneApprovalHost.Result.Cancelled -> host.poll()
+                else -> next
+            }
         }
     }
     fun restart() = launch(R.string.peppy_production_pairing_refreshing) { host.restart(method) }
     fun retry() {
         val current = view?.status?.stage
         when {
+            current == OwnerPhoneStage.VERIFY -> launch(R.string.peppy_production_pairing_checking) { host.poll() }
             current == OwnerPhoneStage.APPROVED -> launch(R.string.peppy_production_pairing_checking) { host.poll() }
             error == "expired" || current == null || current == OwnerPhoneStage.EXPIRED || current == OwnerPhoneStage.DENIED -> restart()
-            current == OwnerPhoneStage.VERIFY -> approve()
             else -> launch(R.string.peppy_production_pairing_checking) { host.poll() }
         }
     }
@@ -341,7 +349,10 @@ internal fun OwnerPhoneApprovalScreen(
                     style = MaterialTheme.typography.headlineMedium,
                 )
                 Row(
-                    Modifier.fillMaxWidth().testTag("owner-phone-codes-match").toggleable(codesMatch, role = Role.Checkbox) { codesMatch = it },
+                    Modifier.fillMaxWidth().testTag("owner-phone-codes-match").toggleable(codesMatch, role = Role.Checkbox) { checked ->
+                        codesMatch = checked
+                        acknowledgedClaim = if (checked) view?.status?.verificationClaim() else null
+                    },
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Checkbox(codesMatch, null)
@@ -397,6 +408,24 @@ internal fun OwnerPhoneApprovalScreen(
         }
     }
 }
+
+internal data class VerificationClaim(
+    val invitationId: String,
+    val digest: String?,
+    val sas: String?,
+)
+
+internal fun OwnerPhoneStatus.verificationClaim(): VerificationClaim? =
+    takeIf { stage == OwnerPhoneStage.VERIFY }?.let {
+        VerificationClaim(it.invitationId, it.claimDigest, it.sas)
+    }
+
+internal fun canApproveOwnerPhoneClaim(
+    status: OwnerPhoneStatus?,
+    acknowledgedClaim: VerificationClaim?,
+    codesMatch: Boolean,
+    busy: Boolean,
+): Boolean = !busy && codesMatch && status?.verificationClaim() == acknowledgedClaim && acknowledgedClaim != null
 
 @Composable
 internal fun ApprovalPassphraseDialog(request: CompletableDeferred<CharArray?>) {

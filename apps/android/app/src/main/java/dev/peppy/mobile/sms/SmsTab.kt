@@ -41,6 +41,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -70,11 +71,9 @@ import dev.peppy.mobile.restrictedsetup.RestrictedSetupEntry
 import dev.peppy.mobile.googlemessages.GoogleMessagesLink
 import dev.peppy.mobile.phoneread.PhoneReadSettings
 import dev.peppy.mobile.syncMessage
-import dev.peppy.mobile.telephony.SimRoutes
 import dev.peppy.mobile.ui.ConsentSheet
 import dev.peppy.mobile.ui.DetailsNavigationRow
 import dev.peppy.mobile.ui.DetailsPageHeader
-import dev.peppy.mobile.ui.DetailsStatusRow as StatusRow
 import dev.peppy.mobile.ui.HeroBanner
 import dev.peppy.mobile.ui.ScreenBody
 import dev.peppy.mobile.ui.SettingToggleRow
@@ -300,7 +299,6 @@ internal fun SmsTab(
                             }
                         },
                     )
-                    StatusRow("status-sim", stringResource(R.string.peppy_toggle_android_sim_route), stringResource(if (SimRoutes.current().isEmpty()) R.string.peppy_toggle_android_sim_missing else R.string.peppy_toggle_android_sim_default))
                 }
             }
             SmsSettings(context, history, policy == true, ::beginEnable)
@@ -441,6 +439,7 @@ private fun SyncSummary(health: SyncHealth?) {
                     val state = health.summaryState
                     Text(
                         if (problem) "⚠" else if (state == SyncSummaryState.HEALTHY) "✓" else "•",
+                        modifier = Modifier.clearAndSetSemantics {},
                         color = if (problem) colors.warningText else if (state == SyncSummaryState.HEALTHY) colors.success else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Column {
@@ -453,13 +452,16 @@ private fun SyncSummary(health: SyncHealth?) {
                                     SyncSummaryState.RETRYING -> R.string.peppy_toggle_android_sync_retrying_title
                                     SyncSummaryState.CHECKING -> R.string.peppy_toggle_android_sync_checking
                                     SyncSummaryState.PROGRESS -> R.string.peppy_toggle_android_sync_progress_title
+                                    SyncSummaryState.HISTORY_PAUSED -> R.string.peppy_toggle_android_sync_history_paused_title
                                 },
                             ),
                             style = MaterialTheme.typography.titleSmall,
                         )
                         Text(
-                            if (problem && health.problemCount == 1) stringResource(R.string.peppy_toggle_android_sync_problems_one)
-                            else if (problem) stringResource(R.string.peppy_toggle_android_sync_problems_many, health.problemCount)
+                            if (problem && health.problemCount > 1) stringResource(R.string.peppy_toggle_android_sync_attention_many)
+                            else if (problem && !health.unlocked) stringResource(R.string.peppy_toggle_android_sync_attention_locked)
+                            else if (problem && health.stopped) stringResource(R.string.peppy_toggle_android_sync_attention_stopped)
+                            else if (problem) stringResource(R.string.peppy_toggle_android_sync_attention_access)
                             else stringResource(
                                 when (state) {
                                     SyncSummaryState.HEALTHY -> R.string.peppy_toggle_android_sync_all_good_body
@@ -467,7 +469,8 @@ private fun SyncSummary(health: SyncHealth?) {
                                     SyncSummaryState.RETRYING -> R.string.peppy_toggle_android_sync_retrying_body
                                     SyncSummaryState.CHECKING -> R.string.peppy_toggle_android_sync_checking
                                     SyncSummaryState.PROGRESS -> R.string.peppy_toggle_android_sync_progress_body
-                                    SyncSummaryState.ATTENTION -> error("Attention has a problem count")
+                                    SyncSummaryState.HISTORY_PAUSED -> R.string.peppy_toggle_android_sync_history_paused_body
+                                    SyncSummaryState.ATTENTION -> error("Attention has a presentation")
                                 },
                             ),
                             style = MaterialTheme.typography.bodyMedium,

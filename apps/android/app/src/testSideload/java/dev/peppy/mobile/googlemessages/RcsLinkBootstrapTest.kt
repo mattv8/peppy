@@ -1,5 +1,6 @@
 package dev.peppy.mobile.googlemessages
 
+import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -31,6 +32,22 @@ class RcsLinkBootstrapTest {
         assertEquals(5L, claim.getLong("expectedLifecycleGeneration"))
         assertEquals(3L, claim.getLong("mappingRevision"))
         assertFalse(claim.has("backfillFromMs"))
+    }
+
+    @Test fun `each failed bootstrap step records its own diagnostic reason`() {
+        fun reasons(fixture: Fixture): List<String> {
+            val records = mutableListOf<String>()
+            SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) { fixture.bootstrap().run() }
+            return records.map { it.substringAfterLast("29=") }
+        }
+        val one = listOf(candidate("google-a", "+15550000001"))
+
+        assertEquals(listOf("186"), reasons(Fixture(candidates = one, complete = false)))
+        assertEquals(listOf("190"), reasons(Fixture(candidates = one, resolution = { NativeRcsBootstrapResolution.Missing })))
+        assertEquals(listOf("194"), reasons(Fixture(candidates = one).apply { observeFailure = setOf("google-a") }))
+        assertEquals(listOf("196"), reasons(Fixture(candidates = one).apply { verifyOutcome = { NativeRcsMappingVerification.REFUSED } }))
+        assertEquals(listOf("197"), reasons(Fixture(candidates = one).apply { claimFailure = setOf("google-a") }))
+        assertEquals(emptyList<String>(), reasons(Fixture(candidates = one)))
     }
 
     @Test fun `owned conversations are skipped without consuming the per run cap`() {

@@ -4,6 +4,7 @@ import dev.peppy.mobile.diagnostics.SyncDiagnosticReason
 import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import dev.peppy.mobile.diagnostics.SyncTraceEvent
 import dev.peppy.mobile.diagnostics.SyncTraceField
+import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
 import uniffi.peppy_mobile_bindings.NativeRcsProviderRoute
 import uniffi.peppy_mobile_bindings.NativeRcsProviderRouteReason
 import uniffi.peppy_mobile_bindings.NativeRcsProviderRowRoute
@@ -34,6 +35,7 @@ internal class RcsProviderRowRouter(
         }
         return try {
             val result = routeJson(providerRowJson(providerRowId, providerThreadId, providerType, observedAtMs, routableAddresses, restricted, textOnly))
+            if (restricted) recordLinkOutcome(result)
             when (result.reason) {
                 NativeRcsProviderRouteReason.PRE_PROOF -> diagnostic(SyncDiagnosticReason.RCS_PROVIDER_PRE_PROOF)
                 NativeRcsProviderRouteReason.GUARD_BAND -> diagnostic(SyncDiagnosticReason.RCS_PROVIDER_GUARD_BAND)
@@ -95,6 +97,21 @@ internal class RcsProviderRowRouter(
                 else -> if (character.code < 0x20) append("\\u%04x".format(character.code)) else append(character)
             }
         }
+    }
+
+    /** Which side takes a mirrored chat row: the link, or this capture, and why. */
+    private fun recordLinkOutcome(result: NativeRcsProviderRoute) {
+        val outcome = when (result.route) {
+            NativeRcsProviderRowRoute.ALERT -> "alert"
+            NativeRcsProviderRowRoute.DETECTOR_RECORDED -> "left_to_link"
+            NativeRcsProviderRowRoute.PROVIDER -> when (result.reason) {
+                NativeRcsProviderRouteReason.PRE_PROOF -> "pre_proof"
+                NativeRcsProviderRouteReason.GUARD_BAND -> "guard_band"
+                NativeRcsProviderRouteReason.NOT_LINK_OWNED -> "not_link_owned"
+                NativeRcsProviderRouteReason.NOT_RESTRICTED_TEXT, null -> return
+            }
+        }
+        recordGoogleMessagesLinkEvent("provider_route", outcome, 0L)
     }
 
     private fun diagnostic(reason: Long) {

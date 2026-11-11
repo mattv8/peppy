@@ -17,6 +17,7 @@ pub enum RcsMediaSyncState {
     NotSent,
     OutcomeUnknown,
     MembersChanged,
+    SendFailed,
 }
 
 impl RcsMediaSyncState {
@@ -33,6 +34,7 @@ impl RcsMediaSyncState {
             "not_sent" => Self::NotSent,
             "outcome_unknown" => Self::OutcomeUnknown,
             "members_changed" => Self::MembersChanged,
+            "send_failed" => Self::SendFailed,
             _ => return None,
         })
     }
@@ -49,6 +51,7 @@ impl RcsMediaSyncState {
             Self::NotSent => "not_sent",
             Self::OutcomeUnknown => "outcome_unknown",
             Self::MembersChanged => "members_changed",
+            Self::SendFailed => "send_failed",
         }
     }
 
@@ -115,6 +118,7 @@ mod tests {
             RcsMediaSyncState::NotSent,
             RcsMediaSyncState::OutcomeUnknown,
             RcsMediaSyncState::MembersChanged,
+            RcsMediaSyncState::SendFailed,
         ] {
             let json = serde_json::to_string(&state).unwrap();
             assert_eq!(json, format!("\"{}\"", state.code()));
@@ -136,5 +140,6 @@ mod tests {
         assert!(RcsMediaSyncState::Expired.is_incoming());
         assert!(!RcsMediaSyncState::Sending.is_incoming());
         assert!(!RcsMediaSyncState::MembersChanged.is_incoming());
+        assert!(!RcsMediaSyncState::SendFailed.is_incoming());
     }
 }

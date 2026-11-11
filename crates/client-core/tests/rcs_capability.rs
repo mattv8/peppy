@@ -1465,3 +1465,94 @@ fn lifecycle_publisher_derives_eligibility_and_monotonic_revisions_atomically() 
     assert_eq!(invalidated.eligibility, RcsEligibility::NotEligible);
     assert!(invalidated.mapping_revision > unavailable.mapping_revision);
 }
+
+#[test]
+fn unchanged_eligibility_is_published_once_until_the_republish_floor_elapses() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-eligibility-idempotent", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+        .unwrap();
+    assert_eq!(
+        client
+            .publish_rcs_eligibility_from_lifecycle(&[conversation], 1_000)
+            .unwrap(),
+        1
+    );
+    let queued = client.pending_outbox_count().unwrap();
+    let first = client
+        .rcs_eligibility_projection(conversation, config.device_id, 1_000)
+        .unwrap()
+        .unwrap();
+
+    let before_floor = 1_000 + RCS_ELIGIBILITY_REPUBLISH_FLOOR_MS - 1;
+    assert_eq!(
+        client
+            .publish_rcs_eligibility_from_lifecycle(&[conversation], before_floor)
+            .unwrap(),
+        0
+    );
+    assert_eq!(client.pending_outbox_count().unwrap(), queued);
+    assert_eq!(
+        client
+            .rcs_eligibility_projection(conversation, config.device_id, before_floor)
+            .unwrap()
+            .unwrap(),
+        first
+    );
+
+    let at_floor = 1_000 + RCS_ELIGIBILITY_REPUBLISH_FLOOR_MS;
+    assert_eq!(
+        client
+            .publish_rcs_eligibility_from_lifecycle(&[conversation], at_floor)
+            .unwrap(),
+        1
+    );
+    assert_eq!(client.pending_outbox_count().unwrap(), queued + 1);
+}
+
+#[test]
+fn unchanged_eligibility_is_published_again_after_the_link_returns() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-eligibility-relinked", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+        .unwrap();
+    client
+        .publish_rcs_eligibility_from_lifecycle(&[conversation], 1_000)
+        .unwrap();
+    client
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Unavailable,
+            false,
+            false,
+            false,
+            1_001,
+            1_001,
+        )
+        .unwrap();
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_002, 1_002)
+        .unwrap();
+
+    assert_eq!(
+        client
+            .publish_rcs_eligibility_from_lifecycle(&[conversation], 1_002)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        client
+            .rcs_eligibility_projection(conversation, config.device_id, 1_002)
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::NotEligible
+    );
+}

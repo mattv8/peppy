@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import androidx.exifinterface.media.ExifInterface
 import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -63,6 +64,29 @@ class MmsImageFitterTest {
 
         assertTrue(firstCount > 0)
         assertTrue(encodes == firstCount)
+    }
+
+    @Test fun cachedMeasurementFailureDeletesFittedPlaintext() {
+        val root = kotlin.io.path.createTempDirectory("mms-fit").toFile()
+        val source = File(root, "source.jpg").apply { writeBytes(ByteArray(100_000)) }
+        val fitter = MmsImageFitter(root) { _, _, _, destination -> destination.apply { writeBytes(ByteArray(100)) } }
+        assertTrue(fitter.fit("command", "fingerprint", 300, listOf(MmsFitPart(source, "image/jpeg", "photo.jpg"))) { 100L } is MmsFitResult.Fitted)
+
+        assertTrue(fitter.fit("command", "fingerprint", 300, listOf(MmsFitPart(source, "image/jpeg", "photo.jpg"))) { error("measurement failed") } is MmsFitResult.Transient)
+        assertFalse(File(root, "command").exists())
+    }
+
+    @Test fun metadataPublicationFailureDeletesFittedPlaintext() {
+        val root = kotlin.io.path.createTempDirectory("mms-fit").toFile()
+        val source = File(root, "source.jpg").apply { writeBytes(ByteArray(100_000)) }
+        val fitter = MmsImageFitter(
+            root,
+            encoder = { _, _, _, destination -> destination.apply { writeBytes(ByteArray(100)) } },
+            publishMetadata = { _, _ -> error("metadata publication failed") },
+        )
+
+        assertTrue(fitter.fit("command", "fingerprint", 300, listOf(MmsFitPart(source, "image/jpeg", "photo.jpg"))) { 100L } is MmsFitResult.Transient)
+        assertFalse(File(root, "command").exists())
     }
 
     @Test

@@ -13,12 +13,13 @@ const MAX_DETECTORS_PER_CONVERSATION: i64 = 1_024;
 const RCS_PROVIDER_GUARD_BAND_MS: i64 = 120_000;
 const RCS_CLAIM_BACKFILL_WINDOW_MS: i64 = 15 * 60 * 1_000;
 
-/// Link-owned lanes for 1:1 conversations, keyed by Google conversation id.
-const LANE_BY_GOOGLE_ONE_TO_ONE: &str = "SELECT o.conversation_id,m.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_conversation_mappings m ON m.peppy_conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=m.google_conversation_id WHERE m.google_conversation_id=? AND m.invalidated_at_ms IS NULL AND o.owner='link'";
+/// Link-owned lanes for 1:1 conversations, keyed by Google conversation id. A lane exists only on
+/// a mapping revision whose thread passed the one-to-one guard (`rcs_mapping::receive_guarded`).
+const LANE_BY_GOOGLE_ONE_TO_ONE: &str = "SELECT o.conversation_id,m.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_conversation_mappings m ON m.peppy_conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=m.google_conversation_id JOIN metadata guarded ON guarded.k='rcs_receive_guarded:' || o.conversation_id AND guarded.v=CAST(m.mapping_revision AS TEXT) WHERE m.google_conversation_id=? AND m.invalidated_at_ms IS NULL AND o.owner='link'";
 /// Link-owned lanes for group conversations that still receive (Live, Paused, or Proving).
 const LANE_BY_GOOGLE_GROUP: &str = "SELECT o.conversation_id,g.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_group_mapping g ON g.conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=g.google_conversation_id WHERE g.google_conversation_id=? AND g.state IN ('live','paused','proving') AND o.owner='link'";
 /// Every link-owned lane, 1:1 and group, in one list for historical recovery.
-const LINK_OWNED_LANES: &str = "SELECT o.conversation_id,m.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_conversation_mappings m ON m.peppy_conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=m.google_conversation_id WHERE o.owner='link' AND m.invalidated_at_ms IS NULL UNION ALL SELECT o.conversation_id,g.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_group_mapping g ON g.conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=g.google_conversation_id WHERE o.owner='link' AND g.state IN ('live','paused','proving') ORDER BY 1";
+const LINK_OWNED_LANES: &str = "SELECT o.conversation_id,m.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_conversation_mappings m ON m.peppy_conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=m.google_conversation_id JOIN metadata guarded ON guarded.k='rcs_receive_guarded:' || o.conversation_id AND guarded.v=CAST(m.mapping_revision AS TEXT) WHERE o.owner='link' AND m.invalidated_at_ms IS NULL UNION ALL SELECT o.conversation_id,g.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_group_mapping g ON g.conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=g.google_conversation_id WHERE o.owner='link' AND g.state IN ('live','paused','proving') ORDER BY 1";
 
 fn lane_by_google(
     conn: &Connection,
@@ -518,9 +519,12 @@ impl Client {
         let mut store = self.lock()?;
         let (conn, ctx) = store.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let Some(mapping) = crate::rcs_mapping::get(&tx, claim.conversation_id)? else {
-            tx.commit()?;
-            return Ok(RcsLinkOwnershipClaimOutcome::Refused);
+        let mapping = match crate::rcs_mapping::get(&tx, claim.conversation_id)? {
+            Some(mapping) if crate::rcs_mapping::receive_guarded(&tx, &mapping)? => mapping,
+            _ => {
+                tx.commit()?;
+                return Ok(RcsLinkOwnershipClaimOutcome::Refused);
+            }
         };
         let Some(lifecycle) = crate::rcs_mapping::recorded_link_lifecycle_metadata(&tx)? else {
             tx.commit()?;
@@ -713,7 +717,7 @@ impl Client {
             && let Some(tmp_id) = record.tmp_id.as_deref()
             && rcs_media::attachment_for_tmp_id(&tx, tmp_id)?.is_some()
         {
-            let Some((command, index, message_id)) = rcs_media::echo_slot(
+            let Some((_, _, message_id)) = rcs_media::echo_slot(
                 &tx,
                 ctx.device_id,
                 conversation_id,
@@ -744,14 +748,6 @@ impl Client {
                     &record.google_message_id,
                 )?,
                 tmp_id,
-            )?;
-            rcs_media::apply_echo_receipt(
-                &tx,
-                &ctx,
-                command,
-                index,
-                message_id,
-                RcsProjectedStatus::Sent,
             )?;
             apply_reported_facts(
                 &tx,
@@ -815,6 +811,11 @@ impl Client {
                     RcsIdentityOutcome::Rejected(code) => Ok(RcsReceiveOutcome::Rejected(code)),
                 };
         }
+        if one_to_one_receive_closed(&tx, conversation_id, Some(&record.google_conversation_id))? {
+            return Ok(RcsReceiveOutcome::Rejected(
+                RcsReceiveCode::ConversationUnproven,
+            ));
+        }
         let message_id = deterministic_message_id(
             &ctx,
             &record.google_conversation_id,
@@ -832,6 +833,12 @@ impl Client {
         let outcome = match identity {
             RcsIdentityOutcome::Recorded => {
                 let unmatched_outgoing = record.direction == Direction::Outgoing;
+                let counterpart = one_to_one_counterpart(
+                    &tx,
+                    conversation_id,
+                    &record.google_conversation_id,
+                    record.direction,
+                )?;
                 let payload = MessagePayload {
                     record: MessageRecord {
                         message_id,
@@ -841,12 +848,13 @@ impl Client {
                     },
                     source_device_id: ctx.device_id,
                     provider_message_id: None,
-                    sender_address,
-                    recipients: Vec::new(),
+                    sender_address: sender_address.or(counterpart.sender),
+                    recipients: counterpart.recipients,
                     subject: None,
                     body: record.body,
                     transport: Transport::Rcs,
                     direction: record.direction,
+                    rcs_capture: unmatched_outgoing,
                     imported: historical,
                     sent_at_ms: record.sent_at_ms,
                     ordered_at_ms: None,
@@ -984,8 +992,9 @@ impl Client {
                 )?,
                 &tmp_id,
             )?;
-            if let Some(status) =
-                rcs_media::apply_echo_receipt(&tx, &ctx, command, index, id, application.status)?
+            let (receipt_changed, aggregate) =
+                rcs_media::apply_echo_receipt(&tx, &ctx, command, index, id, application.status)?;
+            let aggregate_changed = if let Some(status) = aggregate
                 && apply_status(&tx, id, status, true)?
             {
                 enqueue(
@@ -1000,9 +1009,17 @@ impl Client {
                         rcs_reported: true,
                     },
                 )?;
-            }
+                true
+            } else {
+                false
+            };
+            let changed = receipt_changed || aggregate_changed;
             tx.commit()?;
-            return Ok(RcsReceiveOutcome::StatusApplied);
+            return Ok(if changed {
+                RcsReceiveOutcome::StatusApplied
+            } else {
+                RcsReceiveOutcome::StatusUnchanged
+            });
         }
         let mut message_id: Option<String> = tx.query_row(
             "SELECT message_id FROM rcs_message_identities WHERE google_message_id=? AND google_conversation_id=? AND conversation_id=?",
@@ -1161,7 +1178,9 @@ impl Client {
                 RcsReceiveCode::GatewayUnavailable,
             ));
         }
-        if group_receive_closed(&tx, conversation_id)? {
+        if group_receive_closed(&tx, conversation_id)?
+            || one_to_one_receive_closed(&tx, conversation_id, None)?
+        {
             return Ok(RcsRecoveryOutcome::Rejected(
                 RcsReceiveCode::ConversationUnproven,
             ));
@@ -1324,14 +1343,11 @@ impl Client {
             tx.commit()?;
             return Ok(provider_route(RcsProviderRouteReason::NotRestrictedText));
         }
-        let row_identities = row
-            .addresses
-            .iter()
-            .filter_map(|address| crate::rcs_mapping::canonical_recipient(address))
-            .collect::<BTreeSet<_>>();
-        let (resolved, uncertain) =
-            crate::rcs_mapping::peppy_conversations_for_identity_set(&tx, &row_identities)?;
-        let mut conversations = resolved.into_iter().collect::<BTreeSet<_>>();
+        // A row belongs to a link conversation by its numbers alone: the one-to-one chat proven
+        // for its other party, or the group whose roster it names. Stored message history does
+        // not decide this, since rows captured before the link owned the lane name the same
+        // party and would make every later row look uncertain.
+        let mut conversations = BTreeSet::new();
         let mut statement = tx.prepare(
             "SELECT m.peppy_conversation_id,p.canonical_participant,p.identity_region,p.own_identity FROM rcs_conversation_mappings m JOIN rcs_mapping_proofs p ON p.peppy_conversation_id=m.peppy_conversation_id AND p.mapping_revision=m.mapping_revision",
         )?;
@@ -1373,7 +1389,17 @@ impl Client {
                 conversations.insert(conversation.parse().map_err(|_| Error::Database)?);
             }
         }
-        if uncertain || conversations.len() > 1 {
+        // Only a proven chat or roster may hand a row to the link. Without one, a row that names
+        // a single number is still placed through the number index, so an unlinked thread is
+        // told apart from a row that cannot be placed; such a row is never withheld.
+        let proven_by_numbers = !conversations.is_empty();
+        if let ([address], false) = (row.addresses.as_slice(), proven_by_numbers)
+            && let Some(identity) = crate::rcs_mapping::canonical_recipient(address)
+            && let Some(indexed) = crate::rcs_mapping::indexed_conversation(&tx, &identity)?
+        {
+            conversations.insert(indexed);
+        }
+        if conversations.len() > 1 {
             tx.commit()?;
             return Ok(RcsProviderRowRouteResult {
                 route: RcsProviderRowRoute::Alert,
@@ -1405,7 +1431,9 @@ impl Client {
             return Ok(provider_route(RcsProviderRouteReason::NotLinkOwned));
         }
         let linked_google = match crate::rcs_mapping::get(&tx, conversation_id)? {
-            Some(mapping) => Some(mapping.google_conversation_id),
+            // A send-only proof does not make the link the receiver: the provider keeps the row.
+            Some(mapping) => crate::rcs_mapping::receive_guarded(&tx, &mapping)?
+                .then_some(mapping.google_conversation_id),
             None => crate::rcs_group::receivable_mapping(&tx, conversation_id)?
                 .map(|mapping| mapping.google_conversation_id),
         };
@@ -1413,6 +1441,13 @@ impl Client {
         if linked_google.is_none() || owner_google != linked_google {
             tx.commit()?;
             return Ok(provider_route(RcsProviderRouteReason::NotLinkOwned));
+        }
+        if !proven_by_numbers {
+            tx.commit()?;
+            return Ok(RcsProviderRowRouteResult {
+                route: RcsProviderRowRoute::Alert,
+                reason: None,
+            });
         }
         if row.observed_at_ms <= ownership.proof_time_ms {
             tx.commit()?;
@@ -1823,6 +1858,67 @@ fn record_provider_detector_in_transaction(
         params![conversation_key, detector.provider_row_id, detector.provider_thread_id, detector.provider_type, detector.observed_at_ms, detector.observed_generation],
     )?;
     Ok(RcsIdentityOutcome::Recorded)
+}
+
+/// Whether a one-to-one conversation no longer receives through the link. It does once it holds a
+/// chat proof that is withdrawn, is for another chat, or was made by a send on a thread that
+/// carries someone else (`rcs_mapping::receive_guarded`). A caller may hold a receive context
+/// from before that change, so new messages and recovery progress check here as well.
+fn one_to_one_receive_closed(
+    tx: &Connection,
+    conversation_id: ConversationId,
+    google_conversation_id: Option<&str>,
+) -> Result<bool, Error> {
+    let closed: Option<bool> = tx
+        .query_row(
+            "SELECT m.invalidated_at_ms IS NOT NULL OR (?2 IS NOT NULL AND m.google_conversation_id<>?2) OR NOT EXISTS(SELECT 1 FROM metadata guarded WHERE guarded.k='rcs_receive_guarded:' || m.peppy_conversation_id AND guarded.v=CAST(m.mapping_revision AS TEXT)) FROM rcs_conversation_mappings m WHERE m.peppy_conversation_id=?1",
+            params![conversation_id.to_string(), google_conversation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(closed.unwrap_or(false))
+}
+
+/// How a one-to-one chat message names the other party, so that it reads like an SMS in the same
+/// thread: a reply is addressed from the newest message.
+#[derive(Default)]
+struct OneToOneCounterpart {
+    sender: Option<String>,
+    recipients: Vec<String>,
+}
+
+/// The proven participant of the one-to-one chat this conversation is mapped to. A group
+/// conversation, or one without a current receive-guarded proof for this chat, names no one.
+fn one_to_one_counterpart(
+    tx: &Connection,
+    conversation_id: ConversationId,
+    google_conversation_id: &str,
+    direction: Direction,
+) -> Result<OneToOneCounterpart, Error> {
+    let participant: Option<String> = tx
+        .query_row(
+            "SELECT p.canonical_participant FROM rcs_conversation_mappings m JOIN rcs_mapping_proofs p ON p.peppy_conversation_id=m.peppy_conversation_id AND p.mapping_revision=m.mapping_revision JOIN metadata guarded ON guarded.k='rcs_receive_guarded:' || m.peppy_conversation_id AND guarded.v=CAST(m.mapping_revision AS TEXT) WHERE m.peppy_conversation_id=? AND m.google_conversation_id=? AND m.class='one_to_one' AND m.invalidated_at_ms IS NULL",
+            params![conversation_id.to_string(), google_conversation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(participant) = participant else {
+        return Ok(OneToOneCounterpart::default());
+    };
+    let address = participant
+        .strip_prefix("raw:")
+        .unwrap_or(&participant)
+        .to_owned();
+    Ok(match direction {
+        Direction::Incoming => OneToOneCounterpart {
+            sender: Some(address),
+            recipients: Vec::new(),
+        },
+        Direction::Outgoing => OneToOneCounterpart {
+            sender: None,
+            recipients: vec![address],
+        },
+    })
 }
 
 /// Resolves who sent one observation. The outer `Err` is a database failure; the inner `Err`
@@ -2495,7 +2591,7 @@ mod receive_context_snapshot_tests {
                 "CREATE TABLE metadata(k TEXT PRIMARY KEY,v TEXT NOT NULL);
                  CREATE TABLE rcs_link_status_projection(gateway_device_id TEXT PRIMARY KEY,state TEXT NOT NULL,availability INTEGER NOT NULL,health INTEGER NOT NULL,phone_responsive INTEGER NOT NULL,observed_at_ms INTEGER NOT NULL);
                  CREATE TABLE rcs_lane_ownership(conversation_id TEXT PRIMARY KEY,owner TEXT NOT NULL,ownership_generation INTEGER NOT NULL,history_token TEXT);
-                 CREATE TABLE rcs_conversation_mappings(peppy_conversation_id TEXT PRIMARY KEY,google_conversation_id TEXT NOT NULL,invalidated_at_ms INTEGER);",
+                 CREATE TABLE rcs_conversation_mappings(peppy_conversation_id TEXT PRIMARY KEY,google_conversation_id TEXT NOT NULL,mapping_revision INTEGER NOT NULL,invalidated_at_ms INTEGER);",
             )
             .unwrap();
         let device_id = DeviceId::new();
@@ -2545,8 +2641,14 @@ mod receive_context_snapshot_tests {
             .unwrap();
         reader
             .execute(
-                "INSERT INTO rcs_conversation_mappings VALUES(?,'google-conversation',NULL)",
+                "INSERT INTO rcs_conversation_mappings VALUES(?,'google-conversation',1,NULL)",
                 [conversation_id.to_string()],
+            )
+            .unwrap();
+        reader
+            .execute(
+                "INSERT INTO metadata(k,v) VALUES(?,'1')",
+                [format!("rcs_receive_guarded:{conversation_id}")],
             )
             .unwrap();
         reader

@@ -158,6 +158,40 @@ class RcsMediaReceiveCoordinatorTest {
         assertTrue(h.states.isEmpty())
     }
 
+    @Test fun `wifi only defers Google and hosted transfers until an allowed network wake`() = Harness().use { h ->
+        h.networkAllowed = false
+        h.run()
+
+        assertEquals(0, h.downloads)
+        assertTrue(h.requests.isEmpty())
+        assertTrue(h.states.isEmpty())
+
+        h.networkAllowed = true
+        h.run()
+
+        assertEquals(1, h.downloads)
+        assertTrue(h.requests.isNotEmpty())
+    }
+
+    @Test fun `network loss after reserve preserves prepared upload without failed state`() = Harness().use { h ->
+        h.prepared = true
+        h.denyNetworkOnReserve = true
+
+        h.run()
+
+        assertEquals(listOf("reserve"), h.events)
+        assertEquals(NativeAttachmentState.PENDING_UPLOAD, h.attachmentState)
+        assertTrue(h.states.isEmpty())
+    }
+
+    @Test fun `external receive wake during active transfer is retained once`() = Harness().use { h ->
+        h.submitDuringDownload = true
+
+        h.run()
+
+        assertEquals(1, h.rediscoveries)
+    }
+
     @Test fun `throwing downloader cleans its partial file and publishes failure`() = Harness().use { h ->
         h.throwDuringDownload = true
         h.run()
@@ -181,12 +215,16 @@ class RcsMediaReceiveCoordinatorTest {
         var attachmentState = NativeAttachmentState.PENDING_UPLOAD
         var hostedCode = 200
         var downloadCode = "ok"
+        var networkAllowed = true
         @Volatile var retired = false
         var clockMs = 0L
         var throwDuringDownload = false
         var retireDuringDownload = false
         var retireOnReserve = false
         var retireOnPut = false
+        var denyNetworkOnReserve = false
+        var submitDuringDownload = false
+        var rediscoveries = 0
         var destination: File? = null
         var retentionPending = false
         val server = LoopbackHttpServer { request ->
@@ -195,6 +233,7 @@ class RcsMediaReceiveCoordinatorTest {
                 request.target.endsWith("/reserve") -> {
                     events += "reserve"
                     if (retireOnReserve) retired = true
+                    if (denyNetworkOnReserve) networkAllowed = false
                     LoopbackHttpServer.Response(hostedCode, if (hostedCode == 200) """{"attachment_id":"$id"}""" else """{"code":"${if (hostedCode == 401) "unauthorized" else "vault_quota_exceeded"}"}""")
                 }
                 request.target.endsWith("/upload") -> {
@@ -236,7 +275,10 @@ class RcsMediaReceiveCoordinatorTest {
                 else -> throw AssertionError("Unexpected native call: ${method.name}")
             }
         } as NativeClientInterface
-        val coordinator = RcsMediaReceiveCoordinator(files, RcsMediaTransferQueue(executor), client, this) { !retired }
+        val coordinator = RcsMediaReceiveCoordinator(
+            files, RcsMediaTransferQueue(executor), client, this,
+            current = { !retired }, networkAllowed = { networkAllowed }, rediscover = { rediscoveries++ },
+        )
         init { RcsMediaReceiveCoordinator.clearCapacityCache() }
         fun info() = NativeAttachmentInfo(id, "image/jpeg", "a.jpg", 5u, 6u, "a".repeat(64), attachmentState)
         fun capacity(bytes: Long) = AttachmentStorageLoad.Available(AttachmentStorageSnapshot(0, bytes, 0, AttachmentStorageCleanup.AVAILABLE, null))
@@ -251,6 +293,7 @@ class RcsMediaReceiveCoordinatorTest {
         override fun download(task: NativePendingRcsMediaReceive, destination: File): String {
             assertEquals("private-ref", task.mediaRef)
             events += "download"; downloads++; this.destination = destination; destination.writeText("plain")
+            if (submitDuringDownload) coordinator.submit(task)
             if (throwDuringDownload) throw java.io.IOException("download interrupted")
             if (retireDuringDownload) retired = true
             return """{"code":"$downloadCode"}"""

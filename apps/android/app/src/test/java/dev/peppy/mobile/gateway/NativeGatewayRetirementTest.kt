@@ -4,13 +4,33 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
 import androidx.work.Configuration
+import androidx.work.ListenableWorker
+import androidx.work.WorkerParameters
 import androidx.work.testing.SynchronousExecutor
+import androidx.work.testing.TestListenableWorkerBuilder
 import androidx.work.testing.WorkManagerTestInitHelper
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import dev.peppy.mobile.RelayRoute
+import dev.peppy.mobile.RelayRoutePublisher
+import dev.peppy.mobile.RelayWakeRuntime
+import dev.peppy.mobile.RelayWakeReconcileWorker
+import dev.peppy.mobile.RelayWakeWorkerDispatch
+import dev.peppy.mobile.RelayWakeWorkerEnrollmentInput
+import dev.peppy.mobile.relayWakeWorkerEnrollmentInputFactory
+import dev.peppy.mobile.RelayWakeTransport
+import dev.peppy.mobile.relayWakeStateStoreFactory
+import dev.peppy.mobile.relay.RelayWakeActive
+import dev.peppy.mobile.relay.RelayWakeCoordinator
+import dev.peppy.mobile.relay.RelayWakeIdentity
+import dev.peppy.mobile.relay.RelayWakeCleanup
+import dev.peppy.mobile.relay.RelayWakePending
+import dev.peppy.mobile.relay.RelayWakeReconcile
+import dev.peppy.mobile.relay.RelayWakeStateStore
+import dev.peppy.mobile.security.SecretBox
 import dev.peppy.mobile.security.VaultMaterial
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
@@ -39,6 +59,10 @@ class NativeGatewayRetirementTest : GatewayTestBase() {
     @After
     fun resetRetirementFixtures() {
         NativeGateway.persistenceDecisionHook = null
+        NativeGateway.relayArchiveHook = null
+        RelayWakeRuntime.beforeApplyCurrentRelayRuntimeHook = null
+        relayWakeWorkerEnrollmentInputFactory = null
+        HistoricalRelayReconcileWorker.dispatch = null
         WorkManagerTestInitHelper.closeWorkDatabase()
     }
 
@@ -101,6 +125,257 @@ class NativeGatewayRetirementTest : GatewayTestBase() {
             registrar.join(5_000)
         }
     }
+
+    @Test
+    fun archiveDoesNotHoldNativeOwnerLockWhileRelayPublicationHoldsTheJournal() {
+        enrollAndUnlock()
+        val credential = checkNotNull(NativeGateway.accountCredential(context))
+        val preferences = context.getSharedPreferences("peppy-relay", Context.MODE_PRIVATE)
+        preferences.edit().clear().commit()
+        val box = object : SecretBox {
+            override fun seal(purpose: String, plaintext: ByteArray) = plaintext.decodeToString()
+            override fun open(purpose: String, sealed: String) = sealed.encodeToByteArray()
+        }
+        val previousStoreFactory = relayWakeStateStoreFactory
+        relayWakeStateStoreFactory = { RelayWakeStateStore(it, box) }
+        val state = RelayWakeStateStore(preferences, box)
+        val identity = RelayWakeIdentity(
+            credential.origin,
+            credential.vaultId,
+            credential.deviceId,
+            "fcm",
+            "production",
+            state.tokenFingerprint(credential.bearerToken),
+        )
+        val active = RelayWakeActive(
+            identity,
+            "https://relay.example",
+            "hosted",
+            "device-token",
+            RelayRoute("00000000-0000-4000-8000-000000000101", "manage", "wake"),
+            credential.bearerToken,
+            false,
+        )
+        assertTrue(state.saveActive(active))
+        val publicationEntered = CountDownLatch(1)
+        val releasePublication = CountDownLatch(1)
+        val archiveRelayEntered = CountDownLatch(1)
+        val releaseArchiveRelay = CountDownLatch(1)
+        NativeGateway.relayArchiveHook = {
+            archiveRelayEntered.countDown()
+            check(releaseArchiveRelay.await(5, TimeUnit.SECONDS))
+        }
+        val coordinator = RelayWakeCoordinator(
+            RelayWakeStateStore(preferences, box),
+            object : RelayWakeTransport { override fun post(path: String, body: String) = error("unexpected relay request") },
+            RelayRoutePublisher { _, _ -> },
+            publishActive = {
+                publicationEntered.countDown()
+                check(releasePublication.await(5, TimeUnit.SECONDS))
+                checkNotNull(NativeGateway.accountCredential(context))
+            },
+        )
+        val publishResult = AtomicReference<RelayWakeReconcile>()
+        val publishFailure = AtomicReference<Throwable>()
+        val publishThread = Thread {
+            runCatching {
+                coordinator.reconcile(identity, active.relayOrigin, active.protocol, "device", active.tokenFingerprint, credential.bearerToken, true)
+            }.onSuccess(publishResult::set).onFailure(publishFailure::set)
+        }
+        val archiveResult = AtomicReference<Boolean>()
+        val archiveFailure = AtomicReference<Throwable>()
+        val archiveThread = Thread { runCatching { NativeGateway.archiveEnrollment(context) }.onSuccess(archiveResult::set).onFailure(archiveFailure::set) }
+        try {
+            publishThread.start()
+            assertTrue(publicationEntered.await(5, TimeUnit.SECONDS))
+            archiveThread.start()
+            assertTrue(archiveRelayEntered.await(5, TimeUnit.SECONDS))
+
+            releasePublication.countDown()
+            publishThread.join(2_000)
+            assertFalse("publication must not wait on the native owner monitor", publishThread.isAlive)
+            assertNull(publishFailure.get())
+            assertEquals(RelayWakeReconcile.REGISTERED, publishResult.get())
+
+            releaseArchiveRelay.countDown()
+            archiveThread.join(5_000)
+            assertFalse(archiveThread.isAlive)
+            assertNull(archiveFailure.get())
+            assertTrue(archiveResult.get())
+            val archived = RelayWakeStateStore(preferences, box)
+            assertNull(archived.active)
+            assertEquals(active.route.routeId, archived.cleanups().single().route.routeId)
+        } finally {
+            releasePublication.countDown()
+            releaseArchiveRelay.countDown()
+            publishThread.join(5_000)
+            archiveThread.join(5_000)
+            relayWakeStateStoreFactory = previousStoreFactory
+        }
+    }
+
+    @Test
+    fun archiveCompletingAtFinalRelayInitializationBoundaryPreventsWakeResurrection() {
+        val preferences = context.getSharedPreferences("peppy-relay", Context.MODE_PRIVATE)
+        preferences.edit().clear().commit()
+        val box = object : SecretBox {
+            override fun seal(purpose: String, plaintext: ByteArray) = plaintext.decodeToString()
+            override fun open(purpose: String, sealed: String) = sealed.encodeToByteArray()
+        }
+        val previousStoreFactory = relayWakeStateStoreFactory
+        relayWakeStateStoreFactory = { RelayWakeStateStore(it, box) }
+        val hostedCredential = parsed(origin = "https://peppy.pro")
+        assertEquals(ImportResult.IMPORTED, NativeGateway.persistVerified(context, hostedCredential, vaultMaterial()))
+        assertTrue(RelayWakeRuntime.enabled)
+        assertNotNull(RelayWakeRuntime.client)
+
+        val finalApplyEntered = CountDownLatch(1)
+        val releaseFinalApply = CountDownLatch(1)
+        RelayWakeRuntime.beforeApplyCurrentRelayRuntimeHook = {
+            finalApplyEntered.countDown()
+            check(releaseFinalApply.await(5, TimeUnit.SECONDS))
+        }
+        val initializationResult = AtomicReference<ImportResult>()
+        val initializationFailure = AtomicReference<Throwable>()
+        val initializationThread = Thread {
+            runCatching {
+                NativeGateway.persistVerified(context, hostedCredential, vaultMaterial())
+            }.onSuccess(initializationResult::set).onFailure(initializationFailure::set)
+        }
+        val archiveResult = AtomicReference<Boolean>()
+        val archiveFailure = AtomicReference<Throwable>()
+        val archiveThread = Thread {
+            runCatching { NativeGateway.archiveEnrollment(context) }
+                .onSuccess(archiveResult::set)
+                .onFailure(archiveFailure::set)
+        }
+
+        try {
+            initializationThread.start()
+            assertTrue(finalApplyEntered.await(5, TimeUnit.SECONDS))
+            archiveThread.start()
+            archiveThread.join(5_000)
+            assertFalse("archive completes while initialization waits outside the native fence", archiveThread.isAlive)
+            assertNull(archiveFailure.get())
+            assertEquals(true, archiveResult.get())
+
+            releaseFinalApply.countDown()
+            initializationThread.join(5_000)
+            assertFalse(initializationThread.isAlive)
+            assertNull(initializationFailure.get())
+            assertEquals(ImportResult.UPDATED, initializationResult.get())
+            assertNull(NativeGateway.accountCredential(context))
+            assertNull(RelayWakeRuntime.client)
+            assertFalse(RelayWakeRuntime.enabled)
+            assertFalse(RelayWakeRuntime.acceptsWakes(context))
+
+            RelayWakeRuntime.challenge(context, "f".repeat(64))
+            assertNull(RelayWakeStateStore(preferences, box).earlyChallenge())
+        } finally {
+            releaseFinalApply.countDown()
+            initializationThread.join(5_000)
+            archiveThread.join(5_000)
+            RelayWakeRuntime.beforeApplyCurrentRelayRuntimeHook = null
+            relayWakeStateStoreFactory = previousStoreFactory
+        }
+    }
+
+    @Test
+    fun archiveReadFailureThenReplacementRetiresAndDrainsCapturedPendingRoute() {
+        val preferences = context.getSharedPreferences("peppy-relay", Context.MODE_PRIVATE)
+        preferences.edit().clear().commit()
+        val box = ToggleReadableBox()
+        val previousStoreFactory = relayWakeStateStoreFactory
+        relayWakeStateStoreFactory = { RelayWakeStateStore(it, box) }
+        val bearerA = "aa".repeat(48)
+        val bearerB = "bb".repeat(48)
+        val credentialA = parsed(origin = "https://peppy.pro", token = bearerA)
+        val credentialB = parsed(origin = "https://peppy.pro", token = bearerB)
+        val routeA = RelayRoute("00000000-0000-4000-8000-000000000131", "manage-a", "wake-a")
+        val relayOriginA = "https://relay-a.example"
+
+        try {
+            assertEquals(ImportResult.IMPORTED, NativeGateway.persistVerified(context, credentialA, vaultMaterial()))
+            val accountA = checkNotNull(NativeGateway.accountCredential(context))
+            val stateA = RelayWakeStateStore(preferences, box)
+            val identityA = RelayWakeIdentity(
+                accountA.origin,
+                accountA.vaultId,
+                accountA.deviceId,
+                "fcm",
+                "production",
+                stateA.tokenFingerprint(accountA.bearerToken),
+            )
+            assertTrue(
+                stateA.savePending(
+                    RelayWakePending(
+                        identityA,
+                        relayOriginA,
+                        "hosted",
+                        stateA.tokenFingerprint("device-token-a"),
+                        "00000000-0000-4000-8000-000000000130",
+                        routeA,
+                        "f".repeat(64),
+                        1L,
+                    ),
+                ),
+            )
+
+            box.readable = false
+            assertTrue(NativeGateway.archiveEnrollment(context))
+            assertNull(NativeGateway.accountCredential(context))
+            assertTrue(preferences.contains("hosted-relay-pending.v2"))
+
+            assertEquals(ImportResult.IMPORTED, NativeGateway.persistVerified(context, credentialB, vaultMaterial()))
+            assertEquals(bearerB, checkNotNull(NativeGateway.accountCredential(context)).bearerToken)
+            assertTrue(preferences.contains("hosted-relay-pending.v2"))
+
+            box.readable = true
+            RelayWakeRuntime.initialize(context)
+            val dispatch = HistoricalCleanupDispatch(listOf(HttpResult(500, null), HttpResult(200, null)))
+            HistoricalRelayReconcileWorker.dispatch = dispatch
+            relayWakeWorkerEnrollmentInputFactory = {
+                RelayWakeWorkerEnrollmentInput(
+                    deviceToken = "device-token-b",
+                    transport = object : RelayWakeTransport {
+                        override fun post(path: String, body: String) = HttpResult(500, null)
+                    },
+                    supportsCandidates = false,
+                )
+            }
+
+            assertEquals(ListenableWorker.Result.retry(), runHistoricalRelayWorker())
+            val retiredA = RelayWakeStateStore(preferences, box).cleanups().single()
+            assertEquals(routeA.routeId, retiredA.route.routeId)
+            assertNull(retiredA.bearerToken)
+            assertEquals(relayOriginA, retiredA.relayOrigin)
+            assertEquals("manage-a", retiredA.route.manageCredential)
+            assertEquals(bearerB, checkNotNull(NativeGateway.accountCredential(context)).bearerToken)
+
+            assertEquals(ListenableWorker.Result.retry(), runHistoricalRelayWorker())
+            assertTrue(dispatch.accountDeletes.isEmpty())
+            assertEquals(listOf(relayOriginA to "manage-a"), dispatch.revocations)
+            assertEquals(routeA.routeId, RelayWakeStateStore(preferences, box).cleanups().single().route.routeId)
+
+            assertEquals(ListenableWorker.Result.retry(), runHistoricalRelayWorker())
+            assertTrue(dispatch.accountDeletes.isEmpty())
+            assertEquals(listOf(relayOriginA to "manage-a", relayOriginA to "manage-a"), dispatch.revocations)
+            assertTrue(RelayWakeStateStore(preferences, box).cleanups().isEmpty())
+            assertEquals(bearerB, checkNotNull(NativeGateway.accountCredential(context)).bearerToken)
+            assertFalse(dispatch.revocations.any { it.first != relayOriginA })
+        } finally {
+            box.readable = true
+            relayWakeWorkerEnrollmentInputFactory = null
+            HistoricalRelayReconcileWorker.dispatch = null
+            relayWakeStateStoreFactory = previousStoreFactory
+        }
+    }
+
+    private fun runHistoricalRelayWorker() =
+        TestListenableWorkerBuilder<HistoricalRelayReconcileWorker>(context)
+            .build()
+            .startWork()
+            .get(5, TimeUnit.SECONDS)
 
     @Test
     fun failedRevocationKeepsOwnerUnavailableUntilSameRetirementRetriesSuccessfully() {
@@ -467,6 +742,35 @@ class NativeGatewayRetirementTest : GatewayTestBase() {
         assertTrue(archiveParent.delete())
         assertTrue(NativeGateway.archiveEnrollment(context))
         assertNull(NativeGateway.accountCredential(context))
+    }
+
+    private class ToggleReadableBox : SecretBox {
+        @Volatile var readable = true
+        override fun seal(purpose: String, plaintext: ByteArray) = plaintext.decodeToString()
+        override fun open(purpose: String, sealed: String) = sealed.encodeToByteArray().takeIf { readable }
+    }
+
+    private class HistoricalCleanupDispatch(private val revokeResults: List<HttpResult>) : RelayWakeWorkerDispatch {
+        val accountDeletes = mutableListOf<Triple<String, String, String>>()
+        val revocations = mutableListOf<Pair<String, String>>()
+        private var revokeIndex = 0
+
+        override fun deleteWakeRoute(cleanup: RelayWakeCleanup, bearerToken: String): HttpResult {
+            accountDeletes += Triple(cleanup.identity.origin, bearerToken, cleanup.route.routeId)
+            return HttpResult(200, null)
+        }
+
+        override fun revokeRoute(cleanup: RelayWakeCleanup): HttpResult {
+            revocations += cleanup.relayOrigin to cleanup.route.manageCredential
+            return revokeResults[revokeIndex++]
+        }
+    }
+
+    class HistoricalRelayReconcileWorker(context: Context, params: WorkerParameters) :
+        RelayWakeReconcileWorker(context, params, checkNotNull(dispatch)) {
+        companion object {
+            internal var dispatch: RelayWakeWorkerDispatch? = null
+        }
     }
 
     private class CommitFailingContext(base: Context) : ContextWrapper(base) {

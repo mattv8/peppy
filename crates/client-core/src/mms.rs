@@ -806,6 +806,7 @@ impl Client {
             body: input.body.clone(),
             transport: Transport::Mms,
             direction: input.direction,
+            rcs_capture: false,
             imported: input.imported,
             // Non-positive provider dates are unknown, never 1970.
             sent_at_ms: Some(input.observed_at_ms).filter(|time| *time > 0),

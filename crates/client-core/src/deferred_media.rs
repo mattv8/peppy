@@ -928,6 +928,7 @@ mod tests {
             body: "image".into(),
             transport: Transport::Mms,
             direction: Direction::Incoming,
+            rcs_capture: false,
             imported: false,
             sent_at_ms: Some(1),
             ordered_at_ms: None,

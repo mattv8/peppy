@@ -183,7 +183,7 @@ func (link *Link) CommitPreparedRcs(ticketID, permitJSON string) string {
 		return sendJSON(rcsSendResult{Code: "rejected"})
 	}
 	fetched, fetchCode := link.getConversation(operationCtx, client, ticket.request.GoogleConversationID)
-	if fetchCode != "" || !proto.Equal(fetched, ticket.conversation) {
+	if fetchCode != "" || !sameSendAuthority(fetched, ticket.conversation) {
 		return sendJSON(rcsSendResult{Code: "rejected"})
 	}
 	link.mu.Lock()
@@ -258,7 +258,7 @@ func (link *Link) sendAdmissionCurrent(ticket *preparedRcsTicket) bool {
 		return false
 	}
 	current := link.currentSupportedRcsConversationLocked(ticket.request.GoogleConversationID, ticket.generation, ticket.streamEpoch)
-	if current == nil || !proto.Equal(current, ticket.conversation) {
+	if !sameSendAuthority(current, ticket.conversation) {
 		return false
 	}
 	payload, code := validatedPayload(current, link.settings, rcsSendRequest{TmpID: ticket.request.TmpID, GoogleConversationID: ticket.request.GoogleConversationID, Content: ticket.request.Content}, false)

@@ -20,6 +20,15 @@ const (
 	conversationPageTimeout    = 30 * time.Second
 	conversationScanTimeout    = 5 * time.Minute
 	conversationEventLimit     = 128
+	// conversationRefreshAttempts bounds the scans one refresh spends on updates that arrive mid-scan.
+	conversationRefreshAttempts   = 3
+	conversationEventDrainTimeout = 5 * time.Second
+	conversationEventDrainPoll    = 20 * time.Millisecond
+	// conversationIndexMaxAge bounds how long a published index is reused without a rescan.
+	conversationIndexMaxAge = 10 * time.Minute
+	// sessionEvidenceRequestInterval bounds how often one run asks the phone to resend its settings.
+	sessionEvidenceRequestInterval = 30 * time.Second
+	sessionEvidenceRequestTimeout  = 10 * time.Second
 )
 
 const (
@@ -461,6 +470,7 @@ func (link *Link) replaceConversationIndexForContext(ctx context.Context, genera
 	link.indexConversationsLocked(conversations)
 	link.indexRevision++
 	link.conversationIndexComplete = true
+	link.conversationIndexScannedAt = link.nowForTicketLocked()
 	link.conversationIndexGeneration = generation
 	link.conversationIndexStreamEpoch = streamEpoch
 	link.conversationEvents = nil
@@ -558,23 +568,26 @@ func classifyConversation(conversation *gmproto.Conversation) string {
 	return conversationClassificationEligible
 }
 
-func (link *Link) recordConversationEventLocked(id string) {
+// recordConversationEventLocked reports true when the correlation list overflowed and the index
+// must be rescanned. The caller signals the host after releasing the lock.
+func (link *Link) recordConversationEventLocked(id string) (resyncRequired bool) {
 	if len(link.conversationEvents) == 1 && link.conversationEvents[0].Code == "conversation_resync" {
-		return
+		return false
 	}
 	for index := range link.conversationEvents {
 		if link.conversationEvents[index].GoogleConversationID == id {
 			link.conversationEvents[index] = conversationEvent{Code: "conversation_updated", GoogleConversationID: id}
-			return
+			return false
 		}
 	}
 	if len(link.conversationEvents) >= conversationEventLimit {
 		link.invalidateConversationCompletenessLocked()
 		link.indexRevision++
 		link.conversationEvents = []conversationEvent{{Code: "conversation_resync"}}
-		return
+		return true
 	}
 	link.conversationEvents = append(link.conversationEvents, conversationEvent{Code: "conversation_updated", GoogleConversationID: id})
+	return false
 }
 
 func (link *Link) recordConversationEventFor(generation uint64, source libgm.StreamSource, streamEpoch uint64, conversation *gmproto.Conversation) {
@@ -586,31 +599,19 @@ func (link *Link) recordQueuedConversationEventFor(generation uint64, source lib
 		return
 	}
 	link.mu.Lock()
-	defer link.mu.Unlock()
 	if link.closed || generation != link.generation || streamEpoch != link.streamEpoch || !link.streamSourceMatchesLocked(source) {
+		link.mu.Unlock()
 		return
 	}
 	if pending && link.pendingConversationEvents > 0 {
 		link.pendingConversationEvents--
 	}
 	link.applyConversationsLocked([]*gmproto.Conversation{conversation})
-	if !link.hasIndexVerificationLocked() {
-		return
+	resyncRequired := link.hasIndexVerificationLocked() && link.recordConversationEventLocked(conversation.GetConversationID())
+	link.mu.Unlock()
+	if resyncRequired {
+		link.emitFor(generation, "index", "stale", 0)
 	}
-	link.recordConversationEventLocked(conversation.GetConversationID())
-}
-
-func (link *Link) recordConversationEvent(conversation *gmproto.Conversation) {
-	if conversation == nil || conversation.GetConversationID() == "" {
-		return
-	}
-	link.indexConversations([]*gmproto.Conversation{conversation})
-	link.mu.Lock()
-	defer link.mu.Unlock()
-	if link.closed || !link.hasIndexVerificationLocked() {
-		return
-	}
-	link.recordConversationEventLocked(conversation.GetConversationID())
 }
 
 func (link *Link) invalidateConversationCompletenessLocked() {

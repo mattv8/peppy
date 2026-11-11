@@ -513,23 +513,76 @@ pub fn gateway_verify_rcs_mapping(
     observation_json: String,
     now_ms: i64,
 ) -> Result<NativeRcsMappingVerification, MobileBindingsError> {
+    gateway_verify_rcs_mapping_verdict(client, observation_json, now_ms)
+        .map(|verdict| verdict.verification)
+}
+
+/// A mapping verification with the core's fixed refusal code. The code is a closed, content-free
+/// name for diagnostics only; hosts decide on `verification` alone.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeRcsMappingVerdict {
+    pub verification: NativeRcsMappingVerification,
+    pub refusal_code: Option<String>,
+}
+
+#[uniffi::export]
+pub fn gateway_verify_rcs_mapping_verdict(
+    client: Arc<NativeClient>,
+    observation_json: String,
+    now_ms: i64,
+) -> Result<NativeRcsMappingVerdict, MobileBindingsError> {
     with_client(&client.client, |core| {
-        if observation_json.len() > RCS_NATIVE_JSON_CAP {
-            return Err(peppy_client_core::Error::InvalidRequest(
-                "observation too large",
-            ));
-        }
-        let observation = serde_json::from_str::<RcsMappingObservation>(&observation_json)
-            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid observation"))?;
-        core.verify_rcs_mapping(&observation, now_ms)
+        core.verify_rcs_mapping(&mapping_observation(&observation_json)?, now_ms)
     })
-    .map(|outcome| match outcome {
-        RcsMappingOutcome::Mapped(_) => NativeRcsMappingVerification::Mapped,
-        RcsMappingOutcome::Refused(RcsMappingRefusal::GoogleConversationAmbiguous) => {
-            NativeRcsMappingVerification::GoogleConversationAmbiguous
-        }
-        RcsMappingOutcome::Refused(_) => NativeRcsMappingVerification::Refused,
+    .map(mapping_verdict)
+}
+
+/// Verifies the bound target of one pending command. The mapping is stored on the command's own
+/// conversation and only when the command is addressed to exactly the chat's participant.
+#[uniffi::export]
+pub fn gateway_verify_rcs_send_mapping_verdict(
+    client: Arc<NativeClient>,
+    observation_json: String,
+    command_id: String,
+    now_ms: i64,
+) -> Result<NativeRcsMappingVerdict, MobileBindingsError> {
+    with_client(&client.client, |core| {
+        let command_id = command_id
+            .parse()
+            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid command id"))?;
+        core.verify_rcs_send_mapping(&mapping_observation(&observation_json)?, command_id, now_ms)
     })
+    .map(mapping_verdict)
+}
+
+fn mapping_observation(
+    observation_json: &str,
+) -> Result<RcsMappingObservation, peppy_client_core::Error> {
+    if observation_json.len() > RCS_NATIVE_JSON_CAP {
+        return Err(peppy_client_core::Error::InvalidRequest(
+            "observation too large",
+        ));
+    }
+    serde_json::from_str(observation_json)
+        .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid observation"))
+}
+
+fn mapping_verdict(outcome: RcsMappingOutcome) -> NativeRcsMappingVerdict {
+    match outcome {
+        RcsMappingOutcome::Mapped(_) => NativeRcsMappingVerdict {
+            verification: NativeRcsMappingVerification::Mapped,
+            refusal_code: None,
+        },
+        RcsMappingOutcome::Refused(refusal) => NativeRcsMappingVerdict {
+            verification: match refusal {
+                RcsMappingRefusal::GoogleConversationAmbiguous => {
+                    NativeRcsMappingVerification::GoogleConversationAmbiguous
+                }
+                _ => NativeRcsMappingVerification::Refused,
+            },
+            refusal_code: Some(refusal.code().to_owned()),
+        },
+    }
 }
 
 #[uniffi::export]

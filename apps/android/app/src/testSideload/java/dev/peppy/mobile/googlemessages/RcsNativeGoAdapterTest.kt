@@ -226,9 +226,11 @@ class RcsNativeGoAdapterTest {
         assertEquals(null, RcsNativeGoAdapter(lease).classifyTarget("ticket") { RcsNativeTarget.CarrierOnly })
         assertEquals(0, stale.guardCalls)
 
-        val throwing = FakeHandle()
-        assertEquals(null, adapter(throwing).classifyTarget("ticket") { error("classifier failure") })
+        val throwing = FakeHandle().apply { guarded = true }
+        var classifierCalls = 0
+        assertEquals(null, adapter(throwing).classifyTarget("ticket") { classifierCalls++; error("classifier failure") })
         assertEquals(1, throwing.guardCalls)
+        assertEquals(1, classifierCalls)
     }
 
     @Test fun `revoke only accepts exact result codes`() {

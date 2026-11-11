@@ -54,6 +54,7 @@ class MmsCallbackStore(
         val ok = prefs.edit().putString(key(commandId), record.toString()).commit()
         if (ok) {
             file(commandId).delete()
+            trial(commandId).delete()
             fitted(commandId).deleteRecursively()
         }
         ok
@@ -73,12 +74,17 @@ class MmsCallbackStore(
             if (!valid(id) || record.optBoolean("owed")) return@forEach
             val state = record.optString("state")
             if (state == "settled" || (state in setOf("pending", "unknown") && maxOf(record.optLong("created"), record.optLong("activity")) < cutoff)) {
-                file(id).delete(); fitted(id).deleteRecursively(); prefs.edit().remove(name).commit()
+                file(id).delete(); trial(id).delete(); fitted(id).deleteRecursively(); prefs.edit().remove(name).commit()
             }
         }
         pduDir.listFiles()?.forEach { candidate ->
-            if (!candidate.name.matches(TEMP) && !candidate.name.matches(PDU)) return@forEach
-            if (candidate.lastModified() < cutoff && !prefs.contains(key(candidate.name.removeSuffix(".pdu")))) candidate.delete()
+            val commandId = when {
+                candidate.name.matches(TEMP) -> null
+                candidate.name.matches(PDU) -> candidate.name.removeSuffix(".pdu")
+                candidate.name.matches(TRIAL) -> candidate.name.removePrefix(".mms-fit-").removeSuffix(".pdu")
+                else -> return@forEach
+            }
+            if (candidate.lastModified() < cutoff && (commandId == null || !prefs.contains(key(commandId)))) candidate.delete()
         }
         val pending = pendingCommandIds() ?: return@synchronized
         val inFlight = prefs.all.keys.asSequence().filter { it.startsWith(PREFIX) }.map { it.removePrefix(PREFIX) }.toSet()
@@ -105,12 +111,13 @@ class MmsCallbackStore(
         if (valid(commandId) && !prefs.contains(key(commandId))) file(commandId).delete() else false
     }
     private fun file(commandId: String) = File(pduDir, "$commandId.pdu")
+    private fun trial(commandId: String) = File(pduDir, ".mms-fit-$commandId.pdu")
     private fun fitted(commandId: String) = File(fitDir, commandId)
     private fun valid(commandId: String) = UUID.matches(commandId)
     private companion object {
         const val PREFIX = "command:"; val LOCK = Any(); const val MAX_BYTES = 512L * 1024 * 1024; const val MAX_FIT_DIRECTORIES = 64
         val RETAIN_MILLIS = TimeUnit.DAYS.toMillis(7); val UUID = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-        val PDU = Regex("${UUID.pattern}.pdu"); val TEMP = Regex("\\.mms-pdu-.*\\.tmp")
+        val PDU = Regex("${UUID.pattern}.pdu"); val TRIAL = Regex("\\.mms-fit-${UUID.pattern}\\.pdu"); val TEMP = Regex("\\.mms-pdu-.*\\.tmp")
     }
 }
 

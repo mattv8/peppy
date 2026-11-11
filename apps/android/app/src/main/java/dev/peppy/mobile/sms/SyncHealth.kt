@@ -7,7 +7,7 @@ import dev.peppy.mobile.gateway.SyncPhase
 internal fun syncStopped(status: GatewayStatus?): Boolean =
     status != null && (status.syncPhase == SyncPhase.RECOVERY_REQUIRED || status.outboxRejection != null)
 
-internal enum class SyncSummaryState { CHECKING, ATTENTION, PROGRESS, RETRYING, OFF, HEALTHY }
+internal enum class SyncSummaryState { CHECKING, ATTENTION, PROGRESS, RETRYING, OFF, HISTORY_PAUSED, HEALTHY }
 
 internal data class SyncHealth(
     val unlocked: Boolean, val receiveAllowed: Boolean, val sendAllowed: Boolean,
@@ -20,7 +20,6 @@ internal data class SyncHealth(
         smsSyncOn && !receiveAllowed,
         smsSyncOn && !sendAllowed && !sendPausedByAccount,
         smsSyncOn && !readAllowed,
-        history == SmsHistoryState.PAUSED,
     ).count { it }
     val actionNeeded: Boolean get() = problemCount > 0
     val summaryState: SyncSummaryState get() = when {
@@ -29,6 +28,7 @@ internal data class SyncHealth(
         reachability == ServerReachability.UNKNOWN -> SyncSummaryState.CHECKING
         reachability == ServerReachability.UNAVAILABLE || softRejected || history == SmsHistoryState.UNAVAILABLE -> SyncSummaryState.RETRYING
         syncPhase != SyncPhase.LIVE || history == SmsHistoryState.READING || history == SmsHistoryState.PENDING -> SyncSummaryState.PROGRESS
+        history == SmsHistoryState.PAUSED -> SyncSummaryState.HISTORY_PAUSED
         connected && history == SmsHistoryState.CAPTURED -> SyncSummaryState.HEALTHY
         else -> SyncSummaryState.PROGRESS
     }

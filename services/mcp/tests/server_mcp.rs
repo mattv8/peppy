@@ -571,13 +571,11 @@ async fn run_owner_enrollment_smoke() {
     // a digest; the queue response is plaintext-free). Assert the vault classifier that gates
     // `expected_transport` for the same inputs: an attachment or a multi-recipient send is MMS.
     assert_eq!(
-        owner_client
-            .mcp_send_transport(
-                captured.conversation_id,
-                &["+15557654321".to_owned()],
-                &[incoming_image.attachment_id],
-            )
-            .unwrap(),
+        owner_client.mcp_send_transport(
+            &["+15557654321".to_owned()],
+            "",
+            &[incoming_image.attachment_id],
+        ),
         Transport::Mms,
         "image send must classify as MMS"
     );
@@ -602,13 +600,11 @@ async fn run_owner_enrollment_smoke() {
     wait_for_queued_command(&pool, vault, group_command_id).await;
     assert_queued_command_total(&pool, vault, command_count_before_group_send + 1).await;
     assert_eq!(
-        owner_client
-            .mcp_send_transport(
-                captured.conversation_id,
-                &["+15557654321".to_owned(), "+15557654322".to_owned()],
-                &[],
-            )
-            .unwrap(),
+        owner_client.mcp_send_transport(
+            &["+15557654321".to_owned(), "+15557654322".to_owned()],
+            "",
+            &[],
+        ),
         Transport::Mms,
         "two-recipient send must classify as MMS"
     );

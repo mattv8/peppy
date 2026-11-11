@@ -33,15 +33,33 @@ func awaitNativeCommitOutcomeResult(t *testing.T, done <-chan string) string {
 	}
 }
 
+func TestNativeSendCommitAcceptsFetchedDisplayStateChange(t *testing.T) {
+	link, phone, cleanup, ticket, commit := nativeDispatchFixture(t)
+	defer cleanup()
+	phone.mu.Lock()
+	changed := proto.Clone(phone.conversations[0]).(*gmproto.Conversation)
+	changed.LastMessageTimestamp = 99
+	changed.Unread = !changed.Unread
+	phone.conversations[0] = changed
+	phone.mu.Unlock()
+
+	if got := stage2Code(t, committer(t, link).CommitNativeRcs(ticket, nativeCommitJSON(t, commit))); got != "accepted" {
+		t.Fatalf("commit = %s", got)
+	}
+	if phone.countAction("GET_CONVERSATION") != 2 || phone.countAction("SEND_MESSAGE") != 1 {
+		t.Fatal("commit skipped the fresh read or did not send exactly once")
+	}
+}
+
 func TestNativeSendCommitFreshGetRejectsChangedOrInvalidResponses(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		change func(*phoneFixture)
 	}{
-		{"full proto field outside candidate schema", func(phone *phoneFixture) {
+		{"routing field outside candidate schema", func(phone *phoneFixture) {
 			phone.mu.Lock()
 			changed := proto.Clone(phone.conversations[0]).(*gmproto.Conversation)
-			changed.LastMessageTimestamp = 99
+			changed.DefaultOutgoingID = "synthetic-other-sim"
 			phone.conversations[0] = changed
 			phone.mu.Unlock()
 		}},

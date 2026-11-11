@@ -100,8 +100,9 @@ pub struct MessageWindow {
 
 impl Client {
     pub fn search_local(&self, request: LocalSearchRequest) -> Result<LocalSearchPage, Error> {
-        let store = self.lock()?;
-        search(&store, request)
+        let mut store = self.lock()?;
+        let resolution_refresh_incomplete = crate::contact_resolution::refresh(&mut store.conn)?;
+        search(&store, request, resolution_refresh_incomplete)
     }
     /// The only standalone indexing operation; it indexes at most 100 rows.
     pub fn advance_search_index(
@@ -192,7 +193,11 @@ impl Client {
     }
 }
 
-fn search(store: &Store, request: LocalSearchRequest) -> Result<LocalSearchPage, Error> {
+fn search(
+    store: &Store,
+    request: LocalSearchRequest,
+    resolution_refresh_incomplete: bool,
+) -> Result<LocalSearchPage, Error> {
     if store.keys.is_empty() {
         return Err(Error::KeysUnavailable);
     }
@@ -246,7 +251,13 @@ fn search(store: &Store, request: LocalSearchRequest) -> Result<LocalSearchPage,
         }
     }
     if matches!(kind, SearchKind::All | SearchKind::Conversation) {
-        let hits = conversation_hits(store, query, limit + 1, cursor.as_ref())?;
+        let hits = conversation_hits(
+            store,
+            query,
+            limit + 1,
+            cursor.as_ref(),
+            resolution_refresh_incomplete,
+        )?;
         has_more.conversation = hits.len() > limit;
         for (hit, key) in hits.into_iter().take(limit) {
             next_key = Some(key);
@@ -451,6 +462,7 @@ fn conversation_hits(
     query: &str,
     limit: usize,
     cursor: Option<&SearchCursor>,
+    resolution_refresh_incomplete: bool,
 ) -> Result<Vec<(LocalSearchHit, String)>, Error> {
     let phone_digits = phone_query_digits(query);
     let mut statement = store.conn.prepare(
@@ -465,13 +477,19 @@ fn conversation_hits(
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    let resolver = crate::contact_resolution::display_resolver(&store.conn)?;
+    let resolver = (!resolution_refresh_incomplete)
+        .then(|| crate::contact_resolution::display_resolver(&store.conn))
+        .transpose()?;
     let mut matches = std::collections::BTreeMap::<String, (usize, i64, String, String)>::new();
     for (conversation_id, address, latest) in rows {
-        let resolution = resolver.resolve(&address, None)?;
+        let resolution = resolver
+            .as_ref()
+            .map(|resolver| resolver.resolve(&address, None))
+            .transpose()?;
         let candidate_rank = resolution
-            .candidate_display_names
-            .iter()
+            .as_ref()
+            .into_iter()
+            .flat_map(|resolution| resolution.candidate_display_names.iter())
             .filter_map(|name| text_rank(name, query))
             .min();
         let address_rank = text_rank(&address, query).or_else(|| {
@@ -488,7 +506,7 @@ fn conversation_hits(
             continue;
         };
         let title = resolution
-            .chosen_display_name
+            .and_then(|resolution| resolution.chosen_display_name)
             .unwrap_or_else(|| address.clone());
         let subtitle = if title == address {
             String::new()

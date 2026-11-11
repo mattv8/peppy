@@ -93,15 +93,18 @@ pub(crate) fn message_view(
     client: &Client,
     message: Message,
 ) -> Result<NativeMessage, peppy_client_core::Error> {
-    let (rcs, rcs_reported) = if message.payload.transport == Transport::Rcs {
-        let message_id = message.payload.record.message_id;
-        (
-            client.rcs_message_status(message_id)?,
-            client.rcs_message_reported(message_id)?.unwrap_or(false),
-        )
-    } else {
-        (None, false)
-    };
+    let is_rcs = message.payload.transport == Transport::Rcs;
+    let (rcs, rcs_reported) =
+        if is_rcs || message.payload.direction == Direction::Outgoing {
+            let message_id = message.payload.record.message_id;
+            (
+                client.rcs_message_status(message_id)?,
+                client.rcs_message_reported(message_id)?,
+            )
+        } else {
+            (None, None)
+        };
+    let has_rcs_evidence = rcs.is_some() || rcs_reported == Some(true);
     Ok(NativeMessage {
         message_id: message.payload.record.message_id.to_string(),
         conversation_id: message.payload.record.conversation_id.to_string(),
@@ -109,10 +112,14 @@ pub(crate) fn message_view(
         recipients: message.payload.recipients,
         body: message.payload.body,
         subject: message.payload.subject,
-        transport: match message.payload.transport {
-            Transport::Sms => "sms",
-            Transport::Mms => "mms",
-            Transport::Rcs => "rcs",
+        transport: if is_rcs || has_rcs_evidence {
+            "rcs"
+        } else {
+            match message.payload.transport {
+                Transport::Sms => "sms",
+                Transport::Mms => "mms",
+                Transport::Rcs => "rcs",
+            }
         }
         .into(),
         attachment_ids: message
@@ -139,7 +146,7 @@ pub(crate) fn message_view(
             }
             .into()
         }),
-        rcs_reported,
+        rcs_reported: rcs_reported.unwrap_or(false),
     })
 }
 
@@ -264,6 +271,159 @@ fn bounded_text(value: &str, max: usize) -> Result<(), MobileBindingsError> {
         return Err(MobileBindingsError::InvalidRequest);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use peppy_client_core::{
+        ClientConfig, DatabaseKey, DeviceId, MessagePayload, MessageRecord, SourceSequence,
+        VaultId,
+    };
+
+    const SQLCIPHER_KEY: &str =
+        "x'0909090909090909090909090909090909090909090909090909090909090909'";
+
+    fn message(transport: Transport) -> Message {
+        Message {
+            payload: MessagePayload {
+                record: MessageRecord {
+                    message_id: peppy_client_core::MessageId::new(),
+                    conversation_id: ConversationId::new(),
+                    source_sequence: SourceSequence(1),
+                    attachments: vec![],
+                },
+                source_device_id: DeviceId::new(),
+                provider_message_id: None,
+                sender_address: None,
+                recipients: vec!["+14155552671".into()],
+                subject: None,
+                body: "native RCS text".into(),
+                transport,
+                direction: Direction::Outgoing,
+                rcs_capture: false,
+                imported: false,
+                sent_at_ms: Some(1),
+                ordered_at_ms: None,
+                mms_context: None,
+            },
+            seen: true,
+            send_state: None,
+            status_at_ms: Some(2),
+            send_refusal: None,
+        }
+    }
+
+    fn client() -> (Client, std::path::PathBuf) {
+        let path = std::env::temp_dir()
+            .join(format!("peppy-rcs-view-{}.db", uuid::Uuid::new_v4()));
+        let client = Client::open(
+            ClientConfig {
+                database_path: path.clone(),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[9; 32]).unwrap(),
+        )
+        .unwrap();
+        (client, path)
+    }
+
+    fn seed(client_path: &std::path::Path, message: &Message, rank: i64, reported: bool) {
+        let db = rusqlite::Connection::open(client_path).unwrap();
+        db.execute_batch(&format!("PRAGMA key = \"{SQLCIPHER_KEY}\";"))
+            .unwrap();
+        db.execute(
+            "INSERT INTO rcs_message_status(message_id,status_rank,rcs_reported) VALUES(?,?,?)",
+            rusqlite::params![message.payload.record.message_id.to_string(), rank, reported],
+        )
+        .unwrap();
+    }
+
+    fn remove_database(path: &std::path::Path) {
+        for suffix in ["", "-wal", "-shm"] {
+            let mut file = path.as_os_str().to_owned();
+            file.push(suffix);
+            let _ = std::fs::remove_file(file);
+        }
+    }
+
+    #[test]
+    fn outgoing_mms_and_sms_without_rcs_evidence_keep_their_transport() {
+        let (client, path) = client();
+        for (transport, expected) in [(Transport::Mms, "mms"), (Transport::Sms, "sms")] {
+            let view = message_view(&client, message(transport)).unwrap();
+            assert_eq!(view.transport, expected);
+            assert_eq!(view.rcs_status, None);
+            assert!(!view.rcs_reported);
+        }
+        drop(client);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn outgoing_mms_and_sms_with_read_evidence_project_as_rcs() {
+        let (client, path) = client();
+        for transport in [Transport::Mms, Transport::Sms] {
+            let message = message(transport);
+            seed(&path, &message, 5, true);
+
+            let view = message_view(&client, message).unwrap();
+
+            assert_eq!(view.transport, "rcs");
+            assert_eq!(view.rcs_status.as_deref(), Some("read"));
+            assert!(view.rcs_reported);
+        }
+        drop(client);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn outgoing_mms_with_echo_only_evidence_projects_as_rcs() {
+        let (client, path) = client();
+        let message = message(Transport::Mms);
+        seed(&path, &message, 0, true);
+
+        let view = message_view(&client, message).unwrap();
+
+        assert_eq!(view.transport, "rcs");
+        assert_eq!(view.rcs_status, None);
+        assert!(view.rcs_reported);
+        drop(client);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn outgoing_mms_and_sms_with_unreported_echo_only_evidence_keep_their_transport() {
+        let (client, path) = client();
+        for (transport, expected) in [(Transport::Mms, "mms"), (Transport::Sms, "sms")] {
+            let message = message(transport);
+            seed(&path, &message, 0, false);
+
+            let view = message_view(&client, message).unwrap();
+
+            assert_eq!(view.transport, expected);
+            assert_eq!(view.rcs_status, None);
+            assert!(!view.rcs_reported);
+        }
+        drop(client);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn outgoing_mms_with_unreported_failed_evidence_stays_failed() {
+        let (client, path) = client();
+        let message = message(Transport::Mms);
+        seed(&path, &message, 3, false);
+
+        let view = message_view(&client, message).unwrap();
+
+        assert_eq!(view.transport, "rcs");
+        assert_eq!(view.rcs_status.as_deref(), Some("failed"));
+        assert!(!view.rcs_reported);
+        drop(client);
+        remove_database(&path);
+    }
 }
 
 impl GoReceiveRecord {

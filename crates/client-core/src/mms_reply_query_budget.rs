@@ -135,6 +135,7 @@ fn indexes_preserve_reply_metadata_and_source_sim_guard() {
         body: "Group body".into(),
         transport: Transport::Mms,
         direction: Direction::Incoming,
+        rcs_capture: false,
         imported: false,
         sent_at_ms: Some(10),
         ordered_at_ms: None,

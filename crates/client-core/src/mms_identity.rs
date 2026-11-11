@@ -312,6 +312,7 @@ mod tests {
             body: "Group body".into(),
             transport: Transport::Mms,
             direction: crate::Direction::Incoming,
+            rcs_capture: false,
             imported: false,
             sent_at_ms: Some(10),
             ordered_at_ms: None,

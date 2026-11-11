@@ -120,8 +120,11 @@ func (guard *transportGuard) updateCookies(response *http.Response) bool {
 }
 
 func isAllowedRequest(request *http.Request) bool {
-	if request.URL.Scheme != "https" || request.URL.RawQuery != "" {
+	if request.URL.Scheme != "https" {
 		return false
+	}
+	if request.URL.RawQuery != "" {
+		return request.Method == http.MethodPost && libgm.ValidUploadSessionURL(request.URL.String())
 	}
 	path := request.URL.Path
 	if request.URL.Hostname() == "messages.google.com" {
@@ -133,6 +136,9 @@ func isAllowedRequest(request *http.Request) bool {
 	}
 	if request.URL.String() == util.RevokeRelayPairingURL {
 		return false
+	}
+	if path == "/upload" {
+		return isAllowedMediaRequest(request)
 	}
 	switch path {
 	case "/$rpc/google.internal.communications.instantmessaging.v1.Pairing/RegisterPhoneRelay",
@@ -147,4 +153,8 @@ func isAllowedRequest(request *http.Request) bool {
 	default:
 		return false
 	}
+}
+
+func isAllowedMediaRequest(request *http.Request) bool {
+	return request.URL.String() == util.UploadMediaURL && request.URL.Host == "instantmessaging-pa.googleapis.com" && (request.Method == http.MethodGet || request.Method == http.MethodPost)
 }

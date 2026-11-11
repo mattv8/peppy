@@ -92,6 +92,7 @@ type Link struct {
 	conversationRecords          map[string]*gmproto.Conversation
 	indexRevision                uint64
 	conversationIndexComplete    bool
+	conversationIndexScannedAt   time.Time
 	conversationIndexGeneration  uint64
 	conversationIndexStreamEpoch uint64
 	pendingConversationEvents    uint64
@@ -110,6 +111,9 @@ type Link struct {
 	beforeSendAdmission          func()
 	ticketNow                    func() time.Time
 	sendMessage                  func(context.Context, *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error)
+	activateSession              func(context.Context) error
+	sessionActivatedGeneration   uint64
+	sessionEvidenceRequestedAt   time.Time
 	uploadMedia                  func(context.Context, []byte, string, string) (*gmproto.MediaContent, error)
 	downloadMedia                func(context.Context, string, []byte) (io.ReadCloser, error)
 	transferMu                   sync.Mutex
@@ -607,34 +611,141 @@ func (link *Link) RefreshConversationIndex() string {
 		link.emit("conversation_refresh", "verification_unavailable", 0)
 		return refreshConversationIndexJSON("m2_verification_required")
 	}
-	if link.hasPendingConversationEvents() {
+	if !link.awaitConversationEventsApplied(runCtx) {
 		link.emit("conversation_refresh", "pending_events", 0)
 		return refreshConversationIndexJSON("pending_conversation_events")
 	}
+	load := func(ctx context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
+		return link.loadConversationPageWithDiagnostics(ctx, generation, request, client.ListConversations)
+	}
+	return refreshConversationIndexJSON(link.refreshConversationIndexWith(runCtx, generation, streamEpoch, load))
+}
+
+// EnsureConversationIndex reports ok when the published index is still usable and rescans otherwise.
+// Updates on the open stream are applied to the index in place, and a stream gap discards it, so a
+// rescan of a complete index only repeats work and refuses sends while it runs.
+func (link *Link) EnsureConversationIndex() string {
+	if link.hasM2Verification() && link.conversationIndexUsable() {
+		return refreshConversationIndexJSON("")
+	}
+	return link.RefreshConversationIndex()
+}
+
+func (link *Link) conversationIndexUsable() bool {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	age := link.nowForTicketLocked().Sub(link.conversationIndexScannedAt)
+	return !link.closed && link.running && link.runGeneration == link.generation &&
+		link.conversationIndexComplete && link.conversationIndexGeneration == link.generation &&
+		link.conversationIndexStreamEpoch == link.streamEpoch && link.pendingConversationEvents == 0 &&
+		link.hasIndexVerificationLocked() && age >= 0 && age < conversationIndexMaxAge
+}
+
+// refreshConversationIndexWith publishes one complete index. The caller holds rpcMu.
+// A conversation update that lands mid-scan supersedes that scan, so the scan is repeated a
+// bounded number of times. When every scan is superseded, the host is asked to refresh again.
+func (link *Link) refreshConversationIndexWith(runCtx context.Context, generation, streamEpoch uint64, load conversationPageLoader) string {
+	for attempt := 1; ; attempt++ {
+		code, superseded := link.scanConversationIndexOnce(runCtx, generation, streamEpoch, load)
+		if !superseded {
+			return code
+		}
+		if attempt == conversationRefreshAttempts || !link.awaitConversationEventsApplied(runCtx) {
+			link.emitFor(generation, "index", "stale", 0)
+			return code
+		}
+	}
+}
+
+// scanConversationIndexOnce reports superseded when a finished scan could not be published.
+func (link *Link) scanConversationIndexOnce(runCtx context.Context, generation, streamEpoch uint64, load conversationPageLoader) (code string, superseded bool) {
 	indexRevision, started := link.beginConversationIndexRefreshFor(generation, streamEpoch)
 	if !started {
 		link.emit("conversation_refresh", "publication_stale", 0)
-		return refreshConversationIndexJSON("conversation_lookup_stale")
+		return "conversation_lookup_stale", false
 	}
 	ctx, cancel := context.WithTimeout(runCtx, conversationScanTimeout)
 	defer cancel()
+	// A scan that can no longer publish stops at its next page instead of running to the end.
+	abandoned := false
 	conversations, code, diagnostic := scanConversationPagesWithDiagnostic(ctx, func(ctx context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
-		return link.loadConversationPageWithDiagnostics(ctx, generation, request, client.ListConversations)
+		if !link.conversationScanCurrent(generation, streamEpoch, indexRevision) {
+			abandoned = true
+			return nil, errConversationScanSuperseded
+		}
+		return load(ctx, request)
 	})
+	if abandoned {
+		link.emit("conversation_refresh", "publication_stale", 0)
+		return "conversation_lookup_stale", true
+	}
 	if code != "" {
 		link.emit("conversation_refresh", diagnostic, 0)
 		if ctx.Err() == context.Canceled {
-			return refreshConversationIndexJSON("cancelled")
+			return "cancelled", false
 		}
-		return refreshConversationIndexJSON(code)
+		return code, false
 	}
 	if !link.replaceConversationIndexForContext(ctx, generation, streamEpoch, indexRevision, conversations) {
 		link.emit("conversation_refresh", "publication_stale", 0)
-		return refreshConversationIndexJSON("conversation_lookup_stale")
+		return "conversation_lookup_stale", true
 	}
 	link.emit("conversation_refresh", "refreshed", 0)
-	return refreshConversationIndexJSON("ok")
+	return "ok", false
 }
+
+func (link *Link) conversationScanCurrent(generation, streamEpoch, revision uint64) bool {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	return !link.closed && generation == link.generation && link.runGeneration == generation &&
+		streamEpoch == link.streamEpoch && revision == link.indexRevision
+}
+
+// sessionEvidenceRequestLocked returns a call that asks the phone to resend its settings, or nil.
+// The phone sends settings only for a newly active session, and every stream gap discards the
+// stored ones. Connect activates the first session of a run; later ones are requested here, at
+// most once per interval. The returned call must run without link.mu held.
+func (link *Link) sessionEvidenceRequestLocked() func() {
+	now := link.nowForTicketLocked()
+	if link.closed || link.state != stateLinked || !link.running || !link.streamOpen || link.runGeneration != link.generation ||
+		link.runCtx == nil || link.settings != nil || link.sessionActivatedGeneration != link.generation ||
+		now.Sub(link.sessionEvidenceRequestedAt) < sessionEvidenceRequestInterval {
+		return nil
+	}
+	activate := link.activateSession
+	if activate == nil {
+		if link.client == nil {
+			return nil
+		}
+		activate = link.client.SetActiveSession
+	}
+	runCtx, generation := link.runCtx, link.generation
+	link.sessionEvidenceRequestedAt = now
+	return func() {
+		ctx, cancel := context.WithTimeout(runCtx, sessionEvidenceRequestTimeout)
+		defer cancel()
+		link.emitFor(generation, "session", "refresh_requested", 0)
+		_ = activate(ctx)
+	}
+}
+
+// awaitConversationEventsApplied waits briefly for accepted conversation updates to reach the index.
+func (link *Link) awaitConversationEventsApplied(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, conversationEventDrainTimeout)
+	defer cancel()
+	ticker := time.NewTicker(conversationEventDrainPoll)
+	defer ticker.Stop()
+	for link.hasPendingConversationEvents() {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
+	return true
+}
+
+var errConversationScanSuperseded = errors.New("conversation_scan_superseded")
 
 func (link *Link) hasPendingConversationEvents() bool {
 	link.mu.Lock()
@@ -703,7 +814,7 @@ func (link *Link) ResolveExistingConversation(target string) string {
 	if !link.hasReceiveVerificationLocked() {
 		return conversationJSON("m2_verification_required")
 	}
-	if !link.conversationIndexComplete || link.conversationIndexGeneration != link.generation || link.conversationIndexStreamEpoch != link.streamEpoch || link.runGeneration != link.generation {
+	if !link.conversationIndexComplete || link.conversationIndexGeneration != link.generation || link.conversationIndexStreamEpoch != link.streamEpoch || link.runGeneration != link.generation || link.pendingConversationEvents != 0 {
 		return conversationJSON("conversation_lookup_unknown")
 	}
 	for _, conversation := range link.conversationRecords {
@@ -1090,13 +1201,16 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 		link.streamOpen = true
 		link.clearConversationIndexLocked()
 		link.mintRuntimeVerificationLocked()
-		if link.staleIndexEpoch != link.streamEpoch {
-			link.staleIndexEpoch = link.streamEpoch
-			link.mu.Unlock()
-			link.emitFor(generation, "index", "stale", 0)
-			return
-		}
+		requestSessionEvidence := link.sessionEvidenceRequestLocked()
+		indexStale := link.staleIndexEpoch != link.streamEpoch
+		link.staleIndexEpoch = link.streamEpoch
 		link.mu.Unlock()
+		if indexStale {
+			link.emitFor(generation, "index", "stale", 0)
+		}
+		if requestSessionEvidence != nil {
+			go requestSessionEvidence()
+		}
 		return
 	case *libgm.StreamRetired:
 		if value == nil {
@@ -1151,6 +1265,9 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 		link.invalidateEvidenceLocked()
 		link.healthy, link.responding, link.lastOKMS = false, false, 0
 	}
+	if _, ok := event.(*events.ActiveSessionSet); ok {
+		link.sessionActivatedGeneration = generation
+	}
 	if invalidatesOwnerEvidence(event) {
 		link.ownerVerification = nil
 	}
@@ -1162,7 +1279,9 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 	}
 	pendingConversationEvent := false
 	if conversation, ok := event.(*gmproto.Conversation); ok && conversation != nil && conversation.GetConversationID() != "" {
-		link.invalidateConversationCompletenessLocked()
+		// The update is applied to the index in place. Until then the pending count fences every
+		// reader, and the new revision retires tickets and scans bound to the earlier snapshot.
+		link.clearPreparedTicketLocked()
 		link.indexRevision++
 		link.pendingConversationEvents++
 		pendingConversationEvent = true

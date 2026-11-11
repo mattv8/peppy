@@ -60,7 +60,7 @@ func (link *Link) WithNativeRcsTargetClassification(ticketID string, classifier 
 }
 
 // PrepareNativeRcs freezes the local facts that later native-send phases must recheck.
-// It performs no network operation.
+// It sends no message. A refusal for missing settings may ask the phone to resend them.
 func (link *Link) PrepareNativeRcs(requestJSON string) string {
 	if len(requestJSON) > maxNativeRcsPrepareJSONBytes || !utf8.ValidString(requestJSON) {
 		return link.nativePrepareResult("invalid_request", "invalid_request")
@@ -81,7 +81,14 @@ func (link *Link) PrepareNativeRcs(requestJSON string) string {
 		return link.nativePrepareResult("busy", "busy")
 	}
 	if reason := link.nativePrepareFailureReasonLocked(); reason != "prepared" {
+		var requestSessionEvidence func()
+		if reason == "settings_missing" || reason == "settings_stale" {
+			requestSessionEvidence = link.sessionEvidenceRequestLocked()
+		}
 		link.mu.Unlock()
+		if requestSessionEvidence != nil {
+			go requestSessionEvidence()
+		}
 		return link.nativePrepareResult("rejected", reason)
 	}
 	selected := uniqueEnabledRcsCard(link.settings)

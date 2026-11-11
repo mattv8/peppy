@@ -356,6 +356,7 @@ impl Client {
                 .is_none()
                 .then(crate::notifications::now_ms),
             mms_context: None,
+            rcs_capture: false,
         };
         if let Some(message_id) = crate::message_origin::claim(&tx, &payload, true)? {
             let (conversation_id, source_sequence) =
@@ -667,16 +668,21 @@ impl Client {
             observed_high_water,
             live_anchor_fingerprint,
         )?;
-        let full_sweep_due =
-            completed.is_none_or(|at| now_ms.saturating_sub(at) >= SMS_RECONCILIATION_INTERVAL_MS);
+        let clock_rebased = completed.is_some_and(|at| now_ms < at);
+        let full_sweep_due = completed.is_none_or(|at| {
+            !clock_rebased && now_ms.saturating_sub(at) >= SMS_RECONCILIATION_INTERVAL_MS
+        });
         let (mut cursor, upper_bound) = if !upper_bound.is_empty() {
             (cursor, upper_bound)
-        } else if reused.is_none() && !full_sweep_due {
+        } else if reused.is_none() && !full_sweep_due && !clock_rebased {
             tx.commit()?;
             return Ok(None);
         } else {
             let local_cursor = if full_sweep_due {
                 None
+            } else if clock_rebased {
+                crate::history_import::canonical_provider_id(observed_high_water)
+                    .map(|high_water| high_water.saturating_sub(LOCAL_REUSE_WINDOW))
             } else {
                 match reused {
                     Some(ProviderIdReuse::AnchorMismatch { live }) => {
@@ -1845,5 +1851,37 @@ mod tests {
                 .as_deref(),
             Some("204")
         );
+    }
+
+    #[test]
+    fn backward_clock_starts_a_bounded_reconciliation_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+        client.plan_sms_scans("install", "provider", "205").unwrap();
+        client
+            .set_sms_scan_checkpoint("install", "provider", false, "205")
+            .unwrap();
+        assert_eq!(
+            client
+                .plan_sms_reconciliation_at("install", "provider", "205", None, 0)
+                .unwrap(),
+            None
+        );
+        client
+            .lock()
+            .unwrap()
+            .conn
+            .execute(
+                "UPDATE sms_reconciliation_scans SET scan_cursor=NULL,upper_bound='',completed_at_ms=? WHERE source_generation=? AND subscription_id=?",
+                params![10_000, "install", "provider"],
+            )
+            .unwrap();
+
+        let plan = client
+            .plan_sms_reconciliation_at("install", "provider", "205", None, 1_000)
+            .unwrap()
+            .expect("bounded repair");
+        assert_eq!(plan.upper_bound, "205");
+        assert!(plan.cursor.is_some());
     }
 }

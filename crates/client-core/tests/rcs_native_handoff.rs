@@ -228,6 +228,33 @@ fn native_carrier_admission_matches_automatic_and_strict_entry_stays_refused() {
 }
 
 #[test]
+fn a_text_only_mms_command_to_one_recipient_is_admitted_as_an_rcs_text() {
+    let (_directory, _vault, config, gateway, command) = carrier_text_mms_command(&["peer-local"]);
+    let observation = observation("peer-local", 1);
+    gateway.verify_rcs_mapping(&observation, 1_000).unwrap();
+
+    let preparation = gateway.prepare_native_rcs_send(command, 1_000).unwrap();
+    let committed = gateway
+        .begin_native_rcs_send(preparation, &observation, 1_000)
+        .unwrap();
+
+    assert_eq!(committed.message_body, "text reply");
+    assert_eq!(attempt_count(&config, command), 1);
+}
+
+#[test]
+fn a_text_only_mms_command_to_several_recipients_stays_out_of_the_text_path() {
+    let (_directory, _vault, config, gateway, command) =
+        carrier_text_mms_command(&["peer-local", "other-local"]);
+
+    assert!(matches!(
+        gateway.prepare_native_rcs_send(command, 1_000),
+        Err(Error::InvalidRequest("RCS text required"))
+    ));
+    assert_eq!(attempt_count(&config, command), 0);
+}
+
+#[test]
 fn native_preparation_does_not_admit_an_attempt_and_begin_uses_the_stored_command() {
     let (_directory, _vault, config, gateway, command_id, observation) = rcs_command("peer-local");
     let preparation = gateway.prepare_native_rcs_send(command_id, 1_000).unwrap();
@@ -1275,7 +1302,9 @@ fn native_preparation_refuses_nontext_command_without_an_attempt() {
         )
         .unwrap();
     let mut message: MessagePayload = serde_json::from_str(&payload).unwrap();
+    // A subject has no RCS text form, so this MMS is not a plain text.
     message.transport = Transport::Mms;
+    message.subject = Some("subject".into());
     connection
         .execute(
             "UPDATE command_ledger SET payload=? WHERE command_id=?",

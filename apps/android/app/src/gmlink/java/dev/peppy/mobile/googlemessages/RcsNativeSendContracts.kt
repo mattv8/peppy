@@ -108,6 +108,8 @@ internal interface RcsNativeCoreLease : AutoCloseable {
     fun nextContextTuple(runIncarnation: String, runGeneration: ULong, streamEpoch: ULong, pairingEvidenceId: String): RcsNativeContextTuple
     fun nextMappingRevision(conversationId: String): ULong
     fun verifyMapping(exactObservationJson: String): RcsNativeMappingVerification
+    /** Verifies the bound target for one command: its own conversation and exact recipient. */
+    fun verifySendMapping(commandId: String, exactObservationJson: String): RcsNativeMappingVerification
     fun classifyTarget(conversationId: String, recipient: String, exactSnapshotJson: String): RcsNativeTarget
     fun prepare(commandId: String, nowMs: Long): RcsNativePreparation
     fun recordTransportAcknowledged(tmpId: String, googleConversationId: String): Boolean

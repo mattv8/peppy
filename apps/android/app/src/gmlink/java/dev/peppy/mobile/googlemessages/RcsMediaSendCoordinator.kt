@@ -9,64 +9,72 @@ internal class RcsMediaSendCoordinator(
     private val queue: RcsMediaTransferQueue,
     private val core: RcsMediaSendCore,
     private val go: RcsMediaSendGo,
-    private val send: (RcsNativeCommand, UInt) -> RcsNativeSendOutcome,
+    private val send: (RcsNativeCommand, UInt, () -> Unit) -> RcsNativeSendOutcome,
     private val nowMs: () -> Long,
     private val statusChanged: () -> Unit = {},
 ) {
-    fun submit(attachment: RcsMediaAttachment): Boolean = queue.submit(attachment.identity) { lease ->
-        if (!lease.isCurrent()) return@submit
-        if (!attachment.uploadRequired) {
-            runNative(lease, attachment)
-            return@submit
-        }
-        val plaintext = try { core.decrypt(attachment.attachmentId, files.rootForTest().absolutePath) } catch (_: Throwable) {
-            publish(lease, attachment, "failed"); return@submit
-        }
-        try {
-            val path = files.safePath(File(plaintext)) ?: run {
-                publish(lease, attachment, "failed")
+    fun submit(attachment: RcsMediaAttachment): Boolean {
+        return queue.submit(attachment.identity, statusChanged) { lease ->
+            if (!lease.isCurrent()) return@submit
+            if (!attachment.uploadRequired) {
+                runNative(lease, attachment)
                 return@submit
+            }
+            val plaintext = try { core.decrypt(attachment.attachmentId, files.rootForTest().absolutePath) } catch (_: Throwable) {
+                publish(lease, attachment, "failed"); return@submit
             }
             try {
-                core.markUploading(attachment)
-            } catch (_: Throwable) {
-                publish(lease, attachment, "failed")
-                return@submit
+                val path = files.safePath(File(plaintext)) ?: run {
+                    publish(lease, attachment, "failed")
+                    return@submit
+                }
+                try {
+                    core.markUploading(attachment)
+                } catch (_: Throwable) {
+                    publish(lease, attachment, "failed")
+                    return@submit
+                }
+                if (!lease.isCurrent()) return@submit
+                val upload = try {
+                    go.upload(path, attachment)
+                } catch (_: Throwable) {
+                    publish(lease, attachment, "failed")
+                    return@submit
+                }
+                if (upload.code != "ok" || upload.mediaRef == null) {
+                    publish(lease, attachment, uploadOutcome(upload))
+                    return@submit
+                }
+                core.markReferenceReady(attachment, upload.mediaRef, nowMs())
+                if (!lease.isCurrent()) return@submit
+                runNative(lease, attachment)
+            } finally {
+                files.delete(File(plaintext))
             }
-            if (!lease.isCurrent()) return@submit
-            val upload = try {
-                go.upload(path, attachment)
-            } catch (_: Throwable) {
-                publish(lease, attachment, "failed")
-                return@submit
-            }
-            if (upload.code != "ok" || upload.mediaRef == null) {
-                publish(lease, attachment, upload.code.ifBlank { "failed" })
-                return@submit
-            }
-            core.markReferenceReady(attachment, upload.mediaRef, nowMs())
-            if (!lease.isCurrent()) return@submit
-            runNative(lease, attachment)
-        } finally {
-            files.delete(File(plaintext))
         }
     }
 
     private fun runNative(lease: RcsMediaTransferQueue.Lease, attachment: RcsMediaAttachment) {
-        val outcome = try { send(RcsNativeCommand(attachment.commandId, attachment.conversationId, attachment.recipient), attachment.attachmentIndex) }
+        val outcome = try { send(RcsNativeCommand(attachment.commandId, attachment.conversationId, attachment.recipient), attachment.attachmentIndex) { lease.afterRelease(statusChanged) } }
         catch (_: Throwable) { RcsNativeSendOutcome.OUTCOME_UNKNOWN }
         when (outcome) {
             RcsNativeSendOutcome.OUTCOME_UNKNOWN -> publish(lease, attachment, "outcome_unknown")
             RcsNativeSendOutcome.MEMBERS_CHANGED -> publish(lease, attachment, "members_changed")
-            else -> statusChanged()
+            RcsNativeSendOutcome.REFUSED -> Unit
+            else -> lease.afterRelease(statusChanged)
         }
     }
 
     private fun publish(lease: RcsMediaTransferQueue.Lease, attachment: RcsMediaAttachment, outcome: String) {
-        lease.publish {
+        if (lease.publish {
             core.recordOutcome(attachment, outcome, nowMs())
-            statusChanged()
-        }
+        }) lease.afterRelease(statusChanged)
+    }
+
+    private fun uploadOutcome(upload: RcsMediaUploadResult): String = when (upload.code) {
+        "invalid_request", "not_found" -> "rejected"
+        "failed", "busy", "unknown", "rejected", "not_allowed_mime", "too_large" -> upload.code
+        else -> "failed"
     }
 }
 

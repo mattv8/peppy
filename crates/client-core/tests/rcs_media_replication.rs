@@ -64,6 +64,13 @@ fn incoming_media_record() -> RcsProjectedRecord {
     }
 }
 
+fn unmatched_outgoing_media_record() -> RcsProjectedRecord {
+    let mut record = incoming_media_record();
+    record.google_message_id = "google-unmatched-outgoing-media-message".into();
+    record.direction = Direction::Outgoing;
+    record
+}
+
 #[test]
 fn sealed_media_placeholders_replicate_to_a_second_client_without_download_authority() {
     let directory = tempfile::TempDir::new().unwrap();
@@ -278,6 +285,72 @@ fn sealed_media_placeholders_replicate_to_a_second_client_without_download_autho
     }
 }
 
+#[test]
+fn unmatched_outgoing_capture_replicates_receive_slots_without_download_authority() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&directory, "outgoing-capture-gateway", &vault);
+    let desktop_config = config(&directory, "outgoing-capture-desktop", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let desktop = unlocked(&desktop_config, &vault);
+    publish_current_gateway(&gateway, &gateway_config);
+    let conversation_id = ConversationId::new();
+    let ownership = gateway
+        .begin_rcs_link_ownership(conversation_id, 0)
+        .unwrap();
+
+    let mut server = Server::default();
+    server.upload(&gateway);
+    server.sync(&desktop);
+    assert_eq!(
+        gateway
+            .ingest_rcs_projected_record(
+                conversation_id,
+                ownership.ownership_generation,
+                unmatched_outgoing_media_record(),
+            )
+            .unwrap(),
+        RcsReceiveOutcome::UnmatchedOutgoing
+    );
+    assert_eq!(server.upload(&gateway), 5);
+    let report = server.sync(&desktop);
+    assert_eq!(report.quarantined, 0, "{report:?}");
+
+    let message = only_message(&desktop, conversation_id);
+    assert!(message.payload.rcs_capture);
+    assert_eq!(
+        desktop
+            .rcs_media_receive_view(message.payload.record.message_id, 0)
+            .unwrap()
+            .unwrap()
+            .state,
+        RcsMediaSyncState::TooLarge
+    );
+    assert!(
+        desktop
+            .pending_rcs_media_receive_tasks()
+            .unwrap()
+            .is_empty()
+    );
+
+    drop(desktop);
+    let reopened = unlocked(&desktop_config, &vault);
+    assert_eq!(
+        reopened
+            .rcs_media_receive_view(message.payload.record.message_id, 1)
+            .unwrap()
+            .unwrap()
+            .state,
+        RcsMediaSyncState::Downloading
+    );
+    assert!(
+        reopened
+            .pending_rcs_media_receive_tasks()
+            .unwrap()
+            .is_empty()
+    );
+}
+
 fn sqlcipher(path: &std::path::Path) -> rusqlite::Connection {
     let connection = rusqlite::Connection::open(path).unwrap();
     connection
@@ -286,6 +359,445 @@ fn sqlcipher(path: &std::path::Path) -> rusqlite::Connection {
         )
         .unwrap();
     connection
+}
+
+fn rewrite_latest_payload(config: &ClientConfig, rewrite: impl FnOnce(&mut serde_json::Value)) {
+    let connection = sqlcipher(&config.database_path);
+    let (sequence, plain): (i64, Vec<u8>) = connection
+        .query_row(
+            "SELECT seq,plain FROM outbox WHERE state='unsealed' ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let mut payload: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+    rewrite(&mut payload);
+    connection
+        .execute(
+            "UPDATE outbox SET plain=? WHERE seq=? AND state='unsealed'",
+            rusqlite::params![serde_json::to_vec(&payload).unwrap(), sequence],
+        )
+        .unwrap();
+}
+
+fn mark_latest_command_as_capture(config: &ClientConfig) {
+    rewrite_latest_payload(config, |payload| {
+        payload["message"]["rcs_capture"] = serde_json::json!(true);
+    });
+}
+
+fn authority_rows(config: &ClientConfig) -> Vec<Vec<String>> {
+    let connection = sqlcipher(&config.database_path);
+    [
+        "commands",
+        "command_ledger",
+        "attempts",
+        "send_status",
+        "rcs_media_send_ledger",
+        "rcs_media_receive",
+        "rcs_media_receive_local",
+        "rcs_media_send_status",
+        "attachments",
+        "message_attachments",
+        "message_media_meta",
+    ]
+    .iter()
+    .map(|table| {
+        let mut query = connection
+            .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+            .unwrap();
+        let columns = query.column_count();
+        query
+            .query_map([], |row| {
+                Ok((0..columns)
+                    .map(|column| format!("{:?}", row.get_ref(column).unwrap()))
+                    .collect::<Vec<_>>()
+                    .join("|"))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    })
+    .collect()
+}
+
+fn assert_quarantine_reason(config: &ClientConfig, reason: &str) {
+    let connection = sqlcipher(&config.database_path);
+    let reasons: Vec<String> = connection
+        .prepare("SELECT reason FROM journal WHERE status='quarantined' ORDER BY cursor")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(reasons, vec![reason]);
+}
+
+#[test]
+fn send_command_capture_marker_is_rejected_live_and_in_snapshot_with_unmarked_control() {
+    assert_command_capture_admission_matrix(false);
+}
+
+fn assert_command_capture_admission_matrix(mms: bool) {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    for marked in [false, true] {
+        let sender_config = config(&directory, &format!("sms-sender-{marked}"), &vault);
+        let target_config = config(&directory, &format!("sms-target-{marked}"), &vault);
+        let sender = open(&sender_config);
+        let conversation = ConversationId::new();
+        if mms {
+            sender
+                .queue_mms(
+                    OutgoingMms {
+                        conversation_id: conversation,
+                        recipients: vec![ADDRESS.into()],
+                        body: "command admission control".into(),
+                        attachment_ids: Vec::new(),
+                        subject: None,
+                    },
+                    route(&target_config),
+                )
+                .unwrap();
+        } else {
+            sender
+                .queue_send(
+                    sms(conversation, "command admission control"),
+                    route(&target_config),
+                )
+                .unwrap();
+        }
+        rewrite_latest_payload(&sender_config, |payload| {
+            assert_eq!(
+                payload["kind"],
+                if mms {
+                    "send_mms_command"
+                } else {
+                    "send_command"
+                }
+            );
+        });
+        if marked {
+            mark_latest_command_as_capture(&sender_config);
+        }
+        sender
+            .unlock(&vault.profile, &vault.header, PASSPHRASE)
+            .unwrap();
+        let mut server = Server::default();
+        assert_eq!(server.upload(&sender), 1);
+        for snapshot in [false, true] {
+            let mut observer_config = config(
+                &directory,
+                &format!("sms-observer-{marked}-{snapshot}"),
+                &vault,
+            );
+            observer_config.device_id = target_config.device_id;
+            let observer = unlocked(&observer_config, &vault);
+            let before = authority_rows(&observer_config);
+            let report = if snapshot {
+                let session = observer
+                    .begin_snapshot_with_compaction(Cursor(1), 1, SnapshotPurpose::Resync, None)
+                    .unwrap();
+                observer
+                    .append_snapshot_page(
+                        session.generation,
+                        &[SnapshotRecord {
+                            cursor: Cursor(1),
+                            envelope: server.log[0].clone(),
+                        }],
+                    )
+                    .unwrap();
+                observer.finish_snapshot(session.generation).unwrap();
+                observer.apply_pending(100).unwrap()
+            } else {
+                server.sync(&observer)
+            };
+            assert_eq!(report.quarantined, usize::from(marked), "{report:?}");
+            if marked {
+                assert_quarantine_reason(&observer_config, "invalid_payload");
+                assert!(observer.messages(conversation).unwrap().is_empty());
+                assert_eq!(authority_rows(&observer_config), before);
+            } else {
+                assert!(!only_message(&observer, conversation).payload.rcs_capture);
+                let connection = sqlcipher(&observer_config.database_path);
+                assert_eq!(
+                    connection
+                        .query_row("SELECT COUNT(*) FROM commands", [], |row| row
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    1
+                );
+                assert_eq!(
+                    connection
+                        .query_row("SELECT historical FROM command_ledger", [], |row| row
+                            .get::<_, bool>(0))
+                        .unwrap(),
+                    snapshot
+                );
+                assert_eq!(
+                    connection
+                        .query_row("SELECT COUNT(*) FROM attempts", [], |row| row
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+            }
+            assert!(
+                observer
+                    .pending_rcs_media_receive_tasks()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[test]
+fn capture_parent_and_same_id_command_conflict_preserves_first_authority_in_both_orders() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&directory, "conflict-gateway", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    publish_current_gateway(&gateway, &gateway_config);
+    let conversation = ConversationId::new();
+    let ownership = gateway.begin_rcs_link_ownership(conversation, 0).unwrap();
+    let mut prefix = Server::default();
+    prefix.upload(&gateway);
+    gateway
+        .ingest_rcs_projected_record(
+            conversation,
+            ownership.ownership_generation,
+            unmatched_outgoing_media_record(),
+        )
+        .unwrap();
+    let parent = only_message(&gateway, conversation).payload;
+    assert!(parent.rcs_capture);
+    let mut capture = Server::default();
+    assert_eq!(capture.upload(&gateway), 5);
+    drop(gateway);
+    let gateway = open(&gateway_config);
+    gateway
+        .queue_send(
+            sms(ConversationId::new(), "command seed"),
+            route(&gateway_config),
+        )
+        .unwrap();
+    rewrite_latest_payload(&gateway_config, |payload| {
+        let mut command_parent = parent.clone();
+        command_parent.rcs_capture = false;
+        payload["message"] = serde_json::to_value(command_parent).unwrap();
+    });
+    gateway
+        .unlock(&vault.profile, &vault.header, PASSPHRASE)
+        .unwrap();
+    let mut command = Server::default();
+    assert_eq!(command.upload(&gateway), 1);
+    for capture_first in [true, false] {
+        let mut observer_config = config(
+            &directory,
+            &format!("conflict-observer-{capture_first}"),
+            &vault,
+        );
+        observer_config.device_id = gateway_config.device_id;
+        let observer = unlocked(&observer_config, &vault);
+        let mut server = Server {
+            log: prefix.log.clone(),
+        };
+        assert_eq!(server.sync(&observer).quarantined, 0);
+        server.log.extend(if capture_first {
+            capture.log.clone()
+        } else {
+            command.log.clone()
+        });
+        let first = server.sync(&observer);
+        assert_eq!(first.quarantined, 0, "{first:?}");
+        let canonical = only_message(&observer, conversation).payload;
+        assert_eq!(canonical.rcs_capture, capture_first);
+        let before = authority_rows(&observer_config);
+        let connection = sqlcipher(&observer_config.database_path);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM command_ledger", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            i64::from(!capture_first)
+        );
+        // In the command-first case only the conflicting parent is delivered: its
+        // independent slot checkpoints are not part of this admission transaction.
+        server.log.push(if capture_first {
+            command.log[0].clone()
+        } else {
+            capture.log[0].clone()
+        });
+        let conflict = server.sync(&observer);
+        assert_eq!(conflict.quarantined, 1, "{conflict:?}");
+        assert_quarantine_reason(&observer_config, "payload_conflict");
+        assert_eq!(only_message(&observer, conversation).payload, canonical);
+        assert_eq!(authority_rows(&observer_config), before);
+        assert!(
+            observer
+                .pending_rcs_media_receive_tasks()
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn marked_capture_wrong_producer_states_are_rejected_directly_and_discarded_when_staged() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&directory, "producer-gateway", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    publish_current_gateway(&gateway, &gateway_config);
+    let conversation = ConversationId::new();
+    let ownership = gateway.begin_rcs_link_ownership(conversation, 0).unwrap();
+    let mut prefix = Server::default();
+    prefix.upload(&gateway);
+    gateway
+        .ingest_rcs_projected_record(
+            conversation,
+            ownership.ownership_generation,
+            unmatched_outgoing_media_record(),
+        )
+        .unwrap();
+    let parent = only_message(&gateway, conversation).payload;
+    let message_id = parent.record.message_id;
+    assert!(parent.rcs_capture);
+    let mut capture = Server::default();
+    assert_eq!(capture.upload(&gateway), 5);
+    let wrong_config = config(&directory, "producer-wrong", &vault);
+    let wrong = open(&wrong_config);
+    publish_current_gateway(&wrong, &wrong_config);
+    rewrite_latest_payload(&wrong_config, |payload| {
+        *payload = serde_json::json!({
+            "kind": "rcs_media_state", "message_id": message_id,
+            "attachment_index": 1, "state": "failed",
+            "metadata": { "media_type": "image/jpeg", "display_name": "photo.jpg", "plaintext_bytes": 12345 }
+        });
+    });
+    wrong
+        .unlock(&vault.profile, &vault.header, PASSPHRASE)
+        .unwrap();
+    let mut malicious = Server::default();
+    assert_eq!(malicious.upload(&wrong), 1);
+    for staged in [false, true] {
+        let observer_config = config(&directory, &format!("producer-observer-{staged}"), &vault);
+        let observer = unlocked(&observer_config, &vault);
+        let mut server = Server {
+            log: prefix.log.clone(),
+        };
+        server.sync(&observer);
+        if staged {
+            server.log.extend(malicious.log.clone());
+            let report = server.sync(&observer);
+            assert_eq!(report.quarantined, 0, "{report:?}");
+            let connection = sqlcipher(&observer_config.database_path);
+            assert_eq!(
+                connection
+                    .query_row("SELECT COUNT(*) FROM pending_rcs_media_states", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap(),
+                1
+            );
+            assert!(
+                observer
+                    .rcs_media_receive_view(message_id, 1)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        if staged {
+            server.log.push(capture.log[0].clone());
+            let report = server.sync(&observer);
+            assert_eq!(report.quarantined, 0, "{report:?}");
+            assert!(
+                observer
+                    .rcs_media_receive_view(message_id, 1)
+                    .unwrap()
+                    .is_none(),
+                "denied staged producer must not project a receive slot when the marked parent arrives"
+            );
+            let connection = sqlcipher(&observer_config.database_path);
+            assert_eq!(
+                connection
+                    .query_row("SELECT COUNT(*) FROM pending_rcs_media_states", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap(),
+                0,
+                "denied staged producer is discarded, not retained as authority"
+            );
+            assert!(
+                observer
+                    .pending_rcs_media_receive_tasks()
+                    .unwrap()
+                    .is_empty()
+            );
+            server.log.extend(capture.log[1..].iter().cloned());
+        } else {
+            server.log.extend(capture.log.clone());
+        }
+        let report = server.sync(&observer);
+        assert_eq!(report.quarantined, 0, "{report:?}");
+        let canonical = observer
+            .rcs_media_receive_view(message_id, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(canonical.state, RcsMediaSyncState::Downloading);
+        assert_eq!(
+            observer
+                .rcs_media_receive_view(message_id, 0)
+                .unwrap()
+                .unwrap()
+                .state,
+            RcsMediaSyncState::TooLarge
+        );
+        if !staged {
+            let before = authority_rows(&observer_config);
+            server.log.extend(malicious.log.clone());
+            let report = server.sync(&observer);
+            assert_eq!(report.quarantined, 1, "{report:?}");
+            assert_quarantine_reason(&observer_config, "invalid_payload");
+            assert_eq!(authority_rows(&observer_config), before);
+        }
+        assert_eq!(only_message(&observer, conversation).payload, parent);
+        assert_eq!(
+            observer
+                .rcs_media_receive_view(message_id, 1)
+                .unwrap()
+                .unwrap(),
+            canonical
+        );
+        let connection = sqlcipher(&observer_config.database_path);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM pending_rcs_media_states", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM commands", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(
+            observer
+                .pending_rcs_media_receive_tasks()
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn send_mms_command_capture_marker_is_rejected_live_and_in_snapshot_with_unmarked_control() {
+    assert_command_capture_admission_matrix(true);
 }
 
 #[test]
@@ -754,10 +1266,17 @@ fn compacted_media_snapshot_retains_sparse_stored_descriptor_and_all_placeholder
         .ingest_rcs_projected_record(
             conversation_id,
             ownership.ownership_generation,
-            incoming_media_record(),
+            unmatched_outgoing_media_record(),
         )
         .unwrap();
     let parent = only_message(&gateway, conversation_id).payload;
+    assert!(parent.rcs_capture);
+    let mut ordinary = parent.clone();
+    ordinary.rcs_capture = false;
+    let ordinary_json = serde_json::to_value(&ordinary).unwrap();
+    assert!(ordinary_json.get("rcs_capture").is_none());
+    let missing_marker: MessagePayload = serde_json::from_value(ordinary_json).unwrap();
+    assert!(!missing_marker.rcs_capture);
     let message_id = parent.record.message_id;
     let mut server = Server::default();
     server.upload(&gateway);
@@ -840,6 +1359,7 @@ fn compacted_media_snapshot_retains_sparse_stored_descriptor_and_all_placeholder
     restored.finish_snapshot(session.generation).unwrap();
     while restored.apply_pending(100).unwrap().applied > 0 {}
     let message = only_message(&restored, conversation_id);
+    assert!(message.payload.rcs_capture);
     assert_eq!(message.payload.body, parent.body);
     assert_eq!(message.payload.sender_address, parent.sender_address);
     assert_eq!(message.payload.sent_at_ms, parent.sent_at_ms);
@@ -876,6 +1396,74 @@ fn compacted_media_snapshot_retains_sparse_stored_descriptor_and_all_placeholder
     let available: i64 = db.query_row("SELECT COUNT(*) FROM attachments WHERE attachment_id=? AND remote_object_id IS NOT NULL",
         [attachment.attachment_id.to_string()], |row| row.get(0)).unwrap();
     assert_eq!(available, 1);
+    drop(db);
+
+    assert_eq!(
+        restored
+            .attachment_info(attachment.attachment_id)
+            .unwrap()
+            .state,
+        AttachmentState::PendingDownload
+    );
+    assert!(
+        only_message(&restored, conversation_id)
+            .payload
+            .record
+            .attachments[0]
+            .pending
+    );
+    let ciphertext = gateway
+        .native_cipher_file(attachment.attachment_id)
+        .unwrap();
+    restored
+        .install_downloaded_attachment(attachment.attachment_id, &ciphertext)
+        .unwrap();
+
+    let assert_localized_capture =
+        |client: &Client| {
+            let message = only_message(client, conversation_id);
+            assert!(message.payload.rcs_capture);
+            assert_eq!(message.payload.direction, Direction::Outgoing);
+            let references = &message.payload.record.attachments;
+            assert_eq!(references.len(), 1);
+            assert_eq!(references[0].attachment_id, attachment.attachment_id);
+            assert!(
+                !references[0].pending,
+                "verified localization must clear pending"
+            );
+            let placeholder = client
+                .rcs_media_receive_view(message_id, 0)
+                .unwrap()
+                .unwrap();
+            assert_eq!(placeholder.state, RcsMediaSyncState::TooLarge);
+            assert_eq!(placeholder.attachment_id, None);
+            assert_eq!(
+                client
+                    .rcs_media_receive_view(message_id, 1)
+                    .unwrap()
+                    .unwrap(),
+                stored
+            );
+            let info = client.attachment_info(attachment.attachment_id).unwrap();
+            assert_eq!(info.state, AttachmentState::Available);
+            assert_eq!(info.ciphertext_sha256, attachment.ciphertext_sha256);
+            assert_eq!(info.ciphertext_bytes, attachment.ciphertext_bytes);
+            assert_eq!(info.plaintext_bytes, 12_345);
+            assert_eq!(info.media_type, "image/jpeg");
+            assert_eq!(info.display_name, "photo.jpg");
+            let db = sqlcipher(&restored_config.database_path);
+            let position: i64 = db.query_row(
+            "SELECT position FROM message_attachments WHERE message_id=? AND attachment_id=?",
+            rusqlite::params![message_id.to_string(), attachment.attachment_id.to_string()],
+            |row| row.get(0),
+        ).unwrap();
+            assert_eq!(position, 1);
+            assert!(client.pending_rcs_media_receive_tasks().unwrap().is_empty());
+        };
+    assert_localized_capture(&restored);
+    drop(restored);
+    let reopened = unlocked(&restored_config, &vault);
+    assert_localized_capture(&reopened);
 }
 
 #[test]

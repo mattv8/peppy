@@ -15,12 +15,21 @@ internal class RcsMediaTransferQueue(
     private var stopped = false
     private var generation = 0L
 
-    /** A durable identity may be queued once per service incarnation. */
-    fun submit(identity: String, work: (Lease) -> Unit): Boolean {
+    /** Coalesces identical pending/in-flight work; completed identities may be submitted again. */
+    fun submit(
+        identity: String,
+        onAlreadyActive: (() -> Unit)? = null,
+        work: (Lease) -> Unit,
+    ): Boolean {
         require(identity.isNotBlank()) { "identity must not be blank" }
         val schedule: Boolean
         synchronized(lock) {
-            if (stopped || active?.identity == identity || pending.any { it.identity == identity }) return false
+            if (stopped) return false
+            if (active?.identity == identity) {
+                active?.externalAfterRelease = onAlreadyActive
+                return false
+            }
+            if (pending.any { it.identity == identity }) return false
             pending.addLast(Pending(identity, generation, work))
             schedule = scheduleDrainLocked()
         }
@@ -50,11 +59,15 @@ internal class RcsMediaTransferQueue(
         try {
             running.work(Lease(this, running))
         } finally {
-            val schedule = synchronized(lock) {
+            val next = synchronized(lock) {
                 if (active === running) active = null
-                scheduleDrainLocked()
+                val callbacks = if (!stopped && generation == running.generation) {
+                    running.afterRelease + listOfNotNull(running.externalAfterRelease)
+                } else emptyList()
+                QueueNext(scheduleDrainLocked(), callbacks)
             }
-            if (schedule) executor.execute(::drain)
+            next.afterRelease.forEach { runCatching(it) }
+            if (next.scheduleDrain) executor.execute(::drain)
         }
     }
 
@@ -80,11 +93,23 @@ internal class RcsMediaTransferQueue(
             callback()
             true
         }
+
+        /** Runs after this identity leaves the queue, so a continuation cannot be coalesced away. */
+        fun afterRelease(callback: () -> Unit) = synchronized(queue.lock) {
+            if (!queue.stopped && queue.active === running && queue.generation == running.generation) {
+                running.afterRelease += callback
+            }
+        }
     }
 
     internal data class Pending(
         val identity: String,
         val generation: Long,
         val work: (Lease) -> Unit,
-    )
+    ) {
+        val afterRelease = mutableListOf<() -> Unit>()
+        var externalAfterRelease: (() -> Unit)? = null
+    }
+
+    private data class QueueNext(val scheduleDrain: Boolean, val afterRelease: List<() -> Unit>)
 }

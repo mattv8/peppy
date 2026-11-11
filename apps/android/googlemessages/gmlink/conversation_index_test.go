@@ -47,7 +47,7 @@ func TestConversationIndexRefusesAmbiguousOrIneligibleCandidates(t *testing.T) {
 	}
 }
 
-func TestRefreshConversationIndexRejectsStaleIncrementalUpdate(t *testing.T) {
+func TestRefreshConversationIndexRescansAfterIncrementalUpdate(t *testing.T) {
 	auth := linkedSafetyAuth()
 	link, _ := openSafetyLink(t, nil)
 	setSafetyState(link, stateLinked, auth)
@@ -83,11 +83,22 @@ func TestRefreshConversationIndexRejectsStaleIncrementalUpdate(t *testing.T) {
 	close(fixture.listRelease)
 	select {
 	case refreshResult := <-result:
-		if refreshResult != `{"code":"stale"}` {
+		if refreshResult != `{"code":"ok"}` {
 			t.Fatalf("RefreshConversationIndex result = %s", refreshResult)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("RefreshConversationIndex did not return")
+	}
+	// The superseded scan is discarded: the published index is the rescan, which the phone
+	// answered after the update, so the update's own record is gone with the stale scan.
+	if requests := len(fixture.listRequests()); requests != 4 {
+		t.Fatalf("list requests = %d, want the abandoned first page and one three-folder rescan", requests)
+	}
+	link.mu.Lock()
+	complete, stalePublished := link.conversationIndexCurrentLocked(), len(link.conversationCandidates["synthetic-incremental-target"]) != 0
+	link.mu.Unlock()
+	if !complete || stalePublished {
+		t.Fatalf("complete=%t stalePublished=%t", complete, stalePublished)
 	}
 	link.Stop()
 	select {

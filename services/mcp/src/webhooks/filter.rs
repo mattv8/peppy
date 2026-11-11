@@ -45,17 +45,25 @@ fn phone_digits(value: &str) -> Option<String> {
 
 fn addresses_match(left: &str, right: &str) -> bool {
     match (phone_digits(left), phone_digits(right)) {
-        (Some(left), Some(right)) => {
-            left == right
-                || (left.len() >= 10
-                    && right.len() >= 10
-                    && left[left.len() - 10..] == right[right.len() - 10..])
+        (Some(left_digits), Some(right_digits)) => {
+            left_digits == right_digits
+                || (!(left.trim().starts_with('+') && right.trim().starts_with('+'))
+                    && (is_explicit_plus_one(left, &left_digits, &right_digits)
+                        || is_explicit_plus_one(right, &right_digits, &left_digits)))
         }
         // Alphanumeric IDs compare in full, trimmed and case-insensitive. A
         // phone-like value never matches an alphanumeric ID.
         (None, None) => left.trim().eq_ignore_ascii_case(right.trim()),
         _ => false,
     }
+}
+
+fn is_explicit_plus_one(value: &str, international: &str, local: &str) -> bool {
+    value.trim().starts_with('+')
+        && international.len() == 11
+        && international.starts_with('1')
+        && local.len() == 10
+        && &international[1..] == local
 }
 
 #[cfg(test)]
@@ -82,6 +90,32 @@ mod tests {
             FilterMode::Only,
             &[entry("40404")],
             "040404",
+            None
+        ));
+    }
+
+    #[test]
+    fn explicit_international_numbers_do_not_match_by_ten_digit_suffix() {
+        let entries = [entry("+447700900123")];
+        assert!(!matches(FilterMode::Only, &entries, "+917700900123", None));
+        assert!(matches(FilterMode::Except, &entries, "+917700900123", None));
+        assert!(matches(FilterMode::Only, &entries, "+447700900123", None));
+    }
+
+    #[test]
+    fn explicit_international_and_ten_digit_country_codes_do_not_use_local_fallback() {
+        for (configured, sender) in [
+            ("+12425550123", "+2425550123"),
+            ("+2425550123", "+12425550123"),
+        ] {
+            let entries = [entry(configured)];
+            assert!(!matches(FilterMode::Only, &entries, sender, None));
+            assert!(matches(FilterMode::Except, &entries, sender, None));
+        }
+        assert!(matches(
+            FilterMode::Only,
+            &[entry("+12425550123")],
+            "2425550123",
             None
         ));
     }

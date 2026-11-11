@@ -334,11 +334,14 @@ fn unknown_record_is_provably_unrelated(
         .iter()
         .filter(|participant| participant.visible && !participant.self_)
         .collect::<Vec<_>>();
+    // A national number can be valid in two regions. The peer is another party only when both the
+    // region's reading of the raw number and the address Go resolved for it differ from the target.
     peers.len() == 1
         && record.visible_non_self_count == 1
         && !record.group
         && telephone_peer(peers[0], region)
         && canonical_address(&peers[0].raw_number, region) != target
+        && canonical_address(&peers[0].canonical_address, region) != target
 }
 
 /// Go's `indexRevision` is bound inside its own token and never compared with core's independent
@@ -367,10 +370,14 @@ pub(crate) fn resolved_region(conn: &Connection) -> Result<Option<String>, ()> {
     let rows = statement
         .query_map([], |row| row.get::<_, String>(0))
         .map_err(|_| ())?;
-    let regions = rows
-        .filter_map(Result::ok)
-        .filter_map(|body| crate::contact_resolution::region(&body))
-        .collect::<BTreeSet<_>>();
+    // An unreadable row or body makes the inventory unknown. A readable book without a region,
+    // which hosts without a region hint store, only contributes nothing.
+    let mut regions = BTreeSet::new();
+    for body in rows {
+        let body = body.map_err(|_| ())?;
+        serde_json::from_str::<serde_json::Value>(&body).map_err(|_| ())?;
+        regions.extend(crate::contact_resolution::region(&body));
+    }
     Ok((regions.len() == 1).then(|| regions.into_iter().next().unwrap_or_default()))
 }
 
@@ -461,8 +468,10 @@ fn known_conversation_type(conversation_type: i32) -> bool {
     )
 }
 
+/// Every status Google Messages defines, from ACTIVE (1) through TRASH_FOLDER (8). Go already
+/// classifies the non-active ones, KEEP_ARCHIVED (4) included, as unsupported.
 fn known_conversation_status(conversation_status: i32) -> bool {
-    matches!(conversation_status, 1 | 2 | 3 | 5..=8)
+    (ACTIVE_CONVERSATION_STATUS..=8).contains(&conversation_status)
 }
 
 fn known_identifier_type(identifier_type: i32) -> bool {
@@ -629,6 +638,67 @@ mod tests {
             classify_records([&exact, &unknown], TARGET, None, None),
             RecordSummary::Found(_)
         ));
+    }
+
+    #[test]
+    fn unrelated_unknown_without_a_known_match_is_not_complete_absence() {
+        let unrelated_unknown = record(
+            "unknown",
+            CandidateClassification::Unknown,
+            vec![participant("+12025550124", false)],
+        );
+
+        assert!(matches!(
+            classify_records([&unrelated_unknown], TARGET, Some("US"), None),
+            RecordSummary::Unknown
+        ));
+    }
+
+    #[test]
+    fn unknown_record_that_go_resolved_to_the_target_blocks_an_exact_match() {
+        const BRITISH_TARGET: &str = "+442079460018";
+        let exact = record(
+            "exact",
+            CandidateClassification::Eligible,
+            vec![participant(BRITISH_TARGET, false)],
+        );
+        // The raw digits also read as a valid US number, so the region alone calls this another peer.
+        let mut national = participant("2079460018", false);
+        national.canonical_address = BRITISH_TARGET.into();
+        let mut unknown = record("unknown", CandidateClassification::Unknown, vec![national]);
+        unknown.conversation_type = 99;
+
+        assert!(matches!(
+            classify_records([&exact, &unknown], BRITISH_TARGET, Some("US"), None),
+            RecordSummary::Unknown
+        ));
+    }
+
+    #[test]
+    fn keep_archived_records_classify_like_archived_ones() {
+        for status in [2, 4] {
+            let mut archived = record(
+                "archived",
+                CandidateClassification::Unsupported,
+                vec![participant("+12025550124", false)],
+            );
+            archived.conversation_status = status;
+
+            assert!(
+                matches!(
+                    classify_record(&archived, TARGET, None, None),
+                    RecordClass::Unsupported
+                ),
+                "status {status}"
+            );
+            assert!(
+                matches!(
+                    classify_records([&archived], TARGET, None, None),
+                    RecordSummary::Absent
+                ),
+                "status {status}"
+            );
+        }
     }
 
     #[test]
@@ -828,20 +898,6 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_unknown_without_a_known_match_is_not_complete_absence() {
-        let unrelated_unknown = record(
-            "unknown",
-            CandidateClassification::Unknown,
-            vec![participant("+12025550124", false)],
-        );
-
-        assert!(matches!(
-            classify_records([&unrelated_unknown], TARGET, Some("US"), None),
-            RecordSummary::Unknown
-        ));
-    }
-
-    #[test]
     fn snapshot_binding_requires_exact_current_values() {
         let route = ValidatedCarrierRouteContext::new(
             "sim".into(),
@@ -984,6 +1040,45 @@ mod tests {
                 snapshot_token: None
             }
         ));
+    }
+
+    #[test]
+    fn unreadable_book_inventory_is_not_a_unique_region() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE contact_books(body TEXT NOT NULL, forgotten INTEGER NOT NULL);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO contact_books(body,forgotten) VALUES(?,0)",
+            [r#"{"region":"US"}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO contact_books(body,forgotten) VALUES(?,0)",
+            ["not-json"],
+        )
+        .unwrap();
+
+        assert!(resolved_region(&conn).is_err());
+    }
+
+    #[test]
+    fn a_readable_book_without_a_region_leaves_the_other_books_region_unique() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE contact_books(body TEXT NOT NULL, forgotten INTEGER NOT NULL);",
+        )
+        .unwrap();
+        for body in [r#"{"region":"US"}"#, r#"{"id":"book-without-region"}"#] {
+            conn.execute(
+                "INSERT INTO contact_books(body,forgotten) VALUES(?,0)",
+                [body],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(resolved_region(&conn), Ok(Some("US".into())));
     }
 
     #[test]

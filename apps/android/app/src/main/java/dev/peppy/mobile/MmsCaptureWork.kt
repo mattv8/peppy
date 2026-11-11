@@ -364,6 +364,7 @@ internal object MmsCapture {
     private const val MAX_BYTES = 32L * 1024 * 1024
     private const val MAX_BINARY = 10
     private const val PENDING_MEDIA_LIMIT = 512L * 1024 * 1024
+    private const val SCRATCH_RETAIN_MILLIS = 60L * 60 * 1000
     private val POST_SETTLE_REASONS = setOf(
         "preview_deferred", "media_quota", "parts_incomplete", "text_unavailable",
         "preview_unavailable", "part_unavailable", "preview_metadata_unavailable",
@@ -438,6 +439,7 @@ internal object MmsCapture {
         onControlPublished: () -> Unit = {},
         restrictedAccess: () -> RestrictedMessageAccess = { RestrictedMessageAccess.ALLOWED },
     ): MmsCaptureSummary {
+        recoverScratch(tempDirectory)
         var captured = 0
         var pending = 0
         var unavailable = 0
@@ -631,6 +633,13 @@ internal object MmsCapture {
                 )
             }
             MmsCaptureSummary(captured, pending, unavailable, followup)
+        }
+    }
+
+    private fun recoverScratch(directory: File) {
+        val scratch = Regex("(?:mms|mms-preview)-[0-9a-fA-F-]+\\.(?:part|jpg)")
+        directory.listFiles()?.forEach { file ->
+            if (file.isFile && scratch.matches(file.name) && file.lastModified() < System.currentTimeMillis() - SCRATCH_RETAIN_MILLIS) file.delete()
         }
     }
 

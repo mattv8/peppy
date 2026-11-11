@@ -34,19 +34,7 @@ func TestIngressOverflowRetiresOwningRunWithoutHostCallback(t *testing.T) {
 			close(release)
 		}
 	}()
-	for range cap(link.changes) {
-		link.queueEventFor(generation, &events.ListenTemporaryError{})
-	}
-	ingressReturned := make(chan struct{})
-	go func() {
-		link.queueEventFor(generation, &events.ListenTemporaryError{})
-		close(ingressReturned)
-	}()
-	select {
-	case <-ingressReturned:
-	case <-time.After(3 * time.Second):
-		t.Fatal("overflow ingress blocked on host output")
-	}
+	overflowIngressWhileProjectionPaused(t, link, generation)
 	if got := host.countEvent("link", "event_overflow"); got != 0 {
 		t.Fatalf("overflow ingress made %d host callbacks", got)
 	}
@@ -114,10 +102,7 @@ func TestStartupOverflowReturnsEventOverflow(t *testing.T) {
 			close(release)
 		}
 	}()
-	for range cap(link.changes) {
-		link.queueEventFor(generation, &events.ListenTemporaryError{})
-	}
-	link.queueEventFor(generation, &events.ListenTemporaryError{})
+	overflowIngressWhileProjectionPaused(t, link, generation)
 	link.mu.Lock()
 	retired := link.generation
 	link.mu.Unlock()
@@ -144,10 +129,7 @@ func TestCloseAfterIngressOverflowDoesNotDeliverOverflowEvent(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("consumer did not reach blocked host output")
 	}
-	for range cap(link.changes) {
-		link.queueEventFor(9, &events.ListenTemporaryError{})
-	}
-	link.queueEventFor(9, &events.ListenTemporaryError{})
+	overflowIngressWhileProjectionPaused(t, link, 9)
 	closed := make(chan struct{})
 	host.mu.Lock()
 	host.onEvent = func(_, code string) {
@@ -165,5 +147,26 @@ func TestCloseAfterIngressOverflowDoesNotDeliverOverflowEvent(t *testing.T) {
 	}
 	if got := host.countEvent("link", "event_overflow"); got != 0 {
 		t.Fatalf("closed link delivered %d overflow notifications", got)
+	}
+}
+
+func overflowIngressWhileProjectionPaused(t *testing.T, link *Link, generation uint64) {
+	t.Helper()
+	// Host output runs independently, so blocking a Host callback does not pause
+	// the ingress consumer. Pause it at the output-queue boundary before filling.
+	link.outputMu.Lock()
+	defer link.outputMu.Unlock()
+
+	ingressReturned := make(chan struct{})
+	go func() {
+		defer close(ingressReturned)
+		for range cap(link.changes) + 2 {
+			link.queueEventFor(generation, &events.ListenTemporaryError{})
+		}
+	}()
+	select {
+	case <-ingressReturned:
+	case <-time.After(3 * time.Second):
+		t.Fatal("overflow ingress blocked on host output")
 	}
 }

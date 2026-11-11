@@ -2214,7 +2214,7 @@ diff -ruN a/pkg/libgm/methods.go b/pkg/libgm/methods.go
 +		sessionIDOverride: sessionID,
  	})
  }
- 
+
 diff -ruN a/pkg/libgm/pair.go b/pkg/libgm/pair.go
 --- pkg/libgm/pair.go	2026-11-10 20:21:10
 +++ pkg/libgm/pair.go	2026-11-10 20:21:10
@@ -3360,4 +3360,320 @@ diff -ruN a/pkg/libgm/stream_source_test.go b/pkg/libgm/stream_source_test.go
 +	}()
 +	close(start)
 +	wait.Wait()
++}
+diff -ruN a/pkg/libgm/media_response_safety_test.go b/pkg/libgm/media_response_safety_test.go
+--- /dev/null	2026-11-10 00:00:00
++++ pkg/libgm/media_response_safety_test.go	2026-11-10 00:00:00
+@@ -0,0 +1,171 @@
++package libgm
++
++import (
++	"bytes"
++	"context"
++	"encoding/base64"
++	"io"
++	"net/http"
++	"testing"
++
++	"github.com/rs/zerolog"
++	"go.mau.fi/util/exhttp"
++	"google.golang.org/protobuf/proto"
++
++	"go.mau.fi/mautrix-gmessages/pkg/libgm/crypto"
++	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
++	"go.mau.fi/mautrix-gmessages/pkg/libgm/util"
++)
++
++type responseSafetyBody struct {
++	reader io.Reader
++	read   int
++	closed bool
++}
++
++func (body *responseSafetyBody) Read(data []byte) (int, error) {
++	count, err := body.reader.Read(data)
++	body.read += count
++	return count, err
++}
++
++func (body *responseSafetyBody) Close() error { body.closed = true; return nil }
++
++func responseSafetyClient(roundTrip func(*http.Request) (*http.Response, error)) *Client {
++	settings := exhttp.ClientSettings{TransportOverride: func(exhttp.ClientSettings) http.RoundTripper {
++		return safetyRoundTripper(roundTrip)
++	}}
++	return NewClient(NewAuthData(), nil, zerolog.Nop(), settings)
++}
++
++func TestMediaResponseSafetyGuards(t *testing.T) {
++	emptyID, err := proto.Marshal(&gmproto.UploadMediaResponse{Media: &gmproto.UploadedMedia{MediaNumber: 1}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, test := range []struct {
++		name string
++		body []byte
++	}{
++		{name: "nil media", body: nil},
++		{name: "empty media id", body: emptyID},
++		{name: "malformed raw", body: []byte{0xff}},
++		{name: "malformed base64", body: []byte("A===")},
++		{name: "base64 empty media", body: []byte(base64.StdEncoding.EncodeToString(nil))},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			body := &responseSafetyBody{reader: bytes.NewReader(test.body)}
++			client := responseSafetyClient(func(request *http.Request) (*http.Response, error) {
++				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body, Request: request}, nil
++			})
++			_, err := client.FinalizeUploadMedia(context.Background(), &StartGoogleUpload{UploadURL: util.UploadMediaURL})
++			if err == nil || !body.closed {
++				t.Fatalf("err=%v closed=%t", err, body.closed)
++			}
++		})
++	}
++	called := false
++	client := responseSafetyClient(func(*http.Request) (*http.Response, error) { called = true; return nil, nil })
++	if _, err := client.FinalizeUploadMedia(context.Background(), &StartGoogleUpload{UploadURL: "https://messages.google.com/web/authentication"}); err == nil || called {
++		t.Fatalf("err=%v called=%t", err, called)
++	}
++}
++
++func paddedUploadMediaResponse(t *testing.T, size int) []byte {
++	t.Helper()
++	for length := 1; length <= 8; length++ {
++		response, err := proto.Marshal(&gmproto.UploadMediaResponse{Media: &gmproto.UploadedMedia{MediaID: string(bytes.Repeat([]byte{'m'}, length))}})
++		if err != nil || len(response) > size || (size-len(response))%2 != 0 {
++			continue
++		}
++		return append(response, bytes.Repeat([]byte{0x18, 0}, (size-len(response))/2)...)
++	}
++	t.Fatal("could not pad upload response")
++	return nil
++}
++
++func TestFinalizeUploadMediaResponseLimit(t *testing.T) {
++	for _, test := range []struct {
++		name    string
++		size    int
++		accepted bool
++	}{
++		{name: "exact limit", size: 64 * 1024, accepted: true},
++		{name: "limit plus one", size: 64*1024 + 1},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			payload := paddedUploadMediaResponse(t, test.size)
++			reader := io.Reader(bytes.NewReader(payload))
++			if !test.accepted {
++				reader = io.MultiReader(reader, bytes.NewReader(bytes.Repeat([]byte{0}, 64*1024)))
++			}
++			body := &responseSafetyBody{reader: reader}
++			client := responseSafetyClient(func(request *http.Request) (*http.Response, error) {
++				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body, Request: request}, nil
++			})
++			upload, err := client.FinalizeUploadMedia(context.Background(), &StartGoogleUpload{UploadURL: util.UploadMediaURL})
++			if test.accepted {
++				if err != nil || upload == nil || upload.MediaID == "" || body.read != test.size || !body.closed {
++					t.Fatalf("upload=%#v err=%v read=%d closed=%t", upload, err, body.read, body.closed)
++				}
++			} else if err == nil || body.read != 64*1024+1 || !body.closed {
++				t.Fatalf("err=%v read=%d closed=%t", err, body.read, body.closed)
++			}
++		})
++	}
++}
++
++func TestMediaDownloadResponseSafetyGuards(t *testing.T) {
++	key := bytes.Repeat([]byte{1}, 32)
++	cryptor, err := crypto.NewAESGCMHelper(key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	validCiphertext, err := cryptor.EncryptData([]byte("media"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusGone} {
++		body := &responseSafetyBody{reader: bytes.NewReader(validCiphertext)}
++		client := responseSafetyClient(func(request *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: status, Header: make(http.Header), Body: body, Request: request}, nil
++		})
++		if _, err := client.DownloadMedia(context.Background(), "media", key); err == nil || !body.closed {
++			t.Fatalf("status=%d err=%v closed=%t", status, err, body.closed)
++		}
++	}
++}
++
++func TestMediaDecryptStreamHeaderSafety(t *testing.T) {
++	cryptor, err := crypto.NewAESGCMHelper(bytes.Repeat([]byte{1}, 32))
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, body := range [][]byte{nil, {0}, {0, 1}, {1, 0, 0}} {
++		if _, err := io.ReadAll(cryptor.DecryptStream(io.NopCloser(bytes.NewReader(body)))); err == nil {
++			t.Fatalf("body=%v unexpectedly decrypted", body)
++		}
++	}
++	for _, exponent := range []byte{23, 62, 63, 64, 255} {
++		body := &responseSafetyBody{reader: bytes.NewReader(append([]byte{0, exponent, 0}, bytes.Repeat([]byte{1}, 32)...))}
++		if _, err := io.ReadAll(cryptor.DecryptStream(body)); err == nil || body.read != 3 {
++			t.Fatalf("exponent=%d err=%v read=%d", exponent, err, body.read)
++		}
++	}
++	allowed := &responseSafetyBody{reader: bytes.NewReader([]byte{0, 22, 0, 1})}
++	if _, err := io.ReadAll(cryptor.DecryptStream(allowed)); err == nil || allowed.read <= 3 {
++		t.Fatalf("allowed exponent err=%v read=%d", err, allowed.read)
++	}
++	valid, err := cryptor.EncryptData([]byte("media"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	truncated := valid[:len(valid)-1]
++	tagFailure := append([]byte(nil), valid...)
++	tagFailure[len(tagFailure)-1] ^= 1
++	for _, body := range [][]byte{truncated, tagFailure} {
++		if _, err := io.ReadAll(cryptor.DecryptStream(io.NopCloser(bytes.NewReader(body)))); err == nil {
++			t.Fatal("invalid ciphertext decrypted")
++		}
++	}
++}
+diff -ruN a/pkg/libgm/media.go b/pkg/libgm/media.go
+--- pkg/libgm/media.go	2026-11-07 04:07:00
++++ pkg/libgm/media.go	2026-11-07 04:07:00
+@@ -4,6 +4,7 @@
+ 	"bytes"
+ 	"context"
+ 	"encoding/base64"
++	"errors"
+ 	"fmt"
+ 	"io"
+ 	"net/http"
+@@ -137,6 +138,13 @@
+ 	MediaNumber int64
+ }
+ 
++const maxFinalizeUploadResponseBytes = 64 * 1024
++
++var (
++	errInvalidUploadResponse = errors.New("invalid upload response")
++	errInvalidUploadURL      = errors.New("invalid upload URL")
++)
++
+ func isBase64Character(char byte) bool {
+ 	return (char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '+' || char == '/' || char == '='
+ }
+@@ -156,4 +164,7 @@
+ func (c *Client) FinalizeUploadMedia(ctx context.Context, upload *StartGoogleUpload) (*MediaUpload, error) {
++	if !ValidUploadSessionURL(upload.UploadURL) {
++		return nil, errInvalidUploadURL
++	}
+ 	encryptedImageSize := strconv.Itoa(len(upload.EncryptedMediaBytes))
+ 
+ 	finalizeUploadHeaders := util.NewMediaUploadHeaders(encryptedImageSize, "upload, finalize", "0", upload.MimeType, "")
+@@ -172,7 +183,10 @@
+ 	if res.StatusCode != 200 {
+ 		return nil, events.HTTPError{Action: "finalizing media upload", Resp: res}
+ 	}
+-	respData, err := io.ReadAll(res.Body)
++	respData, err := io.ReadAll(io.LimitReader(res.Body, maxFinalizeUploadResponseBytes+1))
++	if len(respData) > maxFinalizeUploadResponseBytes {
++		return nil, errInvalidUploadResponse
++	}
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to read response: %w", err)
+ 	}
+@@ -193,6 +201,9 @@
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+ 	}
++	if mediaIDs.Media == nil || mediaIDs.Media.MediaID == "" {
++		return nil, errInvalidUploadResponse
++	}
+ 	return &MediaUpload{
+ 		MediaID:     mediaIDs.Media.MediaID,
+ 		MediaNumber: mediaIDs.Media.MediaNumber,
+@@ -294,6 +305,10 @@
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to send request: %w", err)
+ 	}
++	if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusMultipleChoices {
++		_ = res.Body.Close()
++		return nil, events.HTTPError{Action: "downloading media", Resp: res}
++	}
+ 	return cryptor.DecryptStream(res.Body), nil
+ }
+ 
+diff -ruN a/pkg/libgm/crypto/aesgcmstream.go b/pkg/libgm/crypto/aesgcmstream.go
+--- pkg/libgm/crypto/aesgcmstream.go	2026-11-07 04:07:00
++++ pkg/libgm/crypto/aesgcmstream.go	2026-11-07 04:07:00
+@@ -28,9 +28,12 @@
+	_, err := io.ReadFull(s.source, header)
+	if err != nil {
+-		return err
++		return fmt.Errorf("failed to read stream header: %w", err)
+	} else if header[0] != 0 {
+		return fmt.Errorf("invalid first-byte header signature (got=%o, expected=%o)", header[0], 0)
+	}
++	if header[1] > 22 {
++		return fmt.Errorf("chunk size exponent too large (%d > 22)", header[1])
++	}
+	rawChunkSize := 1 << header[1]
+	if rawChunkSize > maxRawChunkSize {
+		return fmt.Errorf("chunk size too large (%d > %d)", rawChunkSize, maxRawChunkSize)
+diff -ruN a/pkg/libgm/upload_session.go b/pkg/libgm/upload_session.go
+--- /dev/null	2026-11-11 00:00:00
++++ pkg/libgm/upload_session.go	2026-11-11 00:00:00
+@@ -0,0 +1,54 @@
++package libgm
++
++import (
++	"strings"
++
++	"go.mau.fi/mautrix-gmessages/pkg/libgm/util"
++)
++
++const maxUploadSessionIDBytes = 512
++
++// ValidUploadSessionURL reports whether rawURL is the media endpoint itself or one resumable
++// upload session on it. No other URL may receive encrypted media bytes.
++func ValidUploadSessionURL(rawURL string) bool {
++	if rawURL == util.UploadMediaURL {
++		return true
++	}
++	query, found := strings.CutPrefix(rawURL, util.UploadMediaURL+"?")
++	if !found {
++		return false
++	}
++	sessions, protocols := 0, 0
++	for _, parameter := range strings.Split(query, "&") {
++		name, value, _ := strings.Cut(parameter, "=")
++		switch name {
++		case "upload_id":
++			if !validUploadSessionID(value) {
++				return false
++			}
++			sessions++
++		case "upload_protocol":
++			if value != "resumable" {
++				return false
++			}
++			protocols++
++		default:
++			return false
++		}
++	}
++	return sessions == 1 && protocols <= 1
++}
++
++func validUploadSessionID(sessionID string) bool {
++	if sessionID == "" || len(sessionID) > maxUploadSessionIDBytes {
++		return false
++	}
++	for _, char := range []byte(sessionID) {
++		unreserved := (char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') ||
++			char == '-' || char == '.' || char == '_' || char == '~'
++		if !unreserved {
++			return false
++		}
++	}
++	return true
 +}

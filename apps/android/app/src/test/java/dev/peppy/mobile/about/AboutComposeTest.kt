@@ -64,7 +64,7 @@ class AboutComposeTest {
         compose.waitUntil { compose.onAllNodesWithTag("about-screen").fetchSemanticsNodes().isNotEmpty() }
         compose.waitUntil { compose.onAllNodesWithTag("about-licenses-row").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("about-licenses-row").performScrollTo().performClick()
-        compose.waitUntil { compose.onAllNodesWithTag("licenses-screen").fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil { compose.onAllNodesWithTag("license-row-BoringSSL-LICENSE").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("license-row-BoringSSL-LICENSE").performScrollTo().performClick()
         compose.waitUntil { compose.onAllNodesWithTag("license-screen").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("license-back-button").performScrollTo().performClick()

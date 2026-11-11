@@ -50,6 +50,15 @@ class RcsNativeSendCoordinatorTest {
         assertEquals(1, harness.go.commitCalls)
     }
 
+    @Test fun `the target observation is verified against the command being sent`() {
+        val harness = Harness()
+
+        harness.execute()
+
+        assertEquals(listOf(ROUTE_OBSERVATION), harness.lease.routeVerified)
+        assertEquals(listOf(COMMAND.commandId to FULL_OBSERVATION), harness.lease.sendVerified)
+    }
+
     @Test fun `ticket before lease refusal and held retirement revoke only its ticket`() {
         val held = Harness(factoryReturnsNull = true)
         assertEquals(RcsNativeSendOutcome.REFUSED, held.execute())
@@ -342,7 +351,7 @@ class RcsNativeSendCoordinatorTest {
                 RcsMediaPrivateFiles(androidx.test.core.app.ApplicationProvider.getApplicationContext()),
                 RcsMediaTransferQueue(java.util.concurrent.Executor(Runnable::run)), core,
                 object : RcsMediaSendGo { override fun upload(path: java.io.File, attachment: RcsMediaAttachment): RcsMediaUploadResult = error("reference already uploaded") },
-                { command, _ -> harness.coordinator.execute(command) }, { 100L },
+                { command, _, _ -> harness.coordinator.execute(command) }, { 100L },
             )
             media.submit(RcsMediaAttachment(COMMAND.commandId, COMMAND.conversationId, COMMAND.recipient, 0u, "attachment", "image/jpeg", "photo.jpg", 1u, uploadRequired = false))
             assertEquals(listOf("members_changed"), outcomes)
@@ -505,7 +514,9 @@ class RcsNativeSendCoordinatorTest {
         override fun verifyGroupObservation(exactObservationJson: String): RcsNativeGroupVerification { groupVerified += exactObservationJson; coreCalls++; return groupVerification }
         override fun nextContextTuple(runIncarnation: String, runGeneration: ULong, streamEpoch: ULong, pairingEvidenceId: String) = RcsNativeContextTuple(1u, 1u, 1u).also { coreCalls++ }
         override fun nextMappingRevision(conversationId: String) = 1uL.also { coreCalls++ }
-        override fun verifyMapping(exactObservationJson: String): RcsNativeMappingVerification { verified += exactObservationJson; coreCalls++; return if (exactObservationJson == ROUTE_OBSERVATION) routeVerification else targetVerification }
+        val routeVerified = mutableListOf<String>(); val sendVerified = mutableListOf<Pair<String, String>>()
+        override fun verifyMapping(exactObservationJson: String): RcsNativeMappingVerification { verified += exactObservationJson; routeVerified += exactObservationJson; coreCalls++; return routeVerification }
+        override fun verifySendMapping(commandId: String, exactObservationJson: String): RcsNativeMappingVerification { verified += exactObservationJson; sendVerified += commandId to exactObservationJson; coreCalls++; return targetVerification }
         override fun classifyTarget(conversationId: String, recipient: String, exactSnapshotJson: String) = target.also { classifiedSnapshot = exactSnapshotJson; coreCalls++ }
         override fun prepare(commandId: String, nowMs: Long): RcsNativePreparation {
             coreCalls++; if (prepareFailure) throw IllegalStateException("prepare")

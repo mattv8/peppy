@@ -2,6 +2,7 @@ package dev.peppy.mobile
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.annotation.VisibleForTesting
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
@@ -177,10 +178,14 @@ enum class RelayWakeStatus { PENDING, REGISTERED, RETRYING, PAUSED, UNAVAILABLE,
 
 internal class PausedOutcome(val status: RelayWakeStatus, val retry: Boolean)
 
+@VisibleForTesting
+internal var relayWakeStateStoreFactory: (SharedPreferences) -> RelayWakeStateStore = ::RelayWakeStateStore
+
 /** Durable scheduling and preference boundary. All network work runs in [RelayWakeReconcileWorker]. */
 object RelayWakeRuntime {
     @Volatile var enabled: Boolean = false
     @Volatile var client: RelayWakeClient? = null
+    @VisibleForTesting internal var beforeApplyCurrentRelayRuntimeHook: (() -> Unit)? = null
 
     private const val PREFS = "peppy-relay"
     private const val ENABLED = "relay-enabled.v1"
@@ -197,7 +202,7 @@ object RelayWakeRuntime {
         // users who never touch the toggle still queue cleanup before any v2 route is published.
         if (!migrateLegacyCustomRoute(prefs, credential, origin)) { enabled = false; client = null; schedule(context); return }
         // Queued cleanup and uncertain commits must run even while paused or disabled.
-        val relayState = RelayWakeStateStore(prefs)
+        val relayState = relayWakeStateStoreFactory(prefs)
         if (!relayState.recoverAcknowledgedState() || relayState.cleanups().isNotEmpty()) schedule(context)
         val hostedRelay = credential?.let { hostedWakeRelayUrl(it.origin) }
         val preference = preference(context)
@@ -207,8 +212,12 @@ object RelayWakeRuntime {
                 client = null
                 return
             }
-            client = RelayWakeClient(AndroidRelayWakeTransport(hostedRelay), RelayCredentialStore(prefs), RelayRoutePublisher { routeId, wakeCredential -> GatewayAccountHost.publishWake(context, routeId, wakeCredential) })
-            enabled = true
+            val initialized = RelayWakeClient(AndroidRelayWakeTransport(hostedRelay), RelayCredentialStore(prefs), RelayRoutePublisher { routeId, wakeCredential -> GatewayAccountHost.publishWake(context, routeId, wakeCredential) })
+            beforeApplyCurrentRelayRuntimeHook?.invoke()
+            if (!NativeGateway.applyCurrentRelayRuntime(context, requireNotNull(credential)) {
+                    client = initialized
+                    enabled = true
+                }) return
             schedule(context)
             return
         }
@@ -229,7 +238,7 @@ object RelayWakeRuntime {
         credential: GatewayAccountCredential?,
         persistedOrigin: String?,
         routeStore: RelayRouteStore = RelayCredentialStore(prefs),
-        state: RelayWakeStateStore = RelayWakeStateStore(prefs),
+        state: RelayWakeStateStore = relayWakeStateStoreFactory(prefs),
     ): Boolean {
         if (!state.recoverAcknowledgedState()) return false
         val route = routeStore.route() ?: return true
@@ -344,7 +353,7 @@ object RelayWakeRuntime {
     /** Archive removes the binding but never changes the user's durable wake preference. */
     fun archiveEnrollment(context: Context) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val state = RelayWakeStateStore(prefs)
+        val state = relayWakeStateStoreFactory(prefs)
         if (!state.recoverAcknowledgedState()) {
             enabled = false
             client = null
@@ -362,7 +371,7 @@ object RelayWakeRuntime {
         }
         val pendingRetired = state.pending?.let { pending ->
             if (pending.registrationId != null && pending.challenge != null) {
-                credential != null && state.saveCleanup(RelayWakeCleanup(pending.identity, pending.candidate, credential.bearerToken, pending.relayOrigin))
+                state.saveCleanup(RelayWakeCleanup(pending.identity, pending.candidate, null, pending.relayOrigin))
             } else true
         } ?: true
         if (pendingRetired && state.savePending(null)) state.clearEarlyChallenge()
@@ -391,9 +400,42 @@ object RelayWakeRuntime {
 internal fun relayWakeWorkerShouldRetry(result: RelayWakeReconcile, cleanupRetry: Boolean): Boolean =
     result == RelayWakeReconcile.RETRY || cleanupRetry
 
-internal var relayWakeStateStoreFactory: (SharedPreferences) -> RelayWakeStateStore = ::RelayWakeStateStore
+internal fun cleanupBearerForAuthenticatedDelete(state: RelayWakeStateStore, cleanup: RelayWakeCleanup): String? =
+    cleanup.bearerToken?.takeIf { state.tokenFingerprint(it) == cleanup.identity.credentialFingerprint }
 
-class RelayWakeReconcileWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+internal interface RelayWakeWorkerDispatch {
+    fun deleteWakeRoute(cleanup: RelayWakeCleanup, bearerToken: String): HttpResult
+    fun revokeRoute(cleanup: RelayWakeCleanup): HttpResult
+}
+
+@VisibleForTesting
+internal class RelayWakeWorkerEnrollmentInput(
+    val deviceToken: String,
+    val transport: RelayWakeTransport,
+    val supportsCandidates: Boolean,
+)
+
+@VisibleForTesting
+internal var relayWakeWorkerEnrollmentInputFactory: ((GatewayAccountCredential) -> RelayWakeWorkerEnrollmentInput)? = null
+
+private object ProductionRelayWakeWorkerDispatch : RelayWakeWorkerDispatch {
+    override fun deleteWakeRoute(cleanup: RelayWakeCleanup, bearerToken: String) =
+        GatewayAccountHost.deleteWakeRoute(cleanup.identity.origin, bearerToken, cleanup.route.routeId)
+
+    override fun revokeRoute(cleanup: RelayWakeCleanup) =
+        AndroidRelayWakeTransport(cleanup.relayOrigin).post(
+            "/v1/routes/${cleanup.route.routeId}/revoke",
+            JSONObject().put("manage_credential", cleanup.route.manageCredential).toString(),
+        )
+}
+
+open class RelayWakeReconcileWorker internal constructor(
+    context: Context,
+    params: WorkerParameters,
+    private val dispatch: RelayWakeWorkerDispatch,
+) : CoroutineWorker(context, params) {
+    constructor(context: Context, params: WorkerParameters) : this(context, params, ProductionRelayWakeWorkerDispatch)
+
     override suspend fun doWork(): Result = try {
         withContext(Dispatchers.IO) {
         val state = relayWakeStateStoreFactory(applicationContext.getSharedPreferences("peppy-relay", Context.MODE_PRIVATE))
@@ -405,12 +447,14 @@ class RelayWakeReconcileWorker(context: Context, params: WorkerParameters) : Cor
         state.cleanups().forEach { cleanup ->
             try {
                 if (!state.recoverAcknowledgedState()) { cleanupRetry = true; return@forEach }
-                val deleted = state.runAcknowledgedEffect {
-                    GatewayAccountHost.deleteWakeRoute(cleanup.identity.origin, cleanup.bearerToken, cleanup.route.routeId)
-                } ?: run { cleanupRetry = true; return@forEach }
-                if (!deleted.ok && deleted.code !in setOf(401, 403, 404, 405)) { cleanupRetry = true; return@forEach }
+                cleanupBearerForAuthenticatedDelete(state, cleanup)?.let { bearerToken ->
+                    val deleted = state.runAcknowledgedEffect {
+                        dispatch.deleteWakeRoute(cleanup, bearerToken)
+                    } ?: run { cleanupRetry = true; return@forEach }
+                    if (!deleted.ok && deleted.code !in setOf(401, 403, 404, 405)) { cleanupRetry = true; return@forEach }
+                }
                 val revoked = state.runAcknowledgedEffect {
-                    AndroidRelayWakeTransport(cleanup.relayOrigin).post("/v1/routes/${cleanup.route.routeId}/revoke", JSONObject().put("manage_credential", cleanup.route.manageCredential).toString())
+                    dispatch.revokeRoute(cleanup)
                 } ?: run { cleanupRetry = true; return@forEach }
                 if (!revoked.ok && revoked.code !in setOf(401, 403)) { cleanupRetry = true; return@forEach }
                 if (!state.clearCleanup(cleanup.route.routeId)) cleanupRetry = true
@@ -428,11 +472,12 @@ class RelayWakeReconcileWorker(context: Context, params: WorkerParameters) : Cor
             return@withContext Result.retry()
         }
         val credential = NativeGateway.accountCredential(applicationContext) ?: return@withContext Result.success()
+        val enrollmentInput = relayWakeWorkerEnrollmentInputFactory?.invoke(credential)
         val hostedRelay = hostedWakeRelayUrl(credential.origin)
         val customRelay = applicationContext.getSharedPreferences("peppy-relay", Context.MODE_PRIVATE)
             .getString("relay-origin.v1", null)?.takeIf { applicationContext.getSharedPreferences("peppy-relay", Context.MODE_PRIVATE).getBoolean("relay-enabled.v1", false) }
         val relay = hostedRelay ?: customRelay ?: return@withContext Result.success()
-        val config = if (hostedRelay == null) null else try { state.runAcknowledgedEffect { GatewayAccountHost.pushConfig(applicationContext) } ?: run {
+        val config = if (enrollmentInput != null || hostedRelay == null) null else try { state.runAcknowledgedEffect { GatewayAccountHost.pushConfig(applicationContext) } ?: run {
             RelayWakeRuntime.setStatus(applicationContext, RelayWakeStatus.RETRYING); return@withContext Result.retry()
         } } catch (_: IOException) {
             RelayWakeRuntime.setStatus(applicationContext, RelayWakeStatus.RETRYING); return@withContext Result.retry()
@@ -445,17 +490,19 @@ class RelayWakeReconcileWorker(context: Context, params: WorkerParameters) : Cor
             }
             if (!parsed.available || "fcm" !in parsed.providers) { RelayWakeRuntime.setStatus(applicationContext, RelayWakeStatus.UNAVAILABLE); return@withContext Result.success() }
         }
-        if (applicationContext.resources.getIdentifier("google_app_id", "string", applicationContext.packageName) == 0) {
-            RelayWakeRuntime.setStatus(applicationContext, RelayWakeStatus.MISSING_APP_SUPPORT); return@withContext Result.success()
-        }
-        val token = try { Tasks.await(FirebaseMessaging.getInstance().token) } catch (_: Exception) {
-            RelayWakeRuntime.setStatus(applicationContext, RelayWakeStatus.RETRYING); return@withContext Result.retry()
+        val token = enrollmentInput?.deviceToken ?: run {
+            if (applicationContext.resources.getIdentifier("google_app_id", "string", applicationContext.packageName) == 0) {
+                RelayWakeRuntime.setStatus(applicationContext, RelayWakeStatus.MISSING_APP_SUPPORT); return@withContext Result.success()
+            }
+            try { Tasks.await(FirebaseMessaging.getInstance().token) } catch (_: Exception) {
+                RelayWakeRuntime.setStatus(applicationContext, RelayWakeStatus.RETRYING); return@withContext Result.retry()
+            }
         }
         val fingerprint = state.tokenFingerprint(token)
         val identity = RelayWakeIdentity(credential.origin, credential.vaultId, credential.deviceId, "fcm", "production", state.tokenFingerprint(credential.bearerToken))
         val coordinator = RelayWakeCoordinator(
             state,
-            AndroidRelayWakeTransport(relay),
+            enrollmentInput?.transport ?: AndroidRelayWakeTransport(relay),
             RelayRoutePublisher { routeId, wakeCredential ->
                 // Never publish a saved old route using a credential installed during the request.
                 val current = NativeGateway.accountCredential(applicationContext)
@@ -468,7 +515,7 @@ class RelayWakeReconcileWorker(context: Context, params: WorkerParameters) : Cor
                 state.saveCleanup(RelayWakeCleanup(old.identity, old.route, old.bearerToken, old.relayOrigin))
             },
             retirePending = { pending ->
-                state.saveCleanup(RelayWakeCleanup(pending.identity, pending.candidate, credential.bearerToken, pending.relayOrigin))
+                state.saveCleanup(RelayWakeCleanup(pending.identity, pending.candidate, null, pending.relayOrigin))
             },
             publishActive = { active ->
                 val current = NativeGateway.accountCredential(applicationContext)
@@ -484,7 +531,7 @@ class RelayWakeReconcileWorker(context: Context, params: WorkerParameters) : Cor
         }
         // Capability is a relay concern. The account push-config DTO intentionally contains no
         // relay implementation details, so never infer this from the authenticated server reply.
-        val supportsCandidates = if (hostedRelay != null) {
+        val supportsCandidates = enrollmentInput?.supportsCandidates ?: if (hostedRelay != null) {
             if (!state.recoverAcknowledgedState()) {
                 RelayWakeRuntime.setStatus(applicationContext, RelayWakeStatus.RETRYING)
                 return@withContext Result.retry()

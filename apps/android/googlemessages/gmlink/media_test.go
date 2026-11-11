@@ -6,11 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	gmcrypto "go.mau.fi/mautrix-gmessages/pkg/libgm/crypto"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 )
 
@@ -164,6 +168,112 @@ func TestRcsMediaTransferRoundTrip(t *testing.T) {
 	}
 	if info, err := os.Stat(dest); err != nil || info.Mode().Perm() != 0600 {
 		t.Fatalf("mode=%#o err=%v", info.Mode().Perm(), err)
+	}
+}
+
+func TestDownloadRcsMediaUsesGuardedLibgmDownload(t *testing.T) {
+	plaintext := []byte("media")
+	key := bytes.Repeat([]byte{1}, 32)
+	cryptor, err := gmcrypto.NewAESGCMHelper(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, err := cryptor.EncryptData(plaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/upload" {
+			t.Fatalf("method=%s path=%q", request.Method, request.URL.Path)
+		}
+		requests.Add(1)
+		_, _ = writer.Write(ciphertext)
+	}))
+	defer server.Close()
+	client := safetyClient(t, server, nil, nil)
+	client.AuthData.TachyonAuthToken = []byte("synthetic")
+	client.AuthData.Browser = &gmproto.Device{}
+	link := &Link{client: client, runCtx: context.Background()}
+	destination := filepath.Join(t.TempDir(), "download.jpg")
+	mediaRef, err := json.Marshal(rcsMediaReference{MediaID: "media", Key: key, MIME: "image/jpeg", Size: int64(len(plaintext)), Name: "source.jpg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := json.Marshal(rcsMediaDownloadRequest{MediaRef: string(mediaRef), DestPath: destination, MaxBytes: rcsMediaMaxBytes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := link.DownloadRcsMedia(string(request)); result != `{"code":"ok","size":5}` {
+		t.Fatalf("result=%s", result)
+	}
+	if got, err := os.ReadFile(destination); err != nil || !bytes.Equal(got, plaintext) || requests.Load() != 1 {
+		t.Fatalf("file=%q err=%v requests=%d", got, err, requests.Load())
+	}
+}
+
+func TestGuardedMediaResponsesReturnFixedFailureCodes(t *testing.T) {
+	key := bytes.Repeat([]byte{1}, 32)
+	for _, test := range []struct {
+		name   string
+		status int
+		body   []byte
+	}{
+		{name: "non-success status", status: http.StatusNotFound, body: []byte("not found")},
+		{name: "chunk exponent overflow", status: http.StatusOK, body: []byte{0, 63, 0}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.Method != http.MethodGet || request.URL.Path != "/upload" {
+					t.Fatalf("method=%s path=%q", request.Method, request.URL.Path)
+				}
+				writer.WriteHeader(test.status)
+				_, _ = writer.Write(test.body)
+			}))
+			defer server.Close()
+			client := safetyClient(t, server, nil, nil)
+			client.AuthData.TachyonAuthToken = []byte("synthetic")
+			client.AuthData.Browser = &gmproto.Device{}
+			link := &Link{client: client, runCtx: context.Background()}
+			mediaRef, err := json.Marshal(rcsMediaReference{MediaID: "media", Key: key, MIME: "image/jpeg", Size: 1, Name: "source.jpg"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(t.TempDir(), "download.jpg")
+			request, err := json.Marshal(rcsMediaDownloadRequest{MediaRef: string(mediaRef), DestPath: destination, MaxBytes: rcsMediaMaxBytes})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result := link.DownloadRcsMedia(string(request)); result != `{"code":"failed"}` {
+				t.Fatalf("result=%s", result)
+			}
+			if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("destination err=%v", err)
+			}
+		})
+	}
+}
+
+func TestGuardedFinalizeRejectsMissingMedia(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/upload" {
+			t.Fatalf("path=%q", request.URL.Path)
+		}
+		switch requests.Add(1) {
+		case 1:
+			writer.Header().Set("x-goog-upload-chunk-granularity", "1")
+			writer.Header().Set("x-goog-upload-url", "https://instantmessaging-pa.googleapis.com/upload")
+		case 2:
+			_, _ = writer.Write([]byte{})
+		}
+	}))
+	defer server.Close()
+	client := safetyClient(t, server, nil, nil)
+	client.AuthData.TachyonAuthToken = []byte("synthetic")
+	client.AuthData.Browser = &gmproto.Device{}
+	if _, err := client.UploadMedia(context.Background(), []byte("media"), "source.jpg", "image/jpeg"); err == nil || requests.Load() != 2 {
+		t.Fatalf("err=%v requests=%d", err, requests.Load())
 	}
 }
 

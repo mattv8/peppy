@@ -906,6 +906,13 @@ fn insert_route_proof(
             rusqlite::params![conversation_id.to_string(), participant],
         )
         .unwrap();
+    // The proof stands for one whose thread passed the one-to-one guard.
+    connection
+        .execute(
+            "INSERT INTO metadata(k,v) VALUES(?,'1')",
+            [format!("rcs_receive_guarded:{conversation_id}")],
+        )
+        .unwrap();
 }
 
 #[test]
@@ -1564,6 +1571,258 @@ fn claim_initial_floor_and_router_guard_band() {
 }
 
 const CLAIM_GOOGLE_ID_TWO: &str = "google-conversation-two";
+const THIRD_PARTY: &str = "raw-third-party";
+
+fn capture_from(client: &Client, conversation_id: ConversationId, sender: &str, row: &str) {
+    client
+        .capture_incoming(IncomingSms {
+            conversation_id: Some(conversation_id),
+            sender_address: sender.into(),
+            body: String::new(),
+            provider_message_id: Some(row.into()),
+            imported: true,
+        })
+        .unwrap();
+}
+
+/// A linked gateway holding the participant's thread, plus what another device needs to queue a
+/// text through it.
+struct SendProofGateway {
+    directory: tempfile::TempDir,
+    vault: Vault,
+    config: ClientConfig,
+    client: Client,
+    conversation: ConversationId,
+    server: Server,
+}
+
+fn send_proof_gateway() -> SendProofGateway {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-send-proof", &vault);
+    let client = common::unlocked(&config, &vault);
+    publish_current_gateway(&client, &config);
+    let conversation = ConversationId::new();
+    capture_from(&client, conversation, CLAIM_PARTICIPANT, "participant-row");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, now, now)
+        .unwrap();
+    SendProofGateway {
+        directory,
+        vault,
+        config,
+        client,
+        conversation,
+        server: Server::default(),
+    }
+}
+
+impl SendProofGateway {
+    /// Proves the chat for a text another device queued to the participant in this thread.
+    fn prove_by_send(&mut self, sender_name: &str, revision: u64) {
+        let sender = common::unlocked(
+            &config(&self.directory, sender_name, &self.vault),
+            &self.vault,
+        );
+        let queued = sender
+            .queue_send(
+                OutgoingSms {
+                    conversation_id: self.conversation,
+                    recipients: vec![CLAIM_PARTICIPANT.into()],
+                    body: "hello".into(),
+                },
+                GatewayRoute::RcsLink {
+                    gateway_device_id: self.config.device_id,
+                },
+            )
+            .unwrap();
+        self.server.upload(&sender);
+        self.server.sync(&self.client);
+        let outcome = self
+            .client
+            .verify_rcs_send_mapping(
+                &claim_observation(CLAIM_PARTICIPANT, revision),
+                queued.command_id,
+                1_000,
+            )
+            .unwrap();
+        assert!(
+            matches!(outcome, RcsMappingOutcome::Mapped(_)),
+            "{outcome:?}"
+        );
+    }
+
+    fn claim(&self, revision: u64) -> RcsLinkOwnershipClaimOutcome {
+        let lifecycle = self
+            .client
+            .rcs_link_lifecycle_generation()
+            .unwrap()
+            .unwrap();
+        self.client
+            .claim_rcs_link_ownership(RcsLinkOwnershipClaim {
+                mapping_revision: revision,
+                expected_lifecycle_generation: lifecycle,
+                ..claim_request(self.conversation)
+            })
+            .unwrap()
+    }
+
+    fn owned_lanes(&self) -> usize {
+        self.client.rcs_link_owned_conversations().unwrap().len()
+    }
+}
+
+#[test]
+fn a_send_proof_on_the_participants_own_thread_opens_the_receive_lane() {
+    let mut gateway = send_proof_gateway();
+    gateway.prove_by_send("sender-a", 1);
+
+    assert!(matches!(
+        gateway.claim(1),
+        RcsLinkOwnershipClaimOutcome::Claimed(_)
+    ));
+    assert_eq!(gateway.owned_lanes(), 1);
+}
+
+/// A send needs only its own recipient, so it may prove a chat on a thread that also carries
+/// someone else. That proof must not let the link receive into the thread.
+#[test]
+fn a_send_proof_on_a_thread_with_another_party_cannot_claim_the_receive_lane() {
+    let mut gateway = send_proof_gateway();
+    capture_from(
+        &gateway.client,
+        gateway.conversation,
+        THIRD_PARTY,
+        "third-party-row",
+    );
+    gateway.prove_by_send("sender-a", 1);
+
+    assert_eq!(gateway.claim(1), RcsLinkOwnershipClaimOutcome::Refused);
+    assert_eq!(gateway.owned_lanes(), 0);
+}
+
+/// Google Messages mirrors chat messages into the phone's message store, and the provider capture
+/// stored such rows before the link owned the lane. Those earlier rows must not make the capture
+/// take a new mirrored row as well: the link already delivers that message.
+#[test]
+fn a_mirrored_chat_row_is_left_to_the_link_despite_earlier_captured_rows_naming_the_participant() {
+    let mut gateway = send_proof_gateway();
+    gateway.prove_by_send("sender-a", 1);
+    assert!(matches!(
+        gateway.claim(1),
+        RcsLinkOwnershipClaimOutcome::Claimed(_)
+    ));
+    let earlier = gateway
+        .client
+        .begin_mms_acquisition(MmsAcquisitionInput {
+            source: MmsSource {
+                source_generation: "phone-install-a".into(),
+                subscription_id: "android-subscription-7".into(),
+                provider_message_id: "mirrored-earlier".into(),
+                provider_thread_id: Some("thread-mirror".into()),
+            },
+            direction: Direction::Incoming,
+            sender_address: Some(CLAIM_PARTICIPANT.into()),
+            recipients: vec!["+12025550100".into()],
+            subject: None,
+            body: "mirrored chat message".into(),
+            imported: true,
+            observed_at_ms: 1,
+            transaction_id: None,
+        })
+        .unwrap();
+    gateway
+        .client
+        .complete_mms_acquisition(&earlier.acquisition_id)
+        .unwrap();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    let route = gateway
+        .client
+        .route_rcs_provider_row(RcsProviderRow {
+            provider_row_id: 77,
+            provider_thread_id: 5,
+            provider_type: 1,
+            observed_at_ms: now_ms,
+            addresses: vec![CLAIM_PARTICIPANT.into(), "+12025550100".into()],
+            restricted: true,
+            text_only: true,
+        })
+        .unwrap();
+
+    assert_eq!(route, RcsProviderRowRoute::DetectorRecorded);
+}
+
+/// A receive context fetched while the thread was the participant's alone must not be usable
+/// after the thread gained someone else and only a send has proven the chat since.
+#[test]
+fn a_receive_context_fetched_earlier_cannot_ingest_once_the_thread_lost_its_guard() {
+    let mut gateway = send_proof_gateway();
+    gateway.prove_by_send("sender-a", 1);
+    let RcsLinkOwnershipClaimOutcome::Claimed(ownership) = gateway.claim(1) else {
+        panic!("the participant's own thread opens a lane");
+    };
+    capture_from(
+        &gateway.client,
+        gateway.conversation,
+        THIRD_PARTY,
+        "third-party-row",
+    );
+    gateway.prove_by_send("sender-b", 2);
+
+    let ingested = gateway
+        .client
+        .ingest_rcs_projected_record(
+            gateway.conversation,
+            ownership.ownership_generation,
+            historical_record("after-guard-loss", 2_000),
+        )
+        .unwrap();
+    let progressed = gateway
+        .client
+        .complete_rcs_recovery(gateway.conversation, ownership.ownership_generation, 2_000)
+        .unwrap();
+
+    assert_eq!(
+        ingested,
+        RcsReceiveOutcome::Rejected(RcsReceiveCode::ConversationUnproven)
+    );
+    assert_eq!(
+        progressed,
+        RcsRecoveryOutcome::Rejected(RcsReceiveCode::ConversationUnproven)
+    );
+}
+
+#[test]
+fn a_send_proof_does_not_reopen_a_lane_whose_thread_gained_another_party() {
+    let mut gateway = send_proof_gateway();
+    gateway.prove_by_send("sender-a", 1);
+    assert!(matches!(
+        gateway.claim(1),
+        RcsLinkOwnershipClaimOutcome::Claimed(_)
+    ));
+    capture_from(
+        &gateway.client,
+        gateway.conversation,
+        THIRD_PARTY,
+        "third-party-row",
+    );
+
+    gateway.prove_by_send("sender-b", 2);
+
+    assert_eq!(gateway.owned_lanes(), 0);
+    assert_eq!(
+        gateway.client.rcs_receive_context(CLAIM_GOOGLE_ID).unwrap(),
+        None
+    );
+}
 
 fn claimed(outcome: RcsLinkOwnershipClaimOutcome) -> RcsOwnership {
     match outcome {

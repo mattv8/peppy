@@ -170,6 +170,14 @@ class MmsProviderTest {
         assertThrows(MmsProviderException::class.java) { reader.readPartText(utf16.copy(charset = 9999)) }
     }
 
+    @Test fun retainsFiveKilobytesOfInlinePartTextWithoutAStream() {
+        val text = "x".repeat(5_000)
+        provider.messages += message(1, 128)
+        provider.parts[1] = listOf(Part(10, text))
+
+        assertEquals(text, reader.readPartText(reader.read(1)!!.parts.single()))
+    }
+
     @Test fun providerWithoutFlagColumnsStillReadsAndFlagsDefaultToFalse() {
         provider.optionalColumns = false
         provider.messages += message(1, 128)
@@ -280,7 +288,7 @@ class MmsProviderTest {
         val restricted: Boolean = false,
         val textOnly: Boolean = false,
     )
-    data class Part(val id: Long)
+    data class Part(val id: Long, val text: String? = null)
     /** Rejects unknown projection columns like real providers do when a column is absent from the schema. */
     class FakeMmsProvider : ContentProvider() {
         val messages = mutableListOf<Msg>(); val parts = mutableMapOf<Long, List<Part>>(); val addresses = mutableMapOf<Long, List<Pair<String, Int>>>()
@@ -321,7 +329,7 @@ class MmsProviderTest {
                 }.let { rows -> if (sortOrder?.contains("DESC") == true) rows.sortedByDescending { it.id } else rows.sortedBy { it.id } }
                     .map { mapOf("_id" to it.id) }
                 isAddress -> addresses[segments[0].toLong()].orEmpty().map { mapOf("address" to it.first, "type" to it.second) }
-                isPart -> parts[selectionArgs!!.single().toLong()].orEmpty().mapIndexed { i, p -> mapOf("_id" to p.id, "seq" to i, "ct" to "text/plain", "chset" to 106) }
+                isPart -> parts[selectionArgs!!.single().toLong()].orEmpty().mapIndexed { i, p -> mapOf("_id" to p.id, "seq" to i, "ct" to "text/plain", "chset" to 106, "text" to p.text) }
                 else -> messages.find { it.id == segments.single().toLong() }?.let { listOf(messageRow(it)) }.orEmpty()
             }
             val columns = requested.toTypedArray()

@@ -817,6 +817,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_mapping(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_mapping_verdict(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_send_mapping_verdict(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_rcs_canonicalizer_revision(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_outbox(
@@ -2173,6 +2177,10 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_func_gateway_verify_rcs_mapping(`client`: Long,`observationJson`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_verify_rcs_mapping_verdict(`client`: Long,`observationJson`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_gateway_verify_rcs_send_mapping_verdict(`client`: Long,`observationJson`: RustBuffer.ByValue,`commandId`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_rcs_canonicalizer_revision(uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     external fun ffi_peppy_mobile_bindings_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -2505,6 +2513,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_mapping() and 0xFFFF) != 16011) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_mapping_verdict() and 0xFFFF) != 36909) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_send_mapping_verdict() and 0xFFFF) != 32254) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_rcs_canonicalizer_revision() and 0xFFFF) != 21371) {
@@ -15484,6 +15498,48 @@ public object FfiConverterTypeNativeRcsLinkStatus: FfiConverterRustBuffer<Native
 
 
 /**
+ * A mapping verification with the core's fixed refusal code. The code is a closed, content-free
+ * name for diagnostics only; hosts decide on `verification` alone.
+ */
+data class NativeRcsMappingVerdict (
+    var `verification`: NativeRcsMappingVerification
+    , 
+    var `refusalCode`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsMappingVerdict: FfiConverterRustBuffer<NativeRcsMappingVerdict> {
+    override fun read(buf: ByteBuffer): NativeRcsMappingVerdict {
+        return NativeRcsMappingVerdict(
+            FfiConverterTypeNativeRcsMappingVerification.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeRcsMappingVerdict) = (
+            FfiConverterTypeNativeRcsMappingVerification.allocationSize(value.`verification`) +
+            FfiConverterOptionalString.allocationSize(value.`refusalCode`)
+    )
+
+    override fun write(value: NativeRcsMappingVerdict, buf: ByteBuffer) {
+            FfiConverterTypeNativeRcsMappingVerification.write(value.`verification`, buf)
+            FfiConverterOptionalString.write(value.`refusalCode`, buf)
+    }
+}
+
+
+
+/**
  * Advisory attachment metadata for the native upload coordinator. No plaintext path or Google
  * reference crosses this boundary.
  */
@@ -22713,6 +22769,39 @@ public object FfiConverterSequenceTypeNativeRcsBootstrapResolution: FfiConverter
         
         FfiConverterTypeNativeClient.lower(`client`),
         FfiConverterString.lower(`observationJson`),
+        FfiConverterLong.lower(`nowMs`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `gatewayVerifyRcsMappingVerdict`(`client`: NativeClient, `observationJson`: kotlin.String, `nowMs`: kotlin.Long): NativeRcsMappingVerdict {
+            return FfiConverterTypeNativeRcsMappingVerdict.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_verify_rcs_mapping_verdict(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`observationJson`),
+        FfiConverterLong.lower(`nowMs`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Verifies the bound target of one pending command. The mapping is stored on the command's own
+         * conversation and only when the command is addressed to exactly the chat's participant.
+         */
+    @Throws(MobileBindingsException::class) fun `gatewayVerifyRcsSendMappingVerdict`(`client`: NativeClient, `observationJson`: kotlin.String, `commandId`: kotlin.String, `nowMs`: kotlin.Long): NativeRcsMappingVerdict {
+            return FfiConverterTypeNativeRcsMappingVerdict.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_gateway_verify_rcs_send_mapping_verdict(
+    
+        
+        FfiConverterTypeNativeClient.lower(`client`),
+        FfiConverterString.lower(`observationJson`),
+        FfiConverterString.lower(`commandId`),
         FfiConverterLong.lower(`nowMs`),_status)
 }
     )

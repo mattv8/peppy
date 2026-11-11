@@ -346,6 +346,16 @@ class RcsReceiveCoordinatorTest {
         assertEquals(listOf("google-new", "google-new", "google-other"), requests)
     }
 
+    @Test fun `a live record refused because the proof was withdrawn requests a new proof`() {
+        val requests = mutableListOf<String>()
+        val core = FakeCore(listOf(conv("core-a", "google-a")))
+        core.refusals["message-1"] = "conversation_unproven"
+
+        coordinator(core, bootstrapRequest = requests::add).receive(liveRecord("google-a"))
+
+        assertEquals(listOf("google-a"), requests)
+    }
+
     @Test fun `unknown group sender re-reads the snapshot once and ingests the record unattributed`() {
         val core = FakeCore(listOf(conv("core-a", "google-a")))
         val rereads = AtomicInteger()

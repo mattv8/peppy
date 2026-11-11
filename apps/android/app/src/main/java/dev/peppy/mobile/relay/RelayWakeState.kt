@@ -21,7 +21,7 @@ internal class RelayWakeCandidate(val registrationId: String?, val route: RelayR
     override fun toString() = "RelayWakeCandidate(redacted)"
 }
 
-internal class RelayWakeCleanup(val identity: RelayWakeIdentity, val route: RelayRoute, val bearerToken: String, val relayOrigin: String = identity.origin) {
+internal class RelayWakeCleanup(val identity: RelayWakeIdentity, val route: RelayRoute, val bearerToken: String?, val relayOrigin: String = identity.origin) {
     override fun toString() = "RelayWakeCleanup(redacted)"
 }
 
@@ -38,7 +38,7 @@ internal class RelayWakeStateStore(private val prefs: SharedPreferences, private
     fun active(): Pair<String, RelayRoute>? = read(ACTIVE)?.let { decodeLegacyActive(it) ?: unavailable() }
     fun clearActive(): Boolean = remove(ACTIVE)
     /** Cleanup records are route-keyed so a new rotation cannot erase an older revocation. */
-    fun saveCleanup(cleanup: RelayWakeCleanup): Boolean = save(cleanupKey(cleanup.route.routeId), listOf(cleanup.identity.origin, cleanup.identity.vaultId, cleanup.identity.deviceId, cleanup.identity.provider, cleanup.identity.environment, cleanup.identity.credentialFingerprint, cleanup.route.routeId, cleanup.route.manageCredential, cleanup.route.wakeCredential, cleanup.bearerToken, cleanup.relayOrigin).joinToString("\n"))
+    fun saveCleanup(cleanup: RelayWakeCleanup): Boolean = save(cleanupKey(cleanup.route.routeId), listOf(cleanup.identity.origin, cleanup.identity.vaultId, cleanup.identity.deviceId, cleanup.identity.provider, cleanup.identity.environment, cleanup.identity.credentialFingerprint, cleanup.route.routeId, cleanup.route.manageCredential, cleanup.route.wakeCredential, cleanup.bearerToken.orEmpty(), cleanup.relayOrigin, (cleanup.bearerToken != null).toString()).joinToString("\n"))
     fun cleanups(): List<RelayWakeCleanup> {
         if (!recoverAcknowledgedState()) unavailable()
         return prefs.all.keys.filter { it.startsWith("$CLEANUP.") }.map { key ->
@@ -119,12 +119,16 @@ internal class RelayWakeStateStore(private val prefs: SharedPreferences, private
     private fun decodeLegacyActive(value: String): Pair<String, RelayRoute>? = value.split('\n').takeIf { it.size == 4 }?.let {
         it[0] to RelayRoute(it[1], it[2], it[3])
     }
-    private fun decodeCleanup(value: String): RelayWakeCleanup? = value.split('\n').takeIf { it.size == 11 }?.let { values ->
-        RelayWakeCleanup(
-            RelayWakeIdentity(values[0], values[1], values[2], values[3], values[4], values[5]),
-            RelayRoute(values[6], values[7], values[8]), values[9], values[10],
-        )
-    }
+    private fun decodeCleanup(value: String): RelayWakeCleanup? = value.split('\n').let { values -> when (values.size) {
+        11 -> values[9].takeIf(String::isNotEmpty)?.let { bearer ->
+            RelayWakeCleanup(RelayWakeIdentity(values[0], values[1], values[2], values[3], values[4], values[5]), RelayRoute(values[6], values[7], values[8]), bearer, values[10])
+        }
+        12 -> values[11].toBooleanStrictOrNull()?.let { requiresServerDeletion ->
+            val bearer = values[9].takeIf(String::isNotEmpty)
+            if (requiresServerDeletion == (bearer != null)) RelayWakeCleanup(RelayWakeIdentity(values[0], values[1], values[2], values[3], values[4], values[5]), RelayRoute(values[6], values[7], values[8]), bearer, values[10]) else null
+        }
+        else -> null
+    } }
 
     private fun encodePending(value: RelayWakePending) = (encodeIdentity(value.identity) + listOf(
         value.relayOrigin, value.protocol, value.tokenFingerprint, value.registrationId.orEmpty(),

@@ -1,12 +1,14 @@
 package dev.peppy.mobile.googlemessages
 
 import android.content.Context
+import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
 import dev.peppy.mobile.gateway.NativeGateway
 import org.json.JSONObject
 import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeClient
 import uniffi.peppy_mobile_bindings.NativeRcsCommittedSend
 import uniffi.peppy_mobile_bindings.NativeRcsGroupVerification
+import uniffi.peppy_mobile_bindings.NativeRcsMappingVerdict
 import uniffi.peppy_mobile_bindings.NativeRcsMappingVerification
 import uniffi.peppy_mobile_bindings.NativeRcsReceiveOwner
 import uniffi.peppy_mobile_bindings.NativeRcsSendPreparation
@@ -26,7 +28,8 @@ import uniffi.peppy_mobile_bindings.gatewayRecordRcsSubmitted
 import uniffi.peppy_mobile_bindings.gatewayRecordRcsTransportAck
 import uniffi.peppy_mobile_bindings.gatewayVerifyRcsGroupObservation
 import uniffi.peppy_mobile_bindings.gatewayVerifyRcsGroupRoute
-import uniffi.peppy_mobile_bindings.gatewayVerifyRcsMapping
+import uniffi.peppy_mobile_bindings.gatewayVerifyRcsMappingVerdict
+import uniffi.peppy_mobile_bindings.gatewayVerifyRcsSendMappingVerdict
 
 /** Acquires one exact NativeGateway owner; its client is never resolved again. */
 internal class RcsNativeCoreAdapter(
@@ -56,6 +59,7 @@ internal interface NativeRcsCorePort {
     fun nextContextTuple(runtimeId: String, runGeneration: ULong, streamEpoch: ULong, pairingEvidenceId: String): RcsNativeContextTuple
     fun nextMappingRevision(conversationId: String): ULong
     fun verifyMapping(observationJson: String, nowMs: Long): RcsNativeMappingVerification
+    fun verifySendMapping(commandId: String, observationJson: String, nowMs: Long): RcsNativeMappingVerification
     fun classifyTarget(conversationId: String, recipient: String, snapshotJson: String, nowMs: Long): RcsNativeTarget
     fun prepare(commandId: String, nowMs: Long): NativeRcsPreparationPort
     fun recordTransportAcknowledged(commandId: String, ackAtMs: Long)
@@ -104,6 +108,11 @@ internal class NativeRcsCoreLease(
     override fun verifyMapping(exactObservationJson: String): RcsNativeMappingVerification {
         requireOpen()
         return port.verifyMapping(exactObservationJson, clock.wallTimeMs())
+    }
+
+    override fun verifySendMapping(commandId: String, exactObservationJson: String): RcsNativeMappingVerification {
+        requireOpen()
+        return port.verifySendMapping(commandId, exactObservationJson, clock.wallTimeMs())
     }
 
     override fun classifyTarget(conversationId: String, recipient: String, exactSnapshotJson: String): RcsNativeTarget {
@@ -301,7 +310,17 @@ private class GeneratedNativeRcsCorePort(private val client: NativeClient) : Nat
 
     override fun nextMappingRevision(conversationId: String) = gatewayNextRcsMappingRevision(client, conversationId)
 
-    override fun verifyMapping(observationJson: String, nowMs: Long) = nativeRcsMappingVerification(gatewayVerifyRcsMapping(client, observationJson, nowMs))
+    override fun verifyMapping(observationJson: String, nowMs: Long) =
+        recorded(gatewayVerifyRcsMappingVerdict(client, observationJson, nowMs))
+
+    override fun verifySendMapping(commandId: String, observationJson: String, nowMs: Long) =
+        recorded(gatewayVerifyRcsSendMappingVerdict(client, observationJson, commandId, nowMs))
+
+    /** Records the core's fixed refusal name, so a refused send can be told apart on the phone. */
+    private fun recorded(verdict: NativeRcsMappingVerdict): RcsNativeMappingVerification {
+        verdict.refusalCode?.let { recordGoogleMessagesLinkEvent("mapping_refusal", it, 0L) }
+        return nativeRcsMappingVerification(verdict.verification)
+    }
 
     override fun classifyTarget(conversationId: String, recipient: String, snapshotJson: String, nowMs: Long) =
         nativeRcsTarget(gatewayClassifyRcsTarget(client, conversationId, recipient, snapshotJson, nowMs))

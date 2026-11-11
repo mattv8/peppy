@@ -34,6 +34,11 @@ private class GoLinkHandle(private val link: Link) : LinkHandle {
 	} catch (_: Throwable) {
 		"{\"code\":\"unavailable\"}"
 	}
+	override fun ensureConversationIndex(): String = try {
+		link.ensureConversationIndex()
+	} catch (_: Throwable) {
+		"{\"code\":\"unavailable\"}"
+	}
 	override fun conversationCandidateSnapshot(): String = link.conversationCandidateSnapshot()
 	override fun createRcsGroup(requestJson: String): String = link.createRcsGroup(requestJson)
     override fun conversationLastActivity(googleIdsJson: String): String = link.conversationLastActivity(googleIdsJson)

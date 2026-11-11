@@ -624,6 +624,52 @@ fn conversation_results_rank_matching_recent_threads_first() {
 }
 
 #[test]
+fn conversation_name_search_refreshes_changed_contacts_without_manual_resolution() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "fresh-contact-search", &vault);
+    let client = unlocked(&config, &vault);
+    let capture = |revision: &str, name: &str| {
+        client
+            .capture_contact_book(
+                &json!({
+                    "schema_version": 1,
+                    "book": {"id":"people","owner_device_id":config.device_id.to_string(),"generation":revision,"state":"active","region":"US"},
+                    "contacts": [{"id":"ada","book_id":"people","revision":revision,"display_name":name,"phones":[{"id":"phone","value":"+15555550999"}],"emails":[],"addresses":[],"provenance":{"source_id":"ada","read_only":false}}]
+                })
+                .to_string(),
+            )
+            .unwrap();
+    };
+    capture("1", "Ada");
+    client
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "+15555550999".into(),
+            body: "hello".into(),
+            provider_message_id: Some("fresh-contact-search".into()),
+            imported: false,
+        })
+        .unwrap();
+
+    let search = |query: &str| {
+        client
+            .search_local(LocalSearchRequest {
+                query: query.into(),
+                kind: Some(SearchKind::Conversation),
+                cursor: None,
+                limit: Some(10),
+            })
+            .unwrap()
+    };
+    assert!(matches!(search("Ada").items.as_slice(), [LocalSearchHit::Conversation { title, .. }] if title == "Ada"));
+
+    capture("2", "Bea");
+    assert!(search("Ada").items.is_empty());
+    assert!(matches!(search("Bea").items.as_slice(), [LocalSearchHit::Conversation { title, .. }] if title == "Bea"));
+}
+
+#[test]
 fn search_index_driver_rejects_out_of_range_budgets() {
     let directory = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();

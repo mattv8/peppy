@@ -317,7 +317,7 @@ fn fresh_schema_50_contains_the_production_and_draft_layouts() {
                 row.get::<_, i64>(0)
             })
             .unwrap(),
-        59
+        60
     );
     assert!(column_exists(
         &connection,
@@ -394,7 +394,7 @@ fn production_schema_46_keeps_legacy_drafts_and_adds_the_feature_schema() {
             .query_row("SELECT version FROM schema_meta", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        59
+        60
     );
     assert_eq!(
         connection
@@ -506,7 +506,7 @@ fn feature_schema_46_backfills_pending_drafts_and_repairs_notification_preferenc
                 row.get::<_, i64>(0)
             })
             .unwrap(),
-        59
+        60
     );
     assert!(column_exists(
         &connection,
@@ -592,7 +592,7 @@ fn feature_schema_48_preserves_attempt_evidence_without_backfilling_never_attemp
             .query_row("SELECT version FROM schema_meta", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        59
+        60
     );
     assert!(
         !connection
@@ -1102,6 +1102,64 @@ fn disjoint_caption_edits_are_merged_and_queued() {
     assert_eq!(
         receiver.draft_sync_status(initial.draft_id).unwrap().notice,
         Some(DraftNotice::UpdatedFromOtherDevice)
+    );
+}
+
+#[test]
+fn auto_merge_respects_the_body_limit() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let sender = unlocked(&config(&dir, "sender-limit", &vault), &vault);
+    let receiver = unlocked(&config(&dir, "receiver-limit", &vault), &vault);
+    let base = "a".repeat(64 * 1024 - 1);
+    let initial = save_draft(&sender, &base, vec![ADDRESS.into()]);
+    let branch_id = uuid::Uuid::new_v4();
+    let first = sender.pending_draft_pushes().unwrap().remove(0);
+    receiver
+        .apply_draft_changes(vec![remote_head(&first, branch_id)], "1")
+        .unwrap();
+    let local = receiver.compose_draft(initial.draft_id).unwrap().unwrap();
+    receiver
+        .save_compose_draft(
+            local.draft_id,
+            local.revision,
+            ComposeDraftUpdate {
+                group_name: None,
+                text: format!("L{}", base),
+                recipients: local.recipients.clone(),
+                attachment_ids: local.attachment_ids.clone(),
+                route: local.route.clone(),
+            },
+        )
+        .unwrap();
+    sender
+        .save_compose_draft(
+            initial.draft_id,
+            initial.revision,
+            ComposeDraftUpdate {
+                group_name: None,
+                text: format!("{base}R"),
+                recipients: vec![ADDRESS.into()],
+                attachment_ids: vec![],
+                route: None,
+            },
+        )
+        .unwrap();
+    let remote = sender.pending_draft_pushes().unwrap().remove(0);
+    receiver
+        .apply_draft_changes(vec![remote_head(&remote, branch_id)], "2")
+        .unwrap();
+
+    let status = receiver.draft_sync_status(initial.draft_id).unwrap();
+    assert_eq!(status.conflicts.len(), 1);
+    assert_eq!(status.conflicts[0].text, format!("{base}R"));
+    assert_eq!(
+        receiver
+            .compose_draft(initial.draft_id)
+            .unwrap()
+            .unwrap()
+            .text,
+        format!("L{base}")
     );
 }
 
@@ -1851,6 +1909,236 @@ fn downloaded_synced_draft_queues_one_mms_after_verified_install() {
         .send_compose_draft_accepted(saved.draft_id, routed.revision, send.command_id)
         .unwrap();
     assert_eq!(receiver.pending_outbox().unwrap(), queued);
+}
+
+#[test]
+fn intent_pin_blocks_available_download_eviction_until_abort_and_reopen() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let sender_config = config(&dir, "eviction-sender", &vault);
+    let receiver_config = config(&dir, "eviction-receiver", &vault);
+    let sender = unlocked(&sender_config, &vault);
+    let receiver = unlocked(&receiver_config, &vault);
+    let source = dir.path().join("eviction-image.png");
+    std::fs::write(&source, vec![7; 3 * 1024 * 1024]).unwrap();
+    let attachment = sender
+        .prepare_attachment(&source, "image/png", "eviction-image.png")
+        .unwrap();
+    let cipher =
+        std::fs::read(sender.native_cipher_file(attachment.attachment_id).unwrap()).unwrap();
+    sender
+        .mark_attachment_uploaded(attachment.attachment_id, &uuid::Uuid::new_v4().to_string())
+        .unwrap();
+    let saved = sender
+        .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
+            text: "caption".into(),
+            recipients: vec![ADDRESS.into()],
+            attachment_ids: vec![attachment.attachment_id],
+            route: Some(route(&sender_config)),
+        })
+        .unwrap();
+    let push = sender.pending_draft_pushes().unwrap().remove(0);
+    receiver
+        .apply_draft_changes(vec![remote_head(&push, uuid::Uuid::new_v4())], "1")
+        .unwrap();
+    let received = receiver.compose_draft(saved.draft_id).unwrap().unwrap();
+    let download = dir.path().join("eviction-image.cipher");
+    std::fs::write(&download, cipher).unwrap();
+    receiver
+        .install_downloaded_attachment(attachment.attachment_id, &download)
+        .unwrap();
+    let routed = receiver
+        .save_compose_draft(
+            saved.draft_id,
+            received.revision,
+            ComposeDraftUpdate {
+                group_name: None,
+                text: received.text,
+                recipients: received.recipients,
+                attachment_ids: received.attachment_ids,
+                route: Some(route(&receiver_config)),
+            },
+        )
+        .unwrap();
+    let route_push = receiver.pending_draft_pushes().unwrap().remove(0);
+    accept_push(&receiver, &route_push, uuid::Uuid::new_v4());
+    let command = receiver
+        .begin_draft_send(saved.draft_id, routed.revision, None)
+        .unwrap()
+        .remote
+        .unwrap()
+        .command_id;
+    receiver
+        .save_compose_draft(
+            saved.draft_id,
+            routed.revision,
+            ComposeDraftUpdate::default(),
+        )
+        .unwrap();
+
+    assert!(
+        !receiver
+            .evict_attachment_ciphertext(attachment.attachment_id)
+            .unwrap()
+    );
+    assert_eq!(
+        receiver
+            .attachment_info(attachment.attachment_id)
+            .unwrap()
+            .state,
+        AttachmentState::Available
+    );
+    receiver
+        .abort_draft_send_intent(saved.draft_id, command)
+        .unwrap();
+    assert!(
+        receiver
+            .evict_attachment_ciphertext(attachment.attachment_id)
+            .unwrap()
+    );
+    drop(receiver);
+
+    let reopened = unlocked(&receiver_config, &vault);
+    assert_eq!(
+        reopened
+            .attachment_info(attachment.attachment_id)
+            .unwrap()
+            .state,
+        AttachmentState::PendingDownload
+    );
+    let connection = encrypted_connection(&receiver_config);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM draft_media_references WHERE attachment_id=?",
+                [attachment.attachment_id.to_string()],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn conflict_pin_blocks_available_download_eviction_until_resolution_and_reopen() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let sender_config = config(&dir, "conflict-eviction-sender", &vault);
+    let receiver_config = config(&dir, "conflict-eviction-receiver", &vault);
+    let sender = unlocked(&sender_config, &vault);
+    let receiver = unlocked(&receiver_config, &vault);
+    let source = dir.path().join("conflict-eviction-image.png");
+    std::fs::write(&source, vec![9; 3 * 1024 * 1024]).unwrap();
+    let attachment = sender
+        .prepare_attachment(&source, "image/png", "conflict-eviction-image.png")
+        .unwrap();
+    let cipher =
+        std::fs::read(sender.native_cipher_file(attachment.attachment_id).unwrap()).unwrap();
+    sender
+        .mark_attachment_uploaded(attachment.attachment_id, &uuid::Uuid::new_v4().to_string())
+        .unwrap();
+    sender
+        .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
+            text: "remote".into(),
+            recipients: vec![ADDRESS.into()],
+            attachment_ids: vec![attachment.attachment_id],
+            route: Some(route(&sender_config)),
+        })
+        .unwrap();
+    let push = sender.pending_draft_pushes().unwrap().remove(0);
+    let local = save_draft(&receiver, "local", vec![ADDRESS.into()]);
+    let branch_id = uuid::Uuid::new_v4();
+    receiver
+        .apply_draft_changes(vec![remote_head(&push, branch_id)], "1")
+        .unwrap();
+    assert_eq!(
+        receiver
+            .draft_sync_status(local.draft_id)
+            .unwrap()
+            .conflicts[0]
+            .attachment_ids,
+        vec![attachment.attachment_id]
+    );
+
+    let download = dir.path().join("conflict-eviction-image.cipher");
+    std::fs::write(&download, cipher).unwrap();
+    receiver
+        .install_downloaded_attachment(attachment.attachment_id, &download)
+        .unwrap();
+    assert_eq!(
+        receiver
+            .attachment_info(attachment.attachment_id)
+            .unwrap()
+            .state,
+        AttachmentState::Available
+    );
+    assert!(
+        receiver
+            .compose_draft(local.draft_id)
+            .unwrap()
+            .unwrap()
+            .attachment_ids
+            .is_empty(),
+        "the conflict is the only owner of this downloaded attachment"
+    );
+    assert!(
+        !receiver
+            .evict_attachment_ciphertext(attachment.attachment_id)
+            .unwrap()
+    );
+    assert_eq!(
+        receiver
+            .attachment_info(attachment.attachment_id)
+            .unwrap()
+            .state,
+        AttachmentState::Available
+    );
+
+    receiver
+        .resolve_draft_conflict(local.draft_id, None)
+        .unwrap();
+    assert!(
+        receiver
+            .draft_sync_status(local.draft_id)
+            .unwrap()
+            .conflicts
+            .is_empty()
+    );
+    assert!(
+        receiver
+            .evict_attachment_ciphertext(attachment.attachment_id)
+            .unwrap()
+    );
+    assert_eq!(
+        receiver
+            .attachment_info(attachment.attachment_id)
+            .unwrap()
+            .state,
+        AttachmentState::PendingDownload
+    );
+    drop(receiver);
+
+    let reopened = unlocked(&receiver_config, &vault);
+    assert_eq!(
+        reopened
+            .attachment_info(attachment.attachment_id)
+            .unwrap()
+            .state,
+        AttachmentState::PendingDownload
+    );
+    let connection = encrypted_connection(&receiver_config);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM draft_media_references WHERE attachment_id=?",
+                [attachment.attachment_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -2825,9 +3113,9 @@ fn nonmatching_sent_terminal_keeps_dirty_draft_without_queueing() {
             saved.draft_id,
             saved.revision,
             ComposeDraftUpdate {
-                group_name: None,
+                group_name: Some("Weekend".into()),
                 text: "r2".into(),
-                recipients: vec![ADDRESS.into()],
+                recipients: vec![ADDRESS.into(), "+14155552672".into()],
                 attachment_ids: vec![],
                 route: None,
             },
@@ -2848,6 +3136,8 @@ fn nonmatching_sent_terminal_keeps_dirty_draft_without_queueing() {
     assert_ne!(kept[0].draft_id, saved.draft_id);
     assert_eq!(kept[0].conversation_id, saved.conversation_id);
     assert_eq!(kept[0].text, "r2");
+    assert_eq!(kept[0].group_name.as_deref(), Some("Weekend"));
+    assert_eq!(kept[0].recipients, vec![ADDRESS, "+14155552672"]);
     assert!(client.pending_outbox().unwrap().is_empty());
 }
 
@@ -2935,6 +3225,139 @@ fn intent_reference_prevents_attachment_cleanup_until_abort_and_discard() {
         .unwrap();
     assert!(
         client
+            .discard_unreferenced_attachment(attachment.attachment_id)
+            .unwrap()
+    );
+}
+
+#[test]
+fn intent_pin_failure_rolls_back_the_immutable_send_intent() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client_config = config(&dir, "intent-pin-rollback", &vault);
+    let client = unlocked(&client_config, &vault);
+    let source = dir.path().join("intent-pin-rollback.png");
+    std::fs::write(&source, b"held").unwrap();
+    let attachment = client
+        .prepare_attachment(&source, "image/png", "held.png")
+        .unwrap();
+    let second_source = dir.path().join("intent-pin-rollback-second.png");
+    std::fs::write(&second_source, b"held second").unwrap();
+    let second_attachment = client
+        .prepare_attachment(&second_source, "image/png", "held-second.png")
+        .unwrap();
+    client
+        .mark_attachment_uploaded(attachment.attachment_id, &uuid::Uuid::new_v4().to_string())
+        .unwrap();
+    client
+        .mark_attachment_uploaded(
+            second_attachment.attachment_id,
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .unwrap();
+    let saved = client
+        .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
+            text: "held".into(),
+            recipients: vec![],
+            attachment_ids: vec![attachment.attachment_id, second_attachment.attachment_id],
+            route: Some(route(&client_config)),
+        })
+        .unwrap();
+    let push = client.pending_draft_pushes().unwrap().remove(0);
+    accept_push(&client, &push, uuid::Uuid::new_v4());
+    drop(client);
+
+    let connection = encrypted_connection(&client_config);
+    connection
+        .execute_batch(&format!(
+            "CREATE TRIGGER fail_intent_pin BEFORE INSERT ON draft_media_references
+         WHEN NEW.kind='intent' AND NEW.attachment_id='{}'
+         BEGIN SELECT RAISE(ABORT, 'intent pin failure'); END;",
+            second_attachment.attachment_id
+        ))
+        .unwrap();
+    drop(connection);
+
+    let reopened = unlocked(&client_config, &vault);
+    assert_eq!(
+        reopened.begin_draft_send(saved.draft_id, saved.revision, None),
+        Err(Error::Database)
+    );
+    drop(reopened);
+
+    let connection = encrypted_connection(&client_config);
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM draft_send_intents", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM draft_media_references WHERE kind='intent'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn reopen_repairs_legacy_intent_pins_before_attachment_cleanup() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client_config = config(&dir, "legacy-intent-pin", &vault);
+    let client = unlocked(&client_config, &vault);
+    let source = dir.path().join("legacy-intent-pin.png");
+    std::fs::write(&source, b"held").unwrap();
+    let attachment = client
+        .prepare_attachment(&source, "image/png", "held.png")
+        .unwrap();
+    client
+        .mark_attachment_uploaded(attachment.attachment_id, &uuid::Uuid::new_v4().to_string())
+        .unwrap();
+    let saved = client
+        .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
+            text: "held".into(),
+            recipients: vec![],
+            attachment_ids: vec![attachment.attachment_id],
+            route: Some(route(&client_config)),
+        })
+        .unwrap();
+    let push = client.pending_draft_pushes().unwrap().remove(0);
+    accept_push(&client, &push, uuid::Uuid::new_v4());
+    let command = client
+        .begin_draft_send(saved.draft_id, saved.revision, None)
+        .unwrap()
+        .remote
+        .unwrap()
+        .command_id;
+    client
+        .save_compose_draft(
+            saved.draft_id,
+            saved.revision,
+            ComposeDraftUpdate::default(),
+        )
+        .unwrap();
+    drop(client);
+
+    let connection = encrypted_connection(&client_config);
+    connection
+        .execute(
+            "DELETE FROM draft_media_references WHERE kind='intent' AND owner_id=?",
+            [command.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let reopened = unlocked(&client_config, &vault);
+    assert!(
+        !reopened
             .discard_unreferenced_attachment(attachment.attachment_id)
             .unwrap()
     );

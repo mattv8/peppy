@@ -114,7 +114,12 @@ class MmsProviderReader(context: Context, private val optionalColumns: MmsOption
             ?: throw MmsProviderException("MMS provider returned no parts cursor")).use { c -> while (c.moveToNext()) {
             if (values.size >= MAX_PARTS) { error = "too_many_parts"; break }; val id = c.long("_id") ?: continue; valid(id)
             val name = c.string("name") ?: c.string("fn"); if (name != null && exceedsUtf8Limit(name, MAX_STRING)) { error = "metadata_overflow"; continue }
-            values += MmsProviderPart(id, c.long("seq")?.toInt(), bounded(c.string("ct")), name, c.long("chset")?.toInt(), bounded(c.string("text")), partUri(id))
+            val text = c.string("text")
+            if (text != null && exceedsUtf8Limit(text, MAX_TEXT)) {
+                error = "part_text_overflow"
+                continue
+            }
+            values += MmsProviderPart(id, c.long("seq")?.toInt(), bounded(c.string("ct")), name, c.long("chset")?.toInt(), text, partUri(id))
         } }; return PartResult(values, error)
     }
     private fun addresses(message: Long): AddressResult {
