@@ -2286,7 +2286,9 @@ mod tests {
         );
         assert_eq!(inbound.displays[&(conversation, None)].deadline_mono, 10);
         assert_eq!(
-            inbound.displays[&(conversation, None)].expires_at_ms.as_deref(),
+            inbound.displays[&(conversation, None)]
+                .expires_at_ms
+                .as_deref(),
             Some("10009")
         );
     }

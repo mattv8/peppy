@@ -30,6 +30,22 @@ public struct KeychainSecureStore: SecureStore {
 
     static var accessibility: CFString { kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly }
 
+    func addAttributes(account: String, data: Data) -> [String: Any] {
+        var attributes = query(account)
+        attributes[kSecValueData as String] = data
+        attributes[kSecAttrAccessible as String] = Self.accessibility
+        return attributes
+    }
+
+    func updateAttributes(data: Data) -> [String: Any] {
+        [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: Self.accessibility,
+            kSecAttrSynchronizable as String: kCFBooleanFalse as Any,
+            kSecUseDataProtectionKeychain as String: true,
+        ]
+    }
+
     public func read(_ account: String) throws(ClientError) -> Data? {
         var request = query(account)
         request[kSecReturnData as String] = true
@@ -42,10 +58,7 @@ public struct KeychainSecureStore: SecureStore {
     }
 
     public func addIfAbsent(_ account: String, _ data: Data) throws(ClientError) -> Bool {
-        var item = query(account)
-        item[kSecValueData as String] = data
-        item[kSecAttrAccessible as String] = Self.accessibility
-        let status = SecItemAdd(item as CFDictionary, nil)
+        let status = SecItemAdd(addAttributes(account: account, data: data) as CFDictionary, nil)
         if status == errSecDuplicateItem { return false }
         guard status == errSecSuccess else { throw .secureStorage(status: status) }
         return true
@@ -53,11 +66,7 @@ public struct KeychainSecureStore: SecureStore {
 
     public func upsert(_ account: String, _ data: Data) throws(ClientError) {
         if try addIfAbsent(account, data) { return }
-        let changes: [String: Any] = [
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: Self.accessibility,
-        ]
-        let status = SecItemUpdate(query(account) as CFDictionary, changes as CFDictionary)
+        let status = SecItemUpdate(query(account) as CFDictionary, updateAttributes(data: data) as CFDictionary)
         guard status == errSecSuccess else { throw .secureStorage(status: status) }
     }
 

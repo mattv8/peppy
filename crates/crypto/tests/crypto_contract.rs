@@ -255,6 +255,98 @@ fn stream_rejects_tampering_without_promotion() {
     }
 }
 
+#[test]
+fn authenticated_stream_round_trips_chunk_boundaries() {
+    let key = FileKey::generate().unwrap();
+    let directory = std::env::temp_dir().join(format!("peppy-{}", Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+
+    for (index, plaintext) in [
+        Vec::new(),
+        vec![42],
+        vec![42; STREAM_CHUNK_BYTES - 1],
+        vec![42; STREAM_CHUNK_BYTES],
+        vec![42; STREAM_CHUNK_BYTES + 1],
+        vec![42; STREAM_CHUNK_BYTES * 2 + 1],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut wire = Vec::new();
+        encrypt_stream(Cursor::new(&plaintext), &mut wire, &key, b"object").unwrap();
+        let destination = directory.join(index.to_string());
+
+        decrypt_stream_to_path(Cursor::new(wire), &destination, &key, b"object").unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), plaintext);
+        std::fs::remove_file(destination).unwrap();
+    }
+
+    std::fs::remove_dir(directory).unwrap();
+}
+
+#[test]
+fn authenticated_stream_rejects_reordered_duplicated_and_dropped_frames_without_promotion() {
+    let key = FileKey::generate().unwrap();
+    let plaintext = vec![42; STREAM_CHUNK_BYTES * 2 + 1];
+    let mut wire = Vec::new();
+    encrypt_stream(Cursor::new(&plaintext), &mut wire, &key, b"object").unwrap();
+    let (header, frames) = split_frames(&wire);
+    let directory = std::env::temp_dir().join(format!("peppy-{}", Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+
+    let malformed = [
+        [
+            header.clone(),
+            frames[1].clone(),
+            frames[0].clone(),
+            frames[2].clone(),
+            frames[3].clone(),
+        ]
+        .concat(),
+        [
+            header.clone(),
+            frames[0].clone(),
+            frames[0].clone(),
+            frames[1].clone(),
+            frames[2].clone(),
+            frames[3].clone(),
+        ]
+        .concat(),
+        [
+            header,
+            frames[1].clone(),
+            frames[2].clone(),
+            frames[3].clone(),
+        ]
+        .concat(),
+    ];
+    for wire in malformed {
+        let destination = directory.join(Uuid::new_v4().to_string());
+
+        assert!(decrypt_stream_to_path(Cursor::new(wire), &destination, &key, b"object").is_err());
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+    }
+
+    std::fs::remove_dir(directory).unwrap();
+}
+
+fn split_frames(wire: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
+    const STREAM_PREFIX_BYTES: usize = 5 + 24;
+
+    let mut frames = Vec::new();
+    let mut offset = STREAM_PREFIX_BYTES;
+    while offset < wire.len() {
+        let frame_length =
+            u32::from_be_bytes(wire[offset..offset + 4].try_into().unwrap()) as usize;
+        let frame_end = offset + 4 + frame_length;
+        frames.push(wire[offset..frame_end].to_vec());
+        offset = frame_end;
+    }
+    (wire[..STREAM_PREFIX_BYTES].to_vec(), frames)
+}
+
 fn encrypted_stream(plaintext: &[u8]) -> Vec<u8> {
     let key = FileKey::generate().unwrap();
     let mut output = Vec::new();

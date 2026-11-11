@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserCoreError, CoreRejectedError } from "./core.js";
+import { BrowserEnrollment, type EnrollmentSession } from "./enrollment.js";
 import { browserRememberedUnlock, BrowserWorkerHost, DraftSyncPrompt, dispatchBrowserRpc, sendBrowserDraft, type BrowserPort, type HostSession } from "./host.js";
 import type { OwnerLockManager } from "./owner.js";
 import { TransportError } from "./transport.js";
@@ -96,6 +97,36 @@ function bannerCount(attached: ReturnType<typeof port>): number {
 
 function response(attached: ReturnType<typeof port>, id: number): unknown {
   return attached.messages.find(message => typeof message === "object" && message !== null && "id" in message && message.id === id);
+}
+
+function familyEnrollment(response: Response): BrowserEnrollment {
+  const session: EnrollmentSession = {
+    phase: "ready",
+    async finishEnrollment() {},
+    async unlock() {},
+    publicIdentity: () => ({ role: "owner" }),
+    tokenForTransport: () => "device-token",
+  };
+  return new BrowserEnrollment(
+    { invoke: async () => ({}) },
+    session,
+    "https://peppy.test",
+    async () => response.clone(),
+  );
+}
+
+function familyHost(enrollment: BrowserEnrollment): BrowserWorkerHost {
+  return new BrowserWorkerHost({
+    locks: locks(),
+    boot: async () => new FakeSession(),
+    network: {
+      start: async () => undefined,
+      stop: async () => undefined,
+      enrollmentCreateInvite: () => enrollment.createInvite(),
+      enrollmentApproveVaultRequest: (requestId: string) => enrollment.approveVaultRequest(requestId),
+      enrollmentDenyVaultRequest: (requestId: string) => enrollment.denyVaultRequest(requestId),
+    } as unknown as import("./host.js").BrowserNetwork,
+  });
 }
 
 describe("browser host RPC", () => {
@@ -483,6 +514,86 @@ describe("browser host RPC", () => {
     expect(recovery).toBeInstanceOf(RememberedUnlock);
     await recovery.remember(JSON.stringify({ metadata: { vaultId: "11111111-1111-7111-8111-111111111111" } }), "passphrase");
     expect(fetch).toHaveBeenCalledWith("https://app.peppy.pro/hosted/v1/web/app-session", expect.objectContaining({ credentials: "include" }));
+  });
+
+  it("binds the default browser fetch to the worker global receiver", async () => {
+    const receiverSensitiveFetch = vi.fn(function (this: unknown) {
+      if (this !== globalThis) throw new TypeError("illegal invocation");
+      return Promise.resolve(new Response(null, { status: 503 }));
+    }) as unknown as typeof fetch;
+    vi.stubGlobal("fetch", receiverSensitiveFetch);
+
+    await browserRememberedUnlock("https://app.peppy.pro").remember(JSON.stringify({ metadata: { vaultId: "11111111-1111-7111-8111-111111111111" } }), "passphrase");
+
+    expect(receiverSensitiveFetch).toHaveBeenCalledWith("https://app.peppy.pro/hosted/v1/web/app-session", expect.objectContaining({ credentials: "include" }));
+  });
+
+  it.each([
+    ["enrollment_revoke_invite", "inviteId"],
+    ["enrollment_approve_vault_request", "requestId"],
+    ["enrollment_deny_vault_request", "requestId"],
+  ] as const)("rejects malformed %s identifiers without mutating or broadcasting", async (command, identifier) => {
+    const mutation = vi.fn(async () => undefined);
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => new FakeSession(),
+      network: {
+        start: async () => undefined,
+        stop: async () => undefined,
+        enrollmentRevokeInvite: mutation,
+        enrollmentApproveVaultRequest: mutation,
+        enrollmentDenyVaultRequest: mutation,
+      } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const client = port();
+    await host.attach(client);
+    client.messages.length = 0;
+
+    for (const [index, value] of [undefined, null, false, 1].entries()) {
+      const id = index + 1;
+      client.emit({ id, command, args: value === undefined ? {} : { [identifier]: value } });
+      await eventually(() => response(client, id) !== undefined);
+      expect(response(client, id)).toMatchObject({ ok: false, error: { code: "invalid-request" } });
+    }
+
+    expect(mutation).not.toHaveBeenCalled();
+    expect(client.messages).not.toContainEqual({ event: "changed" });
+  });
+
+  it.each([
+    ["invite_limit", 409, "invite_limit", "enrollment_create_invite"],
+    ["request_not_pending", 409, "request_not_pending", "enrollment_deny_vault_request"],
+    ["invalid_session", 401, "http-401", "enrollment_approve_vault_request"],
+    ["admin_required", 403, "http-403", "enrollment_approve_vault_request"],
+  ] as const)("maps the real family HTTP %s response to %s", async (serverCode, status, expectedCode, command) => {
+    const enrollment = familyEnrollment(new Response(JSON.stringify({ code: serverCode }), { status, headers: { "content-type": "application/json" } }));
+    const host = familyHost(enrollment);
+    const client = port();
+    await host.attach(client);
+    client.messages.length = 0;
+
+    client.emit({ id: 1, command, args: command === "enrollment_create_invite" ? {} : { requestId: "request-1" } });
+    await eventually(() => response(client, 1) !== undefined);
+
+    expect(response(client, 1)).toMatchObject({ id: 1, ok: false, error: { code: expectedCode } });
+  });
+
+  it("keeps successful family RPC results and sanitizes unknown server codes", async () => {
+    const successHost = familyHost(familyEnrollment(new Response(JSON.stringify({ invite_id: "invite-1", invite_token: "token", expires_in_seconds: 300 }), { headers: { "content-type": "application/json" } })));
+    const successClient = port();
+    await successHost.attach(successClient);
+    successClient.messages.length = 0;
+    successClient.emit({ id: 1, command: "enrollment_create_invite", args: {} });
+    await eventually(() => response(successClient, 1) !== undefined);
+    expect(response(successClient, 1)).toEqual({ id: 1, ok: true, value: { inviteId: "invite-1", inviteLink: "https://peppy.test/#invite=token", expiresInSeconds: 300 } });
+
+    const unknownHost = familyHost(familyEnrollment(new Response(JSON.stringify({ code: "unexpected_server_detail" }), { status: 409, headers: { "content-type": "application/json" } })));
+    const unknownClient = port();
+    await unknownHost.attach(unknownClient);
+    unknownClient.messages.length = 0;
+    unknownClient.emit({ id: 2, command: "enrollment_create_invite", args: {} });
+    await eventually(() => response(unknownClient, 2) !== undefined);
+    expect(response(unknownClient, 2)).toMatchObject({ id: 2, ok: false, error: { code: "unavailable" } });
   });
 
   it("accepts canonical opaque MCP authorization IDs and rejects unsafe path values", async () => {

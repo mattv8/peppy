@@ -67,7 +67,7 @@ function parseGroupNotice(value: unknown): GroupNoticeView[] {
 }
 
 const RCS_STATES: readonly NonNullable<AttachmentView["rcsState"]>[] = ["downloading", "stored", "too_large", "quota_full", "failed", "expired"];
-const RCS_SEND_STATUSES: readonly NonNullable<AttachmentView["rcsSendStatus"]>[] = ["sending", "sent", "not_sent", "outcome_unknown", "members_changed"];
+const RCS_SEND_STATUSES: readonly NonNullable<AttachmentView["rcsSendStatus"]>[] = ["sending", "sent", "not_sent", "send_failed", "outcome_unknown", "members_changed"];
 
 /** Keeps only the RCS fields the UI understands. A malformed field is dropped alone, the attachment stays. */
 export function parseRcsAttachmentFields(value: Record<string, unknown>): Pick<AttachmentView, "rcsState" | "rcsSendStatus" | "index"> {

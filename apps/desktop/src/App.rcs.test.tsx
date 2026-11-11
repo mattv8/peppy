@@ -343,9 +343,54 @@ describe("RCS conversation metadata", () => {
 });
 
 describe("member-change media recovery", () => {
+  it.each(["application/pdf", "audio/mpeg", "video/mp4"])("does not restore or resend a definitive attempted %s failure at index zero", async (mediaType) => {
+    snapshot.draft = { ...snapshot.draft!, text: "Existing draft", attachmentIds: [] };
+    snapshot.conversations = snapshot.conversations.map((conversation) => conversation.id === snapshot.activeConversationId ? {
+      ...conversation,
+      messages: [{ id: "attempted-failure", revision: "1", sender: "self", body: "Attempted caption", timestamp: "2026-01-01", transport: "rcs", attachments: [{ id: "attempted-file", name: "attempted.file", mediaType, byteSize: 1, state: "ready", index: 0, rcsSendStatus: "send_failed" }] }],
+    } : conversation);
+    const sendDraft = vi.spyOn(bridge, "send_draft");
+    render(<App />);
+
+    expect(await screen.findByText("Send failed")).toBeInTheDocument();
+    expect(document.querySelector('[data-rcs-media-status]')).toHaveAttribute("data-rcs-media-terminal-failure", "true");
+    expect(screen.queryByRole("button", { name: peppyCopy.group_message_edit_resend })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("Existing draft");
+    expect(sendDraft).not.toHaveBeenCalled();
+  });
+
+  it("keeps an attachment with no view pending on the current RCS route", async () => {
+    snapshot.draft = { ...snapshot.draft!, attachmentIds: ["metadata-pending"] };
+    let notify: () => void = () => undefined;
+    vi.mocked(bridge.subscribe).mockImplementation((listener) => {
+      notify = listener;
+      return () => undefined;
+    });
+    render(<App />);
+
+    const chip = await screen.findByRole("button", { name: "Remove Attached file" });
+    expect(chip.closest("[data-attachment-id]")).toHaveAttribute("data-attachment-id", "metadata-pending");
+    snapshot.draft = { ...snapshot.draft, attachments: [{ id: "metadata-pending", name: "later.pdf", mediaType: "application/pdf", byteSize: 1, state: "ready" }] };
+    await act(async () => { notify(); });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Remove later.pdf" })).toBeInTheDocument());
+  });
+
+  it("does not treat a sparse nonzero attachment as the caption carrier", async () => {
+    snapshot.draft = { ...snapshot.draft!, text: "My reply", attachmentIds: [] };
+    snapshot.conversations = snapshot.conversations.map((conversation) => conversation.id === snapshot.activeConversationId ? {
+      ...conversation,
+      messages: [{ id: "sparse-media", revision: "1", sender: "self", body: "Photo caption", timestamp: "2026-01-01", transport: "rcs", attachments: [{ id: "sparse-file", name: "sparse.pdf", mediaType: "application/pdf", byteSize: 1, state: "ready", index: 3, rcsSendStatus: "not_sent" }] }],
+    } : conversation);
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: peppyCopy.group_message_edit_resend }));
+    await waitFor(() => expect(document.querySelector('[data-attachment-id="sparse-file"]')).toBeInTheDocument());
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("My reply");
+  });
+
   it.each([false, true])("restores definitely unsent original indexes only (mixed=%s), without sending", async (mixed) => {
     const attachments = [
-      ...(mixed ? [{ id: "already-sent", name: "sent.jpg", mediaType: "image/jpeg", byteSize: 67, state: "ready" as const, index: 0, rcsSendStatus: "sent" as const }, { id: "unknown", name: "unknown.pdf", mediaType: "application/pdf", byteSize: 80, state: "ready" as const, index: 1, rcsSendStatus: "outcome_unknown" as const }] : []),
+      ...(mixed ? [{ id: "already-sent", name: "attempted.jpg", mediaType: "image/jpeg", byteSize: 67, state: "ready" as const, index: 0, rcsSendStatus: "send_failed" as const }, { id: "unknown", name: "unknown.pdf", mediaType: "application/pdf", byteSize: 80, state: "ready" as const, index: 1, rcsSendStatus: "outcome_unknown" as const }] : []),
       { id: "member-file", name: "review.pdf", mediaType: "application/pdf", byteSize: 2048, state: "ready" as const, index: mixed ? 2 : 0, rcsSendStatus: "members_changed" as const },
       ...(mixed ? [{ id: "never-sent", name: "rest.pdf", mediaType: "application/pdf", byteSize: 1024, state: "ready" as const, index: 3, rcsSendStatus: "not_sent" as const }] : []),
     ];
@@ -354,6 +399,7 @@ describe("member-change media recovery", () => {
     const sendDraft = vi.spyOn(bridge, "send_draft");
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: peppyCopy.group_message_edit_resend }));
+    fireEvent.click(screen.getByRole("button", { name: peppyCopy.group_message_edit_resend }));
     await waitFor(() => expect(document.querySelector('#attachment-tray-region [data-attachment-id="member-file"]')).toBeInTheDocument());
     const tray = document.getElementById("attachment-tray-region")!;
     expect(tray).toHaveTextContent("review.pdf");
@@ -365,6 +411,33 @@ describe("member-change media recovery", () => {
     expect(document.getElementById("composer-group-changed")).toHaveAttribute("data-member-revision", "reviewed-7");
     expect(document.getElementById("composer-group-changed-members")).toHaveTextContent("+15555550101");
     expect(sendDraft).not.toHaveBeenCalled();
+  });
+
+  it("keeps intentional matching caption text and recovers equal captions from distinct sources", async () => {
+    snapshot.draft = { ...snapshot.draft!, text: "Hello there", attachmentIds: [] };
+    snapshot.conversations = snapshot.conversations.map(c => c.id === snapshot.activeConversationId ? {
+      ...c,
+      participants: ["+15555550101", "+15555550102"],
+      group: { members: ["+15555550101", "+15555550102"], memberRevision: "reviewed-7", state: "live", canCreate: false, createNeedsConfirmation: false },
+      messages: ["source-one", "source-two"].map((id, index) => ({
+        id,
+        revision: "1",
+        sender: "self",
+        body: "Hello",
+        timestamp: "2026-01-01",
+        transport: "rcs" as const,
+        attachments: [{ id: `file-${index}`, name: `file-${index}.pdf`, mediaType: "application/pdf", byteSize: 1, state: "ready" as const, index: 0, rcsSendStatus: "not_sent" as const }],
+      })),
+    } : c);
+    render(<App />);
+
+    const recover = await screen.findAllByRole("button", { name: peppyCopy.group_message_edit_resend });
+    fireEvent.click(recover[0]);
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("Hello\nHello there"));
+    fireEvent.click(recover[1]);
+
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("Hello\nHello\nHello there"));
+    expect(document.querySelectorAll('#attachment-tray-region [data-attachment-id]')).toHaveLength(2);
   });
 });
 

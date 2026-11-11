@@ -127,6 +127,105 @@ import Testing
         #expect(server.paths.filter { $0 == "DELETE /v1/vault" }.count == 1)
     }
 
+    @Test func failedKeyCacheEnumerationPublishesNoCandidateAndSecondOpenRestoresWithoutPassphrase() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let store = RecoverySecureStore()
+        let deviceId = UUID().uuidString.lowercased()
+        let directory = temporaryDirectory()
+        let first = session(server, store: store, deviceId: deviceId, directory: directory)
+        let identity = try #require(try await first.importCredential(server.credential(deviceId: deviceId)).identity)
+        _ = try await first.unlock(passphrase: passphrase)
+        await first.close()
+        let cacheAccount = identity.account("key-cache-1")
+        let cache = try #require(store.value(cacheAccount))
+        let enrollment = try #require(store.value(identity.account("enrollment")))
+        let databaseKey = try #require(store.value(identity.account("database-key")))
+        let requestsBeforeOpen = server.paths
+
+        let second = session(server, store: store, deviceId: deviceId, directory: directory)
+        store.failingRead = cacheAccount
+        await #expect(throws: recoveryStoreFailure) { try await second.open() }
+        await #expect(throws: ClientError.notEnrolled) { try await second.conversations() }
+        store.failingRead = nil
+
+        let reopened = try await second.open()
+        #expect(reopened.databaseOpen && reopened.keysUnlocked && reopened.rejectedKeyCaches == 0)
+        _ = try await second.conversations()
+        #expect(store.value(cacheAccount) == cache)
+        #expect(store.value(identity.account("enrollment")) == enrollment)
+        #expect(store.value(identity.account("database-key")) == databaseKey)
+        #expect(server.paths == requestsBeforeOpen, "restoring the cached keys must not touch the server")
+        await second.close()
+    }
+
+    @Test func confirmedVaultDeleteRetirementFailureKeepsMarkerUntilFreshRetryDrainsOldRoute() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        server.mutate { server in
+            server.override = { request in
+                request.method == "DELETE" && request.url.path == "/v1/vault"
+                    ? HTTPResponse(status: 204, url: request.url, body: Data())
+                    : nil
+            }
+        }
+        let store = RecoverySecureStore()
+        let deviceId = UUID().uuidString.lowercased()
+        let transport = RelayCleanupTransport(inner: DeviceScopedTransport(server: server, deviceId: deviceId))
+        let native = NativeSession(secureStore: store, transport: transport, databaseDirectory: temporaryDirectory(), allowLoopbackHTTP: false)
+        let identity = try #require(try await native.importCredential(server.credential(deviceId: deviceId)).identity)
+        _ = try await native.unlock(passphrase: passphrase)
+
+        let relayOrigin = "https://relay.example.test"
+        let wakeIdentity = RelayWakeIdentity(origin: identity.origin, vaultId: identity.vaultId, deviceId: identity.deviceId, environment: "production")
+        try await native.registerRelayWakeContext(identity: wakeIdentity, relayOrigin: relayOrigin)
+        let route = RelayWakeRoute(
+            routeId: UUID().uuidString.lowercased(), manageCredential: String(repeating: "a", count: 64),
+            wakeCredential: String(repeating: "b", count: 64), tokenFingerprint: "token"
+        )
+        let routeAccount = "relay-wake-v2|\(identity.origin)|\(identity.vaultId)|\(identity.deviceId)|production|\(relayOrigin)|route"
+        try store.upsert(routeAccount, JSONEncoder().encode(route))
+        let routeBytes = try #require(store.value(routeAccount))
+        let mine = RelayWakeCleanupContext(identity: wakeIdentity, relayOrigin: relayOrigin, deviceCredential: server.token, retiring: false)
+        let unrelated = RelayWakeCleanupContext(
+            identity: RelayWakeIdentity(origin: identity.origin, vaultId: UUID().uuidString.lowercased(), deviceId: UUID().uuidString.lowercased(), environment: "production"),
+            relayOrigin: relayOrigin, deviceCredential: "unrelated-bearer", retiring: false
+        )
+        try store.upsert(relayContextsAccount, JSONEncoder().encode(try storedRelayContexts(store) + [unrelated]))
+
+        // Only the protected relay-cleanup-context write fails; the marker, binding and pointer writes succeed.
+        store.failingWrite = relayContextsAccount
+        await #expect(throws: recoveryStoreFailure) { try await native.deleteVault(vaultId: identity.vaultId) }
+        store.failingWrite = nil
+
+        #expect(store.value(EnrollmentStore.activeAccount) == nil, "local teardown deactivates the enrollment pointer")
+        #expect(store.value(identity.account("vault-secret-v2")) == nil, "local teardown removes the device binding")
+        #expect(storedMarker(store) == identity, "the durable marker survives until binding and contexts resolve")
+        #expect(store.value(routeAccount) == routeBytes, "captured route material is retained for the retry")
+        #expect(try storedRelayContexts(store) == [mine, unrelated])
+        #expect(server.paths.filter { $0 == "DELETE /v1/vault" }.count == 1)
+        #expect(transport.cleanupRequests.isEmpty)
+
+        let fresh = NativeSession(secureStore: store, transport: transport, databaseDirectory: temporaryDirectory(), allowLoopbackHTTP: false)
+        _ = try await fresh.deleteVault(vaultId: identity.vaultId)
+        let retiring = RelayWakeCleanupContext(identity: wakeIdentity, relayOrigin: relayOrigin, deviceCredential: server.token, retiring: true)
+        #expect(try await fresh.retiringRelayWakeContexts() == [retiring], "the retry retires only the deleted identity's context")
+        #expect(storedMarker(store) == identity, "retiring a context is not resolution: the marker stays")
+        #expect(transport.cleanupRequests.isEmpty)
+
+        await fresh.drainRetiringRelayWakeContexts(relayTransport: transport, secure: store)
+        let cleanup = transport.cleanupRequests
+        #expect(cleanup.map { "\($0.method) \($0.url.path)" } == [
+            "DELETE /v1/devices/self/wake-route", "POST /v1/routes/\(route.routeId)/revoke",
+        ])
+        #expect(cleanup.first?.headers["Authorization"] == "Bearer \(server.token)", "server removal uses the captured credential")
+        let revokeBody = try JSONSerialization.jsonObject(with: try #require(cleanup.last?.body)) as? [String: Any]
+        #expect(revokeBody?["manage_credential"] as? String == route.manageCredential)
+        #expect(try await fresh.retiringRelayWakeContexts().isEmpty)
+        #expect(store.value(routeAccount) == nil, "the matching old route is revoked and removed")
+        #expect(storedMarker(store) == nil, "the marker clears only after binding, contexts and route cleanup resolve")
+        #expect(try storedRelayContexts(store) == [unrelated], "the live unrelated identity is never retired")
+        #expect(!cleanup.contains { $0.headers["Authorization"] == "Bearer unrelated-bearer" })
+    }
+
     @Test func aSecondEnrollmentIsRefusedAndTheFirstIsKept() async throws {
         let server = try FakeServer(passphrase: passphrase)
         let store = InMemorySecureStore()
@@ -472,6 +571,40 @@ private final class BindingDeleteFaultStore: SecureStore, @unchecked Sendable {
             throw .secureStorage(status: -1)
         }
         try backing.delete(account)
+    }
+}
+
+private let relayContextsAccount = "relay-wake-cleanup-contexts-v1"
+private let vaultBindingCleanupAccount = "vault-binding-cleanup-pending"
+
+private func storedRelayContexts(_ store: RecoverySecureStore) throws -> [RelayWakeCleanupContext] {
+    guard let data = store.value(relayContextsAccount) else { return [] }
+    return try JSONDecoder().decode([RelayWakeCleanupContext].self, from: data)
+}
+
+private func storedMarker(_ store: RecoverySecureStore) -> EnrollmentIdentity? {
+    store.value(vaultBindingCleanupAccount).flatMap { try? JSONDecoder().decode(EnrollmentIdentity.self, from: $0) }
+}
+
+/// Answers the two relay-cleanup calls (server route removal and relay revoke) itself, recording them,
+/// and forwards every other request to the scoped vault server.
+private final class RelayCleanupTransport: HTTPTransport, @unchecked Sendable {
+    private let inner: any HTTPTransport
+    private let lock = NSLock()
+    private var cleanup: [HTTPRequest] = []
+
+    init(inner: any HTTPTransport) {
+        self.inner = inner
+    }
+
+    var cleanupRequests: [HTTPRequest] { lock.withLock { cleanup } }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        let isRouteRemoval = request.method == "DELETE" && request.url.path == "/v1/devices/self/wake-route"
+        let isRelayRevoke = request.method == "POST" && request.url.path.hasPrefix("/v1/routes/") && request.url.path.hasSuffix("/revoke")
+        guard isRouteRemoval || isRelayRevoke else { return try await inner.send(request) }
+        lock.withLock { cleanup.append(request) }
+        return HTTPResponse(status: 204, url: request.url, body: Data())
     }
 }
 

@@ -35,10 +35,10 @@ impl BrowserCore {
         {
             return Err(invalid());
         }
-        if matches!(
-            input.connection.as_str(),
-            "offline" | "revoked" | "key-mismatch" | "error"
-        ) {
+        let applies_roster = input.connection == "connected"
+            || input.connection == "error"
+                && (input.devices.is_some() || input.capabilities.is_some());
+        if !applies_roster {
             if input.devices.is_some() || input.capabilities.is_some() {
                 return Err(invalid());
             }
@@ -148,6 +148,49 @@ mod tests {
 
     fn context(devices: Value, capabilities: Value) -> Value {
         json!({"connection": "connected", "devices": devices, "capabilities": capabilities})
+    }
+
+    fn error_context(devices: Value, capabilities: Value) -> Value {
+        json!({"connection": "error", "devices": devices, "capabilities": capabilities})
+    }
+
+    #[test]
+    fn degraded_context_validates_and_refreshes_the_roster() {
+        let (_root, mut core, device) = unlocked_core();
+        let gateway = DeviceId::new();
+
+        let applied = response(
+            &mut core,
+            "_worker_apply_server_context",
+            error_context(
+                json!({"devices":[
+                    {"device_id":device,"role":"device","revoked":false},
+                    {"device_id":gateway,"role":"gateway","revoked":false}
+                ]}),
+                json!({"capabilities":[{"device_id":gateway,"simulator":false,"capabilities":{"sims":[]}}]}),
+            ),
+        );
+
+        assert_eq!(applied["connection"], "error");
+        assert_eq!(applied["gateways"][0]["id"], gateway.to_string());
+        assert!(core.context.rcs_roster_validated);
+        assert_eq!(response(&mut core, "snapshot", json!({}))["connection"]["state"], "error");
+    }
+
+    #[test]
+    fn degraded_context_rejects_an_unverified_roster() {
+        let (_root, mut core, device) = unlocked_core();
+
+        let result = error(
+            &mut core,
+            error_context(
+                json!({"devices":[{"device_id":device,"role":"invalid","revoked":false}]}),
+                json!({"capabilities":[]}),
+            ),
+        );
+
+        assert_eq!(result["code"], "invalid-request");
+        assert!(!core.context.rcs_roster_validated);
     }
 
     #[test]

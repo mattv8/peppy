@@ -99,21 +99,36 @@ jobs:
       - if: inputs.component == 'desktop'
         name: Build the read-only manifest verifier before signing credentials are mapped
         run: cargo build --quiet --locked --manifest-path infra/release/manifest-verifier/Cargo.toml
+      - if: inputs.component == 'android'
+        name: Install Android build tools
+        run: |
+          set +e
+          set +o pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;35.0.0"
+          sdkmanager_status=${PIPESTATUS[1]}
+          set -e
+          exit "$sdkmanager_status"
       - id: guard
         env:
           CHANNEL: ${{ inputs.channel }}
           VERSION: ${{ inputs.version }}
           COMPONENT: ${{ inputs.component }}
+          SHA: ${{ inputs.sha }}
           GH_TOKEN: ${{ github.token }}
+          PEPPY_UPDATE_PUBLIC_KEY: ${{ vars.PEPPY_UPDATE_PUBLIC_KEY }}
+          PEPPY_RELEASE_GPG_KEY: ${{ secrets.PEPPY_RELEASE_GPG_KEY }}
+          PEPPY_RELEASE_GPG_KEY_ID: ${{ vars.PEPPY_RELEASE_GPG_KEY_ID }}
+          PEPPY_ANDROID_SIGNING_CERT_SHA256: ${{ vars.PEPPY_ANDROID_SIGNING_CERT_SHA256 }}
         run: |
+          set -o pipefail
           case "$CHANNEL" in
             stable) regex='^[0-9]+\.[0-9]+\.[0-9]+$' ;;
             staging) regex='^[0-9]+\.[0-9]+\.[0-9]+-staging\.[0-9]+$' ;;
             *) echo "invalid channel: $CHANNEL" >&2; exit 1 ;;
           esac
           [[ "$VERSION" =~ $regex ]] || { echo "invalid version: $VERSION" >&2; exit 1; }
-          git fetch --tags --force origin
           if [ "$CHANNEL" = staging ]; then
+            git fetch --tags --force origin
             computed_output=$(infra/release/compute-version.sh --channel prerelease --component "$COMPONENT")
             computed=$(printf '%s\n' "$computed_output" | sed -n 's/^version=//p')
             if [ "$computed" != "$VERSION" ]; then
@@ -127,19 +142,19 @@ jobs:
               echo 'skip=true' >> "$GITHUB_OUTPUT"
               exit 0
             fi
+            gh api "repos/$GITHUB_REPOSITORY/releases" --paginate | jq -r --arg tag "$TAG_PREFIX$VERSION" '.[] | select(.tag_name == $tag and .draft) | .id' | while IFS= read -r id; do
+              [ -z "$id" ] || gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+            done
           else
-            if git ls-remote --exit-code --tags origin "refs/tags/$TAG_PREFIX$VERSION" >/dev/null 2>&1; then
-              echo "tag $TAG_PREFIX$VERSION already exists" >&2
-              exit 1
-            fi
-            if gh release list --limit 1000 --json tagName,isDraft | jq -e --arg tag "$TAG_PREFIX$VERSION" '.[] | select(.tagName == $tag and (.isDraft | not))' >/dev/null; then
-              echo "published release $TAG_PREFIX$VERSION already exists" >&2
-              exit 1
+            tag="$TAG_PREFIX$VERSION"
+            remote_tags=$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")
+            releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -r --arg tag "$tag" '.[] | select(.tag_name == $tag) | .id')
+            if [ -n "$remote_tags" ] || [ -n "$releases" ]; then
+              bash .github/scripts/release-component-state.sh verify "$COMPONENT" "$VERSION" "$SHA"
+              echo 'skip=true' >> "$GITHUB_OUTPUT"
+              exit 0
             fi
           fi
-          gh api "repos/$GITHUB_REPOSITORY/releases" --paginate | jq -r --arg tag "$TAG_PREFIX$VERSION" '.[] | select(.tag_name == $tag and .draft) | .id' | while IFS= read -r id; do
-            [ -z "$id" ] || gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
-          done
           echo 'skip=false' >> "$GITHUB_OUTPUT"
       - if: steps.guard.outputs.skip != 'true' && inputs.component == 'desktop'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -172,15 +187,6 @@ jobs:
           CHANNEL: ${{ inputs.channel }}
           VERSION: ${{ inputs.version }}
         run: infra/release/stage-assets.sh --group android "$VERSION" "$CHANNEL" dist/download dist/release
-      - if: steps.guard.outputs.skip != 'true' && inputs.component == 'android'
-        name: Install Android build tools
-        run: |
-          set +e
-          set +o pipefail
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;35.0.0"
-          sdkmanager_status=${PIPESTATUS[1]}
-          set -e
-          exit "$sdkmanager_status"
       - if: steps.guard.outputs.skip != 'true' && inputs.component == 'android'
         name: Verify staged Android release signatures
         env:
@@ -303,7 +309,7 @@ jobs:
           else
             gh release edit "${TAG_PREFIX}$VERSION" --draft=false --prerelease --latest=false
           fi
-      - if: failure() && steps.guard.outputs.skip != 'true'
+      - if: failure() && steps.guard.outputs.skip != 'true' && inputs.channel == 'staging'
         env:
           VERSION: ${{ inputs.version }}
           GH_TOKEN: ${{ github.token }}

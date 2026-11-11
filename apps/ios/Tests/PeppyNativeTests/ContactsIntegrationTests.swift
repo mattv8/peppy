@@ -707,7 +707,7 @@ func sampleContacts(_ count: Int) -> [PlatformContact] {
         let requester = try requester(owner)
         let value = field == "phones" ? "+12025558888" : "new@example.test"
         let create = request(owner, bookId: bookId, [
-            "kind": "create", "display_name": value,
+            "kind": "create", "display_name": "",
             field: [["id": "draft-item", "label": "work", "value": value]],
         ])
         _ = try requester.requestContactEdit(inputJson: NativeContactsCoordinator.json(create))
@@ -716,6 +716,58 @@ func sampleContacts(_ count: Int) -> [PlatformContact] {
         #expect(try await owner.run().outcomeUnknown == 1)
         #expect(try await owner.run().applied == 1)
         #expect(await owner.provider.saves.count == 1)
+    }
+
+    @Test func peerCreateWithDisplayNameAndPhonePreservesTheOnlySuppliedName() async throws {
+        let owner = try await owner([])
+        let bookId = try #require(try await owner.run().bookId)
+        let requester = try requester(owner)
+        let create = request(owner, bookId: bookId, [
+            "kind": "create", "display_name": "Acme reception",
+            "phones": [["id": "draft-phone", "label": "work", "value": "+12025558888"]],
+        ])
+        _ = try requester.requestContactEdit(inputJson: NativeContactsCoordinator.json(create))
+        try await deliver(from: requester, to: owner)
+
+        let report = try await owner.run()
+        #expect(report.applied == 1)
+        #expect((await owner.provider.book).first?.givenName == "Acme reception")
+        #expect(try owner.view().first?["display_name"] as? String == "Acme reception")
+    }
+
+    @Test(arguments: ["+12025558888", "support@example.test"])
+    func peerCreatePreservesAnExplicitNameThatEqualsAnAddress(_ value: String) async throws {
+        let owner = try await owner([])
+        let bookId = try #require(try await owner.run().bookId)
+        let requester = try requester(owner)
+        let field = value.contains("@") ? "emails" : "phones"
+        let create = request(owner, bookId: bookId, [
+            "kind": "create", "display_name": value,
+            field: [["id": "draft-address", "label": "work", "value": value]],
+        ])
+        _ = try requester.requestContactEdit(inputJson: NativeContactsCoordinator.json(create))
+        try await deliver(from: requester, to: owner)
+
+        #expect(try await owner.run().applied == 1)
+        #expect((await owner.provider.book).first?.givenName == value)
+    }
+
+    @Test func unknownDisplayNameOnlyCreateReconcilesTheSavedContactWithoutRetrying() async throws {
+        let owner = try await owner([])
+        let bookId = try #require(try await owner.run().bookId)
+        let requester = try requester(owner)
+        let create = request(owner, bookId: bookId, [
+            "kind": "create", "display_name": "Acme reception",
+            "phones": [["id": "draft-phone", "label": "work", "value": "+12025558888"]],
+        ])
+        _ = try requester.requestContactEdit(inputJson: NativeContactsCoordinator.json(create))
+        try await deliver(from: requester, to: owner)
+        await owner.provider.configure { $0.createOutcome = .outcomeUnknown; $0.createLandsAnyway = true }
+
+        #expect(try await owner.run().outcomeUnknown == 1)
+        #expect(try await owner.run().applied == 1)
+        #expect(await owner.provider.saves.count == 1)
+        #expect((await owner.provider.book).first?.givenName == "Acme reception")
     }
 
     @Test(arguments: [ContactsAccess.full, .limited])

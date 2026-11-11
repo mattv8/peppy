@@ -99,8 +99,9 @@ export function formatElapsedShort(value: DateTimeInput, now = Date.now()): stri
 export function formatRelativeTime(value: DateTimeInput, now = Date.now()): string | undefined {
   const date = toDate(value);
   if (!date || !Number.isFinite(now)) return undefined;
-  return relativeTimeFormatter.format(
-    Math.round((date.getTime() - now) / MILLISECONDS_IN_MINUTE),
-    "minute",
-  );
+  const minutes = (date.getTime() - now) / MILLISECONDS_IN_MINUTE;
+  const magnitude = Math.abs(minutes);
+  if (magnitude < MINUTES_IN_HOUR) return relativeTimeFormatter.format(Math.round(minutes), "minute");
+  if (magnitude < MINUTES_IN_DAY) return relativeTimeFormatter.format(Math.round(minutes / MINUTES_IN_HOUR), "hour");
+  return relativeTimeFormatter.format(Math.round(minutes / MINUTES_IN_DAY), "day");
 }

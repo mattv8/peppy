@@ -29,6 +29,8 @@ chmod +x "$fake_bin/pnpm"
 cat > "$fake_bin/codesign" <<'CODESIGN'
 #!/usr/bin/env bash
 printf 'codesign|%s\n' "$*" >> "$PNPM_LOG"
+[ "${PEPPY_APP_STORE_FAIL-}" != sign ] || { [[ "$*" == *'--force --sign'* ]] && exit 74; }
+[ "${PEPPY_APP_STORE_FAIL-}" != verify ] || { [[ "$*" == *'--verify --deep'* ]] && exit 74; }
 if [[ "$*" == *-dvvv* ]]; then
   if [[ "$*" == *'.app'* ]]; then
     authority="${CODESIGN_APP_AUTHORITY-Developer ID Application: Peppy (team)}"
@@ -88,16 +90,66 @@ chmod +x "$fake_bin/xcrun"
 
 cat > "$fake_bin/security" <<'SECURITY'
 #!/usr/bin/env bash
-printf 'security|%s\n' "$*" >> "$PNPM_LOG"
+set -euo pipefail
+if [ "$1" = import ]; then
+  printf 'security|import\n' >> "$PNPM_LOG"
+else
+  printf 'security|%s\n' "$*" >> "$PNPM_LOG"
+fi
+if [ "$1" = list-keychains ]; then
+  if [[ " $* " == *' -s '* ]]; then
+    [ "${PEPPY_APP_STORE_FAIL-}" != search-list-update ] || exit 80
+    [ -z "${SEARCH_LIST_STATE:-}" ] || printf '%s\n' "$*" > "$SEARCH_LIST_STATE"
+  else
+    [ "${PEPPY_APP_STORE_FAIL-}" != search-list-capture ] || exit 79
+    printf '"%s"\n' "${INITIAL_KEYCHAIN-original.keychain-db}"
+  fi
+fi
+if [ "$1" = create-keychain ]; then
+  [ "${PEPPY_APP_STORE_FAIL-}" != create-foreign ] || exit 78
+  [ -z "${KEYCHAIN_STATE:-}" ] || touch "$KEYCHAIN_STATE/$(basename "${!#}")"
+fi
+if [ "$1" = delete-keychain ]; then
+  [ "${SECURITY_DELETE_EXIT-0}" = 0 ] || exit "${SECURITY_DELETE_EXIT}"
+  [ -z "${KEYCHAIN_STATE:-}" ] || rm -f "$KEYCHAIN_STATE/$(basename "${!#}")"
+fi
+if [ "$1" = import ]; then
+  import_count=1
+  if [ -n "${IMPORT_COUNT:-}" ]; then
+    import_count=$(cat "$IMPORT_COUNT")
+    import_count=$((import_count + 1))
+    printf '%s' "$import_count" > "$IMPORT_COUNT"
+  fi
+  [ "${PEPPY_APP_STORE_FAIL-}" != "import-$import_count" ] || exit 73
+fi
 if [ "$1" = cms ]; then
   printf '<plist><dict><key>Entitlements</key><dict><key>com.apple.developer.team-identifier</key><string>%s</string><key>application-identifier</key><string>%s</string></dict></dict></plist>\n' "${SECURITY_PROFILE_TEAM-team}" "${SECURITY_PROFILE_APPLICATION_IDENTIFIER-team.org.peppy.desktop}"
 fi
 SECURITY
 chmod +x "$fake_bin/security"
 
+cat > "$fake_bin/uuidgen" <<'UUIDGEN'
+#!/usr/bin/env bash
+set -euo pipefail
+count=1
+if [ -n "${UUIDGEN_COUNT:-}" ]; then
+  count=$(cat "$UUIDGEN_COUNT")
+  count=$((count + 1))
+  printf '%s' "$count" > "$UUIDGEN_COUNT"
+fi
+[ "${PEPPY_APP_STORE_FAIL-}" != uuid ] || exit 77
+if [ "$count" = 1 ]; then
+  printf 'fixture-keychain\n'
+else
+  printf 'fixture-password\n'
+fi
+UUIDGEN
+chmod +x "$fake_bin/uuidgen"
+
 cat > "$fake_bin/productbuild" <<'PRODUCTBUILD'
 #!/usr/bin/env bash
 printf 'productbuild|%s\n' "$*" >> "$PNPM_LOG"
+[ "${PEPPY_APP_STORE_FAIL-}" != package ] || exit 75
 touch "${!#}"
 PRODUCTBUILD
 chmod +x "$fake_bin/productbuild"
@@ -125,6 +177,26 @@ fi
 exec /usr/bin/python3 "$@"
 PYTHON
 chmod +x "$fake_bin/python3"
+
+cat > "$fake_bin/mktemp" <<'MKTEMP'
+#!/usr/bin/env bash
+set -euo pipefail
+count=0
+if [ -n "${MKTEMP_COUNT:-}" ]; then
+  count=$(cat "$MKTEMP_COUNT")
+  count=$((count + 1))
+  printf '%s' "$count" > "$MKTEMP_COUNT"
+  [ "${PEPPY_APP_STORE_FAIL-}" != "allocation-$count" ] || exit 76
+fi
+if [ -n "${PRIVATE_PATHS:-}" ] && [ "$#" = 0 ]; then
+  path=$(/usr/bin/mktemp "$TMPDIR/peppy-test.XXXXXX")
+else
+  path=$(/usr/bin/mktemp "$@")
+fi
+[ -z "${PRIVATE_PATHS:-}" ] || printf '%s\n' "$path" >> "$PRIVATE_PATHS"
+printf '%s\n' "$path"
+MKTEMP
+chmod +x "$fake_bin/mktemp"
 
 run_bundles() {
   local macos_mode="${8-developer-id}"
@@ -457,4 +529,86 @@ assert_app_store_failure 'MACOS_BUILD_NUMBER is required for app-store builds' M
 assert_app_store_failure 'MACOS_BUILD_NUMBER must be a positive integer' MACOS_BUILD_NUMBER=0
 assert_app_store_failure 'MACOS_BUILD_NUMBER must be a positive integer' MACOS_BUILD_NUMBER=1.2
 assert_app_store_failure 'App Store bundle is missing the app sandbox entitlement' CODESIGN_APPLICATION_IDENTIFIER=team.org.peppy.desktop CODESIGN_TEAM_IDENTIFIER=team CODESIGN_SANDBOX_VALUE=false
+
+app_store_cleanup_dir="$root/app-store-cleanup"
+password_sentinel='fixture-password-must-not-appear-in-diagnostics'
+run_app_store_cleanup_case() {
+  local target="$1"
+  local selector="$2"
+  local expected_status="$3"
+  local output="$app_store_cleanup_dir/output"
+  rm -rf "$app_store_cleanup_dir"
+  mkdir -p "$app_store_cleanup_dir/private" "$app_store_cleanup_dir/keychains"
+  if [ "$selector" = create-foreign ]; then touch "$app_store_cleanup_dir/keychains/peppy-mas-fixture-keychain.keychain-db"; fi
+  : > "$app_store_cleanup_dir/private-paths"
+  : > "$app_store_cleanup_dir/import-count"
+  : > "$app_store_cleanup_dir/mktemp-count"
+  : > "$app_store_cleanup_dir/uuidgen-count"
+  : > "$app_store_cleanup_dir/search-list"
+  : > "$log"
+  set +e
+  env GITHUB_ACTIONS=true MACOS_BUILD_NUMBER=42 "${app_store_env[@]}" \
+    APPLE_MAS_CERTIFICATE_PASSWORD="$password_sentinel" PEPPY_APP_STORE_FAIL="$selector" \
+    SECURITY_DELETE_EXIT="${SECURITY_DELETE_EXIT:-0}" \
+    PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app VERSION=1.2.3 TRUSTED_UPDATE_BUILD=false \
+    PEPPY_MACOS_DISTRIBUTION=app-store PEPPY_BUNDLE_OUTPUT_DIR="$root/macos" PEPPY_PKG_OUTPUT_DIR="$root/pkg" \
+    TMPDIR="$app_store_cleanup_dir/private" PRIVATE_PATHS="$app_store_cleanup_dir/private-paths" \
+    KEYCHAIN_STATE="$app_store_cleanup_dir/keychains" SEARCH_LIST_STATE="$app_store_cleanup_dir/search-list" \
+    IMPORT_COUNT="$app_store_cleanup_dir/import-count" MKTEMP_COUNT="$app_store_cleanup_dir/mktemp-count" UUIDGEN_COUNT="$app_store_cleanup_dir/uuidgen-count" \
+    "$target" >"$output" 2>&1
+  local status=$?
+  set -e
+  test "$status" = "$expected_status"
+  printf '%s\n' "$status"
+}
+
+assert_app_store_cleanup() {
+  local selector="$1"
+  local expected_status="$2"
+  test "$(run_app_store_cleanup_case "$script_dir/build-desktop-bundles.sh" "$selector" "$expected_status")" = "$expected_status"
+  test -z "$(find "$app_store_cleanup_dir/private" -type f -print -quit)"
+  test -z "$(find "$app_store_cleanup_dir/keychains" -type f -print -quit)"
+  if [ "$selector" != allocation-2 ]; then
+    grep -Fqx 'list-keychains -d user -s original.keychain-db' "$app_store_cleanup_dir/search-list"
+  fi
+  if grep -Fq "$password_sentinel" "$app_store_cleanup_dir/output"; then
+    printf 'App Store failure diagnostics must not expose the certificate password\n' >&2
+    exit 1
+  fi
+}
+
+assert_app_store_cleanup '' 0
+assert_app_store_cleanup allocation-2 76
+assert_app_store_cleanup import-1 73
+assert_app_store_cleanup import-2 73
+assert_app_store_cleanup sign 74
+assert_app_store_cleanup verify 74
+assert_app_store_cleanup package 75
+test "$(SECURITY_DELETE_EXIT=99 run_app_store_cleanup_case "$script_dir/build-desktop-bundles.sh" import-2 73)" = 73
+test -z "$(find "$app_store_cleanup_dir/private" -type f -print -quit)"
+grep -Fqx 'list-keychains -d user -s original.keychain-db' "$app_store_cleanup_dir/search-list"
+
+test "$(run_app_store_cleanup_case "$script_dir/build-desktop-bundles.sh" uuid 77)" = 77
+test -z "$(find "$app_store_cleanup_dir/private" -type f -print -quit)"
+test -z "$(find "$app_store_cleanup_dir/keychains" -type f -print -quit)"
+test ! -s "$app_store_cleanup_dir/search-list"
+
+foreign_keychain='peppy-mas-fixture-keychain.keychain-db'
+test "$(run_app_store_cleanup_case "$script_dir/build-desktop-bundles.sh" create-foreign 78)" = 78
+test -f "$app_store_cleanup_dir/keychains/$foreign_keychain"
+test ! -s "$app_store_cleanup_dir/search-list"
+if grep -Fq "delete-keychain $app_store_cleanup_dir/private/$foreign_keychain" "$log"; then
+  printf 'App Store cleanup must not delete a foreign keychain candidate\n' >&2
+  exit 1
+fi
+
+test "$(run_app_store_cleanup_case "$script_dir/build-desktop-bundles.sh" search-list-capture 79)" = 79
+test -z "$(find "$app_store_cleanup_dir/private" -type f -print -quit)"
+test -z "$(find "$app_store_cleanup_dir/keychains" -type f -print -quit)"
+test ! -s "$app_store_cleanup_dir/search-list"
+
+test "$(run_app_store_cleanup_case "$script_dir/build-desktop-bundles.sh" search-list-update 80)" = 80
+test -z "$(find "$app_store_cleanup_dir/private" -type f -print -quit)"
+test -z "$(find "$app_store_cleanup_dir/keychains" -type f -print -quit)"
+test ! -s "$app_store_cleanup_dir/search-list"
 printf 'desktop bundle orchestration tests passed\n'

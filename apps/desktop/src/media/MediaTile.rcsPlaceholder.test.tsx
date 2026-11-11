@@ -69,6 +69,15 @@ describe("MediaTile RCS placeholders", () => {
     expect(container.querySelector("[data-media-tile]")).toHaveAttribute("data-rcs-media-direction", "outgoing");
     expect(container.querySelector("[data-rcs-media-status]")).toHaveTextContent(peppyCopy.rcs_media_state_not_sent);
   });
+
+  it("marks a definitive attempted failure as a warning without offering a download retry", () => {
+    const value = photo({ id: "rcs-failed", rcsSendStatus: "send_failed", state: "ready", previewUrl: "https://example.test/photo.jpg" });
+    const { container } = render(<MediaActionsProvider {...providerProps}><MediaTile attachment={value} message={{ ...message, attachments: [value] }} variant="single" label="Photo, 1 of 1" onOpen={vi.fn()} /></MediaActionsProvider>);
+
+    expect(container.querySelector("[data-rcs-media-status]")).toHaveAttribute("data-rcs-media-terminal-failure", "true");
+    expect(container.querySelector("[data-rcs-media-status]")).toHaveTextContent("Send failed");
+    expect(screen.queryByRole("button", { name: /Retry download/ })).toBeNull();
+  });
 });
 
 describe("RCS replacement focus", () => {

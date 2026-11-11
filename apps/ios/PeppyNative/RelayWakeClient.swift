@@ -153,7 +153,7 @@ public actor RelayWakeClient {
                 try retire(existing)
                 try secure.delete(account("pending"))
             } else {
-            if let retry = existing.retry, retry.nextRetryAt > Date() { return false }
+            if let retry = existing.retry, retry.nextRetryAt > now() { return false }
             if existing.confirmed { return try await publishConfirmed(existing) }
             if let challenge = existing.challenge, !existing.registrationId.isEmpty {
                 return try await confirm(challenge: challenge)
@@ -252,7 +252,7 @@ public actor RelayWakeClient {
 
     public func route() throws -> RelayWakeRoute? {
         guard let data = try secure.read(account("route")) else { return nil }
-        return try? JSONDecoder().decode(RelayWakeRoute.self, from: data)
+        return try JSONDecoder().decode(RelayWakeRoute.self, from: data)
     }
 
     public func registrationStatus() throws -> RegistrationStatus {
@@ -336,7 +336,7 @@ public actor RelayWakeClient {
 
     private func pending() throws -> PendingRegistration? {
         guard let data = try secure.read(account("pending")) else { return nil }
-        return try? JSONDecoder().decode(PendingRegistration.self, from: data)
+        return try JSONDecoder().decode(PendingRegistration.self, from: data)
     }
 
     private func save(_ value: PendingRegistration) throws { try secure.upsert(account("pending"), try JSONEncoder().encode(value)) }
@@ -357,7 +357,7 @@ public actor RelayWakeClient {
     }
     private func cleanups() throws -> [Cleanup] {
         guard let data = try secure.read(account("cleanup")) else { return [] }
-        return (try? JSONDecoder().decode([Cleanup].self, from: data)) ?? []
+        return try JSONDecoder().decode([Cleanup].self, from: data)
     }
     private func enqueue(_ route: RelayWakeRoute) throws {
         try enqueue(route, forceServerRetry: false)

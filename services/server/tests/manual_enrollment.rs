@@ -591,6 +591,276 @@ async fn manual_challenge_selects_multi_vaults_without_owner_enumeration() {
         .unwrap();
 }
 
+#[tokio::test]
+async fn manual_challenge_retry_reports_its_existing_remaining_ttl() {
+    let (app, pool, schema, vault, _) = app().await;
+    let request = challenge_request(Some(vault), None);
+    let (status, created) = challenge_from(&app, request.clone(), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let enrollment_id: Uuid = created["enrollment_id"].as_str().unwrap().parse().unwrap();
+
+    sqlx::query(
+        "UPDATE device_admissions SET expires_at = now() + interval '1 second' WHERE id = $1",
+    )
+    .bind(enrollment_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let expires_at: String =
+        sqlx::query_scalar("SELECT expires_at::text FROM device_admissions WHERE id = $1")
+            .bind(enrollment_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    let (status, retried) = challenge_from(&app, request, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(retried["expires_in_seconds"].as_u64().unwrap() <= 1);
+    let retried_expires_at: String =
+        sqlx::query_scalar("SELECT expires_at::text FROM device_admissions WHERE id = $1")
+            .bind(enrollment_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(retried_expires_at, expires_at);
+
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn manual_challenge_retry_refreshes_expiry_after_a_vault_lock_wait() {
+    let (app, pool, schema, vault, admission) = app().await;
+    let device = crypto_sign::KeyPair::generate().unwrap();
+    let request = AdmissionChallengeRequest {
+        device: ProposedDevice {
+            device_id: Uuid::new_v4(),
+            kind: ClientKind::Desktop,
+            name: "lock wait desktop".into(),
+            signing_public_key: URL_SAFE_NO_PAD.encode(device.public_key.as_bytes()),
+        },
+        vault_id: Some(vault),
+        vault_owner: None,
+        credential_digest: "55".repeat(32),
+    };
+    let (status, created) = challenge_from(&app, request.clone(), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let old: AdmissionChallenge = serde_json::from_value(created).unwrap();
+    sqlx::query("UPDATE device_admissions SET expires_at = clock_timestamp() + interval '1 second' WHERE id = $1")
+        .bind(old.enrollment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut vault_lock = pool.begin().await.unwrap();
+    sqlx::query("SELECT vault_id FROM vaults WHERE vault_id = $1 FOR UPDATE")
+        .bind(vault)
+        .fetch_one(&mut *vault_lock)
+        .await
+        .unwrap();
+    let retry_app = app.clone();
+    let retry_request = request.clone();
+    let retry = tokio::spawn(async move { challenge_from(&retry_app, retry_request, None).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%FROM vaults WHERE vault_id = $1 FOR UPDATE%')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retry must wait for the held vault lock");
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    vault_lock.commit().await.unwrap();
+
+    let (status, retried) = retry.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    let fresh: AdmissionChallenge = serde_json::from_value(retried).unwrap();
+    assert_ne!(fresh.enrollment_id, old.enrollment_id);
+    assert_eq!(fresh.expires_in_seconds, 120);
+    let fresh_remaining: i64 = sqlx::query_scalar(
+        "SELECT EXTRACT(EPOCH FROM expires_at - clock_timestamp())::bigint FROM device_admissions WHERE id = $1",
+    )
+    .bind(fresh.enrollment_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        fresh_remaining >= 118,
+        "fresh challenge was aged by the lock wait"
+    );
+
+    let context = EnrollmentContext {
+        purpose: EnrollmentPurpose::Manual,
+        canonical_origin: old.origin,
+        vault_id: vault,
+        fingerprint: hex::decode(old.fingerprint).unwrap().try_into().unwrap(),
+        key_epoch: old.key_epoch,
+        enrollment_id: old.enrollment_id,
+        server_nonce: URL_SAFE_NO_PAD
+            .decode(old.nonce)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        owner_transfer_public_key: [0; 32],
+        recipient_transfer_public_key: [0; 32],
+        recipient_signing_public_key: *device.public_key.as_bytes(),
+        device_id: request.device.device_id,
+        credential_digest: hex::decode(&request.credential_digest)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        role: EnrollmentRole::Device,
+    };
+    let proof = CompleteAdmissionRequest {
+        admission_signature: URL_SAFE_NO_PAD.encode(admission.sign_context(&context).unwrap()),
+        device_signature: URL_SAFE_NO_PAD
+            .encode(sign_device_proof(device.secret_key.as_bytes(), &context).unwrap()),
+        credential_digest: request.credential_digest,
+    };
+    let (_, status, _) = call(
+        app,
+        &format!("/v1/enrollment/challenges/{}/complete", old.enrollment_id),
+        serde_json::to_value(proof).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn manual_completion_rechecks_expiry_after_an_admission_lock_wait() {
+    let (app, pool, schema, vault, admission) = app().await;
+    let device = crypto_sign::KeyPair::generate().unwrap();
+    let request = AdmissionChallengeRequest {
+        device: ProposedDevice {
+            device_id: Uuid::new_v4(),
+            kind: ClientKind::Desktop,
+            name: "completion lock desktop".into(),
+            signing_public_key: URL_SAFE_NO_PAD.encode(device.public_key.as_bytes()),
+        },
+        vault_id: Some(vault),
+        vault_owner: None,
+        credential_digest: "66".repeat(32),
+    };
+    let (status, created) = challenge_from(&app, request.clone(), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let challenge: AdmissionChallenge = serde_json::from_value(created).unwrap();
+    sqlx::query("UPDATE device_admissions SET expires_at = clock_timestamp() + interval '1 second' WHERE id = $1")
+        .bind(challenge.enrollment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let context = EnrollmentContext {
+        purpose: EnrollmentPurpose::Manual,
+        canonical_origin: challenge.origin,
+        vault_id: vault,
+        fingerprint: hex::decode(challenge.fingerprint)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        key_epoch: challenge.key_epoch,
+        enrollment_id: challenge.enrollment_id,
+        server_nonce: URL_SAFE_NO_PAD
+            .decode(challenge.nonce)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        owner_transfer_public_key: [0; 32],
+        recipient_transfer_public_key: [0; 32],
+        recipient_signing_public_key: *device.public_key.as_bytes(),
+        device_id: request.device.device_id,
+        credential_digest: hex::decode(&request.credential_digest)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        role: EnrollmentRole::Device,
+    };
+    let proof = CompleteAdmissionRequest {
+        admission_signature: URL_SAFE_NO_PAD.encode(admission.sign_context(&context).unwrap()),
+        device_signature: URL_SAFE_NO_PAD
+            .encode(sign_device_proof(device.secret_key.as_bytes(), &context).unwrap()),
+        credential_digest: request.credential_digest,
+    };
+
+    let mut admission_lock = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM device_admissions WHERE id = $1 FOR UPDATE")
+        .bind(challenge.enrollment_id)
+        .fetch_one(&mut *admission_lock)
+        .await
+        .unwrap();
+    let completion_app = app.clone();
+    let completion = tokio::spawn(async move {
+        call(
+            completion_app,
+            &format!(
+                "/v1/enrollment/challenges/{}/complete",
+                challenge.enrollment_id
+            ),
+            serde_json::to_value(proof).unwrap(),
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%FROM device_admissions a%')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("completion must wait for the held admission lock");
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    admission_lock.commit().await.unwrap();
+
+    let (_, status, body) = completion.await.unwrap();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "challenge_invalid");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM devices WHERE vault_id = $1")
+            .bind(vault)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM device_credentials WHERE vault_id = $1",
+        )
+        .bind(vault)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
 async fn challenge_from(
     app: &Router,
     request: AdmissionChallengeRequest,

@@ -89,10 +89,17 @@ import Testing
     @Test func keychainItemsAreDeviceOnlyAfterFirstUnlockAndNeverSynchronized() {
         let store = KeychainSecureStore(service: "test.service")
         let query = store.query("database-key|x")
+        let add = store.addAttributes(account: "database-key|x", data: Data("key".utf8))
+        let update = store.updateAttributes(data: Data("replacement".utf8))
         #expect(query[kSecAttrSynchronizable as String] as? Bool == false)
         #expect(query[kSecAttrService as String] as? String == "test.service")
         #expect(query[kSecAttrAccount as String] as? String == "database-key|x")
-        #expect(KeychainSecureStore.accessibility == kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
+        for attributes in [add, update] {
+            #expect(attributes[kSecAttrAccessible as String] as? String == kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String)
+            #expect(attributes[kSecAttrSynchronizable as String] as? Bool == false)
+            #expect(attributes[kSecUseDataProtectionKeychain as String] as? Bool == true)
+            #expect(attributes[kSecAttrAccessGroup as String] == nil)
+        }
     }
 
     @Test func telephonyIsNeverExecutableInThisFoundation() {

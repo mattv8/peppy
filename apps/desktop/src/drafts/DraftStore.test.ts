@@ -15,6 +15,115 @@ const draft = (overrides: Partial<Draft> = {}): Draft => ({
 const events = { changed: () => {}, rekeyed: () => {} };
 
 describe("DraftStore authoritative coordination", () => {
+  it("keeps a recovered caption through delayed persistence, typing, and first native identity assignment", async () => {
+    let resolvePersist!: (value: Draft) => void;
+    const persist = vi.fn((input: DraftInput) => persist.mock.calls.length === 1
+      ? new Promise<Draft>(resolve => { resolvePersist = resolve; })
+      : Promise.resolve(draft({ ...input, revision: "2" })));
+    const store = new DraftStore(persist, events);
+    store.adopt("conversation-one", undefined);
+
+    const recovered = store.recoverRcsContent("conversation-one", "message-one\u0000attachment-zero", {
+      caption: "Hello",
+      attachmentIds: ["file-one"],
+    });
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(1));
+    const typed = store.edit("conversation-one", { text: "Hello\nTyped reply" });
+    resolvePersist(draft({ id: "assigned-id", text: "Hello", attachmentIds: ["file-one"], revision: "1" }));
+    await Promise.all([recovered, typed]);
+
+    await store.recoverRcsContent("conversation-one", "message-one\u0000attachment-zero", {
+      caption: "Hello",
+      attachmentIds: ["file-one"],
+    });
+
+    expect(store.get("conversation-one")?.content).toMatchObject({ text: "Hello\nTyped reply", attachmentIds: ["file-one"] });
+  });
+
+  it("keeps a recovered caption after a retained save failure", async () => {
+    const store = new DraftStore(async () => { throw { code: "offline", message: "offline" }; }, events);
+    store.adopt("conversation-one", draft({ text: "", attachmentIds: [] }));
+
+    await store.recoverRcsContent("conversation-one", "message-one\u0000attachment-zero", { caption: "Hello", attachmentIds: [] });
+    await store.recoverRcsContent("conversation-one", "message-one\u0000attachment-zero", { caption: "Hello", attachmentIds: [] });
+
+    expect(store.get("conversation-one")?.content.text).toBe("Hello");
+    expect(store.saveState("conversation-one")).toBe("failed");
+  });
+
+  it("restores a caption after stale-save reconciliation accepts replacement host content", async () => {
+    const replacement = draft({ id: "replacement-id", text: "", attachmentIds: [], revision: "2" });
+    const store = new DraftStore(
+      async () => { throw { code: "stale-draft", message: "stale" }; },
+      events,
+      async () => replacement,
+    );
+    store.adopt("conversation-one", draft({ text: "", attachmentIds: [] }));
+
+    await store.recoverRcsContent("conversation-one", "message-one\u0000attachment-zero", { caption: "Hello", attachmentIds: ["file-one"] });
+    await store.recoverRcsContent("conversation-one", "message-one\u0000attachment-zero", { caption: "Hello", attachmentIds: ["file-one"] });
+
+    expect(store.get("conversation-one")).toMatchObject({
+      id: "replacement-id",
+      content: { text: "Hello", attachmentIds: ["file-one"] },
+    });
+  });
+
+  it("keeps recovery provenance when a dirty slot ignores an authoritative replacement, then clears it after an accepted clear", async () => {
+    let fail = true;
+    const store = new DraftStore(async input => {
+      if (fail) throw { code: "offline", message: "offline" };
+      return draft({ ...input, revision: "3" });
+    }, events);
+    store.adopt("conversation-one", draft({ text: "", attachmentIds: [] }));
+
+    await store.recoverRcsContent("conversation-one", "message-one\u0000attachment-zero", { caption: "Hello", attachmentIds: ["file-one"] });
+    store.applyAuthoritative(draft({ id: "other-id", text: "", attachmentIds: [], revision: "2" }));
+    await store.recoverRcsContent("conversation-one", "message-one\u0000attachment-zero", { caption: "Hello", attachmentIds: ["file-one"] });
+    expect(store.get("conversation-one")).toMatchObject({ id: "draft-one", content: { text: "Hello", attachmentIds: ["file-one"] } });
+
+    fail = false;
+    await store.retry("conversation-one");
+    store.applyAuthoritative(draft({ text: "", attachmentIds: [], revision: "4" }));
+    await store.recoverRcsContent("conversation-one", "message-one\u0000attachment-zero", { caption: "Hello", attachmentIds: ["file-one"] });
+    expect(store.get("conversation-one")?.content.text).toBe("Hello");
+  });
+
+  it("re-recovers later eligible files and intentionally removed files without duplicating the caption", async () => {
+    const store = new DraftStore(async input => draft({ ...input, revision: "2" }), events);
+    store.adopt("conversation-one", draft({ text: "", attachmentIds: [] }));
+
+    await store.recoverRcsContent("conversation-one", "message-one\u0000attachment-zero", { caption: "Hello", attachmentIds: ["file-one"] });
+    await store.recoverRcsContent("conversation-one", "message-one\u0000attachment-zero", { caption: "Hello", attachmentIds: ["file-one", "file-two"] });
+    await store.edit("conversation-one", { attachmentIds: ["file-two"] });
+    await store.recoverRcsContent("conversation-one", "message-one\u0000attachment-zero", { caption: "Hello", attachmentIds: ["file-one", "file-two"] });
+
+    expect(store.get("conversation-one")?.content).toMatchObject({ text: "Hello", attachmentIds: ["file-two", "file-one"] });
+  });
+
+  it("invalidates a recovered caption when separate edits leave the draft empty", async () => {
+    const store = new DraftStore(async input => draft({ ...input, revision: "2" }), events);
+    store.adopt("conversation-one", draft({ text: "", attachmentIds: [] }));
+
+    await store.recoverRcsContent("conversation-one", "message-one\u0000attachment-zero", { caption: "Hello", attachmentIds: ["file-one"] });
+    await store.edit("conversation-one", { attachmentIds: [] });
+    await store.edit("conversation-one", { text: "" });
+    await store.recoverRcsContent("conversation-one", "message-one\u0000attachment-zero", { caption: "Hello", attachmentIds: ["file-one"] });
+
+    expect(store.get("conversation-one")?.content).toMatchObject({ text: "Hello", attachmentIds: ["file-one"] });
+  });
+
+  it("drops recovered caption provenance when reset drops the slot", async () => {
+    const store = new DraftStore(async input => draft(input), events);
+    store.adopt("conversation-one", draft({ text: "", attachmentIds: [] }));
+    await store.recoverRcsContent("conversation-one", "message-one\u0000attachment-zero", { caption: "Hello", attachmentIds: [] });
+    store.reset();
+    store.adopt("conversation-one", draft({ text: "", attachmentIds: [] }));
+    await store.recoverRcsContent("conversation-one", "message-one\u0000attachment-zero", { caption: "Hello", attachmentIds: [] });
+
+    expect(store.get("conversation-one")?.content.text).toBe("Hello");
+  });
+
   it("silently adopts a clean same-draft text mirror", () => {
     const notices: [string, string][] = [];
     const store = new DraftStore(async input => draft({ ...input, revision: "2" }), {

@@ -11,7 +11,8 @@ use crate::{
 use peppy_hosted_api::{
     billing_apple::{
         routes, AppleAccountTokenResponse, AppleTransactionRequest, AppleTransactionResponse,
-        AppleTransactionResult, BillingCatalogProduct, BillingCatalogResponse, BillingProductKind,
+        AppleTransactionResult, BillingCatalogProduct, BillingCatalogResponse, BillingEligibility,
+        BillingProductKind,
     },
     billing_web::{BillingManageableIn, BillingProvider},
 };
@@ -152,6 +153,14 @@ async fn catalog(state: &AppState, hosted: &HostedState) -> BridgeResult<Billing
     response_json(response).await
 }
 
+fn catalog_allows_apple_purchase(catalog: &BillingCatalogResponse, product_id: &str) -> bool {
+    catalog.eligibility == BillingEligibility::Eligible
+        && catalog
+            .products
+            .iter()
+            .any(|product| product.provider == BillingProvider::Apple && product.id == product_id)
+}
+
 async fn account_token(
     state: &AppState,
     hosted: &HostedState,
@@ -236,13 +245,7 @@ where
     Fut: std::future::Future<Output = BridgeResult<bool>>,
 {
     if result == AppleTransactionResult::Granted {
-        let finished = finish(transaction_id.ok_or_else(invalid_response)?.to_owned()).await?;
-        if !finished {
-            return Err(BridgeError::new(
-                "store-unavailable",
-                "The App Store could not finalize this purchase.",
-            ));
-        }
+        let _ = finish(transaction_id.ok_or_else(invalid_response)?.to_owned()).await?;
     }
     Ok(result)
 }
@@ -320,17 +323,29 @@ pub(crate) fn start(app: tauri::AppHandle) {
                 eprintln!("peppy: unfinished App Store reconciliation failed: {code}");
             });
             let Ok(mut updates) = storekit::observe_transaction_updates() else {
+                eprintln!("peppy: App Store observer failed to start: store-unavailable");
                 return;
             };
             while let Some(update) = updates.recv().await {
-                if let Ok(transaction) = update {
-                    let _ = reconcile_transaction(
-                        &state,
-                        &hosted,
-                        &transaction.signed_transaction,
-                        Some(&transaction.transaction_id),
-                    )
-                    .await;
+                match update {
+                    Ok(transaction) => {
+                        if let Err(error) = reconcile_transaction(
+                            &state,
+                            &hosted,
+                            &transaction.signed_transaction,
+                            Some(&transaction.transaction_id),
+                        )
+                        .await
+                        {
+                            eprintln!(
+                                "peppy: App Store observer reconciliation failed: {}",
+                                error.code
+                            );
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("peppy: App Store observer update failed: store-unavailable")
+                    }
                 }
             }
         });
@@ -482,6 +497,22 @@ pub(crate) async fn store_purchase(
     crate::require_main(window.label())?;
     if Distribution::detect() != Distribution::AppStore {
         return Err(unsupported());
+    }
+    let catalog = catalog(&state, &hosted).await.map_err(|error| {
+        if error.code == "hosted-session-required" {
+            error
+        } else {
+            BridgeError::new(
+                "store-unavailable",
+                "Purchases are unavailable right now. Try again.",
+            )
+        }
+    })?;
+    if !catalog_allows_apple_purchase(&catalog, &product_id) {
+        return Err(BridgeError::new(
+            "store-unavailable",
+            "This App Store purchase is no longer available.",
+        ));
     }
     let token = account_token(&state, &hosted).await?;
     let purchase = storekit::purchase(&product_id, &token.token.to_string())
@@ -661,15 +692,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconciliation_retains_granted_transaction_when_storekit_does_not_finish() {
-        let error =
+    async fn reconciliation_treats_an_already_finished_granted_transaction_as_success() {
+        let result =
             reconcile_posted_transaction(AppleTransactionResult::Granted, Some("42"), |_| async {
                 Ok(false)
             })
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert_eq!(error.code, "store-unavailable");
+        assert_eq!(result, AppleTransactionResult::Granted);
     }
 
     #[tokio::test]
@@ -778,6 +809,39 @@ mod tests {
                 "deletionPending": false,
             })
         );
+    }
+
+    #[test]
+    fn purchase_requires_an_eligible_apple_catalog_product() {
+        let catalog: BillingCatalogResponse = serde_json::from_value(serde_json::json!({
+            "products": [{
+                "id": "org.peppy.desktop.plan",
+                "kind": "plan",
+                "provider": "apple",
+                "interval": "month",
+                "storage_pack_count": null
+            }],
+            "eligibility": "eligible"
+        }))
+        .unwrap();
+
+        assert!(catalog_allows_apple_purchase(
+            &catalog,
+            "org.peppy.desktop.plan"
+        ));
+        assert!(!catalog_allows_apple_purchase(
+            &catalog,
+            "org.peppy.desktop.removed"
+        ));
+        let ineligible: BillingCatalogResponse = serde_json::from_value(serde_json::json!({
+            "products": catalog.products,
+            "eligibility": "ineligible"
+        }))
+        .unwrap();
+        assert!(!catalog_allows_apple_purchase(
+            &ineligible,
+            "org.peppy.desktop.plan"
+        ));
     }
 
     #[test]

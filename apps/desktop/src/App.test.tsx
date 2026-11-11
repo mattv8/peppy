@@ -576,6 +576,25 @@ describe("setup landing routing", () => {
     expect(screen.getByRole("button", { name: "Set up phone later" })).toBeEnabled();
   });
 
+  it("keeps the deletion result open and reports subscription-management failures", async () => {
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue({ ...(await fixtureBridge.hosted_account()), signedIn: true });
+    vi.spyOn(bridge, "billing_summary").mockResolvedValue({ provider: "apple", manageableIn: "app_store", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+    vi.spyOn(bridge, "hosted_delete_account").mockResolvedValue("deleted");
+    vi.spyOn(bridge, "open_store_subscriptions").mockRejectedValue(new Error("unavailable"));
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete account" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "I understand this is permanent" }));
+    fireEvent.click(document.getElementById("account-delete-submit")!);
+    await screen.findByRole("heading", { name: "Account deleted" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Manage App Store subscriptions" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("App Store subscriptions couldn't be opened. Try again.");
+    expect(document.getElementById("account-deletion-result-dialog")).toBeInTheDocument();
+  });
+
   it("rechecks a remounted connected owner until its stale status becomes ready", async () => {
     const initial = await fixtureBridge.load_state();
     let current: DesktopSnapshot = {

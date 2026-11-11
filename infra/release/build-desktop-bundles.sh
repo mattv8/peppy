@@ -76,8 +76,23 @@ decode_base64() {
 }
 
 package_app_store() {
-  local bundle_output_dir profile profile_xml application_certificate installer_certificate entitlements signed_entitlements keychain keychain_password team_id application_identifier signed_team_id signed_application_identifier app pkg_dir pkg
-  local -a previous_keychains
+  (
+  local bundle_output_dir profile='' profile_xml='' application_certificate='' installer_certificate='' entitlements='' signed_entitlements='' keychain='' keychain_password='' keychain_uuid team_id application_identifier signed_team_id signed_application_identifier app pkg_dir pkg previous_keychains_output
+  local previous_keychains_captured=false
+  local keychain_search_list_changed=false
+  local keychain_created=false
+  local -a previous_keychains=()
+  cleanup_app_store_keychain() {
+    local status=$?
+    trap - EXIT
+    if [ "$keychain_search_list_changed" = true ] && [ "$previous_keychains_captured" = true ]; then
+      security list-keychains -d user -s "${previous_keychains[@]}" >/dev/null 2>&1 || true
+    fi
+    [ "$keychain_created" != true ] || security delete-keychain "$keychain" >/dev/null 2>&1 || true
+    rm -f "$profile" "$profile_xml" "$application_certificate" "$installer_certificate" "$entitlements" "$signed_entitlements" || true
+    return "$status"
+  }
+  trap cleanup_app_store_keychain EXIT
   bundle_output_dir="${PEPPY_BUNDLE_OUTPUT_DIR:-apps/desktop/src-tauri/target/release/bundle/macos}"
   profile=$(mktemp)
   profile_xml=$(mktemp)
@@ -85,23 +100,16 @@ package_app_store() {
   installer_certificate=$(mktemp)
   entitlements=$(mktemp)
   signed_entitlements=$(mktemp)
-  keychain="${TMPDIR:-/tmp}/peppy-mas-$(uuidgen).keychain-db"
+  keychain_uuid=$(uuidgen)
+  keychain="${TMPDIR:-/tmp}/peppy-mas-$keychain_uuid.keychain-db"
   keychain_password=$(uuidgen)
-  previous_keychains=()
+  previous_keychains_output=$(security list-keychains -d user)
   while IFS= read -r previous_keychain; do
     previous_keychain=${previous_keychain#\"}
     previous_keychain=${previous_keychain%\"}
     [ -n "$previous_keychain" ] && previous_keychains+=("$previous_keychain")
-  done < <(security list-keychains -d user)
-  cleanup_app_store_keychain() {
-    trap - RETURN
-    if [ "${#previous_keychains[@]}" -gt 0 ]; then
-      security list-keychains -d user -s "${previous_keychains[@]}" >/dev/null 2>&1 || true
-    fi
-    security delete-keychain "$keychain" >/dev/null 2>&1 || true
-    rm -f "$profile" "$profile_xml" "$application_certificate" "$installer_certificate" "$entitlements" "$signed_entitlements"
-  }
-  trap cleanup_app_store_keychain RETURN
+  done <<<"$previous_keychains_output"
+  previous_keychains_captured=true
   decode_base64 "$APPLE_MAS_PROVISIONING_PROFILE_BASE64" > "$profile"
   decode_base64 "$APPLE_MAS_CERTIFICATE_P12" > "$application_certificate"
   decode_base64 "$APPLE_MAS_INSTALLER_CERTIFICATE" > "$installer_certificate"
@@ -111,6 +119,7 @@ package_app_store() {
   [ -n "$team_id" ] || { echo 'App Store provisioning profile does not declare a team identifier' >&2; return 1; }
   [ "$application_identifier" = "$team_id.org.peppy.desktop" ] || { echo "App Store provisioning profile application identifier must equal $team_id.org.peppy.desktop" >&2; return 1; }
   security create-keychain -p "$keychain_password" "$keychain"
+  keychain_created=true
   security set-keychain-settings -lut 21600 "$keychain"
   security unlock-keychain -p "$keychain_password" "$keychain"
   if [ "${#previous_keychains[@]}" -gt 0 ]; then
@@ -118,6 +127,7 @@ package_app_store() {
   else
     security list-keychains -d user -s "$keychain"
   fi
+  keychain_search_list_changed=true
   security import "$application_certificate" -k "$keychain" -P "$APPLE_MAS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
   security import "$installer_certificate" -k "$keychain" -P "$APPLE_MAS_CERTIFICATE_PASSWORD" -T /usr/bin/productbuild
   cp packaging/macos/app-store/entitlements.plist "$entitlements"
@@ -140,6 +150,7 @@ package_app_store() {
     pkg="$pkg_dir/Peppy.pkg"
     productbuild --component "$app" /Applications --sign "$APPLE_MAS_INSTALLER_IDENTITY" --keychain "$keychain" "$pkg"
   done < <(find "$bundle_output_dir" -name '*.app' -type d -print0)
+  )
 }
 
 assert_developer_id_signature() {

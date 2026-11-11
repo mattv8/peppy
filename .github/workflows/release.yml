@@ -51,10 +51,12 @@ jobs:
       version: ${{ steps.compute.outputs.version }}
       android_version: ${{ steps.android-compute.outputs.version }}
       android_version_code: ${{ steps.android-compute.outputs.android_version_code }}
-      android_skip: ${{ steps.android-compute.outputs.skip == 'true' || (steps.android-compute.outputs.changed != 'true' && steps.android-compute.outputs.budget_refresh != 'true') }}
+      android_skip: ${{ steps.android-compute.outputs.skip == 'true' || (steps.android-compute.outputs.existing != 'true' && steps.android-compute.outputs.changed != 'true' && steps.android-compute.outputs.budget_refresh != 'true') }}
+      desktop_existing: ${{ steps.compute.outputs.existing == 'true' }}
+      android_existing: ${{ steps.android-compute.outputs.existing == 'true' }}
       wix_version: ${{ steps.compute.outputs.wix_version }}
       sha: ${{ steps.target.outputs.sha }}
-      skip: ${{ steps.target.outputs.skip == 'true' || steps.compute.outputs.skip == 'true' }}
+      skip: ${{ steps.target.outputs.skip == 'true' }}
     steps:
       - name: Require production release event before checkout
         run: |
@@ -122,9 +124,10 @@ jobs:
           output=$(infra/release/compute-version.sh "${args[@]}")
           status=$?
           set -e
-          if [ "$status" -eq 4 ] && [ "$GITHUB_EVENT_NAME" = push ]; then
-            echo '::notice::This production SHA already has a stable release; skipping duplicate automatic release'
-            echo 'skip=true' >> "$GITHUB_OUTPUT"
+          if [ "$status" -eq 4 ]; then
+            candidate=$(bash .github/scripts/release-component-state.sh discover desktop "$GITHUB_SHA" "$VERSION_INPUT")
+            printf '%s\n' "$candidate" | tee -a "$GITHUB_OUTPUT"
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$status" -ne 0 ]; then
@@ -151,8 +154,9 @@ jobs:
           status=$?
           set -e
           if [ "$status" -eq 4 ]; then
-            echo '::notice::This production SHA already has an Android stable release; skipping Android'
-            echo 'skip=true' >> "$GITHUB_OUTPUT"
+            candidate=$(bash .github/scripts/release-component-state.sh discover android "$GITHUB_SHA" '')
+            printf '%s\n' "$candidate" | tee -a "$GITHUB_OUTPUT"
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$status" -ne 0 ]; then
@@ -189,10 +193,32 @@ jobs:
     environment: updates-stable
     outputs:
       ready: ${{ steps.readiness.outputs.ready }}
+      desktop_verified: ${{ steps.existing.outputs.desktop_verified }}
+      android_verified: ${{ steps.existing.outputs.android_verified }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ needs.prepare.outputs.sha }}
           persist-credentials: false
+      - name: Verify checked-out trusted signing context
+        env:
+          CHANNEL: stable
+          REQUESTED_SHA: ${{ needs.prepare.outputs.sha }}
+        run: bash .github/scripts/release-context-guard.sh
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Prepare Android verification tools
+        run: |
+          set +e
+          set +o pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;35.0.0"
+          sdkmanager_status=${PIPESTATUS[1]}
+          set -e
+          exit "$sdkmanager_status"
+      - name: Build the read-only manifest verifier before signing credentials are mapped
+        run: cargo build --quiet --locked --manifest-path infra/release/manifest-verifier/Cargo.toml
       - id: readiness
         env:
           PEPPY_UPDATER_PRIVATE_KEY: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY }}
@@ -217,9 +243,33 @@ jobs:
           PEPPY_ANDROID_KEY_PASSWORD: ${{ secrets.PEPPY_ANDROID_KEY_PASSWORD }}
           PEPPY_ANDROID_SIGNING_CERT_SHA256: ${{ vars.PEPPY_ANDROID_SIGNING_CERT_SHA256 }}
         run: bash .github/scripts/release-signing-readiness.sh
+      - id: existing
+        if: steps.readiness.outputs.ready == 'true' && (needs.prepare.outputs.desktop_existing == 'true' || needs.prepare.outputs.android_existing == 'true')
+        env:
+          DESKTOP_EXISTING: ${{ needs.prepare.outputs.desktop_existing }}
+          ANDROID_EXISTING: ${{ needs.prepare.outputs.android_existing }}
+          DESKTOP_VERSION: ${{ needs.prepare.outputs.version }}
+          ANDROID_VERSION: ${{ needs.prepare.outputs.android_version }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+          PEPPY_UPDATE_PUBLIC_KEY: ${{ vars.PEPPY_UPDATE_PUBLIC_KEY }}
+          PEPPY_RELEASE_GPG_KEY: ${{ secrets.PEPPY_RELEASE_GPG_KEY }}
+          PEPPY_RELEASE_GPG_KEY_ID: ${{ vars.PEPPY_RELEASE_GPG_KEY_ID }}
+          PEPPY_ANDROID_SIGNING_CERT_SHA256: ${{ vars.PEPPY_ANDROID_SIGNING_CERT_SHA256 }}
+        run: |
+          echo 'desktop_verified=false' >> "$GITHUB_OUTPUT"
+          echo 'android_verified=false' >> "$GITHUB_OUTPUT"
+          if [ "$DESKTOP_EXISTING" = true ]; then
+            bash .github/scripts/release-component-state.sh verify desktop "$DESKTOP_VERSION" "$SHA"
+            echo 'desktop_verified=true' >> "$GITHUB_OUTPUT"
+          fi
+          if [ "$ANDROID_EXISTING" = true ]; then
+            bash .github/scripts/release-component-state.sh verify android "$ANDROID_VERSION" "$SHA"
+            echo 'android_verified=true' >> "$GITHUB_OUTPUT"
+          fi
   artifacts:
     needs: [prepare, signing]
-    if: ${{ !cancelled() && needs.prepare.outputs.skip != 'true' && needs.signing.outputs.ready == 'true' }}
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true' && needs.signing.result == 'success' && needs.signing.outputs.ready == 'true' && (needs.prepare.outputs.desktop_existing != 'true' || needs.signing.outputs.desktop_verified == 'true') && (needs.prepare.outputs.android_existing != 'true' || needs.signing.outputs.android_verified == 'true') && (needs.prepare.outputs.desktop_existing != 'true' || (needs.prepare.outputs.android_skip != 'true' && needs.prepare.outputs.android_existing != 'true')) }}
     uses: ./.github/workflows/build-artifacts.yml
     with:
       ref: ${{ needs.prepare.outputs.sha }}
@@ -227,9 +277,9 @@ jobs:
       android_version: ${{ needs.prepare.outputs.android_version }}
       android_version_code: ${{ needs.prepare.outputs.android_version_code }}
       wix_version: ${{ needs.prepare.outputs.wix_version }}
-      build_android: ${{ needs.prepare.outputs.android_skip != 'true' }}
-      build_desktop: true
-      build_ios: true
+      build_android: ${{ needs.prepare.outputs.android_skip != 'true' && needs.prepare.outputs.android_existing != 'true' }}
+      build_desktop: ${{ needs.prepare.outputs.desktop_existing != 'true' }}
+      build_ios: ${{ needs.prepare.outputs.desktop_existing != 'true' }}
       trusted_update_build: true
       update_channel: stable
     secrets:
@@ -255,7 +305,7 @@ jobs:
       PEPPY_ANDROID_KEY_ALIAS: ${{ secrets.PEPPY_ANDROID_KEY_ALIAS }}
       PEPPY_ANDROID_KEY_PASSWORD: ${{ secrets.PEPPY_ANDROID_KEY_PASSWORD }}
   publish:
-    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' && needs.publish-server-image.result == 'success' && needs.publish-relay-image.result == 'success' && needs.publish-mcp-image.result == 'success' }}
+    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.desktop_existing != 'true' && needs.signing.result == 'success' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' && needs.publish-server-image.result == 'success' && needs.publish-relay-image.result == 'success' && needs.publish-mcp-image.result == 'success' }}
     needs: [prepare, signing, artifacts, publish-server-image, publish-relay-image, publish-mcp-image]
     permissions:
       contents: write
@@ -273,7 +323,7 @@ jobs:
       PEPPY_RELEASE_GPG_KEY: ${{ secrets.PEPPY_RELEASE_GPG_KEY }}
       PEPPY_RELEASE_GPG_PASSPHRASE: ${{ secrets.PEPPY_RELEASE_GPG_PASSPHRASE }}
   publish-android:
-    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.android_skip != 'true' && needs.publish.result == 'success' }}
+    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.android_skip != 'true' && needs.prepare.outputs.android_existing != 'true' && needs.signing.result == 'success' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' && (needs.publish.result == 'success' || (needs.publish.result == 'skipped' && needs.prepare.outputs.desktop_existing == 'true' && needs.signing.outputs.desktop_verified == 'true')) }}
     needs: [prepare, signing, artifacts, publish]
     permissions:
       contents: write
@@ -290,7 +340,7 @@ jobs:
       PEPPY_RELEASE_GPG_KEY: ${{ secrets.PEPPY_RELEASE_GPG_KEY }}
       PEPPY_RELEASE_GPG_PASSPHRASE: ${{ secrets.PEPPY_RELEASE_GPG_PASSPHRASE }}
   publish-server-image:
-    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' }}
+    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.desktop_existing != 'true' && needs.signing.result == 'success' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' }}
     needs: [prepare, signing, artifacts]
     uses: ./.github/workflows/publish-community-image.yml
     with:
@@ -302,7 +352,7 @@ jobs:
       sha: ${{ needs.prepare.outputs.sha }}
     secrets: inherit
   publish-relay-image:
-    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' }}
+    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.desktop_existing != 'true' && needs.signing.result == 'success' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' }}
     needs: [prepare, signing, artifacts]
     uses: ./.github/workflows/publish-community-image.yml
     with:
@@ -314,7 +364,7 @@ jobs:
       sha: ${{ needs.prepare.outputs.sha }}
     secrets: inherit
   publish-mcp-image:
-    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' }}
+    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.desktop_existing != 'true' && needs.signing.result == 'success' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' }}
     needs: [prepare, signing, artifacts]
     uses: ./.github/workflows/publish-community-image.yml
     with:

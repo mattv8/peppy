@@ -501,6 +501,7 @@ pub(super) async fn reserve_attachment(
     }
     // Serializing on the vault row makes aggregate quota admission race-free.
     lock_vault(&mut tx, principal.vault).await?;
+    revalidate_principal(&mut tx, &principal).await?;
     withdraw_legacy_retention_mutation(&mut tx, &h, principal.vault, principal.device).await?;
     if let Some(draft_id) = request.draft_id {
         let terminal: Option<String> = sqlx::query_scalar(

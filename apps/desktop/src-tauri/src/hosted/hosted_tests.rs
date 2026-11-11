@@ -13,6 +13,7 @@ use serde_json::json;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -40,6 +41,7 @@ struct FakeServerState {
     grant_expired: bool,
     grant_call_count: usize,
     complete_fails: bool,
+    complete_gate: Option<DeferredCompletion>,
     grant_bodies: Vec<serde_json::Value>,
     complete_calls: usize,
     vault_id: Option<String>,
@@ -77,6 +79,12 @@ struct DeferredRenewal {
     release: Arc<tokio::sync::Notify>,
 }
 
+#[derive(Clone)]
+struct DeferredCompletion {
+    reached: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
 impl Default for FakeServerState {
     fn default() -> Self {
         Self {
@@ -93,6 +101,7 @@ impl Default for FakeServerState {
             grant_expired: false,
             grant_call_count: 0,
             complete_fails: false,
+            complete_gate: None,
             grant_bodies: Vec::new(),
             complete_calls: 0,
             vault_id: None,
@@ -220,16 +229,25 @@ async fn fake_complete_handler(
     axum::extract::State(state): axum::extract::State<Arc<Mutex<FakeServerState>>>,
     body: String,
 ) -> impl IntoResponse {
-    let mut state = state.lock().unwrap();
-    state.complete_calls += 1;
-    if state.complete_fails {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "").into_response();
+    let (gate, request) = {
+        let mut state = state.lock().unwrap();
+        state.complete_calls += 1;
+        if state.complete_fails {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "").into_response();
+        }
+        if state.grant_expired && state.grant_call_count == 0 {
+            state.grant_call_count += 1;
+            return (StatusCode::UNAUTHORIZED, "").into_response();
+        }
+        (
+            state.complete_gate.clone(),
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        )
+    };
+    if let Some(gate) = gate {
+        gate.reached.notify_one();
+        gate.release.notified().await;
     }
-    if state.grant_expired && state.grant_call_count == 0 {
-        state.grant_call_count += 1;
-        return (StatusCode::UNAUTHORIZED, "").into_response();
-    }
-    let request: serde_json::Value = serde_json::from_str(&body).unwrap();
     let response = json!({
         "operation_id": request["operation_id"],
         "vault_id": request["public_key_profile"]["vault_id"],
@@ -1609,6 +1627,152 @@ async fn fresh_provision_generates_a_vault_secret_without_prompting() {
 }
 
 #[tokio::test]
+async fn delayed_provisioning_completion_after_sign_out_keeps_its_checkpoint_and_does_not_activate()
+{
+    let store = Arc::new(MemoryStore::default());
+    let hosted = Arc::new(HostedState::default());
+    let gate = DeferredCompletion {
+        reached: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    };
+    let server = Arc::new(Mutex::new(FakeServerState {
+        complete_gate: Some(gate.clone()),
+        ..FakeServerState::default()
+    }));
+    let (base, _handle) = start_fake_server(server).await;
+    hosted.base_override.lock().unwrap().replace(base);
+    store
+        .set(
+            &super::session_key(HTTPS_ORIGIN),
+            &encode_session(
+                ACCOUNT,
+                "pst_validtoken123456789012345678901234567",
+                super::now_unix() + 3600,
+            ),
+        )
+        .unwrap();
+    let activated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task_store = store.clone();
+    let task_hosted = hosted.clone();
+    let task_activated = activated.clone();
+    let provisioning = tokio::spawn(async move {
+        super::provision_core(
+            &*task_store,
+            &task_hosted,
+            HTTPS_ORIGIN,
+            || async { panic!("fresh provisioning must not prompt") },
+            move |_, _| {
+                let task_activated = task_activated.clone();
+                async move {
+                    task_activated.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        )
+        .await
+    });
+
+    gate.reached.notified().await;
+    super::tombstone_session(&*store, &hosted, HTTPS_ORIGIN)
+        .await
+        .unwrap();
+    gate.release.notify_one();
+
+    let error = provisioning.await.unwrap().unwrap_err();
+    assert_eq!(error.code, "hosted-account-changed");
+    assert!(!activated.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(store
+        .get(&super::checkpoint_key(HTTPS_ORIGIN, ACCOUNT))
+        .unwrap()
+        .is_some_and(|value| !value.is_empty()));
+}
+
+#[tokio::test]
+async fn account_replacement_waits_for_the_provisioning_activation_boundary() {
+    let store = Arc::new(MemoryStore::default());
+    let hosted = Arc::new(HostedState::default());
+    let generation = hosted.begin_sign_in_attempt();
+    super::commit_sign_in_session(
+        &*store,
+        &hosted,
+        HTTPS_ORIGIN,
+        generation,
+        HostedSessionRecord {
+            account_id: ACCOUNT.into(),
+            bearer: Zeroizing::new("account-a-bearer".into()),
+            expires_at_unix: super::now_unix() + 3600,
+        },
+    )
+    .await
+    .unwrap();
+    let revision = hosted
+        .capture_mcp_account_session("account-a-bearer")
+        .await
+        .unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let effect_hosted = hosted.clone();
+    let effect_entered = entered.clone();
+    let effect_release = release.clone();
+    let effect = tokio::spawn(async move {
+        effect_hosted
+            .run_provisioning_account_effect(revision, || async move {
+                effect_entered.notify_one();
+                effect_release.notified().await;
+                Ok(())
+            })
+            .await
+    });
+
+    entered.notified().await;
+    let replacement_store = store.clone();
+    let replacement_hosted = hosted.clone();
+    let replacement_committed = Arc::new(tokio::sync::Notify::new());
+    let replacement_done = replacement_committed.clone();
+    let replacement = tokio::spawn(async move {
+        let generation = replacement_hosted.begin_sign_in_attempt();
+        let result = super::commit_sign_in_session(
+            &*replacement_store,
+            &replacement_hosted,
+            HTTPS_ORIGIN,
+            generation,
+            HostedSessionRecord {
+                account_id: "550e8400-e29b-41d4-a716-446655440001".into(),
+                bearer: Zeroizing::new("account-b-bearer".into()),
+                expires_at_unix: super::now_unix() + 3600,
+            },
+        )
+        .await;
+        replacement_done.notify_one();
+        result
+    });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), replacement_committed.notified())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        hosted
+            .capture_mcp_account_session("account-a-bearer")
+            .await
+            .unwrap(),
+        revision
+    );
+    release.notify_one();
+    effect.await.unwrap().unwrap();
+    replacement.await.unwrap().unwrap();
+    assert_eq!(
+        hosted
+            .capture_mcp_account_session("account-a-bearer")
+            .await
+            .unwrap_err()
+            .code,
+        "hosted-account-changed"
+    );
+}
+
+#[tokio::test]
 async fn pending_secret_write_failure_prevents_checkpoint_and_posts() {
     let hosted = HostedState::default();
     let server = Arc::new(Mutex::new(FakeServerState::default()));
@@ -2297,7 +2461,8 @@ async fn provision_has_vault_returns_error() {
             "alpha bravo charlie delta echo foxtrot".into(),
         )))
     };
-    let activate_fn = |_cred: Zeroizing<Vec<u8>>, _pass: Zeroizing<String>| async { Ok(()) };
+    let activate_fn =
+        |_cred: Zeroizing<Vec<u8>>, _pass: Zeroizing<String>| async { Ok(()) };
 
     let result = super::provision_core(&store, &hosted, &uri, passphrase_fn, activate_fn).await;
 
@@ -2344,7 +2509,8 @@ async fn provision_read_only_returns_entitlement_error() {
             "alpha bravo charlie delta echo foxtrot".into(),
         )))
     };
-    let activate_fn = |_cred: Zeroizing<Vec<u8>>, _pass: Zeroizing<String>| async { Ok(()) };
+    let activate_fn =
+        |_cred: Zeroizing<Vec<u8>>, _pass: Zeroizing<String>| async { Ok(()) };
 
     let result = super::provision_core(&store, &hosted, &uri, passphrase_fn, activate_fn).await;
 
@@ -2390,7 +2556,8 @@ async fn provision_wrong_resume_passphrase_returns_error() {
     store.set(&checkpoint_key, &checkpoint_bytes).unwrap();
 
     let passphrase_fn = || async move { Ok(Some(Zeroizing::new("wrong passphrase".into()))) };
-    let activate_fn = |_cred: Zeroizing<Vec<u8>>, _pass: Zeroizing<String>| async { Ok(()) };
+    let activate_fn =
+        |_cred: Zeroizing<Vec<u8>>, _pass: Zeroizing<String>| async { Ok(()) };
 
     let result = super::provision_core(&store, &hosted, origin, passphrase_fn, activate_fn).await;
 

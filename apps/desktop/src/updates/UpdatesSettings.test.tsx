@@ -1,16 +1,16 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openReleaseNotes, UpdatesSettings } from "./UpdatesSettings";
 import { UPDATE_STATUS_SERDE_FIXTURE, type UpdateStatus } from "./update-contract";
 import { updateApi, useUpdateStatus } from "./updates";
+import { bridge } from "../bridge/bridge";
 
 vi.mock("./updates", () => ({
   updateApi: { check: vi.fn(), defer: vi.fn(), restart: vi.fn(), setAutomatic: vi.fn() },
   useUpdateStatus: vi.fn(),
 }));
-const openUrl = vi.hoisted(() => vi.fn());
-vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl }));
+vi.mock("../bridge/bridge", { spy: true });
 
 const result = (status: UpdateStatus | null, error = "") => ({ status, error, busy: false, refresh: vi.fn(), run: vi.fn() });
 
@@ -180,10 +180,38 @@ describe("UpdatesSettings", () => {
     expect(screen.getByRole("progressbar", { name: "Update download progress" })).not.toHaveAttribute("value");
   });
 
-  it("rejects release-note URLs with credentials or non-default ports", async () => {
+  it("opens only validated GitHub release notes through the native bridge", async () => {
     await expect(openReleaseNotes("https://user:secret@github.com/mattv8/peppy/releases/tag/v1.2.4")).rejects.toThrow("not recognized");
     await expect(openReleaseNotes("https://github.com:8443/mattv8/peppy/releases/tag/v1.2.4")).rejects.toThrow("not recognized");
+    expect(bridge.open_external_url).not.toHaveBeenCalled();
     await openReleaseNotes(UPDATE_STATUS_SERDE_FIXTURE.releaseNotesUrl!);
-    expect(openUrl).toHaveBeenCalledWith(UPDATE_STATUS_SERDE_FIXTURE.releaseNotesUrl);
+    expect(bridge.open_external_url).toHaveBeenCalledWith(UPDATE_STATUS_SERDE_FIXTURE.releaseNotesUrl);
+  });
+
+  it.each([
+    "http://github.com/mattv8/peppy/releases/tag/v1.2.4",
+    "javascript:alert(1)",
+    "https://github.com.evil.test/mattv8/peppy/releases/tag/v1.2.4",
+    "https://evil.test/github.com/mattv8/peppy/releases/tag/v1.2.4",
+    "https://github.com/mattv8/peppy/releases-lookalike/tag/v1.2.4",
+    "https://github.com/mattv8/other/releases/tag/v1.2.4",
+    "https://github.com/mattv8/peppy/releases/../issues/1",
+  ])("refuses hostile release-note destination %s before invoking the bridge", async url => {
+    vi.mocked(bridge.open_external_url!).mockClear();
+    await expect(openReleaseNotes(url)).rejects.toThrow();
+    expect(bridge.open_external_url).not.toHaveBeenCalled();
+  });
+
+  it("shows inline failure feedback when opening release notes is rejected", async () => {
+    vi.mocked(bridge.open_external_url!).mockRejectedValueOnce(new Error("OS open rejected"));
+    render(<UpdatesSettings />);
+    const releaseNotes = screen.getByRole("button", { name: "Release notes" });
+
+    fireEvent.click(releaseNotes);
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/release notes.*opened/i));
+    expect(bridge.open_external_url).toHaveBeenLastCalledWith(UPDATE_STATUS_SERDE_FIXTURE.releaseNotesUrl);
+    expect(releaseNotes).toBeEnabled();
+    expect(screen.getByRole("heading", { name: "Updates" })).toBeVisible();
   });
 });

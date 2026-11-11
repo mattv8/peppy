@@ -3,7 +3,20 @@ export type ParsedReaction = { action: ReactionAction; emoji: string; quotedText
 
 const GOOGLE = /^(Reacted|Removed) (\S+) (to|from) ([\s\S]+)$/u;
 const EMOJI_FIRST = /^(\S+) to ([\s\S]+)$/u;
-const EDGE_NOISE = /^[\s\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]+|[\s\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]+$/gu;
+const EDGE_NOISE = (codePoint: number): boolean => (
+  (codePoint >= 0x0009 && codePoint <= 0x000d)
+  || codePoint === 0x0020
+  || codePoint === 0x00a0
+  || codePoint === 0x1680
+  || (codePoint >= 0x2000 && codePoint <= 0x200a)
+  || (codePoint >= 0x200e && codePoint <= 0x200f)
+  || (codePoint >= 0x2028 && codePoint <= 0x202e)
+  || codePoint === 0x202f
+  || codePoint === 0x205f
+  || (codePoint >= 0x2066 && codePoint <= 0x2069)
+  || codePoint === 0x3000
+  || codePoint === 0xfeff
+);
 const TAPBACK_ADD = /^(Loved|Liked|Disliked|Laughed at|Emphasized|Questioned) ([\s\S]+)$/u;
 const TAPBACK_REMOVE = /^Removed (a heart|a like|a dislike|a laugh|an exclamation|a question mark) from ([\s\S]+)$/u;
 const QUOTE_PAIRS: ReadonlyArray<readonly [string, string]> = [["“", "”"], ['"', '"']];
@@ -19,6 +32,22 @@ const ELLIPSIS = /(?:…|\.\.\.)$/u;
 
 export function normalizeReactionText(text: string): string {
   return text.normalize("NFC").replace(/\s+/gu, " ").trim();
+}
+
+function trimEdgeNoise(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end) {
+    const codePoint = text.codePointAt(start)!;
+    if (!EDGE_NOISE(codePoint)) break;
+    start += codePoint > 0xffff ? 2 : 1;
+  }
+  while (end > start) {
+    const codePoint = text.charCodeAt(end - 1);
+    if (!EDGE_NOISE(codePoint)) break;
+    end -= 1;
+  }
+  return text.slice(start, end);
 }
 
 export function canonicalEmoji(emoji: string): string {
@@ -51,7 +80,7 @@ function parsedReaction(action: ReactionAction, emoji: string, tail: string): Pa
 }
 
 export function parseReaction(body: string): ParsedReaction | null {
-  const text = body.replace(EDGE_NOISE, "");
+  const text = trimEdgeNoise(body);
   const removal = TAPBACK_REMOVE.exec(text);
   if (removal) return parsedReaction("remove", TAPBACK_EMOJI[removal[1]], removal[2]);
 

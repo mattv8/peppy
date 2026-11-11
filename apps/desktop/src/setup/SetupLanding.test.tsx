@@ -2724,5 +2724,24 @@ describe("SetupLanding", () => {
       expect(within(card).getByRole("button", { name: peppyCopy.production_billing_open })).toBeInTheDocument();
       expect(within(card).getByRole("button", { name: peppyCopy.production_billing_check })).toBeInTheDocument();
     });
+
+    it("opens fixed legal destinations through the bridge and keeps billing controls after failure", async () => {
+      vi.spyOn(bridge, "hosted_account").mockResolvedValue(lapsed());
+      vi.spyOn(bridge, "purchase_options").mockResolvedValue({ appStore: true, website: false });
+      vi.spyOn(bridge, "billing_summary").mockResolvedValue({ provider: "none", manageableIn: "none", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+      vi.spyOn(bridge, "store_products").mockResolvedValue([]);
+      vi.spyOn(bridge, "open_external_url").mockRejectedValueOnce(new Error("unavailable")).mockResolvedValueOnce();
+      renderLanding();
+      const card = await lapsedCard();
+
+      fireEvent.click(within(card).getByRole("button", { name: /Terms of Use/ }));
+      await waitFor(() => expect(document.getElementById("hosted-paywall-legal-error")).toHaveTextContent("Terms of Use couldn't be opened. Try again."));
+      expect(bridge.open_external_url).toHaveBeenCalledWith("https://peppy.pro/terms");
+      expect(within(card).getByRole("button", { name: peppyCopy.production_billing_check })).toBeEnabled();
+
+      fireEvent.click(within(card).getByRole("button", { name: /Privacy Policy/ }));
+      await waitFor(() => expect(bridge.open_external_url).toHaveBeenLastCalledWith("https://peppy.pro/privacy"));
+      expect(document.getElementById("hosted-paywall-legal-error")).not.toBeInTheDocument();
+    });
   });
 });

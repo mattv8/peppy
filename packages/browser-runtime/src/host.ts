@@ -354,6 +354,19 @@ function errorFor(error: unknown): RpcError {
   return { code: "unavailable", message: "Browser operation failed." };
 }
 
+function familyEnrollmentErrorFor(error: unknown): RpcError {
+  if (typeof error === "object" && error !== null && typeof (error as { status?: unknown }).status === "number") {
+    const { status, code } = error as { status: number; code?: unknown };
+    if (code === "invite_limit" || code === "request_not_pending") return { code, message: "Browser operation failed." };
+    if (status === 401 || status === 403) return { code: `http-${status}`, message: "Browser operation failed." };
+  }
+  return errorFor(error);
+}
+
+function isFamilyEnrollmentCommand(command: string): boolean {
+  return ["enrollment_create_invite", "enrollment_list_invites", "enrollment_revoke_invite", "enrollment_list_vault_requests", "enrollment_approve_vault_request", "enrollment_deny_vault_request"].includes(command);
+}
+
 function mcpErrorFor(error: unknown): RpcError {
   if (isMcpCancellation(error)) return { code: "cancelled", message: "MCP status check was cancelled. Try again." };
   if (error instanceof Error && error.message === "enrollment-timeout") return { code: "timeout", message: "MCP status check timed out. Try again." };
@@ -1485,6 +1498,8 @@ export class BrowserWorkerHost {
       const waitingOnly = request.args.waitingOnly;
       if (waitingOnly !== undefined && typeof waitingOnly !== "boolean") throw { code: "invalid-request" };
       if (request.command === "enrollment_set_hosted_csrf" && !csrf) throw { code: "invalid-request" };
+      if (request.command === "enrollment_revoke_invite") requiredString(request.args.inviteId);
+      if (request.command === "enrollment_approve_vault_request" || request.command === "enrollment_deny_vault_request") requiredString(request.args.requestId);
       const value = request.command === "enrollment_discover" ? await network.enrollmentDiscover(typeof request.args.origin === "string" ? request.args.origin : undefined)
        : request.command === "enrollment_create_owner" && passphrase ? await network.enrollmentCreateOwner({ ...(setupToken ? { setupToken } : {}), ...(adminPassword ? { adminPassword } : {}), passphrase }, username)
           : request.command === "enrollment_sign_in" ? await network.enrollmentSignIn(adminPassword ?? "", username)
@@ -1518,7 +1533,7 @@ export class BrowserWorkerHost {
       if (request.command === "enrollment_status") this.scheduleRememberedUnlockValidation();
       if (request.command === "enrollment_sign_out" && recoveryClearFailed) return { id: request.id, ok: false, error: RECOVERY_CLEAR_ERROR };
       return { id: request.id, ok: true, value };
-    } catch (error: unknown) { return { id: request.id, ok: false, error: errorFor(error) }; }
+    } catch (error: unknown) { return { id: request.id, ok: false, error: isFamilyEnrollmentCommand(request.command) ? familyEnrollmentErrorFor(error) : errorFor(error) }; }
   }
 
   private async deviceManagement(request: RpcRequest): Promise<RpcResponse> {
@@ -1806,7 +1821,7 @@ function httpsOrigin(value: unknown): string | undefined {
   } catch { return undefined; }
 }
 
-export function browserRememberedUnlock(fetchBase: string, fetchImpl: typeof fetch = fetch): RememberedUnlock {
+export function browserRememberedUnlock(fetchBase: string, fetchImpl: typeof fetch = fetch.bind(globalThis)): RememberedUnlock {
   return new RememberedUnlock(OWNER_NAME, { origin: fetchBase, fetch: fetchImpl });
 }
 

@@ -19,12 +19,8 @@ const copy = (key: PeppyCopyKey) => peppyCopy[key];
 const TERMS_OF_USE_URL = "https://peppy.pro/terms";
 const PRIVACY_POLICY_URL = "https://peppy.pro/privacy";
 const openExternal = async (url: string) => {
-  try {
-    const { openUrl } = await import("@tauri-apps/plugin-opener");
-    await openUrl(url);
-  } catch {
-    // Link failures are intentionally silent; purchase controls remain usable.
-  }
+  if (!bridge.open_external_url) throw new Error("External links are unavailable.");
+  await bridge.open_external_url(url);
 };
 const pollingStages = new Set<Stage>(["waiting_phone", "verify_phone", "phone_approved"]);
 const reconciliationStages = new Set<Stage>(["server", "setup", "signin"]);
@@ -150,10 +146,19 @@ function Stage({ stage, setupMode, children }: { stage: Stage; setupMode?: "open
 }
 
 function PaywallControls({ options, summary, products, state, subscribeLabel, onRefresh }: { options: PurchaseOptions; summary: BillingSummaryView; products: StoreProduct[]; state: "loading" | "ready" | "unavailable"; subscribeLabel?: string; onRefresh(): Promise<unknown> }) {
+  const [legalError, setLegalError] = useState("");
+  const openLegal = async (url: string, error: string) => {
+    setLegalError("");
+    try {
+      await openExternal(url);
+    } catch {
+      setLegalError(error);
+    }
+  };
   if (summary.provider === "stripe" && options.appStore) return <BillingElsewhereNotice variant={options.website ? "website" : "other"} provider="stripe" copy={peppyCopy} onManageWebsite={options.website ? bridge.hosted_open_billing : undefined} />;
   if (summary.provider === "apple" && !options.appStore) return <BillingElsewhereNotice variant="apple" provider="apple" copy={peppyCopy} onManageAppStore={bridge.open_store_subscriptions} />;
   if (!options.appStore) return null;
-  return <StorePlanOptions purchaseOptions={options} billingProvider={summary.provider} products={products} state={state} copy={peppyCopy} subscribeLabel={subscribeLabel} onPurchase={bridge.store_purchase} onPurchased={onRefresh} onRestore={async () => { await bridge.store_restore(); await onRefresh(); }} onRetry={() => void onRefresh()} onOpenTerms={() => void openExternal(TERMS_OF_USE_URL)} onOpenPrivacy={() => void openExternal(PRIVACY_POLICY_URL)} />;
+  return <><StorePlanOptions purchaseOptions={options} billingProvider={summary.provider} products={products} state={state} copy={peppyCopy} subscribeLabel={subscribeLabel} onPurchase={bridge.store_purchase} onPurchased={onRefresh} onRestore={async () => { await bridge.store_restore(); await onRefresh(); }} onRetry={() => void onRefresh()} onOpenTerms={() => void openLegal(TERMS_OF_USE_URL, peppyCopy.store_terms_open_failed)} onOpenPrivacy={() => void openLegal(PRIVACY_POLICY_URL, peppyCopy.store_privacy_open_failed)} />{legalError && <p id="hosted-paywall-legal-error" role="alert">{legalError}</p>}</>;
 }
 
 function DiscardComputerClaimant({ confirming, busy, onConfirming, onDiscard }: { confirming: boolean; busy: boolean; onConfirming(value: boolean): void; onDiscard(): Promise<void> }) {

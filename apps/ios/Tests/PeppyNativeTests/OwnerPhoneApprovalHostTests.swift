@@ -8,6 +8,18 @@ import Testing
     private let invitePath = "/v1/enrollment/invitations/invite"
     private let approvePath = "/v1/enrollment/invitations/invite/approve"
 
+    @Test func approvalActionRequiresTheCurrentVerifiedClaim() {
+        let verify = OwnerPhoneStatus(invitationId: "invite", stage: .verify, expiresInSeconds: 30, sas: "123456", claimDigest: "claim")
+        let acknowledgement = OwnerPhoneApprovalClaim(status: verify)
+
+        #expect(ownerPhoneApprovalCanSubmit(status: OwnerPhoneStatus(invitationId: "invite", stage: .verify, expiresInSeconds: 29, sas: "123456", claimDigest: "claim"), acknowledgement: acknowledgement, codesMatch: true, isBusy: false))
+        #expect(ownerPhoneApprovalCanSubmit(status: verify, acknowledgement: acknowledgement, codesMatch: true, isBusy: false))
+        #expect(!ownerPhoneApprovalCanSubmit(status: verify, acknowledgement: nil, codesMatch: true, isBusy: false))
+        #expect(!ownerPhoneApprovalCanSubmit(status: verify, acknowledgement: acknowledgement, codesMatch: false, isBusy: false))
+        #expect(!ownerPhoneApprovalCanSubmit(status: verify, acknowledgement: acknowledgement, codesMatch: true, isBusy: true))
+        #expect(!ownerPhoneApprovalCanSubmit(status: OwnerPhoneStatus(invitationId: "invite-b", stage: .verify, expiresInSeconds: 30, sas: "654321", claimDigest: "claim-b"), acknowledgement: acknowledgement, codesMatch: true, isBusy: false))
+    }
+
     private func host(
         _ producer: OwnerProducerFake = OwnerProducerFake(),
         _ transport: OwnerTransportFake = OwnerTransportFake(),

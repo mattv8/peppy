@@ -61,6 +61,29 @@ public enum OwnerPhoneResult: Sendable, Equatable {
     case failed(String)
 }
 
+public struct OwnerPhoneApprovalClaim: Equatable, Sendable {
+    public let invitationId: String
+    public let digest: String?
+    public let sas: String?
+
+    public init?(status: OwnerPhoneStatus) {
+        guard status.stage == .verify else { return nil }
+        invitationId = status.invitationId
+        digest = status.claimDigest
+        sas = status.sas
+    }
+}
+
+public func ownerPhoneApprovalCanSubmit(
+    status: OwnerPhoneStatus?,
+    acknowledgement: OwnerPhoneApprovalClaim?,
+    codesMatch: Bool,
+    isBusy: Bool
+) -> Bool {
+    guard !isBusy, codesMatch, let status, let acknowledgement else { return false }
+    return OwnerPhoneApprovalClaim(status: status) == acknowledgement
+}
+
 public actor OwnerPhoneApprovalHost {
     private var producer: any OwnerPhoneProducer
     private let recreateProducer: (@Sendable () throws -> any OwnerPhoneProducer)?

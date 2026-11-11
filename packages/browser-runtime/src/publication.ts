@@ -35,7 +35,9 @@ export async function publishAttachment(session: PublicImageSession, transport: 
     await session.mutate("_worker_attachment_retention_report_removed", { attachmentId: id });
     throw { code: "public-copy-unavailable" };
   }
-  if (!SAFE_TOKEN.test(String(response.token)) || !SAFE_NAME.test(String(response.safe_name))) throw new TransportError("invalid");
+  if (!response || typeof response !== "object" || Array.isArray(response)
+    || typeof response.token !== "string" || !SAFE_TOKEN.test(response.token)
+    || typeof response.safe_name !== "string" || !SAFE_NAME.test(response.safe_name)) throw new TransportError("invalid");
   const expiresInSeconds = response.expires_in_seconds;
   if (expiresInSeconds !== undefined && (typeof expiresInSeconds !== "number" || !Number.isSafeInteger(expiresInSeconds) || expiresInSeconds < 0 || expiresInSeconds > 31_536_000)) throw new TransportError("invalid");
   return { url: `/file/mms-usercontent/${response.token}/${response.safe_name}`, expiresInSeconds: typeof expiresInSeconds === "number" ? expiresInSeconds : 0 };

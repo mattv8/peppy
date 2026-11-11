@@ -22,6 +22,21 @@ const MAX_RECONNECT_DELAY_MS = 60_000;
 const qrOptions = { errorCorrectionLevel: "M" as const, margin: 4, width: 512 };
 const unknownDate = "—";
 
+function bridgeErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : error instanceof Error ? error.message : undefined;
+}
+
+function actionError(action: string, error: unknown): string {
+  const code = bridgeErrorCode(error);
+  if (code === "invite_limit") return peppyCopy.family_vaults_error_invite_limit;
+  if (code === "http-401") return `Peppy could not ${action}. Sign in and try again.`;
+  if (code === "http-403") return `Peppy could not ${action}. Check your access and try again.`;
+  if (code === "request_not_pending") return peppyCopy.family_vaults_error_request_not_pending;
+  return `Peppy could not ${action}.`;
+}
+
 function duration(seconds: number): string {
   return seconds >= 3_600 ? `${Math.ceil(seconds / 3_600)}h` : `${Math.ceil(seconds / 60)}m`;
 }
@@ -103,7 +118,6 @@ export function FamilyVaults({ bridge }: { bridge: FamilyVaultsBridge }) {
       if (!active.current) return;
       delay.current = INITIAL_RECONNECT_DELAY_MS;
       setPaused(false);
-      setError("");
     };
     nextSource.onerror = () => {
       closeSource();
@@ -152,12 +166,13 @@ export function FamilyVaults({ bridge }: { bridge: FamilyVaultsBridge }) {
     if (inviteCreationInFlight.current) return;
     inviteCreationInFlight.current = true;
     setCreatingInvite(true);
+    setError("");
     try {
       const next = await bridge.enrollment_create_invite();
       setInvite(next);
-      await refresh();
-    } catch {
-      setError("Peppy could not create an invite.");
+      await refresh().catch(() => setError("Peppy could not refresh family vaults."));
+    } catch (error) {
+      setError(actionError("create an invite", error));
     } finally {
       inviteCreationInFlight.current = false;
       setCreatingInvite(false);
@@ -166,33 +181,36 @@ export function FamilyVaults({ bridge }: { bridge: FamilyVaultsBridge }) {
 
   const copyInvite = async () => {
     if (!invite) return;
+    setError("");
     try {
       await navigator.clipboard.writeText(invite.inviteLink);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2_000);
-    } catch {
-      setError("Peppy could not copy the invite link.");
+    } catch (error) {
+      setError(actionError("copy the invite link", error));
     }
   };
 
   const revokeInvite = async (inviteId: string) => {
+    setError("");
     try {
       await bridge.enrollment_revoke_invite(inviteId);
       setConfirmRevoke(undefined);
-      await refresh();
-    } catch {
-      setError("Peppy could not revoke this invite.");
+      await refresh().catch(() => setError("Peppy could not refresh family vaults."));
+    } catch (error) {
+      setError(actionError("revoke this invite", error));
     }
   };
 
   const actOnRequest = async (requestId: string, action: "approve" | "deny") => {
+    setError("");
     try {
       if (action === "approve") await bridge.enrollment_approve_vault_request(requestId);
       else await bridge.enrollment_deny_vault_request(requestId);
       setConfirmDeny(undefined);
-      await refresh();
-    } catch {
-      setError(peppyCopy.family_vaults_error_request_not_pending);
+      await refresh().catch(() => setError("Peppy could not refresh family vaults."));
+    } catch (error) {
+      setError(actionError(`${action} this request`, error));
     }
   };
 
@@ -202,12 +220,18 @@ export function FamilyVaults({ bridge }: { bridge: FamilyVaultsBridge }) {
     closeSource();
     delay.current = INITIAL_RECONNECT_DELAY_MS;
     setPaused(false);
+    setError("");
     void refresh().catch(() => setError("Peppy could not refresh family vaults.")).finally(connect);
+  };
+
+  const retryListRefresh = () => {
+    setError("");
+    void refresh().catch(() => setError("Peppy could not refresh family vaults."));
   };
 
   return <section id="family-vaults" aria-labelledby="family-vaults-heading">
     <h2 id="family-vaults-heading">Family vaults</h2>
-    {error && <p id="family-vaults-error" role="alert">{error}</p>}
+    {error && <><p id="family-vaults-error" role="alert">{error}</p>{error === "Peppy could not refresh family vaults." && <button id="family-vaults-refresh-failed-lists" className="secondary-button" type="button" onClick={retryListRefresh}>Refresh family vaults</button>}</>}
     <section id="family-vaults-invite" className="family-vaults-card">
       <h3>{invite ? "Share this invite link" : "Invite a family member"}</h3>
       {invite ? <>

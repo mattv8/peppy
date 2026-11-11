@@ -72,6 +72,59 @@ describe("MediaActionsProvider", () => {
     expect(screen.getByRole("status")).toBeEmptyDOMElement();
   });
 
+  it("announces one complete expiry sentence after creating a public link", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const props = defaults();
+    props.onPublish.mockResolvedValue({ url: "https://example.test/public", expiresInSeconds: 60 });
+    renderActions(props);
+
+    fireEvent.click(screen.getByText("link"));
+
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Link copied. Anyone with this link can view this image. Expires in 1 min."));
+  });
+
+  it.each([0, -60])("retains the unknown-expiry revocation caveat for %s seconds", async expiresInSeconds => {
+    vi.stubGlobal("navigator", { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } });
+    const props = defaults();
+    props.onPublish.mockResolvedValue({ url: "https://example.test/public", expiresInSeconds });
+    renderActions(props);
+
+    fireEvent.click(screen.getByText("link"));
+
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Link copied. Anyone with this link can view this image. No expiry was reported; revoke it on the server when it is no longer needed."));
+    expect(screen.getByRole("status")).toHaveAttribute("data-tone", "warning");
+  });
+
+  it("reports a created link separately when copying it to the clipboard fails", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("clipboard denied"));
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const props = defaults();
+    props.onPublish.mockResolvedValue({ url: "https://example.test/public", expiresInSeconds: 60 });
+    renderActions(props);
+
+    fireEvent.click(screen.getByText("link"));
+
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Link created — use Copy public link to copy it"));
+    expect(writeText).toHaveBeenCalledWith("https://example.test/public");
+    expect(props.onPublish).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("status")).toHaveAttribute("data-tone", "warning");
+  });
+
+  it("reports publication failure without attempting clipboard copying", async () => {
+    const writeText = vi.fn();
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const props = defaults();
+    props.onPublish.mockRejectedValue(new Error("publication denied"));
+    renderActions(props);
+
+    fireEvent.click(screen.getByText("link"));
+
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Couldn't create public link"));
+    expect(writeText).not.toHaveBeenCalled();
+    expect(screen.getByRole("status")).toHaveAttribute("data-tone", "error");
+  });
+
   it("announces pending saves, clears info after four seconds, and keeps saved and cancelled outcomes silent", async () => {
     vi.useFakeTimers();
     const props = defaults();

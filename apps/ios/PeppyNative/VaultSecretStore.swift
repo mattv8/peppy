@@ -81,9 +81,13 @@ public struct VaultSecretStore: Sendable {
     @discardableResult public func storeBinding(_ secret: String, for identity: EnrollmentIdentity, origin: String) -> Bool {
         _ = saveIfMissing(secret, for: identity)
         guard (try? read(identity)) == secret else { return false }
-        guard (try? readPending(origin)) == secret else { return true }
-        try? secure.delete(pendingAccount(origin))
-        return (try? readPending(origin)) == nil
+        do {
+            guard try readPending(origin) == secret else { return true }
+            try secure.delete(pendingAccount(origin))
+            return try readPending(origin) == nil
+        } catch {
+            return false
+        }
     }
 
     public func pendingSecret(origin: String) throws(ClientError) -> String? { try readPending(origin) }

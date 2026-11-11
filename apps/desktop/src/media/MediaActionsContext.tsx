@@ -163,7 +163,7 @@ export function MediaActionsProvider(props: MediaActionsProviderProps): JSX.Elem
     void props.onPublish(attachment).then(async (created) => {
       if (!created) return;
       const copied = await copyText(created);
-      announce(copied ? `Link copied. Anyone with this link can view this image · expires ${expiryText(created.expiresInSeconds)}` : "Link created — use Copy public link to copy it", "warning");
+      announce(copied ? `Link copied. Anyone with this link can view this image. ${expiryText(created.expiresInSeconds)}` : "Link created — use Copy public link to copy it", "warning");
     }).catch(() => announce("Couldn't create public link", "error")).finally(() => publishingIds.current.delete(attachment.id));
   }, [announce, props.onPublish, props.publicCopies]);
 

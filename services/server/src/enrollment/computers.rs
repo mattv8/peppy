@@ -932,7 +932,12 @@ fn request_origin(state: &ComputerEnrollmentRouterState, headers: &HeaderMap) ->
     }
     Ok(())
 }
-fn database(_: sqlx::Error) -> Error {
+fn database(error: sqlx::Error) -> Error {
+    tracing::warn!(
+        operation = "computer_enrollment",
+        kind = crate::api::database_error_kind(&error),
+        "database operation failed"
+    );
     Error(StatusCode::SERVICE_UNAVAILABLE, "database_unavailable")
 }
 fn bad(code: &'static str) -> Error {
@@ -955,7 +960,31 @@ mod tests {
     use peppy_hosted_api::computer_enrollment::ComputerEnrollmentRecipient;
     use peppy_hosted_api::enrollment::ProposedDevice;
     use sqlx::postgres::PgPoolOptions;
+    use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+
+    struct EventCapture(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventCapture {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            struct FieldCapture(String);
+
+            impl Visit for FieldCapture {
+                fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                    self.0.push_str(field.name());
+                    self.0.push('=');
+                    self.0.push_str(&format!("{value:?}"));
+                    self.0.push(';');
+                }
+            }
+
+            let mut fields = FieldCapture(String::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
 
     fn create_request(kind: ClientKind, role: EnrollmentRole) -> CreateComputerEnrollmentRequest {
         CreateComputerEnrollmentRequest {
@@ -987,6 +1016,23 @@ mod tests {
         assert!(
             create_values(&create_request(ClientKind::Browser, EnrollmentRole::Device)).is_ok()
         );
+    }
+
+    #[test]
+    fn database_errors_log_a_sanitized_operation_and_kind() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(EventCapture(events.clone()));
+
+        tracing::subscriber::with_default(subscriber, || {
+            let error = database(sqlx::Error::Protocol("secret proof payload".into()));
+            assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(error.1, "database_unavailable");
+        });
+
+        let event = events.lock().unwrap().join("\n");
+        assert!(event.contains("operation=\"computer_enrollment\""));
+        assert!(event.contains("kind=\"other\""));
+        assert!(!event.contains("secret proof payload"));
     }
 
     #[tokio::test]

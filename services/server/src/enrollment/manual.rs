@@ -267,12 +267,13 @@ async fn create_challenge(
     .await
     .map_err(database_error)?
     {
-        let expired: bool =
-            sqlx::query_scalar("SELECT expires_at <= now() FROM device_admissions WHERE id = $1")
-                .bind(existing.get::<Uuid, _>("id"))
-                .fetch_one(&mut *transaction)
-                .await
-                .map_err(database_error)?;
+        let (expired, remaining_seconds): (bool, i64) = sqlx::query_as(
+            "SELECT expires_at <= clock_timestamp(), GREATEST(0, EXTRACT(EPOCH FROM expires_at - clock_timestamp())::bigint) FROM device_admissions WHERE id = $1",
+        )
+        .bind(existing.get::<Uuid, _>("id"))
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(database_error)?;
         let consumed: bool = sqlx::query_scalar(
             "SELECT consumed_at IS NOT NULL FROM device_admissions WHERE id = $1",
         )
@@ -330,6 +331,7 @@ async fn create_challenge(
                     "challenge_identity_mismatch",
                 ));
             }
+            let remaining_seconds = remaining_seconds.clamp(0, CHALLENGE_TTL_SECONDS) as u32;
             transaction.commit().await.map_err(database_error)?;
             return Ok(Json(AdmissionChallenge {
                 enrollment_id: existing.get("id"),
@@ -342,7 +344,7 @@ async fn create_challenge(
                 requested_role: existing_role,
                 nonce: encode_base64url(&existing_nonce),
                 credential_digest: request.credential_digest,
-                expires_in_seconds: CHALLENGE_TTL_SECONDS as u32,
+                expires_in_seconds: remaining_seconds,
             }));
         }
     }
@@ -387,7 +389,7 @@ async fn create_challenge(
         "INSERT INTO device_admissions
          (id, vault_id, device_id, kind, name, requested_role, device_public_key,
           credential_digest, nonce, origin, expires_at, context_digest)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now() + interval '120 seconds',$11)",
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,clock_timestamp() + interval '120 seconds',$11)",
     )
     .bind(enrollment_id)
     .bind(vault_id)
@@ -534,7 +536,7 @@ async fn complete_challenge(
          JOIN vaults v ON v.vault_id = a.vault_id
          JOIN vault_admission_keys k ON k.vault_id = v.vault_id
            AND k.key_epoch = v.key_epoch AND k.profile_fingerprint = v.profile_fingerprint
-         WHERE a.id = $1 AND a.vault_id = $2 AND a.expires_at > now() FOR UPDATE OF a, v",
+         WHERE a.id = $1 AND a.vault_id = $2 AND a.expires_at > clock_timestamp() FOR UPDATE OF a, v",
     )
     .bind(enrollment_id)
     .bind(vault_id)
@@ -542,6 +544,16 @@ async fn complete_challenge(
     .await
     .map_err(database_error)?
     .ok_or(ManualError(StatusCode::UNAUTHORIZED, "challenge_invalid"))?;
+    let expired: bool = sqlx::query_scalar(
+        "SELECT expires_at <= clock_timestamp() FROM device_admissions WHERE id = $1",
+    )
+    .bind(enrollment_id)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(database_error)?;
+    if expired {
+        return Err(ManualError(StatusCode::UNAUTHORIZED, "challenge_invalid"));
+    }
     if let Some(device_id) = hosted_context
         .as_ref()
         .and_then(|context| context.device_id)

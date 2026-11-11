@@ -20,6 +20,7 @@ struct OwnerPhoneApprovalView: View {
     @State private var status: OwnerPhoneStatus?
     @State private var qr: String?
     @State private var codesMatch = false
+    @State private var acknowledgedClaim: OwnerPhoneApprovalClaim?
     @State private var errorCode: String?
     @State private var operation = Operation.none
     @State private var showingApprovalPrompt = false
@@ -55,6 +56,7 @@ struct OwnerPhoneApprovalView: View {
                             .accessibilityIdentifier("owner-phone-error")
                         Button(String(localized: "peppy.try_again", table: "Peppy")) { Task { await retry() } }
                             .disabled(isBusy)
+                            .accessibilityIdentifier("owner-phone-retry")
                     }
                 }
                 .onChange(of: errorCode) { _, value in
@@ -143,7 +145,13 @@ struct OwnerPhoneApprovalView: View {
                     .accessibilityLabel(Text(verbatim: "\(String(localized: "peppy.production_pairing_sas_label", table: "Peppy")) \(sas)"))
                     .accessibilityIdentifier("owner-phone-sas")
             }
-            Toggle(String(localized: "peppy.owner_phone_codes_match", table: "Peppy"), isOn: $codesMatch)
+            Toggle(String(localized: "peppy.owner_phone_codes_match", table: "Peppy"), isOn: Binding(
+                get: { codesMatch },
+                set: { checked in
+                    codesMatch = checked
+                    acknowledgedClaim = checked ? status.flatMap { OwnerPhoneApprovalClaim(status: $0) } : nil
+                }
+            ))
                 .frame(minHeight: 44).accessibilityIdentifier("owner-phone-codes-match")
             Button(String(localized: "peppy.owner_phone_approve_cta", table: "Peppy")) { Task { await approve() } }
                 .disabled(!codesMatch || isBusy).accessibilityIdentifier("owner-phone-approve")
@@ -272,7 +280,7 @@ struct OwnerPhoneApprovalView: View {
     }
 
     private func approve() async {
-        guard !isBusy else { return }
+        guard ownerPhoneApprovalCanSubmit(status: status, acknowledgement: acknowledgedClaim, codesMatch: codesMatch, isBusy: isBusy) else { return }
         let action = polling.beginAction()
         operation = .approving
         defer { polling.finishAction(action); operation = .none }
@@ -307,9 +315,9 @@ struct OwnerPhoneApprovalView: View {
         errorCode = nil
         switch status?.stage {
         case .verify:
-            await approve()
+            await refresh()
         case .approved:
-            apply(await host.poll(), keepsError: true)
+            await refresh()
         case .waiting where invitationGone:
             await start()
         case .waiting:
@@ -319,6 +327,14 @@ struct OwnerPhoneApprovalView: View {
         case .connected:
             break
         }
+    }
+
+    private func refresh() async {
+        guard !isBusy else { return }
+        let action = polling.beginAction()
+        operation = .refreshing
+        defer { polling.finishAction(action); operation = .none }
+        apply(await host.poll(), keepsError: true)
     }
 
     private func cancelWaitingInvitation() {
@@ -333,7 +349,10 @@ struct OwnerPhoneApprovalView: View {
             status = next
             qr = nextQR ?? qr
             if !keepsError { errorCode = nil }
-            if next.stage != .verify { codesMatch = false }
+            if OwnerPhoneApprovalClaim(status: next) != acknowledgedClaim {
+                codesMatch = false
+                acknowledgedClaim = nil
+            }
         case .cancelled: isPresented = false
         case .failed(let code): errorCode = code
         }

@@ -334,6 +334,7 @@ struct NativeContactsCoordinator {
             }
             return ContactsSyncReport(outcome: .disabled)
         }
+        try removeInactivePhotoScratch()
         let readiness = try Self.object(client.contactSyncReadinessJson())
         let contactsReady = readiness["contacts_ready"] as? Bool ?? false
         let supported = readiness["server_supported"] as? Bool ?? false
@@ -720,6 +721,14 @@ struct NativeContactsCoordinator {
         }
     }
 
+    private func removeInactivePhotoScratch() throws {
+        guard FileManager.default.fileExists(atPath: scratch.path) else { return }
+        for file in try FileManager.default.contentsOfDirectory(at: scratch, includingPropertiesForKeys: nil) {
+            guard file.pathExtension == "img", UUID(uuidString: file.deletingPathExtension().lastPathComponent) != nil else { continue }
+            try FileManager.default.removeItem(at: file)
+        }
+    }
+
     enum EntryPhoto { case keep, set(String), remove }
 
     /// A platform entry: text fields, optional photo intent and owner-local provenance.
@@ -1060,7 +1069,7 @@ struct NativeContactsCoordinator {
                 for key in ["schema_version", "request_id", "target_owner", "book_id", "kind", "contact_id", "base_revision",
                             "expected_old", "patches", "photo_op", "expires_at", "provenance", "photo"] { fields.removeValue(forKey: key) }
                 if let notes = fields["notes"] as? String, !notes.isEmpty { return .failed("unsupported_field") }
-                let contact = ContactsCoreMapping.platform(fields, id: "", knownItemIds: [:])
+                let contact = ContactsCoreMapping.platform(fields, id: "", knownItemIds: [:], useDisplayNameFallback: true)
                 // Pre-write evidence lets an interrupted create be settled later without a retry.
                 if access == .full, let before = try? await createMatches(request, verifyPhoto: false, isCancelled: isCancelled), before.complete, before.contacts.count <= 200 {
                     guard !isCancelled() else { return .failed("canceled") }
@@ -1146,7 +1155,7 @@ struct NativeContactsCoordinator {
 
     func createMatches(_ request: [String: Any], verifyPhoto: Bool = true, isCancelled: @escaping @Sendable () -> Bool) async throws -> ContactsFetch {
         let all = try await provider.fetchAll(isCancelled: isCancelled)
-        let expected = ContactsCoreMapping.platform(request, id: "", knownItemIds: [:])
+        let expected = ContactsCoreMapping.platform(request, id: "", knownItemIds: [:], useDisplayNameFallback: true)
         let expectedPhoto = try (verifyPhoto ? Self.photoAttachment(request) : nil).map {
             ContactPhotoSource.sourceHash(try photoBytes($0))
         }
@@ -1358,9 +1367,11 @@ enum ContactsCoreMapping {
     }
 
     /// Desired provider contact from core JSON. Items whose id is not a known native item become new.
-    static func platform(_ f: [String: Any], id: String, knownItemIds: [String: Set<String>]) -> PlatformContact {
+    static func platform(_ f: [String: Any], id: String, knownItemIds: [String: Set<String>], useDisplayNameFallback: Bool = false) -> PlatformContact {
         let name = f["name"] as? [String: Any] ?? [:]
         let text = { (key: String) in f[key] as? String ?? "" }
+        let givenName = name["given"] as? String ?? ""
+        let displayName = text("display_name")
         let itemId = { (field: String, item: [String: Any]) -> String in
             let value = item["id"] as? String ?? ""
             return knownItemIds[field, default: []].contains(value) ? value : ""
@@ -1370,6 +1381,7 @@ enum ContactsCoreMapping {
                 ContactField(id: itemId(field, $0), label: raw($0["label"] as? String), value: $0["value"] as? String ?? "")
             }
         }
+        let fallbackName = useDisplayNameFallback && name.isEmpty ? displayName : ""
         let addresses = (f["addresses"] as? [[String: Any]] ?? []).map { item -> ContactAddressField in
             var value = PostalAddressValue()
             for key in addressKeys { value[keyPath: key.path] = item[key.json] as? String ?? "" }
@@ -1380,7 +1392,7 @@ enum ContactsCoreMapping {
             return ContactBirthday(year: b["year"] as? Int, month: month, day: day)
         }
         return PlatformContact(
-            id: id, givenName: name["given"] as? String ?? "", middleName: name["middle"] as? String ?? "",
+            id: id, givenName: givenName.isEmpty ? fallbackName : givenName, middleName: name["middle"] as? String ?? "",
             familyName: name["family"] as? String ?? "", namePrefix: name["prefix"] as? String ?? "",
             nameSuffix: name["suffix"] as? String ?? "", nickname: text("nickname"), organization: text("organization"),
             jobTitle: text("title"), phones: list("phones"), emails: list("emails"), postalAddresses: addresses,

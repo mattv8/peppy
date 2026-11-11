@@ -1039,15 +1039,19 @@ public actor NativeSession {
             guard (200..<300).contains(response.status) else { throw ClientError.server(status: response.status, code: nil) }
             // The vault is gone, so a normal device revoke cannot be retried. The durable relay
             // retirement queue survives a lost cleanup response and drains after deactivation.
-            try self.retireRelayWakeContexts()
-            guard try self.store.activeIdentity() == record.identity else { throw ClientError.identityMismatch }
             var cleanupError: ClientError?
+            try self.store.markVaultBindingCleanup(record.identity)
+            do {
+                try self.retireRelayWakeContexts()
+            } catch {
+                cleanupError = ClientError.wrap(error)
+            }
+            guard try self.store.activeIdentity() == record.identity else { throw ClientError.identityMismatch }
             do {
                 // A successful vault deletion is an explicit, irreversible local teardown. Unlike
                 // a revoked credential, this cannot be used to recover or re-enroll the deleted vault.
-                try self.store.markVaultBindingCleanup(record.identity)
                 try VaultSecretStore(secure: self.store.secure).deleteBinding(for: record.identity)
-                try self.store.clearVaultBindingCleanup()
+                try self.clearVaultBindingCleanupIfResolved(record.identity)
             } catch let error as ClientError {
                 cleanupError = error
             }
@@ -1060,7 +1064,28 @@ public actor NativeSession {
 
     private func retryVaultBindingCleanup() throws {
         guard let identity = try store.pendingVaultBindingCleanup() else { throw ClientError.notEnrolled }
+        try retireOrphanedRelayWakeContexts(for: identity)
         try VaultSecretStore(secure: store.secure).deleteBinding(for: identity)
+        try clearVaultBindingCleanupIfResolved(identity)
+    }
+
+    private func retireOrphanedRelayWakeContexts(for identity: EnrollmentIdentity) throws {
+        if try store.activeIdentity() == identity { throw ClientError.identityMismatch }
+        var contexts = try relayWakeContexts()
+        for index in contexts.indices where contexts[index].identity.origin == identity.origin &&
+            contexts[index].identity.vaultId == identity.vaultId && contexts[index].identity.deviceId == identity.deviceId {
+            contexts[index].retiring = true
+        }
+        try saveRelayWakeContexts(contexts)
+    }
+
+    private func clearVaultBindingCleanupIfResolved(_ identity: EnrollmentIdentity) throws {
+        guard try VaultSecretStore(secure: store.secure).read(identity) == nil else { return }
+        let contexts = try relayWakeContexts()
+        guard !contexts.contains(where: {
+            $0.identity.origin == identity.origin && $0.identity.vaultId == identity.vaultId && $0.identity.deviceId == identity.deviceId
+        }) else { return }
+        guard try store.pendingVaultBindingCleanup() == identity else { return }
         try store.clearVaultBindingCleanup()
     }
 
@@ -1190,6 +1215,9 @@ public actor NativeSession {
             await client.revoke()
             if (try? await client.hasPendingCleanup()) == false {
                 try? completeRetiringRelayWakeContext(context)
+                try? clearVaultBindingCleanupIfResolved(EnrollmentIdentity(
+                    origin: context.identity.origin, vaultId: context.identity.vaultId, deviceId: context.identity.deviceId
+                ))
             }
         }
     }
@@ -1344,16 +1372,23 @@ public actor NativeSession {
             if let open = record?.identity, open != identity { throw ClientError.identityMismatch }
             let record = try store.record(identity)
             if client == nil {
-                client = try openClient(identity)
-                status = SessionStatus(identity: identity, databaseOpen: true)
-                for (epoch, cache) in try store.keyCaches(identity, through: record.keyEpoch) {
+                let opened = try openClient(identity)
+                var openedStatus = SessionStatus(identity: identity, databaseOpen: true)
+                do {
+                    for (epoch, cache) in try store.keyCaches(identity, through: record.keyEpoch) {
                     do {
-                        try client?.importNativeKeyCacheFromNativeStorage(bytes: cache)
-                        if epoch == record.keyEpoch { status.keysUnlocked = true }
+                        try opened.importNativeKeyCacheFromNativeStorage(bytes: cache)
+                        if epoch == record.keyEpoch { openedStatus.keysUnlocked = true }
                     } catch {
-                        status.rejectedKeyCaches += 1
+                        openedStatus.rejectedKeyCaches += 1
                     }
                 }
+                } catch {
+                    try? opened.dispose()
+                    throw error
+                }
+                client = opened
+                status = openedStatus
             }
             self.record = record
             reachability.bind(identity)

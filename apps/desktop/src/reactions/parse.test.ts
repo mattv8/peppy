@@ -42,6 +42,11 @@ describe("parseReaction", () => {
     expect(quoteMatches("hello there", { quotedText: "hello", truncated: false })).toBe(false);
   });
 
+  it("removes only edge noise from a long reaction without changing its quoted content", () => {
+    const quotedText = `${" ".repeat(20_000)}a\u200Fb${"\t".repeat(20_000)}`;
+    expect(parseReaction(`\u200E\u2068Reacted 😆 to “${quotedText}”\u2069\uFEFF`)).toMatchObject({ quotedText: `a\u200Fb` });
+  });
+
   it("leaves Google reaction text unparsed when grapheme segmentation is unavailable", () => {
     vi.stubGlobal("Intl", { ...Intl, Segmenter: undefined });
     expect(parseReaction("Reacted 😆 to “hello”")).toBeNull();
