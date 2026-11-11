@@ -194,7 +194,7 @@ import {
   type DraftNoticeEvent,
 } from "./drafts/DraftStore";
 import { DraftNotice } from "./drafts/DraftNotice";
-import { DraftSyncStatus, draftSyncNeedsAttention, useDraftExpiryClock } from "./drafts/DraftSyncStatus";
+import { DraftSyncStatus } from "./drafts/DraftSyncStatus";
 import type { DraftResolutionResult } from "./drafts/DraftConflictReviewDialog";
 import { selectDraftNotice, type DraftNoticeCandidate } from "./drafts/draftNoticeModel";
 import { MmsSizeHelp } from "./drafts/MmsSizeHelp";
@@ -212,6 +212,30 @@ type ActionNotice = Omit<AppNotice, "source">;
 type ComposerFeedback = { key: string; message: string; severity: AppNotice["severity"]; kind?: "attachment-feedback" };
 type LocalCancellationState = "requested" | "too-late" | "unknown" | "failed";
 type CancellationState = NonNullable<MessageView["sendCancellation"]>["state"];
+export type PendingSend = {
+  id: string;
+  conversationId: string;
+  content: DraftContent;
+  createdAt: number;
+  baselineSelfIds: ReadonlySet<string>;
+};
+
+const PENDING_SEND_ECHO_WINDOW_MS = 5 * 60_000;
+
+/**
+ * Pending bubbles to show for the active conversation. Nothing is shown while a mid-history window is open.
+ * A bubble hides once a self message outside its baseline is timestamped at or after the send (minus a
+ * clock-skew window); an unparseable timestamp counts as a match.
+ */
+export function visiblePendingSends(pendingSends: PendingSend[], conversation: ConversationView | undefined, detached: boolean): PendingSend[] {
+  if (detached || !conversation) return [];
+  return pendingSends.filter((pending) => pending.conversationId === conversation.id
+    && !conversation.messages.some((message) => {
+      if (message.sender !== "self" || pending.baselineSelfIds.has(message.id)) return false;
+      const sentAt = Date.parse(message.timestamp);
+      return Number.isNaN(sentAt) || sentAt >= pending.createdAt - PENDING_SEND_ECHO_WINDOW_MS;
+    }));
+}
 
 export function cancellationDisplayState(authoritative: CancellationState | undefined, local: LocalCancellationState | undefined): CancellationState | LocalCancellationState | undefined {
   if (local === "too-late" || local === "unknown" || (local === "failed" && authoritative !== "requested")) return local;
@@ -523,7 +547,7 @@ function availabilityLabel(gateway: GatewayView, accountReadOnly = false): strin
   switch (gatewayAvailability(gateway)) {
     case "delayed": {
       const seen = gateway.lastSeenAgeSeconds !== undefined ? `Last seen ${formatAge(gateway.lastSeenAgeSeconds)} ago` : "Last seen";
-      return accountReadOnly ? `${peppyCopy.account_send_paused_status} · ${seen}` : seen;
+      return accountReadOnly ? `${peppyCopy.account_send_paused_status}, ${seen}` : seen;
     }
     case "offline": return "Not responding";
     case "never_connected": return "Never connected";
@@ -710,11 +734,11 @@ function headRoutePresentation(route: RouteChoice, gateways: GatewayView[], acco
   let state: string;
   switch (gatewayAvailability(route.gateway)) {
     case "connected": state = "Online"; break;
-    case "delayed": state = accountReadOnly ? `${peppyCopy.account_send_paused_status} · ${seenText(route.gateway)}` : seenText(route.gateway); break;
+    case "delayed": state = accountReadOnly ? `${peppyCopy.account_send_paused_status}, ${seenText(route.gateway)}` : seenText(route.gateway); break;
     case "offline": state = "Not responding"; break;
     default: state = availabilityLabel(route.gateway, accountReadOnly);
   }
-  return { sim: simLabel, state, label: `${simLabel} · ${state}` };
+  return { sim: simLabel, state, label: `${simLabel}, ${state}` };
 }
 
 function HeadRoutePill({ content, gateways, accountReadOnly = false }: { content: DraftContent; gateways: GatewayView[]; accountReadOnly?: boolean }) {
@@ -727,7 +751,7 @@ function HeadRoutePill({ content, gateways, accountReadOnly = false }: { content
     ? `${route.gateway.name}, ${sim ?? state}. Phone and SIM are selected in the main window.`
     : "Choose a phone and SIM in the main window.";
   return <section id="head-panel-route-section" aria-label="Phone and SIM" aria-describedby="head-panel-route-description" data-route-state={route.kind === "route" ? gatewayAvailability(route.gateway) : route.kind}>
-    <span id="head-panel-route" className="head-panel-route" title={tooltip} data-gateway-availability={route.kind === "route" ? gatewayAvailability(route.gateway) : undefined}>{sim && <span data-head-route-sim>{sim}</span>}{sim && <span data-head-route-separator>·</span>}<span data-head-route-state>{state}</span></span>
+    <span id="head-panel-route" className="head-panel-route" title={tooltip} data-gateway-availability={route.kind === "route" ? gatewayAvailability(route.gateway) : undefined}>{sim && <span data-head-route-sim data-route-badge="sim">{sim}</span>}<span data-head-route-state data-route-badge="status" data-gateway-availability={route.kind === "route" ? gatewayAvailability(route.gateway) : undefined}>{state}</span></span>
     <span id="head-panel-route-description" className="visually-hidden">{description}</span>
     <span className="visually-hidden" role="status" aria-live="polite">{label}</span>
   </section>;
@@ -816,6 +840,37 @@ class ReactionHintLayout extends Component<ReactionHintLayoutProps, Record<strin
   }
 }
 
+function PendingSendRow({ pending, message, attachmentViews, onOpenExternal }: {
+  pending: PendingSend;
+  message: MessageView;
+  attachmentViews: Record<string, AttachmentView>;
+  onOpenExternal?: (url: string) => Promise<void>;
+}) {
+  return (
+    <div
+      className="message-row self"
+      data-pending-send-id={pending.id}
+      data-sender="self"
+      aria-hidden="true"
+    >
+      <article className="message-bubble self" data-pending-send-id={pending.id}>
+        {message.body && <p><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
+        {pending.content.attachmentIds.map((id) => {
+          const attachment = attachmentViews[id];
+          return (
+            <div key={id} className="file-card">
+              {attachment?.mediaType.startsWith("image/") ? <Image size={16} aria-hidden /> : <FileText size={16} aria-hidden />}
+              <span><bdi>{attachment?.name ?? "Attachment"}</bdi></span>
+              {attachment && <small>{fileSize(attachment.byteSize)}</small>}
+            </div>
+          );
+        })}
+      </article>
+      <MessageMeta message={message} />
+    </div>
+  );
+}
+
 function MessageList({
   conversation,
   loading,
@@ -865,6 +920,8 @@ function MessageList({
   onEditGroupResend,
   onEditRcsUnsent,
   onCreateGroupAgain,
+  pendingSends,
+  attachmentViews,
 }: {
   conversation?: ConversationView;
   /** Copies a refused group message's body back into the composer. Nothing is sent. */
@@ -917,6 +974,8 @@ function MessageList({
   captureReactionLayout(): ReactionLayoutSnapshot | null;
   restoreReactionLayout(snapshot: ReactionLayoutSnapshot): void;
   toneOverrides?: Record<string, number>;
+  pendingSends: PendingSend[];
+  attachmentViews: Record<string, AttachmentView>;
 }) {
   const reactions = useMemo(() => showReactions && conversation ? linkReactions(conversation.messages) : NO_REACTIONS, [showReactions, conversation?.messages]);
   const [focusedNoticeId, setFocusedNoticeId] = useState<string>();
@@ -1058,7 +1117,19 @@ function MessageList({
       </div>
     );
   const conversationToneSeed = conversationAvatar({ id: conversation.id, name: conversation.name, participants: conversation.participants, recipientless: conversation.recipientlessDraft }).seed;
-  const visualMessages = conversation.messages.filter(message => message.sendCancellation?.state !== "confirmed" && !suppressed.has(message.id));
+  const pendingById = new Map(pendingSends.map((pending) => [pending.id, pending]));
+  const visualMessages = [
+    ...conversation.messages.filter(message => message.sendCancellation?.state !== "confirmed" && !suppressed.has(message.id)),
+    ...pendingSends.map((pending): MessageView => ({
+      id: pending.id,
+      revision: "pending",
+      sender: "self",
+      body: pending.content.text,
+      timestamp: new Date(pending.createdAt).toISOString(),
+      status: "queued-local",
+      attachments: [],
+    })),
+  ];
   const timeIsShown = (message: MessageView) => {
     const displayedTime = messageTime(message).displayedTime;
     return Boolean(formatDateTime(displayedTime) && isoDateTime(displayedTime));
@@ -1137,6 +1208,8 @@ function MessageList({
           if (item.kind === "notice") return <GroupNotice key={item.id} notice={item.notice} displayName={(address) => displayAddressName(address, resolution)} />;
           const group = item.group;
           const message = group.messages[0];
+          const pending = pendingById.get(message.id);
+          if (pending) return <PendingSendRow key={pending.id} pending={pending} message={message} attachmentViews={attachmentViews} onOpenExternal={onOpenExternal} />;
           const reactionNotice = reactions.notices.get(message.id);
           const imageRun = group.messages.every((candidate) => (candidate.transport === "mms" || candidate.transport === "rcs") && candidate.attachments.length > 0 && candidate.attachments.every((attachment) => attachment.mediaType.startsWith("image/")));
           const sender = senderRun(group);
@@ -1931,6 +2004,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   useMaximizeButtonRegion({ bridge, enabled: !browserHost && platform === "windows" && !composerConversation });
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
+  const [pendingSends, setPendingSends] = useState<PendingSend[]>([]);
+  const pendingSendGeneration = useRef(0);
+  const pendingSendSessionScope = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (pendingSendSessionScope.current !== undefined && pendingSendSessionScope.current !== snapshot?.sessionScopeId)
+      setPendingSends([]);
+    pendingSendSessionScope.current = snapshot?.sessionScopeId;
+  }, [snapshot?.sessionScopeId]);
   const [notificationRecoveryCount, setNotificationRecoveryCount] = useState(0);
   const [conversationTab, setConversationTab] = useState<ConversationTab>("messages");
   const [lightboxItems, setLightboxItems] = useState<GalleryMediaPageItem[] | null>(null);
@@ -4221,6 +4302,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setComposerNotice(slotKey, "");
     setDraftNotice((notice) => notice?.key === slotKey && notice.event === "stale-send" ? undefined : notice);
     draftNoticesRef.current.delete(slotKey);
+    let pendingSendId: string | undefined;
     try {
       let resolvedKey = store.resolve(slotKey);
       let flushed = await store.flush(resolvedKey);
@@ -4280,6 +4362,16 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         });
         store.release(current.key);
       };
+      const pendingSend: PendingSend = {
+        id: `pending:${current.id}:${++pendingSendGeneration.current}`,
+        conversationId: current.conversationId,
+        content: sendContent,
+        createdAt: Date.now(),
+        baselineSelfIds: new Set(latestConversation?.messages.filter((message) => message.sender === "self").map((message) => message.id)),
+      };
+      pendingSendId = pendingSend.id;
+      setPendingSends((sends) => [...sends, pendingSend]);
+      if (!detachedHistoryRef.current) nearBottom.current = true;
       store.hold(current.key);
       await store.edit(current.key, { text: "", attachmentIds: [], groupName: undefined });
       const sentSlot = store.get(current.key);
@@ -4389,6 +4481,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       }
       await refresh(current.conversationId).catch(reportRefresh(""));
     } finally {
+      if (pendingSendId) setPendingSends((sends) => sends.filter((pending) => pending.id !== pendingSendId));
       sendingRef.current = false;
       setSending(false);
     }
@@ -4833,7 +4926,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const accountIdentityKey = snapshot ? `${snapshot.connection.origin ?? ""}|${snapshot.sessionScopeId ?? ""}` : null;
   const accountNotice = useAccountNotice(accountIdentityKey);
   const [ribbonOpenFailed, setRibbonOpenFailed] = useState(false);
-  const draftStatusNow = useDraftExpiryClock(slot?.id ? draftViews[slot.id]?.sync?.expiresAt : undefined);
 
   /* Locked snapshots carry no conversations, contacts, or notifications, so nothing else renders. */
   if (!browserHost && (lockCode === "app-locked" || lockCode === "secure-store-unavailable" || lockCode === "app-lock-checking"))
@@ -5047,6 +5139,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setGroupNotice({ kind: "create-unconfirmed", key: slotKey });
   };
   const composerGroupNotice = groupNotice && groupNotice.key === slotKey ? groupNotice : null;
+  const hasGroupStatusNotices = Boolean(
+    (sending && isNewConversation && content.recipientIds.length > 1)
+    || composerGroupNotice
+    || groupLeft,
+  );
   const groupStatusNotices = <>
     {sending && isNewConversation && content.recipientIds.length > 1 && <GroupCreateProgress />}
     {composerGroupNotice?.kind === "members-changed" && <GroupMembersChangedNotice
@@ -5129,7 +5226,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const visibleDraftNotice = selectDraftNotice(noticeCandidates);
   const localSaveState = slotKey ? store.saveState(slotKey) : "idle";
   const hasDraftConflicts = Boolean(activeDraftView?.sync?.conflicts.length);
-  const statusActive = Boolean(notificationRecoveryCount || unavailableReason || visibleDraftNotice || activeDraftView?.sync?.notice === "updated-from-other-device" || draftSyncNeedsAttention({ draft: activeDraftView, offline: serverOffline, localSaveState, now: draftStatusNow }));
+  const draftSyncLocalSaveState = visibleDraftNotice?.kind === "save-failed" ? "idle" : localSaveState;
+  const statusActive = Boolean(
+    notificationRecoveryCount
+    || (unavailableReason && !hasDraftConflicts)
+    || rcsBlock.kind !== "none"
+    || hasGroupStatusNotices
+    || (mmsLimitShown && route.kind === "route"),
+  );
   const resolveDraftConflict = async (branchId: string | null): Promise<DraftResolutionResult> => {
     if (resolutionRef.current !== undefined) return { ok: false, message: "A version is already being applied." };
     if (!activeDraftView?.id || !slotKey)
@@ -5331,17 +5435,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 {fileSize(estimateBytes)} used · {fileSize(route.gateway.mmsMaxBytes ?? DEFAULT_MMS_LIMIT_BYTES)} limit ({route.gateway.mmsLimitSource === "carrier" ? "carrier" : "fallback"}) · up to {Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)} recipients
               </span>
             )}
-            <DraftNotice notice={visibleDraftNotice} noticeKey={slotKey} onAction={onDraftNoticeAction} busy={sending || noticeActionBusy} />
-            <DraftSyncStatus
-              draft={activeDraftView}
-              local={content}
-              attachments={attachmentViews}
-              offline={serverOffline}
-              localSaveState={localSaveState}
-              onResolveConflict={resolveDraftConflict}
-              onAcknowledgeNotice={acknowledgeDraftSyncNotice}
-              onAutoAcknowledgeNotice={() => acknowledgeDraftSyncNotice(false)}
-            />
             {!browserHost && !composerConversation && notificationRecoveryBridge && (
               <NotificationReplyRecovery
                 bridge={notificationRecoveryBridge}
@@ -5365,6 +5458,19 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             )}
           </>
         }
+        inlineStatusSlot={<>
+          <DraftNotice notice={visibleDraftNotice} noticeKey={slotKey} onAction={onDraftNoticeAction} busy={sending || noticeActionBusy} />
+          <DraftSyncStatus
+            draft={activeDraftView}
+            local={content}
+            attachments={attachmentViews}
+            offline={serverOffline}
+            localSaveState={draftSyncLocalSaveState}
+            onResolveConflict={resolveDraftConflict}
+            onAcknowledgeNotice={acknowledgeDraftSyncNotice}
+            onAutoAcknowledgeNotice={() => acknowledgeDraftSyncNotice(false)}
+          />
+        </>}
         composerName={title}
         composerUserSized={composerHeight !== null}
         maxAutoGrowHeight={maxAutoGrowHeight}
@@ -5450,6 +5556,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       <MessageList
       key={reactionScopeKey}
       conversation={active}
+      pendingSends={visiblePendingSends(pendingSends, active, Boolean(detachedHistory && detachedHistory.conversationId === active?.id && detachedHistory.hasNewer))}
+      attachmentViews={attachmentViews}
       loading={Boolean(active) && !conversationLoaded}
       registerRow={registerRow}
       publicCopies={publicCopies}

@@ -11,7 +11,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { conversationAvatar, formatDateTime, isoDateTime, paletteIndex } from "@peppy/desktop-ui";
-import { App, DraftStore, nextComposerDraftIdentity, searchRecipientSuggestions } from "./App";
+import { App, DraftStore, nextComposerDraftIdentity, searchRecipientSuggestions, visiblePendingSends, type PendingSend } from "./App";
 import {
   bridge,
   fixtureBridge,
@@ -3046,7 +3046,7 @@ describe("new-recipient drafts", () => {
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Draft not saved. Your text is kept.",
+      "Error saving draft.",
     );
     expect(document.querySelector('[data-recipient-id="+12025550100"]')).toBeInTheDocument();
 
@@ -3355,18 +3355,46 @@ describe("draft durability", () => {
   it("shows a quiet retry notice when saving the active draft fails", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
     host.failSaves = { code: "io", message: "Disk full." };
 
     type("kept locally");
 
     const notice = await screen.findByRole("alert");
     expect(notice).toHaveAttribute("data-draft-notice");
+    expect(notice).toHaveTextContent("Error saving draft.");
+    expect(notice.closest("#composer-inline-status")).not.toBeNull();
+    expect(within(document.getElementById("composer-inline-status")!).getAllByText("Error saving draft.")).toHaveLength(1);
+    expect(document.getElementById("composer-status-row")).toHaveAttribute("hidden");
     expect(within(notice).getByRole("button", { name: "Retry" })).toBeEnabled();
+  });
+
+  it("keeps a distinct draft sync failure alongside a save-failed notice", async () => {
+    host.drafts.set("aurora", {
+      id: "draft-aurora",
+      conversationId: "aurora",
+      text: "stored",
+      recipientIds: [],
+      attachmentIds: [],
+      revision: "1",
+      sync: { state: "failed", expiresAt: null, conflicts: [], notice: null, sendRequiresConnection: false },
+    });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    host.failSaves = { code: "io", message: "Disk full." };
+
+    type("kept locally");
+
+    const inlineStatus = document.getElementById("composer-inline-status")!;
+    expect(await within(inlineStatus).findByText("Error saving draft.")).toBeInTheDocument();
+    expect(within(inlineStatus).getAllByText("Error saving draft.")).toHaveLength(1);
+    expect(within(inlineStatus).getByText("Draft sync failed.")).toBeInTheDocument();
   });
 
   it("keeps ordinary autosaves quiet with no saved notice", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
+    expect(document.getElementById("composer-inline-status")).toBeEmptyDOMElement();
 
     type("first quiet edit");
     await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("first quiet edit"));
@@ -3429,6 +3457,146 @@ describe("draft durability", () => {
 
     await waitFor(() => expect(message()).toHaveValue("next message"));
     expect(host.sent[0]?.text).toBe("sent message");
+  });
+
+  it("shows a queued local bubble while a send is pending", async () => {
+    const response = delayAcceptedSend();
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("queued message");
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => {
+      const pending = document.querySelector("[data-pending-send-id]");
+      expect(pending).toHaveTextContent("queued message");
+      expect(pending).toHaveTextContent("Queued locally");
+    });
+
+    response.resolve();
+    await waitFor(() => expect(document.querySelector("[data-pending-send-id]")).toBeNull());
+  });
+
+  it("removes a pending bubble when the send is rejected, after the draft is restored", async () => {
+    const rejection = deferred<Awaited<ReturnType<typeof bridge.send_draft>>>();
+    vi.mocked(bridge.send_draft).mockReturnValueOnce(rejection.promise);
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("rejected message");
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(document.querySelector("[data-pending-send-id]")).toHaveTextContent("rejected message"));
+
+    rejection.resolve({ accepted: false, status: "failed-before-submit", reason: "Carrier refused the message." });
+
+    await waitFor(() => expect(message()).toHaveValue("rejected message"));
+    await waitFor(() => expect(document.querySelector("[data-pending-send-id]")).toBeNull());
+  });
+
+  it("shows the real queued row once and drops the pending bubble when refresh lands before send_draft settles", async () => {
+    const response = deferred<void>();
+    vi.mocked(bridge.send_draft).mockImplementationOnce(async (input) => {
+      const accepted = host.send(input);
+      await response.promise;
+      return accepted;
+    });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("early refresh message");
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(document.querySelector("[data-pending-send-id]")).toHaveTextContent("early refresh message"));
+
+    host.conversations[0] = {
+      ...host.conversations[0],
+      messages: [...host.conversations[0].messages, {
+        id: "queued-early-row",
+        revision: "1",
+        sender: "self",
+        body: "early refresh message",
+        timestamp: new Date().toISOString(),
+        status: "queued-local",
+        attachments: [],
+      }],
+    };
+    await act(async () => hint?.());
+
+    await waitFor(() => expect(document.querySelector('[data-message-id="queued-early-row"]')).toBeInTheDocument());
+    expect(document.querySelector("[data-pending-send-id]")).toBeNull();
+    expect(screen.getAllByText("early refresh message")).toHaveLength(1);
+
+    response.resolve();
+    await waitFor(() => expect(screen.getAllByText("early refresh message")).toHaveLength(1));
+    expect(document.querySelector("[data-pending-send-id]")).toBeNull();
+  });
+
+  it("replaces a pending bubble with the real queued row after refresh", async () => {
+    vi.mocked(bridge.send_draft).mockImplementationOnce(async (input) => {
+      const result = host.send(input);
+      host.conversations[0] = {
+        ...host.conversations[0],
+        messages: [...host.conversations[0].messages, {
+          id: "queued-real-row",
+          revision: "1",
+          sender: "self",
+          body: input.text,
+          timestamp: new Date().toISOString(),
+          status: "queued-local",
+          attachments: [],
+        }],
+      };
+      return result;
+    });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("real queued message");
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(document.querySelector('[data-message-id="queued-real-row"]')).toBeInTheDocument());
+    expect(document.querySelector("[data-pending-send-id]")).toBeNull();
+    expect(screen.getAllByText("real queued message")).toHaveLength(1);
+  });
+
+  it("keeps a pending bubble when an older self message outside its baseline predates the send window", () => {
+    const createdAt = Date.parse("2026-01-01T12:00:00Z");
+    const pending: PendingSend = {
+      id: "pending:draft-aurora:1",
+      conversationId: "aurora",
+      content: { text: "queued", recipientIds: [], attachmentIds: [] },
+      createdAt,
+      baselineSelfIds: new Set(),
+    };
+    const conversation = {
+      id: "aurora",
+      messages: [{ id: "old-self", revision: "1", sender: "self", body: "earlier", timestamp: new Date(createdAt - 6 * 60_000).toISOString(), attachments: [] }],
+    } as unknown as Parameters<typeof visiblePendingSends>[1];
+
+    expect(visiblePendingSends([pending], conversation, false)).toEqual([pending]);
+    expect(visiblePendingSends([pending], conversation, true)).toEqual([]);
+  });
+
+  it("hides a pending bubble once a fresh self message outside its baseline arrives", () => {
+    const createdAt = Date.parse("2026-01-01T12:00:00Z");
+    const pending: PendingSend = {
+      id: "pending:draft-aurora:1",
+      conversationId: "aurora",
+      content: { text: "queued", recipientIds: [], attachmentIds: [] },
+      createdAt,
+      baselineSelfIds: new Set(["baseline-self"]),
+    };
+    const conversation = {
+      id: "aurora",
+      messages: [
+        { id: "baseline-self", revision: "1", sender: "self", body: "before", timestamp: new Date(createdAt - 60_000).toISOString(), attachments: [] },
+        { id: "fresh-self", revision: "1", sender: "self", body: "queued", timestamp: new Date(createdAt + 1_000).toISOString(), attachments: [] },
+      ],
+    } as unknown as Parameters<typeof visiblePendingSends>[1];
+
+    expect(visiblePendingSends([pending], conversation, false)).toEqual([]);
   });
 
   it("restores a failed send without overwriting the next message buffer", async () => {
@@ -3530,7 +3698,7 @@ describe("draft durability", () => {
     type("latest text");
     const saveFailure = await screen.findByRole("alert");
     expect(saveFailure).toHaveAttribute("data-draft-notice", "save-failed");
-    expect(saveFailure).toHaveTextContent("Draft not saved. Your text is kept.");
+    expect(saveFailure).toHaveTextContent("Error saving draft.");
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     expect(bridge.send_draft).not.toHaveBeenCalled();
     expect(screen.getByRole("alert")).toHaveAttribute("data-draft-notice", "save-failed");
@@ -4024,7 +4192,7 @@ describe("draft durability", () => {
 
     const failure = await screen.findByRole("alert");
     expect(failure).toHaveAttribute("data-draft-notice", "save-failed");
-    expect(failure).toHaveTextContent("Draft not saved. Your text is kept.");
+    expect(failure).toHaveTextContent("Error saving draft.");
     expect(within(failure).getByRole("button", { name: "Retry" })).toBeEnabled();
     expect(message()).toHaveValue("mine");
     expect(host.drafts.get("aurora")).toMatchObject({ text: "other window", simId: "sim-1" });
@@ -4328,7 +4496,7 @@ describe("draft durability", () => {
     await waitFor(() => expect(bridge.acknowledge_lifecycle).toHaveBeenCalledWith("close-with-river-failure", false));
     expect(document.querySelector("[data-header-title]")).toHaveTextContent("River");
     const draftFailure = document.querySelector<HTMLElement>("[data-draft-notice='save-failed']")!;
-    expect(draftFailure).toHaveTextContent("Draft not saved. Your text is kept.");
+    expect(draftFailure).toHaveTextContent("Error saving draft.");
     expect(within(draftFailure).getByRole("button", { name: "Retry" })).toBeEnabled();
   });
 
@@ -4540,8 +4708,12 @@ describe("composer window", () => {
     });
     expect(pill).toHaveAttribute("title", "Phone: choose this phone and SIM in the main window.");
     expect(pill).toHaveAttribute("data-gateway-availability", "connected");
-    expect(pill).toHaveTextContent("SIM 2");
-    expect(pill).toHaveTextContent("Online");
+    expect(pill.querySelector("[data-head-route-sim]")).toHaveTextContent("SIM 2");
+    expect(pill.querySelector("[data-head-route-sim]")).toHaveAttribute("data-route-badge", "sim");
+    expect(pill.querySelector("[data-head-route-state]")).toHaveTextContent("Online");
+    expect(pill.querySelector("[data-head-route-state]")).toHaveAttribute("data-route-badge", "status");
+    expect(pill.querySelector("[data-head-route-state]")).toHaveAttribute("data-gateway-availability", "connected");
+    expect(pill.querySelector("[data-head-route-separator]")).not.toBeInTheDocument();
     expect(pill.querySelector("[aria-hidden]")).not.toBeInTheDocument();
     expect(document.getElementById("head-panel-route-description")).toHaveTextContent("Phone, SIM 2. Phone and SIM are selected in the main window.");
     expect(screen.queryByRole("combobox", { name: "Phone" })).not.toBeInTheDocument();
@@ -4633,7 +4805,8 @@ describe("composer window", () => {
       if (routeCase.draft) host.drafts.set("aurora", routeCase.draft);
       openComposerWindow("aurora", true);
       render(<App />);
-      await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent(routeCase.label.replace(" · ", "·")));
+      await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent(routeCase.label.replace(" · ", "")));
+      expect(document.querySelector("[data-head-route-separator]")).not.toBeInTheDocument();
       expect(screen.queryByRole("combobox", { name: "Phone" })).not.toBeInTheDocument();
     }
   });

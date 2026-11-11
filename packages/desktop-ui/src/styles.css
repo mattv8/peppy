@@ -729,6 +729,21 @@ select:focus-visible {
 .composer-toolbar-spacer {
   flex: 1;
 }
+#composer-inline-status {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+  position: relative;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--peppy-text-secondary);
+}
+#composer-inline-status:empty { display: none; }
+#composer-toolbar:has(#composer-inline-status :is([data-tone="error"], [data-tone="warning"], #draft-sync-status, #draft-notice-action)) #shift-enter-hint { display: none; }
 #composer-toolbar button {
   display: grid;
   width: 28px;
@@ -739,6 +754,14 @@ select:focus-visible {
   background: transparent;
   color: var(--peppy-text-secondary);
 }
+#composer-toolbar #composer-inline-status :is(#draft-notice > button, #draft-sync-status > button, [data-draft-sync-notice] > button, [data-draft-expiry-warning] > button) {
+  display: inline-flex;
+  align-items: center;
+  width: auto;
+  height: auto;
+  flex: 0 0 auto;
+}
+#composer-toolbar #composer-inline-status :is(dialog, [role="dialog"], [role="alertdialog"]) { white-space: normal; font-size: var(--peppy-font-size, 13px); line-height: normal; }
 #composer-toolbar .send-button {
   width: 32px;
   height: 32px;
@@ -804,21 +827,47 @@ select:focus-visible {
 #draft-notice[data-tone="warning"] { color: var(--peppy-warning-text); }
 #draft-notice[data-tone="error"] { color: var(--peppy-error-text); }
 #draft-notice .draft-notice-message { min-width: 0; overflow-wrap: anywhere; }
-#draft-notice-action {
+#composer-inline-status #draft-notice {
+  flex-wrap: nowrap;
+  margin: 0;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+#composer-inline-status > * + * { margin-left: 8px; }
+#composer-inline-status #draft-sync-status { flex-shrink: 3; }
+#composer-inline-status #draft-notice .draft-notice-message,
+#composer-inline-status [data-inline-status-message] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  min-width: 3ch;
+  flex: 0 1 auto;
+}
+#composer-inline-status :is(#draft-notice > button, #draft-sync-status > button, [data-draft-sync-notice] > button) {
   flex: 0 0 auto;
-  min-height: 20px;
+  min-height: 24px;
   padding: 0 6px;
   border: 0;
-  border-radius: var(--peppy-radius-sm);
   background: transparent;
   color: var(--peppy-text-primary);
   font: inherit;
+  line-height: 16px;
   text-decoration: underline;
+  text-underline-offset: 2px;
   cursor: pointer;
+  white-space: nowrap;
 }
-#draft-notice-action:hover { background: var(--peppy-surface-hover); }
-#draft-notice-action:focus-visible { outline: 1px solid var(--peppy-focus); outline-offset: 1px; }
-#draft-notice-action[aria-disabled="true"] { color: var(--peppy-text-muted); background: transparent; cursor: default; }
+#composer-inline-status :is(#draft-notice > button, #draft-sync-status > button, [data-draft-sync-notice] > button):hover { background: var(--peppy-surface-hover); }
+#composer-inline-status :is(#draft-notice > button, #draft-sync-status > button, [data-draft-sync-notice] > button):focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 1px; }
+#composer-inline-status :is(#draft-notice > button, #draft-sync-status > button, [data-draft-sync-notice] > button)[aria-disabled="true"] { color: var(--peppy-text-muted); background: transparent; cursor: default; }
+#composer-inline-status :is([data-draft-sync-notice] > button, [data-draft-expiry-warning] > button) {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+}
 .busy-indicator {
   display: inline-flex;
   align-items: center;
@@ -1264,6 +1313,7 @@ select:focus-visible {
 @media (pointer: coarse) {
   .attachment-storage-info-button, .info-button, .link-button, #billing-elsewhere-manage, #attachment-storage-addon-manage, #attachment-storage-addon-retry, #hosted-store-retry, #hosted-restore-button, #hosted-plan-options .primary-button { min-width: 44px; min-height: 44px; }
   #composer-toolbar button, .attachment-remove, .attachment-retry { min-width: 48px; min-height: 48px; }
+  #composer-toolbar #composer-inline-status :is(#draft-notice > button, #draft-sync-status > button, [data-draft-sync-notice] > button, [data-draft-expiry-warning] > button) { min-width: 48px; min-height: 48px; }
   .attachment-chip { grid-template-columns: minmax(0, 1fr) 48px; }
   .attachment-remove { width: 48px; height: 48px; }
   #attachment-tray[data-attachment-layout="rows"] .attachment-chip { grid-template-columns: 46px minmax(0, 1fr) 48px; }

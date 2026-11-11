@@ -250,3 +250,29 @@ truncation, and agree/decline actions remain reachable at large text sizes. Use
 native typography and at least 48dp Android / 44pt iOS touch targets. A toggle row
 has one accessible switch action, not nested competing toggle targets. Keep
 coral as graphic emphasis or a paired action fill, not normal-size body text.
+
+## Composer status and route badges
+
+These match the desktop composer; keep them consistent across platforms.
+
+- Show phone and SIM route facts as separate filled badges: one badge per value
+  (for example `SIM 1` and `Online`). Do not use outlined pills or join the values
+  with a separator. Use a neutral raised surface fill with a small corner radius.
+  Only the state badge takes a semantic availability color, and its text still
+  states the meaning, so color is never the only signal.
+- Show every draft status on the composer action row, directly after the route
+  badges, on one line. This includes saving, loading, save failures, sync review,
+  moved or replaced drafts, and send failures. Non-draft route or sending
+  blockers keep their own line above the action row.
+- Keep draft status short and direct; for example, use **Error saving draft.**
+  with **Retry**, not a sentence that explains internal save state. When space
+  runs out, truncate the message with an ellipsis. Action buttons, badges and
+  Send never shrink or wrap. Optional hints such as keyboard shortcuts hide
+  first. Accessibility labels and announcements carry the full message.
+- Show brief pending states such as **Saving…** only after a short delay, so
+  quick saves do not flash. Never stack two messages that report the same
+  failure.
+- When a confirmation needs more than one line, such as discarding local
+  changes, show it in an anchored popover or sheet above the action row. Do not
+  grow the row. The popover keeps the full destructive consequence and explicit
+  Cancel and confirm actions.

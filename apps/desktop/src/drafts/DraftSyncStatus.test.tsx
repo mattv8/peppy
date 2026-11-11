@@ -103,6 +103,8 @@ describe("DraftSyncStatus", () => {
     renderStatus({ draft: statusDraft, offline, localSaveState });
 
     expect(document.querySelector("[data-draft-sync-message]")).toHaveTextContent(message);
+    expect(document.querySelector("[data-draft-sync-message]")).toHaveAttribute("data-inline-status-message");
+    expect(document.querySelector("[data-draft-sync-message]")).toHaveAttribute("title", message);
   });
 
   it("stays silent for a paused sync that does not block sending", () => {
@@ -118,6 +120,7 @@ describe("DraftSyncStatus", () => {
     renderStatus({ draft: draft({ notice }) });
 
     expect(document.querySelector("[data-draft-sync-notice]")).toHaveTextContent(text);
+    expect(document.querySelector("[data-draft-sync-notice] > [data-inline-status-message]")).toHaveAttribute("title", text);
     expect(screen.queryByText("New 30-day period")).not.toBeInTheDocument();
   });
 
@@ -138,6 +141,7 @@ describe("DraftSyncStatus", () => {
 
       expect(screen.getByRole("status")).toHaveTextContent("Updated from your other device.");
       expect(document.querySelector("#draft-sync-status")).toContainElement(screen.getByRole("status"));
+      expect(document.querySelector("[data-draft-sync-notice] > [data-inline-status-message]")).toHaveAttribute("title", "Updated from your other device.");
 
       act(() => { vi.advanceTimersByTime(4_000); });
 

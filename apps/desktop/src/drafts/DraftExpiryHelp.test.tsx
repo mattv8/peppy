@@ -9,6 +9,7 @@ describe("DraftExpiryHelp", () => {
   it("opens only on click of the info button", () => {
     render(<DraftExpiryHelp draftId="draft-1" label="Expires within 24 hours" nearExpiry />);
 
+    expect(document.querySelector("[data-draft-expiry-warning] > [data-inline-status-message]")).toHaveAttribute("title", "Expires within 24 hours");
     expect(screen.queryByRole("dialog", { name: "Draft expiry" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "About draft expiry" }));
     expect(screen.getByRole("dialog", { name: "Draft expiry" })).toBeInTheDocument();

@@ -261,7 +261,7 @@ describe("RCS conversation route", () => {
       releaseSave?.();
     });
 
-    await waitFor(() => expect(document.getElementById("composer-status-row")).toHaveTextContent(`Not sent: ${peppyCopy.rcs_composer_reason_unproven}.`));
+    await waitFor(() => expect(document.getElementById("composer-inline-status")).toHaveTextContent(`Not sent: ${peppyCopy.rcs_composer_reason_unproven}.`));
     expect(textarea).toHaveValue("Keep this draft");
     expect(sendDraft).not.toHaveBeenCalled();
   });
