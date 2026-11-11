@@ -11,7 +11,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { conversationAvatar, formatDateTime, isoDateTime, paletteIndex } from "@peppy/desktop-ui";
-import { App, DraftStore, nextComposerDraftIdentity, searchRecipientSuggestions } from "./App";
+import { App, DraftStore, nextComposerDraftIdentity, searchRecipientSuggestions, visiblePendingSends, type PendingSend } from "./App";
 import {
   bridge,
   fixtureBridge,
@@ -3457,6 +3457,146 @@ describe("draft durability", () => {
 
     await waitFor(() => expect(message()).toHaveValue("next message"));
     expect(host.sent[0]?.text).toBe("sent message");
+  });
+
+  it("shows a queued local bubble while a send is pending", async () => {
+    const response = delayAcceptedSend();
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("queued message");
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => {
+      const pending = document.querySelector("[data-pending-send-id]");
+      expect(pending).toHaveTextContent("queued message");
+      expect(pending).toHaveTextContent("Queued locally");
+    });
+
+    response.resolve();
+    await waitFor(() => expect(document.querySelector("[data-pending-send-id]")).toBeNull());
+  });
+
+  it("removes a pending bubble when the send is rejected, after the draft is restored", async () => {
+    const rejection = deferred<Awaited<ReturnType<typeof bridge.send_draft>>>();
+    vi.mocked(bridge.send_draft).mockReturnValueOnce(rejection.promise);
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("rejected message");
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(document.querySelector("[data-pending-send-id]")).toHaveTextContent("rejected message"));
+
+    rejection.resolve({ accepted: false, status: "failed-before-submit", reason: "Carrier refused the message." });
+
+    await waitFor(() => expect(message()).toHaveValue("rejected message"));
+    await waitFor(() => expect(document.querySelector("[data-pending-send-id]")).toBeNull());
+  });
+
+  it("shows the real queued row once and drops the pending bubble when refresh lands before send_draft settles", async () => {
+    const response = deferred<void>();
+    vi.mocked(bridge.send_draft).mockImplementationOnce(async (input) => {
+      const accepted = host.send(input);
+      await response.promise;
+      return accepted;
+    });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("early refresh message");
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(document.querySelector("[data-pending-send-id]")).toHaveTextContent("early refresh message"));
+
+    host.conversations[0] = {
+      ...host.conversations[0],
+      messages: [...host.conversations[0].messages, {
+        id: "queued-early-row",
+        revision: "1",
+        sender: "self",
+        body: "early refresh message",
+        timestamp: new Date().toISOString(),
+        status: "queued-local",
+        attachments: [],
+      }],
+    };
+    await act(async () => hint?.());
+
+    await waitFor(() => expect(document.querySelector('[data-message-id="queued-early-row"]')).toBeInTheDocument());
+    expect(document.querySelector("[data-pending-send-id]")).toBeNull();
+    expect(screen.getAllByText("early refresh message")).toHaveLength(1);
+
+    response.resolve();
+    await waitFor(() => expect(screen.getAllByText("early refresh message")).toHaveLength(1));
+    expect(document.querySelector("[data-pending-send-id]")).toBeNull();
+  });
+
+  it("replaces a pending bubble with the real queued row after refresh", async () => {
+    vi.mocked(bridge.send_draft).mockImplementationOnce(async (input) => {
+      const result = host.send(input);
+      host.conversations[0] = {
+        ...host.conversations[0],
+        messages: [...host.conversations[0].messages, {
+          id: "queued-real-row",
+          revision: "1",
+          sender: "self",
+          body: input.text,
+          timestamp: new Date().toISOString(),
+          status: "queued-local",
+          attachments: [],
+        }],
+      };
+      return result;
+    });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("real queued message");
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(document.querySelector('[data-message-id="queued-real-row"]')).toBeInTheDocument());
+    expect(document.querySelector("[data-pending-send-id]")).toBeNull();
+    expect(screen.getAllByText("real queued message")).toHaveLength(1);
+  });
+
+  it("keeps a pending bubble when an older self message outside its baseline predates the send window", () => {
+    const createdAt = Date.parse("2026-01-01T12:00:00Z");
+    const pending: PendingSend = {
+      id: "pending:draft-aurora:1",
+      conversationId: "aurora",
+      content: { text: "queued", recipientIds: [], attachmentIds: [] },
+      createdAt,
+      baselineSelfIds: new Set(),
+    };
+    const conversation = {
+      id: "aurora",
+      messages: [{ id: "old-self", revision: "1", sender: "self", body: "earlier", timestamp: new Date(createdAt - 6 * 60_000).toISOString(), attachments: [] }],
+    } as unknown as Parameters<typeof visiblePendingSends>[1];
+
+    expect(visiblePendingSends([pending], conversation, false)).toEqual([pending]);
+    expect(visiblePendingSends([pending], conversation, true)).toEqual([]);
+  });
+
+  it("hides a pending bubble once a fresh self message outside its baseline arrives", () => {
+    const createdAt = Date.parse("2026-01-01T12:00:00Z");
+    const pending: PendingSend = {
+      id: "pending:draft-aurora:1",
+      conversationId: "aurora",
+      content: { text: "queued", recipientIds: [], attachmentIds: [] },
+      createdAt,
+      baselineSelfIds: new Set(["baseline-self"]),
+    };
+    const conversation = {
+      id: "aurora",
+      messages: [
+        { id: "baseline-self", revision: "1", sender: "self", body: "before", timestamp: new Date(createdAt - 60_000).toISOString(), attachments: [] },
+        { id: "fresh-self", revision: "1", sender: "self", body: "queued", timestamp: new Date(createdAt + 1_000).toISOString(), attachments: [] },
+      ],
+    } as unknown as Parameters<typeof visiblePendingSends>[1];
+
+    expect(visiblePendingSends([pending], conversation, false)).toEqual([]);
   });
 
   it("restores a failed send without overwriting the next message buffer", async () => {
