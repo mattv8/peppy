@@ -11804,9 +11804,9 @@ fn emit_status(
     )
 }
 
-/// Whether the last published eligibility still says what a new publication would say. A
-/// publication from before the link last returned does not count: peers ignore it. Neither does
-/// a recent republication of an old observation: peers judge freshness by the observation.
+/// Whether publishing again would tell peers nothing new. A publication observed before
+/// linked-since does not count: peers ignore it. Otherwise an unchanged value is suppressed only
+/// for the republish floor, which stops a caller that publishes on every attempt.
 fn eligibility_already_published(
     previous_body: &str,
     published_at_ms: i64,

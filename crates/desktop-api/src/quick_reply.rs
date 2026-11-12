@@ -319,6 +319,65 @@ mod tests {
     }
 
     #[test]
+    fn rcs_route_accepts_old_eligibility_while_the_gateway_status_is_fresh() {
+        use peppy_client_core::{
+            ClientConfig, DatabaseKey, RcsEligibilityProjection, RcsLinkStatusEvent, VaultId,
+        };
+
+        const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
+        let gateway = DeviceId::new();
+        let conversation = ConversationId::new();
+        let directory =
+            std::env::temp_dir().join(format!("desktop-quick-reply-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.join("client.db"),
+                vault_id: VaultId::new(),
+                device_id: gateway,
+            },
+            DatabaseKey::new(&[7; 32]).unwrap(),
+        )
+        .unwrap();
+        let now_ms: i64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .try_into()
+            .unwrap();
+        client
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id: gateway,
+                    state: RcsCapabilityState::Linked,
+                    availability: true,
+                    health: true,
+                    phone_responsive: true,
+                    observed_at_ms: now_ms,
+                    capability_revision: 1,
+                    feature_bits: 0,
+                    linked_since_ms: Some(now_ms - DAY_MS),
+                },
+                &[RcsEligibilityProjection {
+                    conversation_id: conversation,
+                    eligibility: RcsEligibility::Eligible,
+                    feature_bits: 0,
+                    mapping_revision: 1,
+                    observed_at_ms: now_ms - DAY_MS,
+                    gateway_device_id: gateway,
+                }],
+                now_ms,
+            )
+            .unwrap();
+
+        let result = validate_rcs_route(&client, conversation, gateway);
+        drop(client);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn quick_reply_rejects_an_invalid_gateway_id() {
         assert!(parse_device("not-a-device").is_err());
     }
