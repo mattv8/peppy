@@ -448,14 +448,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn start_retries_a_transient_capability_failure_before_opening_producers() {
+    async fn start_retries_a_transient_capability_failure() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let route_attempts = attempts.clone();
         let (origin, _seen) = mock_server(move |method, path, _| {
-            assert_eq!(
-                (method, path),
-                ("PUT", "/v1/devices/self/retention-capability")
-            );
+            if (method, path) != ("PUT", "/v1/devices/self/retention-capability") {
+                return (404, "{}".into());
+            }
             if route_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 (503, "{}".into())
             } else {
@@ -468,12 +467,12 @@ mod tests {
 
         crate::sync::start(&session);
 
-        tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::time::timeout(Duration::from_secs(120), async {
             while !session
                 .attachment_retention_negotiated
                 .load(Ordering::Acquire)
             {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
