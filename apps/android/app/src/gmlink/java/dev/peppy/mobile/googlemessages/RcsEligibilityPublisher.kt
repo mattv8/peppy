@@ -1,5 +1,6 @@
 package dev.peppy.mobile.googlemessages
 
+import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
 import uniffi.peppy_mobile_bindings.NativeClient
 import uniffi.peppy_mobile_bindings.NativeRcsEligibilityPublication
 import uniffi.peppy_mobile_bindings.gatewayPublishRcsEligibility
@@ -33,5 +34,7 @@ internal class GeneratedRcsEligibilityPublisherPort(
     private val client: NativeClient,
 ) : RcsEligibilityPublisherPort {
     override fun publish(publications: List<NativeRcsEligibilityPublication>, nowMs: Long): UInt =
-        runCatching { gatewayPublishRcsEligibility(client, publications, nowMs) }.getOrDefault(0u)
+        runCatching { gatewayPublishRcsEligibility(client, publications, nowMs) }
+            .onFailure { recordGoogleMessagesLinkEvent("link", "rcs_eligibility_failed", 0) }
+            .getOrDefault(0u)
 }

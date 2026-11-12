@@ -1845,75 +1845,9 @@ impl Client {
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let lifecycle = rcs_mapping::recorded_link_lifecycle_metadata(&tx)?;
-        let status = rcs_capability::status_projection(&tx, ctx.device_id, now_ms)?;
-        let linked = lifecycle.as_ref().is_some_and(|lifecycle| {
-            lifecycle.state == RcsCapabilityState::Linked
-                && status.as_ref().is_some_and(|status| {
-                    status.current && status.status.state == RcsCapabilityState::Linked
-                })
-        });
-        let feature_bits = status
-            .as_ref()
-            .filter(|status| linked && status.status.state == RcsCapabilityState::Linked)
-            .map_or(0, |status| status.status.feature_bits);
-        let linked_since_ms = rcs_capability::linked_since(&tx, ctx.device_id)?;
         let mut published = 0;
         for conversation_id in conversation_ids {
-            // A 1:1 mapping, or a group mapping that is Live (only Live groups are eligible).
-            let mapped = linked
-                && (rcs_mapping::get(&tx, *conversation_id)?.is_some()
-                    || rcs_group::proved_member_revision(&tx, *conversation_id)?.is_some());
-            let eligibility = if !linked {
-                RcsEligibility::Unknown
-            } else if mapped {
-                RcsEligibility::Eligible
-            } else {
-                RcsEligibility::NotEligible
-            };
-            let identity = format!("eligibility:{}:{}", ctx.device_id, conversation_id);
-            let previous: Option<(u64, String, i64)> = tx
-                .query_row(
-                    "SELECT revision,body,published_at_ms FROM rcs_capability_published WHERE identity=?",
-                    [&identity],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()?;
-            if previous.as_ref().is_some_and(|(_, body, published_at_ms)| {
-                eligibility_already_published(
-                    body,
-                    *published_at_ms,
-                    eligibility,
-                    feature_bits,
-                    linked_since_ms,
-                    now_ms,
-                )
-            }) {
-                continue;
-            }
-            let revision = previous
-                .map_or(0, |(revision, _, _)| revision)
-                .checked_add(1)
-                .filter(|revision| *revision <= i64::MAX as u64)
-                .ok_or(Error::InvalidRequest("RCS eligibility revision exhausted"))?;
-            let projection = RcsEligibilityProjection {
-                conversation_id: *conversation_id,
-                eligibility,
-                feature_bits,
-                mapping_revision: revision,
-                observed_at_ms: now_ms,
-                gateway_device_id: ctx.device_id,
-            };
-            if publish_rcs_capability_payload(
-                &tx,
-                &ctx,
-                &PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
-                    eligibility: projection,
-                }),
-                identity,
-                revision,
-                now_ms,
-            )? {
+            if publish_rcs_eligibility_for_conversation(&tx, &ctx, *conversation_id, now_ms)? {
                 published += 1;
             }
         }
@@ -1936,7 +1870,7 @@ impl Client {
         }
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let previous_state = rcs_mapping::recorded_link_lifecycle(&tx)?;
         let state_changed = rcs_mapping::record_link_lifecycle(&tx, state, observed_at_ms)?;
         if state_changed {
@@ -1997,6 +1931,47 @@ impl Client {
             revision,
             now_ms,
         )?;
+        if state == RcsCapabilityState::Linked && now_ms >= linked_since_ms {
+            let prefix = format!("eligibility:{}:", ctx.device_id);
+            let mut due = tx
+                .prepare(
+                    "SELECT identity,body FROM rcs_capability_published WHERE identity LIKE ?",
+                )?
+                .query_map([format!("{prefix}%")], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter_map(|(identity, body)| {
+                    let conversation_id = identity
+                        .strip_prefix(&prefix)
+                        .and_then(|value| ConversationId::from_str(value).ok())?;
+                    let PrivatePayload::RcsLinkEligibility(payload) =
+                        serde_json::from_str(&body).ok()?
+                    else {
+                        return None;
+                    };
+                    (payload.eligibility.observed_at_ms < linked_since_ms
+                        || now_ms.saturating_sub(payload.eligibility.observed_at_ms)
+                            >= RCS_CAPABILITY_KEEPALIVE_MS)
+                        .then_some((payload.eligibility.observed_at_ms, conversation_id))
+                })
+                .collect::<Vec<_>>();
+            due.sort_unstable_by_key(|(observed_at_ms, _)| *observed_at_ms);
+            for (_, conversation_id) in due {
+                let savepoint = tx.savepoint()?;
+                if publish_rcs_eligibility_for_conversation(
+                    &savepoint,
+                    &ctx,
+                    conversation_id,
+                    now_ms,
+                )
+                .is_ok()
+                {
+                    savepoint.commit()?;
+                }
+            }
+        }
         tx.commit()?;
         Ok(())
     }
@@ -11832,6 +11807,81 @@ fn eligibility_already_published(
         && linked_since_ms.is_none_or(|since| previous.observed_at_ms >= since)
         && recent(published_at_ms)
         && recent(previous.observed_at_ms)
+}
+
+fn publish_rcs_eligibility_for_conversation(
+    conn: &Connection,
+    ctx: &Ctx,
+    conversation_id: ConversationId,
+    now_ms: i64,
+) -> Result<bool, Error> {
+    let lifecycle = rcs_mapping::recorded_link_lifecycle_metadata(conn)?;
+    let status = rcs_capability::status_projection(conn, ctx.device_id, now_ms)?;
+    let linked = lifecycle.as_ref().is_some_and(|lifecycle| {
+        lifecycle.state == RcsCapabilityState::Linked
+            && status.as_ref().is_some_and(|status| {
+                status.current && status.status.state == RcsCapabilityState::Linked
+            })
+    });
+    let feature_bits = status
+        .as_ref()
+        .filter(|status| linked && status.status.state == RcsCapabilityState::Linked)
+        .map_or(0, |status| status.status.feature_bits);
+    // A 1:1 mapping, or a group mapping that is Live (only Live groups are eligible).
+    let mapped = linked
+        && (rcs_mapping::get(conn, conversation_id)?.is_some()
+            || rcs_group::proved_member_revision(conn, conversation_id)?.is_some());
+    let eligibility = if !linked {
+        RcsEligibility::Unknown
+    } else if mapped {
+        RcsEligibility::Eligible
+    } else {
+        RcsEligibility::NotEligible
+    };
+    let identity = format!("eligibility:{}:{conversation_id}", ctx.device_id);
+    let previous: Option<(u64, String, i64)> = conn
+        .query_row(
+            "SELECT revision,body,published_at_ms FROM rcs_capability_published WHERE identity=?",
+            [&identity],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let linked_since_ms = rcs_capability::linked_since(conn, ctx.device_id)?;
+    if previous.as_ref().is_some_and(|(_, body, published_at_ms)| {
+        eligibility_already_published(
+            body,
+            *published_at_ms,
+            eligibility,
+            feature_bits,
+            linked_since_ms,
+            now_ms,
+        )
+    }) {
+        return Ok(false);
+    }
+    let revision = previous
+        .map_or(0, |(revision, _, _)| revision)
+        .checked_add(1)
+        .filter(|revision| *revision <= i64::MAX as u64)
+        .ok_or(Error::InvalidRequest("RCS eligibility revision exhausted"))?;
+    let projection = RcsEligibilityProjection {
+        conversation_id,
+        eligibility,
+        feature_bits,
+        mapping_revision: revision,
+        observed_at_ms: now_ms,
+        gateway_device_id: ctx.device_id,
+    };
+    publish_rcs_capability_payload(
+        conn,
+        ctx,
+        &PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
+            eligibility: projection,
+        }),
+        identity,
+        revision,
+        now_ms,
+    )
 }
 
 fn publish_rcs_capability_payload(

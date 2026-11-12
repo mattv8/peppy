@@ -122,6 +122,17 @@ class GoogleMessagesLinkDiagnosticsTest {
         "provider_route" to "guard_band", "provider_route" to "not_link_owned",
         "provider_route" to "deferred", "provider_route" to "link_late", "provider_route" to "unidentified",
         "provider_route" to "media",
+        "bootstrap" to "unresolved_missing", "bootstrap" to "unresolved_ambiguous",
+        "bootstrap" to "unresolved_uncertain", "bootstrap" to "unresolved_invalid_identity",
+        "bootstrap" to "unresolved_mapped_elsewhere", "bootstrap" to "claimed",
+        "bootstrap_refusal" to "stale_observation", "bootstrap_refusal" to "google_conversation_ambiguous",
+        "bootstrap_refusal" to "link_unavailable", "bootstrap_refusal" to "ineligible_conversation",
+        "bootstrap_refusal" to "invalid_identity", "bootstrap_refusal" to "participant_ambiguous",
+        "bootstrap_refusal" to "self_chat_mismatch", "bootstrap_refusal" to "peppy_conversation_missing",
+        "bootstrap_refusal" to "peppy_conversation_ambiguous", "bootstrap_refusal" to "mapping_conflict",
+        "bootstrap_refusal" to "nonmonotonic_revision", "bootstrap_refusal" to "retired_context",
+        "bootstrap_refusal" to "peppy_conversation_uncertain", "bootstrap_refusal" to "self_chat_unsupported",
+        "bootstrap_refusal" to "recipient_mismatch",
     )
 
     @Test fun everyPairRecordsOnlyItsStableNumericReason() {
@@ -129,12 +140,31 @@ class GoogleMessagesLinkDiagnosticsTest {
         SyncDiagnostics.withTestConfiguration(true, { 10L }, { error("CPU unused") }, records::add) {
             stablePairs.forEach { (kind, code) -> recordGoogleMessagesLinkEvent(kind, code, Long.MAX_VALUE) }
         }
-		assertEquals(233, records.size)
+		assertEquals(254, records.size)
         records.forEachIndexed { index, record ->
             assertEquals("event=27 session=1 timestamp_ms=10 trace=0 29=${index + 1}", record)
         }
         assertEquals(27L, SyncTraceEvent.GM_LINK.code)
         assertEquals(SyncTraceEvent.entries.size, SyncTraceEvent.entries.map { it.code }.toSet().size)
+    }
+
+    @Test fun `bootstrap diagnostic additions append stable codes`() {
+        assertEquals(233L, GoogleMessagesLinkDiagnosticReason.codes["provider_route" to "media"])
+        assertEquals(234L, GoogleMessagesLinkDiagnosticReason.codes["bootstrap" to "unresolved_missing"])
+        assertEquals(235L, GoogleMessagesLinkDiagnosticReason.codes["bootstrap" to "unresolved_ambiguous"])
+        assertEquals(236L, GoogleMessagesLinkDiagnosticReason.codes["bootstrap" to "unresolved_uncertain"])
+        assertEquals(237L, GoogleMessagesLinkDiagnosticReason.codes["bootstrap" to "unresolved_invalid_identity"])
+        assertEquals(238L, GoogleMessagesLinkDiagnosticReason.codes["bootstrap" to "unresolved_mapped_elsewhere"])
+        assertEquals(239L, GoogleMessagesLinkDiagnosticReason.codes["bootstrap" to "claimed"])
+        val refusals = listOf(
+            "stale_observation", "google_conversation_ambiguous", "link_unavailable", "ineligible_conversation",
+            "invalid_identity", "participant_ambiguous", "self_chat_mismatch", "peppy_conversation_missing",
+            "peppy_conversation_ambiguous", "mapping_conflict", "nonmonotonic_revision", "retired_context",
+            "peppy_conversation_uncertain", "self_chat_unsupported", "recipient_mismatch",
+        )
+        refusals.forEachIndexed { index, code ->
+            assertEquals((240 + index).toLong(), GoogleMessagesLinkDiagnosticReason.codes["bootstrap_refusal" to code])
+        }
     }
 
     @Test fun goEventVocabularyIsCoveredByTheClosedMapping() {
