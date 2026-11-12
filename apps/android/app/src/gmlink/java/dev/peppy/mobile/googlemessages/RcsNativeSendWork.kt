@@ -11,6 +11,11 @@ internal class RcsNativeSendWork(
     private val execute: (RcsNativeCommand) -> Unit,
     private val current: () -> Boolean,
     private val executor: Executor,
+    /**
+     * Asked after each command: true when it left a carrier-only proof for the gateway pass. The
+     * proof holds only until the next native attempt, so the batch ends there.
+     */
+    private val carrierHandoffRequested: () -> Boolean = { false },
 ) {
     private val lock = Any()
     private val stopped = AtomicBoolean(false)
@@ -23,6 +28,7 @@ internal class RcsNativeSendWork(
             if (stopped.get()) return@synchronized false
             if (running) {
                 wakePending = true
+                recordGoogleMessagesLinkEvent("send_work", "busy", 0)
                 false
             } else {
                 running = true
@@ -49,6 +55,9 @@ internal class RcsNativeSendWork(
                     } catch (_: Throwable) {
                         recordGoogleMessagesLinkEvent("link", "rcs_callback_failed", 0)
                     }
+                    // Any later attempt would stale the proof, so the rest of the batch and a
+                    // wake that arrived meanwhile wait for the next wake or the caller's retry.
+                    if (carrierHandoffRequested()) return
                 }
                 // A candidate may legitimately remain pending (for example an upload retry or an
                 // unknown carrier outcome). Only a fresh wake earns another enumeration.

@@ -6,7 +6,6 @@ import (
 
 	"github.com/google/uuid"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
-	"google.golang.org/protobuf/proto"
 )
 
 // BindNativeRcsTarget obtains fresh read-only evidence without extending the prepared ticket.
@@ -68,8 +67,8 @@ func (link *Link) BindNativeRcsTarget(ticketID, googleConversationID, token stri
 	link.mu.Lock()
 	defer link.mu.Unlock()
 	if code != "" || operationCtx.Err() != nil || !link.nativeTicketCurrentLocked(ticket, ticketID) ||
-		ticket.targetObservation != nil || !proto.Equal(conversation, fetched) ||
-		!proto.Equal(conversation, link.currentSupportedRcsConversationLocked(googleConversationID, ticket.generation, ticket.streamEpoch)) {
+		ticket.targetObservation != nil || !sameSendAuthority(conversation, fetched) ||
+		!sameSendAuthority(conversation, link.currentSupportedRcsConversationLocked(googleConversationID, ticket.generation, ticket.streamEpoch)) {
 		return link.rejectNativeTargetLocked(ticket, ticketID)
 	}
 	observation := *ticket.routeObservation

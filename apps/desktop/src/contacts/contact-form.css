@@ -352,6 +352,7 @@
 
 #photo-crop-image {
   display: block;
+  background: #fff;
   user-select: none;
   pointer-events: none;
   transition: transform 100ms ease-out;

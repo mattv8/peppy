@@ -402,7 +402,9 @@ pub fn encrypt_stream(
 pub fn validate_stream_framing(mut input: impl Read) -> Result<(), CryptoError> {
     stream_format::validate(&mut input)
 }
-/// Decrypts a fully verified stream to a temporary sibling and atomically promotes it only after its final tag.
+/// Decrypts a fully verified stream to a temporary sibling and publishes it without replacement only after its final tag.
+///
+/// Rename and link publication backends are atomic; the exclusive-copy fallback is not.
 pub fn decrypt_stream_to_path(
     mut input: impl Read,
     destination: &Path,
@@ -479,11 +481,16 @@ fn create_private_temp(path: &Path) -> Result<File, CryptoError> {
     }
 }
 fn promote_noclobber(temporary: &Path, destination: &Path) -> io::Result<()> {
+    promote_noclobber_with_cleanup(temporary, destination, |path| fs::remove_file(path))
+}
+fn promote_noclobber_with_cleanup(
+    temporary: &Path,
+    destination: &Path,
+    remove_temporary: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<()> {
     filesystem::promote_no_clobber(temporary, destination)?;
-    match fs::remove_file(temporary) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-        _ => Ok(()),
-    }
+    let _ = remove_temporary(temporary);
+    Ok(())
 }
 #[cfg(unix)]
 fn sync_parent_directory(destination: &Path) -> io::Result<()> {
@@ -573,7 +580,7 @@ fn read_frame(input: &mut impl Read) -> Result<Vec<u8>, CryptoError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::KeyPurpose;
+    use crate::{KeyPurpose, promote_noclobber_with_cleanup};
 
     #[test]
     fn key_purpose_discriminants_are_unique_and_draft_remains_seven() {
@@ -618,5 +625,26 @@ mod tests {
         result.unwrap();
         assert_eq!(destination_bytes.unwrap(), b"ciphertext bytes");
         assert!(!temporary_exists);
+    }
+
+    #[test]
+    fn successful_publication_remains_successful_when_temporary_cleanup_fails() {
+        let cleanup_called = std::cell::Cell::new(false);
+        let directory = std::env::temp_dir().join(format!("peppy-noclobber-{}", Uuid::new_v4()));
+        fs::create_dir(&directory).unwrap();
+        let temporary = directory.join("temporary");
+        let destination = directory.join("destination");
+        fs::write(&temporary, b"authenticated plaintext").unwrap();
+
+        let result = promote_noclobber_with_cleanup(&temporary, &destination, |_| {
+            cleanup_called.set(true);
+            Err(std::io::Error::other("injected unlink failure"))
+        });
+        let destination_bytes = fs::read(&destination);
+        let _ = fs::remove_dir_all(&directory);
+
+        result.unwrap();
+        assert_eq!(destination_bytes.unwrap(), b"authenticated plaintext");
+        assert!(cleanup_called.get());
     }
 }

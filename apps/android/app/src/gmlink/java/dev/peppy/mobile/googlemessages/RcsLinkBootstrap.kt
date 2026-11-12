@@ -68,9 +68,9 @@ internal class RcsLinkBootstrap(
 
     fun run(targetGoogleId: String? = null): RcsBootstrapResult {
         if (!current()) return RcsBootstrapResult.STOPPED
-        val snapshot = parseSnapshot() ?: return RcsBootstrapResult.TRANSIENT
-        val lifecycleGeneration = runCandidate { core.lifecycleGeneration() } ?: return RcsBootstrapResult.TRANSIENT
-        val owned = runCandidate { core.ownedGoogleIds() } ?: return RcsBootstrapResult.TRANSIENT
+        val snapshot = parseSnapshot() ?: return transient("snapshot_unavailable")
+        val lifecycleGeneration = quietly { core.lifecycleGeneration() } ?: return transient("lifecycle_failed")
+        val owned = quietly { core.ownedGoogleIds() } ?: return transient("owned_failed")
         if (targetGoogleId != null && targetGoogleId in owned) return sweepConversation(targetGoogleId).toBootstrapResult()
         val candidates = eligibleCandidates(snapshot, targetGoogleId)
         if (targetGoogleId != null && candidates.isEmpty()) return RcsBootstrapResult.TRANSIENT
@@ -79,8 +79,8 @@ internal class RcsLinkBootstrap(
         var attempted = 0
         var targetResult: RcsBootstrapResult? = null
         val attemptedCandidates = candidates.filter { it.googleId !in owned }.take(MAX_CANDIDATES)
-        val resolutions = runCandidate { core.resolve(attemptedCandidates.map { it.number to it.googleId }) }
-            ?: return RcsBootstrapResult.TRANSIENT
+        val resolutions = quietly { core.resolve(attemptedCandidates.map { it.number to it.googleId }) }
+            ?: return transient("resolve_failed")
         for ((candidate, resolution) in attemptedCandidates.zip(resolutions)) {
             if (!current()) return RcsBootstrapResult.STOPPED
             if (attempted == MAX_CANDIDATES) break
@@ -100,28 +100,26 @@ internal class RcsLinkBootstrap(
     }
 
     private fun attempt(candidate: Candidate, resolution: NativeRcsBootstrapResolution, snapshot: JSONObject, lifecycleGeneration: ULong): Attempt {
-        val conversationId = when (resolution) {
-            NativeRcsBootstrapResolution.Uncertain -> return Attempt.Transient
-            is NativeRcsBootstrapResolution.Resolved -> resolution.conversationId
-            else -> return Attempt.Transient
-        }
-        val tuple = runCandidate { core.tuple(snapshot) } ?: return Attempt.Transient
-        val revision = runCandidate { core.revision(conversationId) } ?: return Attempt.Transient
-        val route = runCandidate { routeReader.currentRoute() } ?: return Attempt.Transient
-        val proof = runCandidate { observe(candidate.googleId, snapshot, tuple, revision, route) } ?: return Attempt.Transient
-        val verification = runCandidate { core.verify(proof, clock.nowMs()) } ?: return Attempt.Transient
-        if (verification != NativeRcsMappingVerification.MAPPED) return Attempt.Transient
-        val outcome = runCandidate {
+        val conversationId = (resolution as? NativeRcsBootstrapResolution.Resolved)?.conversationId
+            ?: return transientAttempt("unresolved")
+        val tuple = quietly { core.tuple(snapshot) } ?: return transientAttempt("tuple_failed")
+        val revision = quietly { core.revision(conversationId) } ?: return transientAttempt("revision_failed")
+        val route = quietly { routeReader.currentRoute() } ?: return transientAttempt("route_unavailable")
+        val proof = quietly { observe(candidate.googleId, snapshot, tuple, revision, route) }
+            ?: return transientAttempt("observe_failed")
+        val verification = quietly { core.verify(proof, clock.nowMs()) } ?: return transientAttempt("verify_failed")
+        if (verification != NativeRcsMappingVerification.MAPPED) return transientAttempt("not_mapped")
+        val outcome = quietly {
             core.claim(claimJson(conversationId, candidate.googleId, revision, tuple, lifecycleGeneration))
-        } ?: return Attempt.Transient
-        if (outcome != NativeRcsLinkOwnershipClaimOutcome.CLAIMED) return Attempt.Transient
+        } ?: return transientAttempt("claim_failed")
+        if (outcome != NativeRcsLinkOwnershipClaimOutcome.CLAIMED) return transientAttempt("not_claimed")
         return Attempt.Claimed(conversationId, sweepConversation(candidate.googleId))
     }
 
     private fun sweepConversation(googleId: String): RcsRecoveryResult =
         runCatching { sweep(googleId) }.getOrDefault(RcsRecoveryResult.ABORTED)
 
-    private fun parseSnapshot(): JSONObject? = runCandidate { JSONObject(link.candidateSnapshot()) }
+    private fun parseSnapshot(): JSONObject? = quietly { JSONObject(link.candidateSnapshot()) }
         ?.takeIf { it.optString("code") == "conversation_candidate_snapshot" && it.optBoolean("complete") }
 
     private fun eligibleCandidates(snapshot: JSONObject, target: String?): List<Candidate> {
@@ -167,14 +165,25 @@ internal class RcsLinkBootstrap(
         .put("expectedLinkGeneration", tuple.linkGeneration.toLong()).put("expectedSessionGeneration", tuple.sessionGeneration.toLong())
         .put("expectedContextRevision", tuple.contextRevision.toLong()).toString()
 
-    private fun <T> runCandidate(block: () -> T): T? = try { block() } catch (_: Throwable) {
-        recordGoogleMessagesLinkEvent("link", "rcs_bootstrap_failed", 0)
-        null
+    private fun <T> quietly(block: () -> T): T? = try { block() } catch (_: Throwable) { null }
+
+    /** Records which step stopped the run with a fixed code. No ids, numbers, or error text. */
+    private fun transient(step: String): RcsBootstrapResult {
+        recordGoogleMessagesLinkEvent(STEP_KIND, step, 0)
+        return RcsBootstrapResult.TRANSIENT
+    }
+
+    private fun transientAttempt(step: String): Attempt {
+        recordGoogleMessagesLinkEvent(STEP_KIND, step, 0)
+        return Attempt.Transient
     }
 
     private data class Candidate(val googleId: String, val number: String, val lastMessageMs: Long?)
 
-    private companion object { const val MAX_CANDIDATES = 40 }
+    private companion object {
+        const val MAX_CANDIDATES = 40
+        const val STEP_KIND = "bootstrap"
+    }
 }
 
 /** Per-candidate outcome. Refused is a terminal decision; Transient is retried on a later trigger. */

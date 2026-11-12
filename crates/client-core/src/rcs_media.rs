@@ -128,6 +128,7 @@ pub(crate) struct OutcomeReport {
     pub(crate) sync: RcsMediaSyncState,
     pub(crate) reason: Option<RcsMediaNotSentReason>,
     pub(crate) refused_indexes: Vec<u32>,
+    pub(crate) publish_current: bool,
 }
 
 /// Plans one ledger row per attachment in index order. Text rides on index 0 only.
@@ -297,23 +298,62 @@ pub(crate) fn apply_echo_receipt(
     index: u32,
     message: MessageId,
     status: RcsProjectedStatus,
-) -> Result<Option<RcsMessageStatus>, Error> {
+) -> Result<(bool, Option<RcsMessageStatus>), Error> {
+    if status == RcsProjectedStatus::Failed {
+        let ledger_changed = conn.execute(
+            "UPDATE rcs_media_send_ledger SET state='outcome_unknown' WHERE command_id=? AND attachment_index=? AND state='committed'",
+            params![command.to_string(), index],
+        )?;
+        conn.execute(
+            "DELETE FROM rcs_google_media_refs WHERE command_id=? AND attachment_index=?",
+            params![command.to_string(), index],
+        )?;
+        let projection_changed = conn.execute(
+            "INSERT INTO rcs_media_send_status(message_id,attachment_index,state,reason) VALUES(?,?, 'send_failed',NULL) ON CONFLICT(message_id,attachment_index) DO UPDATE SET state='send_failed',reason=NULL WHERE rcs_media_send_status.state IN ('sending','sent','outcome_unknown')",
+            params![message.to_string(), index],
+        )?;
+        if projection_changed != 0 {
+            enqueue_state_checkpoint(conn, ctx, message, index)?;
+        }
+        return Ok((ledger_changed != 0 || projection_changed != 0, None));
+    }
     let rank = match status {
-        RcsProjectedStatus::Sending | RcsProjectedStatus::Failed => return Ok(None),
+        RcsProjectedStatus::Sending => return Ok((false, None)),
+        RcsProjectedStatus::Failed => unreachable!("failed status settles above"),
         RcsProjectedStatus::Sent => 1,
         RcsProjectedStatus::Delivered => 2,
         RcsProjectedStatus::Read => 3,
     };
+    let failed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rcs_media_send_status WHERE message_id=? AND attachment_index=? AND state='send_failed')",
+        params![message.to_string(), index],
+        |row| row.get(0),
+    )?;
     let key = format!("rcs-media-receipt:{command}:{index}");
     let previous = get_meta(conn, &key)?
         .map(|value| value.parse::<u8>().map_err(|_| Error::Database))
         .transpose()?
         .unwrap_or(0);
-    set_meta(conn, &key, &previous.max(rank).to_string())?;
-    let changed = conn.execute("UPDATE rcs_media_send_ledger SET state='accepted' WHERE command_id=? AND attachment_index=? AND state IN ('committed','outcome_unknown')",
-        params![command.to_string(), index])?;
-    if changed != 0 {
-        conn.execute("UPDATE rcs_media_send_status SET state='sent',reason=NULL WHERE message_id=? AND attachment_index=? AND state IN ('sending','outcome_unknown')", params![message.to_string(), index])?;
+    let receipt_changed = (!failed
+        || matches!(
+            status,
+            RcsProjectedStatus::Delivered | RcsProjectedStatus::Read
+        ))
+        && rank > previous;
+    if receipt_changed {
+        set_meta(conn, &key, &rank.to_string())?;
+    }
+    let ledger_changed = if failed {
+        0
+    } else {
+        conn.execute(
+            "UPDATE rcs_media_send_ledger SET state='accepted' WHERE command_id=? AND attachment_index=? AND state IN ('committed','outcome_unknown')",
+            params![command.to_string(), index],
+        )?
+    };
+    let mut changed = receipt_changed || ledger_changed != 0;
+    if ledger_changed != 0 {
+        changed |= conn.execute("UPDATE rcs_media_send_status SET state='sent',reason=NULL WHERE message_id=? AND attachment_index=? AND state IN ('sending','outcome_unknown')", params![message.to_string(), index])? != 0;
         enqueue_state_checkpoint(conn, ctx, message, index)?;
     }
     let mut minimum = 3;
@@ -327,12 +367,24 @@ pub(crate) fn apply_echo_receipt(
         .unwrap_or(0);
         minimum = minimum.min(current);
     }
-    Ok(match minimum {
-        1 => Some(RcsMessageStatus::Sent),
-        2 => Some(RcsMessageStatus::Delivered),
-        3 => Some(RcsMessageStatus::Read),
-        _ => None,
-    })
+    let any_failed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rcs_media_send_status WHERE message_id=? AND state='send_failed')",
+        [message.to_string()],
+        |row| row.get(0),
+    )?;
+    Ok((
+        changed,
+        if any_failed {
+            None
+        } else {
+            match minimum {
+                1 => Some(RcsMessageStatus::Sent),
+                2 => Some(RcsMessageStatus::Delivered),
+                3 => Some(RcsMessageStatus::Read),
+                _ => None,
+            }
+        },
+    ))
 }
 
 pub(crate) fn ledger_rows(
@@ -673,6 +725,22 @@ pub(crate) fn record_outcome(
         .into_iter()
         .find(|row| row.attachment_index == attachment_index)
     {
+        if row.state == LedgerState::OutcomeUnknown
+            && failed_projection(tx, command_id, attachment_index)?
+        {
+            decide_outcome(LedgerState::Committed, code)?;
+            let refused_indexes = if code == "members_changed" {
+                refuse_remaining_unattempted(tx, command_id, attachment_index)?
+            } else {
+                Vec::new()
+            };
+            return Ok(OutcomeReport {
+                sync: RcsMediaSyncState::SendFailed,
+                reason: None,
+                refused_indexes,
+                publish_current: false,
+            });
+        }
         let sync = match (row.state, code) {
             (LedgerState::OutcomeUnknown, "outcome_unknown" | "members_changed") => {
                 Some(RcsMediaSyncState::OutcomeUnknown)
@@ -685,6 +753,7 @@ pub(crate) fn record_outcome(
                 sync,
                 reason: None,
                 refused_indexes: vec![],
+                publish_current: true,
             });
         }
     }
@@ -706,17 +775,7 @@ pub(crate) fn record_outcome(
     }
     let mut refused_indexes = Vec::new();
     if refuses_rest {
-        refused_indexes = remaining_open_indexes(tx, command_id, attachment_index)?;
-        tx.execute(
-            &format!(
-                "UPDATE rcs_media_send_ledger SET state='refused' WHERE command_id=? AND attachment_index>? AND state NOT IN ({TERMINAL_SQL})"
-            ),
-            params![command_id.to_string(), i64::from(attachment_index)],
-        )?;
-        tx.execute(
-            "DELETE FROM rcs_google_media_refs WHERE command_id=? AND attachment_index>?",
-            params![command_id.to_string(), i64::from(attachment_index)],
-        )?;
+        refused_indexes = refuse_remaining_unattempted(tx, command_id, attachment_index)?;
     }
     let members_changed = code == "members_changed";
     let sync = match next {
@@ -735,7 +794,21 @@ pub(crate) fn record_outcome(
         sync,
         reason,
         refused_indexes,
+        publish_current: true,
     })
+}
+
+fn failed_projection(
+    conn: &Connection,
+    command_id: CommandId,
+    attachment_index: u32,
+) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rcs_media_send_status s JOIN commands c ON c.message_id=s.message_id WHERE c.command_id=? AND s.attachment_index=? AND s.state='send_failed')",
+        params![command_id.to_string(), i64::from(attachment_index)],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
 }
 
 /// Crash recovery, run once when the gateway opens its database and never during a live pass:
@@ -809,21 +882,31 @@ fn not_sent_reason(code: &str) -> Option<RcsMediaNotSentReason> {
     }
 }
 
-fn remaining_open_indexes(
+fn refuse_remaining_unattempted(
     tx: &Transaction<'_>,
     command_id: CommandId,
     attachment_index: u32,
 ) -> Result<Vec<u32>, Error> {
-    let mut query = tx.prepare(&format!(
-        "SELECT attachment_index FROM rcs_media_send_ledger WHERE command_id=? AND attachment_index>? AND state NOT IN ({TERMINAL_SQL}) ORDER BY attachment_index"
-    ))?;
-    query
+    let mut query = tx.prepare(
+        "SELECT attachment_index FROM rcs_media_send_ledger WHERE command_id=? AND attachment_index>? AND state IN ('pending','uploading','reference_ready','permit_issued') ORDER BY attachment_index",
+    )?;
+    let indexes = query
         .query_map(
             params![command_id.to_string(), i64::from(attachment_index)],
             |row| row.get::<_, i64>(0),
         )?
         .map(|index| -> Result<u32, Error> { u32::try_from(index?).map_err(|_| Error::Database) })
-        .collect()
+        .collect::<Result<Vec<_>, Error>>()?;
+    drop(query);
+    tx.execute(
+        "UPDATE rcs_media_send_ledger SET state='refused' WHERE command_id=? AND attachment_index>? AND state IN ('pending','uploading','reference_ready','permit_issued')",
+        params![command_id.to_string(), i64::from(attachment_index)],
+    )?;
+    tx.execute(
+        "DELETE FROM rcs_google_media_refs WHERE command_id=? AND attachment_index>? AND EXISTS(SELECT 1 FROM rcs_media_send_ledger l WHERE l.command_id=rcs_google_media_refs.command_id AND l.attachment_index=rcs_google_media_refs.attachment_index AND l.state='refused')",
+        params![command_id.to_string(), i64::from(attachment_index)],
+    )?;
+    Ok(indexes)
 }
 
 fn raw_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRow> {
@@ -1269,8 +1352,10 @@ pub(crate) fn enqueue_state_checkpoint(
     attachment_index: u32,
 ) -> Result<(), Error> {
     let message = load_message(conn, message_id)?.ok_or(Error::NotFound)?;
-    let (state, reason, attachment, metadata) = if message.direction == Direction::Incoming {
-        if message.source_device_id != ctx.device_id || message.transport != Transport::Rcs {
+    let (state, reason, attachment, metadata) = if message.direction == Direction::Incoming
+        || message.rcs_capture
+    {
+        if receive_state_authority(conn, ctx.device_id, message_id)? != StateAuthority::Allowed {
             return Err(Error::InvalidRequest("RCS media checkpoint source"));
         }
         let view = receive_view(conn, message_id, attachment_index)?.ok_or(Error::NotFound)?;
@@ -1468,7 +1553,7 @@ fn validate_state_content(
         && (!state.is_incoming() || content.metadata.is_none_or(RcsMediaSlotMetadata::is_valid))
 }
 
-fn state_authority(
+fn receive_state_authority(
     conn: &Connection,
     producer: DeviceId,
     message_id: MessageId,
@@ -1476,15 +1561,43 @@ fn state_authority(
     let Some(message) = load_message(conn, message_id)? else {
         return Ok(StateAuthority::Unavailable);
     };
-    if message.direction == Direction::Incoming {
-        return Ok(
-            if message.transport == Transport::Rcs && message.source_device_id == producer {
-                StateAuthority::Allowed
-            } else {
-                StateAuthority::Denied
-            },
-        );
+    let gateway: Option<String> = conn
+        .query_row(
+            "SELECT gateway_device_id FROM commands WHERE message_id=?",
+            [message_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(match message.direction {
+        Direction::Incoming
+            if message.transport == Transport::Rcs && message.source_device_id == producer =>
+        {
+            StateAuthority::Allowed
+        }
+        Direction::Outgoing
+            if message.transport == Transport::Rcs
+                && message.rcs_capture
+                && message.source_device_id == producer
+                && gateway.is_none() =>
+        {
+            StateAuthority::Allowed
+        }
+        _ => StateAuthority::Denied,
+    })
+}
+
+fn state_authority(
+    conn: &Connection,
+    producer: DeviceId,
+    message_id: MessageId,
+    state: RcsMediaSyncState,
+) -> Result<StateAuthority, Error> {
+    if state.is_incoming() {
+        return receive_state_authority(conn, producer, message_id);
     }
+    let Some(_) = load_message(conn, message_id)? else {
+        return Ok(StateAuthority::Unavailable);
+    };
     let gateway: Option<String> = conn
         .query_row(
             "SELECT gateway_device_id FROM commands WHERE message_id=?",
@@ -1513,7 +1626,7 @@ pub(crate) fn apply_authenticated_state(
     if !validate_state_content(attachment_index, state, reason, content) {
         return Ok(Some(QuarantineReason::InvalidPayload));
     }
-    match state_authority(conn, producer, message_id)? {
+    match state_authority(conn, producer, message_id, state)? {
         StateAuthority::Unavailable => stage_state(
             conn,
             producer,
@@ -1732,10 +1845,7 @@ fn apply_authorized_state(
         return Ok(Some(QuarantineReason::InvalidPayload));
     };
     if state.is_incoming() {
-        if message.source_device_id != producer
-            || message.transport != Transport::Rcs
-            || message.direction != Direction::Incoming
-        {
+        if state_authority(conn, producer, message_id, state)? != StateAuthority::Allowed {
             return Ok(Some(QuarantineReason::InvalidPayload));
         }
         return apply_receive_state(
@@ -1760,7 +1870,9 @@ fn apply_authorized_state(
         )
         .optional()?;
     if current.is_some_and(|current| {
-        current != RcsMediaSyncState::Sending.code()
+        !(state == RcsMediaSyncState::SendFailed
+            && matches!(current.as_str(), "sending" | "sent" | "outcome_unknown"))
+            && current != RcsMediaSyncState::Sending.code()
             && !(current == RcsMediaSyncState::OutcomeUnknown.code()
                 && state == RcsMediaSyncState::Sent)
     }) {
@@ -1800,14 +1912,6 @@ pub(crate) fn reconcile_staged_states(
     drop(query);
     for row in rows {
         let producer: DeviceId = row.0.parse().map_err(|_| Error::Database)?;
-        match state_authority(conn, producer, message_id)? {
-            StateAuthority::Unavailable => continue,
-            StateAuthority::Denied => {
-                delete_staged_state(conn, producer, message_id, row.1)?;
-                continue;
-            }
-            StateAuthority::Allowed => {}
-        }
         conn.execute_batch("SAVEPOINT rcs_media_candidate")?;
         let metadata: Option<RcsMediaSlotMetadata> = row
             .2
@@ -1815,6 +1919,7 @@ pub(crate) fn reconcile_staged_states(
             .map(|value| decode(value.as_bytes()))
             .transpose()?;
         let mut rejected = false;
+        let mut unavailable = false;
         let candidates = [
             (row.3, row.4.as_deref(), row.5.as_deref(), None),
             (
@@ -1830,6 +1935,17 @@ pub(crate) fn reconcile_staged_states(
                 continue;
             };
             let state = RcsMediaSyncState::from_code(state).ok_or(Error::Database)?;
+            match state_authority(conn, producer, message_id, state)? {
+                StateAuthority::Unavailable => {
+                    unavailable = true;
+                    break;
+                }
+                StateAuthority::Denied => {
+                    rejected = true;
+                    break;
+                }
+                StateAuthority::Allowed => {}
+            }
             let reason = reason
                 .map(|value| RcsMediaNotSentReason::from_code(value).ok_or(Error::Database))
                 .transpose()?;
@@ -1855,12 +1971,14 @@ pub(crate) fn reconcile_staged_states(
                 break;
             }
         }
-        if rejected {
+        if rejected || unavailable {
             conn.execute_batch("ROLLBACK TO rcs_media_candidate; RELEASE rcs_media_candidate")?;
         } else {
             conn.execute_batch("RELEASE rcs_media_candidate")?;
         }
-        delete_staged_state(conn, producer, message_id, row.1)?;
+        if !unavailable {
+            delete_staged_state(conn, producer, message_id, row.1)?;
+        }
     }
     Ok(())
 }
@@ -2516,6 +2634,26 @@ mod tests {
     }
 
     #[test]
+    fn members_changed_never_refuses_an_already_committed_later_slot() {
+        let mut conn = ledger();
+        let (command, _) = command_with(&mut conn, 3);
+        drive_to_reference_ready(&mut conn, command, 0, 1);
+        step(&mut conn, |tx| issue_permit(tx, command, 0, 2)).unwrap();
+        step(&mut conn, |tx| record_commit(tx, command, 0)).unwrap();
+        step(&mut conn, |tx| record_outcome(tx, command, 0, "ok")).unwrap();
+        drive_to_reference_ready(&mut conn, command, 1, 1);
+        step(&mut conn, |tx| issue_permit(tx, command, 1, 2)).unwrap();
+        step(&mut conn, |tx| record_commit(tx, command, 1)).unwrap();
+
+        let refused_indexes =
+            step(&mut conn, |tx| refuse_remaining_unattempted(tx, command, 0)).unwrap();
+
+        assert_eq!(refused_indexes, vec![2]);
+        assert_eq!(state_of(&conn, command, 1), "committed");
+        assert_eq!(state_of(&conn, command, 2), "refused");
+    }
+
+    #[test]
     fn outcomes_outside_the_vocabulary_for_their_state_are_rejected() {
         let mut conn = ledger();
         let (command, _) = command_with(&mut conn, 1);
@@ -2791,6 +2929,7 @@ mod tests {
             body: "caption".into(),
             transport: Transport::Rcs,
             direction,
+            rcs_capture: false,
             imported: false,
             sent_at_ms: Some(1),
             ordered_at_ms: None,

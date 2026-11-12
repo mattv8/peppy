@@ -543,7 +543,7 @@ async fn validate_community_privileges(pool: &PgPool) -> Result<(), RlsError> {
         ));
     }
     let schema_metadata: bool = sqlx::query_scalar(
-        "SELECT has_table_privilege(current_user, 'peppy_schema_marker', 'SELECT') AND NOT (has_table_privilege(current_user, 'peppy_schema_marker', 'INSERT') OR has_table_privilege(current_user, 'peppy_schema_marker', 'UPDATE') OR has_table_privilege(current_user, 'peppy_schema_marker', 'DELETE') OR has_table_privilege(current_user, 'peppy_schema_marker', 'TRUNCATE') OR has_table_privilege(current_user, 'peppy_schema_marker', 'REFERENCES') OR has_table_privilege(current_user, 'peppy_schema_marker', 'TRIGGER')) AND NOT (has_table_privilege(current_user, '_sqlx_migrations', 'SELECT') OR has_table_privilege(current_user, '_sqlx_migrations', 'INSERT') OR has_table_privilege(current_user, '_sqlx_migrations', 'UPDATE') OR has_table_privilege(current_user, '_sqlx_migrations', 'DELETE') OR has_table_privilege(current_user, '_sqlx_migrations', 'TRUNCATE') OR has_table_privilege(current_user, '_sqlx_migrations', 'REFERENCES') OR has_table_privilege(current_user, '_sqlx_migrations', 'TRIGGER'))",
+        "SELECT has_table_privilege(current_user, 'peppy_schema_marker', 'SELECT') AND NOT (has_table_privilege(current_user, 'peppy_schema_marker', 'INSERT') OR has_table_privilege(current_user, 'peppy_schema_marker', 'UPDATE') OR has_table_privilege(current_user, 'peppy_schema_marker', 'DELETE') OR has_table_privilege(current_user, 'peppy_schema_marker', 'TRUNCATE') OR has_table_privilege(current_user, 'peppy_schema_marker', 'REFERENCES') OR has_table_privilege(current_user, 'peppy_schema_marker', 'TRIGGER') OR has_any_column_privilege(current_user, 'peppy_schema_marker', 'INSERT, UPDATE, REFERENCES')) AND NOT (has_table_privilege(current_user, '_sqlx_migrations', 'SELECT') OR has_table_privilege(current_user, '_sqlx_migrations', 'INSERT') OR has_table_privilege(current_user, '_sqlx_migrations', 'UPDATE') OR has_table_privilege(current_user, '_sqlx_migrations', 'DELETE') OR has_table_privilege(current_user, '_sqlx_migrations', 'TRUNCATE') OR has_table_privilege(current_user, '_sqlx_migrations', 'REFERENCES') OR has_table_privilege(current_user, '_sqlx_migrations', 'TRIGGER') OR has_any_column_privilege(current_user, '_sqlx_migrations', 'SELECT, INSERT, UPDATE, REFERENCES'))",
     )
     .fetch_one(pool)
     .await?;
@@ -562,7 +562,7 @@ async fn validate_community_privileges(pool: &PgPool) -> Result<(), RlsError> {
         "peppy_schema_marker".to_owned(),
     ]);
     let unexpected_grant: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relkind IN ('r', 'p', 'v', 'm', 'S', 'f') AND relname <> ALL($1) AND has_table_privilege(current_user, oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'))",
+        "SELECT EXISTS (SELECT 1 FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relkind IN ('r', 'p', 'v', 'm', 'S', 'f') AND relname <> ALL($1) AND (has_table_privilege(current_user, oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') OR has_any_column_privilege(current_user, oid, 'SELECT, INSERT, UPDATE, REFERENCES')))",
     )
     .bind(allowed)
     .fetch_one(pool)

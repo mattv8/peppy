@@ -42,6 +42,12 @@ fn prepare(client: &Client, directory: &TempDir, name: &str) -> AttachmentId {
         .attachment_id
 }
 
+fn encrypted_connection(config: &ClientConfig) -> rusqlite::Connection {
+    let connection = rusqlite::Connection::open(&config.database_path).unwrap();
+    connection.execute_batch("PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\"; PRAGMA cipher_compatibility = 4; PRAGMA cipher_memory_security = ON;").unwrap();
+    connection
+}
+
 #[test]
 fn gateway_cleanup_waits_for_ack_then_removes_only_completed_mms_original_and_preview() {
     let directory = TempDir::new().unwrap();
@@ -164,4 +170,76 @@ fn gateway_cleanup_waits_for_ack_then_removes_only_completed_mms_original_and_pr
         GatewayMmsCleanup::default(),
         "completed durable markers do not cause an open-time sweep or repeat unlink"
     );
+}
+
+#[test]
+fn gateway_cleanup_respects_durable_intent_and_conflict_references_until_release() {
+    let directory = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "gateway-draft-reference", &vault);
+    let client = unlocked(&config, &vault);
+    let acquisition = client
+        .begin_mms_acquisition(input("draft-reference"))
+        .unwrap();
+    let original = prepare(&client, &directory, "original.png");
+    let preview = prepare(&client, &directory, "preview.png");
+    client
+        .set_mms_acquisition_part(&acquisition.acquisition_id, "original", original)
+        .unwrap();
+    client
+        .set_mms_acquisition_part_metadata(
+            &acquisition.acquisition_id,
+            "original",
+            Some(1),
+            Some(1),
+            None,
+            Some(preview),
+        )
+        .unwrap();
+    client
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+    client.cleanup_uploaded_gateway_mms_ciphertext(10).unwrap();
+    client.cleanup_uploaded_gateway_mms_ciphertext(10).unwrap();
+    for object in client.pending_uploads().unwrap() {
+        client
+            .mark_attachment_uploaded(object.attachment_id, &uuid::Uuid::new_v4().to_string())
+            .unwrap();
+    }
+    let mut server = Server::default();
+    assert_eq!(server.upload(&client), 1);
+    let original_path = client.native_cipher_file(original).unwrap();
+    let preview_path = client.native_cipher_file(preview).unwrap();
+    let connection = encrypted_connection(&config);
+    connection
+        .execute(
+            "INSERT INTO draft_media_references(kind,owner_id,attachment_id) VALUES('intent','intent-only',?)",
+            [original.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO draft_media_references(kind,owner_id,attachment_id) VALUES('conflict','conflict-only',?)",
+            [preview.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert_eq!(
+        client.cleanup_uploaded_gateway_mms_ciphertext(10).unwrap(),
+        GatewayMmsCleanup::default()
+    );
+    assert!(original_path.exists());
+    assert!(preview_path.exists());
+
+    let connection = encrypted_connection(&config);
+    connection
+        .execute("DELETE FROM draft_media_references", [])
+        .unwrap();
+    drop(connection);
+    let cleanup = client.cleanup_uploaded_gateway_mms_ciphertext(10).unwrap();
+    assert_eq!(cleanup.marked, 2);
+    assert_eq!(cleanup.unlinked, 2);
+    assert!(!original_path.exists());
+    assert!(!preview_path.exists());
 }

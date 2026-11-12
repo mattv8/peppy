@@ -14,6 +14,7 @@ pub const RETAINED_DOWNLOAD_CIPHERTEXT_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
 const EVICTABLE_AVAILABLE_PREDICATE: &str = r#"
     a.state = 'available'
     AND NOT EXISTS (SELECT 1 FROM attachment_demand d WHERE d.attachment_id = a.attachment_id)
+    AND NOT EXISTS (SELECT 1 FROM draft_media_references r WHERE r.attachment_id = a.attachment_id)
     AND (
         EXISTS (SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id AND e.unlinked_at IS NOT NULL)
         OR NOT EXISTS (SELECT 1 FROM message_media_meta m WHERE m.thumbnail_attachment_id = a.attachment_id)
@@ -71,6 +72,7 @@ const MAX_GATEWAY_MMS_CLEANUP_BATCH: usize = 100;
 const GATEWAY_MMS_CLEANUP_ELIGIBLE: &str = r#"
     a.state = 'uploaded'
     AND a.remote_object_id IS NOT NULL
+    AND NOT EXISTS (SELECT 1 FROM draft_media_references r WHERE r.attachment_id = a.attachment_id)
     AND EXISTS (
         SELECT 1
         FROM mms_acquisition_parts p

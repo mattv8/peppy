@@ -505,6 +505,31 @@ class GoogleMessagesLinkServiceTest {
         handle.allowRunReturn.countDown()
     }
 
+    @Test fun `readiness reuses a usable index instead of rescanning it`() {
+        val handle = object : MutableStatusRunHandle() {
+            val ensures = AtomicInteger()
+            val rescans = AtomicInteger()
+            override fun ensureConversationIndex(): String = "{\"code\":\"ok\"}".also { ensures.incrementAndGet() }
+            override fun refreshConversationIndex(): String = "{\"code\":\"ok\"}".also { rescans.incrementAndGet() }
+        }
+        val executor = QueueExecutor()
+        GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            bootstrapExecutor = executor,
+            bootstrapFactory = { _, _, _ -> emptyBootstrap() },
+        )
+        installEngine(handle)
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+        executor.runAll()
+
+        assertEquals("ensures=1 rescans=0", "ensures=${handle.ensures.get()} rescans=${handle.rescans.get()}")
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
     @Test fun `readiness retries after an incomplete index and recovers owned conversations after refresh`() {
         val events = mutableListOf<String>()
         val handle = RefreshTrackingHandle(listOf("stale", "ok"), events)

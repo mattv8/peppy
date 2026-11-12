@@ -70,6 +70,7 @@ fn core() -> (tempfile::TempDir, Client, ConversationId, u64, MessageId) {
                 tmp_id: Some(SENTINELS[2].into()),
                 rcs_reported: true,
                 e2ee_reported: Some(true),
+                alternate_message_ids: Vec::new(),
                 attachments: vec![
                     RcsIncomingAttachment {
                         original_index: 0,
@@ -129,6 +130,7 @@ fn core() -> (tempfile::TempDir, Client, ConversationId, u64, MessageId) {
                 tmp_id: None,
                 rcs_reported: false,
                 e2ee_reported: None,
+                alternate_message_ids: Vec::new(),
                 attachments: vec![],
             },
         )
@@ -631,6 +633,7 @@ fn browser_rcs_reported_message_without_status_row_preserves_reported_fact() {
                 tmp_id: None,
                 rcs_reported: false,
                 e2ee_reported: None,
+                alternate_message_ids: Vec::new(),
                 attachments: vec![],
             },
         )
@@ -704,6 +707,7 @@ fn browser_rcs_history_gap_is_projected_after_detector_overflow() {
                 tmp_id: None,
                 rcs_reported: true,
                 e2ee_reported: Some(true),
+                alternate_message_ids: Vec::new(),
                 attachments: vec![],
             },
         )
@@ -774,6 +778,7 @@ fn rcs_conversation(
                 tmp_id: None,
                 rcs_reported,
                 e2ee_reported: encryption,
+                alternate_message_ids: Vec::new(),
                 attachments: vec![],
             },
         )

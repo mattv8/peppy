@@ -13,6 +13,7 @@ import dev.peppy.mobile.RelayWakePreference
 import dev.peppy.mobile.RelayWakeRuntime
 import dev.peppy.mobile.RelayWakeStatus
 import dev.peppy.mobile.RelayWakeTransport
+import dev.peppy.mobile.cleanupBearerForAuthenticatedDelete
 import dev.peppy.mobile.gateway.GatewayAccountCredential
 import dev.peppy.mobile.gateway.HttpResult
 import dev.peppy.mobile.security.SecretBox
@@ -36,6 +37,44 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34])
 class RelayWakeStateTest {
     private val plainBox = object : SecretBox { override fun seal(purpose: String, plaintext: ByteArray) = plaintext.decodeToString(); override fun open(purpose: String, sealed: String) = sealed.encodeToByteArray() }
+
+    @Test fun relayOnlyCleanupPersistsWithoutAnAccountBearer() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val preferences = context.getSharedPreferences("relay-only-cleanup", Context.MODE_PRIVATE)
+        preferences.edit().clear().commit()
+        val cleanup = RelayWakeCleanup(
+            relayIdentity("old-fingerprint"),
+            RelayRoute("00000000-0000-4000-8000-000000000111", "manage", "wake"),
+            null,
+            "https://relay.example",
+        )
+
+        assertTrue(RelayWakeStateStore(preferences, plainBox).saveCleanup(cleanup))
+
+        val restored = RelayWakeStateStore(preferences, plainBox).cleanups().single()
+        assertNull(restored.bearerToken)
+        assertEquals(cleanup.route.routeId, restored.route.routeId)
+    }
+
+    @Test fun legacyMismatchedCleanupRemainsRelayOnlyAfterReload() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val preferences = context.getSharedPreferences("legacy-mismatched-cleanup", Context.MODE_PRIVATE)
+        preferences.edit().clear().putString(
+            "hosted-relay-cleanup.v2.00000000-0000-4000-8000-000000000112",
+            listOf(
+                "https://old.example", "vault-a", "device-a", "fcm", "production", "old-fingerprint",
+                "00000000-0000-4000-8000-000000000112", "manage", "wake", "new-bearer", "https://relay.example",
+            ).joinToString("\n"),
+        ).commit()
+
+        val state = RelayWakeStateStore(preferences, plainBox)
+        val reloaded = state.cleanups().single()
+
+        assertNull(cleanupBearerForAuthenticatedDelete(state, reloaded))
+        assertEquals("https://relay.example", reloaded.relayOrigin)
+        assertEquals("manage", reloaded.route.manageCredential)
+    }
+
     @Test fun candidateIsDistinctFromActiveAndDurableBeforeRegistration() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val state = RelayWakeStateStore(context.getSharedPreferences("relay-state-test", 0), plainBox)

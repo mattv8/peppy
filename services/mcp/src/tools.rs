@@ -201,6 +201,17 @@ async fn get_attachment(
     let attachment_id = id(args, "attachment_id")
         .map(AttachmentId)
         .map_err(|_| ("invalid_arguments", "attachment_id must be a UUID."))?;
+    if client
+        .attachment_info(attachment_id)
+        .map_err(core_error)?
+        .plaintext_bytes
+        > MAX_ATTACHMENT_BYTES
+    {
+        return Err((
+            "unsupported_attachment",
+            "The attachment must be a valid bounded PNG, JPEG, or WebP.",
+        ));
+    }
     let file = client
         .open_native_plaintext(attachment_id)
         .map_err(core_error)?;
@@ -441,14 +452,11 @@ async fn queue_with_conversation(
         );
     }
     validate_explicit_route(args)?;
-    let expected_transport = runtime
-        .client()
-        .mcp_send_transport(
-            conversation_id,
-            &content.recipients,
-            &content.attachment_ids,
-        )
-        .map_err(core_error)?;
+    let expected_transport = runtime.client().mcp_send_transport(
+        &content.recipients,
+        &content.body,
+        &content.attachment_ids,
+    );
     let route = match select_route(
         runtime,
         args,
@@ -1072,6 +1080,48 @@ mod tests {
         assert!(attachment_result(&png(1280, 720)).await.is_ok());
     }
 
+    #[tokio::test]
+    async fn oversized_attachment_is_rejected_before_opening_ciphertext() {
+        use peppy_client_core::{ClientConfig, DatabaseKey, DeviceId, VaultId};
+        use peppy_crypto::{KeyProfile, create_vault_check_header, derive_root_key};
+
+        let dir = tempfile::tempdir().unwrap();
+        let vault_id = VaultId::new();
+        let client = Client::open(
+            ClientConfig {
+                database_path: dir.path().join("tools.db"),
+                vault_id,
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[9; 32]).unwrap(),
+        )
+        .unwrap();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let phrase = "mcp commands test phrase";
+        let root = derive_root_key(phrase, &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        client.unlock(&profile, &header, phrase).unwrap();
+
+        let source = dir.path().join("oversized.png");
+        fs::write(&source, vec![0; 32 * 1024 * 1024]).unwrap();
+        let attachment = client
+            .prepare_attachment(&source, "image/png", "oversized.png")
+            .unwrap();
+        let ciphertext = dir
+            .path()
+            .join("tools.db.media/cipher")
+            .join(format!("{}.ppss", attachment.attachment_id));
+        fs::remove_file(ciphertext).unwrap();
+
+        assert_eq!(
+            get_attachment(&client, &json!({"attachment_id": attachment.attachment_id}))
+                .await
+                .unwrap_err()
+                .0,
+            "unsupported_attachment"
+        );
+    }
+
     #[test]
     fn core_errors_preserve_argument_and_idempotency_failures() {
         assert_eq!(
@@ -1153,10 +1203,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            client
-                .mcp_send_transport(conversation_id, &command.recipients, &[])
-                .unwrap(),
-            Transport::Mms
+            client.mcp_send_transport(&command.recipients, &command.body, &[]),
+            Transport::Sms
         );
         assert_eq!(
             canonical_request_hash("send_message", &args).unwrap(),
@@ -1203,7 +1251,8 @@ mod tests {
                         gateway_device_id: DeviceId::new(),
                         subscription_id: "sim-1".into(),
                     },
-                    expected_transport: Transport::Sms,
+                    // A text this long exceeds what SMS parts hold.
+                    expected_transport: Transport::Mms,
                     request_hash: vec![index as u8; 32],
                 })
                 .unwrap();

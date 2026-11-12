@@ -52,6 +52,7 @@ pub struct AppState {
     provider: Arc<dyn PushProvider>,
     admissions: Arc<Mutex<HashMap<String, Admission>>>,
     wake_admissions: Arc<Mutex<HashMap<String, Admission>>>,
+    management_admissions: Arc<Mutex<HashMap<String, Admission>>>,
     wake_admission_limit: u32,
     trusted_proxy_cidrs: Arc<Vec<IpNet>>,
     release_identity: Arc<String>,
@@ -65,6 +66,7 @@ struct Admission {
 enum AdmissionKind {
     Registration,
     Wake,
+    Management,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -78,6 +80,7 @@ impl AdmissionKind {
         match self {
             Self::Registration => "registration",
             Self::Wake => "wake",
+            Self::Management => "management",
         }
     }
 }
@@ -273,6 +276,7 @@ impl AppState {
             provider,
             admissions: Arc::new(Mutex::new(HashMap::new())),
             wake_admissions: Arc::new(Mutex::new(HashMap::new())),
+            management_admissions: Arc::new(Mutex::new(HashMap::new())),
             wake_admission_limit,
             trusted_proxy_cidrs: Arc::new(trusted_proxy_cidrs),
             release_identity: Arc::new(release_identity),
@@ -300,6 +304,18 @@ impl AppState {
         )
         .await
     }
+    async fn admit_route_management(
+        &self,
+        route_id: Uuid,
+        transaction: &mut Transaction<'_, Postgres>,
+    ) -> Result<(), AdmissionError> {
+        self.admit_durable_with(
+            AdmissionKind::Wake,
+            format!("management:{route_id}"),
+            &mut **transaction,
+        )
+        .await
+    }
     async fn admit_durable(
         &self,
         kind: AdmissionKind,
@@ -319,6 +335,7 @@ impl AppState {
         let limit = match kind {
             AdmissionKind::Registration => u32::from(ADMISSION_LIMIT),
             AdmissionKind::Wake => self.wake_admission_limit,
+            AdmissionKind::Management => self.wake_admission_limit,
         };
         let admitted: bool = sqlx::query_scalar(
             "WITH admitted AS (INSERT INTO relay_admissions(admission_kind,source,window_started_at,attempts) VALUES($1,$2,date_trunc('minute', statement_timestamp()),1) ON CONFLICT(admission_kind,source,window_started_at) DO UPDATE SET attempts=relay_admissions.attempts+1 WHERE relay_admissions.attempts < $3 RETURNING attempts) SELECT EXISTS(SELECT 1 FROM admitted)",
@@ -344,10 +361,12 @@ impl AppState {
         let key = match kind {
             AdmissionKind::Registration => admission_source(ip.ip()),
             AdmissionKind::Wake => canonical_source(ip.ip()),
+            AdmissionKind::Management => canonical_source(ip.ip()),
         };
         let (entries, limit) = match kind {
             AdmissionKind::Registration => (&self.admissions, u32::from(ADMISSION_LIMIT)),
             AdmissionKind::Wake => (&self.wake_admissions, self.wake_admission_limit),
+            AdmissionKind::Management => (&self.management_admissions, self.wake_admission_limit),
         };
         let mut entries = entries.lock().await;
         entries.retain(|_, value| {
@@ -381,6 +400,15 @@ impl AppState {
         headers: &HeaderMap,
     ) -> Result<(), AdmissionError> {
         self.prefilter_admit(AdmissionKind::Wake, self.client_ip(peer, headers))
+            .await
+            .map(|_| ())
+    }
+    async fn admit_management_request(
+        &self,
+        peer: SocketAddr,
+        headers: &HeaderMap,
+    ) -> Result<(), AdmissionError> {
+        self.prefilter_admit(AdmissionKind::Management, self.client_ip(peer, headers))
             .await
             .map(|_| ())
     }
@@ -915,7 +943,7 @@ async fn revoke(
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
     valid_secret(&request.manage_credential, "invalid_manage_credential")?;
     state
-        .admit_wake_request(peer, &headers)
+        .admit_management_request(peer, &headers)
         .await
         .map_err(admission_error)?;
     let mut tx = state.pool.begin().await.map_err(db)?;
@@ -928,7 +956,7 @@ async fn revoke(
         return Err(unauthorized());
     }
     state
-        .admit_route_wake(id, &mut tx)
+        .admit_route_management(id, &mut tx)
         .await
         .map_err(admission_error)?;
     sqlx::query("UPDATE relay_routes SET revoked_at=now(),token='' WHERE id=$1")
@@ -2080,6 +2108,85 @@ mod tests {
             .status(),
             StatusCode::TOO_MANY_REQUESTS
         );
+        task.abort();
+        cleanup(pool, schema).await;
+    }
+
+    #[tokio::test]
+    async fn management_revoke_has_admission_independent_of_wakes() {
+        let (pool, schema) = test_pool().await;
+        let state = AppState::with_provider_proxy_cidrs_and_wake_limit(
+            pool.clone(),
+            Arc::new(FakeProvider::default()),
+            trusted_proxy_cidrs(Some("127.0.0.0/8")).unwrap(),
+            "test-release".into(),
+            1,
+        );
+        let (base, task) = serve(state).await;
+        let client = reqwest::Client::new();
+        let manage_credential = "a".repeat(64);
+        let wake_credential = "b".repeat(64);
+
+        for (wake_source, revoke_source, post_revoke_source) in [
+            ("198.51.100.1", "198.51.100.2", "198.51.100.4"),
+            ("198.51.100.3", "198.51.100.3", "198.51.100.5"),
+        ] {
+            let registration_id = Uuid::new_v4();
+            let route_id = Uuid::new_v4();
+            sqlx::query("INSERT INTO relay_registrations(id,provider,token,challenge_digest,expires_at) VALUES($1,'fcm','token',$2,now()+interval '10 minutes')")
+                .bind(registration_id).bind(vec![0_u8; 32]).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO relay_routes(id,registration_id,provider,token,manage_digest,wake_digest) VALUES($1,$2,'fcm','token',$3,$4)")
+                .bind(route_id).bind(registration_id).bind(digest(&manage_credential)).bind(digest(&wake_credential)).execute(&pool).await.unwrap();
+
+            let wake = client
+                .post(format!("{base}/v1/routes/{route_id}/wake"))
+                .header("x-forwarded-for", wake_source)
+                .json(&serde_json::json!({"wake_credential":&wake_credential,"idempotency_id":"one","opaque_nonce":"nonce"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(wake.status(), StatusCode::ACCEPTED);
+
+            let revoke = client
+                .post(format!("{base}/v1/routes/{route_id}/revoke"))
+                .header("x-forwarded-for", revoke_source)
+                .json(&serde_json::json!({"manage_credential":&manage_credential}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(revoke.status(), StatusCode::NO_CONTENT);
+            let jobs: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM relay_wake_jobs WHERE route_id=$1")
+                    .bind(route_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(jobs, 0);
+            let revoked: bool =
+                sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM relay_routes WHERE id=$1")
+                    .bind(route_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(revoked);
+
+            let after_revoke = client
+                .post(format!("{base}/v1/routes/{route_id}/wake"))
+                .header("x-forwarded-for", post_revoke_source)
+                .json(&serde_json::json!({"wake_credential":&wake_credential,"idempotency_id":"two","opaque_nonce":"nonce"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(after_revoke.status(), StatusCode::UNAUTHORIZED);
+            let jobs: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM relay_wake_jobs WHERE route_id=$1")
+                    .bind(route_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(jobs, 0);
+        }
+
         task.abort();
         cleanup(pool, schema).await;
     }

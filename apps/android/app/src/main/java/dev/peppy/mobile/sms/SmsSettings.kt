@@ -1,7 +1,6 @@
 package dev.peppy.mobile.sms
 
 import android.content.Context
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -86,11 +85,6 @@ internal fun SmsSettings(
             stringResource(if (readGranted) R.string.peppy_sms_history_allowed else R.string.peppy_sms_history_not_allowed),
         )
         StatusRow("sms-history-status", stringResource(R.string.peppy_sms_history_status_label), stringResource(smsHistoryLabel(presentation.state)))
-        if (presentation.state == SmsHistoryState.PAUSED) Text(
-            stringResource(R.string.peppy_sms_history_capacity_footer),
-            Modifier.testTag("sms-history-capacity"),
-            style = MaterialTheme.typography.bodySmall,
-        )
     }
 }
 

@@ -26,18 +26,31 @@ import org.junit.Test
 class OwnerPhoneApprovalScreenTest {
     @get:Rule val compose = createComposeRule()
 
-    private class Actions(private val initial: OwnerPhoneApprovalHost.Result = verifyResult()) : OwnerPhoneApprovalActions {
+    private class Actions(
+        private val initial: OwnerPhoneApprovalHost.Result = verifyResult(),
+        private val pollResults: ArrayDeque<OwnerPhoneApprovalHost.Result> = ArrayDeque(),
+    ) : OwnerPhoneApprovalActions {
         var approvals = 0
+        var approvalEntries = 0
+        var polls = 0
+        var restarts = 0
         val rotations = mutableListOf<OwnerPhoneMethod>()
         private val verify = verifyResult()
         override suspend fun start(method: OwnerPhoneMethod) = initial
-        override suspend fun poll() = verify
+        override suspend fun poll(): OwnerPhoneApprovalHost.Result {
+            polls += 1
+            return pollResults.removeFirstOrNull() ?: verify
+        }
         override suspend fun rotateIfNeeded(requested: OwnerPhoneMethod): OwnerPhoneApprovalHost.Result {
             rotations += requested
             return initial as? OwnerPhoneApprovalHost.Result.View ?: verify
         }
-        override suspend fun restart(method: OwnerPhoneMethod) = initial
+        override suspend fun restart(method: OwnerPhoneMethod): OwnerPhoneApprovalHost.Result {
+            restarts += 1
+            return initial
+        }
         override suspend fun approve(prompt: SecretPrompt): OwnerPhoneApprovalHost.Result {
+            approvalEntries += 1
             val secret = prompt.ask() ?: return OwnerPhoneApprovalHost.Result.Cancelled
             secret.fill('\u0000')
             approvals += 1
@@ -54,8 +67,13 @@ class OwnerPhoneApprovalScreenTest {
     }
 
     private companion object {
-        fun verifyResult() = OwnerPhoneApprovalHost.Result.View(
-            OwnerPhoneStatus(OwnerPhoneStage.VERIFY, 30, "123456", "claim", "invite"),
+        fun verifyResult(
+            invitationId: String = "invite",
+            claimDigest: String? = "claim",
+            sas: String? = "123456",
+            expiresInSeconds: Int = 30,
+        ) = OwnerPhoneApprovalHost.Result.View(
+            OwnerPhoneStatus(OwnerPhoneStage.VERIFY, expiresInSeconds, sas, claimDigest, invitationId),
             null,
         )
 
@@ -81,7 +99,42 @@ class OwnerPhoneApprovalScreenTest {
         compose.onNodeWithTag("owner-phone-prompt-field").performTextInput("vault-secret")
         compose.onNodeWithTag("owner-phone-prompt-confirm").performClick()
         compose.onNodeWithTag("owner-phone-connected").assertIsDisplayed()
+        assertEquals(1, actions.approvalEntries)
         assertEquals(1, actions.approvals)
+    }
+
+    @Test fun retryFromAnExpiredVerifyErrorPollsWithoutOpeningApproval() {
+        val actions = Actions(pollResults = ArrayDeque(listOf(
+            OwnerPhoneApprovalHost.Result.Failed("expired"),
+            verifyResult(),
+        )))
+        compose.setContent { OwnerPhoneApprovalScreen(actions, {}, noReveal, RecordingSecureWindow()) }
+
+        compose.mainClock.advanceTimeBy(2_000)
+        compose.onNodeWithTag("owner-phone-error").assertIsDisplayed()
+        compose.onNodeWithTag("owner-phone-codes-match").performClick()
+        compose.onNodeWithText(string(R.string.peppy_try_again)).performClick()
+
+        compose.onNodeWithTag("owner-phone-approval-dialog").assertDoesNotExist()
+        assertEquals(2, actions.polls)
+        assertEquals(0, actions.approvalEntries)
+        assertEquals(0, actions.approvals)
+        assertEquals(0, actions.restarts)
+        assertTrue(actions.rotations.isEmpty())
+    }
+
+    @Test fun changedVerifyClaimClearsAcknowledgementButCountdownDoesNot() {
+        val claimA = verifyResult(expiresInSeconds = 29)
+        val claimB = verifyResult(invitationId = "invite-b", claimDigest = "claim-b", sas = "654321")
+        val actions = Actions(pollResults = ArrayDeque(listOf(claimA, claimB)))
+        compose.setContent { OwnerPhoneApprovalScreen(actions, {}, noReveal, RecordingSecureWindow()) }
+
+        compose.onNodeWithTag("owner-phone-codes-match").performClick()
+        compose.mainClock.advanceTimeBy(2_000)
+        compose.onNodeWithTag("owner-phone-approve").assertIsEnabled()
+        compose.mainClock.advanceTimeBy(2_000)
+
+        compose.onNodeWithTag("owner-phone-approve").assertIsNotEnabled()
     }
 
     @Test fun missingSecretShowsApprovalPromptDialog() {

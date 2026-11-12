@@ -1,5 +1,6 @@
 use std::{
     io::Cursor,
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 
@@ -13,7 +14,10 @@ use aws_sigv4::{
 };
 use peppy_server::{
     ServerBuilder,
-    api::create_owner,
+    api::{
+        AccessPolicy, AccessPrincipal, AttachmentStoragePolicy, Operation, PolicyFuture,
+        create_owner,
+    },
     config::{Config, S3Config},
     storage::{Storage, StorageError},
 };
@@ -57,6 +61,13 @@ impl TestServer {
     }
 
     async fn start_with_s3(s3: Option<S3Config>) -> Self {
+        Self::start_with_s3_and_policy(s3, None).await
+    }
+
+    async fn start_with_s3_and_policy(
+        s3: Option<S3Config>,
+        policy: Option<Arc<dyn AccessPolicy>>,
+    ) -> Self {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL is required; integration tests never silently skip");
         let mut config = Config::from_env().expect("complete S3 test configuration is required");
@@ -92,11 +103,15 @@ impl TestServer {
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         config.database_url = isolated_url.to_string();
-        let mut server = ServerBuilder::community(config, pool.clone())
-            .storage_cleanup_interval(Duration::from_millis(200))
-            .build()
-            .await
-            .unwrap();
+        let builder = ServerBuilder::community(config, pool.clone())
+            .storage_cleanup_interval(Duration::from_millis(200));
+        let mut server = match policy {
+            Some(policy) => builder.access_policy(policy),
+            None => builder,
+        }
+        .build()
+        .await
+        .unwrap();
         server.start_maintenance().unwrap();
         let router = server.router();
 
@@ -290,6 +305,178 @@ async fn foreign_owner(pool: &PgPool) -> String {
         .await
         .unwrap()
         .device_token
+}
+
+struct CleanupPolicy {
+    limit_bytes: i64,
+}
+
+impl AccessPolicy for CleanupPolicy {
+    fn authorize(
+        &self,
+        _principal: AccessPrincipal,
+        _operation: Operation,
+    ) -> PolicyFuture<'_, bool> {
+        Box::pin(async { true })
+    }
+
+    fn attachment_storage_policy_in_transaction<'a>(
+        &'a self,
+        _principal: AccessPrincipal,
+        _configured_limit_bytes: i64,
+        _connection: &'a mut sqlx::PgConnection,
+    ) -> PolicyFuture<'a, Result<AttachmentStoragePolicy, sqlx::Error>> {
+        Box::pin(async move {
+            Ok(AttachmentStoragePolicy {
+                allow_upload: true,
+                limit_bytes: self.limit_bytes,
+                cleanup_authorized: true,
+                policy_version: Some("test-policy".into()),
+            })
+        })
+    }
+}
+
+async fn hold_vault_lock(server: &TestServer) -> (sqlx::Transaction<'static, sqlx::Postgres>, i32) {
+    let mut holder = server.pool.begin().await.unwrap();
+    let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    sqlx::query("SELECT 1 FROM vaults WHERE vault_id=$1 FOR UPDATE")
+        .bind(server.vault)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    (holder, pid)
+}
+
+async fn wait_for_reserve_to_block(server: &TestServer, holder_pid: i32) {
+    wait_until(5, "reserve request blocked on the vault lock", || {
+        let admin = server.admin.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%SELECT vault_id FROM vaults%')",
+            )
+            .bind(holder_pid)
+            .fetch_one(&admin)
+            .await
+            .unwrap()
+        }
+    })
+    .await;
+}
+
+async fn reserve_detached(base_url: String, token: String) -> (StatusCode, Value) {
+    let response = Client::new()
+        .post(format!("{base_url}/v1/attachments/reserve"))
+        .bearer_auth(token)
+        .header("peppy-attachment-retention-protocol", "1")
+        .json(&json!({
+            "declared_ciphertext_bytes": 1,
+            "declared_ciphertext_sha256": hex::encode(Sha256::digest([1])),
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, response.json().await.unwrap())
+}
+
+async fn revoke_credential_and_release(
+    mut holder: sqlx::Transaction<'static, sqlx::Postgres>,
+    device_id: Uuid,
+) {
+    sqlx::query("UPDATE device_credentials SET revoked_at=now() WHERE device_id=$1")
+        .bind(device_id)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+}
+
+async fn revoked_reserve(server: &TestServer, token: String, device_id: Uuid) -> Value {
+    let (holder, holder_pid) = hold_vault_lock(server).await;
+    let task = tokio::spawn(reserve_detached(server.base_url.clone(), token));
+    wait_for_reserve_to_block(server, holder_pid).await;
+    revoke_credential_and_release(holder, device_id).await;
+    let (status, body) = tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .expect("blocked reserve did not finish after the lock was released")
+        .unwrap();
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["code"], "invalid_bearer");
+    body
+}
+
+#[tokio::test]
+async fn reserve_rejects_a_credential_revoked_while_waiting_for_the_vault_lock() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let token = server.add_device("device").await;
+    let device_id =
+        sqlx::query_scalar("SELECT device_id FROM device_credentials WHERE token_digest=$1")
+            .bind(Sha256::digest(token.as_bytes()).as_slice())
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+
+    revoked_reserve(&server, token, device_id).await;
+    let reservations: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM upload_reservations WHERE vault_id=$1")
+            .bind(server.vault)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+    assert_eq!(reservations, 0);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn revoked_reserve_cannot_queue_cleanup_or_tombstone_attachments() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start_with_s3_and_policy(
+        None,
+        Some(Arc::new(CleanupPolicy { limit_bytes: 1 })),
+    )
+    .await;
+    let attachment_id = Uuid::new_v4();
+    sqlx::query("UPDATE attachment_retention_devices SET cleanup_ready=TRUE,reconciliation_needed=FALSE WHERE vault_id=$1")
+        .bind(server.vault)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let device_id =
+        sqlx::query_scalar("SELECT device_id FROM device_credentials WHERE vault_id=$1")
+            .bind(server.vault)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+    sqlx::query("INSERT INTO attachments(vault_id,attachment_id,object_key,ciphertext_bytes,ciphertext_sha256,created_by_device_id,retention_class) VALUES($1,$2,'private/cleanup-candidate',1,$3,$4,'message_media')")
+        .bind(server.vault)
+        .bind(attachment_id)
+        .bind(vec![0_u8; 32])
+        .bind(device_id)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO attachment_retention_uses(vault_id,use_id,attachment_id,device_id,kind) VALUES($1,$2,$3,$4,'message_history')")
+        .bind(server.vault)
+        .bind(Uuid::new_v4())
+        .bind(attachment_id)
+        .bind(device_id)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+
+    revoked_reserve(&server, server.owner_token.clone(), device_id).await;
+    let effects: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM upload_reservations WHERE vault_id=$1), (SELECT count(*) FROM attachment_removals WHERE vault_id=$1), (SELECT count(*) FROM storage_deletions WHERE vault_id=$1)")
+        .bind(server.vault)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+    assert_eq!(effects, (0, 0, 0));
+    server.shutdown().await;
 }
 
 #[tokio::test]

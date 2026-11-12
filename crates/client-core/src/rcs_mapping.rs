@@ -10,22 +10,11 @@ use rusqlite::{Connection, OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 pub const RCS_MAPPING_PROOF_VERSION: u32 = 2;
 pub const RCS_MAPPING_FRESHNESS_MS: i64 = 30_000;
-const MAX_PROVIDER_ROUTE_MESSAGE_SCAN: usize = 10_000;
 const MAX_RCS_BOOTSTRAP_CANDIDATES: usize = 40;
-
-#[cfg(test)]
-static PROVIDER_ROUTE_SCAN_QUERIES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-// Per-thread so parallel unit tests that also verify mappings cannot skew the count.
-#[cfg(test)]
-thread_local! {
-    static IDENTITY_SCAN_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RcsMappingClass {
@@ -110,6 +99,8 @@ pub enum RcsMappingRefusal {
     RetiredContext,
     PeppyConversationUncertain,
     SelfChatUnsupported,
+    /// The command being sent is not addressed to exactly the chat's participant.
+    RecipientMismatch,
 }
 
 impl RcsMappingRefusal {
@@ -129,6 +120,7 @@ impl RcsMappingRefusal {
             Self::RetiredContext => "retired_context",
             Self::PeppyConversationUncertain => "peppy_conversation_uncertain",
             Self::SelfChatUnsupported => "self_chat_unsupported",
+            Self::RecipientMismatch => "recipient_mismatch",
         }
     }
 }
@@ -174,15 +166,34 @@ pub(crate) fn verify_and_store(
     observation: &RcsMappingObservation,
     now_ms: i64,
 ) -> Result<RcsMappingOutcome, Error> {
+    verify_and_store_at(conn, observation, None, now_ms)
+}
+
+/// Verifies the bound target of one pending command. The mapping is stored on the command's own
+/// conversation, and only when its single recipient is the chat's participant. The thread's
+/// contents never decide the send; they are read once afterwards to decide whether the link may
+/// also receive into it.
+pub(crate) fn verify_and_store_for_send(
+    conn: &Connection,
+    observation: &RcsMappingObservation,
+    command: &crate::MessagePayload,
+    now_ms: i64,
+) -> Result<RcsMappingOutcome, Error> {
+    verify_and_store_at(conn, observation, Some(command), now_ms)
+}
+
+fn verify_and_store_at(
+    conn: &Connection,
+    observation: &RcsMappingObservation,
+    command: Option<&crate::MessagePayload>,
+    now_ms: i64,
+) -> Result<RcsMappingOutcome, Error> {
     if let Some(refusal) = advance_context(conn, observation, now_ms)? {
         return Ok(RcsMappingOutcome::Refused(refusal));
     }
-    let outcome = verify(conn, observation, now_ms)?;
+    let outcome = verify(conn, observation, command, now_ms)?;
     let RcsMappingOutcome::Mapped(mapping) = &outcome else {
-        if !matches!(
-            outcome,
-            RcsMappingOutcome::Refused(RcsMappingRefusal::NonMonotonicRevision)
-        ) {
+        if refusal_withdraws_mappings(&outcome, command.is_some()) {
             invalidate_for_refusal(conn, observation, refusal_code(&outcome))?;
         }
         return Ok(outcome);
@@ -194,7 +205,53 @@ pub(crate) fn verify_and_store(
         ));
     }
     put(conn, mapping)?;
+    let thread_guarded = match command {
+        None => true,
+        Some(_) => matches!(
+            indexed_thread(
+                conn,
+                mapping.conversation_id,
+                &mapping.proof.canonical_participant
+            )?,
+            IndexedThread::OneToOne
+        ),
+    };
+    if thread_guarded {
+        record_receive_guard(conn, mapping)?;
+    }
     Ok(outcome)
+}
+
+/// Metadata key holding the mapping revision whose thread passed the one-to-one guard. The link
+/// receives into a conversation only on such a revision: a send proves its own recipient, not
+/// that the thread carries no one else.
+const RECEIVE_GUARD_KEY_PREFIX: &str = "rcs_receive_guarded:";
+
+fn record_receive_guard(conn: &Connection, mapping: &RcsMapping) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        params![
+            format!("{RECEIVE_GUARD_KEY_PREFIX}{}", mapping.conversation_id),
+            mapping.mapping_revision.to_string()
+        ],
+    )?;
+    Ok(())
+}
+
+/// Whether the link may receive into the mapping's conversation: its current revision is the one
+/// whose thread passed the guard.
+pub(crate) fn receive_guarded(conn: &Connection, mapping: &RcsMapping) -> Result<bool, Error> {
+    let guarded_revision: Option<String> = conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [format!(
+                "{RECEIVE_GUARD_KEY_PREFIX}{}",
+                mapping.conversation_id
+            )],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(guarded_revision == Some(mapping.mapping_revision.to_string()))
 }
 
 /// Advances the link context from one observation with the 1:1 rules. `None` means the context is
@@ -235,6 +292,20 @@ pub(crate) fn advance_group_route_context(
     Ok(advance_context(conn, observation, now_ms)?.is_none())
 }
 
+/// A refusal that says nothing against the chat's stored mapping leaves it in place: a stale
+/// revision, or a command that is simply not this chat's.
+fn refusal_withdraws_mappings(outcome: &RcsMappingOutcome, for_send: bool) -> bool {
+    match outcome {
+        RcsMappingOutcome::Refused(RcsMappingRefusal::NonMonotonicRevision) => false,
+        RcsMappingOutcome::Refused(
+            RcsMappingRefusal::RecipientMismatch
+            | RcsMappingRefusal::PeppyConversationMissing
+            | RcsMappingRefusal::PeppyConversationAmbiguous,
+        ) => !for_send,
+        _ => true,
+    }
+}
+
 fn refusal_code(outcome: &RcsMappingOutcome) -> &'static str {
     match outcome {
         RcsMappingOutcome::Refused(reason) => reason.code(),
@@ -245,6 +316,7 @@ fn refusal_code(outcome: &RcsMappingOutcome) -> &'static str {
 fn verify(
     conn: &Connection,
     observation: &RcsMappingObservation,
+    command: Option<&crate::MessagePayload>,
     now_ms: i64,
 ) -> Result<RcsMappingOutcome, Error> {
     if !is_fresh(now_ms, observation.observed_at_ms) {
@@ -346,36 +418,19 @@ fn verify(
         ));
     };
 
-    let matches = peppy_conversations_for_identity(conn, &participant)?;
-    let conversation_id =
-        match resolve_identity_conversation(conn, &matches, &observation.google_conversation_id)? {
-            RcsBootstrapResolution::Resolved { conversation_id } => conversation_id,
-            RcsBootstrapResolution::Missing => {
-                return Ok(RcsMappingOutcome::Refused(
-                    RcsMappingRefusal::PeppyConversationMissing,
-                ));
-            }
-            RcsBootstrapResolution::Ambiguous => {
-                return Ok(RcsMappingOutcome::Refused(
-                    RcsMappingRefusal::PeppyConversationAmbiguous,
-                ));
-            }
-            RcsBootstrapResolution::Uncertain => {
-                return Ok(RcsMappingOutcome::Refused(
-                    RcsMappingRefusal::PeppyConversationUncertain,
-                ));
-            }
-            RcsBootstrapResolution::InvalidIdentity => {
-                return Ok(RcsMappingOutcome::Refused(
-                    RcsMappingRefusal::InvalidIdentity,
-                ));
-            }
-            RcsBootstrapResolution::AlreadyMappedElsewhere => {
-                return Ok(RcsMappingOutcome::Refused(
-                    RcsMappingRefusal::MappingConflict,
-                ));
-            }
-        };
+    let google_conversation_id = &observation.google_conversation_id;
+    let destination = match command {
+        Some(command) => command_conversation(conn, command, &participant, google_conversation_id)?,
+        None => resolved_conversation(resolve_identity_conversation(
+            conn,
+            &participant,
+            google_conversation_id,
+        )?),
+    };
+    let conversation_id = match destination {
+        Ok(conversation_id) => conversation_id,
+        Err(refusal) => return Ok(RcsMappingOutcome::Refused(refusal)),
+    };
     if let Some(current_revision) = highest_revision(conn, conversation_id)?
         && observation.mapping_revision <= current_revision
     {
@@ -420,8 +475,8 @@ fn canonical_identity(identity: &str) -> Option<String> {
     canonical_recipient(identity)
 }
 
-/// Resolves up to `MAX_RCS_BOOTSTRAP_CANDIDATES` `(participant, google id)` pairs with one
-/// history scan. Results keep the input order; invalid identities resolve per candidate.
+/// Resolves up to `MAX_RCS_BOOTSTRAP_CANDIDATES` `(participant, google id)` pairs through the
+/// number index. Results keep the input order; invalid identities resolve per candidate.
 pub(crate) fn resolve_rcs_bootstrap_conversations(
     conn: &Connection,
     candidates: &[(&str, &str)],
@@ -429,26 +484,13 @@ pub(crate) fn resolve_rcs_bootstrap_conversations(
     if candidates.len() > MAX_RCS_BOOTSTRAP_CANDIDATES {
         return Err(Error::InvalidRequest("too many bootstrap candidates"));
     }
-    let identities = candidates
+    candidates
         .iter()
-        .map(|(identity, _)| canonical_identity(identity))
-        .collect::<Vec<_>>();
-    let requested = identities
-        .iter()
-        .flatten()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let matches = identity_conversations(conn, &requested)?;
-    let no_matches = IdentityConversations::default();
-    identities
-        .iter()
-        .zip(candidates)
-        .map(|(identity, (_, google_conversation_id))| {
-            let Some(identity) = identity else {
+        .map(|(identity, google_conversation_id)| {
+            let Some(identity) = canonical_identity(identity) else {
                 return Ok(RcsBootstrapResolution::InvalidIdentity);
             };
-            let found = matches.get(identity).unwrap_or(&no_matches);
-            resolve_identity_conversation(conn, found, google_conversation_id)
+            resolve_identity_conversation(conn, &identity, google_conversation_id)
         })
         .collect()
 }
@@ -463,25 +505,78 @@ pub(crate) fn resolve_rcs_bootstrap_conversation(
         .ok_or(Error::Database)
 }
 
-/// The one rule shared by bootstrap resolution and mapping verification.
+fn resolved_conversation(
+    resolution: RcsBootstrapResolution,
+) -> Result<ConversationId, RcsMappingRefusal> {
+    match resolution {
+        RcsBootstrapResolution::Resolved { conversation_id } => Ok(conversation_id),
+        RcsBootstrapResolution::Missing => Err(RcsMappingRefusal::PeppyConversationMissing),
+        RcsBootstrapResolution::Ambiguous => Err(RcsMappingRefusal::PeppyConversationAmbiguous),
+        RcsBootstrapResolution::Uncertain => Err(RcsMappingRefusal::PeppyConversationUncertain),
+        RcsBootstrapResolution::InvalidIdentity => Err(RcsMappingRefusal::InvalidIdentity),
+        RcsBootstrapResolution::AlreadyMappedElsewhere => Err(RcsMappingRefusal::MappingConflict),
+    }
+}
+
+/// The destination of a send: the command's own conversation. The command must be addressed to
+/// exactly the chat's participant, and that number's index entry must be this conversation, so
+/// a send and the receive side can never bind one chat to two threads.
+fn command_conversation(
+    conn: &Connection,
+    command: &crate::MessagePayload,
+    participant: &str,
+    google_conversation_id: &str,
+) -> Result<Result<ConversationId, RcsMappingRefusal>, Error> {
+    let [recipient] = command.recipients.as_slice() else {
+        return Ok(Err(RcsMappingRefusal::RecipientMismatch));
+    };
+    if canonical_recipient(recipient).as_deref() != Some(participant) {
+        return Ok(Err(RcsMappingRefusal::RecipientMismatch));
+    }
+    let conversation_id = command.record.conversation_id;
+    Ok(match indexed_conversation(conn, participant)? {
+        None => Err(RcsMappingRefusal::PeppyConversationMissing),
+        Some(indexed) if indexed != conversation_id => {
+            Err(RcsMappingRefusal::PeppyConversationAmbiguous)
+        }
+        Some(_) if mapped_elsewhere(conn, conversation_id, google_conversation_id)? => {
+            Err(RcsMappingRefusal::MappingConflict)
+        }
+        Some(_) => Ok(conversation_id),
+    })
+}
+
+fn mapped_elsewhere(
+    conn: &Connection,
+    conversation_id: ConversationId,
+    google_conversation_id: &str,
+) -> Result<bool, Error> {
+    Ok(
+        has_other_active_mapping(conn, conversation_id, google_conversation_id)?
+            || has_google_mapping_for_other_conversation(
+                conn,
+                conversation_id,
+                google_conversation_id,
+            )?,
+    )
+}
+
+/// The one rule shared by bootstrap resolution and mapping verification: a canonical identity
+/// resolves to the thread the number index holds for it, when that thread carries no one else.
 fn resolve_identity_conversation(
     conn: &Connection,
-    matches: &IdentityConversations,
+    identity: &str,
     google_conversation_id: &str,
 ) -> Result<RcsBootstrapResolution, Error> {
-    if matches.uncertain {
-        return Ok(RcsBootstrapResolution::Uncertain);
-    }
-    let mut conversations = matches.conversations.iter();
-    let Some(conversation_id) = conversations.next().copied() else {
+    let Some(conversation_id) = indexed_conversation(conn, identity)? else {
         return Ok(RcsBootstrapResolution::Missing);
     };
-    if conversations.next().is_some() {
-        return Ok(RcsBootstrapResolution::Ambiguous);
+    match indexed_thread(conn, conversation_id, identity)? {
+        IndexedThread::OneToOne => {}
+        IndexedThread::Unanchored => return Ok(RcsBootstrapResolution::Missing),
+        IndexedThread::HoldsOthers => return Ok(RcsBootstrapResolution::Uncertain),
     }
-    if has_other_active_mapping(conn, conversation_id, google_conversation_id)?
-        || has_google_mapping_for_other_conversation(conn, conversation_id, google_conversation_id)?
-    {
+    if mapped_elsewhere(conn, conversation_id, google_conversation_id)? {
         return Ok(RcsBootstrapResolution::AlreadyMappedElsewhere);
     }
     Ok(RcsBootstrapResolution::Resolved { conversation_id })
@@ -603,102 +698,124 @@ fn validated_visible_participants(
         .ok_or(RcsMappingRefusal::ParticipantAmbiguous)
 }
 
-#[derive(Default)]
-pub(crate) struct IdentityConversations {
-    pub(crate) conversations: BTreeSet<ConversationId>,
-    pub(crate) uncertain: bool,
+/// A canonical identity as the number index spells it.
+fn index_key(identity: &str) -> &str {
+    identity.strip_prefix("raw:").unwrap_or(identity)
 }
 
-pub(crate) fn peppy_conversations_for_identity(
+/// The conversation the number index holds for a canonical identity. The index is written from
+/// messages that name one counterpart and never from a captured MMS, whose address list also
+/// carries the phone's own number.
+pub(crate) fn indexed_conversation(
     conn: &Connection,
     identity: &str,
-) -> Result<IdentityConversations, Error> {
-    let requested = BTreeSet::from([identity.to_owned()]);
-    Ok(identity_conversations(conn, &requested)?
-        .remove(identity)
-        .unwrap_or_default())
+) -> Result<Option<ConversationId>, Error> {
+    conn.query_row(
+        "SELECT conversation_id FROM addresses WHERE address=?",
+        [index_key(identity)],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|conversation_id| crate::parse(&conversation_id).map_err(|_| Error::Database))
+    .transpose()
 }
 
-/// Scans message history once for all requested canonical identities.
-fn identity_conversations(
+/// What the indexed thread's own messages say about it being `identity`'s conversation.
+enum IndexedThread {
+    /// Names the identity exactly and carries no one else.
+    OneToOne,
+    /// No message names the identity exactly: the index entry came from an inferred country code.
+    Unanchored,
+    /// Also carries a group or a mass text.
+    HoldsOthers,
+}
+
+fn indexed_thread(
     conn: &Connection,
-    requested: &BTreeSet<String>,
-) -> Result<BTreeMap<String, IdentityConversations>, Error> {
-    let mut matches = BTreeMap::<String, IdentityConversations>::new();
-    if requested.is_empty() {
-        return Ok(matches);
+    conversation_id: ConversationId,
+    identity: &str,
+) -> Result<IndexedThread, Error> {
+    if !crate::rcs_group::roster(conn, conversation_id)?.is_empty() {
+        return Ok(IndexedThread::HoldsOthers);
     }
-    #[cfg(test)]
-    IDENTITY_SCAN_QUERIES.with(|count| count.set(count.get() + 1));
-    let mut statement = conn.prepare("SELECT conversation_id,payload FROM messages")?;
-    let rows = statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
+    let mut region = None;
+    let mut own_addresses = crate::conversation_match::OwnAddressCache::new();
+    let mut anchored = false;
+    let mut statement = conn.prepare("SELECT payload FROM messages WHERE conversation_id=?")?;
+    let rows = statement.query_map([conversation_id.to_string()], |row| row.get::<_, String>(0))?;
     for row in rows {
-        let (conversation_id, payload) = row?;
-        let payload: crate::MessagePayload = crate::decode(payload.as_bytes())?;
-        let identities = payload
-            .sender_address
-            .iter()
-            .chain(payload.recipients.iter())
-            .filter_map(|address| canonical_identity(address))
-            .collect::<BTreeSet<_>>();
-        for identity in identities
-            .iter()
-            .filter(|identity| requested.contains(*identity))
-        {
-            let entry = matches.entry(identity.clone()).or_default();
-            if payload.mms_context.is_some() {
-                entry.uncertain = true;
-            } else if identities.len() == 1 {
-                entry
-                    .conversations
-                    .insert(crate::parse(&conversation_id).map_err(|_| Error::Database)?);
+        let payload: crate::MessagePayload = crate::decode(row?.as_bytes())?;
+        let sender = (payload.direction == crate::Direction::Incoming)
+            .then_some(payload.sender_address.as_ref())
+            .flatten();
+        let mut others = BTreeSet::new();
+        let mut names_identity_exactly = false;
+        for address in payload.recipients.iter().chain(sender) {
+            if canonical_identity(address).as_deref() == Some(identity) {
+                names_identity_exactly = true;
+                continue;
+            }
+            let region = match &region {
+                Some(region) => region,
+                None => region.insert(crate::conversation_match::identity_region(conn)?),
+            };
+            let canonical =
+                |address: &str| crate::conversation_match::canonical_address(address, Some(region));
+            // The same number written without its country code is still the contact.
+            if canonical(address) != canonical(index_key(identity)) {
+                others.insert((sender == Some(address), canonical(address)));
             }
         }
+        if !others.is_empty()
+            && !only_own_number_remains(
+                conn,
+                &payload,
+                &others,
+                region.as_deref().unwrap_or_default(),
+                &mut own_addresses,
+            )?
+        {
+            return Ok(IndexedThread::HoldsOthers);
+        }
+        anchored |= names_identity_exactly && payload.mms_context.is_none();
     }
-    Ok(matches)
+    Ok(if anchored {
+        IndexedThread::OneToOne
+    } else {
+        IndexedThread::Unanchored
+    })
 }
 
-pub(crate) fn peppy_conversations_for_identity_set(
+/// `others` are a message's addresses that are not the thread's contact, each flagged when it is
+/// the sender. A received MMS lists the phone's own number as a recipient: only the number
+/// recorded for that message's SIM is accepted as such. Anything else is a third party.
+fn only_own_number_remains(
     conn: &Connection,
-    expected: &std::collections::BTreeSet<String>,
-) -> Result<(Vec<ConversationId>, bool), Error> {
-    #[cfg(test)]
-    PROVIDER_ROUTE_SCAN_QUERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut statement = conn.prepare(
-        "SELECT conversation_id,payload FROM messages ORDER BY local_order DESC LIMIT ?",
-    )?;
-    let rows = statement.query_map(
-        [i64::try_from(MAX_PROVIDER_ROUTE_MESSAGE_SCAN + 1).map_err(|_| Error::Database)?],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-    )?;
-    let mut conversations = std::collections::BTreeSet::new();
-    let mut uncertain = false;
-    for (index, row) in rows.enumerate() {
-        if index == MAX_PROVIDER_ROUTE_MESSAGE_SCAN {
-            uncertain = true;
-            break;
-        }
-        let (conversation_id, payload) = row?;
-        let payload: crate::MessagePayload = crate::decode(payload.as_bytes())?;
-        let identities = payload
-            .sender_address
-            .iter()
-            .chain(payload.recipients.iter())
-            .filter_map(|address| canonical_identity(address))
-            .collect::<std::collections::BTreeSet<_>>();
-        if identities == *expected {
-            if payload.mms_context.is_some() {
-                uncertain = true;
-            } else {
-                conversations.insert(crate::parse(&conversation_id).map_err(|_| Error::Database)?);
-            }
-        } else if payload.mms_context.is_some() && !identities.is_disjoint(expected) {
-            uncertain = true;
-        }
-    }
-    Ok((conversations.into_iter().collect(), uncertain))
+    payload: &crate::MessagePayload,
+    others: &BTreeSet<(bool, String)>,
+    region: &str,
+    own_addresses: &mut crate::conversation_match::OwnAddressCache,
+) -> Result<bool, Error> {
+    let Some(context) = payload
+        .mms_context
+        .as_ref()
+        .filter(|_| payload.direction == crate::Direction::Incoming)
+    else {
+        return Ok(false);
+    };
+    let Some(own) = crate::conversation_match::cached_own_address(
+        conn,
+        &payload.source_device_id,
+        &context.subscription_id,
+        own_addresses,
+    )?
+    else {
+        return Ok(false);
+    };
+    let own = crate::conversation_match::canonical_address(&own, Some(region));
+    Ok(others
+        .iter()
+        .all(|(is_sender, address)| !is_sender && *address == own))
 }
 
 fn highest_revision(
@@ -1237,7 +1354,6 @@ pub(crate) fn mapping_observation_status(
     let proof_matches = visible.as_ref().is_some_and(|visible| {
         mapping.proof.digest == proof_digest(observation, mapping.class, &own_identity, visible)
     });
-    let matches = peppy_conversations_for_identity(conn, &mapping.proof.canonical_participant)?;
     let exact = observation.google_candidate_count == 1
         && observation.conversation_type == RcsConversationType::Rcs
         && observation.status == "eligible"
@@ -1245,10 +1361,7 @@ pub(crate) fn mapping_observation_status(
         && !observation.read_only
         && observation.default_outgoing
         && native_observation_is_current(observation, now_ms, &own_identity)
-        && proof_matches
-        && !matches.uncertain
-        && matches.conversations.len() == 1
-        && matches.conversations.contains(&mapping.conversation_id);
+        && proof_matches;
     Ok(if exact {
         MappingObservationStatus::Exact
     } else {
@@ -1623,14 +1736,11 @@ fn invalidate_for_refusal(
             .find(|identity| own_identity.as_deref() != Some(identity.as_str()))
             .or(own_identity);
         if let Some(participant) = participant {
-            for conversation_id in
-                peppy_conversations_for_identity(conn, &participant)?.conversations
-            {
-                conn.execute(
-                    "UPDATE rcs_conversation_mappings SET invalidated_at_ms=verified_at_ms, invalidation_code=? WHERE peppy_conversation_id=? AND invalidated_at_ms IS NULL",
-                    params![code, conversation_id.to_string()],
-                )?;
-            }
+            let indexed = indexed_conversation(conn, &participant)?.map(|id| id.to_string());
+            conn.execute(
+                "UPDATE rcs_conversation_mappings SET invalidated_at_ms=verified_at_ms, invalidation_code=? WHERE invalidated_at_ms IS NULL AND (peppy_conversation_id=? OR EXISTS(SELECT 1 FROM rcs_mapping_proofs p WHERE p.peppy_conversation_id=rcs_conversation_mappings.peppy_conversation_id AND p.mapping_revision=rcs_conversation_mappings.mapping_revision AND p.canonical_participant=?))",
+                params![code, indexed, participant],
+            )?;
         }
     }
     conn.execute(
@@ -1856,6 +1966,7 @@ mod tests {
             body: String::new(),
             transport: Transport::Sms,
             direction: Direction::Incoming,
+            rcs_capture: false,
             imported: true,
             sent_at_ms: None,
             ordered_at_ms: None,
@@ -1912,49 +2023,85 @@ mod tests {
         );
         assert_eq!(get(&conn, conversation_id).unwrap(), Some(mapping));
     }
-    #[test]
-    fn provider_identity_batch_uses_one_bounded_history_query() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE messages(conversation_id TEXT NOT NULL,payload TEXT NOT NULL,local_order INTEGER NOT NULL);",
-        )
-        .unwrap();
-        let identities = (0..100)
-            .map(|index| format!("raw:participant-{index}"))
-            .collect::<std::collections::BTreeSet<_>>();
-        PROVIDER_ROUTE_SCAN_QUERIES.store(0, std::sync::atomic::Ordering::Relaxed);
-        let result = peppy_conversations_for_identity_set(&conn, &identities).unwrap();
-        assert_eq!(result, (Vec::new(), false));
-        assert_eq!(
-            PROVIDER_ROUTE_SCAN_QUERIES.load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
+    fn indexed(client: &crate::Client, address: &str) -> Option<String> {
+        client
+            .lock()
+            .unwrap()
+            .conn
+            .query_row(
+                "SELECT conversation_id FROM addresses WHERE address=?",
+                [address],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    fn capture(client: &crate::Client, conversation: ConversationId, sender: &str, row: &str) {
+        client
+            .capture_incoming(crate::IncomingSms {
+                conversation_id: Some(conversation),
+                sender_address: sender.into(),
+                body: String::new(),
+                provider_message_id: Some(row.into()),
+                imported: true,
+            })
+            .unwrap();
     }
 
     #[test]
-    fn bootstrap_batch_scans_message_history_once_per_batch() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE messages(conversation_id TEXT NOT NULL,payload TEXT NOT NULL,local_order INTEGER NOT NULL);",
+    fn a_group_thread_never_holds_a_numbers_index_entry() {
+        let directory = tempfile::tempdir().unwrap();
+        let client = crate::Client::open(
+            crate::ClientConfig {
+                database_path: directory.path().join("index.db"),
+                vault_id: crate::VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            crate::DatabaseKey::new(&[7; 32]).unwrap(),
         )
         .unwrap();
-        for size in [1, 40] {
-            let owned = (0..size)
-                .map(|index| {
-                    (
-                        format!("participant-{index}"),
-                        "google-conversation".to_owned(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let candidates = owned
-                .iter()
-                .map(|(identity, google)| (identity.as_str(), google.as_str()))
-                .collect::<Vec<_>>();
-            IDENTITY_SCAN_QUERIES.with(|count| count.set(0));
-            let resolutions = resolve_rcs_bootstrap_conversations(&conn, &candidates).unwrap();
-            assert_eq!(resolutions, vec![RcsBootstrapResolution::Missing; size]);
-            assert_eq!(IDENTITY_SCAN_QUERIES.with(std::cell::Cell::get), 1);
-        }
+        let (group, direct) = (ConversationId::new(), ConversationId::new());
+        // An entry written before the thread was known to be a group.
+        capture(&client, group, "+12025550123", "row-1");
+        client
+            .lock()
+            .unwrap()
+            .conn
+            .execute(
+                "INSERT INTO conversation_group_members(conversation_id,canonical_address) VALUES(?1,'+12025550123'),(?1,'+12025550177')",
+                [group.to_string()],
+            )
+            .unwrap();
+
+        capture(&client, group, "+12025550177", "row-2");
+        capture(&client, direct, "+12025550123", "row-3");
+
+        assert_eq!(indexed(&client, "+12025550177"), None);
+        assert_eq!(indexed(&client, "+12025550123"), Some(direct.to_string()));
+    }
+
+    #[test]
+    fn bootstrap_resolution_of_unknown_numbers_reads_only_the_number_index() {
+        // No `messages` table exists, so any read of message history would fail.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE addresses(address TEXT PRIMARY KEY, conversation_id TEXT NOT NULL);",
+        )
+        .unwrap();
+        let owned = (0..MAX_RCS_BOOTSTRAP_CANDIDATES)
+            .map(|index| format!("participant-{index}"))
+            .collect::<Vec<_>>();
+        let candidates = owned
+            .iter()
+            .map(|identity| (identity.as_str(), "google-conversation"))
+            .collect::<Vec<_>>();
+
+        let resolutions = resolve_rcs_bootstrap_conversations(&conn, &candidates).unwrap();
+
+        assert_eq!(
+            resolutions,
+            vec![RcsBootstrapResolution::Missing; MAX_RCS_BOOTSTRAP_CANDIDATES]
+        );
     }
 }

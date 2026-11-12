@@ -10,6 +10,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
@@ -21,11 +23,14 @@ import dev.peppy.mobile.MainActivity
 import dev.peppy.mobile.RcsSendWake
 import dev.peppy.mobile.R
 import dev.peppy.mobile.GatewayWork
+import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
 import dev.peppy.mobile.gateway.NativeGateway
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import uniffi.peppy_mobile_bindings.NativeCarrierCommand
 import uniffi.peppy_mobile_bindings.gatewayPendingNativeRcsCommands
 import uniffi.peppy_mobile_bindings.gatewayPendingRcsMediaCommands
 import uniffi.peppy_mobile_bindings.gatewayNextRcsMediaAttachment
@@ -88,6 +93,7 @@ class GoogleMessagesLinkService : Service() {
     private var lastNotification: String? = null
     private lateinit var nativeRcsSendWork: RcsNativeSendWork
     private val carrierProofWakes = CarrierProofWakeTracker()
+    private val carrierHandoffRequested = AtomicBoolean(false)
     private lateinit var mediaRcsSendWork: RcsNativeSendWork
     private lateinit var mediaRcsReceiveWork: RcsNativeSendWork
     private lateinit var mediaFiles: RcsMediaPrivateFiles
@@ -105,12 +111,23 @@ class GoogleMessagesLinkService : Service() {
     private val readinessLock = Any()
     private var readinessScheduled = false
     private var readinessPending = false
+    private val blockedSendRetry = BlockedSendRetry(
+        schedule = { delayMs, task -> BLOCKED_SEND_RETRY_SCHEDULER.schedule(task, delayMs, TimeUnit.MILLISECONDS) },
+        sendWaiting = ::nativeSendWaiting,
+        retry = { if (isCurrent(lifecycleGeneration)) requestRcsBootstrap() },
+    )
     private val receiveSweepLock = Any()
     private var receiveRunGeneration = 0L
     private var receiveRunLease: LinkHandleLease? = null
     private var pendingReceiveSweep: ReceiveSweepRequest? = null
     private var runningReceiveSweep: ReceiveSweepRequest? = null
     private var receiveSweepDrainScheduled = false
+    private var networkCallbackRegistered = false
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            if (isCurrent(lifecycleGeneration)) mediaRcsReceiveWork.start()
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -127,8 +144,17 @@ class GoogleMessagesLinkService : Service() {
                 runPendingGroupCreates()
                 NativeGateway.open(applicationContext)
                     ?.let { client ->
-                        carrierProofWakes.retainPendingCommands(client.pendingCommands().map { it.commandId }.toSet())
-                        gatewayPendingNativeRcsCommands(client)
+                        val pending = client.pendingCommands()
+                        carrierProofWakes.retainPendingCommands(pending.map { it.commandId }.toSet())
+                        gatewayPendingNativeRcsCommands(client).also { candidates ->
+                            val code = when {
+                                candidates.isNotEmpty() -> "candidates"
+                                pending.isNotEmpty() -> "pending_without_candidates"
+                                else -> "no_candidates"
+                            }
+                            recordGoogleMessagesLinkEvent("send_work", code, 0L)
+                            recordPendingShapes(pending)
+                        }
                     }
                     .orEmpty()
                     .map { RcsNativeCommand(it.commandId, it.conversationId, it.recipient) }
@@ -136,6 +162,7 @@ class GoogleMessagesLinkService : Service() {
             execute = ::runNativeRcsSend,
             current = { isCurrent(lifecycleGeneration) },
             executor = NATIVE_RCS_SEND_EXECUTOR,
+            carrierHandoffRequested = { carrierHandoffRequested.getAndSet(false) },
         )
         mediaFiles = RcsMediaPrivateFiles(applicationContext).also { it.sweep() }
         mediaQueue = RcsMediaTransferQueue(NATIVE_RCS_MEDIA_EXECUTOR)
@@ -165,6 +192,10 @@ class GoogleMessagesLinkService : Service() {
         typingBridge = testHooks.typingBridgeFactory(applicationContext)
         TypingReceiveSinkRegistry.sink = typingBridge
         lifecycleGeneration = replaceActive(this)
+        (getSystemService(ConnectivityManager::class.java))?.let {
+            it.registerDefaultNetworkCallback(networkCallback)
+            networkCallbackRegistered = true
+        }
         typingRetirementListener = NativeGateway.addRetirementListener { typingBridge.stop() }
         LinkCoreBridge.scheduleOwnerUnlinkCutover(applicationContext)
     }
@@ -188,10 +219,15 @@ class GoogleMessagesLinkService : Service() {
         typingRetirementListener = null
         typingBridge.stop()
         if (TypingReceiveSinkRegistry.sink === typingBridge) TypingReceiveSinkRegistry.sink = null
+        blockedSendRetry.stop()
         nativeRcsSendWork.stop()
         mediaRcsSendWork.stop()
         mediaRcsReceiveWork.stop()
         mediaQueue.stop()
+        if (networkCallbackRegistered) {
+            getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(networkCallback)
+            networkCallbackRegistered = false
+        }
         RcsMediaReceiveCoordinator.clearCapacityCache()
         mediaFiles.sweep()
         cancelWorker()
@@ -201,8 +237,26 @@ class GoogleMessagesLinkService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /** Records bounded, content-free command shapes without loading thread history. */
+    private fun recordPendingShapes(pending: List<NativeCarrierCommand>) {
+        if (!SyncDiagnostics.enabled) return
+        pending.take(MAX_PENDING_SHAPE_DIAGNOSTICS).forEach { command ->
+            val message = command.message
+            val shape = when {
+                message.attachmentIds.isNotEmpty() -> "attachments"
+                message.transport != "sms" -> "not_sms"
+                message.recipients.size != 1 -> "recipients"
+                else -> "single_sms_text"
+            }
+            recordGoogleMessagesLinkEvent("send_pending", shape, 0L)
+        }
+    }
+
     private fun runNativeRcsSend(command: RcsNativeCommand) {
-        val lease = LinkRuntime.handleLease(this) ?: return
+        val lease = LinkRuntime.handleLease(this) ?: run {
+            recordGoogleMessagesLinkEvent("send_work", "lease_unavailable", 0L)
+            return
+        }
         val clock = RcsNativeClock(System::currentTimeMillis)
         RcsNativeSendCoordinator(
             RcsNativeGoAdapter(lease),
@@ -214,13 +268,22 @@ class GoogleMessagesLinkService : Service() {
             onRefusalRecorded = { GatewayWork.enqueueAfterCapture(applicationContext) },
         ).execute(command).also { outcome ->
             when (carrierProofWakes.record(command.commandId, outcome)) {
-                CarrierProofWakeAction.WAKE -> GatewayWork.enqueueUrgent(applicationContext)
+                CarrierProofWakeAction.WAKE -> {
+                    carrierHandoffRequested.set(true)
+                    GatewayWork.enqueueUrgent(applicationContext)
+                }
                 CarrierProofWakeAction.PROOF_WINDOW_MISSED ->
                     recordGoogleMessagesLinkEvent("direct_send", "proof_window_missed", 0L)
                 CarrierProofWakeAction.NONE -> Unit
             }
             if (outcome == RcsNativeSendOutcome.SUBMITTED || outcome == RcsNativeSendOutcome.OUTCOME_UNKNOWN) {
                 GatewayWork.enqueueAfterCapture(applicationContext)
+            }
+            // A carrier handoff has not sent anything yet and ends the batch, so later commands
+            // still wait: keep one retry armed, as for a refusal.
+            when (outcome) {
+                RcsNativeSendOutcome.REFUSED, RcsNativeSendOutcome.CARRIER_ONLY -> blockedSendRetry.refused()
+                else -> blockedSendRetry.progressed()
             }
         }
         publishNativeRcsEligibility(command.conversationId)
@@ -243,8 +306,8 @@ class GoogleMessagesLinkService : Service() {
             override fun recordOutcome(attachment: RcsMediaAttachment, outcome: String, atMs: Long) =
                 gatewayRecordRcsMediaOutcome(client, attachment.commandId, attachment.attachmentIndex, outcome, atMs)
         }
-        RcsMediaSendCoordinator(mediaFiles, mediaQueue, core, RcsMediaSendGoAdapter(lease), { mediaCommand, index ->
-            runNativeRcsSend(mediaCommand, index)
+        RcsMediaSendCoordinator(mediaFiles, mediaQueue, core, RcsMediaSendGoAdapter(lease), { mediaCommand, index, onRefusalRecorded ->
+            runNativeRcsSend(mediaCommand, index, onRefusalRecorded)
         }, now) {
             GatewayWork.enqueueAfterCapture(applicationContext)
             // Continue only after the coordinator has durably settled this index.
@@ -257,18 +320,20 @@ class GoogleMessagesLinkService : Service() {
         val client = NativeGateway.open(applicationContext) ?: return
         val task = client.gatewayPendingRcsMediaReceiveTasks()
             .firstOrNull { it.messageId == messageId && it.attachmentIndex == attachmentIndex } ?: return
-        RcsMediaReceiveCoordinator(applicationContext, mediaFiles, mediaQueue, client, lease) {
-            isCurrent(lifecycleGeneration)
-        }.submit(task)
+        RcsMediaReceiveCoordinator(
+            applicationContext, mediaFiles, mediaQueue, client, lease,
+            { isCurrent(lifecycleGeneration) },
+            { mediaRcsReceiveWork.start() },
+        ).submit(task)
     }
 
-    private fun runNativeRcsSend(command: RcsNativeCommand, attachmentIndex: UInt): RcsNativeSendOutcome {
+    private fun runNativeRcsSend(command: RcsNativeCommand, attachmentIndex: UInt, onRefusalRecorded: () -> Unit = {}): RcsNativeSendOutcome {
         val lease = LinkRuntime.handleLease(this) ?: return RcsNativeSendOutcome.REFUSED
         val clock = RcsNativeClock(testHooks.currentTimeMillis)
         val outcome = RcsNativeSendCoordinator(
             RcsNativeGoAdapter(lease), RcsNativeCoreAdapter(applicationContext, clock, attachmentIndex),
             RcsNativeAndroidRouteReader(applicationContext, clock), clock, rcsCanonicalizerRevision().toInt(),
-            RcsNativeAndroidRouteChangeRevoker(applicationContext),
+            RcsNativeAndroidRouteChangeRevoker(applicationContext), onRefusalRecorded,
         ).execute(command)
         publishNativeRcsEligibility(command.conversationId)
         return outcome
@@ -351,13 +416,16 @@ class GoogleMessagesLinkService : Service() {
         } catch (_: RuntimeException) {
             synchronized(readinessLock) { readinessScheduled = false }
             recordGoogleMessagesLinkEvent("link", "rcs_bootstrap_failed", 0)
+            blockedSendRetry.stillBlocked()
         }
     }
 
     private fun drainRcsReadiness() {
         while (true) {
-            runCatching(::runRcsReadinessPass)
-                .onFailure { recordGoogleMessagesLinkEvent("link", "rcs_bootstrap_failed", 0) }
+            runCatching(::runRcsReadinessPass).onFailure {
+                recordGoogleMessagesLinkEvent("link", "rcs_bootstrap_failed", 0)
+                blockedSendRetry.stillBlocked()
+            }
             val rerun = synchronized(readinessLock) {
                 if (readinessPending) {
                     readinessPending = false
@@ -371,13 +439,25 @@ class GoogleMessagesLinkService : Service() {
         }
     }
 
+    /**
+     * Whether any command still waits. It reads the pending ledger, never the native candidate page, which
+     * advances a cursor. A closed gateway has nothing to retry; a failed read keeps the send blocked.
+     */
+    private fun nativeSendWaiting(): Boolean = runCatching {
+        NativeGateway.open(applicationContext)?.pendingCommands()?.isNotEmpty() ?: false
+    }.getOrDefault(true)
+
     private fun runRcsReadinessPass() {
         val generation = lifecycleGeneration
         val bootstrap = currentBootstrap(generation) ?: run {
             recordGoogleMessagesLinkEvent("readiness", "bootstrap_unavailable", 0L)
+            blockedSendRetry.stillBlocked()
             return
         }
-        if (!refreshConversationIndex(bootstrapLease)) return
+        if (!ensureConversationIndex(bootstrapLease)) {
+            blockedSendRetry.stillBlocked()
+            return
+        }
         reconcileRcsGroups(bootstrapLease)
         val now = testHooks.currentTimeMillis()
         if (now - lastBootstrapAtMs >= FULL_BOOTSTRAP_INTERVAL_MS && bootstrap.run() == RcsBootstrapResult.COMPLETE) {
@@ -386,6 +466,8 @@ class GoogleMessagesLinkService : Service() {
         targetedBootstrap.drainNow()
         sweepOwnedConversations(generation)
         nativeRcsSendWork.start()
+        mediaRcsSendWork.start()
+        mediaRcsReceiveWork.start()
     }
 
     private fun offerTargetedBootstrap(googleConversationId: String) {
@@ -441,10 +523,18 @@ class GoogleMessagesLinkService : Service() {
     }
 
     /** Refresh is serialized by the bootstrap executor; a pending-event refusal gets one retry, never a loop. */
-    private fun refreshConversationIndex(lease: LinkHandleLease?): Boolean {
+    /** A readiness pass needs a usable index, not a new one: a rescan refuses sends while it runs. */
+    private fun ensureConversationIndex(lease: LinkHandleLease?): Boolean =
+        conversationIndexReady(lease, LinkHandle::ensureConversationIndex)
+
+    /** A rescan, for a caller that must see a conversation created moments ago. */
+    private fun refreshConversationIndex(lease: LinkHandleLease?): Boolean =
+        conversationIndexReady(lease, LinkHandle::refreshConversationIndex)
+
+    private fun conversationIndexReady(lease: LinkHandleLease?, request: (LinkHandle) -> String): Boolean {
         val handle = lease?.handle ?: return false
         val refresh = {
-            runCatching { handle.refreshConversationIndex() }.getOrDefault("{\"code\":\"unavailable\"}").also { response ->
+            runCatching { request(handle) }.getOrDefault("{\"code\":\"unavailable\"}").also { response ->
                 val reason = when {
                     response.contains("\"code\":\"ok\"") -> "refresh_ok"
                     response.contains("pending") -> "refresh_pending"
@@ -799,6 +889,7 @@ class GoogleMessagesLinkService : Service() {
         internal const val NOTIFICATION_ID = 4110
         private const val PAIRING_WAIT_MS = 200L
         private const val FULL_BOOTSTRAP_INTERVAL_MS = 5 * 60 * 1000L
+        private const val MAX_PENDING_SHAPE_DIAGNOSTICS = 8
         private const val MAX_PAIRING_WAIT_MS = 30_000L + 30_000L + 300_000L + 30_000L
         private val STOP_CODES = setOf("link_closed", "unlink_in_progress", "pair_cancelled", "run_refused")
         private val ATTENTION_STATES = setOf("needs_relink", "signed_out")
@@ -851,6 +942,7 @@ class GoogleMessagesLinkService : Service() {
         internal fun registerSendWake() {
             RcsSendWake.listener = {
                 runCatching {
+                    recordGoogleMessagesLinkEvent("send_work", "wake", 0L)
                     active?.nativeRcsSendWork?.start()
                     active?.mediaRcsSendWork?.start()
                     active?.mediaRcsReceiveWork?.start()
@@ -877,6 +969,7 @@ class GoogleMessagesLinkService : Service() {
         private const val SERVICE_STOP_JOIN_MS = 2_000L
         private const val NATIVE_RCS_ENABLED = true
         private val NATIVE_RCS_SEND_EXECUTOR = Executors.newSingleThreadExecutor()
+        private val BLOCKED_SEND_RETRY_SCHEDULER = Executors.newSingleThreadScheduledExecutor()
         /** Never run Go media I/O on a gmlink callback thread. Shared with future receive transfers. */
         private val NATIVE_RCS_MEDIA_EXECUTOR = Executors.newSingleThreadExecutor()
     }

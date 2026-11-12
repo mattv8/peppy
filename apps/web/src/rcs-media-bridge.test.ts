@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DesktopSnapshot } from "@peppy/desktop-ui/bridge-contracts";
 import { BrowserBridge } from "./browser-bridge";
-import { normalizeGroupSnapshot, parseRcsAttachmentFields, parseSendResult } from "./group-payload";
+import { normalizeGroupSnapshot, normalizeMessageWindow, parseRcsAttachmentFields, parseSendResult } from "./group-payload";
 
 class TestPort {
   public onmessage: ((event: MessageEvent) => void) | null = null;
@@ -23,8 +23,9 @@ describe("retryRcsMediaDownload in the browser bridge", () => {
   it("sends the message and attachment index to the worker", () => {
     const { bridge, port } = bridgeWithPort();
     void bridge.retryRcsMediaDownload("message-rcs-1", 3);
-    expect(JSON.stringify(port.sent)).toContain("retry_rcs_media_download");
-    expect(JSON.stringify(port.sent)).toContain("message-rcs-1");
+    expect(port.sent).toHaveLength(1);
+    expect(port.sent[0]).toMatchObject({ command: "retry_rcs_media_download" });
+    expect((port.sent[0] as { args: unknown }).args).toEqual({ messageId: "message-rcs-1", attachmentIndex: 3 });
   });
 
   it.each([-1, 1.5, Number.NaN])("rejects the attachment index %s without calling the worker", async (index) => {
@@ -61,6 +62,15 @@ describe("RCS attachment fields at the web boundary", () => {
     const normalized = normalizeGroupSnapshot(snapshotWith([{ id: "m-1", attachments: [attachment] }]));
     const [message] = normalized.conversations[0].messages;
     expect(message.attachments[0]).toEqual({ id: "a-1", name: "x.jpg", mediaType: "image/jpeg", byteSize: 1, state: "ready", rcsSendStatus: "sent", index: 0 });
+  });
+
+  it("preserves a definitive attempted send failure and sparse index in snapshots and windows", () => {
+    const attachment = { id: "a-1", name: "x.jpg", mediaType: "image/jpeg", byteSize: 1, state: "ready", rcsSendStatus: "send_failed", index: 4 };
+    const snapshot = normalizeGroupSnapshot(snapshotWith([{ id: "m-1", attachments: [attachment] }]));
+    const window = normalizeMessageWindow({ messages: [{ id: "m-1", attachments: [attachment] }] } as unknown as Parameters<typeof normalizeMessageWindow>[0]);
+
+    expect(snapshot.conversations[0].messages[0].attachments[0]).toMatchObject({ rcsSendStatus: "send_failed", index: 4 });
+    expect(window.messages[0].attachments[0]).toMatchObject({ rcsSendStatus: "send_failed", index: 4 });
   });
 });
 

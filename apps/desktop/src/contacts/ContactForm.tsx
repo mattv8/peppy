@@ -707,7 +707,7 @@ export function ContactForm({
   );
 }
 
-function PhotoCropDialog({
+export function PhotoCropDialog({
   photo,
   opener,
   onConfirm,
@@ -720,6 +720,7 @@ function PhotoCropDialog({
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [cropState, setCropState] = useState<"loading" | "ready" | "error">("loading");
   const [isDragging, setIsDragging] = useState(false);
   const dragStart = useRef({ x: 0, y: 0 });
 
@@ -739,6 +740,7 @@ function PhotoCropDialog({
     const newY = e.clientY - dragStart.current.y;
     const maxX = Math.max(0, (photo.naturalWidth - cropSize) * scale);
     const maxY = Math.max(0, (photo.naturalHeight - cropSize) * scale);
+    setCropState("loading");
     setOffset({
       x: Math.max(0, Math.min(newX, maxX)),
       y: Math.max(0, Math.min(newY, maxY)),
@@ -756,24 +758,28 @@ function PhotoCropDialog({
 
     if (e.key === "ArrowUp") {
       e.preventDefault();
+      setCropState("loading");
       setOffset(prev => ({
         ...prev,
         y: Math.max(0, prev.y - step),
       }));
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
+      setCropState("loading");
       setOffset(prev => ({
         ...prev,
         y: Math.min(maxY, prev.y + step),
       }));
     } else if (e.key === "ArrowLeft") {
       e.preventDefault();
+      setCropState("loading");
       setOffset(prev => ({
         ...prev,
         x: Math.max(0, prev.x - step),
       }));
     } else if (e.key === "ArrowRight") {
       e.preventDefault();
+      setCropState("loading");
       setOffset(prev => ({
         ...prev,
         x: Math.min(maxX, prev.x + step),
@@ -782,36 +788,53 @@ function PhotoCropDialog({
   };
 
   useEffect(() => {
+    let current = true;
+    setCropState("loading");
     const img = new Image();
     img.onload = () => {
       const canvas = canvasRef.current;
-      if (!canvas) return;
+      if (!canvas || !current) return;
       const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-
-      canvas.width = targetSize;
-      canvas.height = targetSize;
-
-      ctx.drawImage(
-        img,
-        offset.x / scale,
-        offset.y / scale,
-        cropSize,
-        cropSize,
-        0,
-        0,
-        targetSize,
-        targetSize
-      );
+      if (!ctx) {
+        setCropState("error");
+        return;
+      }
+      try {
+        canvas.width = targetSize;
+        canvas.height = targetSize;
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, targetSize, targetSize);
+        ctx.drawImage(
+          img,
+          offset.x / scale,
+          offset.y / scale,
+          cropSize,
+          cropSize,
+          0,
+          0,
+          targetSize,
+          targetSize
+        );
+        if (current) setCropState("ready");
+      } catch {
+        if (current) setCropState("error");
+      }
     };
+    img.onerror = () => { if (current) setCropState("error"); };
     img.src = photo.dataUrl;
+    return () => { current = false; };
   }, [photo.dataUrl, offset, scale, cropSize, targetSize]);
 
   const handleConfirm = () => {
+    if (cropState !== "ready") return;
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const jpeg = canvas.toDataURL("image/jpeg", 0.85);
-    onConfirm(jpeg);
+    try {
+      const jpeg = canvas.toDataURL("image/jpeg", 0.85);
+      onConfirm(jpeg);
+    } catch {
+      setCropState("error");
+    }
   };
 
   return (
@@ -826,7 +849,7 @@ function PhotoCropDialog({
           <button type="button" className="secondary-button" onClick={onCancel}>
             Cancel
           </button>
-          <button type="button" className="primary-button" onClick={handleConfirm}>
+          <button type="button" className="primary-button" onClick={handleConfirm} disabled={cropState !== "ready"}>
             Confirm crop
           </button>
         </>
@@ -848,6 +871,7 @@ function PhotoCropDialog({
           src={photo.dataUrl}
           alt="Original photo to crop"
           style={{
+            background: "#fff",
             width: photo.naturalWidth * scale,
             height: photo.naturalHeight * scale,
             transform: `translate(-${offset.x}px, -${offset.y}px)`,
@@ -855,6 +879,8 @@ function PhotoCropDialog({
         />
       </div>
       <canvas id="photo-crop-preview" ref={canvasRef} width={targetSize} height={targetSize} />
+      {cropState === "loading" && <p id="photo-crop-status" role="status">Loading photo…</p>}
+      {cropState === "error" && <p id="photo-crop-status" role="alert">This photo couldn’t be loaded. Cancel and choose another photo.</p>}
       <p id="photo-crop-hint">Use arrow keys or drag to position. Shift+arrow moves faster.</p>
     </Modal>
   );

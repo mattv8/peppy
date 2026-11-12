@@ -54,8 +54,11 @@ internal class RcsReceiveCoordinator(
             if (!enabled()) return
             when (event) {
                 is LiveEvent.Record -> runCatching {
-                    core.ingest(context, event.record, NativeRcsObservationProvenance.LIVE)
+                    val outcome = core.ingest(context, event.record, NativeRcsObservationProvenance.LIVE)
                     GoogleMessagesLinkService.requestRcsMediaReceive()
+                    // The proof was withdrawn after the context was read. A new proof reopens the
+                    // lane, and recovery then fetches this record from the unchanged watermark.
+                    if (outcome.recordOutcome == UNPROVEN_REFUSAL) bootstrapRequest(googleId)
                 }
                 is LiveEvent.ProtocolSwitch -> runCatching { core.invalidate(context, googleId) }
             }
@@ -287,6 +290,7 @@ internal class RcsReceiveCoordinator(
         const val RECORDED = "recorded"
         const val REJECTED_PREFIX = "rejected:"
         const val PROVIDER_FLOOR_REFUSAL = "rejected:provider_floor"
+        const val UNPROVEN_REFUSAL = "rejected:conversation_unproven"
     }
 }
 

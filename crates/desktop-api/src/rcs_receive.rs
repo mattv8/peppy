@@ -85,13 +85,49 @@ fn incoming_attachments(
     Ok(projected)
 }
 
+/// Definitive outgoing slot outcomes that outrank raw receipt history for the whole message.
+#[derive(Default)]
+struct OutgoingMediaOutcome {
+    send_failed: bool,
+    outcome_unknown: bool,
+}
+
+impl OutgoingMediaOutcome {
+    fn record(&mut self, code: &str) {
+        self.send_failed |= code == "send_failed";
+        self.outcome_unknown |= code == "outcome_unknown";
+    }
+
+    /// Unknown wins over failure, and both win over any receipt.
+    fn definitive_status(&self) -> Option<&'static str> {
+        if self.outcome_unknown {
+            Some("unknown")
+        } else if self.send_failed {
+            Some("failed-confirmed")
+        } else {
+            None
+        }
+    }
+}
+
 pub fn message_view(
     client: &Client,
     message: &Message,
     mut attachments: Vec<AttachmentView>,
 ) -> Result<MessageView, Error> {
     let is_rcs = message.payload.transport == Transport::Rcs;
+    let message_id = message.payload.record.message_id;
+    let (rcs_status, rcs_reported) = if is_rcs || message.payload.direction == Direction::Outgoing {
+        (
+            client.rcs_message_status(message_id)?,
+            client.rcs_message_reported(message_id)?,
+        )
+    } else {
+        (None, None)
+    };
+    let has_rcs_evidence = rcs_status.is_some() || rcs_reported == Some(true);
     let mut has_outgoing_rcs_media = false;
+    let mut outgoing_outcome = OutgoingMediaOutcome::default();
     if is_rcs || message.payload.direction == Direction::Outgoing {
         if message.payload.direction == Direction::Incoming {
             attachments = incoming_attachments(client, message, attachments)?;
@@ -121,6 +157,7 @@ pub fn message_view(
                     return Err(Error::Database);
                 }
                 has_outgoing_rcs_media = true;
+                outgoing_outcome.record(status.state.code());
                 attachment.index = Some(index);
                 attachment.rcs_send_status = Some(status.state.code());
                 if let Some(reason) = status.reason {
@@ -133,17 +170,21 @@ pub fn message_view(
     }
     let mut view = base_message_view(message, attachments);
     view.send_cancellation = send_cancellation_view(client, message)?;
-    if !is_rcs && !has_outgoing_rcs_media {
+    if !is_rcs && !has_outgoing_rcs_media && !has_rcs_evidence {
         return Ok(view);
     }
     view.transport = Some("rcs");
-    if !is_rcs {
+    let definitive = outgoing_outcome.definitive_status();
+    if let Some(status) = definitive {
+        view.status = Some(status);
+    }
+    if !is_rcs && (has_outgoing_rcs_media || !has_rcs_evidence) {
         return Ok(view);
     }
-    view.rcs_reported = client
-        .rcs_message_reported(message.payload.record.message_id)?
-        .unwrap_or(false);
-    if let Some(status) = client.rcs_message_status(message.payload.record.message_id)? {
+    view.rcs_reported = rcs_reported.unwrap_or(false);
+    if definitive.is_none()
+        && let Some(status) = rcs_status
+    {
         view.status = Some(match status.status {
             RcsMessageStatus::Sending => "submitted",
             RcsMessageStatus::Sent => "sent",
@@ -162,8 +203,8 @@ pub fn message_view(
 mod tests {
     use super::*;
     use peppy_client_core::{
-        ClientConfig, ConversationId, DatabaseKey, DeviceId, Direction, MessagePayload,
-        MessageRecord, SourceSequence,
+        ClientConfig, ConversationId, DatabaseKey, DeviceId, Direction, GatewayRoute,
+        MessagePayload, MessageRecord, OutgoingMms, SourceSequence, VaultId,
     };
 
     fn client() -> Client {
@@ -228,6 +269,7 @@ mod tests {
                 body: "RCS fallback".into(),
                 transport: Transport::Rcs,
                 direction: Direction::Outgoing,
+                rcs_capture: false,
                 imported: false,
                 sent_at_ms: Some(1),
                 ordered_at_ms: None,
@@ -270,6 +312,260 @@ mod tests {
         let view = message_view(&client(), &mms_message(), vec![]).unwrap();
 
         assert_eq!(view.transport, Some("mms"));
+        assert!(!view.rcs_reported);
+    }
+
+    const DELIVERED_RANK: i64 = 4;
+    const READ_RANK: i64 = 5;
+    const PASSPHRASE: &str = "correct horse battery staple";
+    const GATEWAY_ID: &str = "00000000-0000-4000-8000-000000000001";
+    const SQLCIPHER_KEY: &str =
+        "x'0707070707070707070707070707070707070707070707070707070707070707'";
+
+    struct OutgoingMedia {
+        _directory: tempfile::TempDir,
+        client: Client,
+        database_path: std::path::PathBuf,
+        message: Message,
+    }
+
+    /// A real queued MMS-shaped media command. Slot and receipt rows are seeded with SQL because
+    /// desktop-api cannot reach native RCS admission; the Core writers are covered in client-core.
+    fn outgoing_media(slots: u8) -> OutgoingMedia {
+        let directory = tempfile::TempDir::new().unwrap();
+        let database_path = directory.path().join("rcs-media.db");
+        let vault_id = VaultId::new();
+        let client = Client::open(
+            ClientConfig {
+                database_path: database_path.clone(),
+                vault_id,
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[7; 32]).unwrap(),
+        )
+        .unwrap();
+        let profile = peppy_crypto::KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = peppy_crypto::derive_root_key(PASSPHRASE, &profile).unwrap();
+        let header = peppy_crypto::create_vault_check_header(&root, profile.clone()).unwrap();
+        client.unlock(&profile, &header, PASSPHRASE).unwrap();
+        let attachment_ids = (0..slots)
+            .map(|index| {
+                let source = directory.path().join(format!("media-{index}.jpg"));
+                std::fs::write(&source, [index + 1; 16]).unwrap();
+                client
+                    .prepare_attachment(&source, "image/jpeg", &format!("media-{index}.jpg"))
+                    .unwrap()
+                    .attachment_id
+            })
+            .collect();
+        let conversation_id = ConversationId::new();
+        let queued = client
+            .queue_mms(
+                OutgoingMms {
+                    conversation_id,
+                    recipients: vec!["+14155552671".into()],
+                    body: "caption".into(),
+                    attachment_ids,
+                    subject: None,
+                },
+                GatewayRoute::Carrier {
+                    gateway_device_id: GATEWAY_ID.parse().unwrap(),
+                    subscription_id: "sim".into(),
+                },
+            )
+            .unwrap();
+        let message = client
+            .messages(conversation_id)
+            .unwrap()
+            .into_iter()
+            .find(|message| message.payload.record.message_id == queued.message_id)
+            .unwrap();
+        OutgoingMedia {
+            _directory: directory,
+            client,
+            database_path,
+            message,
+        }
+    }
+
+    impl OutgoingMedia {
+        fn seed(&self, slots: &[(u32, &str)], receipt_rank: Option<i64>) {
+            self.seed_reported(slots, receipt_rank, true);
+        }
+
+        fn seed_reported(&self, slots: &[(u32, &str)], receipt_rank: Option<i64>, reported: bool) {
+            let db = rusqlite::Connection::open(&self.database_path).unwrap();
+            db.execute_batch(&format!("PRAGMA key = \"{SQLCIPHER_KEY}\";"))
+                .unwrap();
+            let id = self.message.payload.record.message_id.to_string();
+            for (index, state) in slots {
+                db.execute(
+                    "INSERT INTO rcs_media_send_status(message_id,attachment_index,state) VALUES(?,?,?)",
+                    rusqlite::params![id, index, state],
+                )
+                .unwrap();
+            }
+            if let Some(rank) = receipt_rank {
+                db.execute(
+                    "INSERT INTO rcs_message_status(message_id,status_rank,rcs_reported) VALUES(?,?,?)",
+                    rusqlite::params![id, rank, reported],
+                )
+                .unwrap();
+            } else if reported {
+                db.execute(
+                    "INSERT INTO rcs_message_status(message_id,status_rank,rcs_reported) VALUES(?,?,1)",
+                    rusqlite::params![id, 0],
+                )
+                .unwrap();
+            }
+        }
+
+        fn project(&self, transport: Transport) -> MessageView {
+            let mut message = self.message.clone();
+            message.payload.transport = transport;
+            let attachments = message
+                .payload
+                .record
+                .attachments
+                .iter()
+                .map(|reference| {
+                    crate::attachment_view(
+                        &self
+                            .client
+                            .attachment_info(reference.attachment_id)
+                            .unwrap(),
+                        None,
+                        None,
+                    )
+                })
+                .collect();
+            message_view(&self.client, &message, attachments).unwrap()
+        }
+
+        fn base(&self) -> MessageView {
+            base_message_view(&self.message, vec![])
+        }
+    }
+
+    #[test]
+    fn explicit_rcs_failed_slot_stays_failed_after_a_read_receipt() {
+        let media = outgoing_media(2);
+        media.seed(&[(0, "send_failed"), (1, "sent")], Some(READ_RANK));
+        let view = media.project(Transport::Rcs);
+        assert_eq!(view.transport, Some("rcs"));
+        assert_eq!(view.status, Some("failed-confirmed"));
+        assert_eq!(view.status_at, media.base().status_at);
+    }
+
+    #[test]
+    fn explicit_rcs_unknown_slot_wins_over_failure_and_read() {
+        let media = outgoing_media(2);
+        media.seed(
+            &[(0, "send_failed"), (1, "outcome_unknown")],
+            Some(READ_RANK),
+        );
+        let view = media.project(Transport::Rcs);
+        assert_eq!(view.status, Some("unknown"));
+        assert_eq!(view.status_at, media.base().status_at);
+    }
+
+    #[test]
+    fn mms_shaped_failed_slot_is_not_reported_as_rcs_success() {
+        let media = outgoing_media(2);
+        media.seed(&[(0, "send_failed"), (1, "sent")], Some(READ_RANK));
+        let view = media.project(Transport::Mms);
+        assert_eq!(view.transport, Some("rcs"));
+        assert_eq!(view.status, Some("failed-confirmed"));
+        assert_eq!(view.status_at, media.base().status_at);
+    }
+
+    #[test]
+    fn mms_shaped_unknown_slot_wins_over_failure() {
+        let media = outgoing_media(2);
+        media.seed(&[(0, "send_failed"), (1, "outcome_unknown")], None);
+        let view = media.project(Transport::Mms);
+        assert_eq!(view.transport, Some("rcs"));
+        assert_eq!(view.status, Some("unknown"));
+    }
+
+    #[test]
+    fn mms_shaped_success_keeps_the_ordinary_projection() {
+        let media = outgoing_media(2);
+        media.seed(&[(0, "sent"), (1, "sending")], Some(READ_RANK));
+        let view = media.project(Transport::Mms);
+        assert_eq!(view.transport, Some("rcs"));
+        assert_eq!(view.status, media.base().status);
+        assert_eq!(view.status_at, media.base().status_at);
+        assert!(!view.rcs_reported);
+    }
+
+    #[test]
+    fn explicit_rcs_success_keeps_the_read_receipt() {
+        let media = outgoing_media(2);
+        media.seed(&[(0, "sent"), (1, "sent")], Some(READ_RANK));
+        let view = media.project(Transport::Rcs);
+        assert_eq!(view.status, Some("read"));
+        assert_eq!(view.status_at, None);
+    }
+
+    #[test]
+    fn explicit_rcs_without_slot_rows_keeps_the_delivery_receipt() {
+        let media = outgoing_media(1);
+        media.seed(&[], Some(DELIVERED_RANK));
+        let view = media.project(Transport::Rcs);
+        assert_eq!(view.status, Some("delivery-confirmed"));
+        assert_eq!(view.status_at, media.base().status_at);
+    }
+
+    #[test]
+    fn outgoing_mms_and_sms_with_read_evidence_project_as_rcs() {
+        for transport in [Transport::Mms, Transport::Sms] {
+            let media = outgoing_media(1);
+            media.seed(&[], Some(READ_RANK));
+
+            let view = media.project(transport);
+
+            assert_eq!(view.transport, Some("rcs"));
+            assert_eq!(view.status, Some("read"));
+            assert_eq!(view.status_at, None);
+            assert!(view.rcs_reported);
+        }
+    }
+
+    #[test]
+    fn outgoing_mms_with_echo_only_evidence_projects_as_rcs() {
+        let media = outgoing_media(1);
+        media.seed_reported(&[], None, true);
+
+        let view = media.project(Transport::Mms);
+
+        assert_eq!(view.transport, Some("rcs"));
+        assert_eq!(view.status, media.base().status);
+        assert!(view.rcs_reported);
+    }
+
+    #[test]
+    fn outgoing_mms_and_sms_with_unreported_echo_only_evidence_keep_their_transport() {
+        for (transport, expected) in [(Transport::Mms, "mms"), (Transport::Sms, "sms")] {
+            let media = outgoing_media(1);
+            media.seed_reported(&[], None, false);
+
+            let view = media.project(transport);
+
+            assert_eq!(view.transport, Some(expected));
+            assert!(!view.rcs_reported);
+        }
+    }
+
+    #[test]
+    fn outgoing_mms_with_unreported_failed_evidence_stays_failed() {
+        let media = outgoing_media(1);
+        media.seed_reported(&[], Some(3), false);
+
+        let view = media.project(Transport::Mms);
+
+        assert_eq!(view.transport, Some("rcs"));
+        assert_eq!(view.status, Some("failed-confirmed"));
         assert!(!view.rcs_reported);
     }
 }

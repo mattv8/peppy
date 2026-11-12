@@ -68,12 +68,11 @@ impl Client {
             }
             return serde_json::from_str(&response).map_err(|_| Error::Database);
         }
-        let transport = classify_outgoing_transport(
-            &tx,
-            command.conversation_id,
+        let transport = compose_transport(
             &command.recipients,
-            &command.attachment_ids,
-        )?;
+            &command.body,
+            !command.attachment_ids.is_empty(),
+        );
         if transport != command.expected_transport {
             return Err(Error::InvalidRequest("transport changed; retry"));
         }
@@ -285,13 +284,7 @@ mod tests {
         command.expected_transport = Transport::Mms;
 
         assert_eq!(
-            client
-                .mcp_send_transport(
-                    command.conversation_id,
-                    &command.recipients,
-                    &command.attachment_ids,
-                )
-                .unwrap(),
+            client.mcp_send_transport(&command.recipients, &command.body, &command.attachment_ids),
             Transport::Mms
         );
         let first = client.queue_mcp_command(command.clone()).unwrap();
@@ -607,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn one_recipient_text_in_an_mms_thread_is_mms() {
+    fn one_recipient_text_in_an_mms_thread_is_plain_text() {
         let dir = tempfile::TempDir::new().unwrap();
         let client = opened(dir.path().join("mcp.db"), VaultId::new(), DeviceId::new());
         let conversation_id = ConversationId::new();
@@ -625,9 +618,37 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            client
-                .mcp_send_transport(conversation_id, &["15551234567".into()], &[],)
-                .unwrap(),
+            client.mcp_send_transport(&["15551234567".into()], "text", &[]),
+            Transport::Sms
+        );
+    }
+
+    #[test]
+    fn a_text_too_long_for_sms_parts_is_mms() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let client = opened(dir.path().join("mcp.db"), VaultId::new(), DeviceId::new());
+        let recipients = ["15551234567".to_owned()];
+        // A flag is four UTF-16 units that one SMS part cannot split.
+        let longest_sms = "🇺🇸".repeat(crate::MAX_SMS_TEXT_UTF16_UNITS / 4);
+        let too_long = "🇺🇸".repeat(crate::MAX_SMS_TEXT_UTF16_UNITS / 4 + 1);
+
+        assert_eq!(
+            client.mcp_send_transport(&recipients, &longest_sms, &[]),
+            Transport::Sms
+        );
+        assert_eq!(
+            client.mcp_send_transport(&recipients, &too_long, &[]),
+            Transport::Mms
+        );
+    }
+
+    #[test]
+    fn a_text_to_an_email_address_stays_mms() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let client = opened(dir.path().join("mcp.db"), VaultId::new(), DeviceId::new());
+
+        assert_eq!(
+            client.mcp_send_transport(&["person@example.com".into()], "text", &[]),
             Transport::Mms
         );
     }
@@ -648,9 +669,7 @@ mod tests {
         let sms_recipients = client.reply_recipients(sms.message_id).unwrap();
         assert_eq!(sms_recipients, vec!["15551234567"]);
         assert_eq!(
-            client
-                .mcp_send_transport(sms.conversation_id, &sms_recipients, &[])
-                .unwrap(),
+            client.mcp_send_transport(&sms_recipients, "text", &[]),
             Transport::Sms
         );
         let mut reaction = command(
@@ -693,13 +712,7 @@ mod tests {
             vec!["15551234567", "15557654321"]
         );
         assert_eq!(
-            client
-                .mcp_send_transport(
-                    mms.conversation_id,
-                    &["15551234567".into(), "15557654321".into()],
-                    &[],
-                )
-                .unwrap(),
+            client.mcp_send_transport(&["15551234567".into(), "15557654321".into()], "text", &[]),
             Transport::Mms
         );
 
@@ -743,9 +756,7 @@ mod tests {
         let first_mms_recipients = client.reply_recipients(first_mms.message_id).unwrap();
         assert_eq!(first_mms_recipients, vec!["15551234567", "15557654321"]);
         assert_eq!(
-            client
-                .mcp_send_transport(conversation_id, &first_mms_recipients, &[])
-                .unwrap(),
+            client.mcp_send_transport(&first_mms_recipients, "text", &[]),
             Transport::Mms
         );
     }

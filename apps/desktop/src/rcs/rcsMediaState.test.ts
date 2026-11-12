@@ -48,6 +48,7 @@ describe("rcsSendStatusLabel and rcsSendNeedsAttention", () => {
       sending: peppyCopy.rcs_media_state_sending,
       sent: peppyCopy.rcs_media_state_sent,
       not_sent: peppyCopy.rcs_media_state_not_sent,
+      send_failed: peppyCopy.rcs_media_state_send_failed,
       outcome_unknown: peppyCopy.rcs_media_state_unknown,
       members_changed: peppyCopy.rcs_media_state_not_sent,
     };
@@ -55,9 +56,19 @@ describe("rcsSendStatusLabel and rcsSendNeedsAttention", () => {
     expect(rcsSendNeedsAttention("not_sent")).toBe(true);
     expect(rcsSendNeedsAttention("outcome_unknown")).toBe(true);
     expect(rcsSendNeedsAttention("members_changed")).toBe(true);
+    expect(rcsSendNeedsAttention("send_failed" as RcsSendStatus)).toBe(true);
     expect(rcsSendNeedsAttention("sending")).toBe(false);
     expect(rcsSendNeedsAttention("sent")).toBe(false);
     expect(rcsSendNeedsAttention(undefined)).toBe(false);
+  });
+
+  it("treats definitive attempted failures as confirmed failures without replacing unresolved outcomes", () => {
+    const sendFailed = attachment({ rcsSendStatus: "send_failed" as RcsSendStatus });
+    const unknown = attachment({ id: "unknown", rcsSendStatus: "outcome_unknown" });
+
+    expect(rcsSendStatusLabel(sendFailed.rcsSendStatus!)).toBe("Send failed");
+    expect(rcsOutcomeStatus(message([sendFailed], "read")).status).toBe("failed-confirmed");
+    expect(rcsOutcomeStatus(message([sendFailed, unknown], "read")).status).toBe("unknown");
   });
 });
 

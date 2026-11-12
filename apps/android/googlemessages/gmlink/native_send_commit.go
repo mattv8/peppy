@@ -6,7 +6,6 @@ import (
 	"reflect"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
-	"google.golang.org/protobuf/proto"
 )
 
 func nativeCommitMatchesTicket(commit nativeRcsCommitProjection, ticket *nativeRcsTicket) bool {
@@ -75,7 +74,7 @@ func (link *Link) CommitNativeRcs(ticketID, commitJSON string) string {
 	if ticket.group && groupMemberDigest(fetched) != ticket.request.ExpectedMemberDigest {
 		return nativeRcsJSON(nativeRcsPrepareResult{Code: "members_changed"})
 	}
-	if !proto.Equal(fetched, ticket.conversation) {
+	if !sameSendAuthority(fetched, ticket.conversation) {
 		return reject()
 	}
 	link.mu.Lock()
@@ -115,7 +114,7 @@ func (link *Link) CommitNativeRcs(ticketID, commitJSON string) string {
 
 func (link *Link) nativeFlightCurrentLocked(ticket *nativeRcsTicket, flight *nativeRcsInFlight) bool {
 	return link.nativeInFlight == flight && flight.ticketID == ticket.id && !flight.revoked && !flight.admitted &&
-		link.nativeFrozenCurrentLocked(ticket) && proto.Equal(ticket.conversation,
+		link.nativeFrozenCurrentLocked(ticket) && sameSendAuthority(ticket.conversation,
 		link.currentSupportedRcsConversationLocked(ticket.targetObservation.GoogleConversationID, ticket.generation, ticket.streamEpoch))
 }
 

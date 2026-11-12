@@ -1601,6 +1601,47 @@ async fn column_privilege_drift_is_detected_and_repaired_by_grants() {
         .unwrap();
 
     sqlx::query(&format!(
+        "GRANT UPDATE (checksum) ON _sqlx_migrations TO {}",
+        fixture.runtime_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    assert!(matches!(
+        rls::validate_runtime_role(&fixture.runtime, true).await,
+        Err(rls::RlsError::UnsafeRuntimeRole(
+            "schema metadata grant is unsafe"
+        ))
+    ));
+    rls::grant_runtime_privileges(&fixture.migration, &fixture.runtime_role)
+        .await
+        .unwrap();
+    rls::validate_runtime_role(&fixture.runtime, true)
+        .await
+        .unwrap();
+
+    sqlx::query(&format!(
+        "GRANT SELECT (vault_id) ON mcp_cleanup_jobs TO {}",
+        fixture.runtime_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    assert!(matches!(
+        rls::validate_runtime_role(&fixture.runtime, true).await,
+        Err(rls::RlsError::UnsafeRuntimeRole(
+            "unexpected public-table privilege"
+        ))
+    ));
+    sqlx::query(&format!(
+        "REVOKE SELECT (vault_id) ON mcp_cleanup_jobs FROM {}",
+        fixture.runtime_role
+    ))
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+
+    sqlx::query(&format!(
         "GRANT INSERT (recovery_record) ON vault_identity_establishments TO {}",
         fixture.maintenance_role
     ))

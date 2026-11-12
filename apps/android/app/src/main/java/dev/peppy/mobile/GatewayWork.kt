@@ -865,7 +865,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
                     mms.refusedBeforeCarrier + sms.refusedBeforeCarrier,
                     mms.waiting + sms.waiting,
                     mms.moreRemaining || sms.moreRemaining,
-                    sms.carrierOnlyProofBlocked,
+                    mms.carrierOnlyProofBlocked + sms.carrierOnlyProofBlocked,
                 )
             },
             capabilities = SimRoutes.capabilityReport(routes, sendGranted, mmsEnabled, mmsReceiveGranted, session.client.mmsContentVersion()) { MmsLimits.forSubscription(applicationContext, it) },

@@ -34,6 +34,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -73,7 +76,6 @@ internal data class MmsHealth(
     val pending: Int = 0,
     val blocked: Int = 0,
     val unavailable: Int = 0,
-    val reasons: List<String> = emptyList(),
     val transferReasons: List<String> = emptyList(),
     val databaseUnavailable: Boolean = false,
     val backfillStatus: MmsBackfillStatus? = null,
@@ -91,16 +93,76 @@ internal sealed interface MmsBackfillStatus {
     data object UpToDate : MmsBackfillStatus
 }
 
+internal enum class MmsPresentationStatus {
+    OFF, ACCESS_NEEDED, LOCKED, GETTING_READY, COPYING_OLDER, COPYING, UP_TO_DATE, MOSTLY_UP_TO_DATE,
+    PHONE_STORAGE_PAUSED, OLDER_HISTORY_PAUSED, HISTORY_PAUSED, SERVER_STORAGE_PAUSED,
+}
+
+internal enum class MmsHealthNote { ACCESS_NEEDED, LOCKED, NOT_COPIED, SKIPPED, BOTH }
+
+internal data class MmsHealthPresentation(
+    val status: MmsPresentationStatus,
+    val note: MmsHealthNote? = null,
+    val showRescan: Boolean = false,
+)
+
+internal fun mmsHealthPresentation(
+    enabled: Boolean,
+    receiveGranted: Boolean,
+    health: MmsHealth,
+): MmsHealthPresentation {
+    if (!enabled) return MmsHealthPresentation(MmsPresentationStatus.OFF)
+    if (!receiveGranted) return MmsHealthPresentation(MmsPresentationStatus.ACCESS_NEEDED, MmsHealthNote.ACCESS_NEEDED)
+    if (health.databaseUnavailable) return MmsHealthPresentation(MmsPresentationStatus.LOCKED, MmsHealthNote.LOCKED)
+
+    val notCopied = health.blocked + health.unavailable > 0 || health.transferReasons.any { !it.endsWith(": transient") }
+    val skipped = health.quarantinedCount > 0L
+    val note = when {
+        notCopied && skipped -> MmsHealthNote.BOTH
+        notCopied -> MmsHealthNote.NOT_COPIED
+        skipped -> MmsHealthNote.SKIPPED
+        else -> null
+    }
+    val status = when (health.backfillStatus ?: MmsBackfillStatus.GettingReady) {
+        MmsBackfillStatus.PausedPhoneStorage -> MmsPresentationStatus.PHONE_STORAGE_PAUSED
+        MmsBackfillStatus.OlderPausedHistoryLimit -> MmsPresentationStatus.OLDER_HISTORY_PAUSED
+        MmsBackfillStatus.PausedHistoryLimit -> MmsPresentationStatus.HISTORY_PAUSED
+        MmsBackfillStatus.OlderPausedServerStorage -> MmsPresentationStatus.SERVER_STORAGE_PAUSED
+        MmsBackfillStatus.GettingReady -> MmsPresentationStatus.GETTING_READY
+        MmsBackfillStatus.CopyingOlder -> MmsPresentationStatus.COPYING_OLDER
+        is MmsBackfillStatus.Copying -> MmsPresentationStatus.COPYING
+        MmsBackfillStatus.UpToDate -> when {
+            health.pending > 0 -> MmsPresentationStatus.COPYING
+            note != null -> MmsPresentationStatus.MOSTLY_UP_TO_DATE
+            else -> MmsPresentationStatus.UP_TO_DATE
+        }
+    }
+    return MmsHealthPresentation(status, note, health.blocked > 0 || health.unavailable > 0 || skipped)
+}
+
 @Composable
-private fun MmsBackfillStatus.text(): String = when (this) {
-    MmsBackfillStatus.PausedPhoneStorage -> stringResource(R.string.peppy_toggle_android_mms_status_paused_phone_storage)
-    MmsBackfillStatus.OlderPausedHistoryLimit -> stringResource(R.string.peppy_toggle_android_mms_status_older_paused_history_limit)
-    MmsBackfillStatus.PausedHistoryLimit -> stringResource(R.string.peppy_toggle_android_mms_status_paused_history_limit)
-    MmsBackfillStatus.OlderPausedServerStorage -> stringResource(R.string.peppy_toggle_android_mms_status_older_paused_server_storage)
-    MmsBackfillStatus.GettingReady -> stringResource(R.string.peppy_toggle_android_mms_status_getting_ready)
-    MmsBackfillStatus.CopyingOlder -> stringResource(R.string.peppy_toggle_android_mms_status_copying_older)
-    is MmsBackfillStatus.Copying -> stringResource(R.string.peppy_toggle_android_mms_status_copying_count, count.toLong())
-    MmsBackfillStatus.UpToDate -> stringResource(R.string.peppy_toggle_android_mms_status_up_to_date)
+private fun MmsPresentationStatus.text(): String = when (this) {
+    MmsPresentationStatus.OFF -> stringResource(R.string.peppy_toggle_android_mms_status_off)
+    MmsPresentationStatus.ACCESS_NEEDED -> stringResource(R.string.peppy_toggle_android_mms_status_access_needed)
+    MmsPresentationStatus.LOCKED -> stringResource(R.string.peppy_toggle_android_mms_status_locked)
+    MmsPresentationStatus.GETTING_READY -> stringResource(R.string.peppy_toggle_android_mms_status_getting_ready)
+    MmsPresentationStatus.COPYING_OLDER -> stringResource(R.string.peppy_toggle_android_mms_status_copying_older)
+    MmsPresentationStatus.COPYING -> stringResource(R.string.peppy_toggle_android_mms_status_copying)
+    MmsPresentationStatus.UP_TO_DATE -> stringResource(R.string.peppy_toggle_android_mms_status_up_to_date)
+    MmsPresentationStatus.MOSTLY_UP_TO_DATE -> stringResource(R.string.peppy_toggle_android_mms_status_mostly_up_to_date)
+    MmsPresentationStatus.PHONE_STORAGE_PAUSED -> stringResource(R.string.peppy_toggle_android_mms_status_paused_phone_storage)
+    MmsPresentationStatus.OLDER_HISTORY_PAUSED -> stringResource(R.string.peppy_toggle_android_mms_status_older_paused_history_limit)
+    MmsPresentationStatus.HISTORY_PAUSED -> stringResource(R.string.peppy_toggle_android_mms_status_paused_history_limit)
+    MmsPresentationStatus.SERVER_STORAGE_PAUSED -> stringResource(R.string.peppy_toggle_android_mms_status_older_paused_server_storage)
+}
+
+@Composable
+private fun MmsHealthNote.text(): String = when (this) {
+    MmsHealthNote.ACCESS_NEEDED -> stringResource(R.string.peppy_toggle_android_mms_note_access_needed)
+    MmsHealthNote.LOCKED -> stringResource(R.string.peppy_toggle_android_mms_note_locked)
+    MmsHealthNote.NOT_COPIED -> stringResource(R.string.peppy_toggle_android_mms_note_not_copied)
+    MmsHealthNote.SKIPPED -> stringResource(R.string.peppy_toggle_android_mms_note_skipped)
+    MmsHealthNote.BOTH -> stringResource(R.string.peppy_toggle_android_mms_note_both)
 }
 
 /** Bounded, content-free transfer failures shown only on this phone. */
@@ -173,7 +235,6 @@ internal fun mmsHealthFromNative(
         pending = incomplete.count { it.state == NativeMmsAcquisitionState.PENDING },
         blocked = incomplete.count { it.state == NativeMmsAcquisitionState.BLOCKED },
         unavailable = incomplete.count { it.state == NativeMmsAcquisitionState.UNAVAILABLE },
-        reasons = incomplete.mapNotNull { it.reason?.take(120) }.distinct().take(8),
         transferReasons = transferReasons,
         backfillStatus = status,
         quarantinedCount = backfill.quarantinedCount.toLong(),
@@ -334,38 +395,22 @@ internal fun MmsSettings(
                     ) { Text(stringResource(R.string.peppy_toggle_android_mms_refresh)) }
                 },
             )
+            val presentation = mmsHealthPresentation(enabled, receiveGranted, health)
             Column(Modifier.fillMaxWidth().testTag("mms-health-list"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (health.databaseUnavailable) {
-                    Text(stringResource(R.string.peppy_toggle_android_mms_health_locked))
-                } else {
-                    StatusRow(
-                        "mms-backfill-status",
-                        stringResource(R.string.peppy_toggle_android_mms_status_label),
-                        health.backfillStatus?.text().orEmpty(),
-                    )
-                    if (health.pending > 0) Text(stringResource(R.string.peppy_toggle_android_mms_health_waiting, health.pending), Modifier.testTag("mms-health-count"), style = MaterialTheme.typography.bodySmall)
-                    if (health.blocked > 0) Text(stringResource(R.string.peppy_toggle_android_mms_health_stuck, health.blocked), Modifier.testTag("mms-health-count"), style = MaterialTheme.typography.bodySmall)
-                    if (health.unavailable > 0) Text(stringResource(R.string.peppy_toggle_android_mms_health_unavailable, health.unavailable), Modifier.testTag("mms-health-count"), style = MaterialTheme.typography.bodySmall)
+                StatusRow(
+                    "mms-backfill-status",
+                    stringResource(R.string.peppy_toggle_android_mms_status_label),
+                    presentation.status.text(),
+                )
+                presentation.note?.let {
+                    Text(it.text(), Modifier.testTag("mms-health-note"), style = MaterialTheme.typography.bodySmall)
                 }
-                if (health.quarantinedCount > 0L) {
-                    Text(
-                        stringResource(R.string.peppy_toggle_android_mms_quarantine_status, health.quarantinedCount),
-                        Modifier.testTag("mms-quarantine-status"),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Text(
-                        stringResource(R.string.peppy_toggle_android_mms_quarantine_explanation),
-                        Modifier.testTag("mms-quarantine-explanation"),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                health.reasons.forEach { Text(it, Modifier.testTag("mms-health-reason"), style = MaterialTheme.typography.bodySmall) }
-                health.transferReasons.forEach { Text("Transfer $it", Modifier.testTag("mms-transfer-health-reason"), style = MaterialTheme.typography.bodySmall) }
             }
             RestrictedMessageAccessControls(
                 context = context,
                 access = restrictedAccess,
                 showAccessStatus = !hasAdvancedFeaturesSetup,
+                showRescan = presentation.showRescan && enabled && receiveGranted && !health.databaseUnavailable,
                 enabled = canRequestProviderRescan(enabled, receiveGranted, databaseOpen, restrictedAccess),
                 pending = rescanPending,
                 feedback = rescanFeedback,
@@ -473,6 +518,7 @@ private fun RestrictedMessageAccessControls(
     context: Context,
     access: RestrictedMessageAccess,
     showAccessStatus: Boolean,
+    showRescan: Boolean,
     enabled: Boolean,
     pending: Boolean,
     feedback: String?,
@@ -483,7 +529,7 @@ private fun RestrictedMessageAccessControls(
     if (showAccessStatus) {
         RestrictedMessageAccessStatus(access)
     }
-    if (access == RestrictedMessageAccess.ALLOWED) {
+    if (access == RestrictedMessageAccess.ALLOWED && showRescan) {
         OutlinedButton(
             onClick = startRescan,
             enabled = enabled && !pending,
@@ -505,7 +551,13 @@ private fun RestrictedMessageAccessControls(
         ) { Text(stringResource(R.string.peppy_mms_restricted_copy_command)) }
     }
     if (showAccessStatus && commandCopied) Text(stringResource(R.string.peppy_mms_restricted_command_copied), Modifier.testTag("mms-restricted-message-command-copied"), style = MaterialTheme.typography.bodySmall)
-    feedback?.let { Text(it, Modifier.testTag("mms-restricted-message-feedback"), style = MaterialTheme.typography.bodySmall) }
+    feedback?.let {
+        Text(
+            it,
+            Modifier.testTag("mms-restricted-message-feedback").semantics { liveRegion = LiveRegionMode.Polite },
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
 }
 
 @Composable

@@ -98,6 +98,7 @@ mod phone_read;
 mod rcs_capability;
 mod rcs_mapping;
 mod rcs_media;
+mod rcs_mirror;
 pub use quick_reply::{QuickReplyContext, QuickReplyInput};
 pub use rcs_media::PendingReceiveTask;
 pub use rcs_media::{RcsMediaReceiveView, ReceiveDownloadAdmission};
@@ -169,8 +170,9 @@ pub use phone_read::{
 };
 pub use rcs_capability::{
     RCS_CAPABILITY_KEEPALIVE_MS, RCS_CAPABILITY_PUBLISH_BATCH, RCS_CAPABILITY_STALE_MS,
-    RcsCapabilityState, RcsEligibility, RcsEligibilityProjection, RcsLinkEligibilityPayload,
-    RcsLinkStatusEvent, RcsLinkStatusPayload, RcsLinkStatusProjection,
+    RCS_ELIGIBILITY_REPUBLISH_FLOOR_MS, RcsCapabilityState, RcsEligibility,
+    RcsEligibilityProjection, RcsLinkEligibilityPayload, RcsLinkStatusEvent, RcsLinkStatusPayload,
+    RcsLinkStatusProjection,
 };
 pub use rcs_mapping::{
     RCS_MAPPING_FRESHNESS_MS, RCS_MAPPING_PROOF_VERSION, RcsBootstrapResolution,
@@ -213,7 +215,7 @@ pub use vault_identity::{
 };
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 59;
+const SCHEMA_VERSION: i64 = 60;
 const PENDING_COMMAND_ELIGIBILITY: &str = "a.command_id IS NULL AND l.historical=0 AND l.retired=0 AND l.subscription_id<>'' AND l.key_epoch=? AND NOT EXISTS(SELECT 1 FROM rcs_media_send_ledger m WHERE m.command_id=l.command_id) AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.command_id=l.command_id AND x.target_gateway_id=? AND x.state IN ('requested','confirmed'))";
 #[cfg(test)]
 thread_local! {
@@ -434,6 +436,9 @@ pub struct MessagePayload {
     pub body: String,
     pub transport: Transport,
     pub direction: Direction,
+    /// Set only by authenticated native RCS capture for an unmatched outgoing observation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rcs_capture: bool,
     /// Imported provider history starts read; live captures start unread.
     pub imported: bool,
     /// Provider timestamp when known. It is deliberately distinct from local ordering.
@@ -1488,6 +1493,26 @@ impl Client {
         Ok(outcome)
     }
 
+    /// Verifies the bound target of one pending command and stores its mapping on the command's
+    /// own conversation. The command's single recipient must be the chat's participant.
+    pub fn verify_rcs_send_mapping(
+        &self,
+        observation: &RcsMappingObservation,
+        command_id: CommandId,
+        now_ms: i64,
+    ) -> Result<RcsMappingOutcome, Error> {
+        let mut store = self.lock()?;
+        let active_epoch = store.active_epoch;
+        let transaction = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let command = pending_command_message(&transaction, active_epoch, command_id)?;
+        let outcome =
+            rcs_mapping::verify_and_store_for_send(&transaction, observation, &command, now_ms)?;
+        transaction.commit()?;
+        Ok(outcome)
+    }
+
     /// Resolves a bootstrap participant using the exact identity lookup used by mapping verification.
     pub fn resolve_rcs_bootstrap_conversation(
         &self,
@@ -1832,6 +1857,7 @@ impl Client {
             .as_ref()
             .filter(|status| linked && status.status.state == RcsCapabilityState::Linked)
             .map_or(0, |status| status.status.feature_bits);
+        let linked_since_ms = rcs_capability::linked_since(&tx, ctx.device_id)?;
         let mut published = 0;
         for conversation_id in conversation_ids {
             // A 1:1 mapping, or a group mapping that is Live (only Live groups are eligible).
@@ -1846,15 +1872,27 @@ impl Client {
                 RcsEligibility::NotEligible
             };
             let identity = format!("eligibility:{}:{}", ctx.device_id, conversation_id);
-            let previous_revision = tx
+            let previous: Option<(u64, String, i64)> = tx
                 .query_row(
-                    "SELECT revision FROM rcs_capability_published WHERE identity=?",
+                    "SELECT revision,body,published_at_ms FROM rcs_capability_published WHERE identity=?",
                     [&identity],
-                    |row| row.get::<_, u64>(0),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
-                .optional()?
-                .unwrap_or(0);
-            let revision = previous_revision
+                .optional()?;
+            if previous.as_ref().is_some_and(|(_, body, published_at_ms)| {
+                eligibility_already_published(
+                    body,
+                    *published_at_ms,
+                    eligibility,
+                    feature_bits,
+                    linked_since_ms,
+                    now_ms,
+                )
+            }) {
+                continue;
+            }
+            let revision = previous
+                .map_or(0, |(revision, _, _)| revision)
                 .checked_add(1)
                 .filter(|revision| *revision <= i64::MAX as u64)
                 .ok_or(Error::InvalidRequest("RCS eligibility revision exhausted"))?;
@@ -3463,6 +3501,7 @@ fn capture_in(
         body: sms.body,
         transport,
         direction: Direction::Incoming,
+        rcs_capture: false,
         imported: sms.imported,
         ordered_at_ms: sent_at_ms.is_none().then(notifications::now_ms),
         sent_at_ms,
@@ -3940,12 +3979,11 @@ impl Client {
     /// Classifies an MCP send without changing local state.
     pub fn mcp_send_transport(
         &self,
-        conversation_id: ConversationId,
         recipients: &[String],
+        body: &str,
         attachments: &[AttachmentId],
-    ) -> Result<Transport, Error> {
-        let store = self.lock()?;
-        classify_outgoing_transport(&store.conn, conversation_id, recipients, attachments)
+    ) -> Transport {
+        compose_transport(recipients, body, !attachments.is_empty())
     }
 
     /// Returns the recipients used when replying to a stored message.
@@ -4007,12 +4045,11 @@ impl Client {
             .as_ref()
             .is_some_and(|current| current.revision == expected_revision && *current == draft);
         let route = draft.route.as_ref().ok_or(Error::InvalidRequest("route"))?;
-        let transport = classify_outgoing_transport(
-            &tx,
-            draft.conversation_id,
+        let transport = compose_transport(
             &draft.recipients,
-            &draft.attachment_ids,
-        )?;
+            &draft.text,
+            !draft.attachment_ids.is_empty(),
+        );
         if transport == Transport::Sms {
             validate_outgoing(
                 &OutgoingSms {
@@ -4158,28 +4195,31 @@ fn queue_split_draft_messages(
     Ok(first)
 }
 
-/// For one-to-one text replies, the latest record defines the current thread transport; an old
-/// legacy picture MMS must not permanently convert a later SMS thread to MMS.
-fn classify_outgoing_transport(
-    tx: &Connection,
-    conversation_id: ConversationId,
-    recipients: &[String],
-    attachments: &[AttachmentId],
-) -> Result<Transport, Error> {
-    let latest_transport: Option<Transport> = tx
-        .query_row(
-            "SELECT payload FROM messages WHERE conversation_id=? ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1",
-            params![conversation_id.to_string()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .map(|payload| decode::<MessagePayload>(payload.as_bytes()).map(|message| message.transport))
-        .transpose()?;
-    if attachments.is_empty() && recipients.len() == 1 && latest_transport != Some(Transport::Mms) {
-        Ok(Transport::Sms)
-    } else {
-        Ok(Transport::Mms)
+/// The longest text queued as SMS, in UTF-16 units. A phone sends at most 255 parts and a part of
+/// text outside the GSM alphabet holds 67 units, but it keeps an emoji or a flag whole, so a part
+/// can end early. Half of that capacity is enough even when every part does.
+pub const MAX_SMS_TEXT_UTF16_UNITS: usize = 255 * 67 / 2;
+
+/// The transport a composed message is queued with. A text to one party is plain text whatever
+/// the thread last carried: the gateway picks RCS or the carrier when it sends. MMS is for what
+/// plain text cannot carry: attachments, several recipients, an address only MMS reaches, or a
+/// text longer than SMS parts hold.
+pub fn compose_transport(recipients: &[String], body: &str, has_attachments: bool) -> Transport {
+    match recipients {
+        [recipient]
+            if !has_attachments
+                && !is_mms_only_address(recipient)
+                && body.encode_utf16().count() <= MAX_SMS_TEXT_UTF16_UNITS =>
+        {
+            Transport::Sms
+        }
+        _ => Transport::Mms,
     }
+}
+
+/// An email address: MMS delivers to it, SMS and RCS do not.
+fn is_mms_only_address(address: &str) -> bool {
+    address.contains('@')
 }
 
 fn validate_outgoing(sms: &OutgoingSms, route: &GatewayRoute) -> Result<(), Error> {
@@ -4320,6 +4360,7 @@ fn queue_message(
         body: sms.body,
         transport,
         direction: Direction::Outgoing,
+        rcs_capture: false,
         imported: false,
         sent_at_ms: None,
         ordered_at_ms: Some(notifications::now_ms()),
@@ -5473,14 +5514,16 @@ impl Client {
         let (conn, ctx) = store.parts();
         let tx = conn.transaction()?;
         let report = rcs_media::record_outcome(&tx, command_id, attachment_index, code)?;
-        emit_rcs_media_state(
-            &tx,
-            &ctx,
-            command_id,
-            attachment_index,
-            report.sync,
-            report.reason,
-        )?;
+        if report.publish_current {
+            emit_rcs_media_state(
+                &tx,
+                &ctx,
+                command_id,
+                attachment_index,
+                report.sync,
+                report.reason,
+            )?;
+        }
         for index in report.refused_indexes {
             emit_rcs_media_state(
                 &tx,
@@ -6142,10 +6185,7 @@ impl Client {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )?;
         let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
-        if !media_ready
-            || message.transport != Transport::Sms
-            || !message.record.attachments.is_empty()
-        {
+        if !media_ready || !is_one_to_one_text(&message) || !message.record.attachments.is_empty() {
             return Err(Error::InvalidRequest("RCS text required"));
         }
         let route = GatewayRoute::RcsLink { gateway_device_id };
@@ -6203,10 +6243,7 @@ impl Client {
         )?;
         require_received_command_eligible(&tx, active, epoch, historical)?;
         let (message, media_ready) = localize(&tx, decode(payload.as_bytes())?)?;
-        if !media_ready
-            || message.transport != Transport::Sms
-            || !message.record.attachments.is_empty()
-        {
+        if !media_ready || !is_one_to_one_text(&message) || !message.record.attachments.is_empty() {
             return Err(Error::InvalidRequest("RCS text required"));
         }
         let Some(mapping) =
@@ -9382,6 +9419,37 @@ CREATE TABLE IF NOT EXISTS rcs_media_state_clocks(
  PRIMARY KEY(producer_device_id,message_id,attachment_index)
 );
 ";
+
+const RCS_MEDIA_SEND_STATUS_MIGRATION_60: &str = "
+CREATE TABLE rcs_media_send_status_60(
+ message_id TEXT NOT NULL,
+ attachment_index INTEGER NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('sending','sent','not_sent','outcome_unknown','members_changed','send_failed')),
+ reason TEXT CHECK(reason IS NULL OR reason IN ('not_allowed_mime','too_large','rejected','failed')),
+ CHECK((state='not_sent') = (reason IS NOT NULL)),
+ PRIMARY KEY(message_id,attachment_index)
+);
+";
+
+fn apply_rcs_media_send_status_migration_60(conn: &Connection) -> Result<(), Error> {
+    let mut statement = conn.prepare(
+        "SELECT sql FROM sqlite_master WHERE tbl_name='rcs_media_send_status' AND type IN ('index','trigger') AND sql IS NOT NULL",
+    )?;
+    let objects = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    conn.execute_batch(RCS_MEDIA_SEND_STATUS_MIGRATION_60)?;
+    conn.execute(
+        "INSERT INTO rcs_media_send_status_60(message_id,attachment_index,state,reason) SELECT message_id,attachment_index,state,reason FROM rcs_media_send_status",
+        [],
+    )?;
+    conn.execute_batch("DROP TABLE rcs_media_send_status; ALTER TABLE rcs_media_send_status_60 RENAME TO rcs_media_send_status;")?;
+    for object in objects {
+        conn.execute_batch(&object)?;
+    }
+    Ok(())
+}
 fn apply_rcs_union_migrations(conn: &Connection) -> Result<(), Error> {
     conn.execute_batch(RCS_MIGRATION_46)?;
     add_column_if_missing(
@@ -9612,6 +9680,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             apply_rcs_media_receive_metadata_migration(&tx)?;
             tx.execute_batch(RCS_MEDIA_DEFERRED_STATE_MIGRATION_57)?;
             tx.execute_batch(SEND_CANCELLATION_MIGRATION_58)?;
+            apply_rcs_media_send_status_migration_60(&tx)?;
             tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
@@ -9621,7 +9690,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=58)) => {
+        Some(version @ (4..=59)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -9765,6 +9834,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             if version <= 58 {
                 apply_send_cancellation_migration_59(&tx)?;
             }
+            apply_rcs_media_send_status_migration_60(&tx)?;
             tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
@@ -9776,7 +9846,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     mms_backfill::initialize(conn)?;
     attachment_retention::initialize(conn)?;
     mcp_commands::initialize(conn)?;
+    rcs_mirror::initialize(conn)?;
     media_cache::initialize(conn)?;
+    draft_sync::repair_unqueued_intent_media_references(conn)?;
     deferred_media::initialize(conn)?;
     initialize_battery_lookup_indexes(conn)?;
     mms_identity::install_query_indexes(conn)?;
@@ -10988,6 +11060,7 @@ fn apply_record(
             };
             if message.direction != Direction::Outgoing
                 || !valid_message(&message, producer)
+                || message.rcs_capture
                 || !media_matches(&message, &media)
             {
                 return Ok(Some(Q::InvalidPayload));
@@ -11556,20 +11629,46 @@ fn insert_message(conn: &Connection, message: &MessagePayload) -> Result<Inserte
     if message.mms_context.is_none()
         && let Some(address) = address
     {
-        for address in [
-            address.to_owned(),
-            conversation_match::canonical_address(
-                address,
-                Some(&conversation_match::identity_region(conn)?),
-            ),
-        ] {
-            conn.execute(
-                "INSERT OR IGNORE INTO addresses(address,conversation_id) VALUES(?,?)",
-                params![address, message.record.conversation_id.to_string()],
-            )?;
-        }
+        index_address(conn, address, message.record.conversation_id)?;
     }
     Ok(Inserted::New)
+}
+
+/// Records `conversation_id` as the one-to-one thread of `address`. The first thread keeps a
+/// number, except that a group never holds one: a member's message does not index the group, and
+/// an entry that points at a group is replaced.
+fn index_address(
+    conn: &Connection,
+    address: &str,
+    conversation_id: ConversationId,
+) -> Result<(), Error> {
+    if rcs_group::is_group_conversation(conn, conversation_id)? {
+        return Ok(());
+    }
+    let region = conversation_match::identity_region(conn)?;
+    for address in [
+        address.to_owned(),
+        conversation_match::canonical_address(address, Some(&region)),
+    ] {
+        let indexed: Option<String> = conn
+            .query_row(
+                "SELECT conversation_id FROM addresses WHERE address=?",
+                [&address],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let held_by_group = match indexed {
+            Some(indexed) => rcs_group::is_group_conversation(conn, parse(&indexed)?)?,
+            None => false,
+        };
+        let insert = if held_by_group {
+            "INSERT OR REPLACE INTO addresses(address,conversation_id) VALUES(?,?)"
+        } else {
+            "INSERT OR IGNORE INTO addresses(address,conversation_id) VALUES(?,?)"
+        };
+        conn.execute(insert, params![address, conversation_id.to_string()])?;
+    }
+    Ok(())
 }
 
 fn queue_message_banner(conn: &Connection, message: &MessagePayload) -> Result<(), Error> {
@@ -11707,6 +11806,32 @@ fn emit_status(
         status_at_ms,
         reason,
     )
+}
+
+/// Whether the last published eligibility still says what a new publication would say. A
+/// publication from before the link last returned does not count: peers ignore it. Neither does
+/// a recent republication of an old observation: peers judge freshness by the observation.
+fn eligibility_already_published(
+    previous_body: &str,
+    published_at_ms: i64,
+    eligibility: RcsEligibility,
+    feature_bits: u32,
+    linked_since_ms: Option<i64>,
+    now_ms: i64,
+) -> bool {
+    let Ok(PrivatePayload::RcsLinkEligibility(previous)) = serde_json::from_str(previous_body)
+    else {
+        return false;
+    };
+    let previous = previous.eligibility;
+    let recent = |at_ms: i64| {
+        (0..RCS_ELIGIBILITY_REPUBLISH_FLOOR_MS).contains(&now_ms.saturating_sub(at_ms))
+    };
+    previous.eligibility == eligibility
+        && previous.feature_bits == feature_bits
+        && linked_since_ms.is_none_or(|since| previous.observed_at_ms >= since)
+        && recent(published_at_ms)
+        && recent(previous.observed_at_ms)
 }
 
 fn publish_rcs_capability_payload(
@@ -13190,17 +13315,13 @@ fn unattempted_rcs_message(
     command_id: CommandId,
     allow_carrier_intent: bool,
 ) -> Result<UnattemptedRcsMessage, Error> {
-    let ledger: Option<(u32, String, String, bool)> = conn
-        .query_row(
-            "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
-            [command_id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .optional()?;
-    let Some((epoch, subscription_id, payload, historical)) = ledger else {
-        return Err(Error::NotFound);
-    };
-    let (message, media_ready) = localize(conn, decode(payload.as_bytes())?)?;
+    let LedgerCommand {
+        epoch,
+        subscription_id,
+        historical,
+        message,
+        media_ready,
+    } = ledger_command(conn, command_id)?;
     // D5: the gateway routes a group text whatever route the draft carried, so only 1:1 commands
     // need the RCS route. A group text is `Mms` transport; only attachments make it media.
     let group = rcs_group::is_group_conversation(conn, message.record.conversation_id)?;
@@ -13217,7 +13338,7 @@ fn unattempted_rcs_message(
     }
     require_received_command_eligible(conn, active_epoch, epoch, historical)?;
     if !media_ready
-        || (message.transport != Transport::Sms && !group)
+        || (!is_one_to_one_text(&message) && !group)
         || !message.record.attachments.is_empty()
     {
         return Err(Error::InvalidRequest("RCS text required"));
@@ -13231,9 +13352,122 @@ fn unattempted_rcs_message(
     })
 }
 
+/// A pending one-to-one message for the carrier that plain text cannot carry: a picture, or a
+/// subject. While the link is on the carrier may send it only after the link has decided the
+/// number has no chat, so the native send work takes it for that decision alone. A conversation
+/// with a live chat mapping is not probed: its pictures belong to the media send work.
+fn unattempted_route_probe_message(
+    conn: &Connection,
+    active_epoch: Option<u32>,
+    command_id: CommandId,
+) -> Result<UnattemptedRcsMessage, Error> {
+    let LedgerCommand {
+        epoch,
+        subscription_id,
+        historical,
+        message,
+        ..
+    } = ledger_command(conn, command_id)?;
+    if let Some(state) = attempt_state(conn, command_id)? {
+        return Err(Error::AlreadyAttempted(state));
+    }
+    require_received_command_eligible(conn, active_epoch, epoch, historical)?;
+    let conversation_id = message.record.conversation_id;
+    let plain_text = is_one_to_one_text(&message) && message.record.attachments.is_empty();
+    if subscription_id.is_empty()
+        || message.recipients.len() != 1
+        || plain_text
+        || rcs_group::is_group_conversation(conn, conversation_id)?
+        || rcs_mapping::has_live_mapping(conn, conversation_id)?
+        || send_retention_blocked(conn, command_id)?
+    {
+        return Err(Error::InvalidRequest("carrier route probe required"));
+    }
+    Ok(UnattemptedRcsMessage {
+        message,
+        subscription_id,
+    })
+}
+
+/// A received command that has not been attempted, whatever it carries. Proving a chat for it
+/// admits nothing: the text, media and carrier paths each check the command again before a send.
+fn pending_command_message(
+    conn: &Connection,
+    active_epoch: Option<u32>,
+    command_id: CommandId,
+) -> Result<MessagePayload, Error> {
+    let LedgerCommand {
+        epoch,
+        historical,
+        message,
+        ..
+    } = ledger_command(conn, command_id)?;
+    if let Some(state) = attempt_state(conn, command_id)? {
+        return Err(Error::AlreadyAttempted(state));
+    }
+    require_received_command_eligible(conn, active_epoch, epoch, historical)?;
+    Ok(message)
+}
+
+/// A pending command the native send work takes: a text it can send, or else a message that only
+/// needs its route decision.
+pub(crate) fn unattempted_native_message(
+    conn: &Connection,
+    active_epoch: Option<u32>,
+    command_id: CommandId,
+) -> Result<UnattemptedRcsMessage, Error> {
+    match unattempted_rcs_message(conn, active_epoch, command_id, true) {
+        Err(Error::InvalidRequest(_)) => {
+            unattempted_route_probe_message(conn, active_epoch, command_id)
+        }
+        loaded => loaded,
+    }
+}
+
+/// Whether a command without attachments is a plain text to one party. An older composer queued
+/// a text reply as MMS when the thread's latest message was MMS; to one recipient and without a
+/// subject it is the same text as an SMS, so the link may send it. A subject has no RCS text form.
+fn is_one_to_one_text(message: &MessagePayload) -> bool {
+    match message.transport {
+        Transport::Sms => true,
+        Transport::Mms => message.recipients.len() == 1 && message.subject.is_none(),
+        Transport::Rcs => false,
+    }
+}
+
 struct UnattemptedRcsMessage {
     message: MessagePayload,
     subscription_id: String,
+}
+
+/// A received command as the ledger holds it, with its attachments resolved on this device.
+struct LedgerCommand {
+    epoch: u32,
+    subscription_id: String,
+    historical: bool,
+    message: MessagePayload,
+    media_ready: bool,
+}
+
+fn ledger_command(conn: &Connection, command_id: CommandId) -> Result<LedgerCommand, Error> {
+    let ledger: Option<(u32, String, String, bool)> = conn
+        .query_row(
+            "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
+            [command_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((epoch, subscription_id, payload, historical)) = ledger else {
+        return Err(Error::NotFound);
+    };
+    let (message, media_ready) = localize(conn, decode(payload.as_bytes())?)?;
+    Ok(LedgerCommand {
+        epoch,
+        subscription_id,
+        historical,
+        message,
+        media_ready,
+    })
 }
 
 /// The media executor has its own permit ledger, so it must not use the text-only candidate
@@ -13468,14 +13702,16 @@ fn admit_native_rcs_media_send(
                         attachment_index,
                         "members_changed",
                     )?;
-                    emit_rcs_media_state(
-                        &tx,
-                        ctx,
-                        request.command_id,
-                        attachment_index,
-                        report.sync,
-                        report.reason,
-                    )?;
+                    if report.publish_current {
+                        emit_rcs_media_state(
+                            &tx,
+                            ctx,
+                            request.command_id,
+                            attachment_index,
+                            report.sync,
+                            report.reason,
+                        )?;
+                    }
                     for index in report.refused_indexes {
                         emit_rcs_media_state(
                             &tx,
@@ -13788,7 +14024,7 @@ fn automatic_rcs_permit(
     observation: &RcsMappingObservation,
     now_ms: i64,
 ) -> Result<RcsPermit, Error> {
-    if message.transport != Transport::Sms || !message.record.attachments.is_empty() {
+    if !is_one_to_one_text(&message) || !message.record.attachments.is_empty() {
         return Err(Error::InvalidRequest("RCS text required"));
     }
     let mapping = exact_rcs_mapping(tx, message.record.conversation_id, observation, now_ms)?
@@ -14781,6 +15017,11 @@ pub fn canonical_address(address: &str, region: Option<&str>) -> String {
     conversation_match::canonical_address(address, region)
 }
 fn canonical(path: &Path) -> Result<PathBuf, Error> {
+    match path.canonicalize() {
+        Ok(path) => return Ok(path),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(Error::Database),
+        Err(_) => {}
+    }
     let parent = path.parent().ok_or(Error::Database)?;
     std::fs::create_dir_all(parent).map_err(|_| Error::Database)?;
     let parent = parent.canonicalize().map_err(|_| Error::Database)?;
@@ -14809,6 +15050,20 @@ mod tests {
     use serde_json::json;
     use std::time::Instant;
     use uuid::Uuid;
+
+    #[cfg(unix)]
+    #[test]
+    fn database_leaf_alias_uses_the_existing_file_canonical_path() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("database.sqlite");
+        std::fs::write(&database, []).unwrap();
+        let alias = directory.path().join("database-alias.sqlite");
+        symlink(&database, &alias).unwrap();
+
+        assert_eq!(canonical(&database).unwrap(), canonical(&alias).unwrap());
+    }
 
     #[test]
     fn native_rcs_body_bounds_are_utf8_byte_bounds() {
@@ -14863,6 +15118,7 @@ mod tests {
                 body: String::new(),
                 transport: Transport::Mms,
                 direction: Direction::Incoming,
+                rcs_capture: false,
                 imported: false,
                 sent_at_ms: None,
                 ordered_at_ms: None,
@@ -15122,6 +15378,39 @@ mod tests {
         "rcs_media_state_clocks",
     ];
 
+    const EXPECTED_RCS_MEDIA_SEND_STATUS_57: &str = "CREATE TABLE rcs_media_send_status(
+ message_id TEXT NOT NULL,
+ attachment_index INTEGER NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('sending','sent','not_sent','outcome_unknown','members_changed')),
+ reason TEXT CHECK(reason IS NULL OR reason IN ('not_allowed_mime','too_large','rejected','failed')),
+ CHECK((state='not_sent') = (reason IS NOT NULL)),
+ PRIMARY KEY(message_id,attachment_index)
+)";
+    const EXPECTED_RCS_MEDIA_SEND_STATUS_60: &str = "CREATE TABLE \"rcs_media_send_status\"(
+ message_id TEXT NOT NULL,
+ attachment_index INTEGER NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('sending','sent','not_sent','outcome_unknown','members_changed','send_failed')),
+ reason TEXT CHECK(reason IS NULL OR reason IN ('not_allowed_mime','too_large','rejected','failed')),
+ CHECK((state='not_sent') = (reason IS NOT NULL)),
+ PRIMARY KEY(message_id,attachment_index)
+)";
+
+    fn rcs_media_send_status_sql(conn: &Connection) -> String {
+        conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='rcs_media_send_status'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn install_frozen_schema_57_send_status(conn: &Connection) {
+        conn.execute_batch("DROP TABLE rcs_media_send_status;")
+            .unwrap();
+        conn.execute_batch(EXPECTED_RCS_MEDIA_SEND_STATUS_57)
+            .unwrap();
+    }
+
     #[test]
     fn version_53_upgrade_adds_rcs_media_tables_without_changing_existing_rows() {
         let directory = tempfile::TempDir::new().unwrap();
@@ -15169,6 +15458,524 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert_eq!(preserved, conversation_id);
+    }
+
+    #[test]
+    fn late_failed_media_members_changed_publishes_only_new_sibling_checkpoint() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let gateway_id = DeviceId::new();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("late-failed-media-callback.db"),
+                vault_id,
+                device_id: gateway_id,
+            },
+            DatabaseKey::new(&[59; 32]).unwrap(),
+        )
+        .unwrap();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("late callback passphrase", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        client
+            .unlock(&profile, &header, "late callback passphrase")
+            .unwrap();
+
+        let command_id = CommandId::new();
+        let message_id = MessageId::new();
+        let conversation_id = ConversationId::new();
+        let message = MessagePayload {
+            record: MessageRecord {
+                message_id,
+                conversation_id,
+                source_sequence: SourceSequence(1),
+                attachments: vec![
+                    AttachmentReference {
+                        attachment_id: AttachmentId::new(),
+                        pending: false,
+                    },
+                    AttachmentReference {
+                        attachment_id: AttachmentId::new(),
+                        pending: false,
+                    },
+                ],
+            },
+            source_device_id: DeviceId::new(),
+            provider_message_id: None,
+            sender_address: None,
+            recipients: vec!["+15555550100".into()],
+            subject: None,
+            body: String::new(),
+            transport: Transport::Rcs,
+            direction: Direction::Outgoing,
+            rcs_capture: false,
+            imported: false,
+            sent_at_ms: None,
+            ordered_at_ms: None,
+            mms_context: None,
+        };
+        let before = {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,payload,seen) VALUES(?,?,?,?,?,0)",
+                    params![
+                        message_id.to_string(),
+                        conversation_id.to_string(),
+                        message.source_device_id.to_string(),
+                        1_i64,
+                        json(&message).unwrap(),
+                    ],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO commands(command_id,message_id,gateway_device_id) VALUES(?,?,?)",
+                    params![
+                        command_id.to_string(),
+                        message_id.to_string(),
+                        gateway_id.to_string(),
+                    ],
+                )
+                .unwrap();
+            for (index, attachment, state) in [
+                (
+                    0_i64,
+                    message.record.attachments[0].attachment_id,
+                    "outcome_unknown",
+                ),
+                (
+                    1_i64,
+                    message.record.attachments[1].attachment_id,
+                    "pending",
+                ),
+            ] {
+                store
+                    .conn
+                    .execute(
+                        "INSERT INTO rcs_media_send_ledger(command_id,attachment_index,attachment_id,state) VALUES(?,?,?,?)",
+                        params![
+                            command_id.to_string(),
+                            index,
+                            attachment.to_string(),
+                            state,
+                        ],
+                    )
+                    .unwrap();
+            }
+            store
+                .conn
+                .execute(
+                    "INSERT INTO rcs_media_send_status(message_id,attachment_index,state,reason) VALUES(?,0,'send_failed',NULL)",
+                    [message_id.to_string()],
+                )
+                .unwrap();
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM outbox", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+        };
+
+        client
+            .record_rcs_media_outcome(command_id, 0, "members_changed")
+            .unwrap();
+
+        let store = client.lock().unwrap();
+        let after = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM outbox", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(
+            after,
+            before + 1,
+            "only the newly refused sibling is published"
+        );
+        let states = store
+            .conn
+            .prepare(
+                "SELECT attachment_index,state FROM rcs_media_send_status WHERE message_id=? ORDER BY attachment_index",
+            )
+            .unwrap()
+            .query_map([message_id.to_string()], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            states,
+            vec![(0, "send_failed".into()), (1, "members_changed".into())]
+        );
+    }
+
+    #[test]
+    fn schema_60_fresh_database_enforces_send_status_contract() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("fresh-schema-60.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[60; 32]).unwrap(),
+        )
+        .unwrap();
+        let store = client.lock().unwrap();
+
+        assert_eq!(
+            rcs_media_send_status_sql(&store.conn),
+            EXPECTED_RCS_MEDIA_SEND_STATUS_60
+        );
+        store
+            .conn
+            .execute(
+                "INSERT INTO rcs_media_send_status VALUES('failed',0,'send_failed',NULL)",
+                [],
+            )
+            .unwrap();
+        for invalid in [
+            "INSERT INTO rcs_media_send_status VALUES('failed-reason',0,'send_failed','failed')",
+            "INSERT INTO rcs_media_send_status VALUES('not-sent-null',0,'not_sent',NULL)",
+            "INSERT INTO rcs_media_send_status VALUES('sent-reason',0,'sent','rejected')",
+            "INSERT INTO rcs_media_send_status VALUES('unknown-state',0,'failed',NULL)",
+        ] {
+            assert!(store.conn.execute(invalid, []).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn schema_60_populated_57_upgrade_preserves_rows_objects_and_unrelated_state() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("populated-schema-57.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = || DatabaseKey::new(&[57; 32]).unwrap();
+        let command_id = CommandId::new().to_string();
+        let client = Client::open(config.clone(), key()).unwrap();
+        {
+            let store = client.lock().unwrap();
+            install_frozen_schema_57_send_status(&store.conn);
+            assert_eq!(
+                rcs_media_send_status_sql(&store.conn),
+                EXPECTED_RCS_MEDIA_SEND_STATUS_57
+            );
+            store
+                .conn
+                .execute_batch(
+                    "CREATE TABLE rcs_media_status_audit(message_id TEXT NOT NULL, state TEXT NOT NULL);
+                     CREATE INDEX rcs_media_send_status_sent ON rcs_media_send_status(message_id) WHERE state='sent';
+                     CREATE TRIGGER rcs_media_send_status_audit AFTER INSERT ON rcs_media_send_status BEGIN
+                       INSERT INTO rcs_media_status_audit(message_id,state) VALUES(new.message_id,new.state);
+                     END;
+                     INSERT INTO rcs_media_send_status VALUES('sending',0,'sending',NULL);
+                     INSERT INTO rcs_media_send_status VALUES('sent',0,'sent',NULL);
+                     INSERT INTO rcs_media_send_status VALUES('not-sent-failed',0,'not_sent','failed');
+                     INSERT INTO rcs_media_send_status VALUES('not-sent-mime',0,'not_sent','not_allowed_mime');
+                     INSERT INTO rcs_media_send_status VALUES('not-sent-rejected',0,'not_sent','rejected');
+                     INSERT INTO rcs_media_send_status VALUES('not-sent-too-large',0,'not_sent','too_large');
+                     INSERT INTO rcs_media_send_status VALUES('unknown',0,'outcome_unknown',NULL);
+                     INSERT INTO rcs_media_send_status VALUES('members',0,'members_changed',NULL);
+                     DELETE FROM rcs_media_status_audit;
+                     INSERT INTO rcs_google_media_refs VALUES('reference',0,X'0102');
+                     INSERT INTO rcs_media_receive(message_id,attachment_index,attachment_id,state) VALUES('receive',0,'attachment','stored');
+                     INSERT INTO rcs_media_receive_local(message_id,attachment_index,source_gateway_id,media_ref,media_type,display_name,plaintext_bytes) VALUES('receive-local',0,'gateway',X'0304','image/png','photo.png',2);
+                     INSERT INTO rcs_media_retry_demand VALUES('retry',0,'gateway');
+                     INSERT INTO rcs_media_tmp_dedup VALUES('google-tmp','tmp-command',0);
+                     INSERT INTO pending_rcs_media_states(producer_device_id,message_id,attachment_index,terminal_sequence,terminal_state) VALUES('producer','pending',0,9,'failed');
+                     INSERT INTO rcs_media_state_clocks(producer_device_id,message_id,attachment_index,terminal_sequence) VALUES('producer','clock',0,11);
+                     INSERT INTO metadata(k,v) VALUES('schema-60-unrelated','preserved');",
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload,historical) VALUES(?1,0,'sim','{}',0)",
+                    [&command_id],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO attempts(command_id,state,attempted_at_ms,finalized_transport) VALUES(?1,'sent',17,'rcs')",
+                    [&command_id],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO rcs_media_send_ledger(command_id,attachment_index,attachment_id,state,tmp_id) VALUES(?1,0,'attachment','accepted','tmp')",
+                    [&command_id],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute("UPDATE schema_meta SET version=57", [])
+                .unwrap();
+
+            let untouched_tables = [
+                "command_ledger",
+                "attempts",
+                "metadata",
+                "rcs_media_send_ledger",
+                "rcs_google_media_refs",
+                "rcs_media_receive",
+                "rcs_media_receive_local",
+                "rcs_media_retry_demand",
+                "rcs_media_tmp_dedup",
+                "pending_rcs_media_states",
+                "rcs_media_state_clocks",
+            ];
+            let row_counts = |conn: &Connection| {
+                untouched_tables.map(|table| {
+                    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap()
+                })
+            };
+            let before = row_counts(&store.conn);
+            store
+                .conn
+                .execute_batch("SAVEPOINT schema_60_probe;")
+                .unwrap();
+            apply_rcs_media_send_status_migration_60(&store.conn).unwrap();
+            assert_eq!(row_counts(&store.conn), before);
+            assert_eq!(
+                rcs_media_send_status_sql(&store.conn),
+                EXPECTED_RCS_MEDIA_SEND_STATUS_60
+            );
+            store
+                .conn
+                .execute_batch("ROLLBACK TO schema_60_probe; RELEASE schema_60_probe;")
+                .unwrap();
+            assert_eq!(row_counts(&store.conn), before);
+            assert_eq!(
+                rcs_media_send_status_sql(&store.conn),
+                EXPECTED_RCS_MEDIA_SEND_STATUS_57
+            );
+        }
+        drop(client);
+
+        let upgraded = Client::open(config.clone(), key()).unwrap();
+        {
+            let store = upgraded.lock().unwrap();
+            assert_eq!(
+                store
+                    .conn
+                    .query_row("SELECT version FROM schema_meta", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA_VERSION
+            );
+            assert_eq!(
+                rcs_media_send_status_sql(&store.conn),
+                EXPECTED_RCS_MEDIA_SEND_STATUS_60
+            );
+            let statuses = store
+                .conn
+                .prepare(
+                    "SELECT message_id,state,reason FROM rcs_media_send_status ORDER BY message_id",
+                )
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(
+                statuses,
+                vec![
+                    ("members".into(), "members_changed".into(), None),
+                    (
+                        "not-sent-failed".into(),
+                        "not_sent".into(),
+                        Some("failed".into())
+                    ),
+                    (
+                        "not-sent-mime".into(),
+                        "not_sent".into(),
+                        Some("not_allowed_mime".into())
+                    ),
+                    (
+                        "not-sent-rejected".into(),
+                        "not_sent".into(),
+                        Some("rejected".into())
+                    ),
+                    (
+                        "not-sent-too-large".into(),
+                        "not_sent".into(),
+                        Some("too_large".into())
+                    ),
+                    ("sending".into(), "sending".into(), None),
+                    ("sent".into(), "sent".into(), None),
+                    ("unknown".into(), "outcome_unknown".into(), None),
+                ]
+            );
+            store
+                .conn
+                .execute(
+                    "INSERT INTO rcs_media_send_status VALUES('new-failure',0,'send_failed',NULL)",
+                    [],
+                )
+                .unwrap();
+            assert_eq!(
+                store
+                    .conn
+                    .query_row(
+                        "SELECT state FROM rcs_media_status_audit WHERE message_id='new-failure'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap(),
+                "send_failed"
+            );
+            let index_plan = store
+                .conn
+                .prepare("EXPLAIN QUERY PLAN SELECT message_id FROM rcs_media_send_status WHERE state='sent'")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n");
+            assert!(
+                index_plan.contains("rcs_media_send_status_sent"),
+                "{index_plan}"
+            );
+            assert!(store.conn.execute(
+                "INSERT INTO rcs_media_send_status VALUES('new-failure',0,'send_failed',NULL)",
+                [],
+            ).is_err(), "composite primary key must remain enforced");
+            assert_eq!(
+                store
+                    .conn
+                    .query_row(
+                        "SELECT state FROM attempts WHERE command_id=?",
+                        [&command_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap(),
+                "sent"
+            );
+            for (table, key_column, key) in [
+                ("rcs_media_send_ledger", "command_id", command_id.as_str()),
+                ("rcs_media_receive", "message_id", "receive"),
+                ("rcs_media_receive_local", "message_id", "receive-local"),
+                ("rcs_media_retry_demand", "message_id", "retry"),
+                ("rcs_media_tmp_dedup", "google_tmp_id", "google-tmp"),
+                ("pending_rcs_media_states", "message_id", "pending"),
+                ("rcs_media_state_clocks", "message_id", "clock"),
+                ("metadata", "k", "schema-60-unrelated"),
+            ] {
+                let count: i64 = store
+                    .conn
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE {key_column}=?"),
+                        [key],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(count, 1, "{table}");
+            }
+        }
+        drop(upgraded);
+
+        let reopened = Client::open(config, key()).unwrap();
+        let store = reopened.lock().unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT state FROM rcs_media_send_status WHERE message_id='new-failure'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "send_failed"
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT reason FROM rcs_media_send_status WHERE message_id='not-sent-failed'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn schema_60_failed_copy_rolls_back_schema_57_rows_objects_and_version() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta(version INTEGER NOT NULL);
+             INSERT INTO schema_meta VALUES(57);",
+        )
+        .unwrap();
+        conn.execute_batch(EXPECTED_RCS_MEDIA_SEND_STATUS_57)
+            .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE rcs_media_status_audit(message_id TEXT NOT NULL);
+             CREATE INDEX rcs_media_send_status_sent ON rcs_media_send_status(message_id) WHERE state='sent';
+             CREATE TRIGGER rcs_media_send_status_audit AFTER INSERT ON rcs_media_send_status BEGIN
+               INSERT INTO rcs_media_status_audit VALUES(new.message_id);
+             END;
+             PRAGMA ignore_check_constraints=ON;
+             INSERT INTO rcs_media_send_status VALUES('invalid',0,'invalid-state',NULL);
+             PRAGMA ignore_check_constraints=OFF;",
+        )
+        .unwrap();
+
+        let tx = conn.transaction().unwrap();
+        assert!(apply_rcs_media_send_status_migration_60(&tx).is_err());
+        tx.rollback().unwrap();
+
+        assert_eq!(
+            conn.query_row("SELECT version FROM schema_meta", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            57
+        );
+        assert_eq!(
+            rcs_media_send_status_sql(&conn),
+            EXPECTED_RCS_MEDIA_SEND_STATUS_57
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT state FROM rcs_media_send_status WHERE message_id='invalid'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "invalid-state"
+        );
+        for object in ["rcs_media_send_status_sent", "rcs_media_send_status_audit"] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name=? AND type IN ('index','trigger')",
+                    [object],
+                    |row| row.get::<_, i64>(0),
+                ).unwrap(),
+                1,
+                "{object}"
+            );
+        }
+        assert!(!table_exists(&conn, "rcs_media_send_status_60").unwrap());
     }
 
     #[test]
@@ -15419,6 +16226,7 @@ mod tests {
             body: format!("message {sequence}"),
             transport: Transport::Sms,
             direction,
+            rcs_capture: false,
             imported: false,
             sent_at_ms: None,
             ordered_at_ms: None,
@@ -15962,6 +16770,7 @@ mod tests {
             subject: None,
             transport: Transport::Mms,
             direction: Direction::Incoming,
+            rcs_capture: false,
             imported: false,
             sent_at_ms: None,
             ordered_at_ms: None,
@@ -17452,6 +18261,7 @@ mod tests {
                 body: String::new(),
                 transport: Transport::Mms,
                 direction: Direction::Incoming,
+                rcs_capture: false,
                 imported: false,
                 sent_at_ms: None,
                 ordered_at_ms: None,
@@ -18444,6 +19254,7 @@ mod tests {
                 subject: None,
                 transport: Transport::Mms,
                 direction: Direction::Incoming,
+                rcs_capture: false,
                 imported: false,
                 sent_at_ms: None,
                 ordered_at_ms: None,
@@ -18759,6 +19570,7 @@ mod tests {
             body: "body".into(),
             transport: Transport::Mms,
             direction: Direction::Incoming,
+            rcs_capture: false,
             imported: false,
             sent_at_ms: None,
             ordered_at_ms: None,

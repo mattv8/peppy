@@ -26,6 +26,7 @@ import org.robolectric.annotation.Config
 import uniffi.peppy_mobile_bindings.NativeClient
 import uniffi.peppy_mobile_bindings.NativeComposeDraftUpdate
 import uniffi.peppy_mobile_bindings.NativePermitState
+import uniffi.peppy_mobile_bindings.NativeRcsLinkState
 
 
 private class FakeMmsCarrier(var failure: RuntimeException? = null) : MmsCarrier {
@@ -66,6 +67,10 @@ class MmsDispatcherTest : GatewayTestBase() {
         current: List<SimRoute> = routes,
         cap: MmsLimits = generous,
     ) = MmsDispatcher(context, client, carrier, current, granted, enabled, { cap })
+
+    /** A text to one number is plain text, so a one-to-one MMS command needs an attachment. */
+    private fun picture(): File =
+        File.createTempFile("picture", ".png").apply { writeBytes(byteArrayOf(1)); deleteOnExit() }
 
     private fun queueMms(
         gateway: NativeClient,
@@ -252,6 +257,22 @@ class MmsDispatcherTest : GatewayTestBase() {
     }
 
     @Test
+    fun mmsBlockedOnTheCarrierOnlyProofIsReportedSoTheLinkIsAsked() {
+        val client = enrollAndUnlock()
+        val (command, _) = queueMms(client, "group hello", listOf("+15551234567", "+15557654321"))
+        // A link that was linked and is now unavailable blocks carrier work until it proves the target.
+        client.recordRcsLinkLifecycle(NativeRcsLinkState.LINKED, true, true, true, 1_000L, 1_000L)
+        client.recordRcsLinkLifecycle(NativeRcsLinkState.UNAVAILABLE, false, false, false, 2_000L, 2_000L)
+        val carrier = FakeMmsCarrier()
+
+        val summary = dispatcher(client, carrier).dispatch()
+
+        assertEquals(summary.toString(), 1, summary.carrierOnlyProofBlocked)
+        assertTrue(carrier.calls.isEmpty())
+        assertEquals(NativePermitState.CARRIER_ONLY_PROOF_UNAVAILABLE, client.beginSendAttempt(command).state)
+    }
+
+    @Test
     fun staleSimConsumesNoPermit() {
         val client = enrollAndUnlock()
         val (id, _) = queueMms(client, "sim", listOf("+15551234567", "+15557654321"))
@@ -283,7 +304,7 @@ class MmsDispatcherTest : GatewayTestBase() {
         val client = enrollAndUnlock()
         val image = File.createTempFile("missing", ".png").apply { writeBytes(byteArrayOf(1)); deleteOnExit() }
         val (first, _) = queueMms(client, "", listOf("+15551234567"), image, installMedia = false)
-        val (later, _) = queueMms(client, "later", listOf("+15551234567"))
+        val (later, _) = queueMms(client, "later", listOf("+15551234567"), picture())
         val carrier = FakeMmsCarrier()
 
         val summary = dispatcher(client, carrier).dispatch()
@@ -297,8 +318,8 @@ class MmsDispatcherTest : GatewayTestBase() {
     @Test
     fun callbackRegistrationWaitBlocksLaterSameThreadMms() {
         val client = enrollAndUnlock()
-        val (first, _) = queueMms(client, "first", listOf("+15551234567"))
-        val (later, _) = queueMms(client, "later", listOf("+15551234567"))
+        val (first, _) = queueMms(client, "first", listOf("+15551234567"), picture())
+        val (later, _) = queueMms(client, "later", listOf("+15551234567"), picture())
         val callbacks = MmsCallbackStore(context)
         assertTrue(callbacks.register(first))
         val carrier = FakeMmsCarrier()

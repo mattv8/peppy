@@ -428,7 +428,7 @@ test("Google Messages link device status help is generated for the Peppy table",
 test("store, account, startup, and re-enrol copy is desktop-only and generated", () => {
   const desktopOnlyPattern = /^(store_|attachment_storage_addon_|billing_elsewhere_|account_billing_intro_|account_portal_cta$|account_delete_|account_deleted_|startup_|reenrol_|updates_app_store_delivered$|hosted_sign_in_(group_label|waiting)$|hosted_session_recovery_body$)/;
   const keys = Object.keys(desktopOverrides).filter(key => desktopOnlyPattern.test(key));
-  assert.equal(keys.length, 69, "every key in the UX spec catalog section must be present");
+  assert.equal(keys.length, 71, "every key in the UX spec catalog section must be present");
   const desktop = readFileSync(path("apps/desktop/src/generated/peppyCopy.ts"), "utf8");
   const android = readFileSync(path("apps/android/app/src/main/res/values/strings_peppy.xml"), "utf8");
   const ios = readFileSync(path("apps/ios/PeppyMobile/Peppy.xcstrings"), "utf8");

@@ -1397,6 +1397,7 @@ function draftSyncFixture(overrides: {
   const calls: string[] = [];
   const draftLimits: Array<number | undefined> = [];
   const mutations: Array<[string, Record<string, unknown>]> = [];
+  const contexts: Record<string, unknown>[] = [];
   let pendingOutbox = overrides.pendingOutbox ?? [];
   const session = {
     hydrate: async (id: string) => { calls.push(`hydrate:${id}`); },
@@ -1416,7 +1417,7 @@ function draftSyncFixture(overrides: {
       if (command === "_worker_attachment_retention_upload_classification") return { retentionClass: "protected", referenceTracking: false };
       if (command === "cipher_file") return { file: "draft-cipher", ciphertextSha256: "hash" };
       if (command === "receive_cursor") return { cursor: "0" };
-      if (command === "_worker_apply_server_context") return {};
+      if (command === "_worker_apply_server_context") { contexts.push(args); return {}; }
       throw new Error(`${command}:${JSON.stringify(args)}`);
     },
     mutate: async (command: string, args: Record<string, unknown>) => {
@@ -1453,7 +1454,7 @@ function draftSyncFixture(overrides: {
       calls.push(`discard:${this.request}:${path}`);
     },
   };
-  return { calls, draftLimits, mutations, session, transport, scheduler: new BrowserScheduler(session, transport, { media: overrides.media }) };
+  return { calls, contexts, draftLimits, mutations, session, transport, scheduler: new BrowserScheduler(session, transport, { media: overrides.media }) };
 }
 
 const pendingDraftPush = {
@@ -1509,6 +1510,100 @@ it("fails closed when the draft push checkpoint cannot commit", async () => {
   expect(await fixture.scheduler.poll()).toEqual({ connection: "error" });
   expect(fixture.mutations).toContainEqual(["_worker_draft_mark_push_attempt", { draftId: DRAFT_ID, revisionId: REVISION_ID }]);
   expect(fixture.calls).not.toContain(`http:/v1/drafts/${DRAFT_ID}/revisions/${REVISION_ID}`);
+});
+
+it.each(["put", "record"])("surfaces a draft %s failure while continuing replay and clears it after reconciliation", async failure => {
+  let shouldFail = true;
+  const fixture = draftSyncFixture({
+    draftJson: async (_path, request) => {
+      if (request.method === "PUT" && shouldFail && failure === "put") throw new TransportError("status", 400, "invalid_draft");
+      return acceptedDraftPush(_path, request);
+    },
+    pendingPushes: [pendingDraftPush],
+  });
+  const mutate = fixture.session.mutate;
+  fixture.session.mutate = async (command, args) => {
+    if (command === "_worker_draft_record_push" && shouldFail && failure === "record") throw new CoreRejectedError("core");
+    return mutate(command, args);
+  };
+
+  await expect(fixture.scheduler.poll()).resolves.toEqual({ connection: "error" });
+  expect(fixture.calls).toContain("http:/v1/events?after=0&limit=100");
+
+  shouldFail = false;
+  await expect(fixture.scheduler.poll()).resolves.toEqual({ connection: "connected" });
+});
+
+it("retains a permanent draft failure through a transient PUT retry and clears it after reconciliation", async () => {
+  let phase = 0;
+  const fixture = draftSyncFixture({
+    draftJson: async (path, request) => {
+      if (request.method === "PUT" && phase === 0) throw new TransportError("status", 400, "invalid_draft");
+      if (request.method === "PUT" && phase === 1) throw new TransportError("status", 503, "busy");
+      return acceptedDraftPush(path, request);
+    },
+    pendingPushes: [pendingDraftPush],
+  });
+
+  await expect(fixture.scheduler.poll()).resolves.toEqual({ connection: "error" });
+  expect(fixture.contexts.at(-1)).toMatchObject({ devices: { devices: [] }, capabilities: { capabilities: [] }, connection: "error" });
+  expect(fixture.calls).toContain("http:/v1/events?after=0&limit=100");
+
+  phase = 1;
+  await expect(fixture.scheduler.poll()).resolves.toEqual({ connection: "error" });
+  expect(fixture.contexts.at(-1)).toMatchObject({ connection: "error" });
+
+  phase = 2;
+  await expect(fixture.scheduler.poll()).resolves.toEqual({ connection: "connected" });
+  expect(fixture.contexts.at(-1)).toMatchObject({ connection: "connected" });
+});
+
+it("retains a handled record failure through a transient PUT retry until the outcome records", async () => {
+  let phase = 0;
+  const fixture = draftSyncFixture({
+    draftJson: async (path, request) => {
+      if (request.method === "PUT" && phase === 1) throw new TransportError("status", 503, "busy");
+      return acceptedDraftPush(path, request);
+    },
+    pendingPushes: [pendingDraftPush],
+  });
+  const mutate = fixture.session.mutate;
+  fixture.session.mutate = async (command, args) => {
+    if (command === "_worker_draft_record_push" && phase === 0) throw new CoreRejectedError("core");
+    return mutate(command, args);
+  };
+
+  await expect(fixture.scheduler.poll()).resolves.toEqual({ connection: "error" });
+  phase = 1;
+  await expect(fixture.scheduler.poll()).resolves.toEqual({ connection: "error" });
+  phase = 2;
+  await expect(fixture.scheduler.poll()).resolves.toEqual({ connection: "connected" });
+  expect(fixture.contexts.at(-1)).toMatchObject({ connection: "connected" });
+});
+
+it("does not let a transient discard hide an actionable draft push failure", async () => {
+  let recovered = false;
+  const fixture = draftSyncFixture({
+    draftJson: acceptedDraftPush,
+    pendingPushes: [pendingDraftPush],
+    pendingDiscards: [DRAFT_ID],
+  });
+  const mutate = fixture.session.mutate;
+  fixture.session.mutate = async (command, args) => {
+    if (command === "_worker_draft_record_push" && !recovered) throw new CoreRejectedError("core");
+    return mutate(command, args);
+  };
+  fixture.transport.discard = async () => {
+    if (!recovered) throw new TransportError("offline");
+  };
+
+  await expect(fixture.scheduler.poll()).resolves.toEqual({ connection: "error" });
+  expect(fixture.contexts.at(-1)).toMatchObject({ connection: "error" });
+  expect(fixture.calls).toContain("http:/v1/events?after=0&limit=100");
+
+  recovered = true;
+  await expect(fixture.scheduler.poll()).resolves.toEqual({ connection: "connected" });
+  expect(fixture.contexts.at(-1)).toMatchObject({ connection: "connected" });
 });
 
 it("bootstraps every draft page before finishing and records a discard with its bound transport", async () => {
@@ -1571,13 +1666,16 @@ it("restarts a failed draft bootstrap from zero without finishing the partial ch
   expect(fixture.mutations.filter(([command]) => command === "_worker_draft_finish_bootstrap")).toHaveLength(1);
 });
 
-it.each([new TransportError("status", 503), new TransportError("status", 403, "forbidden", "json")])("keeps ordinary outbox and replay moving when draft sync fails (%s)", async error => {
+it.each([
+  [new TransportError("status", 503), "connected"],
+  [new TransportError("status", 403, "forbidden", "json"), "error"],
+] as const)("keeps ordinary outbox and replay moving when draft sync fails (%s)", async (error, connection) => {
   const fixture = draftSyncFixture({
     draftJson: async () => { throw error; },
     pendingOutbox: [{ purpose: "event", envelope_id: "outbox-1" }],
   });
 
-  await expect(fixture.scheduler.poll()).resolves.toEqual({ connection: "connected" });
+  await expect(fixture.scheduler.poll()).resolves.toEqual({ connection });
 
   expect(fixture.mutations).toContainEqual(["ack_outbox", { envelopeId: "outbox-1" }]);
   expect(fixture.calls).toContain("http:/v1/events");

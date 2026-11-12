@@ -1167,6 +1167,116 @@ fn assert_persisted_send_state(fixture: &Fixture, expected: &str) {
 }
 
 #[test]
+fn mapping_verdict_names_the_core_refusal_for_diagnostics() {
+    let fixture = fixture();
+    let mut ambiguous = fixture.observation.clone();
+    ambiguous.google_candidate_count = 0;
+    ambiguous.native_evidence.google_candidate_count = 0;
+
+    let verdict = gateway_verify_rcs_mapping_verdict(
+        fixture.gateway.clone(),
+        serde_json::to_string(&ambiguous).unwrap(),
+        1_000,
+    )
+    .unwrap();
+
+    assert_eq!(
+        verdict,
+        NativeRcsMappingVerdict {
+            verification: NativeRcsMappingVerification::GoogleConversationAmbiguous,
+            refusal_code: Some("google_conversation_ambiguous".into()),
+        }
+    );
+}
+
+#[test]
+fn mapping_verdict_carries_no_refusal_for_a_mapped_conversation() {
+    let fixture =
+        fixture_with_google_conversation_id_and_peer("conversation-mapped", "+12025550123");
+    let mut observation = fixture.observation.clone();
+    observation.mapping_revision = gateway_next_rcs_mapping_revision(
+        fixture.gateway.clone(),
+        with_client(&fixture.gateway.client, |core| {
+            Ok(core
+                .pending_automatic_commands()?
+                .pop()
+                .unwrap()
+                .message
+                .record
+                .conversation_id
+                .to_string())
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    let verdict = gateway_verify_rcs_mapping_verdict(
+        fixture.gateway.clone(),
+        serde_json::to_string(&observation).unwrap(),
+        1_000,
+    )
+    .unwrap();
+
+    assert_eq!(
+        verdict,
+        NativeRcsMappingVerdict {
+            verification: NativeRcsMappingVerification::Mapped,
+            refusal_code: None,
+        }
+    );
+}
+
+fn send_observation_json(fixture: &Fixture) -> String {
+    let mut observation = fixture.observation.clone();
+    observation.mapping_revision =
+        gateway_next_rcs_mapping_revision(fixture.gateway.clone(), fixture.conversation_id.clone())
+            .unwrap();
+    serde_json::to_string(&observation).unwrap()
+}
+
+#[test]
+fn send_mapping_verdict_maps_the_commands_own_conversation() {
+    let fixture =
+        fixture_with_google_conversation_id_and_peer("conversation-mapped", "+12025550123");
+
+    let verdict = gateway_verify_rcs_send_mapping_verdict(
+        fixture.gateway.clone(),
+        send_observation_json(&fixture),
+        fixture.command_id.clone(),
+        1_000,
+    )
+    .unwrap();
+
+    assert_eq!(
+        verdict,
+        NativeRcsMappingVerdict {
+            verification: NativeRcsMappingVerification::Mapped,
+            refusal_code: None,
+        }
+    );
+    let mapped = with_client(&fixture.gateway.client, |core| {
+        core.rcs_mapping(fixture.conversation_id.parse().unwrap())
+    })
+    .unwrap();
+    assert!(mapped.is_some());
+}
+
+#[test]
+fn send_mapping_verdict_rejects_a_malformed_command_id() {
+    let fixture =
+        fixture_with_google_conversation_id_and_peer("conversation-mapped", "+12025550123");
+
+    let result = gateway_verify_rcs_send_mapping_verdict(
+        fixture.gateway.clone(),
+        send_observation_json(&fixture),
+        "not-a-command".into(),
+        1_000,
+    );
+
+    assert!(matches!(result, Err(MobileBindingsError::InvalidRequest)));
+}
+
+#[test]
 fn trusted_mapping_wrapper_returns_mapped_and_persists_the_exact_mapping() {
     let fixture =
         fixture_with_google_conversation_id_and_peer("conversation-mapped", "+12025550123");
@@ -1428,7 +1538,8 @@ fn eligibility_publication_is_derived_from_core_mapping_and_revisions() {
     })
     .unwrap()
     .unwrap();
-    assert!(next.mapping_revision > mapped.mapping_revision);
+    // An unchanged eligibility is not published again at once; the revision moves when it changes.
+    assert_eq!(next.mapping_revision, mapped.mapping_revision);
     assert_eq!(next.eligibility, RcsEligibility::Eligible);
 
     with_client(&fixture.gateway.client, |core| {

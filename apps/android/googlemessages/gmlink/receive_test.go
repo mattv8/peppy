@@ -96,6 +96,47 @@ func TestRcsProjectionProjectsOnlyApprovedTextFields(t *testing.T) {
 	}
 }
 
+func TestRcsProjectionReportsTheOtherIDsOfAMessage(t *testing.T) {
+	conversation := &gmproto.Conversation{ConversationID: "conversation-1", Type: gmproto.ConversationType_RCS}
+	message := func(another *gmproto.AnotherMessageID) *libgm.WrappedMessage {
+		return &libgm.WrappedMessage{Message: &gmproto.Message{
+			MessageID:        "message-1",
+			ConversationID:   "conversation-1",
+			Type:             rcsMessageType,
+			MessageStatus:    &gmproto.MessageStatus{Status: gmproto.MessageStatusType_INCOMING_COMPLETE},
+			AnotherMessageID: another,
+			MessageInfo: []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MessageContent{
+				MessageContent: &gmproto.MessageContent{Content: "synthetic body"},
+			}}},
+		}}
+	}
+	for name, test := range map[string]struct {
+		another *gmproto.AnotherMessageID
+		want    string
+	}{
+		"none":            {nil, ""},
+		"same as primary": {&gmproto.AnotherMessageID{MessageID: "message-1"}, ""},
+		"both":            {&gmproto.AnotherMessageID{MessageID: "legacy-1", AnotherID: "MxOther"}, `"alternate_message_ids":["legacy-1","MxOther"]`},
+		"repeated":        {&gmproto.AnotherMessageID{MessageID: "MxOther", AnotherID: "MxOther"}, `"alternate_message_ids":["MxOther"]`},
+		"oversized":       {&gmproto.AnotherMessageID{AnotherID: strings.Repeat("x", 513)}, ""},
+	} {
+		got := projectRcsMessage(message(test.another), conversation)
+		if got.Code != "ok" {
+			t.Fatalf("%s: code = %q, want ok", name, got.Code)
+		}
+		encoded, err := json.Marshal(got.Record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if test.want == "" && strings.Contains(string(encoded), "alternate_message_ids") {
+			t.Fatalf("%s: JSON = %s, want no alternate ids", name, encoded)
+		}
+		if !strings.Contains(string(encoded), test.want) {
+			t.Fatalf("%s: JSON = %s, want %s", name, encoded, test.want)
+		}
+	}
+}
+
 func TestRcsProjectionRejectsUnsupportedAndUnknownMessages(t *testing.T) {
 	conversation := &gmproto.Conversation{ConversationID: "conversation-1", Type: gmproto.ConversationType_RCS}
 	media := &libgm.WrappedMessage{Message: &gmproto.Message{

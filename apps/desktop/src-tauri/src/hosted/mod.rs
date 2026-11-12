@@ -52,6 +52,8 @@ const RENEWAL_FAILURE_RETRY_SECONDS: u64 = 30;
 pub struct HostedState {
     session: Mutex<Option<HostedSessionRecord>>,
     provisioning: Mutex<()>,
+    /// Serializes account revision changes with the account-bound activation effect.
+    account_effect: Mutex<()>,
     sign_in_generation: AtomicU64,
     account_session_revision: AtomicU64,
     renewal: Mutex<()>,
@@ -158,6 +160,33 @@ impl HostedState {
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn ensure_provisioning_account_session_current(
+        &self,
+        revision: u64,
+    ) -> BridgeResult<()> {
+        if self.account_session_revision.load(Ordering::SeqCst) != revision {
+            return Err(BridgeError::new(
+                "hosted-account-changed",
+                "The Peppy Hosted account changed during provisioning.",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn run_provisioning_account_effect<F, Fut, T>(
+        &self,
+        revision: u64,
+        effect: F,
+    ) -> BridgeResult<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = BridgeResult<T>>,
+    {
+        let _effect = self.account_effect.lock().await;
+        self.ensure_provisioning_account_session_current(revision)?;
+        effect().await
     }
 
     fn api_base(&self, origin: &str) -> String {
@@ -914,6 +943,7 @@ where
             "Sign in again to Peppy Hosted.",
         ));
     };
+    let session_revision = hosted.capture_mcp_account_session(&session.bearer).await?;
 
     let base = hosted.api_base(origin);
     let client = http(&base)?;
@@ -1084,10 +1114,14 @@ where
     let credential = provisioning
         .credential_json(String::from_utf8(done).map_err(|_| invalid_response())?)
         .map_err(client_error)?;
-    let cleanup_secret = passphrase.clone();
-    activate_and_unlock(Zeroizing::new(credential.into_bytes()), passphrase).await?;
-    hand_off_and_cleanup(store, &key, &pending_key, &provisioning, &cleanup_secret);
-    Ok(())
+    hosted
+        .run_provisioning_account_effect(session_revision, || async {
+            let cleanup_secret = passphrase.clone();
+            activate_and_unlock(Zeroizing::new(credential.into_bytes()), passphrase).await?;
+            hand_off_and_cleanup(store, &key, &pending_key, &provisioning, &cleanup_secret);
+            Ok(())
+        })
+        .await
 }
 
 /// A completed activation is never turned into a retry error by secure-store trouble. Cleanup is
@@ -1300,6 +1334,7 @@ pub(crate) async fn tombstone_session(
     hosted: &HostedState,
     origin: &str,
 ) -> BridgeResult<()> {
+    let _effect = hosted.account_effect.lock().await;
     let mut cached = hosted.session.lock().await;
     tombstone(store, &session_key(origin))?;
     hosted.sign_in_generation.fetch_add(1, Ordering::SeqCst);
@@ -1325,6 +1360,7 @@ pub(crate) async fn commit_sign_in_session(
     generation: u64,
     record: HostedSessionRecord,
 ) -> BridgeResult<()> {
+    let _effect = hosted.account_effect.lock().await;
     let mut cached = hosted.session.lock().await;
     if hosted.sign_in_generation.load(Ordering::SeqCst) != generation {
         return Err(BridgeError::new(
@@ -1355,6 +1391,7 @@ async fn tombstone_observed_session(
     observed_bearer: &str,
     observed_generation: u64,
 ) -> BridgeResult<bool> {
+    let _effect = hosted.account_effect.lock().await;
     let mut cached = hosted.session.lock().await;
     if hosted.sign_in_generation.load(Ordering::SeqCst) != observed_generation {
         return Ok(false);

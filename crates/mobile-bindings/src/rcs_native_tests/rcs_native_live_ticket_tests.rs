@@ -376,6 +376,7 @@ fn one_command_sends_two_media_indexes_with_distinct_permits_and_only_one_captio
                 tmp_id: Some(tmp_id.clone()),
                 rcs_reported: true,
                 e2ee_reported: None,
+                alternate_message_ids: Vec::new(),
                 attachments: vec![peppy_client_core::RcsIncomingAttachment {
                     original_index: 0,
                     media_type: "image/jpeg".into(),

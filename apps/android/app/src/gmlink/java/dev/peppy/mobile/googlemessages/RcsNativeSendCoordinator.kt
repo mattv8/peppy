@@ -87,7 +87,7 @@ internal class RcsNativeSendCoordinator(
                     RcsNativeGroupVerification.MembersChanged -> return RcsNativeSendOutcome.MEMBERS_CHANGED
                     RcsNativeGroupVerification.Refused -> return trace.refused("proof_refused")
                 }
-            } else if (lease.verifyMapping(observation) != RcsNativeMappingVerification.Mapped) {
+            } else if (lease.verifySendMapping(command.commandId, observation) != RcsNativeMappingVerification.Mapped) {
                 return trace.refused("target_mapping_refused")
             }
             trace.reason = "facts_failed"

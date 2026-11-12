@@ -501,7 +501,7 @@ fn acquisition_count_limit_rejects_without_eviction() {
 }
 
 #[test]
-fn checked_compose_transport_uses_latest_message_and_rejects_a_stale_classification() {
+fn a_one_to_one_text_reply_in_an_mms_thread_is_queued_as_plain_text() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
     let gateway_cfg = config(&dir, "gateway-route", &vault);
@@ -517,15 +517,6 @@ fn checked_compose_transport_uses_latest_message_and_rejects_a_stale_classificat
             attachment_ids: vec![],
             recipients: vec![],
             subject: None,
-        })
-        .unwrap();
-    client
-        .capture_incoming(IncomingSms {
-            conversation_id: Some(conversation),
-            sender_address: ADDRESS.into(),
-            body: "latest sms".into(),
-            provider_message_id: Some("latest-sms".into()),
-            imported: false,
         })
         .unwrap();
     let draft = client.create_compose_draft(Some(conversation)).unwrap();

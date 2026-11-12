@@ -49,13 +49,15 @@ describe("RcsMessageMeta attachment outcomes", () => {
   const refused = { id: "refused-1", name: "notes.pdf", mediaType: "application/pdf", byteSize: 1, state: "ready" as const, rcsSendStatus: "not_sent" as const, error: "not_allowed_mime" };
   const unknown = { id: "unknown-1", name: "receipt.jpg", mediaType: "image/jpeg", byteSize: 1, state: "ready" as const, rcsSendStatus: "outcome_unknown" as const };
 
-  it("gives a partial outcome a summary, a hint per problem, and 'Send the rest again' for refused attachments", () => {
+  it("gives a partial outcome a summary, a hint per problem, and an edit action when an attempted slot is unresolved", () => {
     const onEditResend = vi.fn();
     render(<RcsMessageMeta messageId="partial" status="failed-confirmed" statusLabel="Failed" attachments={[sent, refused, unknown]} onEditResend={onEditResend} />);
     expect(document.querySelector("[data-rcs-media-summary]")).toHaveTextContent("1 of 3 sent");
     expect(document.querySelector('[data-hint="media-refused"]')).toHaveTextContent(peppyCopy.rcs_media_refused_hint.replace("{name}", "notes.pdf"));
     expect(document.querySelector('[data-hint="media-unknown"]')).toHaveTextContent(peppyCopy.rcs_media_unknown_hint.replace("{name}", "receipt.jpg"));
-    fireEvent.click(screen.getByRole("button", { name: peppyCopy.rcs_media_resend_rest }));
+    expect(document.querySelector('[data-rcs-media-issue-attachment="refused-1"]')).toBeInTheDocument();
+    expect(document.querySelector('[data-rcs-media-issue-attachment="unknown-1"]')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: peppyCopy.group_message_edit_resend }));
     expect(onEditResend).toHaveBeenCalledTimes(1);
   });
 
@@ -69,6 +71,54 @@ describe("RcsMessageMeta attachment outcomes", () => {
     render(<RcsMessageMeta messageId="unknown" status="unknown" statusLabel="Unknown" attachments={[sent, unknown]} onEditResend={vi.fn()} />);
     expect(screen.queryByRole("button")).toBeNull();
     expect(document.querySelector('[data-hint="media-unknown"]')).toBeInTheDocument();
+  });
+
+  it("shows an attributed terminal send failure without offering recovery", () => {
+    const sendFailed = { id: "failed-1", name: "résumé.pdf", mediaType: "application/pdf", byteSize: 1, state: "ready" as const, rcsSendStatus: "send_failed" as const };
+    render(<RcsMessageMeta messageId="send-failed" status="failed-confirmed" statusLabel="Failed" attachments={[sendFailed]} onEditResend={vi.fn()} />);
+
+    const hint = document.querySelector('[data-rcs-media-issue-attachment="failed-1"]');
+    expect(hint).toHaveAttribute("data-hint", "media-send-failed");
+    expect(hint).toHaveAttribute("data-rcs-media-terminal-failure", "true");
+    expect(hint).toHaveTextContent("Google Messages reported that résumé.pdf couldn’t be sent.");
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("keeps a group-members warning and its SendFailed issue visible without a recovery action", () => {
+    const failed = { id: "failed-only", name: "failed.pdf", mediaType: "application/pdf", byteSize: 1, state: "ready" as const, rcsSendStatus: "send_failed" as const };
+    render(<RcsMessageMeta messageId="group-failed" status="failed-confirmed" statusLabel="Failed" groupHint="members_changed" attachments={[failed]} onEditResend={vi.fn()} />);
+
+    expect(document.querySelector('[data-hint="group-members-changed"]')).toBeInTheDocument();
+    expect(document.getElementById("rcs-media-issues-group-failed")).toContainElement(document.querySelector('[data-rcs-media-issue-attachment="failed-only"]'));
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("composes a group-members warning with one eligible recovery action", () => {
+    const recover = vi.fn();
+    const attachments = [
+      { id: "failed", name: "failed.pdf", mediaType: "application/pdf", byteSize: 1, state: "ready" as const, rcsSendStatus: "send_failed" as const },
+      { id: "eligible", name: "eligible.pdf", mediaType: "application/pdf", byteSize: 1, state: "ready" as const, rcsSendStatus: "not_sent" as const },
+    ];
+    render(<RcsMessageMeta messageId="group-mixed" status="failed-confirmed" statusLabel="Failed" groupHint="members_changed" attachments={attachments} onEditResend={recover} />);
+
+    expect(document.querySelector('[data-hint="group-members-changed"]')).toBeInTheDocument();
+    expect(document.querySelector('[data-rcs-media-issue-attachment="failed"]')).toBeInTheDocument();
+    const recoveryActions = screen.getAllByRole("button", { name: peppyCopy.group_message_edit_resend });
+    expect(recoveryActions).toHaveLength(1);
+    fireEvent.click(recoveryActions[0]);
+    expect(recover).toHaveBeenCalledOnce();
+  });
+
+  it("uses the existing edit-and-resend label when attempted and eligible slots are mixed", () => {
+    const attachments = [
+      { ...sent, id: "sent" },
+      { id: "attempted", name: "attempted.pdf", mediaType: "application/pdf", byteSize: 1, state: "ready" as const, rcsSendStatus: "send_failed" as const },
+      { id: "eligible", name: "eligible.pdf", mediaType: "application/pdf", byteSize: 1, state: "ready" as const, rcsSendStatus: "not_sent" as const },
+    ];
+    render(<RcsMessageMeta messageId="attempted-mixed" status="failed-confirmed" statusLabel="Failed" attachments={attachments} onEditResend={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: peppyCopy.group_message_edit_resend })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: peppyCopy.rcs_media_resend_rest })).toBeNull();
   });
 
   it("derives the group review hint from a members-changed attachment without duplicating it", () => {

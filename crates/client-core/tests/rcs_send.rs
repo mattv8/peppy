@@ -146,6 +146,53 @@ fn carrier_command_on_sim(
     )
 }
 
+/// A received text-only MMS command on the carrier route, as a composer queues a text reply in a
+/// thread whose latest message is MMS.
+fn carrier_text_mms_command(
+    recipients: &[&str],
+) -> (tempfile::TempDir, Vault, ClientConfig, Client, CommandId) {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let sender_config = config(&directory, "sender", &vault);
+    let gateway_config = config(&directory, "gateway", &vault);
+    let sender = unlocked(&sender_config, &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let captured = gateway
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "peer-local".into(),
+            body: String::new(),
+            provider_message_id: Some("provider-local".into()),
+            imported: true,
+        })
+        .unwrap();
+    let command = sender
+        .queue_mms(
+            OutgoingMms {
+                conversation_id: captured.conversation_id,
+                recipients: recipients.iter().map(|peer| (*peer).into()).collect(),
+                body: "text reply".into(),
+                attachment_ids: Vec::new(),
+                subject: None,
+            },
+            GatewayRoute::Carrier {
+                gateway_device_id: gateway_config.device_id,
+                subscription_id: "android-subscription-7".into(),
+            },
+        )
+        .unwrap();
+    let mut server = Server::default();
+    server.upload(&sender);
+    server.sync(&gateway);
+    (
+        directory,
+        vault,
+        gateway_config,
+        gateway,
+        command.command_id,
+    )
+}
+
 fn carrier_proof(command: &ReceivedCommand) -> CarrierOnlyProof {
     CarrierOnlyProof {
         conversation_id: command.message.record.conversation_id,

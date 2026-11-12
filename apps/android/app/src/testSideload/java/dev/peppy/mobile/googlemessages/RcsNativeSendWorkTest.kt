@@ -66,6 +66,54 @@ class RcsNativeSendWorkTest {
         assertEquals(0, executor.size)
     }
 
+    @Test fun `a carrier handoff ends the batch so no later command stales its proof`() {
+        val executor = QueueExecutor()
+        val sent = mutableListOf<String>()
+        var handedOff = false
+        lateinit var work: RcsNativeSendWork
+        work = RcsNativeSendWork(
+            enabled = { true },
+            candidates = { listOf(command("carrier-only"), command("blocked")) },
+            execute = {
+                sent += it.commandId
+                handedOff = it.commandId == "carrier-only"
+                // A wake that arrives mid-batch must not re-run the batch before the carrier acts.
+                work.start()
+            },
+            current = { true },
+            executor = executor,
+            carrierHandoffRequested = { handedOff.also { handedOff = false } },
+        )
+
+        work.start()
+        executor.runNext()
+
+        assertEquals(listOf("carrier-only"), sent)
+        assertEquals(0, executor.size)
+    }
+
+    @Test fun `work resumes with the next wake after a carrier handoff`() {
+        val executor = QueueExecutor()
+        val sent = mutableListOf<String>()
+        var pending = listOf(command("carrier-only"), command("blocked"))
+        val work = RcsNativeSendWork(
+            enabled = { true },
+            candidates = { pending },
+            execute = { sent += it.commandId },
+            current = { true },
+            executor = executor,
+            carrierHandoffRequested = { sent.last() == "carrier-only" },
+        )
+        work.start()
+        executor.runNext()
+        pending = listOf(command("blocked"))
+
+        work.start()
+        executor.runNext()
+
+        assertEquals(listOf("carrier-only", "blocked"), sent)
+    }
+
     @Test fun `enabled work sends candidates sequentially until retired`() {
         val sent = mutableListOf<String>()
         lateinit var work: RcsNativeSendWork

@@ -125,3 +125,23 @@ pub fn only_message(client: &Client, conversation: ConversationId) -> Message {
     assert_eq!(messages.len(), 1);
     messages.remove(0)
 }
+
+fn length_delimited(number: u8, value: &[u8]) -> Vec<u8> {
+    let mut encoded = vec![number << 3 | 2, u8::try_from(value.len()).unwrap()];
+    encoded.extend_from_slice(value);
+    encoded
+}
+
+/// The transaction id Google Messages writes on the copy of a chat message in the phone's store.
+pub fn mirrored_transaction_id(google_message_id: &str) -> String {
+    use base64::Engine;
+    let mut identity = length_delimited(2, &length_delimited(5, google_message_id.as_bytes()));
+    identity.extend(length_delimited(5, &[7; 16]));
+    identity.extend(length_delimited(6, &[9; 16]));
+    let mut envelope = length_delimited(1, b"com.google.android.apps.messaging.");
+    envelope.extend(length_delimited(2, &identity));
+    format!(
+        "proto:{}",
+        base64::engine::general_purpose::STANDARD.encode(length_delimited(1, &envelope))
+    )
+}

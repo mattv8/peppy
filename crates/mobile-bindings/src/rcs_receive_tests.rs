@@ -6,7 +6,10 @@ use crate::{
     MobileBindingsError, NativeClient, NativeOpenConfig, create_vault_material, open_native_client,
     with_client,
 };
-use peppy_client_core::{DeviceId, RcsCapabilityState, RcsLinkStatusEvent, RcsProviderDetector};
+use peppy_client_core::{
+    DeviceId, Direction, MmsAcquisitionInput, MmsSource, RcsCapabilityState, RcsLinkStatusEvent,
+    RcsProviderDetector,
+};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -499,6 +502,126 @@ fn new_receive_wrappers_reject_closed_clients() {
 }
 
 #[test]
+fn go_wire_record_may_carry_the_other_ids_google_gives_the_message() {
+    let fixture = fixture();
+    let mut record: serde_json::Value = serde_json::from_str(&go_incoming("")).unwrap();
+    record["alternate_message_ids"] = json!(["MxAbCdEfGhIjKlMnOpQr=StU", "another-id"]);
+
+    let result = fixture
+        .client
+        .gateway_ingest_go_rcs_record_json(
+            fixture.conversation_id.clone(),
+            fixture.generation,
+            record.to_string(),
+        )
+        .unwrap();
+
+    assert_eq!(result.record_outcome, "inserted");
+}
+
+/// The transaction id Google Messages writes on the copy of a chat message in the phone's store.
+fn mirrored_transaction_id(google_message_id: &str) -> String {
+    use base64::Engine;
+    fn length_delimited(number: u8, value: &[u8]) -> Vec<u8> {
+        let mut encoded = vec![number << 3 | 2, u8::try_from(value.len()).unwrap()];
+        encoded.extend_from_slice(value);
+        encoded
+    }
+    let identity = length_delimited(2, &length_delimited(5, google_message_id.as_bytes()));
+    let mut envelope = length_delimited(1, b"com.google.android.apps.messaging.");
+    envelope.extend(length_delimited(2, &identity));
+    format!(
+        "proto:{}",
+        base64::engine::general_purpose::STANDARD.encode(length_delimited(1, &envelope))
+    )
+}
+
+/// Stores the copy of a chat text from the phone's store in the fixture's conversation.
+fn capture_mirrored_text(fixture: &Fixture, google_message_id: &str) {
+    let connection = rusqlite::Connection::open(&fixture.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO mms_thread_conversations(source_device_id,source_generation,subscription_id,provider_thread_id,conversation_id) VALUES((SELECT v FROM metadata WHERE k='device_id'),'generation','sim-1','thread-1',?)",
+            [&fixture.conversation_id],
+        )
+        .unwrap();
+    with_client(&fixture.client.client, |core| {
+        let acquisition = core.begin_mms_acquisition(MmsAcquisitionInput {
+            source: MmsSource {
+                source_generation: "generation".into(),
+                subscription_id: "sim-1".into(),
+                provider_message_id: "mirrored-row".into(),
+                provider_thread_id: Some("thread-1".into()),
+            },
+            direction: Direction::Incoming,
+            sender_address: Some("+14155552671".into()),
+            recipients: Vec::new(),
+            subject: None,
+            body: "synthetic body".into(),
+            imported: false,
+            observed_at_ms: 1_735_689_600_123,
+            transaction_id: Some(mirrored_transaction_id(google_message_id)),
+        })?;
+        core.complete_mms_acquisition(&acquisition.acquisition_id)
+    })
+    .unwrap();
+}
+
+/// Go reports a message's delivery status inside the record. For a text the capture already
+/// stored, the record is a duplicate, its status has nothing to apply to, and recovery goes on.
+#[test]
+fn go_wire_record_for_a_captured_text_is_a_duplicate_whose_status_does_not_stop_recovery() {
+    let fixture = fixture();
+    capture_mirrored_text(&fixture, "MxAbCdEfGhIjKlMnOpQr=StU");
+    let before = fixture
+        .client
+        .messages(fixture.conversation_id.clone())
+        .unwrap()
+        .len();
+    let mut record: serde_json::Value = serde_json::from_str(&go_incoming("sent")).unwrap();
+    record["alternate_message_ids"] = json!(["MxAbCdEfGhIjKlMnOpQr=StU"]);
+
+    let ingest = || {
+        fixture
+            .client
+            .gateway_ingest_go_rcs_record_json(
+                fixture.conversation_id.clone(),
+                fixture.generation,
+                record.to_string(),
+            )
+            .unwrap()
+    };
+    let outcomes = [ingest(), ingest()];
+    let recovery = fixture
+        .client
+        .gateway_complete_rcs_recovery(
+            fixture.conversation_id.clone(),
+            fixture.generation,
+            1_735_689_600_123,
+        )
+        .unwrap();
+
+    for outcome in outcomes {
+        assert_eq!(outcome.record_outcome, "duplicate");
+        assert_eq!(outcome.status_outcome.as_deref(), Some("status_unchanged"));
+    }
+    assert_eq!(recovery, "recorded");
+    assert_eq!(
+        fixture
+            .client
+            .messages(fixture.conversation_id.clone())
+            .unwrap()
+            .len(),
+        before
+    );
+}
+
+#[test]
 fn go_wire_invalid_records_and_stale_generation_do_not_mutate() {
     let fixture = fixture();
     let before = reads(&fixture);
@@ -527,6 +650,9 @@ fn go_wire_invalid_records_and_stale_generation_do_not_mutate() {
         ("cursor", json!("AAAAAAAAAAFtZXNzYWdlLTE")),
         ("direction", json!("sideways")),
         ("status", json!("untrusted")),
+        ("alternate_message_ids", json!(["a", "b", "c", "d", "e"])),
+        ("alternate_message_ids", json!(["x".repeat(513)])),
+        ("alternate_message_ids", json!("not-a-list")),
     ] {
         let mut changed = valid.clone();
         changed[key] = value;
@@ -795,6 +921,7 @@ fn pre_proof_provider_row_routes_to_provider_for_the_single_link_lane() {
                 "providerThreadId": 7,
                 "providerType": 1,
                 "observedAtMs": 1_000,
+                "transactionId": "proto:CgA=",
                 "addresses": ["+14155552671"]
             })
             .to_string(),

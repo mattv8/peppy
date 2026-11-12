@@ -390,6 +390,7 @@ mod tests {
                 body: "Hello".into(),
                 transport: Transport::Sms,
                 direction: Direction::Outgoing,
+                rcs_capture: false,
                 imported: false,
                 sent_at_ms: Some(2),
                 ordered_at_ms: None,

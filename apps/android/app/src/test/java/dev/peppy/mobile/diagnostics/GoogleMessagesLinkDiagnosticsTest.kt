@@ -93,6 +93,35 @@ class GoogleMessagesLinkDiagnosticsTest {
         "conversation_rpc" to "list_unencrypted_ignored", "conversation_rpc" to "list_waiter_matched",
         "conversation_rpc" to "list_waiter_unmatched", "conversation_rpc" to "list_session_missing",
         "conversation_rpc" to "rpc_decrypt_failed",
+        "bootstrap" to "snapshot_unavailable", "bootstrap" to "lifecycle_failed", "bootstrap" to "owned_failed",
+        "bootstrap" to "resolve_failed", "bootstrap" to "unresolved", "bootstrap" to "tuple_failed",
+        "bootstrap" to "revision_failed", "bootstrap" to "route_unavailable", "bootstrap" to "observe_failed",
+        "bootstrap" to "verify_failed", "bootstrap" to "not_mapped", "bootstrap" to "claim_failed",
+        "bootstrap" to "not_claimed", "session" to "refresh_requested",
+        "send_work" to "wake", "send_work" to "busy", "send_work" to "candidates",
+        "send_work" to "no_candidates", "send_work" to "pending_without_candidates",
+        "send_work" to "lease_unavailable",
+        "send_pending" to "attachments", "send_pending" to "not_sms", "send_pending" to "recipients",
+        "send_pending" to "single_sms_text",
+        "mapping_refusal" to "stale_observation",
+        "mapping_refusal" to "google_conversation_ambiguous",
+        "mapping_refusal" to "link_unavailable",
+        "mapping_refusal" to "ineligible_conversation",
+        "mapping_refusal" to "invalid_identity",
+        "mapping_refusal" to "participant_ambiguous",
+        "mapping_refusal" to "self_chat_mismatch",
+        "mapping_refusal" to "peppy_conversation_missing",
+        "mapping_refusal" to "peppy_conversation_ambiguous",
+        "mapping_refusal" to "mapping_conflict",
+        "mapping_refusal" to "nonmonotonic_revision",
+        "mapping_refusal" to "retired_context",
+        "mapping_refusal" to "peppy_conversation_uncertain",
+        "mapping_refusal" to "self_chat_unsupported",
+        "mapping_refusal" to "recipient_mismatch",
+        "provider_route" to "alert", "provider_route" to "left_to_link", "provider_route" to "pre_proof",
+        "provider_route" to "guard_band", "provider_route" to "not_link_owned",
+        "provider_route" to "deferred", "provider_route" to "link_late", "provider_route" to "unidentified",
+        "provider_route" to "media",
     )
 
     @Test fun everyPairRecordsOnlyItsStableNumericReason() {
@@ -100,7 +129,7 @@ class GoogleMessagesLinkDiagnosticsTest {
         SyncDiagnostics.withTestConfiguration(true, { 10L }, { error("CPU unused") }, records::add) {
             stablePairs.forEach { (kind, code) -> recordGoogleMessagesLinkEvent(kind, code, Long.MAX_VALUE) }
         }
-		assertEquals(185, records.size)
+		assertEquals(233, records.size)
         records.forEachIndexed { index, record ->
             assertEquals("event=27 session=1 timestamp_ms=10 trace=0 29=${index + 1}", record)
         }

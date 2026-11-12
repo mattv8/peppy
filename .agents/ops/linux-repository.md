@@ -40,6 +40,27 @@ sudo ./setup-peppy-updates.sh --distro debian --channel stable \
   --key-fingerprint 0123456789ABCDEF0123456789ABCDEF01234567 --dry-run
 ```
 
+Fedora can authenticate repository metadata and RPM payloads with separate
+primary keys. `--key-url` and `--key-fingerprint` remain the metadata key; add
+the RPM key only as a complete independently pinned pair:
+
+```sh
+sudo ./setup-peppy-updates.sh --distro fedora --channel stable \
+  --repo-url https://packages.example.invalid/peppy \
+  --key-url https://packages.example.invalid/peppy/metadata.asc \
+  --key-fingerprint 0123456789ABCDEF0123456789ABCDEF01234567 \
+  --rpm-key-url https://packages.example.invalid/peppy/rpm.asc \
+  --rpm-key-fingerprint 89ABCDEF0123456789ABCDEF0123456789ABCDEF
+```
+
+Both URLs must be HTTPS and use the repository URL's exact authority. The
+script verifies each downloaded file has exactly its separately pinned primary
+fingerprint before writing host configuration. Omitting both RPM options keeps
+the compatible same-key Fedora setup. It refuses incomplete pairs, Debian use,
+and existing Peppy paths (including symlinks); administrators migrating an
+existing installation must disable it and perform an explicit, reviewed key
+migration rather than rerunning setup over its files.
+
 `--dry-run` is fixture-only: it performs no downloads or system changes.
 Without it, setup downloads through an HTTPS-only redirect chain and verifies
 the supplied 40-hex OpenPGP fingerprint before trusting the key. Repository
@@ -56,7 +77,9 @@ from it except `peppy`; they do not trust attacker-changeable Release `Origin`
 alone. The APT source is amd64-only. DNF uses `includepkgs=peppy`, not a global
 automatic-update policy. RPM key trust is host-global by RPM design, so this
 package restriction is policy scope, not per-repository cryptographic
-isolation. Existing Peppy setup files are never overwritten. To disable, run
+isolation. When separate Fedora keys are configured, DNF lists both in
+`gpgkey`: `repo_gpgcheck=1` verifies repository metadata and `gpgcheck=1`
+verifies RPM payloads. Existing Peppy setup files are never overwritten. To disable, run
 `systemctl disable --now peppy-update.timer`, then remove the Peppy source,
 preferences/repo file, key, and service/timer files. APT lock behavior and
 distribution package policy remain system-controlled; test lock contention,

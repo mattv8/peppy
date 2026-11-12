@@ -111,7 +111,7 @@ pub(crate) fn confirmed_own_address(own: &str, participant: &str, region: Option
         || crate::mms_identity::same_own_address(own, participant)
 }
 
-fn cached_own_address(
+pub(crate) fn cached_own_address(
     conn: &Connection,
     device_id: &crate::DeviceId,
     subscription_id: &str,

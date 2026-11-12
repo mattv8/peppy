@@ -115,6 +115,413 @@ fn capture_in_conversation(
     conversation_id
 }
 
+const THREAD_PEER: &str = "+12025550123";
+const THREAD_OWN: &str = "+12025550100";
+const THREAD_OTHER: &str = "+12025550199";
+
+const THREAD_SUBSCRIPTION: &str = "android-subscription-7";
+
+fn thread_gateway_without_own_number(name: &str) -> (tempfile::TempDir, Client) {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&directory, name, &vault), &vault);
+    (directory, client)
+}
+
+/// A gateway that has recorded the SIM's own number, as the phone does once it knows it.
+fn thread_gateway(name: &str) -> (tempfile::TempDir, Client) {
+    let (directory, client) = thread_gateway_without_own_number(name);
+    client
+        .set_mms_own_address(THREAD_SUBSCRIPTION, THREAD_OWN)
+        .unwrap();
+    (directory, client)
+}
+
+/// One captured provider SMS in `thread`, as the phone's native capture stores it.
+fn capture_thread_sms(
+    client: &Client,
+    thread: &str,
+    row: &str,
+    direction: Direction,
+    counterpart: &str,
+) -> ConversationId {
+    let acquisition = client
+        .begin_sms_acquisition(SmsAcquisitionInput {
+            source: SmsSource {
+                source_generation: "phone-install-a".into(),
+                subscription_id: THREAD_SUBSCRIPTION.into(),
+                provider_message_id: row.into(),
+                provider_thread_id: Some(thread.into()),
+                broadcast_id: None,
+            },
+            direction,
+            sender_address: (direction == Direction::Incoming).then(|| counterpart.into()),
+            recipients: match direction {
+                Direction::Incoming => Vec::new(),
+                Direction::Outgoing => vec![counterpart.into()],
+            },
+            body: "text".into(),
+            imported: true,
+            sent_at_ms: Some(1),
+            date_sent_ms: Some(1),
+            creator: None,
+            source_row_fingerprint: format!("fingerprint-{row}"),
+        })
+        .unwrap();
+    client
+        .complete_sms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+    acquisition.conversation_id
+}
+
+/// One captured provider MMS in `thread`. Google Messages mirrors RCS messages into the provider
+/// as such rows, so an RCS contact's thread normally holds them.
+fn capture_thread_mms(
+    client: &Client,
+    thread: &str,
+    row: &str,
+    direction: Direction,
+    sender: Option<&str>,
+    recipients: &[&str],
+) -> ConversationId {
+    let acquisition = client
+        .begin_mms_acquisition(MmsAcquisitionInput {
+            source: MmsSource {
+                source_generation: "phone-install-a".into(),
+                subscription_id: THREAD_SUBSCRIPTION.into(),
+                provider_message_id: row.into(),
+                provider_thread_id: Some(thread.into()),
+            },
+            direction,
+            sender_address: sender.map(Into::into),
+            recipients: recipients.iter().map(|address| (*address).into()).collect(),
+            subject: None,
+            body: "mirrored chat message".into(),
+            imported: true,
+            observed_at_ms: 1,
+            transaction_id: None,
+        })
+        .unwrap();
+    client
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+    acquisition.conversation_id
+}
+
+fn mapped_conversation(client: &Client, peer: &str) -> ConversationId {
+    let outcome = client
+        .verify_rcs_mapping(&observation(peer, 1), 1_000)
+        .unwrap();
+    let RcsMappingOutcome::Mapped(mapping) = outcome else {
+        panic!("expected a mapping, got {outcome:?}");
+    };
+    mapping.conversation_id
+}
+
+#[test]
+fn a_contacts_thread_with_captured_mms_maps_to_that_thread() {
+    let (_directory, client) = thread_gateway("rcs-mapping-thread");
+    let thread = capture_thread_sms(
+        &client,
+        "thread-peer",
+        "sms-1",
+        Direction::Incoming,
+        THREAD_PEER,
+    );
+    let mirrored = capture_thread_mms(
+        &client,
+        "thread-peer",
+        "mms-1",
+        Direction::Incoming,
+        Some(THREAD_PEER),
+        &[THREAD_OWN],
+    );
+    capture_thread_mms(
+        &client,
+        "thread-peer",
+        "mms-2",
+        Direction::Outgoing,
+        None,
+        &[THREAD_PEER],
+    );
+
+    assert_eq!(mirrored, thread);
+    assert_eq!(mapped_conversation(&client, THREAD_PEER), thread);
+}
+
+#[test]
+fn a_group_mms_in_another_thread_does_not_block_the_contacts_mapping() {
+    let (_directory, client) = thread_gateway("rcs-mapping-group-elsewhere");
+    let thread = capture_thread_sms(
+        &client,
+        "thread-peer",
+        "sms-1",
+        Direction::Incoming,
+        THREAD_PEER,
+    );
+    capture_thread_mms(
+        &client,
+        "thread-group",
+        "mms-1",
+        Direction::Incoming,
+        Some(THREAD_PEER),
+        &[THREAD_OWN, THREAD_OTHER],
+    );
+
+    assert_eq!(mapped_conversation(&client, THREAD_PEER), thread);
+}
+
+/// Without the SIM's recorded number, the other address of a received MMS may be a third party.
+#[test]
+fn a_received_mms_addressed_to_an_unrecorded_number_is_not_bound() {
+    let (_directory, client) = thread_gateway_without_own_number("rcs-mapping-unrecorded-own");
+    capture_thread_sms(
+        &client,
+        "thread-peer",
+        "sms-1",
+        Direction::Incoming,
+        THREAD_PEER,
+    );
+    capture_thread_mms(
+        &client,
+        "thread-peer",
+        "mms-1",
+        Direction::Incoming,
+        Some(THREAD_PEER),
+        &[THREAD_OWN],
+    );
+
+    assert_eq!(
+        client
+            .verify_rcs_mapping(&observation(THREAD_PEER, 1), 1_000)
+            .unwrap(),
+        RcsMappingOutcome::Refused(RcsMappingRefusal::PeppyConversationUncertain)
+    );
+}
+
+/// The number index can point at a thread that also carries other people; such a thread is not
+/// bound as the contact's one-to-one conversation.
+#[test]
+fn an_indexed_thread_that_holds_another_party_is_not_bound() {
+    type Capture = fn(&Client);
+    let other_parties: [(&str, Capture); 4] = [
+        ("a text to someone else", |client| {
+            capture_thread_sms(
+                client,
+                "thread-peer",
+                "sms-2",
+                Direction::Outgoing,
+                THREAD_OTHER,
+            );
+        }),
+        ("an MMS from someone else", |client| {
+            capture_thread_mms(
+                client,
+                "thread-peer",
+                "mms-1",
+                Direction::Incoming,
+                Some(THREAD_OTHER),
+                &[THREAD_OWN, THREAD_PEER],
+            );
+        }),
+        ("an MMS sent to several people", |client| {
+            capture_thread_mms(
+                client,
+                "thread-peer",
+                "mms-1",
+                Direction::Outgoing,
+                None,
+                &[THREAD_PEER, THREAD_OTHER],
+            );
+        }),
+        ("an MMS the contact sent to several people", |client| {
+            capture_thread_mms(
+                client,
+                "thread-peer",
+                "mms-1",
+                Direction::Incoming,
+                Some(THREAD_PEER),
+                &[THREAD_OWN, THREAD_OTHER],
+            );
+        }),
+    ];
+    for (name, capture_other_party) in other_parties {
+        let (_directory, client) = thread_gateway("rcs-mapping-mixed-thread");
+        capture_thread_sms(
+            &client,
+            "thread-peer",
+            "sms-1",
+            Direction::Incoming,
+            THREAD_PEER,
+        );
+        capture_other_party(&client);
+
+        assert_eq!(
+            client
+                .verify_rcs_mapping(&observation(THREAD_PEER, 1), 1_000)
+                .unwrap(),
+            RcsMappingOutcome::Refused(RcsMappingRefusal::PeppyConversationUncertain),
+            "{name}"
+        );
+    }
+}
+
+/// A gateway and a second device whose text to `recipient`, queued in `conversation_id`, has
+/// reached the gateway as a pending command.
+fn queue_text_from_another_device(
+    directory: &tempfile::TempDir,
+    vault: &Vault,
+    gateway: &Client,
+    gateway_config: &ClientConfig,
+    conversation_id: ConversationId,
+    recipient: &str,
+) -> CommandId {
+    let sender = unlocked(&config(directory, "rcs-mapping-sender", vault), vault);
+    let queued = sender
+        .queue_send(
+            OutgoingSms {
+                conversation_id,
+                recipients: vec![recipient.into()],
+                body: "hello".into(),
+            },
+            GatewayRoute::RcsLink {
+                gateway_device_id: gateway_config.device_id,
+            },
+        )
+        .unwrap();
+    let mut server = Server::default();
+    server.upload(&sender);
+    server.sync(gateway);
+    queued.command_id
+}
+
+struct SendGateway {
+    directory: tempfile::TempDir,
+    vault: Vault,
+    config: ClientConfig,
+    client: Client,
+}
+
+fn send_gateway(name: &str) -> SendGateway {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, name, &vault);
+    let client = unlocked(&config, &vault);
+    SendGateway {
+        directory,
+        vault,
+        config,
+        client,
+    }
+}
+
+impl SendGateway {
+    fn queue_text(&self, conversation_id: ConversationId, recipient: &str) -> CommandId {
+        queue_text_from_another_device(
+            &self.directory,
+            &self.vault,
+            &self.client,
+            &self.config,
+            conversation_id,
+            recipient,
+        )
+    }
+}
+
+/// The owner's stuck send: the contact's thread holds mirrored chat messages, and the phone has
+/// no recorded own number to explain their second address.
+#[test]
+fn a_send_maps_to_its_own_thread_whatever_captured_mms_the_thread_holds() {
+    let gateway = send_gateway("rcs-mapping-send");
+    let thread = capture_thread_mms(
+        &gateway.client,
+        "thread-peer",
+        "mms-1",
+        Direction::Incoming,
+        Some(THREAD_PEER),
+        &[THREAD_OWN],
+    );
+    let command_id = gateway.queue_text(thread, THREAD_PEER);
+
+    let outcome = gateway
+        .client
+        .verify_rcs_send_mapping(&observation(THREAD_PEER, 1), command_id, 1_000)
+        .unwrap();
+
+    let RcsMappingOutcome::Mapped(mapping) = outcome else {
+        panic!("expected a mapping, got {outcome:?}");
+    };
+    assert_eq!(mapping.conversation_id, thread);
+    assert_eq!(mapping.proof.canonical_participant, THREAD_PEER);
+}
+
+#[test]
+fn a_send_addressed_to_someone_else_is_refused_and_leaves_the_chats_mapping() {
+    let gateway = send_gateway("rcs-mapping-send-mismatch");
+    let peer_thread = capture_thread_sms(
+        &gateway.client,
+        "thread-peer",
+        "sms-1",
+        Direction::Incoming,
+        THREAD_PEER,
+    );
+    let other_thread = capture_thread_sms(
+        &gateway.client,
+        "thread-other",
+        "sms-2",
+        Direction::Incoming,
+        THREAD_OTHER,
+    );
+    assert_eq!(
+        mapped_conversation(&gateway.client, THREAD_PEER),
+        peer_thread
+    );
+    let command_id = gateway.queue_text(other_thread, THREAD_OTHER);
+
+    let outcome = gateway
+        .client
+        .verify_rcs_send_mapping(&observation(THREAD_PEER, 2), command_id, 1_000)
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        RcsMappingOutcome::Refused(RcsMappingRefusal::RecipientMismatch)
+    );
+    assert!(gateway.client.rcs_mapping(peer_thread).unwrap().is_some());
+    assert!(gateway.client.rcs_mapping(other_thread).unwrap().is_none());
+}
+
+#[test]
+fn a_send_from_a_thread_that_is_not_the_numbers_indexed_thread_is_refused() {
+    let gateway = send_gateway("rcs-mapping-send-duplicate");
+    capture_in_conversation(&gateway.client, THREAD_PEER, "row-a");
+    let duplicate = capture_in_conversation(&gateway.client, THREAD_PEER, "row-b");
+    let command_id = gateway.queue_text(duplicate, THREAD_PEER);
+
+    let outcome = gateway
+        .client
+        .verify_rcs_send_mapping(&observation(THREAD_PEER, 1), command_id, 1_000)
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        RcsMappingOutcome::Refused(RcsMappingRefusal::PeppyConversationAmbiguous)
+    );
+}
+
+#[test]
+fn a_send_verification_for_an_unknown_command_is_an_error() {
+    let gateway = send_gateway("rcs-mapping-send-unknown");
+
+    let result = gateway.client.verify_rcs_send_mapping(
+        &observation(THREAD_PEER, 1),
+        CommandId::new(),
+        1_000,
+    );
+
+    assert!(matches!(result, Err(Error::NotFound)));
+}
+
 #[test]
 fn verified_mapping_is_fresh_local_and_survives_reopen() {
     let (_directory, config, client, conversation_id) = client_with_participant("raw-peer");
@@ -226,20 +633,15 @@ fn self_chat_is_explicitly_unsupported() {
 }
 
 #[test]
-fn refuses_raw_identity_with_multiple_authoritative_message_conversations() {
+fn duplicate_conversations_for_one_identity_map_to_the_indexed_one() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
     let config = config(&directory, "rcs-mapping-duplicates", &vault);
     let client = open(&config);
-    capture_in_conversation(&client, "raw-peer", "row-a");
+    let indexed = capture_in_conversation(&client, "raw-peer", "row-a");
     capture_in_conversation(&client, "raw-peer", "row-b");
 
-    assert_eq!(
-        client
-            .verify_rcs_mapping(&observation("raw-peer", 1), 1_000)
-            .unwrap(),
-        RcsMappingOutcome::Refused(RcsMappingRefusal::PeppyConversationAmbiguous)
-    );
+    assert_eq!(mapped_conversation(&client, "raw-peer"), indexed);
 }
 
 #[test]
@@ -642,7 +1044,7 @@ fn bootstrap_resolution_uses_the_same_canonical_lookup_as_verify() {
 }
 
 #[test]
-fn bootstrap_resolution_refuses_missing_ambiguous_invalid_and_conflicting_candidates() {
+fn bootstrap_resolution_refuses_missing_invalid_and_conflicting_candidates() {
     let (_directory, _config, client, _conversation_id) = client_with_participant("2025550123");
     let google_id = observation("raw-peer", 1).google_conversation_id;
     let international = format!("+{}{}", "1202", "5550123");
@@ -659,13 +1061,15 @@ fn bootstrap_resolution_refuses_missing_ambiguous_invalid_and_conflicting_candid
         RcsBootstrapResolution::InvalidIdentity
     );
 
-    capture_in_conversation(&client, "raw-dup", "dup-a");
+    let indexed_duplicate = capture_in_conversation(&client, "raw-dup", "dup-a");
     capture_in_conversation(&client, "raw-dup", "dup-b");
     assert_eq!(
         client
             .resolve_rcs_bootstrap_conversation("raw-dup", &google_id)
             .unwrap(),
-        RcsBootstrapResolution::Ambiguous
+        RcsBootstrapResolution::Resolved {
+            conversation_id: indexed_duplicate
+        }
     );
 
     let (_directory, _config, client, _conversation_id) = client_with_participant("raw-peer");
@@ -695,7 +1099,7 @@ fn bootstrap_batch_matches_single_candidate_resolution_in_input_order() {
     let (_directory, _config, client, conv_e164) = client_with_participant("+1 202 555 0123");
     let conv_nat = capture_in_conversation(&client, "2025550123", "nat-row");
     let conv_raw = capture_in_conversation(&client, "raw-peer", "peer-row");
-    capture_in_conversation(&client, "raw-dup", "dup-a");
+    let indexed_duplicate = capture_in_conversation(&client, "raw-dup", "dup-a");
     capture_in_conversation(&client, "raw-dup", "dup-b");
     assert!(matches!(
         client
@@ -719,7 +1123,9 @@ fn bootstrap_batch_matches_single_candidate_resolution_in_input_order() {
     ];
     let expected = [
         RcsBootstrapResolution::AlreadyMappedElsewhere,
-        RcsBootstrapResolution::Ambiguous,
+        RcsBootstrapResolution::Resolved {
+            conversation_id: indexed_duplicate,
+        },
         RcsBootstrapResolution::InvalidIdentity,
         RcsBootstrapResolution::Missing,
         RcsBootstrapResolution::Resolved {

@@ -60,8 +60,111 @@ class SyncHealthTest {
     }
 
     @Test
-    fun pausedHistoryAddsAProblem() {
-        assertEquals(1, health(history = SmsHistoryState.PAUSED).problemCount)
+    fun pausedHistoryIsNotAnActionAndShowsHistoryPaused() {
+        val health = health(history = SmsHistoryState.PAUSED)
+
+        assertEquals(0, health.problemCount)
+        assertFalse(health.actionNeeded)
+        assertEquals("HISTORY_PAUSED", health.summaryState.name)
+    }
+
+    @Test
+    fun pausedHistoryKeepsMissingReceivePermissionAsAttention() {
+        val health = health(history = SmsHistoryState.PAUSED, receiveGranted = false)
+
+        assertEquals(1, health.problemCount)
+        assertTrue(health.actionNeeded)
+        assertEquals(SyncSummaryState.ATTENTION, health.summaryState)
+    }
+
+    @Test
+    fun pausedHistoryKeepsMissingSendPermissionAsAttention() {
+        val health = health(history = SmsHistoryState.PAUSED, sendGranted = false)
+
+        assertEquals(1, health.problemCount)
+        assertTrue(health.actionNeeded)
+        assertEquals(SyncSummaryState.ATTENTION, health.summaryState)
+    }
+
+    @Test
+    fun pausedHistoryKeepsMissingReadPermissionAsAttention() {
+        val health = health(history = SmsHistoryState.PAUSED, readGranted = false)
+
+        assertEquals(1, health.problemCount)
+        assertTrue(health.actionNeeded)
+        assertEquals(SyncSummaryState.ATTENTION, health.summaryState)
+    }
+
+    @Test
+    fun pausedHistoryKeepsLockedVaultAsAttention() {
+        val health = health(history = SmsHistoryState.PAUSED, databaseOpen = false)
+
+        assertEquals(1, health.problemCount)
+        assertTrue(health.actionNeeded)
+        assertEquals(SyncSummaryState.ATTENTION, health.summaryState)
+    }
+
+    @Test
+    fun pausedHistoryKeepsStoppedSyncAsAttentionWithOneProblem() {
+        val health = health(history = SmsHistoryState.PAUSED, syncPhase = SyncPhase.RECOVERY_REQUIRED)
+
+        assertEquals(1, health.problemCount)
+        assertTrue(health.actionNeeded)
+        assertEquals(SyncSummaryState.ATTENTION, health.summaryState)
+    }
+
+    @Test
+    fun pausedHistoryKeepsOutboxRejectionAsAttentionWithOneProblem() {
+        val health = health(history = SmsHistoryState.PAUSED, outboxRejection = "x")
+
+        assertEquals(1, health.problemCount)
+        assertTrue(health.actionNeeded)
+        assertEquals(SyncSummaryState.ATTENTION, health.summaryState)
+    }
+
+    @Test
+    fun pausedHistoryWithSmsOffIsOffWithoutAProblem() {
+        val health = health(history = SmsHistoryState.PAUSED, smsSyncOn = false)
+
+        assertEquals(0, health.problemCount)
+        assertFalse(health.actionNeeded)
+        assertEquals(SyncSummaryState.OFF, health.summaryState)
+    }
+
+    @Test
+    fun pausedHistoryWithUnknownReachabilityIsCheckingWithoutAProblem() {
+        val health = health(history = SmsHistoryState.PAUSED, reachability = ServerReachability.UNKNOWN)
+
+        assertEquals(0, health.problemCount)
+        assertFalse(health.actionNeeded)
+        assertEquals(SyncSummaryState.CHECKING, health.summaryState)
+    }
+
+    @Test
+    fun pausedHistoryWithUnavailableServerRetriesWithoutAProblem() {
+        val health = health(history = SmsHistoryState.PAUSED, reachability = ServerReachability.UNAVAILABLE)
+
+        assertEquals(0, health.problemCount)
+        assertFalse(health.actionNeeded)
+        assertEquals(SyncSummaryState.RETRYING, health.summaryState)
+    }
+
+    @Test
+    fun pausedHistoryWithSoftRejectionRetriesWithoutAProblem() {
+        val health = health(history = SmsHistoryState.PAUSED, softRejection = SoftRejection("x", 0, 1))
+
+        assertEquals(0, health.problemCount)
+        assertFalse(health.actionNeeded)
+        assertEquals(SyncSummaryState.RETRYING, health.summaryState)
+    }
+
+    @Test
+    fun pausedHistoryDuringNonLiveSyncIsProgressWithoutAProblem() {
+        val health = health(history = SmsHistoryState.PAUSED, syncPhase = SyncPhase.BOOTSTRAP_DRAINING)
+
+        assertEquals(0, health.problemCount)
+        assertFalse(health.actionNeeded)
+        assertEquals(SyncSummaryState.PROGRESS, health.summaryState)
     }
 
     @Test

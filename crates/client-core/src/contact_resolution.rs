@@ -231,7 +231,7 @@ fn refresh_page(
     Ok((has_more, next))
 }
 
-fn refresh(conn: &mut Connection) -> Result<bool, Error> {
+pub(crate) fn refresh(conn: &mut Connection) -> Result<bool, Error> {
     let prepared = prepare_refresh(conn)?;
     refresh_page(conn, &prepared, None).map(|(has_more, _)| has_more)
 }

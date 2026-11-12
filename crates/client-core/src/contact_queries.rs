@@ -54,28 +54,29 @@ pub(crate) fn list_books(conn: &Connection) -> Result<String, Error> {
 
     let books = stmt
         .query_map([], |row| row.get::<_, String>(0))?
-        .filter_map(Result::ok)
-        .filter_map(|s| serde_json::from_str::<Value>(&s).ok())
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|body| serde_json::from_str::<Value>(&body).map_err(|_| Error::Database))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .take(RESULT_LIMIT as usize)
-        .map(|mut book| {
+        .map(|mut book| -> Result<Value, Error> {
             book = sanitize(book);
             if let Some(obj) = book.as_object_mut() {
                 // Count live (non-deleted) contacts in this book
                 let book_id = obj.get("id").and_then(Value::as_str).unwrap_or("");
-                let count = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM contacts WHERE book_id=? AND deleted_at IS NULL",
-                        [book_id],
-                        |r| r.get::<_, i64>(0),
-                    )
-                    .unwrap_or(0);
+                let count = conn.query_row(
+                    "SELECT COUNT(*) FROM contacts WHERE book_id=? AND deleted_at IS NULL",
+                    [book_id],
+                    |r| r.get::<_, i64>(0),
+                )?;
                 obj.insert("contact_count".to_string(), json!(count));
             }
             let effective = effective_remote_edits(&book);
             book["effective_remote_edits"] = json!(effective);
-            book
+            Ok(book)
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(json!({
         "schema_version": 1,
@@ -610,6 +611,19 @@ mod tests {
         let parsed: Value = serde_json::from_str(&result).expect("parse json");
 
         assert_eq!(parsed["books"].as_array().expect("array").len(), 0);
+    }
+
+    #[test]
+    fn list_books_rejects_a_malformed_stored_book() {
+        let (conn, device_id, book_id) = setup_test_db();
+        insert_test_book(&conn, &book_id, &device_id, false).unwrap();
+        conn.execute(
+            "INSERT INTO contact_books(id,owner_device_id,generation,state,body,forgotten) VALUES(?,?,?,?,?,0)",
+            params!["broken", device_id, 1i64, "active", "not-json"],
+        )
+        .unwrap();
+
+        assert!(matches!(list_books(&conn), Err(Error::Database)));
     }
 
     #[test]

@@ -147,6 +147,89 @@ impl Fixture {
         queued
     }
 
+    /// A text reply the composer marked as MMS because the thread's latest message was one.
+    fn queue_text_mms_for(&mut self, conversation_id: ConversationId, peers: &[&str]) -> CommandId {
+        let command_id = self
+            .sender
+            .queue_mms(
+                OutgoingMms {
+                    conversation_id,
+                    recipients: peers.iter().map(|peer| (*peer).into()).collect(),
+                    body: "text reply".into(),
+                    attachment_ids: Vec::new(),
+                    subject: None,
+                },
+                GatewayRoute::Carrier {
+                    gateway_device_id: self.gateway_config.device_id,
+                    subscription_id: "android-subscription-7".into(),
+                },
+            )
+            .unwrap()
+            .command_id;
+        self.server.upload(&self.sender);
+        self.server.sync(&self.gateway);
+        command_id
+    }
+
+    /// An MMS to one number that plain text cannot carry: a picture, or a subject.
+    fn queue_mms_content_for(
+        &mut self,
+        conversation_id: ConversationId,
+        peer: &str,
+        with_picture: bool,
+    ) -> CommandId {
+        let attachment_ids = if with_picture {
+            let source = self._directory.path().join(format!("picture-{peer}.txt"));
+            std::fs::write(&source, b"picture").unwrap();
+            let attachment = self
+                .sender
+                .prepare_attachment(&source, "text/plain", "picture.txt")
+                .unwrap();
+            vec![attachment.attachment_id]
+        } else {
+            Vec::new()
+        };
+        let command_id = self
+            .sender
+            .queue_mms(
+                OutgoingMms {
+                    conversation_id,
+                    recipients: vec![peer.into()],
+                    body: "see this".into(),
+                    subject: (!with_picture).then(|| "subject".into()),
+                    attachment_ids: attachment_ids.clone(),
+                },
+                GatewayRoute::Carrier {
+                    gateway_device_id: self.gateway_config.device_id,
+                    subscription_id: "android-subscription-7".into(),
+                },
+            )
+            .unwrap()
+            .command_id;
+        for attachment_id in &attachment_ids {
+            self.sender
+                .mark_attachment_uploaded(*attachment_id, &uuid::Uuid::new_v4().to_string())
+                .unwrap();
+        }
+        self.server.upload(&self.sender);
+        self.server.sync(&self.gateway);
+        for attachment_id in attachment_ids {
+            let download = self
+                ._directory
+                .path()
+                .join(format!("download-{attachment_id}"));
+            std::fs::copy(
+                self.sender.native_cipher_file(attachment_id).unwrap(),
+                &download,
+            )
+            .unwrap();
+            self.gateway
+                .install_downloaded_attachment(attachment_id, &download)
+                .unwrap();
+        }
+        command_id
+    }
+
     fn queue_carrier_for(&mut self, conversation_id: ConversationId, peer: &str) -> CommandId {
         let command_id = self
             .sender
@@ -322,6 +405,130 @@ fn native_candidates_include_carrier_texts_without_a_mapping() {
         .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 3_000, 3_000)
         .unwrap();
     assert_eq!(pending_ids(&fixture.gateway), vec![carrier]);
+}
+
+#[test]
+fn native_candidates_include_a_text_only_mms_command_to_one_recipient() {
+    let mut fixture = Fixture::new();
+    let conversation = |fixture: &Fixture, peer: &str| {
+        fixture
+            .gateway
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: peer.into(),
+                body: String::new(),
+                provider_message_id: Some(format!("provider-{peer}")),
+                imported: true,
+            })
+            .unwrap()
+            .conversation_id
+    };
+    let one_to_one = conversation(&fixture, "+12025550124");
+    let several = conversation(&fixture, "+12025550125");
+
+    let text_reply = fixture.queue_text_mms_for(one_to_one, &["+12025550124"]);
+    fixture.queue_text_mms_for(several, &["+12025550125", "+12025550126"]);
+
+    assert_eq!(pending_ids(&fixture.gateway), vec![text_reply]);
+}
+
+/// The carrier sends such a message only once the link has decided the number has no chat, and
+/// only the native send work makes that decision.
+#[test]
+fn native_candidates_include_a_one_to_one_mms_the_link_must_route() {
+    let mut fixture = Fixture::new();
+    let conversation = |fixture: &Fixture, peer: &str| {
+        fixture
+            .gateway
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: peer.into(),
+                body: String::new(),
+                provider_message_id: Some(format!("provider-{peer}")),
+                imported: true,
+            })
+            .unwrap()
+            .conversation_id
+    };
+    let picture_thread = conversation(&fixture, "+12025550124");
+    let subject_thread = conversation(&fixture, "+12025550125");
+
+    let picture = fixture.queue_mms_content_for(picture_thread, "+12025550124", true);
+    let subject = fixture.queue_mms_content_for(subject_thread, "+12025550125", false);
+
+    assert_eq!(pending_ids(&fixture.gateway), vec![picture, subject]);
+}
+
+#[test]
+fn a_picture_for_a_mapped_chat_is_left_to_the_media_send_work() {
+    let mut fixture = Fixture::new();
+    let mapped_conversation = fixture.conversation_id;
+
+    fixture.queue_mms_content_for(mapped_conversation, PEER, true);
+
+    assert_eq!(pending_ids(&fixture.gateway), Vec::<CommandId>::new());
+}
+
+/// The media send work runs the same target verification as a text, for a command with a picture.
+#[test]
+fn a_picture_for_a_mapped_chat_passes_the_send_verification() {
+    let mut fixture = Fixture::new();
+    let picture = fixture.queue_mms_content_for(fixture.conversation_id, PEER, true);
+    let mut target = observation();
+    target.mapping_revision = 2;
+
+    let outcome = fixture
+        .gateway
+        .verify_rcs_send_mapping(&target, picture, 1_000)
+        .unwrap();
+
+    assert!(
+        matches!(outcome, RcsMappingOutcome::Mapped(ref mapping) if mapping.conversation_id == fixture.conversation_id),
+        "{outcome:?}"
+    );
+}
+
+/// The route decision for a picture finds a chat: the picture then belongs to the media send work
+/// and the text send work must stop taking it.
+#[test]
+fn a_picture_moves_to_the_media_send_work_once_its_number_has_a_chat() {
+    let mut fixture = Fixture::new();
+    let other_peer = "+12025550124";
+    let unmapped_conversation = fixture
+        .gateway
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: other_peer.into(),
+            body: String::new(),
+            provider_message_id: Some("provider-found-later".into()),
+            imported: true,
+        })
+        .unwrap()
+        .conversation_id;
+    let picture = fixture.queue_mms_content_for(unmapped_conversation, other_peer, true);
+    assert_eq!(pending_ids(&fixture.gateway), vec![picture]);
+    let mut found = observation();
+    found.google_conversation_id = "conversation-found-later".into();
+    found.participants[0].identity = other_peer.into();
+
+    let outcome = fixture
+        .gateway
+        .verify_rcs_send_mapping(&found, picture, 1_000)
+        .unwrap();
+
+    assert!(
+        matches!(outcome, RcsMappingOutcome::Mapped(ref mapping) if mapping.conversation_id == unmapped_conversation),
+        "{outcome:?}"
+    );
+    assert_eq!(pending_ids(&fixture.gateway), Vec::<CommandId>::new());
+    let media_commands = fixture
+        .gateway
+        .pending_rcs_media_commands(1_000)
+        .unwrap()
+        .into_iter()
+        .map(|command| command.command_id)
+        .collect::<Vec<_>>();
+    assert_eq!(media_commands, vec![picture]);
 }
 
 #[test]

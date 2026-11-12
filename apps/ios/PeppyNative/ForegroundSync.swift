@@ -103,11 +103,13 @@ struct ForegroundSync: Sendable {
             try await server.postNoContent("/v1/compaction/capability", meter: &pass.meter)
         } catch let error as ClientError {
             switch error {
-            case .unauthorized, .forbidden: throw error
+            case .unauthorized, .forbidden, .canceled: throw error
             default:
                 _ = try client.setServerCompactionState(supported: false, active: false)
                 return
             }
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             // A 404 is an older server; unavailable capability negotiation remains fail-closed.
             _ = try client.setServerCompactionState(supported: false, active: false)
@@ -118,11 +120,13 @@ struct ForegroundSync: Sendable {
             cut = try await server.get("/v1/snapshot", limit: ServerClient.maxSmallBytes, meter: &pass.meter)
         } catch let error as ClientError {
             switch error {
-            case .unauthorized, .forbidden: throw error
+            case .unauthorized, .forbidden, .canceled: throw error
             default:
                 _ = try client.setServerCompactionState(supported: false, active: false)
                 return
             }
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             _ = try client.setServerCompactionState(supported: false, active: false)
             return

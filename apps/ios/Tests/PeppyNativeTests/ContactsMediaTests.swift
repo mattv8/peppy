@@ -76,6 +76,23 @@ func syntheticImage(_ type: UTType = .png, side: Int = 96, red: CGFloat = 0.8) -
         return (coordinator, provider, client)
     }
 
+    @Test func contactPassReapsOnlyInactiveUUIDImageScratchFiles() async throws {
+        let (coordinator, _, client) = try await owner([], photos: [:])
+        let stale = coordinator.scratch.appendingPathComponent("\(UUID().uuidString).img")
+        let activeCiphertext = coordinator.scratch.appendingPathComponent("active.ppss")
+        let sentinel = coordinator.scratch.appendingPathComponent("keep.img")
+        try Data("stale".utf8).write(to: stale)
+        try Data("ciphertext".utf8).write(to: activeCiphertext)
+        try Data("sentinel".utf8).write(to: sentinel)
+
+        _ = try await coordinator.run(reason: .foreground, isCancelled: { false })
+
+        #expect(!FileManager.default.fileExists(atPath: stale.path))
+        #expect(FileManager.default.fileExists(atPath: activeCiphertext.path))
+        #expect(FileManager.default.fileExists(atPath: sentinel.path))
+        try client.dispose()
+    }
+
     func view(_ client: NativeClient, _ bookId: String) throws -> (json: String, contacts: [[String: Any]]) {
         let json = try client.contactBookView(inputJson: NativeContactsCoordinator.json(["book_id": bookId, "limit": 200]))
         return (json, try NativeContactsCoordinator.object(json)["contacts"] as? [[String: Any]] ?? [])

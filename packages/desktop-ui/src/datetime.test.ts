@@ -70,11 +70,14 @@ describe("datetime", () => {
     expect(formatElapsedShort(now, NaN)).toBeUndefined();
   });
 
-  it("formats relative time in runtime locale minute units", () => {
+  it("formats relative time using the largest elapsed unit below a day", () => {
     const now = 1_788_433_980_000;
     const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
     expect(formatRelativeTime(now - 90_000, now)).toBe(formatter.format(-1, "minute"));
     expect(formatRelativeTime(now + 60_000, now)).toBe(formatter.format(1, "minute"));
+    expect(formatRelativeTime(now - 5 * 60 * 60_000, now)).toBe(formatter.format(-5, "hour"));
+    expect(formatRelativeTime(now + 23 * 60 * 60_000, now)).toBe(formatter.format(23, "hour"));
+    expect(formatRelativeTime(now - 24 * 60 * 60_000, now)).toBe(formatter.format(-1, "day"));
     expect(formatRelativeTime("invalid", now)).toBeUndefined();
     expect(formatRelativeTime(now, Infinity)).toBeUndefined();
     expect(formatRelativeTime(now, NaN)).toBeUndefined();

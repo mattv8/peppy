@@ -271,6 +271,66 @@
         }
       }
     },
+    "peppy.toggle_android_sync_attention_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy is locked. Unlock it to keep syncing."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_attention_stopped": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sync has stopped. See the message below."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_attention_access": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow the missing access below so texts can sync."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_attention_many": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "More than one thing needs fixing. See below."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_history_paused_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Older messages paused"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_history_paused_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Older messages aren't being copied because your history limit was reached."
+          }
+        }
+      }
+    },
     "peppy.toggle_android_sync_connection_unavailable": {
       "localizations": {
         "en": {
@@ -441,12 +501,62 @@
         }
       }
     },
+    "peppy.toggle_android_mms_status_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MMS sync is off"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_status_access_needed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Needs message access"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_note_access_needed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Go back to the SMS tab and turn on MMS sync to allow access."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_status_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Locked"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_note_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock Peppy to see MMS status."
+          }
+        }
+      }
+    },
     "peppy.toggle_android_mms_status_paused_phone_storage": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Paused: phone storage is full"
+            "value": "Paused: free up space on this phone"
           }
         }
       }
@@ -456,7 +566,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Older MMS paused: message history limit reached"
+            "value": "Older MMS paused at history limit"
           }
         }
       }
@@ -466,7 +576,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Paused: message history limit reached"
+            "value": "MMS paused at history limit"
           }
         }
       }
@@ -501,6 +611,16 @@
         }
       }
     },
+    "peppy.toggle_android_mms_status_copying": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copying MMS…"
+          }
+        }
+      }
+    },
     "peppy.toggle_android_mms_status_copying_count": {
       "localizations": {
         "en": {
@@ -517,6 +637,46 @@
           "stringUnit": {
             "state": "translated",
             "value": "Up to date"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_status_mostly_up_to_date": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mostly up to date"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_note_not_copied": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Some MMS couldn't be copied."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_note_skipped": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Some MMS were skipped so your existing messages stay safe."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mms_note_both": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Some MMS couldn't be copied or were skipped."
           }
         }
       }
@@ -1496,7 +1656,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Recover skipped provider messages"
+            "value": "Retry missed MMS"
           }
         }
       }
@@ -1506,7 +1666,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Recovery queued. History capacity limits still apply."
+            "value": "Retry queued. The history limit still applies."
           }
         }
       }
@@ -1516,7 +1676,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Recovery already queued. History capacity limits still apply."
+            "value": "Retry already queued. The history limit still applies."
           }
         }
       }
@@ -1536,7 +1696,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Could not queue recovery. Try again."
+            "value": "Couldn't start the retry. Try again."
           }
         }
       }
@@ -5396,7 +5556,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Paused: message history limit reached"
+            "value": "Paused at history limit"
           }
         }
       }

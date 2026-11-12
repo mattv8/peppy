@@ -21,6 +21,7 @@ import (
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/util"
 	"go.mau.fi/util/exhttp"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -110,7 +111,7 @@ func TestUnknownHostRefused(t *testing.T) {
 	}
 }
 
-func TestUploadAndRevokePathsRefused(t *testing.T) {
+func TestInvalidUploadSessionAndRevokePathsRefused(t *testing.T) {
 	var arrivals atomic.Int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		arrivals.Add(1)
@@ -120,13 +121,148 @@ func TestUploadAndRevokePathsRefused(t *testing.T) {
 	client := safetyClient(t, server, nil, nil)
 	client.AuthData.TachyonAuthToken = []byte("synthetic")
 	client.AuthData.Browser = &gmproto.Device{}
-	_, uploadErr := client.StartUploadMedia(context.Background(), []byte("synthetic"), "image/png")
+	_, uploadErr := client.FinalizeUploadMedia(context.Background(), &libgm.StartGoogleUpload{UploadURL: "https://instantmessaging-pa.googleapis.com/upload?session=synthetic", EncryptedMediaBytes: []byte("synthetic"), MimeType: "image/png"})
 	_, revokeErr := client.UnpairBugle()
-	if !errors.Is(uploadErr, errRequestRefused) || !errors.Is(revokeErr, errRequestRefused) {
+	if uploadErr == nil || !errors.Is(revokeErr, errRequestRefused) {
 		t.Fatalf("upload=%v revoke=%v", uploadErr, revokeErr)
 	}
 	if arrivals.Load() != 0 {
 		t.Fatalf("refused requests reached server %d times", arrivals.Load())
+	}
+}
+
+func TestMediaUploadStartsAndFinalizesThroughGuard(t *testing.T) {
+	var requests atomic.Int32
+	response, err := proto.Marshal(&gmproto.UploadMediaResponse{Media: &gmproto.UploadedMedia{MediaID: "media", MediaNumber: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/upload" {
+			t.Fatalf("path=%q", request.URL.Path)
+		}
+		switch requests.Add(1) {
+		case 1:
+			writer.Header().Set("x-goog-upload-chunk-granularity", "1")
+			writer.Header().Set("x-goog-upload-url", "https://instantmessaging-pa.googleapis.com/upload")
+		case 2:
+			_, _ = writer.Write(response)
+		default:
+			t.Fatalf("unexpected request %d", requests.Load())
+		}
+	}))
+	defer server.Close()
+	client := safetyClient(t, server, nil, nil)
+	client.AuthData.TachyonAuthToken = []byte("synthetic")
+	client.AuthData.Browser = &gmproto.Device{}
+	media, err := client.UploadMedia(context.Background(), []byte("media"), "source.jpg", "image/jpeg")
+	if err != nil || media.GetMediaID() != "media" || requests.Load() != 2 {
+		t.Fatalf("media=%#v err=%v requests=%d", media, err, requests.Load())
+	}
+}
+
+func TestMediaUploadFinalizesAtReturnedUploadSession(t *testing.T) {
+	var requests atomic.Int32
+	response, err := proto.Marshal(&gmproto.UploadMediaResponse{Media: &gmproto.UploadedMedia{MediaID: "media", MediaNumber: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch requests.Add(1) {
+		case 1:
+			writer.Header().Set("x-goog-upload-chunk-granularity", "1")
+			writer.Header().Set("x-goog-upload-url", "https://instantmessaging-pa.googleapis.com/upload?upload_id=Synthetic_upload-1&upload_protocol=resumable")
+		case 2:
+			if request.URL.Path != "/upload" || request.URL.Query().Get("upload_id") != "Synthetic_upload-1" {
+				t.Fatalf("finalize url=%q", request.URL.String())
+			}
+			_, _ = writer.Write(response)
+		default:
+			t.Fatalf("unexpected request %d", requests.Load())
+		}
+	}))
+	defer server.Close()
+	client := safetyClient(t, server, nil, nil)
+	client.AuthData.TachyonAuthToken = []byte("synthetic")
+	client.AuthData.Browser = &gmproto.Device{}
+	media, err := client.UploadMedia(context.Background(), []byte("media"), "source.jpg", "image/jpeg")
+	if err != nil || media.GetMediaID() != "media" || requests.Load() != 2 {
+		t.Fatalf("media=%#v err=%v requests=%d", media, err, requests.Load())
+	}
+}
+
+func TestMediaUploadRefusesReturnedNonMediaURL(t *testing.T) {
+	for _, uploadURL := range []string{
+		"https://instantmessaging-pa.googleapis.com/upload?upload_id=",
+		"https://instantmessaging-pa.googleapis.com/upload?upload_protocol=resumable",
+		"https://instantmessaging-pa.googleapis.com/upload?upload_id=first&upload_id=second",
+		"https://instantmessaging-pa.googleapis.com/upload?upload_id=synthetic&upload_protocol=multipart",
+		"https://instantmessaging-pa.googleapis.com/upload?upload_id=synthetic&session=synthetic",
+		"https://instantmessaging-pa.googleapis.com/upload?upload_id=synthetic%2Fpath",
+		"https://instantmessaging-pa.clients6.google.com/upload?upload_id=synthetic",
+		"https://instantmessaging-pa.googleapis.com/upload/session?upload_id=synthetic",
+		"https://instantmessaging-pa.googleapis.com/$rpc/google.internal.communications.instantmessaging.v1.Messaging/SendMessage",
+		"https://messages.google.com/web/authentication",
+		"http://instantmessaging-pa.googleapis.com/upload",
+		"https://instantmessaging-pa.googleapis.com/upload?session=synthetic",
+		"https://instantmessaging-pa.googleapis.com/upload?",
+		"https://instantmessaging-pa.googleapis.com/%75pload",
+		"https://instantmessaging-pa.googleapis.com:/upload",
+		"https://instantmessaging-pa.googleapis.com/upload#synthetic",
+	} {
+		t.Run(uploadURL, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.URL.Path != "/upload" {
+					t.Fatalf("path=%q", request.URL.Path)
+				}
+				requests.Add(1)
+				writer.Header().Set("x-goog-upload-chunk-granularity", "1")
+				writer.Header().Set("x-goog-upload-url", uploadURL)
+			}))
+			defer server.Close()
+			client := safetyClient(t, server, nil, nil)
+			client.AuthData.TachyonAuthToken = []byte("synthetic")
+			client.AuthData.Browser = &gmproto.Device{}
+			if _, err := client.UploadMedia(context.Background(), []byte("media"), "source.jpg", "image/jpeg"); err == nil || requests.Load() != 1 {
+				t.Fatalf("err=%v requests=%d", err, requests.Load())
+			}
+		})
+	}
+}
+
+func TestMediaRequestsRequireExactURL(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		method  string
+		url     string
+		allowed bool
+	}{
+		{name: "start", method: http.MethodPost, url: "https://instantmessaging-pa.googleapis.com/upload", allowed: true},
+		{name: "download", method: http.MethodGet, url: "https://instantmessaging-pa.googleapis.com/upload", allowed: true},
+		{name: "wrong method", method: http.MethodPut, url: "https://instantmessaging-pa.googleapis.com/upload"},
+		{name: "alternate host", method: http.MethodPost, url: "https://instantmessaging-pa.clients6.google.com/upload"},
+		{name: "port", method: http.MethodPost, url: "https://instantmessaging-pa.googleapis.com:443/upload"},
+		{name: "userinfo", method: http.MethodPost, url: "https://user@instantmessaging-pa.googleapis.com/upload"},
+		{name: "upload session", method: http.MethodPost, url: "https://instantmessaging-pa.googleapis.com/upload?upload_id=Synthetic_upload-1&upload_protocol=resumable", allowed: true},
+		{name: "upload session download", method: http.MethodGet, url: "https://instantmessaging-pa.googleapis.com/upload?upload_id=synthetic"},
+		{name: "upload session alternate host", method: http.MethodPost, url: "https://instantmessaging-pa.clients6.google.com/upload?upload_id=synthetic"},
+		{name: "query", method: http.MethodPost, url: "https://instantmessaging-pa.googleapis.com/upload?session=synthetic"},
+		{name: "rpc query", method: http.MethodPost, url: "https://instantmessaging-pa.googleapis.com/$rpc/google.internal.communications.instantmessaging.v1.Messaging/SendMessage?upload_id=synthetic"},
+		{name: "empty query", method: http.MethodPost, url: "https://instantmessaging-pa.googleapis.com/upload?"},
+		{name: "encoded path", method: http.MethodPost, url: "https://instantmessaging-pa.googleapis.com/%75pload"},
+		{name: "fragment", method: http.MethodPost, url: "https://instantmessaging-pa.googleapis.com/upload#synthetic"},
+		{name: "path", method: http.MethodPost, url: "https://instantmessaging-pa.googleapis.com/upload/session"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request, err := http.NewRequest(test.method, test.url, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := isAllowedRequest(request); got != test.allowed {
+				t.Fatalf("allowed=%t, want %t", got, test.allowed)
+			}
+		})
 	}
 }
 

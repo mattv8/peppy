@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FamilyVaults, type FamilyVaultsBridge } from "./FamilyVaults";
+import type { VaultRequestView } from "./browser-bridge";
 import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
 
 vi.mock("qrcode", () => ({ default: { toDataURL: vi.fn(async () => "data:image/png;base64,qr") } }));
@@ -18,8 +19,8 @@ class FakeEventSource {
 const sources: FakeEventSource[] = [];
 
 const bridge = () => ({
-  enrollment_list_vaults: vi.fn<FamilyVaultsBridge["enrollment_list_vaults"]>(async () => []), enrollment_create_invite: vi.fn(), enrollment_list_invites: vi.fn(async () => []), enrollment_revoke_invite: vi.fn(),
-  enrollment_list_vault_requests: vi.fn(async () => []), enrollment_approve_vault_request: vi.fn(), enrollment_deny_vault_request: vi.fn(),
+  enrollment_list_vaults: vi.fn<FamilyVaultsBridge["enrollment_list_vaults"]>(async () => []), enrollment_create_invite: vi.fn(), enrollment_list_invites: vi.fn<FamilyVaultsBridge["enrollment_list_invites"]>(async () => []), enrollment_revoke_invite: vi.fn(),
+  enrollment_list_vault_requests: vi.fn<FamilyVaultsBridge["enrollment_list_vault_requests"]>(async () => []), enrollment_approve_vault_request: vi.fn(), enrollment_deny_vault_request: vi.fn(),
 });
 
 afterEach(() => { cleanup(); sources.splice(0); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -66,6 +67,17 @@ describe("FamilyVaults", () => {
     expect(await screen.findByText("Share this invite link")).toBeTruthy();
   });
 
+  it("shows the invite limit guidance for the structured invite_limit response", async () => {
+    installEventSource();
+    const mockedBridge = bridge();
+    mockedBridge.enrollment_create_invite.mockRejectedValueOnce(new Error("invite_limit"));
+    render(<FamilyVaults bridge={mockedBridge} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create invite link" }));
+
+    expect((await screen.findByRole("alert")).textContent).toBe(peppyCopy.family_vaults_error_invite_limit);
+  });
+
   it("shows an em dash when a vault creation timestamp is nonpositive", async () => {
     installEventSource();
     const mockedBridge = bridge();
@@ -80,6 +92,83 @@ describe("FamilyVaults", () => {
     render(<FamilyVaults bridge={mockedBridge} />);
     const vault = await screen.findByText("Avery");
     expect(vault.closest("tr")?.textContent).toContain("—");
+  });
+
+  it("keeps a created invite link when its follow-up refresh fails", async () => {
+    installEventSource();
+    const mockedBridge = bridge();
+    mockedBridge.enrollment_create_invite.mockResolvedValue({ inviteId: "invite-1", inviteLink: "https://example.test/#invite=token", expiresInSeconds: 60 });
+    render(<FamilyVaults bridge={mockedBridge} />);
+    await waitFor(() => expect(mockedBridge.enrollment_list_invites).toHaveBeenCalled());
+    mockedBridge.enrollment_list_invites.mockRejectedValueOnce(new Error("offline"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Create invite link" }));
+
+    expect(await screen.findByText("https://example.test/#invite=token")).toBeTruthy();
+    expect((await screen.findByRole("alert")).textContent).toBe("Peppy could not refresh family vaults.");
+  });
+
+  it("offers a refresh-only retry after a connected create succeeds but list refresh fails", async () => {
+    installEventSource();
+    const mockedBridge = bridge();
+    mockedBridge.enrollment_create_invite.mockResolvedValue({ inviteId: "invite-1", inviteLink: "https://example.test/#invite=token", expiresInSeconds: 60 });
+    render(<FamilyVaults bridge={mockedBridge} />);
+    await waitFor(() => expect(mockedBridge.enrollment_list_invites).toHaveBeenCalledOnce());
+    mockedBridge.enrollment_list_invites.mockRejectedValueOnce(new Error("offline"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Create invite link" }));
+    expect(await screen.findByText("https://example.test/#invite=token")).toBeTruthy();
+    const refresh = await screen.findByRole("button", { name: "Refresh family vaults" });
+    expect(sources[0]?.closed).toBe(false);
+
+    fireEvent.click(refresh);
+    await waitFor(() => expect(mockedBridge.enrollment_list_invites).toHaveBeenCalledTimes(3));
+    expect(mockedBridge.enrollment_create_invite).toHaveBeenCalledOnce();
+    expect(sources[0]?.closed).toBe(false);
+  });
+
+  it("uses the server's request_not_pending decision without treating access failures as a decision", async () => {
+    installEventSource();
+    const mockedBridge = bridge();
+    mockedBridge.enrollment_list_vault_requests.mockResolvedValue([{
+      requestId: "request-1", displayName: "Avery", client: "browser", state: "pending", createdAt: "2026-01-01T00:00:00Z", expiresInSeconds: 60,
+    }] satisfies VaultRequestView[]);
+    mockedBridge.enrollment_approve_vault_request.mockRejectedValueOnce(new Error("http-403"));
+    render(<FamilyVaults bridge={mockedBridge} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: peppyCopy.family_vaults_approve_request }));
+    expect((await screen.findByRole("alert")).textContent).toBe("Peppy could not approve this request. Check your access and try again.");
+
+    mockedBridge.enrollment_approve_vault_request.mockRejectedValueOnce(new Error("request_not_pending"));
+    fireEvent.click(screen.getByRole("button", { name: peppyCopy.family_vaults_approve_request }));
+    expect((await screen.findByRole("alert")).textContent).toBe(peppyCopy.family_vaults_error_request_not_pending);
+  });
+
+  it.each(["network", "http-401", "http-403"])("does not describe deny %s failures as no longer pending", async (code) => {
+    installEventSource();
+    const mockedBridge = bridge();
+    mockedBridge.enrollment_list_vault_requests.mockResolvedValue([{
+      requestId: "request-1", displayName: "Avery", client: "browser", state: "pending", createdAt: "2026-01-01T00:00:00Z", expiresInSeconds: 60,
+    }] satisfies VaultRequestView[]);
+    mockedBridge.enrollment_deny_vault_request.mockRejectedValueOnce(new Error(code));
+    render(<FamilyVaults bridge={mockedBridge} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: peppyCopy.family_vaults_deny_request }));
+    fireEvent.click(document.getElementById("family-vaults-deny-confirm-yes-request-1")!);
+    expect((await screen.findByRole("alert")).textContent).not.toBe(peppyCopy.family_vaults_error_request_not_pending);
+  });
+
+  it("renders the shared hour-relative age in the request row", async () => {
+    installEventSource();
+    const now = Date.now();
+    const mockedBridge = bridge();
+    mockedBridge.enrollment_list_vault_requests.mockResolvedValue([{
+      requestId: "request-1", displayName: "Avery", client: "browser", state: "pending", createdAt: new Date(now - 5 * 60 * 60_000).toISOString(), expiresInSeconds: 60,
+    }] satisfies VaultRequestView[]);
+    render(<FamilyVaults bridge={mockedBridge} />);
+
+    const expected = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }).format(-5, "hour");
+    expect((await screen.findByText("Avery")).closest("article")?.textContent).toContain(expected);
   });
 
   describe("SSE reconnect backoff (M22)", () => {

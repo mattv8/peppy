@@ -48,6 +48,8 @@ export function rcsSendStatusLabel(status: RcsSendStatus): string {
       return peppyCopy.rcs_media_state_sent;
     case "outcome_unknown":
       return peppyCopy.rcs_media_state_unknown;
+    case "send_failed":
+      return peppyCopy.rcs_media_state_send_failed;
     case "not_sent":
     case "members_changed":
       return peppyCopy.rcs_media_state_not_sent;
@@ -56,7 +58,7 @@ export function rcsSendStatusLabel(status: RcsSendStatus): string {
 
 /** Outgoing attachments whose outcome is not a clean success. */
 export function rcsSendNeedsAttention(status: RcsSendStatus | undefined): boolean {
-  return status === "not_sent" || status === "outcome_unknown" || status === "members_changed";
+  return status === "not_sent" || status === "send_failed" || status === "outcome_unknown" || status === "members_changed";
 }
 
 /** Zero-based attachment index for the retry command: the DTO value, else the position in the message. */
@@ -70,7 +72,7 @@ export function rcsOutcomeStatus(message: MessageView): MessageView {
   if (!statuses.some((status) => status !== undefined)) return message;
   const status = statuses.includes("outcome_unknown")
     ? "unknown"
-    : statuses.includes("not_sent")
+    : statuses.includes("not_sent") || statuses.includes("send_failed")
       ? "failed-confirmed"
       : statuses.includes("members_changed")
         ? "failed-before-submit"

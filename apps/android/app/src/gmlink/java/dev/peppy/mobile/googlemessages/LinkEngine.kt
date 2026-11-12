@@ -41,6 +41,8 @@ interface LinkHandle {
     fun revokeNativeSend(ticketId: String): String = "{\"code\":\"none\"}"
     fun bootstrapRcsObservation(requestJson: String): String = "{\"code\":\"rejected\"}"
 	fun refreshConversationIndex(): String = "{\"code\":\"unavailable\"}"
+    /** Reports ok for an index that is still usable; rescans only otherwise. */
+    fun ensureConversationIndex(): String = refreshConversationIndex()
     fun conversationCandidateSnapshot(): String = "{\"code\":\"conversation_candidate_snapshot_unavailable\"}"
     /** One Google group create. Never retried by the caller; an unavailable link reports unknown. */
     fun createRcsGroup(requestJson: String): String = "{\"code\":\"unknown\"}"

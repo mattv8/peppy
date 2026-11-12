@@ -785,7 +785,7 @@ function MessageMeta({ message: source, hideTime = false, onEditResend, onCreate
   const statusIcon = message.status === "sent" ? <Check size={10} aria-hidden /> : message.status === "read" ? <CheckCheck size={10} aria-hidden /> : <Clock size={10} aria-hidden />;
   const showTextStatus = !read && !deliveryConfirmed && Boolean(statusLabel) && (!compactStatus || !validTime);
   const showCompactStatus = !deliveryConfirmed && Boolean(compactStatus && validTime);
-  const hasRcsMediaIssues = rcsMessage && (message.attachments.some((attachment) => ["not_sent", "outcome_unknown", "members_changed"].includes(attachment.rcsSendStatus ?? "")) || message.attachments.filter((attachment) => canRetryRcsDownload(attachment.rcsState)).length >= 2);
+  const hasRcsMediaIssues = rcsMessage && (message.attachments.some((attachment) => ["not_sent", "send_failed", "outcome_unknown", "members_changed"].includes(attachment.rcsSendStatus ?? "")) || message.attachments.filter((attachment) => canRetryRcsDownload(attachment.rcsState)).length >= 2);
   if (!showTextStatus && !showTime && !showCompactStatus && !deliveryConfirmed && !phoneHistory && !read && !message.groupHint && !hasRcsMediaIssues) return null;
   return <div className="message-meta" data-message-meta={message.id} data-status={message.status} aria-live={rcsMessage ? "off" : undefined}>
     {showTextStatus && <span className="message-meta-status">{["failed-before-submit", "failed-confirmed"].includes(message.status!) ? <X size={10} aria-hidden /> : message.status === "unknown" ? <TriangleAlert size={10} aria-hidden /> : statusIcon}{statusLabel}</span>}
@@ -804,12 +804,13 @@ function RcsAttachmentStatus({ attachment, visible }: { attachment: AttachmentVi
   const text = attachment.rcsSendStatus === "sending" ? peppyCopy.rcs_media_state_sending
     : attachment.rcsSendStatus === "sent" ? peppyCopy.rcs_media_state_sent
       : attachment.rcsSendStatus === "outcome_unknown" ? peppyCopy.rcs_media_state_unknown
+        : attachment.rcsSendStatus === "send_failed" ? peppyCopy.rcs_media_state_send_failed
         : peppyCopy.rcs_media_state_not_sent;
   const icon = attachment.rcsSendStatus === "sending" ? <Loader2 className="tile-action-spinner" size={12} aria-hidden />
     : attachment.rcsSendStatus === "sent" ? <Check size={12} aria-hidden />
-      : attachment.rcsSendStatus === "outcome_unknown" ? <TriangleAlert size={12} aria-hidden />
+      : attachment.rcsSendStatus === "outcome_unknown" || attachment.rcsSendStatus === "send_failed" ? <TriangleAlert size={12} aria-hidden />
         : <X size={12} aria-hidden />;
-  return <small data-rcs-media-status data-rcs-media-state={attachment.rcsSendStatus}>{icon}{text}</small>;
+  return <small data-rcs-media-status data-rcs-media-state={attachment.rcsSendStatus} data-rcs-media-terminal-failure={attachment.rcsSendStatus === "send_failed" || undefined}>{icon}{text}</small>;
 }
 
 function showsReactionNoticeMeta(message: MessageView): boolean {
@@ -1955,6 +1956,15 @@ function ReenrolScreen({ onRetry, onStart, enrollment }: { onRetry(): Promise<vo
 
 function AccountDeletionResultDialog({ result, onDone }: { result: { outcome: "deleted" | "pending"; provider: "none" | "stripe" | "apple" }; onDone(): void }) {
   const deleted = result.outcome === "deleted";
+  const [managementFailed, setManagementFailed] = useState(false);
+  const openSubscriptionManagement = async () => {
+    setManagementFailed(false);
+    try {
+      await bridge.open_store_subscriptions();
+    } catch {
+      setManagementFailed(true);
+    }
+  };
   return <Modal
     id="account-deletion-result-dialog"
     title={deleted ? peppyCopy.account_deleted_title : peppyCopy.account_delete_pending_title}
@@ -1962,7 +1972,7 @@ function AccountDeletionResultDialog({ result, onDone }: { result: { outcome: "d
     actions={<button id="account-deletion-result-done" className="primary-button" type="button" onClick={onDone}>{peppyCopy.account_deleted_done}</button>}
   >
     <p id="account-deletion-result-body">{deleted ? peppyCopy.account_deleted_body : peppyCopy.account_delete_pending_body}</p>
-    {deleted && result.provider === "apple" && <><p id="account-deletion-result-apple-notice">{peppyCopy.account_deleted_apple_body}</p><button id="account-deletion-result-manage" className="secondary-button" type="button" onClick={() => void bridge.open_store_subscriptions()}>{peppyCopy.store_manage_cta}</button></>}
+    {deleted && result.provider === "apple" && <><p id="account-deletion-result-apple-notice">{peppyCopy.account_deleted_apple_body}</p><button id="account-deletion-result-manage" className="secondary-button" type="button" onClick={() => void openSubscriptionManagement()}>{peppyCopy.store_manage_cta}</button>{managementFailed && <p id="account-deletion-result-management-error" role="alert">{peppyCopy.store_manage_failed}</p>}</>}
   </Modal>;
 }
 
@@ -4964,7 +4974,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const attachments: Attachment[] = content.attachmentIds.map((id) => {
     const attachment = attachmentViews[id] ?? { id, name: "Attached file", state: "pending" };
     if (!rcsRoute.current) return attachment;
-    const mediaType = attachment.mediaType.toLowerCase();
+    const mediaType = attachment.mediaType?.toLowerCase() ?? "";
     const heic = mediaType === "image/heic" || mediaType === "image/heif" || (!mediaType && /\.hei[cf]$/i.test(attachment.name));
     const block = heic
       ? { kind: "heic" as const, text: peppyCopy.rcs_media_chip_heic }
@@ -5118,18 +5128,26 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const groupBarState = groupNoticeState(active?.group);
   const groupRcsLinked = Boolean(content.gatewayId && snapshot?.rcsStatus?.gateways.some((gateway) => gateway.gatewayId === content.gatewayId && gateway.state === "linked" && gateway.current && gateway.healthy));
   const typingLabel = groupTypingLabel(typing.participants, (address) => displayAddressName(address, resolution));
-  /** Copies the unsent parts of an RCS message back into the composer: the text only when the text carrier (first attachment) was not sent. Nothing is sent. */
-  const restoreUnsentRcs = (message: MessageView) => {
+  /** Copies definitely unsent RCS content into the draft. Nothing is sent. */
+  const restoreUnsentRcs = async (message: MessageView) => {
     if (!slotKey || !active) return;
     const unsentAttachments = message.attachments.filter((attachment) => attachment.rcsSendStatus === "not_sent" || attachment.rcsSendStatus === "members_changed");
-    const unsent = unsentAttachments.map((attachment) => attachment.id);
     const partialRcs = message.attachments.some((attachment) => attachment.rcsSendStatus !== undefined);
-    setAttachmentViews((current) => ({ ...current, ...Object.fromEntries(unsentAttachments.map((attachment) => [attachment.id, attachment])) }));
-    edit({ text: !partialRcs || unsentAttachments.some((attachment) => rcsAttachmentIndex(message, attachment) === 0) ? [message.body, content.text].filter(Boolean).join("\n") : content.text, attachmentIds: [...new Set([...content.attachmentIds, ...unsent])] });
+    const captionCarrier = message.attachments.find((attachment) => rcsAttachmentIndex(message, attachment) === 0);
+    const restoreCaption = Boolean(message.body) && (!partialRcs || Boolean(captionCarrier && unsentAttachments.includes(captionCarrier)));
+    const draftKey = store.resolve(slotKey);
+    const draft = store.get(draftKey);
+    if (!draft) return;
+    const recoveryId = `${message.id}\u0000${captionCarrier?.id ?? "body"}`;
+    setAttachmentViews((views) => ({ ...views, ...Object.fromEntries(unsentAttachments.map((attachment) => [attachment.id, attachment])) }));
+    await store.recoverRcsContent(draftKey, recoveryId, {
+      caption: restoreCaption ? message.body : undefined,
+      attachmentIds: unsentAttachments.map((attachment) => attachment.id),
+    });
   };
   const editGroupResend = (message: MessageView) => {
     if (!slotKey || groupLeft || !active) return;
-    restoreUnsentRcs(message);
+    void restoreUnsentRcs(message);
     setGroupNotice({ kind: "members-changed", key: slotKey, memberRevision: active.group?.memberRevision, members: active.group?.members });
   };
   // The unconfirmed create's body goes back into the composer; the user confirms with "Create it again" there.

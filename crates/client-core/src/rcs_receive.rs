@@ -1,4 +1,5 @@
 use crate::rcs_media;
+use crate::rcs_mirror::{MirrorKey, MirrorSource};
 use crate::{
     Client, ConversationId, Ctx, DeviceId, Direction, EnvelopePurpose, Error, Inserted, MessageId,
     MessagePayload, MessageRecord, PrivatePayload, RcsMessageStatus, Transport, enqueue, get_meta,
@@ -12,13 +13,21 @@ use uuid::Uuid;
 const MAX_DETECTORS_PER_CONVERSATION: i64 = 1_024;
 const RCS_PROVIDER_GUARD_BAND_MS: i64 = 120_000;
 const RCS_CLAIM_BACKFILL_WINDOW_MS: i64 = 15 * 60 * 1_000;
+/// How old a mirrored row may be while the capture still waits for the link to deliver its
+/// message. Shorter than the delay before the capture's next pass, so the row is decided then.
+const RCS_LINK_DELIVERY_GRACE_MS: i64 = 10_000;
+/// How long the capture waits for the link to report back a chat message Peppy itself sent.
+const RCS_SENT_ECHO_GRACE_MS: i64 = 120_000;
+/// The message box of a received row in the phone's message store.
+const PROVIDER_BOX_INBOX: i64 = 1;
 
-/// Link-owned lanes for 1:1 conversations, keyed by Google conversation id.
-const LANE_BY_GOOGLE_ONE_TO_ONE: &str = "SELECT o.conversation_id,m.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_conversation_mappings m ON m.peppy_conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=m.google_conversation_id WHERE m.google_conversation_id=? AND m.invalidated_at_ms IS NULL AND o.owner='link'";
+/// Link-owned lanes for 1:1 conversations, keyed by Google conversation id. A lane exists only on
+/// a mapping revision whose thread passed the one-to-one guard (`rcs_mapping::receive_guarded`).
+const LANE_BY_GOOGLE_ONE_TO_ONE: &str = "SELECT o.conversation_id,m.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_conversation_mappings m ON m.peppy_conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=m.google_conversation_id JOIN metadata guarded ON guarded.k='rcs_receive_guarded:' || o.conversation_id AND guarded.v=CAST(m.mapping_revision AS TEXT) WHERE m.google_conversation_id=? AND m.invalidated_at_ms IS NULL AND o.owner='link'";
 /// Link-owned lanes for group conversations that still receive (Live, Paused, or Proving).
 const LANE_BY_GOOGLE_GROUP: &str = "SELECT o.conversation_id,g.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_group_mapping g ON g.conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=g.google_conversation_id WHERE g.google_conversation_id=? AND g.state IN ('live','paused','proving') AND o.owner='link'";
 /// Every link-owned lane, 1:1 and group, in one list for historical recovery.
-const LINK_OWNED_LANES: &str = "SELECT o.conversation_id,m.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_conversation_mappings m ON m.peppy_conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=m.google_conversation_id WHERE o.owner='link' AND m.invalidated_at_ms IS NULL UNION ALL SELECT o.conversation_id,g.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_group_mapping g ON g.conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=g.google_conversation_id WHERE o.owner='link' AND g.state IN ('live','paused','proving') ORDER BY 1";
+const LINK_OWNED_LANES: &str = "SELECT o.conversation_id,m.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_conversation_mappings m ON m.peppy_conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=m.google_conversation_id JOIN metadata guarded ON guarded.k='rcs_receive_guarded:' || o.conversation_id AND guarded.v=CAST(m.mapping_revision AS TEXT) WHERE o.owner='link' AND m.invalidated_at_ms IS NULL UNION ALL SELECT o.conversation_id,g.google_conversation_id,o.ownership_generation FROM rcs_lane_ownership o JOIN rcs_group_mapping g ON g.conversation_id=o.conversation_id JOIN metadata owner ON owner.k='rcs_link_owner_google:' || o.conversation_id AND owner.v=g.google_conversation_id WHERE o.owner='link' AND g.state IN ('live','paused','proving') ORDER BY 1";
 
 fn lane_by_google(
     conn: &Connection,
@@ -90,6 +99,8 @@ pub struct RcsProviderRow {
     pub addresses: Vec<String>,
     pub restricted: bool,
     pub text_only: bool,
+    /// The row's transaction id. A mirrored chat row names its Google message id here.
+    pub transaction_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,8 +124,11 @@ pub enum RcsLinkOwnershipClaimOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RcsProviderRowRoute {
     Provider,
+    /// The link already delivered this message: the capture leaves the row alone.
     DetectorRecorded,
     Alert,
+    /// The row is seconds old and the link has not delivered it yet: ask again on a later pass.
+    Defer,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,6 +137,12 @@ pub enum RcsProviderRouteReason {
     NotLinkOwned,
     PreProof,
     GuardBand,
+    /// The link owns the chat but has not delivered this message, so the capture takes the row.
+    LinkLate,
+    /// The link owns the chat and the row does not name its Google message id.
+    Unidentified,
+    /// The link owns the chat and the row carries a picture or another attachment.
+    Media,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,6 +176,9 @@ pub struct RcsProjectedRecord {
     pub body: String,
     pub sent_at_ms: Option<i64>,
     pub tmp_id: Option<String>,
+    /// Other ids Google gives the same message. The copy in the phone's message store carries
+    /// one of this message's ids.
+    pub alternate_message_ids: Vec<String>,
     pub rcs_reported: bool,
     pub e2ee_reported: Option<bool>,
     /// Gateway-local media references never enter this record. The bounded, sanitized manifest
@@ -518,9 +541,12 @@ impl Client {
         let mut store = self.lock()?;
         let (conn, ctx) = store.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let Some(mapping) = crate::rcs_mapping::get(&tx, claim.conversation_id)? else {
-            tx.commit()?;
-            return Ok(RcsLinkOwnershipClaimOutcome::Refused);
+        let mapping = match crate::rcs_mapping::get(&tx, claim.conversation_id)? {
+            Some(mapping) if crate::rcs_mapping::receive_guarded(&tx, &mapping)? => mapping,
+            _ => {
+                tx.commit()?;
+                return Ok(RcsLinkOwnershipClaimOutcome::Refused);
+            }
         };
         let Some(lifecycle) = crate::rcs_mapping::recorded_link_lifecycle_metadata(&tx)? else {
             tx.commit()?;
@@ -713,7 +739,7 @@ impl Client {
             && let Some(tmp_id) = record.tmp_id.as_deref()
             && rcs_media::attachment_for_tmp_id(&tx, tmp_id)?.is_some()
         {
-            let Some((command, index, message_id)) = rcs_media::echo_slot(
+            let Some((_, _, message_id)) = rcs_media::echo_slot(
                 &tx,
                 ctx.device_id,
                 conversation_id,
@@ -737,6 +763,7 @@ impl Client {
             if let RcsIdentityOutcome::Rejected(code) = identity {
                 return Ok(RcsReceiveOutcome::Rejected(code));
             }
+            record_link_report(&tx, &mirror_ids(&record), conversation_id, message_id)?;
             set_meta(
                 &tx,
                 &rcs_media::echo_identity_key(
@@ -744,14 +771,6 @@ impl Client {
                     &record.google_message_id,
                 )?,
                 tmp_id,
-            )?;
-            rcs_media::apply_echo_receipt(
-                &tx,
-                &ctx,
-                command,
-                index,
-                message_id,
-                RcsProjectedStatus::Sent,
             )?;
             apply_reported_facts(
                 &tx,
@@ -779,6 +798,8 @@ impl Client {
                     .optional()?
         {
                 let message_id = message_id.parse().map_err(|_| Error::Database)?;
+                // Rolled back with the transaction when the identity is rejected.
+                record_link_report(&tx, &mirror_ids(&record), conversation_id, message_id)?;
                 return match record_identity(
                     &tx,
                     conversation_id,
@@ -815,11 +836,38 @@ impl Client {
                     RcsIdentityOutcome::Rejected(code) => Ok(RcsReceiveOutcome::Rejected(code)),
                 };
         }
+        if one_to_one_receive_closed(&tx, conversation_id, Some(&record.google_conversation_id))? {
+            return Ok(RcsReceiveOutcome::Rejected(
+                RcsReceiveCode::ConversationUnproven,
+            ));
+        }
         let message_id = deterministic_message_id(
             &ctx,
             &record.google_conversation_id,
             &record.google_message_id,
         )?;
+        // Reported before any copy is looked for: a second message reporting one of these ids
+        // makes the id untrusted, and then neither message is taken for a stored copy.
+        let link_identity = linked_message(&tx, &record)?.unwrap_or(message_id);
+        record_link_report(&tx, &mirror_ids(&record), conversation_id, link_identity)?;
+        if captured_text_copy(&tx, &record, conversation_id)?.is_some() {
+            // The capture stored this text from its copy in the phone's store. The link keeps
+            // the id without a message of its own, so a replay is a duplicate as well.
+            let identity = record_identity(
+                &tx,
+                conversation_id,
+                ownership_generation,
+                &record.google_message_id,
+                &record.google_conversation_id,
+                None,
+                false,
+            )?;
+            if let RcsIdentityOutcome::Rejected(code) = identity {
+                return Ok(RcsReceiveOutcome::Rejected(code));
+            }
+            tx.commit()?;
+            return Ok(RcsReceiveOutcome::Duplicate);
+        }
         let identity = record_identity(
             &tx,
             conversation_id,
@@ -832,6 +880,12 @@ impl Client {
         let outcome = match identity {
             RcsIdentityOutcome::Recorded => {
                 let unmatched_outgoing = record.direction == Direction::Outgoing;
+                let counterpart = one_to_one_counterpart(
+                    &tx,
+                    conversation_id,
+                    &record.google_conversation_id,
+                    record.direction,
+                )?;
                 let payload = MessagePayload {
                     record: MessageRecord {
                         message_id,
@@ -841,12 +895,13 @@ impl Client {
                     },
                     source_device_id: ctx.device_id,
                     provider_message_id: None,
-                    sender_address,
-                    recipients: Vec::new(),
+                    sender_address: sender_address.or(counterpart.sender),
+                    recipients: counterpart.recipients,
                     subject: None,
                     body: record.body,
                     transport: Transport::Rcs,
                     direction: record.direction,
+                    rcs_capture: unmatched_outgoing,
                     imported: historical,
                     sent_at_ms: record.sent_at_ms,
                     ordered_at_ms: None,
@@ -984,8 +1039,9 @@ impl Client {
                 )?,
                 &tmp_id,
             )?;
-            if let Some(status) =
-                rcs_media::apply_echo_receipt(&tx, &ctx, command, index, id, application.status)?
+            let (receipt_changed, aggregate) =
+                rcs_media::apply_echo_receipt(&tx, &ctx, command, index, id, application.status)?;
+            let aggregate_changed = if let Some(status) = aggregate
                 && apply_status(&tx, id, status, true)?
             {
                 enqueue(
@@ -1000,9 +1056,17 @@ impl Client {
                         rcs_reported: true,
                     },
                 )?;
-            }
+                true
+            } else {
+                false
+            };
+            let changed = receipt_changed || aggregate_changed;
             tx.commit()?;
-            return Ok(RcsReceiveOutcome::StatusApplied);
+            return Ok(if changed {
+                RcsReceiveOutcome::StatusApplied
+            } else {
+                RcsReceiveOutcome::StatusUnchanged
+            });
         }
         let mut message_id: Option<String> = tx.query_row(
             "SELECT message_id FROM rcs_message_identities WHERE google_message_id=? AND google_conversation_id=? AND conversation_id=?",
@@ -1039,6 +1103,15 @@ impl Client {
             }
         }
         let Some(message_id) = message_id else {
+            // The capture holds this text as an ordinary message, which carries no chat status.
+            if crate::rcs_mirror::link_left_message_to_capture(
+                &tx,
+                &application.google_message_id,
+                conversation_id,
+            )? {
+                tx.commit()?;
+                return Ok(RcsReceiveOutcome::StatusUnchanged);
+            }
             return Ok(RcsReceiveOutcome::Rejected(
                 RcsReceiveCode::IdentityConflict,
             ));
@@ -1161,7 +1234,9 @@ impl Client {
                 RcsReceiveCode::GatewayUnavailable,
             ));
         }
-        if group_receive_closed(&tx, conversation_id)? {
+        if group_receive_closed(&tx, conversation_id)?
+            || one_to_one_receive_closed(&tx, conversation_id, None)?
+        {
             return Ok(RcsRecoveryOutcome::Rejected(
                 RcsReceiveCode::ConversationUnproven,
             ));
@@ -1324,14 +1399,11 @@ impl Client {
             tx.commit()?;
             return Ok(provider_route(RcsProviderRouteReason::NotRestrictedText));
         }
-        let row_identities = row
-            .addresses
-            .iter()
-            .filter_map(|address| crate::rcs_mapping::canonical_recipient(address))
-            .collect::<BTreeSet<_>>();
-        let (resolved, uncertain) =
-            crate::rcs_mapping::peppy_conversations_for_identity_set(&tx, &row_identities)?;
-        let mut conversations = resolved.into_iter().collect::<BTreeSet<_>>();
+        // A row belongs to a link conversation by its numbers alone: the one-to-one chat proven
+        // for its other party, or the group whose roster it names. Stored message history does
+        // not decide this, since rows captured before the link owned the lane name the same
+        // party and would make every later row look uncertain.
+        let mut conversations = BTreeSet::new();
         let mut statement = tx.prepare(
             "SELECT m.peppy_conversation_id,p.canonical_participant,p.identity_region,p.own_identity FROM rcs_conversation_mappings m JOIN rcs_mapping_proofs p ON p.peppy_conversation_id=m.peppy_conversation_id AND p.mapping_revision=m.mapping_revision",
         )?;
@@ -1365,7 +1437,9 @@ impl Client {
                 .addresses
                 .iter()
                 .filter(|address| {
-                    !crate::conversation_match::confirmed_own_address(&own, address, Some(&region))
+                    // Exactly the phone's number: a number that merely ends like it is someone else.
+                    crate::conversation_match::canonical_address(address, Some(&region))
+                        != crate::conversation_match::canonical_address(&own, Some(&region))
                 })
                 .filter_map(|address| crate::rcs_mapping::canonical_recipient(address))
                 .collect::<BTreeSet<_>>();
@@ -1373,7 +1447,17 @@ impl Client {
                 conversations.insert(conversation.parse().map_err(|_| Error::Database)?);
             }
         }
-        if uncertain || conversations.len() > 1 {
+        // Only a proven chat or roster may hand a row to the link. Without one, a row that names
+        // a single number is still placed through the number index, so an unlinked thread is
+        // told apart from a row that cannot be placed; such a row is never withheld.
+        let proven_by_numbers = !conversations.is_empty();
+        if let ([address], false) = (row.addresses.as_slice(), proven_by_numbers)
+            && let Some(identity) = crate::rcs_mapping::canonical_recipient(address)
+            && let Some(indexed) = crate::rcs_mapping::indexed_conversation(&tx, &identity)?
+        {
+            conversations.insert(indexed);
+        }
+        if conversations.len() > 1 {
             tx.commit()?;
             return Ok(RcsProviderRowRouteResult {
                 route: RcsProviderRowRoute::Alert,
@@ -1405,7 +1489,9 @@ impl Client {
             return Ok(provider_route(RcsProviderRouteReason::NotLinkOwned));
         }
         let linked_google = match crate::rcs_mapping::get(&tx, conversation_id)? {
-            Some(mapping) => Some(mapping.google_conversation_id),
+            // A send-only proof does not make the link the receiver: the provider keeps the row.
+            Some(mapping) => crate::rcs_mapping::receive_guarded(&tx, &mapping)?
+                .then_some(mapping.google_conversation_id),
             None => crate::rcs_group::receivable_mapping(&tx, conversation_id)?
                 .map(|mapping| mapping.google_conversation_id),
         };
@@ -1414,6 +1500,13 @@ impl Client {
             tx.commit()?;
             return Ok(provider_route(RcsProviderRouteReason::NotLinkOwned));
         }
+        if !proven_by_numbers {
+            tx.commit()?;
+            return Ok(RcsProviderRowRouteResult {
+                route: RcsProviderRowRoute::Alert,
+                reason: None,
+            });
+        }
         if row.observed_at_ms <= ownership.proof_time_ms {
             tx.commit()?;
             return Ok(provider_route(RcsProviderRouteReason::PreProof));
@@ -1421,6 +1514,49 @@ impl Client {
         if row.observed_at_ms <= ownership.proof_time_ms + RCS_PROVIDER_GUARD_BAND_MS {
             tx.commit()?;
             return Ok(provider_route(RcsProviderRouteReason::GuardBand));
+        }
+        // The link owning the chat does not prove it delivered this message. The row is left
+        // alone only once the link has stored, in this conversation, the text its Google message
+        // id names. A row with a picture is always captured: the two copies can hold different
+        // media.
+        if !row.text_only {
+            tx.commit()?;
+            return Ok(provider_route(RcsProviderRouteReason::Media));
+        }
+        let Some(mirror_id) = row
+            .transaction_id
+            .as_deref()
+            .and_then(crate::rcs_mirror::mirrored_message_id)
+        else {
+            tx.commit()?;
+            return Ok(provider_route(RcsProviderRouteReason::Unidentified));
+        };
+        let delivered = MirrorKey {
+            mirror_id: &mirror_id,
+            conversation_id,
+            source: MirrorSource::Link,
+        };
+        let delivered_text = match crate::rcs_mirror::message(&tx, delivered)? {
+            Some(message_id) => crate::rcs_mirror::is_text_only(&tx, message_id)?,
+            None => false,
+        };
+        if !delivered_text {
+            let now_ms = crate::notifications::now_ms();
+            let age_ms = now_ms.saturating_sub(row.observed_at_ms);
+            let outgoing = row.provider_type != PROVIDER_BOX_INBOX;
+            let link_may_still_deliver = (0..RCS_LINK_DELIVERY_GRACE_MS).contains(&age_ms)
+                || (0..RCS_SENT_ECHO_GRACE_MS).contains(&age_ms)
+                    && outgoing
+                    && sent_message_awaits_its_echo(&tx, conversation_id, now_ms)?;
+            tx.commit()?;
+            return Ok(if link_may_still_deliver {
+                RcsProviderRowRouteResult {
+                    route: RcsProviderRowRoute::Defer,
+                    reason: None,
+                }
+            } else {
+                provider_route(RcsProviderRouteReason::LinkLate)
+            });
         }
         record_provider_detector_in_transaction(
             &tx,
@@ -1433,6 +1569,10 @@ impl Client {
                 observed_at_ms: row.observed_at_ms,
                 observed_generation: ownership.ownership_generation,
             },
+        )?;
+        tx.execute(
+            "UPDATE rcs_provider_detectors SET resolved=1 WHERE conversation_id=? AND provider_row_id=?",
+            params![conversation_id.to_string(), row.provider_row_id],
         )?;
         tx.commit()?;
         Ok(RcsProviderRowRouteResult {
@@ -1782,6 +1922,93 @@ fn validate_provider_row(row: &RcsProviderRow) -> Result<(), Error> {
     Ok(())
 }
 
+/// Every id Google gives one chat message. Its copy in the phone's store carries one of them.
+fn mirror_ids(record: &RcsProjectedRecord) -> Vec<String> {
+    std::iter::once(&record.google_message_id)
+        .chain(&record.alternate_message_ids)
+        .cloned()
+        .collect()
+}
+
+/// Remembers the ids the link reported for one message, under the link's own identity for it,
+/// so its copy in the phone's store is recognised later and an id reported for two messages is
+/// found out.
+fn record_link_report(
+    tx: &Connection,
+    mirror_ids: &[String],
+    conversation_id: ConversationId,
+    message_id: MessageId,
+) -> Result<(), Error> {
+    for mirror_id in mirror_ids {
+        let key = MirrorKey {
+            mirror_id,
+            conversation_id,
+            source: MirrorSource::Link,
+        };
+        crate::rcs_mirror::record(tx, key, message_id)?;
+    }
+    Ok(())
+}
+
+/// The message the link already holds for a record's own Google message id.
+fn linked_message(
+    tx: &Connection,
+    record: &RcsProjectedRecord,
+) -> Result<Option<MessageId>, Error> {
+    tx.query_row(
+        "SELECT message_id FROM rcs_message_identities WHERE google_message_id=? AND google_conversation_id=?",
+        params![record.google_message_id, record.google_conversation_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()?
+    .flatten()
+    .map(|message_id| message_id.parse().map_err(|_| Error::Database))
+    .transpose()
+}
+
+/// The message the capture already stored in this conversation from the copy of a text the link
+/// now reports. A message with a picture on either side is never matched: the two copies can
+/// hold different media, so both are kept.
+fn captured_text_copy(
+    tx: &Connection,
+    record: &RcsProjectedRecord,
+    conversation_id: ConversationId,
+) -> Result<Option<MessageId>, Error> {
+    if !record.attachments.is_empty() {
+        return Ok(None);
+    }
+    for mirror_id in &mirror_ids(record) {
+        let key = MirrorKey {
+            mirror_id,
+            conversation_id,
+            source: MirrorSource::Capture,
+        };
+        if let Some(message_id) = crate::rcs_mirror::message(tx, key)?
+            && crate::rcs_mirror::is_text_only(tx, message_id)?
+        {
+            return Ok(Some(message_id));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether Peppy sent a chat message in this conversation moments ago that the link has not
+/// reported back yet. Its copy in the phone's store must not be captured as a second message.
+fn sent_message_awaits_its_echo(
+    tx: &Connection,
+    conversation_id: ConversationId,
+    now_ms: i64,
+) -> Result<bool, Error> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rcs_send_ledger l JOIN commands c ON c.command_id=l.command_id JOIN messages m ON m.id=c.message_id
+          WHERE m.conversation_id=?1 AND l.attempted_at_ms>?2
+            AND NOT EXISTS(SELECT 1 FROM rcs_message_identities i WHERE i.message_id=c.message_id))",
+        params![conversation_id.to_string(), now_ms.saturating_sub(RCS_SENT_ECHO_GRACE_MS)],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
 fn record_provider_detector_in_transaction(
     tx: &Connection,
     ctx: &Ctx<'_>,
@@ -1823,6 +2050,67 @@ fn record_provider_detector_in_transaction(
         params![conversation_key, detector.provider_row_id, detector.provider_thread_id, detector.provider_type, detector.observed_at_ms, detector.observed_generation],
     )?;
     Ok(RcsIdentityOutcome::Recorded)
+}
+
+/// Whether a one-to-one conversation no longer receives through the link. It does once it holds a
+/// chat proof that is withdrawn, is for another chat, or was made by a send on a thread that
+/// carries someone else (`rcs_mapping::receive_guarded`). A caller may hold a receive context
+/// from before that change, so new messages and recovery progress check here as well.
+fn one_to_one_receive_closed(
+    tx: &Connection,
+    conversation_id: ConversationId,
+    google_conversation_id: Option<&str>,
+) -> Result<bool, Error> {
+    let closed: Option<bool> = tx
+        .query_row(
+            "SELECT m.invalidated_at_ms IS NOT NULL OR (?2 IS NOT NULL AND m.google_conversation_id<>?2) OR NOT EXISTS(SELECT 1 FROM metadata guarded WHERE guarded.k='rcs_receive_guarded:' || m.peppy_conversation_id AND guarded.v=CAST(m.mapping_revision AS TEXT)) FROM rcs_conversation_mappings m WHERE m.peppy_conversation_id=?1",
+            params![conversation_id.to_string(), google_conversation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(closed.unwrap_or(false))
+}
+
+/// How a one-to-one chat message names the other party, so that it reads like an SMS in the same
+/// thread: a reply is addressed from the newest message.
+#[derive(Default)]
+struct OneToOneCounterpart {
+    sender: Option<String>,
+    recipients: Vec<String>,
+}
+
+/// The proven participant of the one-to-one chat this conversation is mapped to. A group
+/// conversation, or one without a current receive-guarded proof for this chat, names no one.
+fn one_to_one_counterpart(
+    tx: &Connection,
+    conversation_id: ConversationId,
+    google_conversation_id: &str,
+    direction: Direction,
+) -> Result<OneToOneCounterpart, Error> {
+    let participant: Option<String> = tx
+        .query_row(
+            "SELECT p.canonical_participant FROM rcs_conversation_mappings m JOIN rcs_mapping_proofs p ON p.peppy_conversation_id=m.peppy_conversation_id AND p.mapping_revision=m.mapping_revision JOIN metadata guarded ON guarded.k='rcs_receive_guarded:' || m.peppy_conversation_id AND guarded.v=CAST(m.mapping_revision AS TEXT) WHERE m.peppy_conversation_id=? AND m.google_conversation_id=? AND m.class='one_to_one' AND m.invalidated_at_ms IS NULL",
+            params![conversation_id.to_string(), google_conversation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(participant) = participant else {
+        return Ok(OneToOneCounterpart::default());
+    };
+    let address = participant
+        .strip_prefix("raw:")
+        .unwrap_or(&participant)
+        .to_owned();
+    Ok(match direction {
+        Direction::Incoming => OneToOneCounterpart {
+            sender: Some(address),
+            recipients: Vec::new(),
+        },
+        Direction::Outgoing => OneToOneCounterpart {
+            sender: None,
+            recipients: vec![address],
+        },
+    })
 }
 
 /// Resolves who sent one observation. The outer `Err` is a database failure; the inner `Err`
@@ -2495,7 +2783,7 @@ mod receive_context_snapshot_tests {
                 "CREATE TABLE metadata(k TEXT PRIMARY KEY,v TEXT NOT NULL);
                  CREATE TABLE rcs_link_status_projection(gateway_device_id TEXT PRIMARY KEY,state TEXT NOT NULL,availability INTEGER NOT NULL,health INTEGER NOT NULL,phone_responsive INTEGER NOT NULL,observed_at_ms INTEGER NOT NULL);
                  CREATE TABLE rcs_lane_ownership(conversation_id TEXT PRIMARY KEY,owner TEXT NOT NULL,ownership_generation INTEGER NOT NULL,history_token TEXT);
-                 CREATE TABLE rcs_conversation_mappings(peppy_conversation_id TEXT PRIMARY KEY,google_conversation_id TEXT NOT NULL,invalidated_at_ms INTEGER);",
+                 CREATE TABLE rcs_conversation_mappings(peppy_conversation_id TEXT PRIMARY KEY,google_conversation_id TEXT NOT NULL,mapping_revision INTEGER NOT NULL,invalidated_at_ms INTEGER);",
             )
             .unwrap();
         let device_id = DeviceId::new();
@@ -2545,8 +2833,14 @@ mod receive_context_snapshot_tests {
             .unwrap();
         reader
             .execute(
-                "INSERT INTO rcs_conversation_mappings VALUES(?,'google-conversation',NULL)",
+                "INSERT INTO rcs_conversation_mappings VALUES(?,'google-conversation',1,NULL)",
                 [conversation_id.to_string()],
+            )
+            .unwrap();
+        reader
+            .execute(
+                "INSERT INTO metadata(k,v) VALUES(?,'1')",
+                [format!("rcs_receive_guarded:{conversation_id}")],
             )
             .unwrap();
         reader

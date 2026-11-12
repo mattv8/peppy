@@ -7,10 +7,12 @@ import dev.peppy.mobile.attachments.AttachmentRetentionDriver
 import dev.peppy.mobile.gateway.GatewayAccountIdentity
 import dev.peppy.mobile.attachments.AttachmentStorageLoad
 import dev.peppy.mobile.gateway.GatewayAccountHost
+import dev.peppy.mobile.gateway.GatewayPolicyHost
 import dev.peppy.mobile.gateway.NativeGateway
 import dev.peppy.mobile.gateway.GatewayHttp
 import dev.peppy.mobile.mms.MmsMediaTransfer
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONObject
 import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.NativeAttachmentState
@@ -24,15 +26,23 @@ internal class RcsMediaReceiveCoordinator(
     private val client: NativeClientInterface,
     private val io: RcsMediaReceiveIo,
     private val current: () -> Boolean,
+    private val networkAllowed: () -> Boolean = { true },
+    private val rediscover: () -> Unit = {},
 ) {
     constructor(context: Context, files: RcsMediaPrivateFiles, queue: RcsMediaTransferQueue,
-        client: NativeClientInterface, linkLease: LinkHandleLease, current: () -> Boolean,
-    ) : this(files, queue, client, AndroidRcsMediaReceiveIo(context, linkLease, client), current)
+        client: NativeClientInterface, linkLease: LinkHandleLease, current: () -> Boolean, rediscover: () -> Unit = {},
+    ) : this(
+        files, queue, client, AndroidRcsMediaReceiveIo(context, linkLease, client), current,
+        { !GatewayPolicyHost(context).mediaWifiOnly || GatewayPolicyHost.onWifi(context) }, rediscover,
+    )
 
-    fun submit(task: NativePendingRcsMediaReceive): Boolean = queue.submit("receive/${task.messageId}/${task.attachmentIndex}") { lease ->
+    fun submit(task: NativePendingRcsMediaReceive): Boolean = queue.submit(
+        "receive/${task.messageId}/${task.attachmentIndex}", rediscover,
+    ) { lease ->
         if (!lease.isCurrent() || !current()) return@submit
         val scope = io.captureAccount() ?: return@submit
         if (!valid(lease, scope) || scopeDenied(scope)) return@submit
+        if (!networkAllowed()) return@submit
         try {
             // Prepared ciphertext must not depend on another capacity lookup (or Google fetch).
             var admission = client.gatewayAdmitRcsMediaDownload(task.messageId, task.attachmentIndex, null)
@@ -67,6 +77,7 @@ internal class RcsMediaReceiveCoordinator(
             return
         }
         try {
+            if (!networkAllowed()) return
             if (!valid(lease, scope)) return
             val response = io.download(task, destination)
             if (!valid(lease, scope)) return
@@ -96,7 +107,7 @@ internal class RcsMediaReceiveCoordinator(
         attachmentId: String,
         scope: GatewayAccountHost.AttachmentStorageScope,
     ) {
-        if (!valid(lease, scope)) return
+        if (!networkAllowed() || !valid(lease, scope)) return
         val attachment = client.attachmentInfo(attachmentId)
         if (attachment.state in setOf(NativeAttachmentState.UPLOADED, NativeAttachmentState.AVAILABLE)) {
             finalize(lease, task, scope)
@@ -107,7 +118,8 @@ internal class RcsMediaReceiveCoordinator(
             return
         }
         if (!valid(lease, scope)) return
-        val http = fencedHttp(lease, scope) ?: return
+        val policyDeferred = AtomicBoolean(false)
+        val http = fencedHttp(lease, scope, policyDeferred) ?: return
         val result = MmsMediaTransfer(
             client = client,
             http = http,
@@ -115,6 +127,7 @@ internal class RcsMediaReceiveCoordinator(
             pendingUploads = { client.pendingUploads().filter { it.attachmentId == attachmentId } },
             pendingDownloads = { emptyList() },
         ).run(limit = 1)
+        if (policyDeferred.get()) return
         if (!valid(lease, scope)) return
         if (client.attachmentInfo(attachmentId).state in setOf(NativeAttachmentState.UPLOADED, NativeAttachmentState.AVAILABLE)) {
             finalize(lease, task, scope)
@@ -127,10 +140,18 @@ internal class RcsMediaReceiveCoordinator(
         }
     }
 
-    private fun fencedHttp(lease: RcsMediaTransferQueue.Lease, scope: GatewayAccountHost.AttachmentStorageScope): GatewayHttp? =
-        io.http(scope)?.also { http ->
-            http.setBeforeRequest { check(valid(lease, scope)) { "RCS media scope retired" } }
+    private fun fencedHttp(lease: RcsMediaTransferQueue.Lease, scope: GatewayAccountHost.AttachmentStorageScope, policyDeferred: AtomicBoolean? = null): GatewayHttp? {
+        if (!networkAllowed()) return null
+        return io.http(scope)?.also { http ->
+            http.setBeforeRequest {
+                if (!networkAllowed()) {
+                    policyDeferred?.set(true)
+                    throw PolicyDeferredException
+                }
+                check(valid(lease, scope)) { "RCS media scope retired" }
+            }
         }
+    }
 
     private fun finalize(lease: RcsMediaTransferQueue.Lease, task: NativePendingRcsMediaReceive, scope: GatewayAccountHost.AttachmentStorageScope) {
         var finalized = false
@@ -203,6 +224,8 @@ internal class RcsMediaReceiveCoordinator(
         fun clearCapacityCache() = synchronized(capacityLock) { capacityCache = null }
     }
 }
+
+private object PolicyDeferredException : IllegalStateException()
 
 /** Native host effects; core admission and hosted transfer remain in the coordinator. */
 internal interface RcsMediaReceiveIo {

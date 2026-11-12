@@ -23,6 +23,25 @@ describe("public attachment publication", () => {
     expect(upload).toHaveBeenCalledWith("/v1/attachments/remote-object/public-copies", derivative, { fileName: "image.png" });
   });
 
+  it.each([
+    undefined,
+    null,
+    {},
+    { token: null, safe_name: "image.png" },
+    { token: false, safe_name: "image.png" },
+    { token: 1, safe_name: "image.png" },
+    { token: "share-token", safe_name: null },
+    { token: "share-token", safe_name: false },
+    { token: "share-token", safe_name: 1 },
+    { token: "", safe_name: "image.png" },
+    { token: "share-token", safe_name: "" },
+  ])("rejects malformed successful publication responses: %j", async response => {
+    const session = { query: vi.fn(async () => ({ remoteObjectId: "remote-object" })), mutate: vi.fn(), publicImage: vi.fn(async () => ({ bytes: new Uint8Array([1]), name: "image.png" })) };
+    const upload = { postPublicCopy: async <T>() => response as T };
+
+    await expect(publishAttachment(session, upload, { id, confirmed: true })).rejects.toMatchObject({ kind: "invalid" });
+  });
+
   it("checkpoints exact policy removal from publication but leaves generic 404 and 410 retryable", async () => {
     const mutate = vi.fn(async () => ({}));
     const session = { query: vi.fn(async () => ({ remoteObjectId: "remote-object" })), mutate, publicImage: vi.fn(async () => ({ bytes: new Uint8Array([1]), name: "image.png" })) };

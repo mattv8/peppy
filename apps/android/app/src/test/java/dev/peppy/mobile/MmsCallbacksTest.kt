@@ -46,6 +46,7 @@ class MmsCallbacksTest : GatewayTestBase() {
 
 
     private fun pdu(id: String) = File(context.filesDir, "mms-pdu/$id.pdu")
+    private fun trial(id: String) = File(context.filesDir, "mms-pdu/.mms-fit-$id.pdu")
     private fun fit(id: String) = File(context.noBackupFilesDir, "mms-fit/$id")
     private fun callback(id: String) = Intent(MmsStatusReceiver.ACTION).setData(android.net.Uri.parse("peppy-mms://callback/$id"))
     private fun pendingResult(code: Int) = android.content.BroadcastReceiver.PendingResult::class.java.declaredConstructors
@@ -62,7 +63,7 @@ class MmsCallbacksTest : GatewayTestBase() {
 
     @Test
     fun pendingAndUnknownAttemptsAgeAfterSevenDaysButOwedEvidenceDoesNot() {
-        var now = 1_000_000L
+        var now = TimeUnit.DAYS.toMillis(10)
         val store = MmsCallbackStore(context, now = { now })
         val pending = UUID.randomUUID().toString()
         val unknown = UUID.randomUUID().toString()
@@ -82,6 +83,24 @@ class MmsCallbacksTest : GatewayTestBase() {
         assertFalse(store.contains(unknown))
         assertTrue("unreplayed callback evidence is never expired", pdu(owed).exists())
         assertEquals(listOf(owed to NativeSendResult.SENT), store.owed())
+    }
+
+    @Test fun cleanupReclaimsOnlyStaleInactiveFitTrials() {
+        var now = TimeUnit.DAYS.toMillis(10)
+        val stale = UUID.randomUUID().toString()
+        val active = UUID.randomUUID().toString()
+        val recent = UUID.randomUUID().toString()
+        val store = MmsCallbackStore(context, now = { now })
+        listOf(stale, active, recent).forEach { id -> trial(id).parentFile!!.mkdirs(); trial(id).writeText("plaintext") }
+        assertTrue(store.register(active))
+        trial(stale).setLastModified(now - TimeUnit.DAYS.toMillis(7) - 1)
+        trial(active).setLastModified(now - TimeUnit.DAYS.toMillis(7) - 1)
+
+        store.cleanup()
+
+        assertFalse(trial(stale).exists())
+        assertTrue(trial(active).exists())
+        assertTrue(trial(recent).exists())
     }
 
     @Test

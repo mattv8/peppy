@@ -158,6 +158,7 @@ object NativeGateway {
     private val retirementListeners = CopyOnWriteArraySet<() -> Unit>()
     private var retirement: Retirement? = null
     @VisibleForTesting internal var persistenceDecisionHook: (() -> Unit)? = null
+    @VisibleForTesting internal var relayArchiveHook: (() -> Unit)? = null
 
     private enum class RetirementState { REVOKING, REVOCATION_FAILED, COMMIT_FAILED }
 
@@ -435,6 +436,17 @@ object NativeGateway {
         } == true
     }
 
+    /** Applies a captured enrollment's volatile relay state only while that exact binding remains live. */
+    internal fun applyCurrentRelayRuntime(
+        context: Context,
+        credential: GatewayAccountCredential,
+        apply: () -> Unit,
+    ): Boolean = synchronized(lock) {
+        if (retirement != null || !isCurrentAccountCredential(context, credential)) return@synchronized false
+        apply()
+        true
+    }
+
     internal fun ownerEnrollmentMaterial(context: Context): OwnerEnrollmentMaterial? = synchronized(lock) {
         if (!sharedKeysReady) return null
         val prefs = prefs(context)
@@ -473,51 +485,62 @@ object NativeGateway {
             failRetirement(retirementToken)
             return false
         }
-        return synchronized(lock) {
-            if (retirement !== retirementToken || generation != retirementToken.generation || client !== retirementToken.client) return@synchronized false
-            val prefs = prefs(context)
-            val identity = identity(prefs) ?: return@synchronized false
-            val archive = File(context.noBackupFilesDir, "peppy-archives/${archiveId(identity)}")
-            val staging = File(archive.parentFile, ".${archive.name}.staging")
-            try {
+        var staging: File? = null
+        try {
+            val prepared = synchronized(lock) {
+                if (retirement !== retirementToken || generation != retirementToken.generation || client !== retirementToken.client) return@synchronized false
+                val prefs = prefs(context)
+                val identity = identity(prefs) ?: return@synchronized false
+                val archive = File(context.noBackupFilesDir, "peppy-archives/${archiveId(identity)}")
+                staging = File(archive.parentFile, ".${archive.name}.staging")
             // Quiesce the client before inspecting SQLite's database/WAL pair.  Copying while a
             // worker can append a WAL frame could make an archive that is internally inconsistent.
             client?.dispose(); client = null; sharedKeysReady = false; generation++
             if (!archive.exists()) {
-                if (!staging.mkdirs()) return false
+                if (!checkNotNull(staging).mkdirs()) return@synchronized false
                 // Copy first, then atomically publish the completed archive directory. Active
                 // files are only removed after every sidecar and wrapped key have a durable copy.
                 databaseFiles(context).forEach { source ->
-                    if (source.exists()) source.copyTo(File(staging, source.name), overwrite = false)
+                    if (source.exists()) source.copyTo(File(checkNotNull(staging), source.name), overwrite = false)
                 }
                 val wrappedKey = prefs.getString(P_DB_KEY, null) ?: return false
-                File(staging, "db-key.sealed").writeText(wrappedKey, Charsets.UTF_8)
-                File(staging, "identity").writeText(identity.encode(), Charsets.UTF_8)
-                if (!staging.renameTo(archive)) return false
+                File(checkNotNull(staging), "db-key.sealed").writeText(wrappedKey, Charsets.UTF_8)
+                File(checkNotNull(staging), "identity").writeText(identity.encode(), Charsets.UTF_8)
+                if (!checkNotNull(staging).renameTo(archive)) return@synchronized false
             }
             // An archive left by an interrupted cleanup is resumable, but never substitute a
             // different identity/key record for the active enrollment.
-            if (archive.resolve("identity").readText(Charsets.UTF_8) != identity.encode() ||
+                if (archive.resolve("identity").readText(Charsets.UTF_8) != identity.encode() ||
                 !archive.resolve("db-key.sealed").isFile
-            ) return false
+                ) return@synchronized false
             databaseFiles(context).forEach { file -> if (file.exists() && !file.delete()) return false }
-            // The active binding and all state that fences its sync history disappear together as
-            // far as each durable store permits.  No old credential remains usable by new work.
-            // Capture cleanup under the still-current credential before clearing the enrollment.
+                true
+            }
+            if (!prepared) return false
+            // The retirement token and incremented generation fence the captured owner while relay
+            // bookkeeping takes its journal lock. Do not hold the native owner monitor here: relay
+            // publication revalidates this generation before it can publish.
+            relayArchiveHook?.invoke()
             RelayWakeRuntime.archiveEnrollment(context)
-            ContactSyncHost.ensureObserver(context)
-            if (!prefs.edit().clear().commit()) return false
-            GatewayStateStore(context).resetForNewEnrollment()
-            ServerReachabilityState.clear()
-            RemoteMessagingService.stop(context)
-            true
-            } catch (_: IOException) {
-                false
-            } finally {
-                if (staging.exists()) staging.deleteRecursively()
+            return synchronized(lock) {
+                if (retirement !== retirementToken || generation != retirementToken.generation + 1 || client != null) return@synchronized false
+                val prefs = prefs(context)
+                if (identity(prefs) == null) return@synchronized false
+                ContactSyncHost.ensureObserver(context)
+                if (!prefs.edit().clear().commit()) return@synchronized false
+                GatewayStateStore(context).resetForNewEnrollment()
+                ServerReachabilityState.clear()
+                RemoteMessagingService.stop(context)
+                true
+            }
+        } catch (_: IOException) {
+            return false
+        } finally {
+                staging?.takeIf(File::exists)?.deleteRecursively()
+                synchronized(lock) {
                 retirement = null
                 lock.notifyAll()
-            }
+                }
         }
     }
 
@@ -644,7 +667,10 @@ object NativeGateway {
                     }
                 }
             }
-            decision.result?.let { return it }
+            decision.result?.let { result ->
+                if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) RelayWakeRuntime.enrollmentChanged(context)
+                return result
+            }
             if (decision.wait) {
                 if (!waitForRetirement()) return ImportResult.STORAGE_ERROR
                 continue
@@ -654,7 +680,7 @@ object NativeGateway {
                 failRetirement(token)
                 return ImportResult.STORAGE_ERROR
             }
-            return synchronized(lock) {
+            val result = synchronized(lock) {
                 if (token != null && (retirement !== token || generation != token.generation || client !== token.client)) {
                     return@synchronized ImportResult.STORAGE_ERROR
                 }
@@ -672,6 +698,8 @@ object NativeGateway {
                     }
                 }
             }
+            if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) RelayWakeRuntime.enrollmentChanged(context)
+            return result
         }
     }
 
@@ -743,7 +771,6 @@ object NativeGateway {
             client = null
             sharedKeysReady = false
         }
-        RelayWakeRuntime.enrollmentChanged(context)
         // A new database always bootstraps from a snapshot before any live replay or effect.
         if (result == ImportResult.IMPORTED) GatewayStateStore(context).startBootstrap()
         return result

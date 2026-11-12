@@ -84,7 +84,7 @@ publish_job_names = %w[
   stable-release
 ]
 
-condition_allows = lambda do |condition, event:, ref:, cancelled:, implicit_success:, results:, outputs: {}|
+condition_allows = lambda do |condition, event:, ref:, cancelled:, implicit_success:, results:, outputs: {}, inputs: {}|
   has_status_guard = condition.match?(/(?:^|\s)(?:!cancelled|always|failure|success)\(\)/)
   next false if !has_status_guard && !implicit_success
 
@@ -109,7 +109,7 @@ condition_allows = lambda do |condition, event:, ref:, cancelled:, implicit_succ
 
   evaluate = nil
   evaluate = lambda do |expression|
-    expression = expression.strip
+    expression = expression.strip.sub(/\A\$\{\{\s*/, '').sub(/\s*\}\}\z/, '')
     expression = expression[1...-1].strip while expression.start_with?('(') && expression.end_with?(')')
     and_terms = split_terms.call(expression.dup, ' && ')
     next and_terms.all? { |term| evaluate.call(term) } if and_terms.length > 1
@@ -121,12 +121,14 @@ condition_allows = lambda do |condition, event:, ref:, cancelled:, implicit_succ
     case term
     when '!cancelled()'
       !cancelled
+    when '!inputs.dry_run'
+      !inputs.fetch('dry_run', false)
     when "github.event_name == 'push'"
       event == 'push'
     when /\Agithub\.ref == '([^']+)'\z/
       ref == Regexp.last_match(1)
-    when /\Aneeds\.([a-z0-9-]+)\.result == 'success'\z/
-      results.fetch(Regexp.last_match(1)) == 'success'
+    when /\Aneeds\.([a-z0-9-]+)\.result == '([^']+)'\z/
+      results.fetch(Regexp.last_match(1)) == Regexp.last_match(2)
     when /\Aneeds\.([a-z0-9-]+)\.result != 'failure'\z/
       results.fetch(Regexp.last_match(1)) != 'failure'
     when /\Aneeds\.([a-z0-9-]+)\.outputs\.([a-z0-9_]+) == 'true'\z/
@@ -198,7 +200,7 @@ end
 production_publishers.each do |job_name|
   assert.call(!condition_allows.call(publish_conditions.fetch(job_name), **staging_context), "#{job_name} must not run on staging")
 end
-%w[publish-prerelease publish-prerelease-android stable-release].each do |job_name|
+%w[publish-prerelease publish-prerelease-android].each do |job_name|
   context = staging_publishers.include?(job_name) ? staging_context : production_context
   output = job_name == 'publish-prerelease-android' ? 'android_head_released' : 'head_released'
   assert.call(!condition_allows.call(publish_conditions.fetch(job_name), **context.merge(outputs: context.fetch(:outputs).merge("version.#{output}" => true))), "#{job_name} must not republish an already released head")
@@ -237,11 +239,47 @@ assert.call(release.fetch(true).key?('workflow_call'), 'release must be reusable
 assert.call(release.fetch('concurrency').fetch('cancel-in-progress') == false, 'release serialization must not cancel publication')
 prepare = release.fetch('jobs').fetch('prepare')
 assert.call(prepare.fetch('outputs').key?('skip'), 'duplicate and stale automatic releases must produce a no-op output')
+assert.call(%w[android_existing desktop_existing].all? { |name| prepare.fetch('outputs').key?(name) }, 'prepare must keep candidate component state separate')
 prepare_steps = prepare.fetch('steps')
 checkout_index = prepare_steps.index { |step| step['uses']&.start_with?('actions/checkout@') }
 guard_index = prepare_steps.index { |step| step['run']&.include?('release-context-guard.sh') }
 assert.call(!checkout_index.nil? && !guard_index.nil? && checkout_index < guard_index, 'release context helper must run after checkout')
 assert.call(prepare_steps.fetch(guard_index).fetch('run').include?('git rev-parse HEAD'), 'release context helper must compare the checked-out HEAD to GitHub SHA')
+desktop_compute = prepare_steps.find { |step| step['id'] == 'compute' }
+android_compute = prepare_steps.find { |step| step['id'] == 'android-compute' }
+assert.call(desktop_compute.fetch('run').include?('release-component-state.sh discover desktop "$GITHUB_SHA" "$VERSION_INPUT"'), 'desktop compute collision must discover a candidate for both push and manual releases')
+assert.call(android_compute.fetch('run').include?("release-component-state.sh discover android \"$GITHUB_SHA\" ''"), 'Android compute collision must discover a candidate independently')
+Dir.mktmpdir('peppy-release-prepare') do |fixture|
+  FileUtils.mkdir_p(File.join(fixture, '.github', 'scripts'))
+  FileUtils.mkdir_p(File.join(fixture, 'infra', 'release'))
+  FileUtils.cp(File.join(__dir__, 'release-component-state.sh'), File.join(fixture, '.github', 'scripts'))
+  FileUtils.cp(File.join(root, '..', 'infra', 'release', 'lib.sh'), File.join(fixture, 'infra', 'release'))
+  bin = File.join(fixture, 'bin')
+  FileUtils.mkdir_p(bin)
+  compute = File.join(fixture, 'infra', 'release', 'compute-version.sh')
+  File.write(compute, "#!/usr/bin/env bash\nexit 4\n")
+  File.chmod(0o755, compute)
+  %w[user.email fixture@example.invalid user.name fixture].each_slice(2) do |key, value|
+    _, stderr, status = Open3.capture3('git', '-C', fixture, 'init', '--quiet') if key == 'user.email'
+    assert.call(status.success?, "prepare fixture git init failed: #{stderr}") if key == 'user.email'
+    _, stderr, status = Open3.capture3('git', '-C', fixture, 'config', key, value)
+    assert.call(status.success?, "prepare fixture git config failed: #{stderr}")
+  end
+  File.write(File.join(fixture, 'fixture'), "candidate\n")
+  _, stderr, status = Open3.capture3('git', '-C', fixture, 'add', 'fixture')
+  assert.call(status.success?, "prepare fixture git add failed: #{stderr}")
+  _, stderr, status = Open3.capture3('git', '-C', fixture, 'commit', '--quiet', '-m', 'candidate')
+  assert.call(status.success?, "prepare fixture git commit failed: #{stderr}")
+  sha, stderr, status = Open3.capture3('git', '-C', fixture, 'rev-parse', 'HEAD')
+  assert.call(status.success?, "prepare fixture SHA lookup failed: #{stderr}")
+  sha = sha.strip
+  _, stderr, status = Open3.capture3('git', '-C', fixture, 'tag', 'v1.2.3', sha)
+  assert.call(status.success?, "prepare fixture tag failed: #{stderr}")
+  output = File.join(fixture, 'github-output')
+  environment = { 'PATH' => "#{bin}:#{ENV.fetch('PATH')}", 'GITHUB_OUTPUT' => output, 'GITHUB_SHA' => sha, 'GITHUB_EVENT_NAME' => 'workflow_dispatch', 'VERSION_INPUT' => '', 'BUMP' => 'auto' }
+  _, stderr, status = Open3.capture3(environment, 'bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', desktop_compute.fetch('run'), chdir: fixture)
+  assert.call(status.success? && File.read(output).include?("version=1.2.3\nexisting=true\nskip=false\n"), "prepare collision recovery must execute the extracted manual-dispatch shell: #{stderr}")
+end
 
 build = load_workflow.call('build-artifacts.yml')
 desktop_steps = build.fetch('jobs').fetch('desktop-development-artifacts').fetch('steps')
@@ -338,12 +376,33 @@ assert.call(!signing_checkout_index.nil? && !signing_helper_index.nil? && signin
 signing_env = signing_steps.fetch(signing_helper_index).fetch('env')
 assert.call(signing_env.fetch('PEPPY_MACOS_SIGNING_MODE').include?("vars.PEPPY_MACOS_SIGNING_MODE || 'developer-id'"), 'stable readiness must default an absent macOS mode to strict')
 assert.call(signing_env.fetch('PEPPY_WINDOWS_SIGNING_MODE').include?("vars.PEPPY_WINDOWS_SIGNING_MODE || 'authenticode'"), 'stable readiness must default an absent Windows mode to strict')
+assert.call(signing.fetch('outputs').keys.sort == %w[android_verified desktop_verified ready], 'protected signing must expose only readiness and verified existing component state')
+signing_checkout = signing_steps.fetch(signing_checkout_index)
+assert.call(signing_checkout.dig('with', 'ref') == '${{ needs.prepare.outputs.sha }}', 'protected signing must pin checkout to the prepared SHA')
+signing_context_guard_index = signing_steps.index { |step| step['name'] == 'Verify checked-out trusted signing context' }
+signing_manifest_index = signing_steps.index { |step| step['run'] == 'cargo build --quiet --locked --manifest-path infra/release/manifest-verifier/Cargo.toml' }
+signing_android_tools_index = signing_steps.index { |step| step['name'] == 'Prepare Android verification tools' }
+assert.call(!signing_context_guard_index.nil? && signing_checkout_index < signing_context_guard_index && signing_context_guard_index < signing_manifest_index, 'signing must guard its pinned checkout before protected inputs')
+assert.call(signing_steps.fetch(signing_context_guard_index).dig('env', 'CHANNEL') == 'stable' && signing_steps.fetch(signing_context_guard_index).dig('env', 'REQUESTED_SHA') == '${{ needs.prepare.outputs.sha }}', 'signing context guard must validate the prepared stable SHA')
+assert.call(!signing_manifest_index.nil? && !signing_android_tools_index.nil? && signing_manifest_index < signing_helper_index && signing_android_tools_index < signing_helper_index, 'signing must prepare read-only desktop and Android verifiers before private key mapping')
+existing_verification = signing_steps.find { |step| step['id'] == 'existing' }
+assert.call(existing_verification&.fetch('run')&.include?('release-component-state.sh verify desktop') && existing_verification.fetch('run').include?('release-component-state.sh verify android'), 'signing must verify existing component candidates with the maintained helper')
+assert.call(existing_verification.fetch('if').include?("steps.readiness.outputs.ready == 'true'") && existing_verification.dig('env', 'GH_TOKEN') == '${{ github.token }}', 'existing verification must wait for readiness and receive only its read-only GitHub token')
 
 release_artifacts = release.fetch('jobs').fetch('artifacts')
 assert.call(release_artifacts.fetch('needs').sort == %w[prepare signing], 'trusted artifacts must wait for signing readiness')
 assert.call(release_artifacts.fetch('if').include?("needs.signing.outputs.ready == 'true'"), 'trusted artifacts must require ready signing inputs')
+assert.call(release_artifacts.fetch('if').include?("needs.signing.outputs.desktop_verified == 'true'") && release_artifacts.fetch('if').include?("needs.signing.outputs.android_verified == 'true'"), 'artifact work must require a positive verification for every candidate')
+assert.call(release_artifacts.fetch('if').include?("needs.prepare.outputs.desktop_existing != 'true' || (needs.prepare.outputs.android_skip != 'true' && needs.prepare.outputs.android_existing != 'true')"), 'both complete or Android-ineligible desktop recovery must not call an all-skipped artifact workflow')
 assert.call(release_artifacts.fetch('if').include?('!cancelled()'), 'trusted artifacts must not begin after cancellation')
-assert.call(release_artifacts.fetch('with').fetch('build_desktop') == true, 'stable release artifacts must always include desktop')
+assert.call(release_artifacts.fetch('with').fetch('build_desktop') == "${{ needs.prepare.outputs.desktop_existing != 'true' }}", 'stable recovery must skip desktop artifacts only after a candidate is separately verified')
+assert.call(release_artifacts.fetch('with').fetch('build_ios') == "${{ needs.prepare.outputs.desktop_existing != 'true' }}", 'stable recovery must skip iOS artifacts with verified desktop reuse')
+assert.call(release_artifacts.fetch('with').fetch('build_android') == "${{ needs.prepare.outputs.android_skip != 'true' && needs.prepare.outputs.android_existing != 'true' }}", 'stable recovery must build only missing eligible Android artifacts')
+assert.call(release.fetch('jobs').fetch('publish').fetch('if').include?("needs.prepare.outputs.desktop_existing != 'true'"), 'desktop publisher must skip verified existing desktop releases')
+%w[publish-server-image publish-relay-image publish-mcp-image].each do |job_name|
+  assert.call(release.fetch('jobs').fetch(job_name).fetch('if').include?("needs.prepare.outputs.desktop_existing != 'true'"), "#{job_name} must skip during desktop recovery")
+end
+assert.call(!ci_jobs.fetch('stable-release').fetch('if').include?('head_released'), 'outer CI must not suppress a same-SHA component recovery')
 
 publish_needs = release.fetch('jobs').fetch('publish').fetch('needs')
 assert.call(publish_needs.sort == %w[artifacts prepare publish-mcp-image publish-relay-image publish-server-image signing], 'stable publish must wait for trusted artifacts and all image publishers')
@@ -462,7 +521,7 @@ android_stop_gradle = android_steps.find { |step| step['name'] == 'Stop Android 
 android_checkout = android_steps.find { |step| step['uses']&.start_with?('actions/checkout@') }
 assert.call(!android_precheck.nil? && !android_guard.nil?, 'trusted Android builds must check context before and after checkout')
 assert.call(android_precheck.fetch('run').include?(trusted_contexts), 'Android pre-check must match the trusted context matrix')
-assert.call(android_precheck.fetch('run').include?('[ "$BUILD_DESKTOP" != false ]'), 'trusted Android builds must reject requests without desktop artifacts')
+assert.call(!android_precheck.fetch('run').include?('BUILD_DESKTOP'), 'trusted Android builds must not couple protected Android work to desktop artifacts')
 android_sign = android_steps.find { |step| step['run'] == 'bash infra/release/sign-android-artifacts.sh dist/android-release/peppy-android-unsigned.apk dist/android-release/peppy-android-unsigned.aab dist/android-release' }
 assert.call(!android_sign.nil?, 'trusted Android builds must sign release artifacts after building')
 trusted_android_build = android_steps.find { |step| step['name'] == 'Build trusted Android release artifacts' }
@@ -513,6 +572,7 @@ publisher_android_edit = publisher_steps.find { |step| step['run']&.include?('gh
 publisher_desktop_create = publisher_steps.find { |step| step['run']&.include?('gh release create "v$VERSION"') }
 publisher_desktop_edit = publisher_steps.find { |step| step['run']&.include?('gh release edit "v$VERSION" --draft=false --latest') }
 publisher_context_guard = publisher_steps.find { |step| step['run'] == 'bash .github/scripts/release-context-guard.sh' }
+publisher_existing_guard = publisher_steps.find { |step| step['id'] == 'guard' }
 assert.call(!publisher_stage.nil? && !publisher_desktop_stage.nil? && !publisher_updater_sign.nil? && !publisher_checksums.nil? && !publisher_android_create.nil? && !publisher_desktop_create.nil?, 'publisher must retain component staging, desktop updater signing, checksums, and release creation')
 assert.call(publisher_stage.fetch('if').include?("inputs.component == 'android'") && publisher_desktop_stage.fetch('if').include?("inputs.component == 'desktop'"), 'publisher must stage the selected component only')
 assert.call(publisher_steps.index(publisher_context_guard) < publisher_steps.index(publisher_stage) && publisher_steps.index(publisher_stage) < publisher_steps.index(verify_step) && publisher_steps.index(verify_step) < publisher_steps.index(publisher_checksums) && publisher_steps.index(verify_step) < publisher_steps.index(publisher_android_create), 'publisher must verify Android assets after Android staging and before checksums or Android release creation')
@@ -521,6 +581,41 @@ assert.call(publisher_android_create.fetch('run').include?('--latest=false') && 
 assert.call(publisher_android_create.fetch('run').include?('"${TAG_PREFIX}$VERSION"') && publisher_android_edit.fetch('run').include?('"${TAG_PREFIX}$VERSION"'), 'Android release commands must use the android-v tag prefix')
 assert.call(publisher.fetch('jobs').fetch('publish').dig('env', 'TAG_PREFIX') == "${{ inputs.component == 'android' && 'android-v' || 'v' }}", 'Android release commands must resolve to android-v tags')
 assert.call(publisher_desktop_create.fetch('run').include?('"v$VERSION"') && publisher_desktop_edit.fetch('run').include?('--latest'), 'desktop release create/edit commands must retain the desktop tag and stable latest flag')
+assert.call(publisher_existing_guard.fetch('run').include?('release-component-state.sh verify "$COMPONENT" "$VERSION" "$SHA"'), 'serialized stable publisher must revalidate an existing component before skipping writes')
+assert.call(publisher_existing_guard.fetch('run').include?('remote_tags=$(git ls-remote --tags origin') && publisher_existing_guard.fetch('run').include?('releases=$(gh api --paginate'), 'serialized stable publisher must distinguish absent remote state from an existing invocation before verification')
+assert.call(publisher_existing_guard.fetch('run').include?('if [ "$CHANNEL" = staging ]; then') && publisher_existing_guard.fetch('run').include?('gh api -X DELETE'), 'staging draft recovery must remain isolated from stable existing-release handling')
+stable_cleanup = publisher_steps.find { |step| step['if'] == "failure() && steps.guard.outputs.skip != 'true' && inputs.channel == 'staging'" }
+assert.call(!stable_cleanup.nil?, 'only staging may retain draft cleanup after a failed publish')
+Dir.mktmpdir('peppy-stable-publish-guard') do |fixture|
+  bin = File.join(fixture, 'bin')
+  FileUtils.mkdir_p(bin)
+  File.write(File.join(bin, 'git'), <<~'SH')
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ "$1" = ls-remote ] || exit 97
+    printf '%s\n' "$*" >> "$GIT_LOG"
+  SH
+  File.write(File.join(bin, 'gh'), <<~'SH')
+    #!/usr/bin/env bash
+    set -euo pipefail
+    printf '%s\n' "$*" >> "$GH_LOG"
+    [ "$1" = api ] && [ "$2" = --paginate ] && [ "$3" = "repos/example/peppy/releases?per_page=100" ] && [ "$#" -eq 3 ] || exit 98
+    [ "${GH_MODE:-empty}" = empty ] || exit 99
+    printf '[]\n'
+  SH
+  [File.join(bin, 'git'), File.join(bin, 'gh')].each { |path| File.chmod(0o755, path) }
+  output = File.join(fixture, 'github-output')
+  environment = {
+    'PATH' => "#{bin}:#{ENV.fetch('PATH')}", 'GIT_LOG' => File.join(fixture, 'git.log'), 'GH_LOG' => File.join(fixture, 'gh.log'),
+    'GITHUB_OUTPUT' => output, 'GITHUB_REPOSITORY' => 'example/peppy', 'CHANNEL' => 'stable', 'VERSION' => '1.2.3',
+    'COMPONENT' => 'desktop', 'SHA' => 'a' * 40, 'GH_TOKEN' => 'fixture-token'
+  }
+  _, stderr, status = Open3.capture3(environment, 'bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', publisher_existing_guard.fetch('run'), chdir: root)
+  assert.call(status.success? && File.read(output) == "skip=false\n", "fresh stable publisher guard must use the strict GH CLI contract: #{stderr}")
+  assert.call(!File.read(File.join(fixture, 'gh.log')).include?('--arg'), 'stable publisher guard must pass jq arguments only to standalone jq')
+  _, _, failed_status = Open3.capture3(environment.merge('GH_MODE' => 'api-error'), 'bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', publisher_existing_guard.fetch('run'), chdir: root)
+  assert.call(!failed_status.success?, 'stable publisher guard must fail closed on release API errors')
+end
 publisher_prune = publisher_steps.find { |step| step['run']&.include?('prune-prereleases.sh') }
 assert.call(publisher_prune.fetch('run').include?('--prefix "$TAG_PREFIX"'), 'prerelease pruning must stay scoped to the component tag prefix')
 
@@ -532,20 +627,26 @@ android_stable = release.fetch('jobs').fetch('publish-android')
 assert.call(android_stable.fetch('needs').sort == %w[artifacts prepare publish signing], 'Android stable publishing must wait for desktop stable publication')
 assert.call(android_stable.fetch('with').fetch('component') == 'android', 'Android stable publishing must select the Android component')
 assert.call(prepare_steps.any? { |step| step['run']&.include?(".name == \"gate\" and .conclusion == \"success\"") }, 'stable Android publishing must inherit the successful CI gate requirement')
-release_publish_android_allows = lambda do |context, dry_run:, release_results:, release_outputs:|
-  next false unless condition_allows.call(publish_conditions.fetch('stable-release'), **context)
-  next false if dry_run || release_outputs.fetch('skip') || release_outputs.fetch('android_skip')
-
-  release_results.fetch('publish') == 'success'
+release_publish_android_condition = android_stable.fetch('if')
+release_android_context = {
+  event: 'workflow_dispatch', ref: 'refs/heads/production', cancelled: false, implicit_success: false,
+  results: { 'prepare' => 'success', 'signing' => 'success', 'artifacts' => 'success', 'publish' => 'success' },
+  outputs: {
+    'prepare.skip' => false, 'prepare.android_skip' => false, 'prepare.android_existing' => false,
+    'prepare.desktop_existing' => false, 'signing.ready' => true, 'signing.desktop_verified' => false
+  }, inputs: { 'dry_run' => false }
+}.freeze
+assert.call(condition_allows.call(release_publish_android_condition, **release_android_context), 'publish-android must run for an ordinary successful stable release')
+recovery_context = release_android_context.merge(results: release_android_context.fetch(:results).merge('publish' => 'skipped'), outputs: release_android_context.fetch(:outputs).merge('prepare.desktop_existing' => true, 'signing.desktop_verified' => true))
+assert.call(condition_allows.call(release_publish_android_condition, **recovery_context), 'publish-android must follow a positively verified skipped desktop publisher')
+%w[failure cancelled skipped].each do |result|
+  assert.call(!condition_allows.call(release_publish_android_condition, **release_android_context.merge(results: release_android_context.fetch(:results).merge('prepare' => result))), "publish-android must require successful preparation, not #{result}")
+  assert.call(!condition_allows.call(release_publish_android_condition, **release_android_context.merge(results: release_android_context.fetch(:results).merge('signing' => result))), "publish-android must require successful signing, not #{result}")
+  assert.call(!condition_allows.call(release_publish_android_condition, **release_android_context.merge(results: release_android_context.fetch(:results).merge('artifacts' => result))), "publish-android must require successful artifacts, not #{result}")
 end
-successful_release_outputs = { 'skip' => false, 'android_skip' => false }.freeze
-successful_release_results = { 'publish' => 'success' }.freeze
-assert.call(release_publish_android_allows.call(production_context.merge(implicit_success: true), dry_run: false, release_results: successful_release_results, release_outputs: successful_release_outputs), 'publish-android must run for a successful stable release')
-assert.call(!release_publish_android_allows.call(pull_request_context, dry_run: false, release_results: successful_release_results, release_outputs: successful_release_outputs), 'publish-android must not run for a pull request')
-assert.call(!release_publish_android_allows.call(staging_context.merge(implicit_success: true), dry_run: false, release_results: successful_release_results, release_outputs: successful_release_outputs), 'publish-android must not run on staging')
-%w[failure skipped cancelled].each do |gate_result|
-  assert.call(!release_publish_android_allows.call(production_context.merge(implicit_success: true, results: successful_results.merge('gate' => gate_result)), dry_run: false, release_results: successful_release_results, release_outputs: successful_release_outputs), "publish-android must require a successful gate, not #{gate_result}")
-end
+assert.call(!condition_allows.call(release_publish_android_condition, **release_android_context.merge(inputs: { 'dry_run' => true })), 'publish-android must not run during dry runs')
+assert.call(!condition_allows.call(release_publish_android_condition, **release_android_context.merge(outputs: release_android_context.fetch(:outputs).merge('prepare.android_skip' => true))), 'publish-android must not run when Android is ineligible')
+assert.call(!condition_allows.call(release_publish_android_condition, **release_android_context.merge(results: release_android_context.fetch(:results).merge('publish' => 'skipped'))), 'publish-android must not accept an unverified skipped desktop publisher')
 
 workflow_text = Dir[File.join(root, 'workflows', '*.{yml,yaml}')].sort.map { |path| File.read(path) }.join("\n")
 assert.call(!workflow_text.include?('peppyGoogleMessagesLink=false'), 'workflows must not disable the Google Messages link with a default-off flag')
@@ -641,5 +742,9 @@ Dir.mktmpdir('peppy-android-release-test') do |fixture|
   assert.call(direct_invocation.count('-PpeppyGoogleMessagesLink=true') == 1, 'trusted direct Android build must enable the Google Messages link exactly once without a sign-off variable')
   assert.call(play_invocation.count('-PpeppyGoogleMessagesLink=true') == 1, 'trusted Play Android build must enable the Google Messages link exactly once')
 end
+
+component_state_test = File.join(__dir__, 'test-release-component-state.sh')
+_, stderr, status = Open3.capture3('bash', component_state_test)
+assert.call(status.success?, "component-state fixtures must pass through the maintained helper: #{stderr}")
 
 puts 'release workflow tests passed'

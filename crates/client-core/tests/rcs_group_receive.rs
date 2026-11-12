@@ -152,6 +152,7 @@ fn incoming(google_message_id: &str, body: &str) -> RcsProjectedRecord {
         tmp_id: None,
         rcs_reported: true,
         e2ee_reported: None,
+        alternate_message_ids: Vec::new(),
         attachments: Vec::new(),
     }
 }
@@ -162,6 +163,7 @@ fn restricted_text_row(row_id: i64, addresses: &[&str], observed_at_ms: i64) -> 
         provider_thread_id: 7,
         provider_type: 2,
         observed_at_ms,
+        transaction_id: None,
         addresses: addresses.iter().map(|a| a.to_string()).collect(),
         restricted: true,
         text_only: true,
@@ -355,14 +357,43 @@ fn withdrawn_group_refuses_receive_and_leaves_recovery() {
 
 #[test]
 fn group_provider_rows_route_by_exact_roster_and_detect_only_restricted_text() {
-    let (_directory, client, _config, _context) = linked_group(&[ALEX, SAM]);
+    let (_directory, client, _config, context) = linked_group(&[ALEX, SAM]);
     let observed = now_ms();
+    let delivered = RcsProjectedRecord {
+        alternate_message_ids: vec!["MxGroupMessage".into()],
+        ..incoming("m-delivered", "hi")
+    };
+    client
+        .ingest_rcs_receive_observation(
+            context.conversation_id,
+            context.ownership_generation,
+            delivered,
+            Some(RcsGroupSender::Address(ALEX.into())),
+            RcsObservationProvenance::Live,
+        )
+        .unwrap();
+    let delivered_copy = RcsProviderRow {
+        transaction_id: Some(mirrored_transaction_id("MxGroupMessage")),
+        ..restricted_text_row(301, &[ALEX, SAM], observed)
+    };
+    assert_eq!(
+        client.route_rcs_provider_row(delivered_copy).unwrap(),
+        RcsProviderRowRoute::DetectorRecorded,
+        "the copy of a message the link delivered to the exact roster is left alone"
+    );
+    let undelivered_copy = RcsProviderRow {
+        transaction_id: Some(mirrored_transaction_id("MxNeverDelivered")),
+        ..restricted_text_row(304, &[ALEX, SAM], observed - 60_000)
+    };
     assert_eq!(
         client
-            .route_rcs_provider_row(restricted_text_row(301, &[ALEX, SAM], observed))
+            .route_rcs_provider_row_result(undelivered_copy)
             .unwrap(),
-        RcsProviderRowRoute::DetectorRecorded,
-        "an exact roster match is detector-only after the guard band"
+        RcsProviderRowRouteResult {
+            route: RcsProviderRowRoute::Provider,
+            reason: Some(RcsProviderRouteReason::LinkLate),
+        },
+        "an exact roster match alone does not withhold a row"
     );
     assert_eq!(
         client

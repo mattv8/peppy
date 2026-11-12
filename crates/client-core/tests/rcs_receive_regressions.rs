@@ -77,6 +77,7 @@ fn record(id: &str) -> RcsProjectedRecord {
         tmp_id: None,
         rcs_reported: false,
         e2ee_reported: None,
+        alternate_message_ids: Vec::new(),
         attachments: Vec::new(),
     }
 }
@@ -1684,6 +1685,80 @@ fn mapped_fixture() -> (
             context_revision: 1,
         },
     )
+}
+
+/// A reply is addressed from the newest message of a thread, so a chat message must name the
+/// other party the way an SMS does.
+#[test]
+fn a_received_chat_message_names_the_chats_participant_as_its_sender() {
+    let (_dir, _vault, _config, client, conversation, ownership, _) = mapped_fixture();
+
+    let mut received = record("in");
+    received.sent_at_ms = Some(now());
+
+    client
+        .ingest_rcs_projected_record(conversation, ownership.ownership_generation, received)
+        .unwrap();
+
+    let newest = client
+        .latest_message(conversation)
+        .unwrap()
+        .unwrap()
+        .payload;
+    assert_eq!(newest.transport, Transport::Rcs);
+    assert_eq!(newest.sender_address.as_deref(), Some("raw-peer"));
+}
+
+#[test]
+fn a_message_arriving_after_the_chats_proof_was_withdrawn_is_not_stored() {
+    let (_dir, _vault, _config, client, conversation, ownership, _) = mapped_fixture();
+    let observed_at_ms = now();
+    let mut contradicted = mapping_observation(observed_at_ms);
+    contradicted.google_candidate_count = 0;
+    contradicted.native_evidence.google_candidate_count = 0;
+    assert!(matches!(
+        client
+            .verify_rcs_mapping(&contradicted, observed_at_ms)
+            .unwrap(),
+        RcsMappingOutcome::Refused(_)
+    ));
+    let mut received = record("in");
+    received.sent_at_ms = Some(now());
+
+    let outcome = client
+        .ingest_rcs_projected_record(conversation, ownership.ownership_generation, received)
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        RcsReceiveOutcome::Rejected(RcsReceiveCode::ConversationUnproven)
+    );
+    let newest = client
+        .latest_message(conversation)
+        .unwrap()
+        .unwrap()
+        .payload;
+    assert_eq!(newest.transport, Transport::Sms);
+}
+
+#[test]
+fn a_chat_message_sent_outside_peppy_is_addressed_to_the_chats_participant() {
+    let (_dir, _vault, _config, client, conversation, ownership, _) = mapped_fixture();
+    let mut sent_elsewhere = record("out");
+    sent_elsewhere.direction = Direction::Outgoing;
+    sent_elsewhere.sent_at_ms = Some(now());
+
+    client
+        .ingest_rcs_projected_record(conversation, ownership.ownership_generation, sent_elsewhere)
+        .unwrap();
+
+    let newest = client
+        .latest_message(conversation)
+        .unwrap()
+        .unwrap()
+        .payload;
+    assert_eq!(newest.recipients, vec!["raw-peer".to_owned()]);
+    assert_eq!(newest.sender_address, None);
 }
 
 #[derive(Debug, PartialEq)]

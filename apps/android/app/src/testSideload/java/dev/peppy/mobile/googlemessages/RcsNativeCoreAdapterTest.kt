@@ -20,6 +20,14 @@ import uniffi.peppy_mobile_bindings.gatewayRecordRcsOutcomeUnknown
 import uniffi.peppy_mobile_bindings.gatewayVerifyRcsGroupRoute
 
 class RcsNativeCoreAdapterTest {
+    @Test fun `a send verification forwards the command and the opaque observation`() {
+        val port = FakePort()
+
+        lease(port).verifySendMapping("command", " { opaque } ")
+
+        assertEquals(listOf(Triple("command", " { opaque } ", 101L)), port.sendVerified)
+    }
+
     @Test fun `forwards opaque input and exact unsigned tuple values`() {
         val port = FakePort()
         val lease = lease(port)
@@ -178,6 +186,8 @@ class RcsNativeCoreAdapterTest {
         override fun nextContextTuple(runtimeId: String, runGeneration: ULong, streamEpoch: ULong, pairingEvidenceId: String) = RcsNativeContextTuple(runGeneration, streamEpoch, 11u)
         override fun nextMappingRevision(conversationId: String) = ULong.MAX_VALUE
         override fun verifyMapping(observationJson: String, nowMs: Long): RcsNativeMappingVerification { observation = observationJson; nowValues += nowMs; return RcsNativeMappingVerification.Mapped }
+        val sendVerified = mutableListOf<Triple<String, String, Long>>()
+        override fun verifySendMapping(commandId: String, observationJson: String, nowMs: Long): RcsNativeMappingVerification { sendVerified += Triple(commandId, observationJson, nowMs); return RcsNativeMappingVerification.Mapped }
         override fun classifyTarget(conversationId: String, recipient: String, snapshotJson: String, nowMs: Long): RcsNativeTarget { snapshot = snapshotJson; nowValues += nowMs; return target }
         override fun prepare(commandId: String, nowMs: Long) = preparation
         override fun recordTransportAcknowledged(commandId: String, ackAtMs: Long) { effects += "ack:$commandId" }

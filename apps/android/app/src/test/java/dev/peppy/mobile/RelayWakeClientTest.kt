@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.work.Configuration
 import androidx.work.ListenableWorker
 import androidx.work.WorkManager
+import androidx.work.WorkerParameters
 import androidx.work.testing.SynchronousExecutor
 import androidx.work.testing.TestListenableWorkerBuilder
 import androidx.work.testing.WorkManagerTestInitHelper
@@ -117,6 +118,73 @@ class RelayWakeClientTest {
         }
     }
 
+    @Test fun legacyMismatchedCleanupNeverDeletesAccountAndRetriesRelayRevocationAfterReload() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val preferences = context.getSharedPreferences("peppy-relay", Context.MODE_PRIVATE)
+        val box = PlaintextBox()
+        val routeId = "00000000-0000-4000-8000-000000000122"
+        val bearerA = "bearer-a"
+        val bearerB = "bearer-b"
+        val state = RelayWakeStateStore(preferences, box)
+        val legacyCleanup = listOf(
+            "https://account-a.example", "vault-a", "device-a", "fcm", "production", state.tokenFingerprint(bearerA),
+            routeId, "manage-a", "wake-a", bearerB, "https://relay-a.example",
+        ).joinToString("\n")
+        val dispatch = RecordingCleanupDispatch(listOf(HttpResult(500, null), HttpResult(200, null)))
+        val previousFactory = relayWakeStateStoreFactory
+        preferences.edit().clear().putString("hosted-relay-cleanup.v2.$routeId", legacyCleanup).commit()
+        relayWakeStateStoreFactory = { RelayWakeStateStore(it, box) }
+        RecordingReconcileWorker.dispatch = dispatch
+
+        try {
+            assertEquals(ListenableWorker.Result.retry(), TestListenableWorkerBuilder<RecordingReconcileWorker>(context)
+                .build().startWork().get(5, TimeUnit.SECONDS))
+            assertTrue(dispatch.accountDeletes.isEmpty())
+            assertEquals(listOf("https://relay-a.example" to "manage-a"), dispatch.revocations)
+            assertEquals(routeId, RelayWakeStateStore(preferences, box).cleanups().single().route.routeId)
+
+            assertEquals(ListenableWorker.Result.success(), TestListenableWorkerBuilder<RecordingReconcileWorker>(context)
+                .build().startWork().get(5, TimeUnit.SECONDS))
+            assertTrue(dispatch.accountDeletes.isEmpty())
+            assertEquals(2, dispatch.revocations.size)
+            assertTrue(RelayWakeStateStore(preferences, box).cleanups().isEmpty())
+        } finally {
+            RecordingReconcileWorker.dispatch = null
+            relayWakeStateStoreFactory = previousFactory
+            preferences.edit().clear().commit()
+        }
+    }
+
+    @Test fun matchingLegacyCleanupDeletesCapturedAccountBeforeRevokingRelay() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val preferences = context.getSharedPreferences("peppy-relay", Context.MODE_PRIVATE)
+        val box = PlaintextBox()
+        val routeId = "00000000-0000-4000-8000-000000000123"
+        val bearerA = "bearer-a"
+        val state = RelayWakeStateStore(preferences, box)
+        val legacyCleanup = listOf(
+            "https://account-a.example", "vault-a", "device-a", "fcm", "production", state.tokenFingerprint(bearerA),
+            routeId, "manage-a", "wake-a", bearerA, "https://relay-a.example",
+        ).joinToString("\n")
+        val dispatch = RecordingCleanupDispatch(listOf(HttpResult(200, null)))
+        val previousFactory = relayWakeStateStoreFactory
+        preferences.edit().clear().putString("hosted-relay-cleanup.v2.$routeId", legacyCleanup).commit()
+        relayWakeStateStoreFactory = { RelayWakeStateStore(it, box) }
+        RecordingReconcileWorker.dispatch = dispatch
+
+        try {
+            assertEquals(ListenableWorker.Result.success(), TestListenableWorkerBuilder<RecordingReconcileWorker>(context)
+                .build().startWork().get(5, TimeUnit.SECONDS))
+            assertEquals(listOf(Triple("https://account-a.example", bearerA, routeId)), dispatch.accountDeletes)
+            assertEquals(listOf("https://relay-a.example" to "manage-a"), dispatch.revocations)
+            assertTrue(RelayWakeStateStore(preferences, box).cleanups().isEmpty())
+        } finally {
+            RecordingReconcileWorker.dispatch = null
+            relayWakeStateStoreFactory = previousFactory
+            preferences.edit().clear().commit()
+        }
+    }
+
     @Test fun malformedChallengeIsRejectedBeforeTransport() {
         var requests = 0
         val client = RelayWakeClient(object : RelayWakeTransport {
@@ -148,5 +216,33 @@ private class ReadabilityChangesAfterEntryBox : SecretBox {
     override fun open(purpose: String, sealed: String): ByteArray? {
         openCalls++
         return if (openCalls <= readableOpens) sealed.encodeToByteArray() else null
+    }
+}
+
+private class PlaintextBox : SecretBox {
+    override fun seal(purpose: String, plaintext: ByteArray) = plaintext.decodeToString()
+    override fun open(purpose: String, sealed: String) = sealed.encodeToByteArray()
+}
+
+private class RecordingCleanupDispatch(private val revokeResults: List<HttpResult>) : RelayWakeWorkerDispatch {
+    val accountDeletes = mutableListOf<Triple<String, String, String>>()
+    val revocations = mutableListOf<Pair<String, String>>()
+    private var revokeIndex = 0
+
+    override fun deleteWakeRoute(cleanup: RelayWakeCleanup, bearerToken: String): HttpResult {
+        accountDeletes += Triple(cleanup.identity.origin, bearerToken, cleanup.route.routeId)
+        return HttpResult(200, null)
+    }
+
+    override fun revokeRoute(cleanup: RelayWakeCleanup): HttpResult {
+        revocations += cleanup.relayOrigin to cleanup.route.manageCredential
+        return revokeResults[revokeIndex++]
+    }
+}
+
+class RecordingReconcileWorker(context: Context, params: WorkerParameters) :
+    RelayWakeReconcileWorker(context, params, checkNotNull(dispatch)) {
+    companion object {
+        internal var dispatch: RelayWakeWorkerDispatch? = null
     }
 }

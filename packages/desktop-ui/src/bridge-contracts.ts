@@ -59,7 +59,7 @@ export type AttachmentState = "pending" | "uploading" | "failed" | "ready";
 export type DraftAttachmentState = "saving" | "local" | "waiting" | "uploading" | "uploaded" | "upload-failed" | "downloading" | "download-failed" | "unavailable";
 export const MAX_DRAFT_ATTACHMENTS = 10;
 export type RcsAttachmentState = "downloading" | "stored" | "too_large" | "quota_full" | "failed" | "expired";
-export type RcsSendStatus = "sending" | "sent" | "not_sent" | "outcome_unknown" | "members_changed";
+export type RcsSendStatus = "sending" | "sent" | "not_sent" | "send_failed" | "outcome_unknown" | "members_changed";
 export type SendCancellationView = {
   state: "none" | "requested" | "confirmed" | "too-late" | "unknown";
   canCancel: boolean;

@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 pub const RCS_CAPABILITY_STALE_MS: i64 = 30 * 60_000;
 pub const RCS_CAPABILITY_KEEPALIVE_MS: i64 = 10 * 60_000;
 pub const RCS_CAPABILITY_PUBLISH_BATCH: usize = 100;
+/// An unchanged eligibility is not published again sooner than this. It stays far below the
+/// keepalive so peers see the same freshness; it only stops a caller that publishes on every
+/// attempt from producing an event each time.
+pub const RCS_ELIGIBILITY_REPUBLISH_FLOOR_MS: i64 = 60_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

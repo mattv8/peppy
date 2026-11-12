@@ -66,6 +66,7 @@ export class BrowserScheduler {
   private lastPublishedProgress?: string;
   /** True when this round stopped outbox delivery on a coded server refusal; reset at each round start. */
   private outboxRejected = false;
+  private draftSyncFailed = false;
   private retentionNegotiationResolved = false;
   private draftSyncEnabled?: boolean;
 
@@ -97,7 +98,7 @@ export class BrowserScheduler {
     if (this.running) return this.running;
     this.controller = new AbortController();
     const running = this.round(this.controller.signal)
-      .then(() => this.setStatus("connected"))
+      .then(() => this.setStatus(this.draftSyncFailed ? "error" : "connected"))
       .catch(error => {
         if (isCancelled(error)) throw error;
         return this.setStatus(statusFor(error));
@@ -147,6 +148,7 @@ export class BrowserScheduler {
           await this.syncDrafts(signal, negotiationResolved && uploadsAllowed);
         } catch (error) {
           throwIfFatalDraftError(error, signal);
+          this.draftSyncFailed ||= isActionableDraftError(error);
         }
       }
       await this.sendOutbox(signal);
@@ -185,6 +187,7 @@ export class BrowserScheduler {
     const cursor = bootstrap ? "0" : stringField(await this.session.query("_worker_draft_sync_cursor", {}), "cursor");
     const seenDraftIds = new Set<string>();
     let after = cursor;
+    let incompletePush = false;
     try {
       for (;;) {
         const changes = await drafts.draftChanges(after, signal);
@@ -228,6 +231,8 @@ export class BrowserScheduler {
         await this.session.mutate("_worker_draft_record_push", { draftId: input.draftId, revisionId: input.revisionId, outcome });
       } catch (error) {
         throwIfFatalDraftError(error, signal);
+        incompletePush = true;
+        this.draftSyncFailed ||= isActionableDraftError(error);
       }
     }
     const pendingDiscards = object(await this.session.query("_worker_draft_pending_discards", {})).draftIds;
@@ -237,6 +242,7 @@ export class BrowserScheduler {
       await drafts.discardDraft(draftId, signal);
       await this.session.mutate("_worker_draft_record_discard", { draftId });
     }
+    if (!incompletePush) this.draftSyncFailed = false;
   }
 
   private async setDraftSyncSupport(supported: boolean): Promise<void> {
@@ -472,7 +478,12 @@ export class BrowserScheduler {
     const devices = await this.transport.json("/v1/devices", { method: "GET", signal });
     throwIfAborted(signal);
     const capabilities = await this.transport.json("/v1/capabilities", { method: "GET", signal });
-    await this.session.query("_worker_apply_server_context", { devices, capabilities, connection: "connected", outboxRejected: this.outboxRejected });
+    await this.session.query("_worker_apply_server_context", {
+      devices,
+      capabilities,
+      connection: this.draftSyncFailed ? "error" : "connected",
+      outboxRejected: this.outboxRejected,
+    });
   }
 
   private async refreshOfflineContext(connection: SchedulerConnection, signal: AbortSignal): Promise<void> {
@@ -512,6 +523,11 @@ function isCancelled(error: unknown): boolean {
 function throwIfFatalDraftError(error: unknown, signal: AbortSignal): void {
   if (signal.aborted || isCancelled(error) || !(error instanceof CoreRejectedError) && !(error instanceof TransportError)
     || error instanceof TransportError && (error.kind === "revoked" || (error.kind === "status" && error.status === 401))) throw error;
+}
+
+function isActionableDraftError(error: unknown): boolean {
+  return error instanceof CoreRejectedError
+    || error instanceof TransportError && error.kind === "status" && error.status !== undefined && error.status >= 400 && error.status < 500 && error.code !== undefined;
 }
 
 function isUnavailableStatus(status: number | undefined): boolean {

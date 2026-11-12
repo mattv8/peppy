@@ -1,7 +1,7 @@
 use crate::{
     Client, CommandId, Connection, ConversationId, DeviceId, Error, GatewayRoute, MessageId,
-    MessagePayload, QueuedSend, Transport, classify_outgoing_transport, decode, notifications,
-    parse, queue_message, rcs_group, require_subscription, validate_outgoing,
+    MessagePayload, QueuedSend, Transport, compose_transport, decode, notifications, parse,
+    queue_message, rcs_group, require_subscription, validate_outgoing,
     validate_outgoing_mms_content,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior};
@@ -35,7 +35,7 @@ impl Client {
         let guard = self.lock()?;
         let recipients = current_recipients(&guard.conn, conversation_id)?;
         Ok(QuickReplyContext {
-            transport: classify_outgoing_transport(&guard.conn, conversation_id, &recipients, &[])?,
+            transport: reply_transport(&recipients, ""),
             recipients,
             expected_member_revision: crate::group_metadata::member_revision(
                 &guard.conn,
@@ -70,7 +70,7 @@ impl Client {
         }
 
         let recipients = current_recipients(&tx, input.conversation_id)?;
-        let transport = classify_outgoing_transport(&tx, input.conversation_id, &recipients, &[])?;
+        let transport = reply_transport(&recipients, &input.body);
         if transport != input.expected_transport {
             return Err(Error::InvalidRequest("quick reply transport changed"));
         }
@@ -130,6 +130,12 @@ impl Client {
         tx.commit()?;
         Ok(queued)
     }
+}
+
+/// A quick reply is text alone, so it is queued by the composer's rule for a text.
+fn reply_transport(recipients: &[String], body: &str) -> Transport {
+    const NO_ATTACHMENTS: bool = false;
+    compose_transport(recipients, body, NO_ATTACHMENTS)
 }
 
 fn current_recipients(

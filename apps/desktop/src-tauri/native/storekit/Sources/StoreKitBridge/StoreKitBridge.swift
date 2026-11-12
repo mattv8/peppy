@@ -137,6 +137,12 @@ public func storekitFinish(_ request: UnsafePointer<CChar>?, _ context: UnsafeMu
                 return
             }
         }
+        for await result in Transaction.currentEntitlements {
+            if case .verified(let transaction) = result, String(transaction.id) == identifier {
+                respond(callback, ["finished": true])
+                return
+            }
+        }
         respond(callback, ["finished": false])
     }
 }

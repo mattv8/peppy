@@ -96,6 +96,25 @@ import Testing
         #expect(try store.pendingSecret(origin: origin) == nil, "a stored pending copy must not outlive its binding")
     }
 
+    @Test func storeBindingReportsPendingCleanupReadFailureWithoutDiscardingTheBinding() throws {
+        let secure = VaultFaultyStore(); secure.seed(account, "pending secret"); secure.seed(pendingAccount, "pending secret")
+        secure.failingReadAccounts = [pendingAccount]
+        let stored = VaultSecretStore(secure: secure).storeBinding("pending secret", for: identity, origin: origin)
+        #expect(!stored)
+        #expect(secure.stored(account) == "pending secret")
+        #expect(secure.stored(pendingAccount) == "pending secret")
+    }
+
+    @Test(arguments: ["delete", "readback"])
+    func storeBindingReportsPostInstallPendingCleanupFailures(_ stage: String) {
+        let secure = VaultFaultyStore(); secure.seed(pendingAccount, "pending secret")
+        if stage == "delete" { secure.failingDeleteAccounts = [pendingAccount] }
+        else { secure.failPendingReadback = true }
+        #expect(!VaultSecretStore(secure: secure).storeBinding("pending secret", for: identity, origin: origin))
+        #expect(secure.stored(account) == "pending secret")
+        if stage == "delete" { #expect(secure.stored(pendingAccount) == "pending secret") }
+    }
+
     @Test func storeBindingNeverOverwritesAnExistingBinding() throws {
         let secure = VaultFaultyStore(); secure.seed(account, "bound secret"); secure.seed(pendingAccount, "pending secret")
         VaultSecretStore(secure: secure).storeBinding("pending secret", for: identity, origin: origin)
@@ -158,12 +177,20 @@ private final class VaultFaultyStore: SecureStore, @unchecked Sendable {
     private let inner = InMemorySecureStore()
     var failReads = false
     var failWrites = false
+    var failingReadAccounts: Set<String> = []
+    var failingDeleteAccounts: Set<String> = []
+    var failPendingReadback = false
+    private var pendingReads = 0
 
     func seed(_ account: String, _ value: String) { try? inner.upsert(account, Data(value.utf8)) }
     func stored(_ account: String) -> String? { inner.value(account).flatMap { String(data: $0, encoding: .utf8) } }
 
     func read(_ account: String) throws(ClientError) -> Data? {
-        if failReads { throw .unexpected("keychain read") }
+        if account.hasPrefix("vault-secret-pending-v2:"), failPendingReadback {
+            pendingReads += 1
+            if pendingReads > 1 { throw .unexpected("keychain readback") }
+        }
+        if failReads || failingReadAccounts.contains(account) { throw .unexpected("keychain read") }
         return inner.value(account)
     }
     func addIfAbsent(_ account: String, _ data: Data) throws(ClientError) -> Bool {
@@ -174,5 +201,8 @@ private final class VaultFaultyStore: SecureStore, @unchecked Sendable {
         if failWrites { throw .unexpected("keychain write") }
         try inner.upsert(account, data)
     }
-    func delete(_ account: String) throws(ClientError) { try inner.delete(account) }
+    func delete(_ account: String) throws(ClientError) {
+        if failingDeleteAccounts.contains(account) { throw .unexpected("keychain delete") }
+        try inner.delete(account)
+    }
 }

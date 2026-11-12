@@ -859,7 +859,7 @@ fn stored_revision(session: &Session, id: &str) -> String {
 }
 
 #[test]
-fn existing_mms_single_text_reply_is_v1_denied_unchanged_then_v2_accepted_as_mms() {
+fn a_text_reply_in_a_one_to_one_mms_thread_is_plain_text_and_needs_no_mms_capability() {
     let f = fixture();
     let session = open(&f, &f.binding, &[]);
     unlock(&session, &f);
@@ -890,14 +890,9 @@ fn existing_mms_single_text_reply_is_v1_denied_unchanged_then_v2_accepted_as_mms
         &gateway_id,
         "sim-1",
     );
-    assert_eq!(
-        session.send_draft(&send).unwrap_err().code,
-        "mms-unsupported"
-    );
-    assert_eq!(stored_revision(&session, &draft.id), draft.revision);
 
-    set_gateway(&session, gateway(&gateway_id, true, true));
     assert!(session.send_draft(&send).unwrap().accepted);
+
     assert_eq!(
         session
             .client
@@ -907,7 +902,7 @@ fn existing_mms_single_text_reply_is_v1_denied_unchanged_then_v2_accepted_as_mms
             .unwrap()
             .payload
             .transport,
-        Transport::Mms
+        Transport::Sms
     );
 }
 

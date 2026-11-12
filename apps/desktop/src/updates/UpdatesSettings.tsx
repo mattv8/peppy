@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { bridge } from "../bridge/bridge";
 import { peppyCopy } from "../generated/peppyCopy";
 import { updateApi, useUpdateStatus } from "./updates";
 
@@ -10,8 +11,8 @@ export async function openReleaseNotes(url: string): Promise<void> {
   if (parsed.protocol !== "https:" || parsed.hostname !== "github.com" || parsed.port || parsed.username || parsed.password || !parsed.pathname.startsWith("/mattv8/peppy/releases/")) {
     throw new Error("Release notes link was not recognized.");
   }
-  const { openUrl } = await import("@tauri-apps/plugin-opener");
-  await openUrl(parsed.toString());
+  if (!bridge.open_external_url) throw new Error("External links are unavailable.");
+  await bridge.open_external_url(parsed.toString());
 }
 
 function statusText(status: NonNullable<ReturnType<typeof useUpdateStatus>["status"]>): string {

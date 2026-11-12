@@ -82,6 +82,44 @@ class RcsMediaTransferQueueTest {
         assertTrue(published)
     }
 
+    @Test fun `stop fences continuations registered before release`() {
+        val executor = QueuedExecutor()
+        val queue = RcsMediaTransferQueue(executor)
+        var continued = false
+        queue.submit("message-1/0") { lease ->
+            lease.afterRelease { continued = true }
+            queue.stop()
+        }
+
+        executor.runNext()
+
+        assertFalse(continued)
+    }
+
+    @Test fun `external wakes coalesce while an identity is active`() {
+        val executor = QueuedExecutor()
+        val queue = RcsMediaTransferQueue(executor)
+        var wakes = 0
+        queue.submit("message-1/0") {
+            assertFalse(queue.submit("message-1/0", { wakes += 1 }) { error("duplicate work must not run") })
+            assertFalse(queue.submit("message-1/0", { wakes += 1 }) { error("duplicate work must not run") })
+        }
+
+        executor.runNext()
+
+        assertEquals(1, wakes)
+    }
+
+    @Test fun `submit reports queued duplicate and stopped states`() {
+        val executor = QueuedExecutor()
+        val queue = RcsMediaTransferQueue(executor)
+
+        assertTrue(queue.submit("message-1/0") { })
+        assertFalse(queue.submit("message-1/0") { })
+        queue.stop()
+        assertFalse(queue.submit("message-2/0") { })
+    }
+
     private class QueuedExecutor : Executor {
         private val tasks = ArrayDeque<Runnable>()
 

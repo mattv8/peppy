@@ -10,6 +10,7 @@ import {
 import { StrictMode, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ContactsView, type ContactTarget } from "./Contacts";
+import { PhotoCropDialog } from "./ContactForm";
 import {
   bridge,
   type ContactBookView,
@@ -78,6 +79,13 @@ const deferred = <T,>() => {
   return { promise, resolve };
 };
 
+class DeferredCropImage {
+  static instances: DeferredCropImage[] = [];
+  public onload: (() => void) | null = null;
+  public onerror: (() => void) | null = null;
+  public set src(_value: string) { DeferredCropImage.instances.push(this); }
+}
+
 describe("ContactsView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -115,6 +123,86 @@ describe("ContactsView", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
     await waitFor(() => expect(bridge.request_contact_sync).toHaveBeenCalledWith("book-pixel8"));
     expect(bridge.request_contact_repair).not.toHaveBeenCalled();
+  });
+
+  it("does not confirm a crop until the current image has drawn on a white canvas", () => {
+    class DeferredImage {
+      static current: DeferredImage | undefined;
+      public onload: (() => void) | null = null;
+      public onerror: (() => void) | null = null;
+      public set src(_value: string) { DeferredImage.current = this; }
+    }
+    vi.stubGlobal("Image", DeferredImage);
+    const fillRect = vi.fn();
+    const drawImage = vi.fn();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ fillStyle: "", fillRect, drawImage } as unknown as CanvasRenderingContext2D);
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/jpeg;base64,cropped");
+    const onConfirm = vi.fn();
+    render(<PhotoCropDialog photo={{ dataUrl: "data:image/png;base64,transparent", naturalWidth: 256, naturalHeight: 256 }} opener={{ current: null }} onConfirm={onConfirm} onCancel={vi.fn()} />);
+
+    const confirm = screen.getByRole("button", { name: "Confirm crop" });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(confirm);
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    act(() => DeferredImage.current?.onload?.());
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+    expect(onConfirm).toHaveBeenCalledWith("data:image/jpeg;base64,cropped");
+    expect(fillRect).toHaveBeenCalledWith(0, 0, 256, 256);
+    expect(drawImage).toHaveBeenCalled();
+    expect(fillRect.mock.invocationCallOrder[0]).toBeLessThan(drawImage.mock.invocationCallOrder[0]);
+  });
+
+  it("shows transparent crop content against white before it is exported", () => {
+    render(<PhotoCropDialog photo={{ dataUrl: "data:image/png;base64,transparent", naturalWidth: 256, naturalHeight: 256 }} opener={{ current: null }} onConfirm={vi.fn()} onCancel={vi.fn()} />);
+
+    expect(getComputedStyle(document.getElementById("photo-crop-image")!).backgroundColor).toBe("rgb(255, 255, 255)");
+  });
+
+  it.each(["image error", "missing canvas context", "drawing error", "JPEG export error"])("keeps crop confirmation inert after %s", (failure) => {
+    DeferredCropImage.instances = [];
+    vi.stubGlobal("Image", DeferredCropImage);
+    const drawImage = vi.fn();
+    const context = failure === "missing canvas context" ? null : { fillStyle: "", fillRect: vi.fn(), drawImage: failure === "drawing error" ? vi.fn(() => { throw new Error("draw"); }) : drawImage };
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context as CanvasRenderingContext2D | null);
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockImplementation(() => {
+      if (failure === "JPEG export error") throw new Error("export");
+      return "data:image/jpeg;base64,cropped";
+    });
+    const onConfirm = vi.fn();
+    render(<PhotoCropDialog photo={{ dataUrl: "data:image/png;base64,transparent", naturalWidth: 256, naturalHeight: 256 }} opener={{ current: null }} onConfirm={onConfirm} onCancel={vi.fn()} />);
+    const confirm = screen.getByRole("button", { name: "Confirm crop" });
+
+    if (failure === "image error") act(() => DeferredCropImage.instances[0]?.onerror?.());
+    else act(() => DeferredCropImage.instances[0]?.onload?.());
+    if (failure === "JPEG export error") fireEvent.click(confirm);
+
+    expect(confirm).toBeDisabled();
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert").textContent).toContain("couldn’t be loaded");
+  });
+
+  it("ignores stale image callbacks after a photo replacement, keyboard crop, and cancellation", () => {
+    DeferredCropImage.instances = [];
+    vi.stubGlobal("Image", DeferredCropImage);
+    const drawImage = vi.fn();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ fillStyle: "", fillRect: vi.fn(), drawImage } as unknown as CanvasRenderingContext2D);
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/jpeg;base64,cropped");
+    const onConfirm = vi.fn();
+    const { rerender, unmount } = render(<PhotoCropDialog photo={{ dataUrl: "data:image/png;base64,first", naturalWidth: 512, naturalHeight: 256 }} opener={{ current: null }} onConfirm={onConfirm} onCancel={vi.fn()} />);
+    const oldImage = DeferredCropImage.instances[0]!;
+    rerender(<PhotoCropDialog photo={{ dataUrl: "data:image/png;base64,second", naturalWidth: 512, naturalHeight: 256 }} opener={{ current: null }} onConfirm={onConfirm} onCancel={vi.fn()} />);
+    act(() => oldImage.onload?.());
+    expect(screen.getByRole("button", { name: "Confirm crop" })).toBeDisabled();
+    act(() => DeferredCropImage.instances[1]?.onload?.());
+    fireEvent.keyDown(screen.getByLabelText("Photo crop position"), { key: "ArrowRight" });
+    act(() => DeferredCropImage.instances[1]?.onload?.());
+    expect(screen.getByRole("button", { name: "Confirm crop" })).toBeDisabled();
+    const currentImage = DeferredCropImage.instances[2]!;
+    unmount();
+    act(() => currentImage.onload?.());
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 
   it("explains why limited and unready books cannot request a scan", async () => {

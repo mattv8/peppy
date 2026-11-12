@@ -364,6 +364,7 @@ internal object MmsCapture {
     private const val MAX_BYTES = 32L * 1024 * 1024
     private const val MAX_BINARY = 10
     private const val PENDING_MEDIA_LIMIT = 512L * 1024 * 1024
+    private const val SCRATCH_RETAIN_MILLIS = 60L * 60 * 1000
     private val POST_SETTLE_REASONS = setOf(
         "preview_deferred", "media_quota", "parts_incomplete", "text_unavailable",
         "preview_unavailable", "part_unavailable", "preview_metadata_unavailable",
@@ -438,6 +439,7 @@ internal object MmsCapture {
         onControlPublished: () -> Unit = {},
         restrictedAccess: () -> RestrictedMessageAccess = { RestrictedMessageAccess.ALLOWED },
     ): MmsCaptureSummary {
+        recoverScratch(tempDirectory)
         var captured = 0
         var pending = 0
         var unavailable = 0
@@ -634,6 +636,13 @@ internal object MmsCapture {
         }
     }
 
+    private fun recoverScratch(directory: File) {
+        val scratch = Regex("(?:mms|mms-preview)-[0-9a-fA-F-]+\\.(?:part|jpg)")
+        directory.listFiles()?.forEach { file ->
+            if (file.isFile && scratch.matches(file.name) && file.lastModified() < System.currentTimeMillis() - SCRATCH_RETAIN_MILLIS) file.delete()
+        }
+    }
+
     private fun scan(
         core: MmsCaptureCore,
         provider: MmsCaptureProvider,
@@ -729,8 +738,11 @@ internal object MmsCapture {
         }
         // MMS uses msg_box as providerType; only visible sender/recipient evidence is routed.
         val addresses = record.sender + record.toRecipients + record.ccRecipients
-        if (core.providerRouter.route(record.id, record.threadId, record.messageBox ?: 0, record.dateMs, addresses, record.restricted, record.textOnly) == ProviderAcquisitionRoute.SKIP) {
-            return ProcessResult(durable = true)
+        when (core.providerRouter.route(record.id, record.threadId, record.messageBox ?: 0, record.dateMs, addresses, record.restricted, record.textOnly, record.transactionId)) {
+            ProviderAcquisitionRoute.SKIP -> return ProcessResult(durable = true)
+            // The link may still deliver this message; a later pass decides.
+            ProviderAcquisitionRoute.DEFER -> return ProcessResult(durable = false, followup = true)
+            ProviderAcquisitionRoute.ACQUIRE -> Unit
         }
         val placeholder = input(generation, routeId, record, imported, body = inlineText(record))
         val acquisition = existing ?: when (val outcome = try { core.begin(placeholder) } catch (_: Exception) { return ProcessResult(false) }) {
@@ -804,8 +816,11 @@ internal object MmsCapture {
         imported: Boolean,
     ): ProcessResult {
         val addresses = record.sender + record.toRecipients + record.ccRecipients
-        if (core.providerRouter.route(record.id, record.threadId, record.messageBox ?: 0, record.dateMs, addresses, record.restricted, record.textOnly) == ProviderAcquisitionRoute.SKIP) {
-            return ProcessResult(durable = true)
+        when (core.providerRouter.route(record.id, record.threadId, record.messageBox ?: 0, record.dateMs, addresses, record.restricted, record.textOnly, record.transactionId)) {
+            ProviderAcquisitionRoute.SKIP -> return ProcessResult(durable = true)
+            // The link may still deliver this message; a later pass decides.
+            ProviderAcquisitionRoute.DEFER -> return ProcessResult(durable = false, followup = true)
+            ProviderAcquisitionRoute.ACQUIRE -> Unit
         }
         val acquisition = when (val outcome = core.begin(input(generation, UNKNOWN_SUBSCRIPTION, record, imported, inlineText(record)))) {
             is NativeMmsBeginOutcome.Acquired -> outcome.acquisition

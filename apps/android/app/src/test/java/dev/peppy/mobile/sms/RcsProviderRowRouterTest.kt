@@ -10,10 +10,12 @@ import dev.peppy.mobile.SmsCaptureProvider
 import dev.peppy.mobile.SmsCompletion
 import dev.peppy.mobile.diagnostics.SyncDiagnosticReason
 import dev.peppy.mobile.diagnostics.SyncDiagnostics
+import dev.peppy.mobile.diagnostics.SyncTraceEvent
 import dev.peppy.mobile.diagnostics.SyncTraceField
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import uniffi.peppy_mobile_bindings.NativeRcsProviderRouteReason
 import uniffi.peppy_mobile_bindings.NativeRcsProviderRowRoute
 import uniffi.peppy_mobile_bindings.NativeRcsProviderRoute
 import uniffi.peppy_mobile_bindings.MobileBindingsException
@@ -22,6 +24,31 @@ class RcsProviderRowRouterTest {
     @Test fun providerAcquires() {
         val router = RcsProviderRowRouter { route(NativeRcsProviderRowRoute.PROVIDER) }
         assertEquals(ProviderAcquisitionRoute.ACQUIRE, router.route(1, 2, 1, 3, listOf("+15550001")))
+    }
+
+    @Test fun mediaAcquires() {
+        val router = RcsProviderRowRouter { NativeRcsProviderRoute(NativeRcsProviderRowRoute.PROVIDER, NativeRcsProviderRouteReason.MEDIA) }
+        assertEquals(ProviderAcquisitionRoute.ACQUIRE, router.route(1, 2, 1, 3, listOf("+15550001")))
+    }
+
+    @Test fun transactionIdIsPassedWhenValidAndOmittedOtherwise() {
+        val json = mutableListOf<String>()
+        val router = RcsProviderRowRouter { json += it; route(NativeRcsProviderRowRoute.PROVIDER) }
+
+        router.route(1, 2, 1, 3, listOf("+15550001"), transactionId = "proto:abc")
+        router.route(2, 2, 1, 3, listOf("+15550001"), transactionId = null)
+        router.route(3, 2, 1, 3, listOf("+15550001"), transactionId = " ")
+        router.route(4, 2, 1, 3, listOf("+15550001"), transactionId = "a".repeat(513))
+
+        assertTrue(json[0].contains("\"transactionId\":\"proto:abc\""))
+        assertEquals(4, json.size)
+        assertTrue(json.drop(1).none { it.contains("\"transactionId\"") })
+    }
+
+    @Test fun deferMapsToDeferredAcquisition() {
+        val router = RcsProviderRowRouter { route(NativeRcsProviderRowRoute.DEFER) }
+
+        assertEquals(ProviderAcquisitionRoute.DEFER, router.route(1, 2, 1, 3, listOf("+15550001")))
     }
 
     @Test fun detectorRecordedSkipsAndAdvancesSmsCheckpoint() {
@@ -48,6 +75,36 @@ class RcsProviderRowRouterTest {
                 .route(1, 2, 1, 3, listOf("+15550001")))
         }
         assertTrue(events.any { it.contains("${SyncTraceField.REASON.code}=${SyncDiagnosticReason.RCS_PROVIDER_ROUTE_ERROR}") })
+    }
+
+    @Test fun `a mirrored chat row records which side takes it`() {
+        val outcomes = listOf(
+            NativeRcsProviderRoute(NativeRcsProviderRowRoute.ALERT, null) to 225L,
+            NativeRcsProviderRoute(NativeRcsProviderRowRoute.DETECTOR_RECORDED, null) to 226L,
+            NativeRcsProviderRoute(NativeRcsProviderRowRoute.PROVIDER, NativeRcsProviderRouteReason.PRE_PROOF) to 227L,
+            NativeRcsProviderRoute(NativeRcsProviderRowRoute.PROVIDER, NativeRcsProviderRouteReason.GUARD_BAND) to 228L,
+            NativeRcsProviderRoute(NativeRcsProviderRowRoute.PROVIDER, NativeRcsProviderRouteReason.NOT_LINK_OWNED) to 229L,
+            NativeRcsProviderRoute(NativeRcsProviderRowRoute.DEFER, null) to 230L,
+            NativeRcsProviderRoute(NativeRcsProviderRowRoute.PROVIDER, NativeRcsProviderRouteReason.LINK_LATE) to 231L,
+            NativeRcsProviderRoute(NativeRcsProviderRowRoute.PROVIDER, NativeRcsProviderRouteReason.UNIDENTIFIED) to 232L,
+            NativeRcsProviderRoute(NativeRcsProviderRowRoute.PROVIDER, NativeRcsProviderRouteReason.MEDIA) to 233L,
+        )
+        for ((outcome, reason) in outcomes) {
+            val events = mutableListOf<String>()
+            SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+                RcsProviderRowRouter { outcome }.route(1, 2, 1, 3, listOf("+15550001"), restricted = true, textOnly = true)
+            }
+            assertTrue("$reason in $events", events.any { it.startsWith("event=${SyncTraceEvent.GM_LINK.code} ") && it.endsWith(" ${SyncTraceField.REASON.code}=$reason") })
+        }
+    }
+
+    @Test fun `an ordinary provider row records no link outcome`() {
+        val events = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+            RcsProviderRowRouter { NativeRcsProviderRoute(NativeRcsProviderRowRoute.PROVIDER, NativeRcsProviderRouteReason.NOT_RESTRICTED_TEXT) }
+                .route(1, 2, 1, 3, listOf("+15550001"))
+        }
+        assertTrue("$events", events.none { it.startsWith("event=${SyncTraceEvent.GM_LINK.code} ") })
     }
 
     @Test fun noLinkShortCircuitCallsRouterOnlyOncePerPass() {

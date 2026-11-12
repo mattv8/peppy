@@ -10841,6 +10841,64 @@ public func FfiConverterTypeNativeRcsLinkStatus_lower(_ value: NativeRcsLinkStat
 
 
 /**
+ * A mapping verification with the core's fixed refusal code. The code is a closed, content-free
+ * name for diagnostics only; hosts decide on `verification` alone.
+ */
+public struct NativeRcsMappingVerdict: Equatable, Hashable {
+    public var verification: NativeRcsMappingVerification
+    public var refusalCode: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(verification: NativeRcsMappingVerification, refusalCode: String?) {
+        self.verification = verification
+        self.refusalCode = refusalCode
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeRcsMappingVerdict: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRcsMappingVerdict: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsMappingVerdict {
+        return
+            try NativeRcsMappingVerdict(
+                verification: FfiConverterTypeNativeRcsMappingVerification.read(from: &buf), 
+                refusalCode: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeRcsMappingVerdict, into buf: inout [UInt8]) {
+        FfiConverterTypeNativeRcsMappingVerification.write(value.verification, into: &buf)
+        FfiConverterOptionString.write(value.refusalCode, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsMappingVerdict_lift(_ buf: RustBuffer) throws -> NativeRcsMappingVerdict {
+    return try FfiConverterTypeNativeRcsMappingVerdict.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsMappingVerdict_lower(_ value: NativeRcsMappingVerdict) -> RustBuffer {
+    return FfiConverterTypeNativeRcsMappingVerdict.lower(value)
+}
+
+
+/**
  * Advisory attachment metadata for the native upload coordinator. No plaintext path or Google
  * reference crosses this boundary.
  */
@@ -16236,6 +16294,9 @@ public enum NativeRcsProviderRouteReason: Equatable, Hashable {
     case notLinkOwned
     case preProof
     case guardBand
+    case linkLate
+    case unidentified
+    case media
 
 
 
@@ -16265,6 +16326,12 @@ public struct FfiConverterTypeNativeRcsProviderRouteReason: FfiConverterRustBuff
         
         case 4: return .guardBand
         
+        case 5: return .linkLate
+        
+        case 6: return .unidentified
+        
+        case 7: return .media
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -16287,6 +16354,18 @@ public struct FfiConverterTypeNativeRcsProviderRouteReason: FfiConverterRustBuff
         
         case .guardBand:
             writeInt(&buf, Int32(4))
+        
+        
+        case .linkLate:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .unidentified:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .media:
+            writeInt(&buf, Int32(7))
         
         }
     }
@@ -16315,6 +16394,7 @@ public enum NativeRcsProviderRowRoute: Equatable, Hashable {
     case provider
     case detectorRecorded
     case alert
+    case `defer`
 
 
 
@@ -16342,6 +16422,8 @@ public struct FfiConverterTypeNativeRcsProviderRowRoute: FfiConverterRustBuffer 
         
         case 3: return .alert
         
+        case 4: return .`defer`
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -16360,6 +16442,10 @@ public struct FfiConverterTypeNativeRcsProviderRowRoute: FfiConverterRustBuffer 
         
         case .alert:
             writeInt(&buf, Int32(3))
+        
+        
+        case .`defer`:
+            writeInt(&buf, Int32(4))
         
         }
     }
@@ -19528,6 +19614,31 @@ public func gatewayVerifyRcsMapping(client: NativeClient, observationJson: Strin
     )
 })
 }
+public func gatewayVerifyRcsMappingVerdict(client: NativeClient, observationJson: String, nowMs: Int64)throws  -> NativeRcsMappingVerdict  {
+    return try  FfiConverterTypeNativeRcsMappingVerdict_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_verify_rcs_mapping_verdict(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(observationJson),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+/**
+ * Verifies the bound target of one pending command. The mapping is stored on the command's own
+ * conversation and only when the command is addressed to exactly the chat's participant.
+ */
+public func gatewayVerifyRcsSendMappingVerdict(client: NativeClient, observationJson: String, commandId: String, nowMs: Int64)throws  -> NativeRcsMappingVerdict  {
+    return try  FfiConverterTypeNativeRcsMappingVerdict_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_gateway_verify_rcs_send_mapping_verdict(
+        FfiConverterTypeNativeClient_lower(client),
+        FfiConverterString.lower(observationJson),
+        FfiConverterString.lower(commandId),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
 public func rcsCanonicalizerRevision() -> UInt32  {
     return try!  FfiConverterUInt32.lift(try! rustCall() {
         uniffiCallStatus in
@@ -19762,6 +19873,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_mapping() != 16011) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_mapping_verdict() != 36909) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_gateway_verify_rcs_send_mapping_verdict() != 32254) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_rcs_canonicalizer_revision() != 21371) {

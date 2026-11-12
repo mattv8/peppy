@@ -114,7 +114,12 @@ internal class AndroidContactsProvider(context: Context) {
     }
     sealed interface PhotoOp {
         /** Normalized JPEG (<= [MAX_NORMALIZED_PHOTO_BYTES]). */
-        class Write(val jpeg: ByteArray) : PhotoOp
+        class Write(
+            val jpeg: ByteArray,
+            val expectedPhotoDataId: Long? = null,
+            val expectedPhotoVersion: Int? = null,
+            val expectedRawVersion: Int? = null,
+        ) : PhotoOp
         data class Remove(val dataId: Long, val expectedVersion: Int) : PhotoOp
     }
     data class NewField(val kind: Kind, val values: Map<String, String?>)
@@ -377,7 +382,29 @@ internal class AndroidContactsProvider(context: Context) {
                     if (row.version != photo.expectedVersion) return WriteResult.Conflict
                     batch += ContentProviderOperation.newDelete(Data.CONTENT_URI).withSelection(GUARDED_ROW, guardArgs(row)).withExpectedCount(1).build()
                 }
-                is PhotoOp.Write -> if (current.values.any { it.kind == Kind.PHOTO && it.readOnly }) return WriteResult.ReadOnly
+                is PhotoOp.Write -> {
+                    if (photo.expectedRawVersion == null || raw.version != photo.expectedRawVersion) return WriteResult.Conflict
+                    val existing = photo.expectedPhotoDataId?.let(current::get)
+                    if (photo.expectedPhotoDataId != null && (existing?.kind != Kind.PHOTO || existing.version != photo.expectedPhotoVersion)) return WriteResult.Conflict
+                    if (existing?.readOnly == true || (existing == null && current.values.any { it.kind == Kind.PHOTO && it.readOnly })) return WriteResult.ReadOnly
+                    batch += ContentProviderOperation.newAssertQuery(RawContacts.CONTENT_URI)
+                        .withSelection("${RawContacts._ID}=? AND ${RawContacts.VERSION}=?", arrayOf(rawContactId.toString(), photo.expectedRawVersion.toString()))
+                        .withExpectedCount(1)
+                        .build()
+                    if (existing == null) {
+                        batch += ContentProviderOperation.newInsert(Data.CONTENT_URI)
+                            .withValue(Data.RAW_CONTACT_ID, rawContactId)
+                            .withValue(Data.MIMETYPE, Photo.CONTENT_ITEM_TYPE)
+                            .withValue(Photo.PHOTO, photo.jpeg)
+                            .build()
+                    } else {
+                        batch += ContentProviderOperation.newUpdate(Data.CONTENT_URI)
+                            .withSelection(GUARDED_ROW, guardArgs(existing))
+                            .withValue(Photo.PHOTO, photo.jpeg)
+                            .withExpectedCount(1)
+                            .build()
+                    }
+                }
                 null -> Unit
             }
             // Only kinds this request grows are capped; pre-existing oversized lists stay editable.
@@ -394,7 +421,7 @@ internal class AndroidContactsProvider(context: Context) {
                 }
             }
             val photoOutcome = when (photo) {
-                is PhotoOp.Write -> writeDisplayPhoto(rawContactId, photo.jpeg)
+                is PhotoOp.Write -> PhotoOutcome.WRITTEN
                 is PhotoOp.Remove -> PhotoOutcome.WRITTEN
                 null -> PhotoOutcome.NOT_REQUESTED
             }

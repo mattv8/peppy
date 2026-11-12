@@ -31,6 +31,8 @@ export type DraftSlot = {
   pendingSave?: Promise<SaveOutcome>;
   /** Last host version successfully acknowledged for safe stale-save reconciliation. */
   acknowledgedContent: DraftContent;
+  /** Captions recovered into this surviving local slot, keyed by their source attachment. */
+  recoveredCaptionSources: Set<string>;
 };
 
 /** A failed outcome from `flushAll` carries the resolved key of the draft that failed, which may be offscreen. */
@@ -325,11 +327,26 @@ export class DraftStore {
     const slot = this.ensure(key);
     this.undoVersions.delete(slot.key);
     slot.content = { ...slot.content, ...patch };
+    if (!slot.content.text && !slot.content.attachmentIds.length) slot.recoveredCaptionSources.clear();
     slot.generation += 1;
     this.events.changed();
     if (slot.error?.code === "not-found") return Promise.resolve({ ok: false, error: slot.error.message });
     this.reviewRequired.delete(slot.key);
     return this.enqueue(slot);
+  }
+
+  /** Installs eligible media recovery as a local draft edit; it never sends. */
+  recoverRcsContent(key: string, sourceIdentity: string, recovery: { caption?: string; attachmentIds: string[] }): Promise<SaveOutcome> {
+    const resolved = this.resolve(key);
+    if (this.tombstones.has(key) || this.tombstones.has(resolved))
+      return Promise.resolve({ ok: false, error: "This draft was deleted or moved elsewhere." });
+    const slot = this.ensure(key);
+    const addCaption = Boolean(recovery.caption) && !slot.recoveredCaptionSources.has(sourceIdentity);
+    const attachmentIds = [...slot.content.attachmentIds, ...recovery.attachmentIds.filter(id => !slot.content.attachmentIds.includes(id))];
+    if (!addCaption && attachmentIds.length === slot.content.attachmentIds.length) return Promise.resolve({ ok: true });
+    if (addCaption) slot.recoveredCaptionSources.add(sourceIdentity);
+    const text = addCaption ? [recovery.caption, slot.content.text].filter(Boolean).join("\n") : slot.content.text;
+    return this.edit(resolved, { text, attachmentIds });
   }
 
   /** Applies a snapshot and records that this conversation's initial draft lookup completed. */
@@ -362,6 +379,7 @@ export class DraftStore {
     if (draft) {
       const target = slot;
       if (!this.shouldAdopt(target, draft)) return;
+      const changed = !sameDraftContent(target.content, contentOf(draft));
       Object.assign(target, {
         id: draft.id,
         conversationId: draft.conversationId,
@@ -370,6 +388,7 @@ export class DraftStore {
         error: undefined,
         acknowledgedContent: contentOf(draft),
       });
+      if (changed) target.recoveredCaptionSources.clear();
     } else {
       Object.assign(slot, {
         id: "",
@@ -378,6 +397,7 @@ export class DraftStore {
         error: undefined,
         acknowledgedContent: blankContent(),
       });
+      slot.recoveredCaptionSources.clear();
     }
     this.events.changed();
   }
@@ -408,6 +428,7 @@ export class DraftStore {
       error: undefined,
       acknowledgedContent: incomingContent,
     });
+    if (changed) slot.recoveredCaptionSources.clear();
     if (changed && structuralReplacement) this.events.notice?.(slot.key, "remote-update");
     this.events.changed();
   }
@@ -467,6 +488,7 @@ export class DraftStore {
   markSent(key: string, sentGeneration: number, revision?: string, postSendContent?: Partial<DraftContent>) {
     const slot = this.get(key);
     if (!slot) return;
+    slot.recoveredCaptionSources.clear();
     if (!revision) {
       slot.held = true;
       const cleared = { ...slot.content, text: "", attachmentIds: [] };
@@ -560,6 +582,7 @@ export class DraftStore {
         held: false,
         queue: Promise.resolve(),
         acknowledgedContent: blankContent(),
+        recoveredCaptionSources: new Set(),
       };
       this.slots.set(resolved, slot);
     }
@@ -821,6 +844,7 @@ export class DraftStore {
       savedGeneration: slot.generation,
       error: undefined,
     });
+    slot.recoveredCaptionSources.clear();
     this.saveStates.set(slot.key, "idle");
     this.reviewRequired.add(slot.key);
     this.events.notice?.(slot.key, event);

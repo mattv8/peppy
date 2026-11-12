@@ -161,7 +161,7 @@ fn candidate(
     }
     let result = match kind {
         CandidateKind::Text => {
-            crate::unattempted_rcs_message(conn, Some(active_epoch), command_id, true)
+            crate::unattempted_native_message(conn, Some(active_epoch), command_id)
                 .map(|pending| (pending.message, Some(pending.subscription_id)))
         }
         CandidateKind::Media => {

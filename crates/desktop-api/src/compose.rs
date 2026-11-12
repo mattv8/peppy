@@ -6,7 +6,7 @@ use crate::{
 use peppy_client_core::{
     AttachmentId, Client, CommandId, ComposeDraft, ComposeDraftUpdate, ConversationId, DeviceId,
     Direction, DraftId, DraftSendParts, Error as CoreError, GatewayRoute, GroupDraftSend, Message,
-    SendRefusalReason, Transport,
+    SendRefusalReason, Transport, compose_transport,
 };
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -501,9 +501,8 @@ pub fn prepare_draft_send(
                 input.group_create_confirm_duplicate.unwrap_or(false),
             )?);
     let requires_mms = !rcs_media_route
-        && (!attachment_info.is_empty()
-            || recipients.len() > 1
-            || latest_transport == Some(Transport::Mms));
+        && compose_transport(&recipients, &stored.text, !attachment_info.is_empty())
+            == Transport::Mms;
     if requires_mms {
         if !gateway.supports_mms || gateway.mms_content_version.unwrap_or(0) < 2 {
             return Err(ui(
@@ -605,19 +604,15 @@ fn queue_prepared_draft_send(
     let stored = client
         .resolve_compose_draft_for_send(draft_id, revision)
         .map_err(ComposeError::Core)?;
-    let (_, latest_transport) = conversation_context(client, stored.conversation_id)?;
     let parts = command_id
         .is_none()
         .then(|| prepared_draft_send_parts(client, input, gateways))
         .transpose()?;
-    let transport = if !stored.attachment_ids.is_empty()
-        || stored.recipients.len() > 1
-        || latest_transport == Some(Transport::Mms)
-    {
-        Transport::Mms
-    } else {
-        Transport::Sms
-    };
+    let transport = compose_transport(
+        &stored.recipients,
+        &stored.text,
+        !stored.attachment_ids.is_empty(),
+    );
     let group = match (command_id, parts.as_ref().and_then(Option::as_ref)) {
         (None, None) if stored.recipients.len() > 1 => Some(group_send(input)?),
         _ => None,
