@@ -887,9 +887,9 @@ fn refuse_remaining_unattempted(
     command_id: CommandId,
     attachment_index: u32,
 ) -> Result<Vec<u32>, Error> {
-    let mut query = tx.prepare(&format!(
-        "SELECT attachment_index FROM rcs_media_send_ledger WHERE command_id=? AND attachment_index>? AND state IN ('pending','uploading','reference_ready','permit_issued') ORDER BY attachment_index"
-    ))?;
+    let mut query = tx.prepare(
+        "SELECT attachment_index FROM rcs_media_send_ledger WHERE command_id=? AND attachment_index>? AND state IN ('pending','uploading','reference_ready','permit_issued') ORDER BY attachment_index",
+    )?;
     let indexes = query
         .query_map(
             params![command_id.to_string(), i64::from(attachment_index)],

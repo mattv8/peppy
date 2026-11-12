@@ -710,6 +710,22 @@ fn valid(metadata: &ConversationGroupMetadata, producer: DeviceId) -> bool {
             .is_none_or(|name| !name.is_empty() && name.len() <= 256)
 }
 
+/// A writer field must be the canonical text of a device id, so equal writers always compare equal.
+fn canonical_device(value: &str) -> bool {
+    value
+        .parse::<DeviceId>()
+        .is_ok_and(|device| device.to_string() == value)
+}
+
+fn canonical_member(member: &str) -> bool {
+    let Some(digits) = member.strip_prefix('+') else {
+        return false;
+    };
+    (1..=15).contains(&digits.len())
+        && matches!(digits.as_bytes().first(), Some(b'1'..=b'9'))
+        && digits.bytes().all(|digit| digit.is_ascii_digit())
+}
+
 #[cfg(test)]
 mod validation_tests {
     use super::*;
@@ -732,20 +748,4 @@ mod validation_tests {
         };
         assert!(!valid(&metadata, producer));
     }
-}
-
-/// A writer field must be the canonical text of a device id, so equal writers always compare equal.
-fn canonical_device(value: &str) -> bool {
-    value
-        .parse::<DeviceId>()
-        .is_ok_and(|device| device.to_string() == value)
-}
-
-fn canonical_member(member: &str) -> bool {
-    let Some(digits) = member.strip_prefix('+') else {
-        return false;
-    };
-    (1..=15).contains(&digits.len())
-        && matches!(digits.as_bytes().first(), Some(b'1'..=b'9'))
-        && digits.bytes().all(|digit| digit.is_ascii_digit())
 }
