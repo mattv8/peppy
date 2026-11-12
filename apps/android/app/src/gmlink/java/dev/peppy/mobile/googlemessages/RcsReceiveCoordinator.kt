@@ -30,6 +30,7 @@ internal class RcsReceiveCoordinator(
     private val bootstrapRequest: (String) -> Unit = GoogleMessagesLinkService::requestTargetedRcsBootstrap,
     /** One fresh complete snapshot ingest for group records; false when no complete snapshot was available. */
     private val reconcileGroups: () -> Boolean = GoogleMessagesLinkService::requestRcsGroupReconcile,
+    private val nowMs: () -> Long = System::currentTimeMillis,
 ) : RcsReceiveSink {
     private val locks = ConcurrentHashMap<String, Any>()
     private val sweepLock = Any()
@@ -60,7 +61,10 @@ internal class RcsReceiveCoordinator(
                     // lane, and recovery then fetches this record from the unchanged watermark.
                     if (outcome.recordOutcome == UNPROVEN_REFUSAL) bootstrapRequest(googleId)
                 }
-                is LiveEvent.ProtocolSwitch -> runCatching { core.invalidate(context, googleId) }
+                is LiveEvent.ProtocolSwitch -> runCatching { core.invalidate(context, googleId, null) }
+                    .getOrNull()
+                    ?.takeIf { it }
+                    ?.let { recordGoogleMessagesLinkEvent("recovery", "live_switch_invalidated", 0) }
             }
         }
     }
@@ -107,7 +111,8 @@ internal class RcsReceiveCoordinator(
         cancelled: AtomicBoolean = AtomicBoolean(),
         current: () -> Boolean = { true },
     ): RcsRecoveryResult {
-        val context = runCatching { core.context(googleConversationId) }.getOrNull() ?: return RcsRecoveryResult.ABORTED
+        val context = runCatching { core.context(googleConversationId) }.getOrNull()
+            ?: return aborted("context_missing")
         return recover(handle, context, cancelled, current)
     }
 
@@ -146,24 +151,30 @@ internal class RcsReceiveCoordinator(
         // One snapshot re-read per conversation traversal, before its first unattributed group record.
         var rereadDone = false
         repeat(MAX_PAGES) {
-            if (!active(cancelled, current)) return RcsRecoveryResult.ABORTED
+            if (!active(cancelled, current)) return aborted("cancelled")
             val requested = cursor.orEmpty()
             usedCursors += requested
             val page = fetchPage(handle, context.googleConversationId, requested) ?: return failedPage(context)
             val pageTarget = targetMs ?: page.records.maxOfOrNull { it.sentAtMs }
             targetMs = pageTarget
             for (record in page.records) {
-                if (!active(cancelled, current)) return RcsRecoveryResult.ABORTED
+                if (!active(cancelled, current)) return aborted("cancelled")
                 if (record.sentAtMs >= floorMs && !rereadDone && unknownGroupSender(record.json)) {
                     reconcileGroups()
                     rereadDone = true
                 }
-                if (record.sentAtMs >= floorMs && ingestAborts(context, record.json)) return RcsRecoveryResult.ABORTED
+                if (record.sentAtMs >= floorMs && ingestAborts(context, record.json)) return aborted("ingest_refused")
             }
-            for (googleId in page.signalGoogleIds.distinct()) {
-                if (!active(cancelled, current) || runCatching { core.invalidate(context, googleId) }.isFailure) {
-                    return RcsRecoveryResult.ABORTED
+            for (signal in page.signals) {
+                if (!active(cancelled, current)) return aborted("cancelled")
+                val invalidated = runCatching { core.invalidate(context, signal.googleConversationId, signal.sentAtMs) }
+                    .getOrElse { return aborted("signal_failed") }
+                if (invalidated) {
+                    recordGoogleMessagesLinkEvent("recovery_signal_age", signalAge(signal.sentAtMs), 0)
+                    return aborted("signal_invalidated")
                 }
+                recordGoogleMessagesLinkEvent("recovery_skipped_age", signalAge(signal.sentAtMs), 0)
+                recordGoogleMessagesLinkEvent("recovery", "stale_signal_skipped", 0)
             }
             if (!page.hasMore || (page.records.isNotEmpty() && page.records.all { it.sentAtMs < floorMs })) {
                 return finish(context, pageTarget)
@@ -171,8 +182,9 @@ internal class RcsReceiveCoordinator(
             val next = page.nextCursor
             if (next == null || next in usedCursors) return failedPage(context)
             if (pageTarget != null) {
-                if (!write { core.recordProgress(context, pageTarget, next) }) return RcsRecoveryResult.ABORTED
-                context = runCatching { core.context(context.googleConversationId) }.getOrNull() ?: return RcsRecoveryResult.ABORTED
+                if (!write { core.recordProgress(context, pageTarget, next) }) return aborted("progress_failed")
+                context = runCatching { core.context(context.googleConversationId) }.getOrNull()
+                    ?: return aborted("context_reload_missing")
             }
             cursor = next
         }
@@ -182,12 +194,30 @@ internal class RcsReceiveCoordinator(
     /** Closes the gap at [targetMs]. An empty first page writes nothing unless a stale gap or hint must be cleared. */
     private fun finish(context: NativeRcsReceiveContext, targetMs: Long?): RcsRecoveryResult {
         if (targetMs == null && !context.incomplete && context.resumeHint == null) return RcsRecoveryResult.COMPLETE
-        return if (write { core.complete(context, targetMs ?: context.watermarkMs) }) RcsRecoveryResult.COMPLETE else RcsRecoveryResult.ABORTED
+        return if (write { core.complete(context, targetMs ?: context.watermarkMs) }) RcsRecoveryResult.COMPLETE else aborted("finish_failed")
     }
 
     /** A fetch, cursor or sanity failure: keep the watermark, drop the hint, and leave the gap open. */
     private fun failedPage(context: NativeRcsReceiveContext): RcsRecoveryResult =
-        if (write { core.clearHint(context) }) RcsRecoveryResult.INCOMPLETE else RcsRecoveryResult.ABORTED
+        if (write { core.clearHint(context) }) RcsRecoveryResult.INCOMPLETE else aborted("clear_hint_failed")
+
+    private fun aborted(code: String): RcsRecoveryResult {
+        recordGoogleMessagesLinkEvent("recovery_abort", code, 0)
+        return RcsRecoveryResult.ABORTED
+    }
+
+    private fun signalAge(sentAtMs: Long?): String {
+        if (sentAtMs == null) return "absent"
+        val ageMs = nowMs() - sentAtMs
+        return when {
+            ageMs < 0 -> "future"
+            ageMs < TWO_MINUTES_MS -> "under_2m"
+            ageMs < 15 * 60 * 1000L -> "under_15m"
+            ageMs < 60 * 60 * 1000L -> "under_1h"
+            ageMs < 24 * 60 * 60 * 1000L -> "under_24h"
+            else -> "older"
+        }
+    }
 
     private fun fetchPage(handle: LinkHandle, googleId: String, cursor: String): Page? {
         val response = runCatching { handle.fetchRcsGap(googleId, cursor) }.getOrNull() ?: return null
@@ -260,7 +290,11 @@ internal class RcsReceiveCoordinator(
             records = List(records.length()) { index ->
                 records.getJSONObject(index).let { PageRecord(it.toString(), it.optLong("sent_at_ms")) }
             },
-            signalGoogleIds = List(signals.length()) { signals.getJSONObject(it).getString("google_conversation_id") },
+            signals = List(signals.length()) { index ->
+                signals.getJSONObject(index).let { signal ->
+                    PageSignal(signal.getString("google_conversation_id"), signal.optLong("sent_at_ms").takeIf { it > 0 })
+                }
+            },
             nextCursor = value.optString("next_cursor").takeIf(String::isNotEmpty),
             hasMore = value.optBoolean("has_more"),
         )
@@ -269,12 +303,13 @@ internal class RcsReceiveCoordinator(
     private data class Page(
         val code: String,
         val records: List<PageRecord>,
-        val signalGoogleIds: List<String>,
+        val signals: List<PageSignal>,
         val nextCursor: String?,
         val hasMore: Boolean,
     )
 
     private class PageRecord(val json: String, val sentAtMs: Long)
+    private class PageSignal(val googleConversationId: String, val sentAtMs: Long?)
 
     private sealed interface LiveEvent {
         val googleConversationId: String
@@ -284,6 +319,7 @@ internal class RcsReceiveCoordinator(
 
     private companion object {
         const val SLACK_MS = 15 * 60 * 1000L
+        const val TWO_MINUTES_MS = 2 * 60 * 1000L
         const val MAX_PAGES = 32
         const val SWEEP_CAP = 25
         const val MAX_ACTIVITY_IDS = 500
@@ -307,7 +343,7 @@ internal interface RcsReceiveCore {
 
     /** Fenced hint removal that keeps the gap open for a later trigger. */
     fun clearHint(context: NativeRcsReceiveContext): String
-    fun invalidate(context: NativeRcsReceiveContext, googleId: String)
+    fun invalidate(context: NativeRcsReceiveContext, googleId: String, eventAtMs: Long?): Boolean
 }
 
 private class GeneratedRcsReceiveCore(private val context: Context) : RcsReceiveCore {
@@ -318,5 +354,6 @@ private class GeneratedRcsReceiveCore(private val context: Context) : RcsReceive
     override fun recordProgress(context: NativeRcsReceiveContext, targetMs: Long, cursor: String) = client().gatewayRecordRcsRecoveryProgress(context.conversationId, context.ownershipGeneration, targetMs, cursor)
     override fun complete(context: NativeRcsReceiveContext, targetMs: Long) = client().gatewayCompleteRcsRecovery(context.conversationId, context.ownershipGeneration, targetMs)
     override fun clearHint(context: NativeRcsReceiveContext) = client().gatewayClearRcsRecoveryHint(context.conversationId, context.ownershipGeneration)
-    override fun invalidate(context: NativeRcsReceiveContext, googleId: String) { client().gatewayInvalidateRcsContextForGoogleEvent(context.conversationId, googleId, context.expectation) }
+    override fun invalidate(context: NativeRcsReceiveContext, googleId: String, eventAtMs: Long?) =
+        client().gatewayInvalidateRcsContextForGoogleEvent(context.conversationId, googleId, context.expectation, eventAtMs) != null
 }

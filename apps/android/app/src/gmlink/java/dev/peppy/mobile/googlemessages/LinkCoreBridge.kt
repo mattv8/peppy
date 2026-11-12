@@ -1,6 +1,7 @@
 package dev.peppy.mobile.googlemessages
 
 import android.content.Context
+import dev.peppy.mobile.GatewayWork
 import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
 import dev.peppy.mobile.gateway.NativeGateway
 import java.util.concurrent.Executors
@@ -20,14 +21,18 @@ internal object LinkCoreBridge {
 
     /** Called only from link worker threads; suppresses duplicate lifecycle observations for ten minutes. */
     fun recordIfNeeded(context: Context, status: LinkStatus): Boolean = lifecycleExecutor.submit<Boolean> {
-        synchronized(this) {
+        var linkReturned = false
+        val recorded = synchronized(this) {
             val now = System.currentTimeMillis()
             if (status.facts() == lastFacts && now - lastRecordedAt < HEARTBEAT_MS) return@synchronized true
             if (!record(context, status)) return@synchronized false
+            linkReturned = status.state == "linked" && lastFacts?.state != "linked"
             lastFacts = status.facts()
             lastRecordedAt = now
             true
         }
+        if (recorded && linkReturned) enqueueGatewayPass(context)
+        recorded
     }.get()
 
     /** Completes an owner-requested unlink only after publishing a fresh Unlinked lifecycle. */
@@ -102,10 +107,19 @@ internal object LinkCoreBridge {
     fun recordObservation(token: Long, lease: LinkHandleLease, context: Context, status: LinkStatus): Boolean {
         return lifecycleExecutor.submit<Boolean> {
             LinkCoreBridgeTestHooks.beforeObservationValidation?.invoke()
-            synchronized(this) {
+            var linkReturned = false
+            val recorded = synchronized(this) {
                 if (LinkRuntime.pairingInProgress.get() || token != observationGeneration.get() || !LinkRuntime.ownsObservationLease(lease)) return@synchronized true
-                recordIfNeededNow(context, status)
+                val now = System.currentTimeMillis()
+                if (status.facts() == lastFacts && now - lastRecordedAt < HEARTBEAT_MS) return@synchronized true
+                if (!record(context, status)) return@synchronized false
+                linkReturned = status.state == "linked" && lastFacts?.state != "linked"
+                lastFacts = status.facts()
+                lastRecordedAt = now
+                true
             }
+            if (recorded && linkReturned) enqueueGatewayPass(context)
+            recorded
         }.get()
     }
 
@@ -118,6 +132,7 @@ internal object LinkCoreBridge {
         LinkCoreBridgeTestHooks.beforeObservationValidation = null
         LinkCoreBridgeTestHooks.preStartFenceBegun = null
         LinkCoreBridgeTestHooks.cutoverAlertIds = null
+        LinkCoreBridgeTestHooks.enqueueGatewayPass = null
     }
 
     fun record(context: Context, status: LinkStatus): Boolean = record(context, status, System.currentTimeMillis())
@@ -151,13 +166,10 @@ internal object LinkCoreBridge {
         }.getOrDefault(false)
     }
 
-    private fun recordIfNeededNow(context: Context, status: LinkStatus): Boolean {
-        val now = System.currentTimeMillis()
-        if (status.facts() == lastFacts && now - lastRecordedAt < HEARTBEAT_MS) return true
-        if (!record(context, status)) return false
-        lastFacts = status.facts()
-        lastRecordedAt = now
-        return true
+    private fun enqueueGatewayPass(context: Context) {
+        runCatching {
+            LinkCoreBridgeTestHooks.enqueueGatewayPass?.invoke() ?: GatewayWork.enqueueAfterCapture(context.applicationContext)
+        }
     }
 
     private fun sweepOwnerUnlinkCutoverNow(context: Context) {
@@ -198,4 +210,5 @@ internal object LinkCoreBridgeTestHooks {
     @Volatile var beforeObservationValidation: (() -> Unit)? = null
     @Volatile var preStartFenceBegun: (() -> Unit)? = null
     @Volatile var cutoverAlertIds: (() -> Set<String>)? = null
+    @Volatile var enqueueGatewayPass: (() -> Unit)? = null
 }

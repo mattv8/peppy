@@ -1644,6 +1644,7 @@ fn receive_context_exports_require_current_local_link_ownership() {
                 context.conversation_id.clone(),
                 context.google_conversation_id.clone(),
                 changed_expectation,
+                None,
             ),
         Err(MobileBindingsError::InvalidRequest)
     ));
@@ -1654,11 +1655,11 @@ fn receive_context_exports_require_current_local_link_ownership() {
                 context.conversation_id.clone(),
                 context.google_conversation_id.clone(),
                 context.expectation,
+                None,
             )
             .unwrap(),
-        2
+        Some(2)
     );
-
     with_client(&fixture.gateway.client, |core| {
         core.begin_rcs_unlink_cutover(fixture.conversation_id.parse().unwrap())?;
         Ok(())

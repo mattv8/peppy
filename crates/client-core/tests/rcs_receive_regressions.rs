@@ -1830,9 +1830,14 @@ fn google_event_invalidation_bumps_once_and_replay_is_write_free() {
     let connection = sql(&config);
     assert_eq!(
         client
-            .invalidate_rcs_context_for_google_event(conversation, "google-conversation", expected,)
+            .invalidate_rcs_context_for_google_event(
+                conversation,
+                "google-conversation",
+                expected,
+                None
+            )
             .unwrap(),
-        2
+        Some(2)
     );
     let after = context_invalidation_snapshot(&connection, conversation);
     assert!(after.mappings.iter().all(|mapping| mapping.2.is_some()));
@@ -1844,6 +1849,7 @@ fn google_event_invalidation_bumps_once_and_replay_is_write_free() {
             conversation,
             "google-conversation",
             expected,
+            None,
         ),
         Err(Error::InvalidRequest(_))
     ));
@@ -1866,6 +1872,7 @@ fn google_event_invalidation_rejects_each_stale_context_field_without_writes() {
                 conversation,
                 "google-conversation",
                 expected,
+                None,
             ),
             Err(Error::InvalidRequest(_))
         ));
@@ -1925,6 +1932,7 @@ fn google_event_invalidation_rejects_stale_ownership_mapping_and_cutover_without
                 conversation,
                 "google-conversation",
                 expected,
+                None,
             ),
             Err(Error::InvalidRequest(_))
         ));
@@ -1950,6 +1958,7 @@ fn google_event_invalidation_rejects_revision_overflow_without_writes() {
             conversation,
             "google-conversation",
             expected,
+            None,
         ),
         Err(Error::InvalidRequest(_))
     ));
@@ -1971,13 +1980,161 @@ fn google_event_invalidation_rolls_back_context_when_mapping_update_aborts() {
         .unwrap();
     assert!(
         client
-            .invalidate_rcs_context_for_google_event(conversation, "google-conversation", expected,)
+            .invalidate_rcs_context_for_google_event(
+                conversation,
+                "google-conversation",
+                expected,
+                None
+            )
             .is_err()
     );
     assert_eq!(
         context_invalidation_snapshot(&connection, conversation),
         before
     );
+}
+
+#[test]
+fn google_event_invalidation_ignores_history_before_the_mapping_guard_band() {
+    let (_directory, _vault, config, client, conversation, _ownership, expected) = mapped_fixture();
+    let connection = sql(&config);
+    let verified_at_ms: i64 = connection
+        .query_row(
+            "SELECT verified_at_ms FROM rcs_conversation_mappings WHERE peppy_conversation_id=?",
+            [conversation.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let before = context_invalidation_snapshot(&connection, conversation);
+
+    assert_eq!(
+        client
+            .invalidate_rcs_context_for_google_event(
+                conversation,
+                "google-conversation",
+                expected,
+                Some(verified_at_ms - 120_000),
+            )
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        context_invalidation_snapshot(&connection, conversation),
+        before
+    );
+}
+
+#[test]
+fn google_event_invalidation_accepts_newer_or_untrusted_history_timestamps() {
+    for case in ["inside_band", "newer", "none", "zero", "negative"] {
+        let (_directory, _vault, config, client, conversation, _ownership, expected) =
+            mapped_fixture();
+        let connection = sql(&config);
+        let verified_at_ms: i64 = connection
+            .query_row(
+                "SELECT verified_at_ms FROM rcs_conversation_mappings WHERE peppy_conversation_id=?",
+                [conversation.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let event_at_ms = match case {
+            "inside_band" => Some(verified_at_ms - 120_000 + 1),
+            "newer" => Some(verified_at_ms + 1),
+            "none" => None,
+            "zero" => Some(0),
+            "negative" => Some(-1),
+            _ => unreachable!(),
+        };
+
+        assert_eq!(
+            client
+                .invalidate_rcs_context_for_google_event(
+                    conversation,
+                    "google-conversation",
+                    expected,
+                    event_at_ms,
+                )
+                .unwrap(),
+            Some(2),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn google_event_invalidation_ignores_an_old_history_signal_after_a_reproof() {
+    let (_directory, _vault, config, client, conversation, _ownership, expected) = mapped_fixture();
+    let connection = sql(&config);
+    let old_event_at_ms: i64 = connection
+        .query_row(
+            "SELECT verified_at_ms FROM rcs_conversation_mappings WHERE peppy_conversation_id=?",
+            [conversation.to_string()],
+            |row| Ok(row.get::<_, i64>(0)? - 120_000),
+        )
+        .unwrap();
+    assert_eq!(
+        client
+            .invalidate_rcs_context_for_google_event(
+                conversation,
+                "google-conversation",
+                expected,
+                Some(old_event_at_ms + 120_001),
+            )
+            .unwrap(),
+        Some(2)
+    );
+    let reproof_at_ms = now() + 1;
+    let mut observation = mapping_observation(reproof_at_ms);
+    observation.context_revision = 2;
+    observation.native_evidence.lifetime.context_revision = 2;
+    observation.carrier_binding.route_context_revision = 2;
+    observation.mapping_revision = 2;
+    assert!(matches!(
+        client
+            .verify_rcs_mapping(&observation, reproof_at_ms)
+            .unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    let before = context_invalidation_snapshot(&connection, conversation);
+    assert_eq!(
+        client
+            .invalidate_rcs_context_for_google_event(
+                conversation,
+                "google-conversation",
+                RcsContextExpectation {
+                    context_revision: 2,
+                    ..expected
+                },
+                Some(old_event_at_ms),
+            )
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        context_invalidation_snapshot(&connection, conversation),
+        before
+    );
+}
+
+#[test]
+fn google_event_invalidation_rejects_a_lane_without_a_one_to_one_mapping_at_any_time() {
+    for event_at_ms in [None, Some(0), Some(1)] {
+        let (_directory, _vault, _config, client, conversation, ownership) = fixture();
+        assert!(matches!(
+            client.invalidate_rcs_context_for_google_event(
+                conversation,
+                "group-google-conversation",
+                RcsContextExpectation {
+                    ownership_generation: ownership.ownership_generation,
+                    link_generation: 0,
+                    session_generation: 0,
+                    context_revision: 0,
+                },
+                event_at_ms,
+            ),
+            Err(Error::InvalidRequest(_))
+        ));
+    }
 }
 
 /// Ingest never touches recovery: no resume hint and no open gap.

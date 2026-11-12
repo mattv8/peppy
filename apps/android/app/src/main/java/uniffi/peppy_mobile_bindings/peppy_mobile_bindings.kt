@@ -1837,8 +1837,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_ingest_rcs_projected_observation(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`ownershipGeneration`: Long,`goRecordJson`: RustBuffer.ByValue,`provenance`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_invalidate_rcs_context_for_google_event(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`googleConversationId`: RustBuffer.ByValue,`expected`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_invalidate_rcs_context_for_google_event(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`googleConversationId`: RustBuffer.ByValue,`expected`: RustBuffer.ByValue,`eventAtMs`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_mark_rcs_media_download_state(`ptr`: Long,`messageId`: RustBuffer.ByValue,`attachmentIndex`: Int,`state`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_pending_rcs_media_receive_tasks(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -3142,7 +3142,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_rcs_projected_observation() and 0xFFFF) != 24444) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_invalidate_rcs_context_for_google_event() and 0xFFFF) != 56850) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_invalidate_rcs_context_for_google_event() and 0xFFFF) != 57246) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_mark_rcs_media_download_state() and 0xFFFF) != 37355) {
@@ -4441,7 +4441,7 @@ public interface NativeClientInterface {
     
     fun `gatewayIngestRcsProjectedObservation`(`conversationId`: kotlin.String, `ownershipGeneration`: kotlin.ULong, `goRecordJson`: kotlin.String, `provenance`: NativeRcsObservationProvenance): NativeRcsIngestOutcome
     
-    fun `gatewayInvalidateRcsContextForGoogleEvent`(`conversationId`: kotlin.String, `googleConversationId`: kotlin.String, `expected`: NativeRcsContextExpectation): kotlin.ULong
+    fun `gatewayInvalidateRcsContextForGoogleEvent`(`conversationId`: kotlin.String, `googleConversationId`: kotlin.String, `expected`: NativeRcsContextExpectation, `eventAtMs`: kotlin.Long?): kotlin.ULong?
     
     /**
      * Marks a trusted host download as retryable/terminal without allowing a caller to fabricate
@@ -7939,8 +7939,8 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
-    @Throws(MobileBindingsException::class)override fun `gatewayInvalidateRcsContextForGoogleEvent`(`conversationId`: kotlin.String, `googleConversationId`: kotlin.String, `expected`: NativeRcsContextExpectation): kotlin.ULong {
-            return FfiConverterULong.lift(
+    @Throws(MobileBindingsException::class)override fun `gatewayInvalidateRcsContextForGoogleEvent`(`conversationId`: kotlin.String, `googleConversationId`: kotlin.String, `expected`: NativeRcsContextExpectation, `eventAtMs`: kotlin.Long?): kotlin.ULong? {
+            return FfiConverterOptionalULong.lift(
     callWithHandle {
     uniffiRustCallWithError(MobileBindingsException) { _status ->
     UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_invalidate_rcs_context_for_google_event(
@@ -7948,7 +7948,8 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         
         FfiConverterString.lower(`conversationId`),
         FfiConverterString.lower(`googleConversationId`),
-        FfiConverterTypeNativeRcsContextExpectation.lower(`expected`),_status)
+        FfiConverterTypeNativeRcsContextExpectation.lower(`expected`),
+        FfiConverterOptionalLong.lower(`eventAtMs`),_status)
 }
     }
     )

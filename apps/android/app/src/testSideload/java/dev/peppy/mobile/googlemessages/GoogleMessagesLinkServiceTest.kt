@@ -1047,7 +1047,7 @@ class GoogleMessagesLinkServiceTest {
             return "recorded"
         }
         override fun clearHint(context: NativeRcsReceiveContext) = "recorded"
-        override fun invalidate(context: NativeRcsReceiveContext, googleId: String) = Unit
+        override fun invalidate(context: NativeRcsReceiveContext, googleId: String, eventAtMs: Long?) = false
     }
 
     private class ReconnectRunHandle : StatusHandle(LINKED_STATUS) {

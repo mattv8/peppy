@@ -133,6 +133,19 @@ class GoogleMessagesLinkDiagnosticsTest {
         "bootstrap_refusal" to "nonmonotonic_revision", "bootstrap_refusal" to "retired_context",
         "bootstrap_refusal" to "peppy_conversation_uncertain", "bootstrap_refusal" to "self_chat_unsupported",
         "bootstrap_refusal" to "recipient_mismatch",
+        "recovery" to "stale_signal_skipped", "recovery_abort" to "signal_invalidated",
+        "recovery_abort" to "context_missing", "recovery_abort" to "cancelled",
+        "recovery_abort" to "ingest_refused", "recovery_abort" to "signal_failed",
+        "recovery_abort" to "progress_failed", "recovery_abort" to "context_reload_missing",
+        "recovery_abort" to "finish_failed", "recovery_abort" to "clear_hint_failed",
+        "recovery" to "live_switch_invalidated",
+        "recovery_signal_age" to "absent", "recovery_signal_age" to "future",
+        "recovery_signal_age" to "under_2m", "recovery_signal_age" to "under_15m",
+        "recovery_signal_age" to "under_1h", "recovery_signal_age" to "under_24h",
+        "recovery_signal_age" to "older", "recovery_skipped_age" to "absent",
+        "recovery_skipped_age" to "future", "recovery_skipped_age" to "under_2m",
+        "recovery_skipped_age" to "under_15m", "recovery_skipped_age" to "under_1h",
+        "recovery_skipped_age" to "under_24h", "recovery_skipped_age" to "older",
     )
 
     @Test fun everyPairRecordsOnlyItsStableNumericReason() {
@@ -140,7 +153,7 @@ class GoogleMessagesLinkDiagnosticsTest {
         SyncDiagnostics.withTestConfiguration(true, { 10L }, { error("CPU unused") }, records::add) {
             stablePairs.forEach { (kind, code) -> recordGoogleMessagesLinkEvent(kind, code, Long.MAX_VALUE) }
         }
-		assertEquals(254, records.size)
+        assertEquals(279, records.size)
         records.forEachIndexed { index, record ->
             assertEquals("event=27 session=1 timestamp_ms=10 trace=0 29=${index + 1}", record)
         }
@@ -164,6 +177,22 @@ class GoogleMessagesLinkDiagnosticsTest {
         )
         refusals.forEachIndexed { index, code ->
             assertEquals((240 + index).toLong(), GoogleMessagesLinkDiagnosticReason.codes["bootstrap_refusal" to code])
+        }
+        val recovery = listOf(
+            "recovery" to "stale_signal_skipped", "recovery_abort" to "signal_invalidated",
+            "recovery_abort" to "context_missing", "recovery_abort" to "cancelled",
+            "recovery_abort" to "ingest_refused", "recovery_abort" to "signal_failed",
+            "recovery_abort" to "progress_failed", "recovery_abort" to "context_reload_missing",
+            "recovery_abort" to "finish_failed", "recovery_abort" to "clear_hint_failed",
+            "recovery" to "live_switch_invalidated",
+        )
+        recovery.forEachIndexed { index, pair ->
+            assertEquals((255 + index).toLong(), GoogleMessagesLinkDiagnosticReason.codes[pair])
+        }
+        val ages = listOf("absent", "future", "under_2m", "under_15m", "under_1h", "under_24h", "older")
+        ages.forEachIndexed { index, code ->
+            assertEquals((266 + index).toLong(), GoogleMessagesLinkDiagnosticReason.codes["recovery_signal_age" to code])
+            assertEquals((273 + index).toLong(), GoogleMessagesLinkDiagnosticReason.codes["recovery_skipped_age" to code])
         }
     }
 

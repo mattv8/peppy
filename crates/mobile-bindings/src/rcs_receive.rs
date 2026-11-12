@@ -1221,7 +1221,8 @@ impl NativeClient {
         conversation_id: String,
         google_conversation_id: String,
         expected: NativeRcsContextExpectation,
-    ) -> Result<u64, MobileBindingsError> {
+        event_at_ms: Option<i64>,
+    ) -> Result<Option<u64>, MobileBindingsError> {
         let conversation = conversation_id
             .parse()
             .map_err(|_| MobileBindingsError::InvalidRequest)?;
@@ -1235,6 +1236,7 @@ impl NativeClient {
                     session_generation: expected.session_generation,
                     context_revision: expected.context_revision,
                 },
+                event_at_ms,
             )
         })
     }

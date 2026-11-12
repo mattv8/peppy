@@ -141,6 +141,29 @@ class LinkCoreBridgeTest {
         assertEquals(1, attempts)
     }
 
+    @Test
+    fun `linked transition enqueues one gateway pass but a linked heartbeat does not`() {
+        var enqueues = 0
+        LinkCoreBridge.recorder = { _, _ -> true }
+        LinkCoreBridgeTestHooks.enqueueGatewayPass = { enqueues += 1 }
+
+        assertTrue(LinkCoreBridge.recordIfNeeded(context, LinkStatus(0, "unlinked", false, false, false, 0, "")))
+        assertTrue(LinkCoreBridge.recordIfNeeded(context, LinkStatus(0, "linked", true, true, true, 0, "")))
+        assertTrue(LinkCoreBridge.recordIfNeeded(context, LinkStatus(0, "linked", true, true, true, 0, "")))
+
+        assertEquals(1, enqueues)
+    }
+
+    @Test
+    fun `failed lifecycle record and failed enqueue do not fail linking`() {
+        LinkCoreBridge.recorder = { _, _ -> false }
+        assertFalse(LinkCoreBridge.recordIfNeeded(context, LinkStatus(0, "linked", true, true, true, 0, "")))
+
+        LinkCoreBridge.recorder = { _, _ -> true }
+        LinkCoreBridgeTestHooks.enqueueGatewayPass = { throw IllegalStateException() }
+        assertTrue(LinkCoreBridge.recordIfNeeded(context, LinkStatus(0, "linked", true, true, true, 0, "")))
+    }
+
     private fun observationLease(): LinkHandleLease {
         LinkRuntimeTestHooks.engine = object : LinkEngine {
             override val available = true

@@ -1740,12 +1740,16 @@ impl Client {
         })
     }
 
+    /// Ignores a historical switch at or before the active proof minus the guard band: the proof
+    /// already reflects a switch written before its observation, and the band absorbs clock skew
+    /// between Google's message time and the phone clock.
     pub fn invalidate_rcs_context_for_google_event(
         &self,
         conversation_id: ConversationId,
         google_conversation_id: &str,
         expected: RcsContextExpectation,
-    ) -> Result<u64, Error> {
+        event_at_ms: Option<i64>,
+    ) -> Result<Option<u64>, Error> {
         let mut store = self.lock()?;
         let (conn, ctx) = store.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1786,13 +1790,17 @@ impl Client {
         if !matches_context {
             return Err(Error::InvalidRequest("RCS context is not current"));
         }
-        let targets_mapping: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM rcs_conversation_mappings WHERE peppy_conversation_id=? AND google_conversation_id=? AND invalidated_at_ms IS NULL)",
+        let verified_at_ms: Option<i64> = tx.query_row(
+            "SELECT verified_at_ms FROM rcs_conversation_mappings WHERE peppy_conversation_id=? AND google_conversation_id=? AND invalidated_at_ms IS NULL",
             params![conversation_id.to_string(), google_conversation_id],
             |row| row.get(0),
-        )?;
-        if !targets_mapping {
+        ).optional()?;
+        let Some(verified_at_ms) = verified_at_ms else {
             return Err(Error::InvalidRequest("RCS mapping is not current"));
+        };
+        if matches!(event_at_ms, Some(event_at_ms) if event_at_ms > 0 && event_at_ms <= verified_at_ms.saturating_sub(RCS_PROVIDER_GUARD_BAND_MS))
+        {
+            return Ok(None);
         }
         let revision = expected
             .context_revision
@@ -1805,7 +1813,7 @@ impl Client {
         )?;
         crate::rcs_mapping::invalidate_mapping(&tx, conversation_id, "google_event")?;
         tx.commit()?;
-        Ok(revision)
+        Ok(Some(revision))
     }
 }
 
