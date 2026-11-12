@@ -5,9 +5,7 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$RepoPath,
   [Parameter(Mandatory = $true)]
-  [string]$CargoTargetDir,
-  [ValidateSet('0', '1')]
-  [string]$NotificationQuickReply = '0'
+  [string]$CargoTargetDir
 )
 
 $ErrorActionPreference = 'Stop'
@@ -114,9 +112,7 @@ function Invoke-WindowsDesktop {
   param(
     [string]$RequestedAction,
     [string]$Repository,
-    [string]$TargetDirectory,
-    [ValidateSet('0', '1')]
-    [string]$QuickReply = $NotificationQuickReply
+    [string]$TargetDirectory
   )
   $Repository = (Resolve-Path -LiteralPath $Repository).ProviderPath
   $TargetDirectory = [System.IO.Path]::GetFullPath($TargetDirectory)
@@ -124,9 +120,6 @@ function Invoke-WindowsDesktop {
   Push-Location $Repository
   try {
     if ($RequestedAction -eq 'open') {
-      if ($QuickReply -eq '1') {
-        throw 'Install the generated NSIS or MSI bundle, then launch Peppy_dev from the Start menu. Raw target debug and release executables do not qualify for native notification testing.'
-      }
       if (-not (Test-Path -LiteralPath $app -PathType Leaf)) {
         throw "No current Windows executable at $app; run desktop-bundle first."
       }
@@ -137,9 +130,6 @@ function Invoke-WindowsDesktop {
     $env:CARGO_TARGET_DIR = $TargetDirectory
     Invoke-Checked -File $tools.Pnpm -Arguments @('install', '--frozen-lockfile')
     $cargoArguments = @('--locked')
-    if ($QuickReply -eq '1') {
-      $cargoArguments += @('--features', 'notification-quick-reply')
-    }
     if ($RequestedAction -eq 'dev') {
       Invoke-Checked -File $tools.Pnpm -Arguments (@('--dir', 'apps/desktop', 'exec', 'tauri', 'dev', '--') + $cargoArguments)
     } else {
@@ -152,7 +142,7 @@ function Invoke-WindowsDesktop {
 
 if ($MyInvocation.InvocationName -ne '.') {
   try {
-    Invoke-WindowsDesktop -RequestedAction $Action -Repository $RepoPath -TargetDirectory $CargoTargetDir -QuickReply $NotificationQuickReply
+    Invoke-WindowsDesktop -RequestedAction $Action -Repository $RepoPath -TargetDirectory $CargoTargetDir
   } catch {
     [Console]::Error.WriteLine("Windows desktop setup requires native Node/pnpm/Rust, Visual Studio C++ Build Tools with the Windows SDK, WebView2 Runtime, and native Strawberry Perl. $($_.Exception.Message)")
     exit 1

@@ -23,12 +23,6 @@ action=${1:-}
 [[ $# -eq 1 ]] || usage
 case "$action" in dev|build|open) ;; *) usage ;; esac
 
-notification_quick_reply=${PEPPY_NOTIFICATION_QUICK_REPLY:-0}
-case "$notification_quick_reply" in
-  0|1) ;;
-  *) die "PEPPY_NOTIFICATION_QUICK_REPLY must be 0 or 1." ;;
-esac
-
 script_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 caller_root=$(CDPATH='' cd -- "$script_dir/../.." && pwd -P)
 source_root=$(CDPATH='' cd -- "${PEPPY_SOURCE_TREE:-$caller_root}" && pwd -L)
@@ -139,9 +133,6 @@ macos() {
       false) ;;
       *) die "The local development TLS helper returned an invalid DEBUG setting." ;;
     esac
-    if [[ "$notification_quick_reply" == 1 ]]; then
-      cargo_args+=(--features notification-quick-reply)
-    fi
   fi
   case "$action" in
     open)
@@ -197,8 +188,7 @@ wsl_windows() {
     die "Windows PowerShell was not found through WSL interop."
   fi
   "$powershell" -NoProfile -ExecutionPolicy Bypass -File "${caller_windows}\\infra\\dev\\windows-desktop.ps1" \
-    -Action "$action" -RepoPath "$source_windows" -CargoTargetDir "$target_windows" \
-    -NotificationQuickReply "$notification_quick_reply"
+    -Action "$action" -RepoPath "$source_windows" -CargoTargetDir "$target_windows"
 }
 
 case "$(uname -s)" in
