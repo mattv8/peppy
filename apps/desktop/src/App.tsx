@@ -1156,7 +1156,7 @@ function MessageList({
   const hiddenTimeTitle = (message: MessageView) => hiddenTimes.has(message.id)
     ? formatDateTime(messageTime(message).displayedTime) ?? undefined
     : undefined;
-  const isGroup = (conversation.participants?.length ?? 0) > 1;
+  const isGroup = Boolean(conversation.group) || (conversation.participants?.length ?? 0) > 1;
   const messageGroups = groupMessages(visualMessages);
   const timeline = interleaveGroupNotices(messageGroups, groupNoticeItems(conversation.group?.notices));
   const senderEdges = isGroup

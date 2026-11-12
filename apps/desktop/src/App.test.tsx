@@ -241,6 +241,53 @@ describe("group sender attribution", () => {
     expect(document.querySelector('[data-message-row="after-images"]')).toHaveAttribute("data-sender-run-end");
     expect(document.querySelector('[data-message-row="after-images"] [data-sender-avatar="+18015551234"]')).toBeInTheDocument();
   });
+
+  it("restores sender labels and run avatars for an authoritative unlinked MMS group with one reply participant", async () => {
+    host.conversations[0] = {
+      ...host.conversations[0],
+      participants: ["+18015551234"],
+      group: {
+        members: ["+18015551234", "+18015551235"],
+        state: "unlinked",
+        memberRevision: "3",
+        canCreate: false,
+        createNeedsConfirmation: false,
+        notices: [{ kind: "added", member: "+18015551235", atMs: "1788434459000" }],
+      },
+      messages: [
+        { id: "mms-burst-ada-first", revision: "1", sender: "other", senderAddress: "+18015551234", body: "First", timestamp: "1788434460000", transport: "mms", attachments: [] },
+        { id: "mms-burst-ada-last", revision: "1", sender: "other", senderAddress: "+18015551234", body: "Second", timestamp: "1788434461000", transport: "mms", attachments: [] },
+        { id: "mms-burst-grace", revision: "1", sender: "other", senderAddress: "+18015551235", body: "Third", timestamp: "1788434462000", transport: "mms", attachments: [] },
+      ],
+    };
+    render(<App />);
+
+    await screen.findByText("Third");
+    expect(document.querySelectorAll("[data-sender-label]")).toHaveLength(2);
+    expect(document.querySelector('[data-message-row="mms-burst-ada-first"]')).toHaveAttribute("data-sender-run-start");
+    expect(document.querySelector('[data-message-row="mms-burst-ada-last"]')).toHaveAttribute("data-sender-run-end");
+    expect(document.querySelector('[data-message-row="mms-burst-ada-last"] [data-sender-avatar="+18015551234"]')).toBeInTheDocument();
+    expect(document.querySelector('[data-message-row="mms-burst-grace"] [data-sender-avatar="+18015551235"]')).toBeInTheDocument();
+  });
+
+  it("keeps sender labels for an unlinked MMS group whose loaded history has one sender", async () => {
+    localStorage.setItem("peppy.layout.v1", JSON.stringify({ groupSenderAvatars: false }));
+    host.conversations[0] = {
+      ...host.conversations[0],
+      participants: ["+18015551234"],
+      group: { members: ["+18015551234", "+18015551235"], state: "unlinked", memberRevision: "3", canCreate: false, createNeedsConfirmation: false },
+      messages: [
+        { id: "mms-solo-first", revision: "1", sender: "other", senderAddress: "+18015551234", body: "Solo first", timestamp: "1788434460000", transport: "mms", attachments: [] },
+        { id: "mms-solo-last", revision: "1", sender: "other", senderAddress: "+18015551234", body: "Solo last", timestamp: "1788434461000", transport: "mms", attachments: [] },
+      ],
+    };
+    render(<App />);
+
+    await screen.findByText("Solo last");
+    expect(document.querySelectorAll("[data-sender-label]")).toHaveLength(1);
+    expect(document.querySelector('[data-message-row="mms-solo-first"]')).toHaveAttribute("data-sender-run-start");
+    expect(document.querySelector("[data-sender-avatar]")).not.toBeInTheDocument();
+  });
 });
 
 describe("conversation add-contact action", () => {
