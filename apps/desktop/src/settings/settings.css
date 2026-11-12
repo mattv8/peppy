@@ -200,7 +200,8 @@
   #notification-settings .notification-setting-help .info-button,
   #notification-settings .peppy-modal-actions > button,
   #notification-settings #notification-test-actions > button,
-  #notification-settings :is(select, #notification-persistence-custom) {
+  #notification-settings #notification-persistence-open-settings,
+  #notification-settings select {
     min-height: 44px;
   }
 
@@ -232,62 +233,22 @@
   min-width: 0;
 }
 
-#notification-persistence-controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-#notification-persistence-custom-field {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-#notification-persistence-custom {
-  flex: none;
-  width: 7ch;
-  min-width: 80px;
-}
-
-#notification-persistence-custom-field > span {
-  color: var(--peppy-text-secondary);
-  font-size: 12px;
-}
-
-#notification-persistence-custom[aria-invalid="true"] {
-  box-shadow: inset 0 0 0 2px var(--peppy-error-text);
-}
-
 @container (max-width: 420px) {
   #notification-preview-row,
-  #notification-persistence-row {
+  #notification-persistence-row:not([data-persistence-platform="browser"]) {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     width: 100%;
   }
 
   #notification-preview-row select,
-  #notification-persistence-controls {
+  #notification-persistence {
     width: 100%;
     max-width: 100%;
   }
 
-  #notification-persistence-controls {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  #notification-persistence-custom {
-    flex: 1;
-  }
-}
-
-@media (forced-colors: active) {
-  #notification-persistence-custom[aria-invalid="true"] {
-    outline: 2px solid CanvasText;
-    outline-offset: -2px;
+  #notification-persistence-open-settings {
+    justify-self: start;
   }
 }
 

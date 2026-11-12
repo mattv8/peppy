@@ -564,7 +564,7 @@ export class BrowserBridge implements DesktopBridge {
   public set_app_muted(sourceDeviceId: string, packageName: string, appName: string, muted: boolean): Promise<void> { return this.call("set_app_muted", { sourceDeviceId, packageName, appName, muted }); }
   public mark_notifications_seen(targets: NotificationTarget[]): Promise<void> { return this.call("mark_notifications_seen", { targets }); }
   public set_notification_preferences(preferences: NotificationPreferences): Promise<void> { return this.call("set_notification_preferences", { preferences }); }
-  public async get_notification_persistence(): Promise<NotificationPersistenceSettings> { return { ...this.notificationPersistence(), supported: this.notificationPersistenceSupported() }; }
+  public async get_notification_persistence(): Promise<NotificationPersistenceSettings> { return { ...this.notificationPersistence(), supported: this.notificationPersistenceSupported(), platform: "browser" }; }
   public async set_notification_persistence(value: NotificationPersistence): Promise<void> {
     const persistence = notificationPersistence(value);
     if (!persistence) throw new BrowserBridgeError("invalid-request", "Invalid notification persistence.");

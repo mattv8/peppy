@@ -5774,22 +5774,33 @@ fn get_notification_sound(
 }
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct NotificationPersistenceSettings {
     seconds: Option<u16>,
     supported: bool,
+    platform: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    macos_style: Option<notification_permission::MacosStyle>,
 }
 
 #[tauri::command]
-fn get_notification_persistence(
+async fn get_notification_persistence(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
 ) -> BridgeResult<NotificationPersistenceSettings> {
     let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let persistence = state.notifications.persistence();
+    #[cfg(target_os = "macos")]
+    let macos_style =
+        Some(blocking(|| Ok(notification_permission::macos::persistence_style())).await?);
+    #[cfg(not(target_os = "macos"))]
+    let macos_style = None;
     Ok(NotificationPersistenceSettings {
         seconds: persistence.seconds,
-        supported: notification_persistence::supported(),
+        supported: notification_persistence::settings_supported(),
+        platform: notification_persistence::platform(),
+        macos_style,
     })
 }
 

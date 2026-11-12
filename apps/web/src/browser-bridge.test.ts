@@ -95,7 +95,7 @@ describe("BrowserBridge", () => {
     local.storage.setItem("peppy.notification-persistence", "not-json");
     try {
       const bridge = new BrowserBridge(port as unknown as MessagePort);
-      await expect(bridge.get_notification_persistence?.()).resolves.toEqual({ seconds: 5, supported: true });
+      await expect(bridge.get_notification_persistence?.()).resolves.toEqual({ seconds: 5, supported: true, platform: "browser" });
       const context = bridge.set_notification_context("settings");
       port.reply({ id: 1, ok: true, value: undefined });
       await context;
@@ -112,7 +112,7 @@ describe("BrowserBridge", () => {
     const original = Object.getOwnPropertyDescriptor(globalThis, "Notification");
     Object.defineProperty(globalThis, "Notification", { configurable: true, value: undefined });
     try {
-      await expect(new BrowserBridge(new TestPort() as unknown as MessagePort).get_notification_persistence?.()).resolves.toEqual({ seconds: 5, supported: false });
+      await expect(new BrowserBridge(new TestPort() as unknown as MessagePort).get_notification_persistence?.()).resolves.toEqual({ seconds: 5, supported: false, platform: "browser" });
     } finally {
       if (original) Object.defineProperty(globalThis, "Notification", original);
       else delete (globalThis as { Notification?: typeof Notification }).Notification;
@@ -154,7 +154,7 @@ describe("BrowserBridge", () => {
       local.storage.setItem("peppy.notification-persistence", JSON.stringify({ seconds: null }));
       const unsupportedPort = new TestPort();
       const unsupported = new BrowserBridge(unsupportedPort as unknown as MessagePort);
-      await expect(unsupported.get_notification_persistence?.()).resolves.toEqual({ seconds: null, supported: false });
+      await expect(unsupported.get_notification_persistence?.()).resolves.toEqual({ seconds: null, supported: false, platform: "browser" });
       unsupportedPort.reply({ event: "banner", candidate: { id: "unsupported", title: "Source", body: "" } });
       expect(posted).toHaveBeenLastCalledWith("Source", { body: "", tag: "peppy-unsupported" });
     } finally {

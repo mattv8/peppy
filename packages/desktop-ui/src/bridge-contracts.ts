@@ -113,7 +113,11 @@ export type NotificationPermissionStatus = "granted" | "quiet" | "denied" | "unk
 export type NotificationCheck = { status: NotificationPermissionStatus; testSent: boolean; canOpenSettings: boolean };
 /** Per-device banner on-screen time; `seconds: null` requests banners stay until dismissed where the platform supports it. Platforms may shorten or ignore it. */
 export type NotificationPersistence = { seconds: number | null };
-export type NotificationPersistenceSettings = NotificationPersistence & { supported: boolean };
+export type NotificationPersistenceSettings = NotificationPersistence & {
+  supported: boolean;
+  platform?: "macos" | "windows" | "linux" | "browser";
+  macosStyle?: "banners" | "alerts" | "off" | "unknown";
+};
 export type NotificationQuickReplySettings = { enabled: boolean; supported: boolean };
 export type NotificationReplyRecovery = {
   id: string;
