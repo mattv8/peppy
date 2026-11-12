@@ -1827,10 +1827,13 @@ function SettingsView({
           </label>
         </fieldset>}
         <div id="settings-compact-timestamps-group">
-          <label className="settings-check">
-            <input id="settings-compact-timestamps" type="checkbox" checked={compactTimestamps} aria-describedby="settings-compact-timestamps-hint" onChange={(event) => onCompactTimestamps(event.target.checked)} />
-            Show times only after a pause
-          </label>
+          <div id="settings-compact-timestamps-row" className="settings-control-row">
+            <label htmlFor="settings-compact-timestamps">Show times only after a pause</label>
+            <span className="settings-switch">
+              <input id="settings-compact-timestamps" type="checkbox" role="switch" checked={compactTimestamps} aria-checked={compactTimestamps} aria-describedby="settings-compact-timestamps-hint" onChange={(event) => onCompactTimestamps(event.target.checked)} />
+              <span aria-hidden />
+            </span>
+          </div>
           <p id="settings-compact-timestamps-hint" className="settings-field-hint">Hides times on messages sent within an hour of the next one.</p>
         </div>
         <fieldset id="settings-attachment-layout">
@@ -1845,28 +1848,31 @@ function SettingsView({
           </label>
         </fieldset>
         <div id="settings-group-sender-avatars-group">
-          <label className="settings-check">
-            <input id="settings-group-sender-avatars" type="checkbox" checked={groupSenderAvatars} aria-describedby="settings-group-sender-avatars-hint" onChange={(event) => onGroupSenderAvatars(event.target.checked)} />
-            Show sender avatars in group conversations
-          </label>
+          <div id="settings-group-sender-avatars-row" className="settings-control-row">
+            <label htmlFor="settings-group-sender-avatars">Show sender avatars in group conversations</label>
+            <span className="settings-switch">
+              <input id="settings-group-sender-avatars" type="checkbox" role="switch" checked={groupSenderAvatars} aria-checked={groupSenderAvatars} aria-describedby="settings-group-sender-avatars-hint" onChange={(event) => onGroupSenderAvatars(event.target.checked)} />
+              <span aria-hidden />
+            </span>
+          </div>
           <p id="settings-group-sender-avatars-hint" className="settings-field-hint">Shows a photo or initials beside the last message in each stretch from one person. Names always show.</p>
         </div>
       </section>
       {desktop?.startupSupported && <section id="settings-startup" className="settings-card" data-settings-section="startup" data-startup-state={startupStatus?.state ?? (desktop.startAtLogin ? "on" : "off")}>
         <h2>Startup</h2>
-        <label className="settings-check"><input id="start-at-login" type="checkbox" checked={startupStatus ? startupStatus.state === "on" || startupStatus.state === "approval_needed" : desktop.startAtLogin} disabled={savingStartup || startupStatus?.state === "unavailable"} onChange={async event => {
+        <div id="start-at-login-row" className="settings-control-row"><label htmlFor="start-at-login">{peppyCopy.startup_login_label}</label><span className="settings-switch"><input id="start-at-login" type="checkbox" role="switch" checked={startupStatus ? startupStatus.state === "on" || startupStatus.state === "approval_needed" : desktop.startAtLogin} aria-checked={startupStatus ? startupStatus.state === "on" || startupStatus.state === "approval_needed" : desktop.startAtLogin} disabled={savingStartup || startupStatus?.state === "unavailable"} onChange={async event => {
           setSavingStartup(true); setStartupError("");
           try { await onStartAtLogin(event.target.checked); await reloadStartupStatus(); }
           catch (error) { setStartupError(errorText(error)); }
           finally { setSavingStartup(false); }
-        }} /> {peppyCopy.startup_login_label}</label>
-        <label className="settings-check"><input id="startup-open-background" type="checkbox" checked={startupStatus?.background ?? desktop.background} disabled={savingStartup || !startupStatus || startupStatus.state === "off" || startupStatus.state === "unavailable"} aria-describedby="startup-open-background-hint" onChange={async event => {
+        }} /><span aria-hidden /></span></div>
+        <div id="startup-open-background-row" className="settings-control-row"><label htmlFor="startup-open-background">{peppyCopy.startup_background_label}</label><span className="settings-switch"><input id="startup-open-background" type="checkbox" role="switch" checked={startupStatus?.background ?? desktop.background} aria-checked={startupStatus?.background ?? desktop.background} disabled={savingStartup || !startupStatus || startupStatus.state === "off" || startupStatus.state === "unavailable"} aria-describedby="startup-open-background-hint" onChange={async event => {
           const background = event.target.checked;
           setSavingStartup(true); setStartupError("");
           try { await bridge.set_open_in_background(background); await reloadStartupStatus(); }
           catch (error) { setStartupError(errorText(error)); await reloadStartupStatus().catch(() => undefined); }
           finally { setSavingStartup(false); }
-        }} /> {peppyCopy.startup_background_label}</label>
+        }} /><span aria-hidden /></span></div>
         <p id="startup-open-background-hint" className="settings-field-hint">{startupStatus?.state === "off" ? peppyCopy.startup_background_needs_login : platform === "macos" ? peppyCopy.startup_background_hint_menu_bar : peppyCopy.startup_background_hint_notification_area}</p>
         <p id="startup-status" role="status">{startupStatus?.state === "approval_needed" ? platform === "macos" ? peppyCopy.startup_approval_macos : peppyCopy.startup_approval_windows : startupStatus?.state === "unavailable" ? peppyCopy.startup_unavailable : ""}</p>
         {startupStatus?.state === "approval_needed" && platform === "macos" && <button id="startup-open-login-items" className="secondary-button" type="button" disabled={savingStartup} onClick={() => { setOpenLoginItemsError(false); void bridge.open_login_items().catch(() => setOpenLoginItemsError(true)); }}>{peppyCopy.startup_open_login_items_cta}</button>}

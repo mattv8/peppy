@@ -41,6 +41,6 @@ describe("AppLockSettings", () => {
   it("disables the password setting while app lock status is pending", () => {
     render(<AppLockSettings status={{ enabled: false, locked: true, storageAvailable: true, pending: true }} onChange={async () => true} />);
 
-    expect(screen.getByRole("checkbox", { name: "Require a password when Peppy starts" })).toBeDisabled();
+    expect(screen.getByRole("switch", { name: "Require a password when Peppy starts" })).toBeDisabled();
   });
 });

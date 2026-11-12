@@ -154,7 +154,7 @@ describe("group sender attribution", () => {
     expect(document.querySelector("[data-sender-gutter]")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const avatars = await screen.findByRole("checkbox", { name: "Show sender avatars in group conversations" });
+    const avatars = await screen.findByRole("switch", { name: "Show sender avatars in group conversations" });
     expect(avatars).not.toBeChecked();
     fireEvent.click(avatars);
     expect(JSON.parse(localStorage.getItem("peppy.layout.v1")!)).toMatchObject({ groupSenderAvatars: true });
@@ -1984,7 +1984,7 @@ describe("lazy conversation history", () => {
     expect(sentProgress.querySelector("time")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const compactTimestamps = await screen.findByRole("checkbox", { name: "Show times only after a pause" });
+    const compactTimestamps = await screen.findByRole("switch", { name: "Show times only after a pause" });
     expect(compactTimestamps).toBeChecked();
     fireEvent.click(compactTimestamps);
     fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
@@ -5897,7 +5897,7 @@ describe("host state display", () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const startup = screen.getByRole("checkbox", { name: "Start at login" });
+    const startup = screen.getByRole("switch", { name: "Start at login" });
     fireEvent.click(startup);
     expect(startup).toBeDisabled();
     expect(startup).not.toBeChecked();
@@ -5920,8 +5920,8 @@ describe("host state display", () => {
 
     const card = document.getElementById("settings-startup")!;
     await waitFor(() => expect(card).toHaveAttribute("data-startup-state", state));
-    expect(screen.getByRole("checkbox", { name: "Start at login" })).toHaveProperty("checked", checked);
-    const backgroundToggle = screen.getByRole("checkbox", { name: "Open in the background" });
+    expect(screen.getByRole("switch", { name: "Start at login" })).toHaveProperty("checked", checked);
+    const backgroundToggle = screen.getByRole("switch", { name: "Open in the background" });
     expect(backgroundToggle).toHaveProperty("checked", background);
     if (state === "unavailable") expect(backgroundToggle).toBeDisabled();
   });
@@ -5932,7 +5932,7 @@ describe("host state display", () => {
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
-    expect(await screen.findByRole("checkbox", { name: "Open in the background" })).toBeDisabled();
+    expect(await screen.findByRole("switch", { name: "Open in the background" })).toBeDisabled();
     expect(document.getElementById("startup-open-background-hint")).toHaveTextContent("Turn on Start at login to use this.");
   });
 
@@ -5943,7 +5943,7 @@ describe("host state display", () => {
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
-    fireEvent.click(await screen.findByRole("checkbox", { name: "Open in the background" }));
+    fireEvent.click(await screen.findByRole("switch", { name: "Open in the background" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Permission denied.");
     expect(screen.queryByText(/Start at login was not changed/)).not.toBeInTheDocument();
@@ -7240,7 +7240,7 @@ describe("desktop app lock", () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const checkbox = await screen.findByRole("checkbox", { name: "Require a password when Peppy starts" });
+    const checkbox = await screen.findByRole("switch", { name: "Require a password when Peppy starts" });
     expect(checkbox).not.toBeChecked();
     expect(document.querySelector("input[type=\"password\"]")).toBeNull();
     expect(screen.getByText(/Changes apply the next time Peppy starts/)).toBeInTheDocument();
@@ -7255,10 +7255,10 @@ describe("desktop app lock", () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const checkbox = await screen.findByRole("checkbox", { name: "Require a password when Peppy starts" });
+    const checkbox = await screen.findByRole("switch", { name: "Require a password when Peppy starts" });
     fireEvent.click(checkbox);
     await waitFor(() => expect(setLock).toHaveBeenCalledWith(true));
-    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Require a password when Peppy starts" })).toBeChecked());
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Require a password when Peppy starts" })).toBeChecked());
     expect(document.querySelector("input[type=\"password\"]")).toBeNull();
   });
 
@@ -7267,11 +7267,11 @@ describe("desktop app lock", () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const checkbox = await screen.findByRole("checkbox", { name: "Require a password when Peppy starts" });
+    const checkbox = await screen.findByRole("switch", { name: "Require a password when Peppy starts" });
     fireEvent.click(checkbox);
     await waitFor(() => expect(setLock).toHaveBeenCalledWith(true));
     expect(await screen.findByText("The password requirement was not changed.")).toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: "Require a password when Peppy starts" })).not.toBeChecked();
+    expect(screen.getByRole("switch", { name: "Require a password when Peppy starts" })).not.toBeChecked();
   });
 
   it("disables the control and explains storage failure when secure storage is unavailable", async () => {
@@ -7279,7 +7279,7 @@ describe("desktop app lock", () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(await screen.findByRole("checkbox", { name: "Require a password when Peppy starts" })).toBeDisabled();
+    expect(await screen.findByRole("switch", { name: "Require a password when Peppy starts" })).toBeDisabled();
     expect(screen.getByText("Secure storage is unavailable, so this setting cannot be changed.")).toBeInTheDocument();
   });
 
@@ -7345,7 +7345,7 @@ describe("desktop app lock", () => {
 
     await act(async () => { hint?.(); });
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
-    expect(screen.getByRole("checkbox", { name: "Require a password when Peppy starts" })).toBeChecked();
+    expect(screen.getByRole("switch", { name: "Require a password when Peppy starts" })).toBeChecked();
   });
 
   it("starts a fresh app lock check when storage retry is selected", async () => {
@@ -7371,7 +7371,7 @@ describe("desktop app lock", () => {
 
     await waitFor(() => expect(bridge.get_app_lock_status).toHaveBeenCalledTimes(2));
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const checkbox = screen.getByRole("checkbox", { name: "Require a password when Peppy starts" });
+    const checkbox = screen.getByRole("switch", { name: "Require a password when Peppy starts" });
     expect(checkbox).toBeChecked();
     expect(checkbox).toBeEnabled();
   });
@@ -7391,7 +7391,7 @@ describe("desktop app lock", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
 
     await waitFor(() => expect(bridge.get_app_lock_status).toHaveBeenCalledTimes(2));
-    const checkbox = screen.getByRole("checkbox", { name: "Require a password when Peppy starts" });
+    const checkbox = screen.getByRole("switch", { name: "Require a password when Peppy starts" });
     expect(checkbox).toBeChecked();
     expect(checkbox).toBeEnabled();
   });
@@ -7404,7 +7404,7 @@ describe("desktop app lock", () => {
     expect(screen.queryByRole("heading", { name: "Peppy is locked" })).not.toBeInTheDocument();
     expect(status).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(screen.queryByRole("checkbox", { name: "Require a password when Peppy starts" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch", { name: "Require a password when Peppy starts" })).not.toBeInTheDocument();
   });
 });
 

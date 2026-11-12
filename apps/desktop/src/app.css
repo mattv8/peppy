@@ -107,7 +107,6 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   color: var(--peppy-text-primary);
 }
 .settings-check { display: flex; gap: 6px; align-items: center; font-size: 12px; }
-.settings-check-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .head-panel-shell { width: 100%; min-width: 0; }
 #head-panel-header { position: relative; z-index: 2; display: flex; min-height: 36px; align-items: center; gap: 6px; padding: 0 8px; background: var(--peppy-accent); color: var(--peppy-accent-text); }
 #head-panel-header::before { position: absolute; top: -7px; left: 20px; width: 14px; height: 14px; content: ""; background: var(--peppy-accent); transform: rotate(45deg); }
@@ -1162,16 +1161,20 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   align-items: end;
   gap: 8px;
 }
-:is(#notification-settings, #settings-messages, #settings-advanced) .settings-control-row:has(.settings-switch) {
+#settings-view .settings-control-row:has(.settings-switch) {
   align-items: center;
+  min-height: 28px;
 }
-:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch {
+#settings-view .settings-control-row:has(.settings-switch:has(input:disabled)) > label {
+  color: var(--peppy-text-secondary);
+}
+#settings-view .settings-switch {
   position: relative;
   width: 32px;
   height: 18px;
   flex: 0 0 32px;
 }
-:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch > input[role="switch"] {
+#settings-view .settings-switch > input[role="switch"] {
   position: absolute;
   z-index: 1;
   inset: 0;
@@ -1181,7 +1184,7 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   cursor: pointer;
   opacity: 0;
 }
-:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch > span {
+#settings-view .settings-switch > span {
   position: absolute;
   inset: 0;
   border: 1px solid var(--peppy-border-strong);
@@ -1189,7 +1192,7 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   background: var(--peppy-surface-active);
   transition: background-color var(--peppy-duration-fast) var(--peppy-ease-out), border-color var(--peppy-duration-fast) var(--peppy-ease-out);
 }
-:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch > span::before {
+#settings-view .settings-switch > span::before {
   display: block;
   width: 12px;
   height: 12px;
@@ -1199,38 +1202,52 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   content: "";
   transition: transform var(--peppy-duration-fast) var(--peppy-ease-out), background-color var(--peppy-duration-fast) var(--peppy-ease-out);
 }
-:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch > input[role="switch"]:checked + span {
+#settings-view .settings-switch > input[role="switch"]:checked + span {
   border-color: var(--peppy-accent);
   background: var(--peppy-accent);
 }
-:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch > input[role="switch"]:checked + span::before {
+#settings-view .settings-switch > input[role="switch"]:checked + span::before {
   background: var(--peppy-accent-text);
   transform: translateX(14px);
 }
-:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch > input[role="switch"]:focus-visible + span {
+#settings-view .settings-switch > input[role="switch"]:focus-visible + span {
   outline: 2px solid var(--peppy-focus);
   outline-offset: 2px;
 }
-:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch > input[role="switch"]:disabled {
+#settings-view .settings-switch > input[role="switch"]:disabled {
   cursor: not-allowed;
 }
-:is(#notification-settings, #settings-messages, #settings-advanced) .settings-switch > input[role="switch"]:disabled + span {
+#settings-view .settings-switch > input[role="switch"]:disabled + span {
   opacity: .55;
 }
+@media (pointer: coarse) {
+  #settings-view .settings-switch > input[role="switch"] {
+    inset: auto;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    transform: translate(-50%, -50%);
+  }
+}
 @media (forced-colors: active) {
-  :is(#notification-settings, #settings-messages) .settings-switch > span {
+  #settings-view .settings-switch > span {
     border-color: ButtonText;
     background: ButtonFace;
   }
-  :is(#notification-settings, #settings-messages) .settings-switch > span::before {
+  #settings-view .settings-switch > span::before {
     background: ButtonText;
   }
-  :is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"]:checked + span {
+  #settings-view .settings-switch > input[role="switch"]:checked + span {
     border-color: Highlight;
     background: Highlight;
   }
-  :is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"]:checked + span::before {
+  #settings-view .settings-switch > input[role="switch"]:checked + span::before {
     background: HighlightText;
+  }
+  #settings-view .settings-switch > input[role="switch"]:disabled + span {
+    border-color: GrayText;
+    opacity: 1;
   }
 }
 @media (forced-colors: active) {
