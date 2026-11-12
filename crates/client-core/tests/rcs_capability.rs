@@ -674,23 +674,35 @@ fn missing_fence_metadata_recovers_on_fresh_eligibility() {
 }
 
 #[test]
-fn linked_heartbeat_rederives_raw_capability_from_local_mappings() {
+fn linked_heartbeat_with_interleaved_messages_preserves_eligibility() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
     let config = config(&directory, "rcs-capability-heartbeat", &vault);
     let client = unlocked(&config, &vault);
-    let conversation = ConversationId::new();
+    let conversation = client
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "+12025550123".into(),
+            body: String::new(),
+            provider_message_id: Some("provider-heartbeat".into()),
+            imported: true,
+        })
+        .unwrap()
+        .conversation_id;
+    assert!(matches!(
+        client
+            .verify_rcs_mapping(&mapping_observation("+12025550123"), 1_000)
+            .unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
 
     client
         .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
         .unwrap();
     client
-        .publish_rcs_capability(
-            &status(config.device_id, 2, 1_000),
-            &[eligibility(config.device_id, conversation, 1, 1_000)],
-            1_000,
-        )
+        .publish_rcs_eligibility_from_lifecycle(&[conversation], 1_000)
         .unwrap();
+    let before = client.pending_outbox_count().unwrap();
     client
         .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_001, 1_001)
         .unwrap();
@@ -701,8 +713,9 @@ fn linked_heartbeat_rederives_raw_capability_from_local_mappings() {
             .unwrap()
             .unwrap()
             .eligibility,
-        RcsEligibility::NotEligible
+        RcsEligibility::Eligible
     );
+    assert_eq!(client.pending_outbox_count().unwrap(), before + 1);
 }
 
 #[test]
@@ -1676,7 +1689,7 @@ fn unchanged_eligibility_is_not_published_again_after_unavailable_returns() {
 }
 
 #[test]
-fn linked_record_refreshes_an_invalidated_mapping_after_return() {
+fn linked_heartbeat_refreshes_an_invalidated_mapping() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
     let config = config(&directory, "rcs-capability-return", &vault);
@@ -1721,23 +1734,15 @@ fn linked_record_refreshes_an_invalidated_mapping_after_return() {
         .unwrap();
     drop(connection);
     let client = unlocked(&config, &vault);
+    let before = client.pending_outbox_count().unwrap();
     client
-        .record_rcs_link_lifecycle(
-            RcsCapabilityState::Unavailable,
-            false,
-            false,
-            false,
-            1_001,
-            1_001,
-        )
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_001, 1_001)
         .unwrap();
-    client
-        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_002, 1_002)
-        .unwrap();
+    assert_eq!(client.pending_outbox_count().unwrap(), before + 2);
 
     assert_eq!(
         client
-            .rcs_eligibility_projection(mapped, config.device_id, 1_002)
+            .rcs_eligibility_projection(mapped, config.device_id, 1_001)
             .unwrap()
             .unwrap()
             .eligibility,
@@ -1872,7 +1877,7 @@ fn linked_record_before_keepalive_adds_only_its_status_event() {
 }
 
 #[test]
-fn linked_record_refreshes_all_due_published_rows() {
+fn unavailable_return_does_not_republish_unchanged_published_rows() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
     let config = config(&directory, "rcs-capability-drain", &vault);
@@ -1890,34 +1895,70 @@ fn linked_record_refreshes_all_due_published_rows() {
     }
     let before = client.pending_outbox_count().unwrap();
     client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_001, 1_001)
+        .unwrap();
+    assert_eq!(client.pending_outbox_count().unwrap(), before + 1);
+    let before = client.pending_outbox_count().unwrap();
+    client
         .record_rcs_link_lifecycle(
             RcsCapabilityState::Unavailable,
             false,
             false,
             false,
-            1_001,
-            1_001,
+            1_002,
+            1_002,
         )
         .unwrap();
     client
-        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_002, 1_002)
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_003, 1_003)
         .unwrap();
     assert_eq!(client.pending_outbox_count().unwrap(), before + 2);
+    let before_relink = client.pending_outbox_count().unwrap();
+    client
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::NeedsRelink,
+            false,
+            false,
+            false,
+            1_004,
+            1_004,
+        )
+        .unwrap();
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_005, 1_005)
+        .unwrap();
+    assert_eq!(client.pending_outbox_count().unwrap(), before_relink + 103);
 }
 
 #[test]
-fn replayed_refreshed_eligibility_is_current_on_another_client() {
+fn unavailable_return_keeps_replayed_eligibility_current() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
     let source_config = config(&directory, "rcs-capability-replay-source", &vault);
     let source = unlocked(&source_config, &vault);
-    let conversation = ConversationId::new();
+    let eligible = source
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "+12025550123".into(),
+            body: String::new(),
+            provider_message_id: Some("provider-replay-eligible".into()),
+            imported: true,
+        })
+        .unwrap()
+        .conversation_id;
+    assert!(matches!(
+        source
+            .verify_rcs_mapping(&mapping_observation("+12025550123"), 1_000)
+            .unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    let not_eligible = ConversationId::new();
     let mut server = Server::default();
     source
         .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
         .unwrap();
     source
-        .publish_rcs_eligibility_from_lifecycle(&[conversation], 1_000)
+        .publish_rcs_eligibility_from_lifecycle(&[eligible, not_eligible], 1_000)
         .unwrap();
     server.upload(&source);
     source
@@ -1941,7 +1982,14 @@ fn replayed_refreshed_eligibility_is_current_on_another_client() {
     }
     assert_eq!(settle(&peer).quarantined, 0);
     assert_eq!(
-        peer.rcs_eligibility_projection(conversation, source_config.device_id, 1_002)
+        peer.rcs_eligibility_projection(eligible, source_config.device_id, 1_002)
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Eligible
+    );
+    assert_eq!(
+        peer.rcs_eligibility_projection(not_eligible, source_config.device_id, 1_002)
             .unwrap()
             .unwrap()
             .eligibility,
@@ -2006,21 +2054,11 @@ fn linked_record_rederives_due_raw_capability_from_local_mappings() {
         )
         .unwrap();
     client
-        .record_rcs_link_lifecycle(
-            RcsCapabilityState::Unavailable,
-            false,
-            false,
-            false,
-            1_001,
-            1_001,
-        )
-        .unwrap();
-    client
-        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_002, 1_002)
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_001, 1_001)
         .unwrap();
     assert_eq!(
         client
-            .rcs_eligibility_projection(conversation, config.device_id, 1_002,)
+            .rcs_eligibility_projection(conversation, config.device_id, 1_001,)
             .unwrap()
             .unwrap()
             .eligibility,
@@ -2039,7 +2077,11 @@ fn linked_record_before_linked_since_after_clock_rollback_skips_eligibility_refr
         .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
         .unwrap();
     client
-        .publish_rcs_eligibility_from_lifecycle(&[conversation], 1_000)
+        .publish_rcs_capability(
+            &status(config.device_id, 2, 1_000),
+            &[eligibility(config.device_id, conversation, 1, 1_000)],
+            1_000,
+        )
         .unwrap();
     client
         .record_rcs_link_lifecycle(
@@ -2190,4 +2232,163 @@ fn failed_due_row_is_contained_while_other_rows_refresh() {
             .observed_at_ms,
         1_002
     );
+}
+
+#[test]
+fn repeated_unavailable_returns_keep_the_original_linked_since_without_republishing() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-capability-repeated-restart", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+        .unwrap();
+    client
+        .publish_rcs_eligibility_from_lifecycle(&[conversation], 1_000)
+        .unwrap();
+    let before = client.pending_outbox_count().unwrap();
+    for now in [1_001, 1_003] {
+        client
+            .record_rcs_link_lifecycle(
+                RcsCapabilityState::Unavailable,
+                false,
+                false,
+                false,
+                now,
+                now,
+            )
+            .unwrap();
+        client
+            .record_rcs_link_lifecycle(
+                RcsCapabilityState::Linked,
+                true,
+                true,
+                true,
+                now + 1,
+                now + 1,
+            )
+            .unwrap();
+    }
+    assert_eq!(client.pending_outbox_count().unwrap(), before + 4);
+    drop(client);
+    let connection = Connection::open(&config.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    let linked_since: String = connection
+        .query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [format!("rcs_linked_since_v1/{}", config.device_id)],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(linked_since, "1000");
+}
+
+#[test]
+fn terminal_records_clear_the_resume_fence_before_an_unavailable_return() {
+    for (offset, terminal) in [
+        RcsCapabilityState::NeedsRelink,
+        RcsCapabilityState::Unlinked,
+        RcsCapabilityState::SignedOut,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::new();
+        let config = config(
+            &directory,
+            &format!("rcs-capability-terminal-{offset}"),
+            &vault,
+        );
+        let client = unlocked(&config, &vault);
+        let conversation = ConversationId::new();
+        client
+            .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+            .unwrap();
+        client
+            .publish_rcs_eligibility_from_lifecycle(&[conversation], 1_000)
+            .unwrap();
+        let before = client.pending_outbox_count().unwrap();
+        client
+            .record_rcs_link_lifecycle(terminal, false, false, false, 1_001, 1_001)
+            .unwrap();
+        client
+            .record_rcs_link_lifecycle(
+                RcsCapabilityState::Unavailable,
+                false,
+                false,
+                false,
+                1_002,
+                1_002,
+            )
+            .unwrap();
+        client
+            .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_003, 1_003)
+            .unwrap();
+        assert_eq!(client.pending_outbox_count().unwrap(), before + 4);
+    }
+}
+
+#[test]
+fn linked_heartbeat_repairs_a_published_row_with_a_garbage_body() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-capability-garbage", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+        .unwrap();
+    client
+        .publish_rcs_eligibility_from_lifecycle(&[conversation], 1_000)
+        .unwrap();
+    let before = client.pending_outbox_count().unwrap();
+    drop(client);
+    let connection = Connection::open(&config.database_path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE rcs_capability_published SET body='garbage' WHERE identity=?",
+            [format!("eligibility:{}:{conversation}", config.device_id)],
+        )
+        .unwrap();
+    drop(connection);
+    let client = unlocked(&config, &vault);
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_001, 1_001)
+        .unwrap();
+    assert_eq!(client.pending_outbox_count().unwrap(), before + 2);
+}
+
+#[test]
+fn linked_heartbeat_repairs_a_feature_bits_only_difference() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-capability-feature-bits", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+        .unwrap();
+    let mut lifecycle_status = status(config.device_id, 2, 1_000);
+    lifecycle_status.feature_bits = 0;
+    let mut published = eligibility(config.device_id, conversation, 1, 1_000);
+    published.eligibility = RcsEligibility::NotEligible;
+    client
+        .publish_rcs_capability(&lifecycle_status, &[published], 1_000)
+        .unwrap();
+    let before = client.pending_outbox_count().unwrap();
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_001, 1_001)
+        .unwrap();
+    assert_eq!(client.pending_outbox_count().unwrap(), before + 2);
 }
