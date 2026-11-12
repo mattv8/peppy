@@ -398,9 +398,16 @@ Update participating clients before you enable Android notification mirroring. O
 
 The desktop shows a notification feed, app mutes, and dismissals. Phone dismissals sync through the vault. Desktop dismissal requests wait for the phone's next sync and Android background scheduling can delay them by 15 minutes or more; this is not an immediate remote-control channel. Group summaries can remain on the phone after their children are dismissed. The feed keeps up to 1,000 active notifications; bulk dismissal handles up to 100 at a time. Native banner behavior depends on OS permissions and settings.
 
-#### Experimental desktop quick reply
+**Settings → Notification mirroring → Banner duration** applies only to that computer, and each platform offers what its notification system supports:
 
-Native notification replies are gated behind the non-default desktop Cargo feature `notification-quick-reply` while macOS and Windows runtime qualification is pending. Normal builds do not show the setting. In a feature-enabled build with an available native notification backend, **Settings → Notification mirroring → Quick reply in notifications** is off by default and applies only to that computer.
+- **Linux:** 5, 15 or 30 seconds, or until dismissed. The desktop's notification service may ignore the value.
+- **Windows:** short (about 5 seconds), long (about 25 seconds), or until dismissed. Windows may still hide a banner set to stay.
+- **macOS:** apps cannot set banner timing. Peppy shows the current style and opens System Settings, where **Banners** fade on their own and **Alerts** stay until dismissed.
+- **Browser:** a switch keeps banners until dismissed; otherwise the browser decides.
+
+#### Desktop quick reply
+
+Native notification replies are available in macOS and Windows builds when the native notification backend is available. **Settings → Notification mirroring → Quick reply in notifications** is off by default and applies only to that computer. No special build flag is needed.
 
 Full message previews offer quick reply; hidden and sender-only previews offer **Show message** first. Windows provides an inline input, while macOS opens its system input through **Reply**. The OS controls action placement and expansion. Mirrored app notifications and summary banners do not gain reply actions. Peppy must be unlocked, and reply routing follows the existing phone/SIM, group and RCS restrictions. On macOS, **Show message** posts a new banner, which macOS shows about one second after the click; that wait is controlled by the system.
 

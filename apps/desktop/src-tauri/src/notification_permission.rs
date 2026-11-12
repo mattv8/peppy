@@ -31,6 +31,26 @@ pub enum MacAuth {
     Ephemeral,
 }
 
+/// Platform-neutral mirror of `UNAlertStyle` so mapping is testable everywhere.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MacAlertStyle {
+    None,
+    Banner,
+    Alert,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum MacosStyle {
+    Banners,
+    Alerts,
+    Off,
+    Unknown,
+}
+
 /// Platform-neutral mirror of WinRT `NotificationSetting`.
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +77,17 @@ pub fn map_macos(auth: MacAuth, alerts_off: bool) -> PermissionStatus {
         MacAuth::Authorized | MacAuth::Ephemeral => PermissionStatus::Granted,
         MacAuth::Denied => PermissionStatus::Denied,
         MacAuth::NotDetermined => PermissionStatus::Unknown,
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub fn map_macos_persistence(auth: MacAuth, alert_style: MacAlertStyle) -> MacosStyle {
+    match (auth, alert_style) {
+        (MacAuth::NotDetermined, _) => MacosStyle::Unknown,
+        (MacAuth::Denied, _) | (_, MacAlertStyle::None) => MacosStyle::Off,
+        (_, MacAlertStyle::Unknown) => MacosStyle::Unknown,
+        (_, MacAlertStyle::Banner) => MacosStyle::Banners,
+        (_, MacAlertStyle::Alert) => MacosStyle::Alerts,
     }
 }
 
@@ -91,7 +122,9 @@ pub fn settings_url(_bundle_id: Option<&str>) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 pub(crate) mod macos {
-    use super::{map_macos, MacAuth, PermissionStatus};
+    use super::{
+        map_macos, map_macos_persistence, MacAlertStyle, MacAuth, MacosStyle, PermissionStatus,
+    };
     use block2::RcBlock;
     use objc2::runtime::Bool;
     use objc2_foundation::{NSBundle, NSError};
@@ -112,7 +145,7 @@ pub(crate) mod macos {
             .map(|id| id.to_string())
     }
 
-    fn read(center: &UNUserNotificationCenter) -> Option<(MacAuth, bool)> {
+    fn read(center: &UNUserNotificationCenter) -> Option<(MacAuth, MacAlertStyle)> {
         let (tx, rx) = mpsc::sync_channel(1);
         let block = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
             // SAFETY: the framework passes a valid, non-null settings object for the callback.
@@ -124,7 +157,13 @@ pub(crate) mod macos {
                 UNAuthorizationStatus::Ephemeral => MacAuth::Ephemeral,
                 _ => MacAuth::NotDetermined,
             };
-            let _ = tx.try_send((auth, settings.alertStyle() == UNAlertStyle::None));
+            let alert_style = match settings.alertStyle() {
+                UNAlertStyle::None => MacAlertStyle::None,
+                UNAlertStyle::Banner => MacAlertStyle::Banner,
+                UNAlertStyle::Alert => MacAlertStyle::Alert,
+                _ => MacAlertStyle::Unknown,
+            };
+            let _ = tx.try_send((auth, alert_style));
         });
         center.getNotificationSettingsWithCompletionHandler(&block);
         rx.recv_timeout(READ_TIMEOUT).ok()
@@ -163,12 +202,12 @@ pub(crate) mod macos {
             return None;
         }
         let center = UNUserNotificationCenter::currentNotificationCenter();
-        let (mut auth, mut alerts_off) = read(&center)?;
+        let (mut auth, mut alert_style) = read(&center)?;
         if auth == MacAuth::NotDetermined {
             request(&center, true, || {});
-            (auth, alerts_off) = read(&center)?;
+            (auth, alert_style) = read(&center)?;
         }
-        Some((auth, alerts_off))
+        Some((auth, alert_style == MacAlertStyle::None))
     }
 
     pub fn authorization_status() -> Option<MacAuth> {
@@ -177,6 +216,16 @@ pub(crate) mod macos {
         }
         let center = UNUserNotificationCenter::currentNotificationCenter();
         read(&center).map(|(auth, _)| auth)
+    }
+
+    pub fn persistence_style() -> MacosStyle {
+        if tauri::is_dev() || bundle_id().is_none() {
+            return MacosStyle::Unknown;
+        }
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        read(&center)
+            .map(|(auth, alert_style)| map_macos_persistence(auth, alert_style))
+            .unwrap_or(MacosStyle::Unknown)
     }
 
     pub fn request_authorization(completed: impl Fn() + Send + 'static) {
@@ -325,6 +374,43 @@ mod tests {
             map_macos(MacAuth::NotDetermined, false),
             PermissionStatus::Unknown
         );
+    }
+
+    #[test]
+    fn maps_macos_banner_styles() {
+        assert_eq!(
+            map_macos_persistence(MacAuth::Authorized, MacAlertStyle::Banner),
+            MacosStyle::Banners
+        );
+        assert_eq!(
+            map_macos_persistence(MacAuth::Authorized, MacAlertStyle::Alert),
+            MacosStyle::Alerts
+        );
+        for style in [
+            MacAlertStyle::None,
+            MacAlertStyle::Banner,
+            MacAlertStyle::Alert,
+            MacAlertStyle::Unknown,
+        ] {
+            assert_eq!(
+                map_macos_persistence(MacAuth::Denied, style),
+                MacosStyle::Off
+            );
+        }
+        assert_eq!(
+            map_macos_persistence(MacAuth::Authorized, MacAlertStyle::None),
+            MacosStyle::Off
+        );
+        for style in [
+            MacAlertStyle::Banner,
+            MacAlertStyle::Alert,
+            MacAlertStyle::Unknown,
+        ] {
+            assert_eq!(
+                map_macos_persistence(MacAuth::NotDetermined, style),
+                MacosStyle::Unknown
+            );
+        }
     }
 
     #[test]

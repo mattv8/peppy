@@ -15,7 +15,6 @@ default = ["self-update"]
 self-update = ["dep:tauri-plugin-updater", "dep:zbus"]
 retained-stack-smoke = []
 dev-local-tls = []
-notification-quick-reply = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

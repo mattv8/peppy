@@ -11,8 +11,9 @@ $desktopScript = Join-Path $root 'infra/dev/windows-desktop.ps1'
 . $desktopScript -Action build -RepoPath $root -CargoTargetDir (Join-Path $root '.opencode/test-target')
 $desktopSource = Get-Content -LiteralPath $desktopScript -Raw
 
-Assert-True ($desktopSource -match "\[ValidateSet\('0', '1'\)\]") 'Windows quick-reply input must accept only 0 or 1'
-Assert-True ($desktopSource -match "notification-quick-reply") 'Windows builds must include the notification quick-reply Cargo feature when requested'
+Assert-True ($desktopSource -notmatch 'NotificationQuickReply') 'Windows desktop helper must not expose a retired quick-reply parameter'
+Assert-True ($desktopSource -notmatch 'notification-quick-reply') 'Windows standard builds must not select a retired quick-reply Cargo feature'
+Assert-True ($desktopSource -match "\$cargoArguments = @\('--locked'\)") 'Windows standard builds must retain locked Cargo arguments'
 
 $openTarget = Join-Path ([System.IO.Path]::GetTempPath()) ("peppy-open-" + [guid]::NewGuid())
 $openApp = Join-Path $openTarget 'release\peppy-desktop.exe'
@@ -23,17 +24,10 @@ function global:Start-Process {
   param([string]$FilePath)
   $script:openedApp = $FilePath
 }
-Invoke-WindowsDesktop -RequestedAction open -Repository $root -TargetDirectory $openTarget -QuickReply '0'
+Invoke-WindowsDesktop -RequestedAction open -Repository $root -TargetDirectory $openTarget
 Assert-True ($script:openedApp -eq $openApp) 'Default Windows open must preserve raw executable launch behavior'
 Remove-Item function:global:Start-Process
 
-$openRejected = $false
-try {
-  Invoke-WindowsDesktop -RequestedAction open -Repository $root -TargetDirectory $openTarget -QuickReply '1'
-} catch {
-  $openRejected = $_.Exception.Message -match 'Install the generated NSIS or MSI bundle' -and $_.Exception.Message -match 'Start menu'
-}
-Assert-True $openRejected 'Quick-reply Windows open must require installation and Start menu launch for native notification testing'
 Remove-Item -LiteralPath $openTarget -Recurse -Force
 
 Assert-True (Test-NodeVersion -Selector '26' -Version 'v26.0.0') 'Major selectors must accept stable Node releases in their major line'

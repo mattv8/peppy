@@ -22,6 +22,25 @@ pub fn supported() -> bool {
     cfg!(any(target_os = "windows", target_os = "linux"))
 }
 
+pub fn settings_supported() -> bool {
+    supported() || cfg!(target_os = "macos")
+}
+
+pub fn platform() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "macos"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "windows"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        "linux"
+    }
+}
+
 pub fn load(root: &Path) -> NotificationPersistence {
     fs::read(root.join(FILE))
         .ok()
@@ -75,7 +94,7 @@ impl<'de> Deserialize<'de> for NotificationPersistence {
 
 #[cfg(test)]
 mod tests {
-    use super::{load, supported, NotificationPersistence, FILE};
+    use super::{load, platform, settings_supported, supported, NotificationPersistence, FILE};
 
     #[test]
     fn persistence_rejects_invalid_json_and_accepts_valid_values() {
@@ -118,5 +137,18 @@ mod tests {
             supported(),
             cfg!(any(target_os = "windows", target_os = "linux"))
         );
+    }
+
+    #[test]
+    fn persistence_settings_report_the_platform_and_are_supported() {
+        let expected_platform = if cfg!(target_os = "macos") {
+            "macos"
+        } else if cfg!(target_os = "windows") {
+            "windows"
+        } else {
+            "linux"
+        };
+        assert_eq!(platform(), expected_platform);
+        assert!(settings_supported());
     }
 }

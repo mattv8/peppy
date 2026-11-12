@@ -17,9 +17,9 @@ class InstallError(Exception):
     """A configuration that must not be changed automatically."""
 
 
-# Commands in the released 16-action catalog. This history is intentionally
-# installer-only: retired actions must not be emitted into new configurations.
-LEGACY_ACTION_COMMANDS = {
+# Retired commands remain installer-only so exact known actions are removed
+# without emitting them into new configurations.
+RETIRED_ACTION_COMMANDS = {
     "peppy.dev-setup": "bash infra/dev/dev.sh dev-setup",
     "peppy.dev-actions": "bash infra/dev/dev.sh dev-actions",
     "peppy.dev-up": "bash infra/dev/dev.sh dev-up",
@@ -36,6 +36,7 @@ LEGACY_ACTION_COMMANDS = {
     "peppy.desktop-bundle": "bash infra/dev/dev.sh desktop-bundle",
     "peppy.desktop-run": "bash infra/dev/dev.sh desktop-run",
     "peppy.desktop-open": "bash infra/dev/dev.sh desktop-open",
+    "peppy.desktop-test-notification-replies": "PEPPY_NOTIFICATION_QUICK_REPLY=1 bash infra/dev/dev.sh desktop-run",
 }
 
 def reject_symlink(path: Path, label: str) -> None:
@@ -123,8 +124,8 @@ def is_retired_legacy_action(action: dict[str, Any]) -> bool:
     return (
         isinstance(action_id, str)
         and isinstance(command, str)
-        and action_id in LEGACY_ACTION_COMMANDS
-        and LEGACY_ACTION_COMMANDS[action_id] == command
+        and action_id in RETIRED_ACTION_COMMANDS
+        and RETIRED_ACTION_COMMANDS[action_id] == command
     )
 
 

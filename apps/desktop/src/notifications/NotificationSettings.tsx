@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { DEFAULT_NOTIFICATION_PERSISTENCE, MAX_NOTIFICATION_PERSISTENCE_SECONDS, notificationPersistence, type NotificationPersistence, type NotificationPersistenceSettings, type NotificationQuickReplySettings } from "@peppy/desktop-ui/bridge-contracts";
+import { DEFAULT_NOTIFICATION_PERSISTENCE, notificationPersistence, type NotificationPersistence, type NotificationPersistenceSettings, type NotificationQuickReplySettings } from "@peppy/desktop-ui/bridge-contracts";
 import type { AppFilter, MirroredNotification, NotificationCheck, NotificationPreferences } from "../bridge/bridge";
 import { notificationAppName, notificationTuple, notificationSourceName } from "./Notifications";
 import { NotificationSettingsGroup, NotificationSettingsHelp } from "./NotificationSettingsParts";
 
-const PERSISTENCE_PRESETS = [
+const LINUX_PERSISTENCE_PRESETS = [
   { value: 5, label: "5 seconds" },
+  { value: 15, label: "15 seconds" },
   { value: 30, label: "30 seconds" },
-  { value: 60, label: "1 minute" },
 ] as const;
 const DEFAULT_PERSISTENCE_SECONDS = DEFAULT_NOTIFICATION_PERSISTENCE.seconds ?? 5;
 
@@ -22,6 +22,21 @@ function permissionMessage(check: NotificationCheck): string {
   return check.testSent
     ? "Test notification sent, but this system doesn't report Peppy's notification permission. If nothing appears, check Peppy's notification settings and Focus or Do Not Disturb."
     : "This system doesn't report Peppy's notification permission, and the test notification could not be sent.";
+}
+
+function formatPersistence(seconds: number): string {
+  if (seconds < 60) return `${seconds} second${seconds === 1 ? "" : "s"}`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (!remainder) return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  return `${minutes} min ${remainder} s`;
+}
+
+function macosPersistenceStatus(style: NotificationPersistenceSettings["macosStyle"]): string {
+  if (style === "banners") return "Current style: Banners. They fade on their own.";
+  if (style === "alerts") return "Current style: Alerts. They stay until you dismiss them.";
+  if (style === "off") return "Notifications are off for Peppy in macOS.";
+  return "Peppy can't read this setting. Check Peppy's page in System Settings.";
 }
 
 export function NotificationSettings({ notifications, filters, sources, preferences, headsSupported, locked, soundSettings, persistenceSettings, quickReplySettings, onPreferences, onMute, onPermission, onOpenSettings }: {
@@ -46,10 +61,8 @@ export function NotificationSettings({ notifications, filters, sources, preferen
   const [soundEnabled, setSoundEnabled] = useState<boolean>();
   const [persistence, setPersistence] = useState<NotificationPersistence>();
   const [persistenceSupported, setPersistenceSupported] = useState<boolean>();
-  const [persistencePending, setPersistencePending] = useState(false);
-  const [customMode, setCustomMode] = useState(false);
-  const [customDraft, setCustomDraft] = useState("");
-  const [customInvalid, setCustomInvalid] = useState(false);
+  const [persistencePlatform, setPersistencePlatform] = useState<NonNullable<NotificationPersistenceSettings["platform"]>>("linux");
+  const [macosStyle, setMacosStyle] = useState<NotificationPersistenceSettings["macosStyle"]>("unknown");
   const [persistenceError, setPersistenceError] = useState("");
   const [persistenceLoadError, setPersistenceLoadError] = useState("");
   const [quickReply, setQuickReply] = useState<NotificationQuickReplySettings>();
@@ -57,6 +70,8 @@ export function NotificationSettings({ notifications, filters, sources, preferen
   const [quickReplyError, setQuickReplyError] = useState("");
   const lastFinitePersistence = useRef(DEFAULT_PERSISTENCE_SECONDS);
   const persistenceSavePending = useRef(false);
+  const persistenceInitialLoadPending = useRef(false);
+  const persistenceRefreshPending = useRef(false);
   const persistenceSaveToken = useRef(0);
   const persistenceSettingsRef = useRef(persistenceSettings);
   const persistenceMounted = useRef(true);
@@ -100,33 +115,52 @@ export function NotificationSettings({ notifications, filters, sources, preferen
       persistenceLoadAdapter.current = loadPersistence;
       persistenceSaveToken.current += 1;
       persistenceSavePending.current = false;
-      setPersistencePending(false);
       setPersistenceError("");
       setPersistenceLoadError("");
       setPersistence(undefined);
       setPersistenceSupported(undefined);
-      setCustomMode(false);
-      setCustomDraft("");
-      setCustomInvalid(false);
     }
     if (!loadPersistence || locked || (!adapterChanged && persistenceSupported !== undefined)) return () => { current = false; };
     setPersistenceLoadError("");
+    persistenceInitialLoadPending.current = true;
     void loadPersistence().then(value => {
       if (!current) return;
       setPersistenceSupported(value.supported);
+      setPersistencePlatform(value.platform ?? "linux");
+      setMacosStyle(value.macosStyle ?? "unknown");
       if (!value.supported) return;
       const loaded = notificationPersistence({ seconds: value.seconds }) ?? DEFAULT_NOTIFICATION_PERSISTENCE;
       setPersistence(loaded);
-      if (loaded.seconds !== null && !PERSISTENCE_PRESETS.some(preset => preset.value === loaded.seconds)) setCustomMode(true);
       if (loaded.seconds !== null) {
         lastFinitePersistence.current = loaded.seconds;
-        setCustomDraft(String(loaded.seconds));
       }
     }).catch(() => {
-      if (current) setPersistenceLoadError("Could not load banner duration settings. Reopen Settings to try again.");
-    });
+      if (current) setPersistenceLoadError("Could not load banner settings. Reopen Settings to try again.");
+    }).finally(() => { persistenceInitialLoadPending.current = false; });
     return () => { current = false; };
   }, [loadPersistence, locked, persistenceSupported]);
+  useEffect(() => {
+    if (persistencePlatform !== "macos" || locked || !loadPersistence) return;
+    let current = true;
+    const refresh = () => {
+      if (document.visibilityState === "visible" && !persistenceInitialLoadPending.current && !persistenceRefreshPending.current) {
+        persistenceRefreshPending.current = true;
+        void loadPersistence().then(value => {
+          if (current && value.supported && value.platform === "macos") {
+            setMacosStyle(value.macosStyle ?? "unknown");
+            setPersistence(notificationPersistence({ seconds: value.seconds }) ?? DEFAULT_NOTIFICATION_PERSISTENCE);
+          }
+        }).catch(() => undefined).finally(() => { persistenceRefreshPending.current = false; });
+      }
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      current = false;
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [loadPersistence, locked, persistencePlatform]);
   // Observed app defaults never override authoritative synchronized mute choices.
   const apps = [...new Map([
     ...notifications.map(n => ({ sourceDeviceId: n.target.sourceDeviceId, packageName: n.packageName, appName: n.appName, muted: false })),
@@ -144,8 +178,7 @@ export function NotificationSettings({ notifications, filters, sources, preferen
   const previewMode = preferences.preview === "full" ? "full" : preferences.showSource ? "source" : "hidden";
   const lockedNoteId = locked ? "notification-banner-locked-note" : undefined;
   const quickReplyDescribedBy = ["notification-quick-reply-hint", lockedNoteId, quickReplyError && "notification-quick-reply-error"].filter(Boolean).join(" ") || undefined;
-  const persistenceDescribedBy = [lockedNoteId, persistenceError && "notification-persistence-error"].filter(Boolean).join(" ") || undefined;
-  const customPersistenceDescribedBy = [persistenceDescribedBy, customInvalid && "notification-persistence-validation-error"].filter(Boolean).join(" ") || undefined;
+  const persistenceDescribedBy = ["notification-persistence-hint", lockedNoteId, persistenceError && "notification-persistence-error"].filter(Boolean).join(" ") || undefined;
   const clearErrors = () => {
     setError("");
     setPersistenceError("");
@@ -187,69 +220,35 @@ export function NotificationSettings({ notifications, filters, sources, preferen
     catch { setError("Could not open notification settings."); }
     finally { setBusy(false); }
   };
-  const savePersistence = async (value: NotificationPersistence, onSuccess: () => void, onFailure: () => void) => {
+  const savePersistence = async (value: NotificationPersistence) => {
     if (locked || persistenceSavePending.current || !persistenceSettings) return;
     const savedSettings = persistenceSettings;
     const isCurrentSave = () => persistenceMounted.current && persistenceSettingsRef.current === savedSettings;
     const saveToken = ++persistenceSaveToken.current;
     persistenceSavePending.current = true;
-    setPersistencePending(true);
     setPersistenceError("");
     try {
       await savedSettings.save(value);
       if (!isCurrentSave()) return;
       setPersistence(value);
       if (value.seconds !== null) lastFinitePersistence.current = value.seconds;
-      onSuccess();
     } catch {
       if (!isCurrentSave()) return;
       setPersistenceError("Could not save notification settings. Try again.");
-      onFailure();
     } finally {
       if (persistenceSaveToken.current === saveToken) {
         persistenceSavePending.current = false;
-        if (persistenceMounted.current) setPersistencePending(false);
       }
     }
   };
-  const persistenceSelection = customMode ? "custom" : persistence?.seconds === null ? "indefinite" : String(persistence?.seconds);
-  const commitCustomPersistence = () => {
-    if (locked || persistenceSavePending.current || !persistence || persistence.seconds === null) return;
-    const value = /^\d+$/.test(customDraft) ? notificationPersistence({ seconds: Number(customDraft) }) : undefined;
-    if (!value || value.seconds === null) {
-      setCustomInvalid(true);
-      return;
-    }
-    setCustomInvalid(false);
-    setPersistenceError("");
-    if (value.seconds === persistence.seconds) return;
-    void savePersistence(value, () => undefined, () => {
-      setCustomDraft(String(persistence.seconds));
-      setCustomInvalid(false);
-    });
-  };
+  const persistenceSelection = persistence?.seconds === null ? "indefinite" : String(persistence?.seconds);
+  const windowsSelection = persistence?.seconds === null ? "indefinite" : (persistence?.seconds ?? 0) <= 7 ? "5" : "25";
+  const persistenceMode = persistencePlatform === "windows" ? windowsSelection === "5" ? "short" : windowsSelection === "25" ? "long" : "indefinite" : persistenceSelection;
   const selectPersistence = (selection: string) => {
     if (locked || persistenceSavePending.current || !persistence) return;
-    if (selection === "custom") {
-      setCustomInvalid(false);
-      setPersistenceError("");
-      setCustomMode(true);
-      const seconds = persistence.seconds === null ? lastFinitePersistence.current : persistence.seconds;
-      setCustomDraft(String(seconds));
-      if (persistence.seconds === null) void savePersistence({ seconds }, () => undefined, () => {
-        setCustomMode(false);
-        setCustomDraft("");
-      });
-      return;
-    }
     const value = selection === "indefinite" ? { seconds: null } : { seconds: Number(selection) };
-    void savePersistence(value, () => {
-      setCustomMode(false);
-      setCustomInvalid(false);
-    }, () => {
-      if (persistence.seconds !== null) setCustomDraft(String(persistence.seconds));
-      setCustomInvalid(false);
-    });
+    if (value.seconds === persistence.seconds) return;
+    void savePersistence(value);
   };
   useEffect(() => {
     if (!hasDesktopBanners) setPersistenceError("");
@@ -345,38 +344,37 @@ export function NotificationSettings({ notifications, filters, sources, preferen
         </>}
         {persistenceSettings && persistenceLoadError && !persistenceSupported && <p id="notification-persistence-load-error" className="settings-note" role="alert">{persistenceLoadError}</p>}
         {!hasDesktopBanners && quickReplyError && <p id="notification-quick-reply-error" className="settings-error" role="alert">{quickReplyError}</p>}
-        {hasDesktopBanners && persistenceSettings && persistenceSupported && persistence && <div id="notification-persistence-row" className="settings-control-row" data-persistence-mode={persistenceSelection}>
-          <span className="notification-setting-label"><label htmlFor="notification-persistence">Banner duration</label><NotificationSettingsHelp id="notification-persistence-help" title="Banner duration"><p>Choose how long this computer keeps a banner visible.</p></NotificationSettingsHelp></span>
-          <span id="notification-persistence-controls">
-            <select id="notification-persistence" value={persistenceSelection} disabled={locked} aria-describedby={persistenceDescribedBy}
-              onChange={event => selectPersistence(event.target.value)}>
-              {PERSISTENCE_PRESETS.map(preset => <option key={preset.value} value={preset.value}>{preset.label}</option>)}
-              <option value="custom">Custom</option>
-              <option value="indefinite">Indefinitely</option>
+        {hasDesktopBanners && persistenceSettings && persistenceSupported && persistence && persistencePlatform === "macos" && <>
+          <div id="notification-persistence-row" className="settings-control-row" data-persistence-platform="macos" data-persistence-mode={macosStyle ?? "unknown"} role="group" aria-labelledby="notification-persistence-label">
+            <span className="notification-setting-label"><span id="notification-persistence-label">Banner style</span></span>
+            <button id="notification-persistence-open-settings" className="secondary-button" type="button" aria-describedby="notification-persistence-status" disabled={busy} onClick={() => void openSettings()}>Open System Settings</button>
+          </div>
+          <p id="notification-persistence-status" className="settings-note" role="status">{macosPersistenceStatus(macosStyle)}</p>
+          <p id="notification-persistence-hint" className="settings-note">macOS decides how long banners stay. Change it under Notifications in System Settings.</p>
+        </>}
+        {hasDesktopBanners && persistenceSettings && persistenceSupported && persistence && persistencePlatform === "browser" && <>
+          <div id="notification-persistence-row" className="settings-control-row" data-persistence-platform="browser" data-persistence-mode={persistenceMode}>
+            <span className="notification-setting-label"><label htmlFor="notification-persistence-keep">Keep banners until dismissed</label></span>
+            <span className="settings-switch"><input id="notification-persistence-keep" type="checkbox" role="switch" checked={persistence.seconds === null} aria-checked={persistence.seconds === null} disabled={locked} aria-describedby={persistenceDescribedBy}
+              onChange={event => selectPersistence(event.target.checked ? "indefinite" : String(lastFinitePersistence.current))} /><span aria-hidden /></span>
+          </div>
+          <p id="notification-persistence-hint" className="settings-note">Off: your browser decides how long banners stay. Some browsers ignore this.</p>
+        </>}
+        {hasDesktopBanners && persistenceSettings && persistenceSupported && persistence && (persistencePlatform === "linux" || persistencePlatform === "windows") && <>
+          <div id="notification-persistence-row" className="settings-control-row" data-persistence-platform={persistencePlatform} data-persistence-mode={persistenceMode}>
+            <span className="notification-setting-label"><label htmlFor="notification-persistence">Banner duration</label></span>
+            <select id="notification-persistence" value={persistencePlatform === "windows" ? windowsSelection : persistenceSelection} disabled={locked} aria-describedby={persistenceDescribedBy} onChange={event => selectPersistence(event.target.value)}>
+              {persistencePlatform === "windows" ? <>
+                <option value="5">Short (about 5 seconds)</option>
+                <option value="25">Long (about 25 seconds)</option>
+              </> : <>
+                {[...LINUX_PERSISTENCE_PRESETS, ...(persistence.seconds !== null && !LINUX_PERSISTENCE_PRESETS.some(preset => preset.value === persistence.seconds) ? [{ value: persistence.seconds, label: `${formatPersistence(persistence.seconds)} (current)` }] : [])].sort((left, right) => left.value - right.value).map(preset => <option key={preset.value} value={preset.value}>{preset.label}</option>)}
+              </>}
+              <option value="indefinite">Until dismissed</option>
             </select>
-            {customMode && <span id="notification-persistence-custom-field">
-              <input id="notification-persistence-custom" type="number" min={1} max={MAX_NOTIFICATION_PERSISTENCE_SECONDS} step={1} inputMode="numeric" aria-label="Custom banner duration in seconds"
-                value={customDraft} readOnly={persistencePending || locked} aria-invalid={customInvalid || undefined} aria-describedby={customPersistenceDescribedBy}
-                onChange={event => {
-                  const draft = event.target.value;
-                  setCustomDraft(draft);
-                  const valid = /^\d+$/.test(draft) && notificationPersistence({ seconds: Number(draft) });
-                  if (valid) { setCustomInvalid(false); setPersistenceError(""); }
-                }}
-                onBlur={commitCustomPersistence}
-                onKeyDown={event => {
-                  if (event.key === "Enter") { event.preventDefault(); commitCustomPersistence(); }
-                  if (event.key === "Escape" && persistence?.seconds !== null) {
-                    setCustomDraft(String(persistence.seconds));
-                    setCustomInvalid(false);
-                    setPersistenceError("");
-                  }
-                }} />
-              <span aria-hidden>seconds</span>
-            </span>}
-          </span>
-        </div>}
-        {hasDesktopBanners && customInvalid && <p id="notification-persistence-validation-error" role="alert" aria-label="Invalid custom banner duration">Enter whole seconds from 1 to 3600.</p>}
+          </div>
+          <p id="notification-persistence-hint" className="settings-note">{persistencePlatform === "windows" ? "Windows may still hide a banner set to stay until dismissed." : "Your desktop may ignore this and use its own timing."}</p>
+        </>}
         {hasDesktopBanners && persistenceError && <p id="notification-persistence-error" role="alert" aria-label="Notification settings action failed">{persistenceError}</p>}
       </NotificationSettingsGroup>}
       {hasDesktopBanners && <NotificationSettingsGroup id="notification-test-group" title="Test notifications">

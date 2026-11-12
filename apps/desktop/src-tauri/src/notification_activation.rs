@@ -47,7 +47,7 @@ pub(crate) struct PopupActions {
 
 impl PopupActions {
     pub(crate) fn enabled(&self) -> bool {
-        cfg!(feature = "notification-quick-reply") && (self.reveal || self.reply)
+        self.reveal || self.reply
     }
 }
 
@@ -85,17 +85,11 @@ impl ActivationState {
     pub fn quick_reply_generation_cancel(&self) -> tokio_util::sync::CancellationToken {
         self.quick_reply_cancel.lock().unwrap().clone()
     }
-    /// QA feature builds still require a successfully installed native owner.
+    /// Native reply support requires a successfully installed native owner.
     pub fn quick_reply_supported(&self) -> bool {
-        #[cfg(all(
-            feature = "notification-quick-reply",
-            any(target_os = "macos", target_os = "windows")
-        ))]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         return self.owner.lock().unwrap().is_some();
-        #[cfg(not(all(
-            feature = "notification-quick-reply",
-            any(target_os = "macos", target_os = "windows")
-        )))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         false
     }
 }

@@ -1,91 +1,31 @@
 //! Synthetic quick-reply exercise for the notification settings test button.
 //! It is deliberately detached from conversations, drafts, and the outbound queue.
-#[cfg(all(
-    feature = "notification-quick-reply",
-    any(target_os = "macos", target_os = "windows")
-))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::{Destination, PopupAction, PopupActions, PostError};
-#[cfg(all(
-    feature = "notification-quick-reply",
-    any(target_os = "macos", target_os = "windows")
-))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use crate::AppState;
-#[cfg(any(
-    test,
-    all(
-        feature = "notification-quick-reply",
-        any(target_os = "macos", target_os = "windows")
-    )
-))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 use peppy_client_core::NotificationPreview;
-#[cfg(all(
-    feature = "notification-quick-reply",
-    any(target_os = "macos", target_os = "windows")
-))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::{atomic::Ordering, Arc, Mutex};
 use tauri::AppHandle;
-#[cfg(all(
-    feature = "notification-quick-reply",
-    any(target_os = "macos", target_os = "windows")
-))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use tauri::Manager;
-#[cfg(any(
-    test,
-    all(
-        feature = "notification-quick-reply",
-        any(target_os = "macos", target_os = "windows")
-    )
-))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 use tokio_util::sync::CancellationToken;
 
-#[cfg(any(
-    test,
-    all(
-        feature = "notification-quick-reply",
-        any(target_os = "macos", target_os = "windows")
-    )
-))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 const TEST_TITLE: &str = "Peppy test message";
-#[cfg(any(
-    test,
-    all(
-        feature = "notification-quick-reply",
-        any(target_os = "macos", target_os = "windows")
-    )
-))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 const TEST_BODY: &str = "This is a test message. Reply here to try quick reply.";
-#[cfg(any(
-    test,
-    all(
-        feature = "notification-quick-reply",
-        any(target_os = "macos", target_os = "windows")
-    )
-))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 const HIDDEN_TITLE: &str = "New notification";
-#[cfg(any(
-    test,
-    all(
-        feature = "notification-quick-reply",
-        any(target_os = "macos", target_os = "windows")
-    )
-))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 const REPLY_TITLE: &str = "Test reply received";
-#[cfg(any(
-    test,
-    all(
-        feature = "notification-quick-reply",
-        any(target_os = "macos", target_os = "windows")
-    )
-))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 const REPLY_BODY: &str = "No message was sent.";
 
-#[cfg(any(
-    test,
-    all(
-        feature = "notification-quick-reply",
-        any(target_os = "macos", target_os = "windows")
-    )
-))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TestPrivacy {
     Full,
@@ -93,13 +33,7 @@ pub(super) enum TestPrivacy {
     Hidden,
 }
 
-#[cfg(any(
-    test,
-    all(
-        feature = "notification-quick-reply",
-        any(target_os = "macos", target_os = "windows")
-    )
-))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct TestPresentation {
     pub(super) title: &'static str,
@@ -107,13 +41,7 @@ pub(super) struct TestPresentation {
     pub(super) reveal: bool,
 }
 
-#[cfg(any(
-    test,
-    all(
-        feature = "notification-quick-reply",
-        any(target_os = "macos", target_os = "windows")
-    )
-))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 pub(super) fn presentation(privacy: TestPrivacy) -> TestPresentation {
     match privacy {
         TestPrivacy::Full => TestPresentation {
@@ -134,24 +62,12 @@ pub(super) fn presentation(privacy: TestPrivacy) -> TestPresentation {
     }
 }
 
-#[cfg(any(
-    test,
-    all(
-        feature = "notification-quick-reply",
-        any(target_os = "macos", target_os = "windows")
-    )
-))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 pub(super) fn request_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
-#[cfg(any(
-    test,
-    all(
-        feature = "notification-quick-reply",
-        any(target_os = "macos", target_os = "windows")
-    )
-))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 fn privacy(preview: NotificationPreview, show_source: bool) -> TestPrivacy {
     match (preview, show_source) {
         (NotificationPreview::Full, _) => TestPrivacy::Full,
@@ -160,13 +76,7 @@ fn privacy(preview: NotificationPreview, show_source: bool) -> TestPrivacy {
     }
 }
 
-#[cfg(any(
-    test,
-    all(
-        feature = "notification-quick-reply",
-        any(target_os = "macos", target_os = "windows")
-    )
-))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 fn enabled(
     locked: bool,
     lock_actions_allowed: bool,
@@ -176,43 +86,25 @@ fn enabled(
     !locked && lock_actions_allowed && quick_reply_enabled && supported
 }
 
-#[cfg(any(
-    test,
-    all(
-        feature = "notification-quick-reply",
-        any(target_os = "macos", target_os = "windows")
-    )
-))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 fn reply_is_admitted(body: &str) -> bool {
     body.len() <= super::MAX_REPLY_BYTES && !body.trim().is_empty()
 }
 
 pub(super) fn post(app: &AppHandle) -> Result<bool, ()> {
-    #[cfg(all(
-        feature = "notification-quick-reply",
-        any(target_os = "macos", target_os = "windows")
-    ))]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     return post_supported(app);
-    #[cfg(not(all(
-        feature = "notification-quick-reply",
-        any(target_os = "macos", target_os = "windows")
-    )))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = app;
         Ok(false)
     }
 }
 
-#[cfg(all(
-    feature = "notification-quick-reply",
-    any(target_os = "macos", target_os = "windows")
-))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 type PresentationVersion = Arc<Mutex<Option<super::owner::PopupVersion>>>;
 
-#[cfg(all(
-    feature = "notification-quick-reply",
-    any(target_os = "macos", target_os = "windows")
-))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 struct CapturedTest {
     session_generation: String,
     session_cancel: CancellationToken,
@@ -222,10 +114,7 @@ struct CapturedTest {
     has_session: bool,
 }
 
-#[cfg(all(
-    feature = "notification-quick-reply",
-    any(target_os = "macos", target_os = "windows")
-))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn post_supported(app: &AppHandle) -> Result<bool, ()> {
     let state = app.state::<AppState>();
     // Capture eligibility, privacy, and cancellation generations atomically with invalidation.
@@ -281,10 +170,7 @@ fn post_supported(app: &AppHandle) -> Result<bool, ()> {
     post_popup(app, captured).map(|()| true).map_err(|_| ())
 }
 
-#[cfg(all(
-    feature = "notification-quick-reply",
-    any(target_os = "macos", target_os = "windows")
-))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn eligible(state: &AppState) -> bool {
     enabled(
         state.app_locked.load(Ordering::Acquire),
@@ -297,10 +183,7 @@ fn eligible(state: &AppState) -> bool {
     )
 }
 
-#[cfg(all(
-    feature = "notification-quick-reply",
-    any(target_os = "macos", target_os = "windows")
-))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn post_popup(app: &AppHandle, captured: CapturedTest) -> Result<(), PostError> {
     let capability = Arc::new(TestCapability {
         app: app.clone(),
@@ -325,10 +208,7 @@ fn post_popup(app: &AppHandle, captured: CapturedTest) -> Result<(), PostError> 
     submit(capability, presentation(captured.privacy), true)
 }
 
-#[cfg(all(
-    feature = "notification-quick-reply",
-    any(target_os = "macos", target_os = "windows")
-))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 struct TestCapability {
     app: AppHandle,
     request_id: String,
@@ -342,10 +222,7 @@ struct TestCapability {
     presentation: PresentationVersion,
 }
 
-#[cfg(all(
-    feature = "notification-quick-reply",
-    any(target_os = "macos", target_os = "windows")
-))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl Drop for TestCapability {
     fn drop(&mut self) {
         self.stop.cancel();
@@ -353,10 +230,7 @@ impl Drop for TestCapability {
     }
 }
 
-#[cfg(all(
-    feature = "notification-quick-reply",
-    any(target_os = "macos", target_os = "windows")
-))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn watch_cancellation(
     app: AppHandle,
     session_cancel: CancellationToken,
@@ -377,10 +251,7 @@ fn watch_cancellation(
     }));
 }
 
-#[cfg(all(
-    feature = "notification-quick-reply",
-    any(target_os = "macos", target_os = "windows")
-))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl TestCapability {
     fn current(&self) -> bool {
         if !cancellation_current(
@@ -409,13 +280,7 @@ impl TestCapability {
     }
 }
 
-#[cfg(any(
-    test,
-    all(
-        feature = "notification-quick-reply",
-        any(target_os = "macos", target_os = "windows")
-    )
-))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 fn cancellation_current(
     owner_cancel: &CancellationToken,
     session_cancel: &CancellationToken,
@@ -428,10 +293,7 @@ fn cancellation_current(
         && !generation_cancel.is_cancelled()
 }
 
-#[cfg(all(
-    feature = "notification-quick-reply",
-    any(target_os = "macos", target_os = "windows")
-))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn submit(
     capability: Arc<TestCapability>,
     presentation: TestPresentation,
@@ -475,10 +337,7 @@ fn submit(
     acceptance.and_then(super::owner::Acceptance::wait)
 }
 
-#[cfg(all(
-    feature = "notification-quick-reply",
-    any(target_os = "macos", target_os = "windows")
-))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn handle_action(capability: Arc<TestCapability>, action: PopupAction) {
     if !capability.current() {
         return;
@@ -502,10 +361,7 @@ fn handle_action(capability: Arc<TestCapability>, action: PopupAction) {
     }
 }
 
-#[cfg(all(
-    feature = "notification-quick-reply",
-    any(target_os = "macos", target_os = "windows")
-))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn post_confirmation(app: &AppHandle) {
     // Deliberately ordinary: it cannot recurse into this composer and ignores OS reply text.
     let _ = super::post_ordinary_test(app, REPLY_TITLE, REPLY_BODY);

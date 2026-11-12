@@ -518,7 +518,7 @@ export const fixtureBridge: DesktopBridge = {
   open_login_items: async () => undefined,
   get_notification_sound: async () => fixtureNotificationSound,
   set_notification_sound: async enabled => { fixtureNotificationSound = enabled; },
-  get_notification_persistence: async () => ({ ...fixtureNotificationPersistence, supported: true }),
+  get_notification_persistence: async () => ({ ...fixtureNotificationPersistence, supported: true, platform: "linux" }),
   set_notification_persistence: async value => { fixtureNotificationPersistence = value; },
   get_notification_quick_reply: async () => ({ enabled: fixtureNotificationQuickReply, supported: true }),
   set_notification_quick_reply: async enabled => { fixtureNotificationQuickReply = enabled; },
