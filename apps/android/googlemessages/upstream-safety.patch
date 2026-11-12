@@ -3453,8 +3453,8 @@ diff -ruN a/pkg/libgm/media_response_safety_test.go b/pkg/libgm/media_response_s
 +
 +func TestFinalizeUploadMediaResponseLimit(t *testing.T) {
 +	for _, test := range []struct {
-+		name    string
-+		size    int
++		name     string
++		size     int
 +		accepted bool
 +	}{
 +		{name: "exact limit", size: 64 * 1024, accepted: true},
