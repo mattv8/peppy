@@ -195,7 +195,16 @@ fn publisher_is_bounded_current_and_expires_stale_projections() {
     );
     assert_eq!(
         client
-            .publish_rcs_capability(&status, &[projection], 1_000 + RCS_CAPABILITY_KEEPALIVE_MS)
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    capability_revision: 2,
+                    observed_at_ms: 1_000 + RCS_CAPABILITY_KEEPALIVE_MS,
+                    linked_since_ms: Some(1_000),
+                    ..status
+                },
+                &[projection],
+                1_000 + RCS_CAPABILITY_KEEPALIVE_MS,
+            )
             .unwrap(),
         2
     );
@@ -206,6 +215,113 @@ fn publisher_is_bounded_current_and_expires_stale_projections() {
                 config.device_id,
                 1_000 + RCS_CAPABILITY_STALE_MS + 1
             )
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Eligible
+    );
+    assert_eq!(
+        client
+            .rcs_eligibility_projection(
+                conversation,
+                config.device_id,
+                1_000 + RCS_CAPABILITY_KEEPALIVE_MS + RCS_CAPABILITY_STALE_MS + 1,
+            )
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Unknown
+    );
+}
+
+#[test]
+fn old_eligibility_stays_current_until_the_gateway_status_expires() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-capability-old-eligibility", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    let eligibility_observed_at_ms = 1_000;
+    let status_observed_at_ms = eligibility_observed_at_ms + 24 * 60 * 60 * 1_000;
+    let mut link_status = status(config.device_id, 2, status_observed_at_ms);
+    link_status.linked_since_ms = Some(eligibility_observed_at_ms);
+
+    client
+        .publish_rcs_capability(
+            &status(config.device_id, 1, eligibility_observed_at_ms),
+            &[eligibility(
+                config.device_id,
+                conversation,
+                1,
+                eligibility_observed_at_ms,
+            )],
+            eligibility_observed_at_ms,
+        )
+        .unwrap();
+    client
+        .publish_rcs_capability(&link_status, &[], status_observed_at_ms)
+        .unwrap();
+
+    assert_eq!(
+        client
+            .rcs_eligibility_projection(
+                conversation,
+                config.device_id,
+                status_observed_at_ms + RCS_CAPABILITY_STALE_MS,
+            )
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Eligible
+    );
+    assert_eq!(
+        client
+            .rcs_eligibility_projection(
+                conversation,
+                config.device_id,
+                status_observed_at_ms + RCS_CAPABILITY_STALE_MS + 1,
+            )
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Unknown
+    );
+}
+
+#[test]
+fn future_dated_eligibility_is_unknown_while_gateway_is_current() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let conversation = ConversationId::new();
+    let now_ms = 1_000;
+
+    let producer = DeviceId::new();
+    let peer_config = config(&directory, "rcs-capability-future-eligibility-peer", &vault);
+    let peer = unlocked(&peer_config, &vault);
+    for (sequence, payload) in [
+        PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
+            status: status(producer, 1, now_ms),
+        }),
+        PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
+            eligibility: eligibility(producer, conversation, 1, now_ms + 1),
+        }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            peer.ingest(
+                &sealed(&vault, producer, sequence as u64 + 1, payload),
+                Cursor(sequence as u64 + 1)
+            )
+            .unwrap(),
+            IngestResult::Journaled
+        );
+    }
+    assert_eq!(peer.apply_pending(10).unwrap().applied, 2);
+
+    assert_eq!(
+        peer.rcs_eligibility_projection(conversation, producer, now_ms)
             .unwrap()
             .unwrap()
             .eligibility,
@@ -1691,7 +1807,7 @@ fn linked_record_refreshes_published_mapped_and_unmapped_eligibility_after_retur
 }
 
 #[test]
-fn unchanged_linked_since_never_republishes_old_eligibility() {
+fn unchanged_linked_since_keeps_old_eligibility_current() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
     let config = config(&directory, "rcs-capability-keepalive", &vault);
@@ -1728,7 +1844,7 @@ fn unchanged_linked_since_never_republishes_old_eligibility() {
         .rcs_eligibility_projection(conversation, config.device_id, started + 31 * 60 * 1_000)
         .unwrap()
         .unwrap();
-    assert_eq!(refreshed.eligibility, RcsEligibility::Unknown);
+    assert_eq!(refreshed.eligibility, RcsEligibility::NotEligible);
     assert_eq!(first.eligibility, RcsEligibility::NotEligible);
     assert_eq!(client.pending_outbox_count().unwrap(), 5);
 }
@@ -1941,7 +2057,7 @@ fn linked_record_before_linked_since_after_clock_rollback_skips_eligibility_refr
 }
 
 #[test]
-fn documented_residual_window_can_expire_before_the_next_linked_record() {
+fn current_gateway_status_keeps_eligibility_current_before_the_next_linked_record() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
     let config = config(&directory, "rcs-capability-residual-window", &vault);
@@ -1973,12 +2089,10 @@ fn documented_residual_window_can_expire_before_the_next_linked_record() {
         )
         .unwrap();
     let current_status = started + 20 * 60 * 1_000;
+    let mut current_status = status(config.device_id, 3, current_status);
+    current_status.linked_since_ms = Some(started);
     client
-        .publish_rcs_capability(
-            &status(config.device_id, 3, current_status),
-            &[],
-            current_status,
-        )
+        .publish_rcs_capability(&current_status, &[], current_status.observed_at_ms)
         .unwrap();
     let expired = started + 30 * 60 * 1_000 + 1;
     assert_eq!(
@@ -1987,7 +2101,7 @@ fn documented_residual_window_can_expire_before_the_next_linked_record() {
             .unwrap()
             .unwrap()
             .eligibility,
-        RcsEligibility::Unknown
+        RcsEligibility::NotEligible
     );
     client
         .record_rcs_link_lifecycle(

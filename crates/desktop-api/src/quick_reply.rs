@@ -207,6 +207,11 @@ fn validate_rcs_route(
     let eligibility = client
         .rcs_eligibility_projection(conversation_id, gateway_device_id, now_ms)
         .map_err(ComposeError::Core)?;
+    let gateway_expires_at_ms = status
+        .status
+        .observed_at_ms
+        .checked_add(peppy_client_core::RCS_CAPABILITY_STALE_MS)
+        .and_then(|value| value.checked_add(1));
     let policy = rcs_send_block(RcsSendPolicyInput {
         known_rcs_chat: true,
         gateway_state: Some(status.status.state),
@@ -214,18 +219,9 @@ fn validate_rcs_route(
         gateway_available: status.status.availability,
         gateway_healthy: status.status.health,
         gateway_phone_responsive: status.status.phone_responsive,
-        gateway_expires_at_ms: status
-            .status
-            .observed_at_ms
-            .checked_add(peppy_client_core::RCS_CAPABILITY_STALE_MS)
-            .and_then(|value| value.checked_add(1)),
+        gateway_expires_at_ms,
         eligibility: eligibility.as_ref().map(|value| value.eligibility),
-        eligibility_expires_at_ms: eligibility.and_then(|value| {
-            value
-                .observed_at_ms
-                .checked_add(peppy_client_core::RCS_CAPABILITY_STALE_MS)
-                .and_then(|value| value.checked_add(1))
-        }),
+        eligibility_expires_at_ms: eligibility.and(gateway_expires_at_ms),
         now_ms,
     });
     match policy {
@@ -357,5 +353,31 @@ mod tests {
             };
             assert_eq!(actual, expected, "fixture: {}", fixture.expected);
         }
+    }
+
+    #[test]
+    fn rcs_send_policy_keeps_old_eligibility_current_until_gateway_deadline() {
+        let status_deadline = 1_001;
+        let input = RcsSendPolicyInput {
+            known_rcs_chat: true,
+            gateway_state: Some(RcsCapabilityState::Linked),
+            gateway_current: true,
+            gateway_available: true,
+            gateway_healthy: true,
+            gateway_phone_responsive: true,
+            gateway_expires_at_ms: Some(status_deadline),
+            eligibility: Some(RcsEligibility::Eligible),
+            eligibility_expires_at_ms: Some(status_deadline),
+            now_ms: 1_000,
+        };
+
+        assert_eq!(rcs_send_block(input), RcsSendBlock::Allow);
+        assert_eq!(
+            rcs_send_block(RcsSendPolicyInput {
+                now_ms: status_deadline,
+                ..input
+            }),
+            RcsSendBlock::Phone
+        );
     }
 }
