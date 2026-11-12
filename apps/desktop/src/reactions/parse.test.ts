@@ -33,7 +33,37 @@ describe("parseReaction", () => {
     ["\uFEFFLoved “x”", { action: "add", emoji: "❤️", quotedText: "x", truncated: false }],
   ])("parses %s", (body, expected) => expect(parseReaction(body)).toEqual(expected));
 
+  // Google Messages frames its SMS reactions as U+200A U+200B <emoji> U+200B " to " “ U+200A <text> U+200A ” U+200A.
+  // Keep these bodies as escaped code points: retyping them from visible text drops the frame.
+  it.each([
+    ["Google frame captured from a phone", "\u200A\u200B😂\u200B to “\u200AThousands. 🤓😍😍😍😍\u200A”\u200A", { action: "add", emoji: "😂", quotedText: "Thousands. 🤓😍😍😍😍", truncated: false }],
+    ["Google frame around a truncated quote", "\u200A\u200B😂\u200B to “\u200ADid they discuss the NICU at all…\u200A”\u200A", { action: "add", emoji: "😂", quotedText: "Did they discuss the NICU at all", truncated: true }],
+    ["Google frame on the Reacted form", "\u200AReacted \u200B😂\u200B to “\u200AHey\u200A”\u200A", { action: "add", emoji: "😂", quotedText: "Hey", truncated: false }],
+    ["Google frame on the Removed form", "\u200ARemoved \u200B😂\u200B from “\u200AHey\u200A”\u200A", { action: "remove", emoji: "😂", quotedText: "Hey", truncated: false }],
+    ["zero-width spaces at the body edges", "\u200B😂 to “Hey”\u200B", { action: "add", emoji: "😂", quotedText: "Hey", truncated: false }],
+    ["zero-width spaces inside the quote edges", "😂 to “\u200BHey\u200B”", { action: "add", emoji: "😂", quotedText: "Hey", truncated: false }],
+    ["a leading word joiner", "\u2060😂 to “Hey”", { action: "add", emoji: "😂", quotedText: "Hey", truncated: false }],
+    ["no-break space separators", "😂\u00A0to\u00A0“Hey”", { action: "add", emoji: "😂", quotedText: "Hey", truncated: false }],
+    ["repeated space separators", "😂  to  “Hey”", { action: "add", emoji: "😂", quotedText: "Hey", truncated: false }],
+    ["a no-break space after a tapback verb", "Loved\u00A0“x”", { action: "add", emoji: "❤️", quotedText: "x", truncated: false }],
+    ["a framed tapback removal", "\u200BRemoved a heart  from “\u200Ax\u200A”", { action: "remove", emoji: "❤️", quotedText: "x", truncated: false }],
+    ["a framed joined emoji", "\u200B👨\u200D👩\u200D👧\u200B to “family”", { action: "add", emoji: "👨\u200D👩\u200D👧", quotedText: "family", truncated: false }],
+    ["a framed tag-sequence flag", "\u200B\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}\u200B to “flag”", { action: "add", emoji: "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}", quotedText: "flag", truncated: false }],
+  ])("parses %s", (_name, body, expected) => expect(parseReaction(body)).toEqual(expected));
+
   it.each(["Reacted to “x”", "Reacted haha to “x”", "Reacted 😆😆 to “x”", "I Loved “x”", "Loved “x” so much", "Reacted 😆 to “”", "Loved “   ”", "Reacted 😆 to “mixed\"", 'Loved "mixed”', "❤️❤️ to “x”", "hi to “x”", "❤️ to x", "❤️ to “x” later", "❤️ from “x”"])("rejects %s", (body) => expect(parseReaction(body)).toBeNull());
+
+  it.each([
+    ["two framed emoji", "\u200B😂😆\u200B to “x”"],
+    ["two emoji split by a zero-width space", "😂\u200B😆 to “x”"],
+    ["a quote holding only invisible characters", "😂 to “\u200B\u200A\u200B”"],
+    ["framed text after the quote", "\u200B😂\u200B to “x”\u200Blater"],
+  ])("rejects %s", (_name, body) => expect(parseReaction(body)).toBeNull());
+
+  it("strips invisible characters from the edges of compared text and keeps them inside it", () => {
+    expect(normalizeReactionText("\u200A\u200BHey  there\u200B\u200A")).toBe("Hey there");
+    expect(normalizeReactionText("\u2060a\u200Bb\uFEFF")).toBe("a\u200Bb");
+  });
 
   it("normalizes text, emoji presentation, and exact or truncated quotes", () => {
     expect(normalizeReactionText("  e\u0301  a \n b ")).toBe("é a b");

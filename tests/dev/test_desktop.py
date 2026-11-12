@@ -24,6 +24,7 @@ class DesktopHelperTests(unittest.TestCase):
         values = os.environ.copy()
         values.pop("PEPPY_MACOS_SIGNING_IDENTITY", None)
         values.pop("APPLE_SIGNING_IDENTITY", None)
+        values.pop("PEPPY_NOTIFICATION_QUICK_REPLY", None)
         values.update(env or {})
         return subprocess.run(
             ["bash", str(HELPER), *args],
@@ -128,8 +129,35 @@ class DesktopHelperTests(unittest.TestCase):
                     "C:\\Users\\テスト Space\\Peppy\\infra\\dev\\windows-desktop.ps1",
                     "-Action", "build", "-RepoPath", "C:\\Users\\テスト Space\\Peppy",
                     "-CargoTargetDir", "C:\\Users\\テスト Space\\Peppy",
+                    "-NotificationQuickReply", "0",
                 ],
             )
+
+    def test_wsl_explicitly_propagates_the_notification_quick_reply_flag(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_bin = pathlib.Path(temporary)
+            arguments = fake_bin / "arguments"
+            self.fake_command(fake_bin, "uname", "echo Linux")
+            self.fake_command(fake_bin, "wslpath", "echo 'C:\\Users\\Peppy'")
+            self.fake_command(fake_bin, "powershell.exe", f"printf '%s\\n' \"$@\" > '{arguments}'")
+
+            result = self.run_helper(
+                "build",
+                env={
+                    "PEPPY_NOTIFICATION_QUICK_REPLY": "1",
+                    "WSL_INTEROP": "1",
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(arguments.read_text().splitlines()[-2:], ["-NotificationQuickReply", "1"])
+
+    def test_rejects_invalid_notification_quick_reply_flag(self):
+        result = self.run_helper("build", env={"PEPPY_NOTIFICATION_QUICK_REPLY": "true"})
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("PEPPY_NOTIFICATION_QUICK_REPLY must be 0 or 1", result.stderr)
 
     def test_wsl_rejects_unc_checkout_before_starting_powershell(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -223,11 +251,13 @@ class DesktopHelperTests(unittest.TestCase):
 
     def test_macos_dev_passes_absolute_dev_overlay_before_cargo_arguments(self):
         cases = (
-            ("true", ["--features", "dev-local-tls"]),
-            ("false", []),
+            ("true", "0", ["--features", "dev-local-tls"]),
+            ("false", "0", []),
+            ("true", "1", ["--features", "dev-local-tls", "--features", "notification-quick-reply"]),
+            ("false", "1", ["--features", "notification-quick-reply"]),
         )
-        for debug, cargo_suffix in cases:
-            with self.subTest(debug=debug), tempfile.TemporaryDirectory() as temporary:
+        for debug, quick_reply, cargo_suffix in cases:
+            with self.subTest(debug=debug, quick_reply=quick_reply), tempfile.TemporaryDirectory() as temporary:
                 fake_bin = pathlib.Path(temporary)
                 arguments = fake_bin / "pnpm-arguments"
                 tls_directory = fake_bin / "tls"
@@ -240,7 +270,7 @@ class DesktopHelperTests(unittest.TestCase):
 
                 result = self.run_helper(
                     "dev",
-                    env={"PATH": f"{fake_bin}:{os.environ['PATH']}", **self.tls_environment(fake_bin, debug)},
+                    env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "PEPPY_NOTIFICATION_QUICK_REPLY": quick_reply, **self.tls_environment(fake_bin, debug)},
                 )
 
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -255,11 +285,13 @@ class DesktopHelperTests(unittest.TestCase):
 
     def test_macos_build_passes_app_only_overlay_and_accepts_dev_bundle_without_dmg(self):
         cases = (
-            ("true", ["--features", "dev-local-tls"]),
-            ("false", []),
+            ("true", "0", ["--features", "dev-local-tls"]),
+            ("false", "0", []),
+            ("true", "1", ["--features", "dev-local-tls", "--features", "notification-quick-reply"]),
+            ("false", "1", ["--features", "notification-quick-reply"]),
         )
-        for debug, cargo_suffix in cases:
-            with self.subTest(debug=debug), tempfile.TemporaryDirectory() as temporary:
+        for debug, quick_reply, cargo_suffix in cases:
+            with self.subTest(debug=debug, quick_reply=quick_reply), tempfile.TemporaryDirectory() as temporary:
                 fake_bin = pathlib.Path(temporary)
                 target = fake_bin / "target"
                 self.write_bundle(target)
@@ -277,6 +309,7 @@ class DesktopHelperTests(unittest.TestCase):
                     env={
                         "PATH": f"{fake_bin}:{os.environ['PATH']}",
                         "CARGO_TARGET_DIR": str(target),
+                        "PEPPY_NOTIFICATION_QUICK_REPLY": quick_reply,
                         **self.tls_environment(fake_bin, debug),
                     },
                 )

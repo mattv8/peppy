@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DraftNotice } from "./DraftNotice";
 import { draftNoticeView, selectDraftNotice, type DraftNoticeCandidate, type DraftNoticeKind } from "./draftNoticeModel";
@@ -74,6 +74,13 @@ describe("selectDraftNotice", () => {
     }
   });
 
+  it("uses concise generic save-failure copy", () => {
+    expect(draftNoticeView(candidateOf("save-failed", 1))).toMatchObject({
+      action: "retry",
+      message: "Error saving draft.",
+    });
+  });
+
   it("keeps setup failures actionable without calling them unsaved drafts", () => {
     const notice = draftNoticeView({ kind: "save-failed", detail: "Draft updates unavailable: listener failed", sequence: 1 });
     expect(notice).toMatchObject({ action: "retry", message: "Draft updates unavailable: listener failed" });
@@ -143,6 +150,7 @@ describe("DraftNotice", () => {
     expect(notice).toHaveAttribute("data-draft-notice", "saved");
     expect(notice).toHaveAttribute("data-kind", "saved");
     expect(notice).toHaveAttribute("role", "status");
+    expect(notice!.querySelector(".draft-notice-message")).toHaveAttribute("title", "Draft saved.");
     expect(screen.queryByRole("button")).toBeNull();
   });
 
@@ -205,6 +213,24 @@ describe("DraftNotice", () => {
     expect(copy).toHaveAttribute("aria-disabled", "true");
     fireEvent.click(copy);
     expect(onAction).not.toHaveBeenCalled();
+  });
+
+  it("portals the discard confirmation outside the composer and supports Escape and Cancel", async () => {
+    render(<div className="theme-light"><div id="composer-field"><div id="composer-toolbar"><DraftNotice notice={draftNoticeView({ kind: "save-failed", errorCode: "not-found", sequence: 1 })} onAction={vi.fn()} /></div></div></div>);
+    fireEvent.click(screen.getByRole("button", { name: "Discard local changes" }));
+
+    const confirmation = screen.getByRole("alertdialog", { name: "Discard local changes?" });
+    expect(document.getElementById("composer-field")).not.toContainElement(confirmation);
+    expect(confirmation.parentElement).toHaveClass("theme-light");
+
+    fireEvent.keyDown(confirmation, { key: "Escape" });
+    expect(screen.queryByRole("alertdialog", { name: "Discard local changes?" })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Discard local changes" })).toHaveFocus());
+
+    fireEvent.click(screen.getByRole("button", { name: "Discard local changes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("alertdialog", { name: "Discard local changes?" })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Discard local changes" })).toHaveFocus());
   });
 
   it("shows a saving notice only after the 600ms delay", () => {

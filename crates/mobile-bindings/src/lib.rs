@@ -902,7 +902,7 @@ impl From<CoreError> for MobileBindingsError {
             | CoreError::InvalidCursor
             | CoreError::NoAttempt
             | CoreError::IllegalTransition { .. } => Self::InvalidRequest,
-            CoreError::Conflict => Self::Conflict,
+            CoreError::Conflict | CoreError::ExistingCommandConflict => Self::Conflict,
             CoreError::NotFound => Self::NotFound,
             CoreError::StaleDraft { .. } | CoreError::DraftMoved { .. } => Self::StaleDraft,
             CoreError::DraftNotDiscardable

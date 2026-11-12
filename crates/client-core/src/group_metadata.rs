@@ -607,6 +607,13 @@ pub(crate) fn with_synced_authority(
     Ok(Some(view))
 }
 
+pub(crate) fn member_revision(
+    conn: &Connection,
+    conversation_id: ConversationId,
+) -> Result<Option<u64>, Error> {
+    Ok(stored(conn, conversation_id)?.map(|metadata| metadata.member_revision))
+}
+
 fn stored(conn: &Connection, conversation_id: ConversationId) -> Result<Option<Stored>, Error> {
     let row = conn
         .query_row(

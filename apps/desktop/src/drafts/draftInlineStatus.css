@@ -1,0 +1,57 @@
+#composer-inline-status #draft-sync-status {
+  flex-wrap: nowrap;
+  padding: 0;
+  min-width: 0;
+  flex: 0 1 auto;
+  white-space: nowrap;
+}
+
+#composer-inline-status #draft-sync-status [data-draft-sync-notice] {
+  display: inline-flex;
+  min-width: 0;
+  gap: 4px;
+}
+
+#composer-inline-status [data-draft-expiry-warning] {
+  display: inline-flex;
+  min-width: 0;
+}
+
+[data-draft-discard-confirmation] {
+  position: fixed;
+  z-index: 10;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  white-space: normal;
+  background: var(--peppy-surface-panel);
+  border: 1px solid var(--peppy-border-strong);
+  border-radius: var(--peppy-control-radius);
+  box-shadow: var(--peppy-shadow-floating);
+  color: var(--peppy-text-primary);
+}
+
+[data-draft-discard-actions] {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+[data-draft-discard-confirmation] button {
+  min-height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--peppy-border-strong);
+  border-radius: var(--peppy-radius-sm);
+  background: transparent;
+  color: var(--peppy-text-primary);
+  font-size: 12px;
+  white-space: normal;
+}
+
+[data-draft-discard-confirmation] button:hover { background: var(--peppy-surface-hover); }
+[data-draft-discard-confirmation] [data-draft-discard-confirm] { border-color: var(--peppy-error-text); color: var(--peppy-error-text); }
+
+@media (forced-colors: active) {
+  [data-draft-discard-confirmation] button { border-color: ButtonText; }
+}

@@ -82,7 +82,7 @@ export function draftNoticeView(candidate: DraftNoticeCandidate): DraftNoticeVie
         };
       return {
         kind: candidate.kind,
-        message: candidate.detail ?? "Draft not saved. Your text is kept. Sending and closing wait until it saves.",
+        message: candidate.detail ?? "Error saving draft.",
         tone: "error",
         role: "alert",
         action: "retry",

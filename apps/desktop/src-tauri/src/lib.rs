@@ -2041,6 +2041,18 @@ fn resume_session_after_app_lock_check(app: tauri::AppHandle) {
     });
 }
 
+fn begin_app_lock_check_state(
+    checking: &AtomicBool,
+    activation: &notification_activation::ActivationState,
+) {
+    let _effect = activation
+        .effect_gate
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    checking.store(true, Ordering::Release);
+    activation.invalidate_quick_reply_under_gate();
+}
+
 fn start_app_lock_check(app: tauri::AppHandle) {
     let state = app.state::<AppState>();
     if state
@@ -2050,7 +2062,7 @@ fn start_app_lock_check(app: tauri::AppHandle) {
     {
         return;
     }
-    state.app_lock_checking.store(true, Ordering::Release);
+    begin_app_lock_check_state(&state.app_lock_checking, &state.notification_activation);
     let generation = state.app_lock_check_generation.load(Ordering::Acquire);
     refresh_lock_menu(&app, &state);
     let store = state.store.clone();
@@ -5696,6 +5708,7 @@ async fn set_notification_preferences(
             .map_err(core_error)
     })
     .await?;
+    state.notification_activation.invalidate_quick_reply();
     session.notify();
     (state.notifier)();
     Ok(())
@@ -6949,6 +6962,13 @@ pub fn run() {
         let handler: fn(tauri::ipc::Invoke) -> bool = command_handler!(
             notification_activation::peek_notification_activation,
             notification_activation::ack_notification_activation,
+            notification_activation::quick_reply::get_notification_quick_reply,
+            notification_activation::quick_reply::set_notification_quick_reply,
+            notification_activation::quick_reply::notification_reply_recoveries,
+            notification_activation::quick_reply::claim_notification_reply_restore,
+            notification_activation::quick_reply::release_notification_reply_restore,
+            notification_activation::quick_reply::ack_notification_reply_restore,
+            notification_activation::quick_reply::discard_notification_reply,
             hosted::hosted_account,
             hosted::hosted_session_renew,
             hosted::hosted_origin_url,

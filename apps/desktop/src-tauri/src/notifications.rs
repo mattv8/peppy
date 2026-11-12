@@ -19,6 +19,7 @@ use tauri::{AppHandle, Manager};
 
 const PREFERENCES_FILE: &str = "notification-preferences.json";
 const SOUND_FILE: &str = "notification-sound.json";
+const QUICK_REPLY_FILE: &str = "notification-quick-reply.json";
 const MAX_PREFERENCES_BYTES: u64 = 8 * 1024;
 const BANNER_BATCH: usize = 20;
 const MAX_BANNER_BATCHES_PER_WAKE: usize = 5;
@@ -50,6 +51,11 @@ pub struct NotificationSettings {
     drain_lock: Mutex<()>,
     banner_drain: Mutex<BannerDrainState>,
     sound: Mutex<bool>,
+    quick_reply: Mutex<bool>,
+    quick_reply_policy: Mutex<(
+        Option<NotificationPreferences>,
+        tokio_util::sync::CancellationToken,
+    )>,
     persistence: Mutex<crate::notification_persistence::NotificationPersistence>,
 }
 
@@ -66,6 +72,54 @@ pub enum PreferenceRead {
 }
 
 impl NotificationSettings {
+    pub(crate) fn quick_reply_policy_cancel(&self) -> tokio_util::sync::CancellationToken {
+        self.quick_reply_policy
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .1
+            .clone()
+    }
+
+    fn observe_quick_reply_policy(&self, preferences: &NotificationPreferences) {
+        let mut policy = self
+            .quick_reply_policy
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let restricted = policy.0.as_ref().is_some_and(|previous| {
+            (previous.preview == Preview::Full && preferences.preview == Preview::Hidden)
+                || (previous.show_source
+                    && !preferences.show_source
+                    && preferences.preview == Preview::Hidden)
+                || (previous.message_banners && !preferences.message_banners)
+                || (!previous.mute_with_heads && preferences.mute_with_heads)
+        });
+        if restricted {
+            policy.1.cancel();
+            policy.1 = tokio_util::sync::CancellationToken::new();
+        }
+        policy.0 = Some(preferences.clone());
+    }
+
+    pub fn quick_reply_enabled(&self) -> bool {
+        *self.quick_reply.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    pub fn set_quick_reply_enabled(&self, enabled: bool) -> BridgeResult<()> {
+        let mut value = self.quick_reply.lock().unwrap_or_else(|p| p.into_inner());
+        crate::fsutil::write_private_atomic(
+            &self.root.join(QUICK_REPLY_FILE),
+            if enabled { b"true" } else { b"false" },
+        )
+        .map_err(|_| {
+            BridgeError::new(
+                "notification-quick-reply",
+                "Could not save quick reply settings.",
+            )
+        })?;
+        *value = enabled;
+        Ok(())
+    }
+
     pub fn sound_enabled(&self) -> bool {
         *self
             .sound
@@ -133,6 +187,15 @@ impl NotificationSettings {
                     .unwrap_or(false),
             ),
             persistence: Mutex::new(crate::notification_persistence::load(root)),
+            quick_reply: Mutex::new(
+                fs::metadata(root.join(QUICK_REPLY_FILE))
+                    .ok()
+                    .filter(|metadata| metadata.is_file() && metadata.len() <= 16)
+                    .and_then(|_| fs::read(root.join(QUICK_REPLY_FILE)).ok())
+                    .and_then(|bytes| serde_json::from_slice::<bool>(&bytes).ok())
+                    .unwrap_or(false),
+            ),
+            quick_reply_policy: Mutex::new((None, tokio_util::sync::CancellationToken::new())),
         }
     }
 
@@ -141,6 +204,17 @@ impl NotificationSettings {
     /// The legacy filename is renamed into the binding's private data directory before core sees
     /// it. A restart can therefore retry only that binding; another vault cannot race a clone.
     pub fn notification_preferences(
+        &self,
+        client: &Client,
+        binding: &Binding,
+        read: PreferenceRead,
+    ) -> BridgeResult<(NotificationPreferences, bool)> {
+        let result = self.read_notification_preferences(client, binding, read)?;
+        self.observe_quick_reply_policy(&result.0);
+        Ok(result)
+    }
+
+    fn read_notification_preferences(
         &self,
         client: &Client,
         binding: &Binding,
@@ -469,7 +543,7 @@ pub fn drain_banner_candidates(
     session: &Session,
     settings: &NotificationSettings,
 ) -> BridgeResult<bool> {
-    drain_with_delivery(
+    drain_with_candidate_delivery(
         session,
         settings,
         || {
@@ -483,18 +557,53 @@ pub fn drain_banner_candidates(
                     crate::heads_runtime::has_head(app, id)
                 })
         },
-        |destination, title, body, icon, copy| {
-            crate::notification_activation::post(app, session, destination, title, body, icon, copy)
+        |candidate, destination, title, body, icon, copy| {
+            crate::notification_activation::quick_reply::post_candidate(
+                app,
+                session,
+                candidate,
+                crate::notification_activation::quick_reply::BannerPresentation {
+                    destination,
+                    title,
+                    body,
+                    icon,
+                    copy,
+                },
+            )
         },
     )
 }
 
+#[cfg(test)]
 pub(crate) fn drain_with_delivery(
     session: &Session,
     settings: &NotificationSettings,
     app_locked: impl Fn() -> bool,
     suppress: impl Fn(&BannerCandidate, &NotificationPreferences) -> bool,
     mut post: impl FnMut(
+        peppy_desktop_api::NotificationActivationDestination,
+        String,
+        String,
+        Option<crate::notification_icon::Icon>,
+        Option<OneTimeCodeTarget>,
+    ) -> Result<(), crate::notification_activation::PostError>,
+) -> BridgeResult<bool> {
+    drain_with_candidate_delivery(
+        session,
+        settings,
+        app_locked,
+        suppress,
+        |_, destination, title, body, icon, copy| post(destination, title, body, icon, copy),
+    )
+}
+
+fn drain_with_candidate_delivery(
+    session: &Session,
+    settings: &NotificationSettings,
+    app_locked: impl Fn() -> bool,
+    suppress: impl Fn(&BannerCandidate, &NotificationPreferences) -> bool,
+    mut post: impl FnMut(
+        Option<&BannerCandidate>,
         peppy_desktop_api::NotificationActivationDestination,
         String,
         String,
@@ -588,6 +697,7 @@ pub(crate) fn drain_with_delivery(
                     .then(|| copy_target(&candidate))
                     .flatten();
                 match post(
+                    Some(&candidate),
                     crate::notification_activation::destination(&candidate),
                     title,
                     body,
@@ -653,6 +763,7 @@ pub(crate) fn drain_with_delivery(
             if !summary_ids.is_empty() {
                 let (title, body) = summary_text();
                 match post(
+                    None,
                     peppy_desktop_api::NotificationActivationDestination::Main,
                     title,
                     body,
@@ -1291,6 +1402,58 @@ mod tests {
         assert!(NotificationSettings::load(dir.path()).sound_enabled());
         settings.set_sound_enabled(false).unwrap();
         assert!(!NotificationSettings::load(dir.path()).sound_enabled());
+    }
+
+    #[test]
+    fn notification_quick_reply_is_opt_in_and_survives_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = NotificationSettings::load(dir.path());
+        assert!(!settings.quick_reply_enabled());
+        settings.set_quick_reply_enabled(true).unwrap();
+        assert!(NotificationSettings::load(dir.path()).quick_reply_enabled());
+        settings.set_quick_reply_enabled(false).unwrap();
+        assert!(!NotificationSettings::load(dir.path()).quick_reply_enabled());
+    }
+
+    #[test]
+    fn notification_quick_reply_malformed_file_defaults_off() {
+        let dir = tempfile::tempdir().unwrap();
+        for invalid in ["", "null", "{}", "\"true\"", "invalid"] {
+            fs::write(dir.path().join("notification-quick-reply.json"), invalid).unwrap();
+            assert!(!NotificationSettings::load(dir.path()).quick_reply_enabled());
+        }
+    }
+
+    #[test]
+    fn notification_quick_reply_policy_cancels_only_when_more_restrictive() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = NotificationSettings::load(dir.path());
+        let full = NotificationPreferences::default();
+        settings.observe_quick_reply_policy(&full);
+        let original = settings.quick_reply_policy_cancel();
+        settings.observe_quick_reply_policy(&full);
+        assert!(!original.is_cancelled());
+        let hidden = NotificationPreferences {
+            preview: Preview::Hidden,
+            ..full.clone()
+        };
+        settings.observe_quick_reply_policy(&hidden);
+        assert!(original.is_cancelled());
+        let replacement = settings.quick_reply_policy_cancel();
+        settings.observe_quick_reply_policy(&full);
+        assert!(!replacement.is_cancelled());
+    }
+
+    #[test]
+    fn notification_quick_reply_failed_save_keeps_last_applied_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = NotificationSettings::load(dir.path());
+        settings.set_quick_reply_enabled(true).unwrap();
+        fs::remove_file(dir.path().join("notification-quick-reply.json")).unwrap();
+        fs::create_dir(dir.path().join("notification-quick-reply.json")).unwrap();
+        assert!(settings.set_quick_reply_enabled(false).is_err());
+        assert!(settings.quick_reply_enabled());
+        assert!(!NotificationSettings::load(dir.path()).quick_reply_enabled());
     }
 
     #[test]

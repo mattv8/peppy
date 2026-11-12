@@ -23,6 +23,17 @@ describe("linkReactions", () => {
     expect(linked.badges.get("m1")).toEqual([{ emoji: "❤️", actors: [{ key: "other:+15550001", sender: "other", senderAddress: "+15550001" }], reactionIds: ["m2"] }]);
   });
 
+  it("badges the original from an outgoing Google-framed reaction", () => {
+    const linked = linkReactions([message("m1", "Thousands. 🤓😍😍😍😍"), message("m2", "\u200A\u200B😂\u200B to “\u200AThousands. 🤓😍😍😍😍\u200A”\u200A", { sender: "self", senderAddress: undefined })]);
+    expect(linked.notices.get("m2")).toMatchObject({ reactionId: "m2", targetId: "m1", emoji: "😂" });
+    expect(linked.badges.get("m1")).toEqual([{ emoji: "😂", actors: [{ key: "self", sender: "self", senderAddress: undefined }], reactionIds: ["m2"] }]);
+  });
+
+  it("links to an original whose body has invisible characters at its edges", () => {
+    const linked = linkReactions([message("m1", "\u200BHey\u200B\u200A"), message("m2", "😂 to “Hey”")]);
+    expect(linked.notices.get("m2")?.targetId).toBe("m1");
+  });
+
   it("replaces an actor's emoji and removes only that actor", () => {
     const linked = linkReactions([message("m1", "plan?"), message("m2", "Loved “plan?”"), message("m3", "Reacted 😆 to “plan?”"), message("m4", "Reacted 😆 to “plan?”", { senderAddress: "+15550002" }), message("m5", "Removed 😆 from “plan?”")]);
     expect(linked.badges.get("m1")).toEqual([{ emoji: "😆", actors: [{ key: "other:+15550002", sender: "other", senderAddress: "+15550002" }], reactionIds: ["m4"] }]);

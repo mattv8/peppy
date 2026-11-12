@@ -915,6 +915,31 @@ describe("desktop UI controls", () => {
     expect(screen.queryByRole("button", { name: /route|transport|send as/i })).toBeNull();
   });
 
+  it("renders inline status after the gateway slot only when provided", () => {
+    const { rerender } = render(
+      <Composer
+        draft=""
+        attachments={[]}
+        sendSupported
+        onDraftChange={() => {}}
+        onSend={() => {}}
+        gatewaySlot={<span id="gateway-slot" />}
+        inlineStatusSlot={<span id="probe">Saving…</span>}
+      />,
+    );
+
+    const toolbar = document.getElementById("composer-toolbar")!;
+    expect(toolbar.children[0]).toHaveAttribute("aria-label", "Add attachment");
+    expect(toolbar.children[1]).toHaveAttribute("id", "gateway-slot");
+    expect(toolbar.children[2]).toHaveAttribute("id", "composer-inline-status");
+    expect(toolbar.children[2]).toContainElement(document.getElementById("probe"));
+    expect(toolbar.children[3]).toHaveClass("composer-toolbar-spacer");
+    expect(toolbar.children[toolbar.children.length - 1]).toHaveAttribute("aria-label", "Send");
+
+    rerender(<Composer draft="" attachments={[]} sendSupported onDraftChange={() => {}} onSend={() => {}} gatewaySlot={<span id="gateway-slot" />} />);
+    expect(document.getElementById("composer-inline-status")).toBeNull();
+  });
+
   it("exposes the typing sender state on the shared composer", () => {
     render(<Composer draft="" attachments={[]} sendSupported onDraftChange={() => {}} onSend={() => {}} typingSendState="active" />);
     expect(document.getElementById("shared-composer")).toHaveAttribute("data-typing-send", "active");

@@ -86,46 +86,51 @@ impl Client {
         conversation_id: ConversationId,
     ) -> Result<MmsReplyContext, Error> {
         let s = self.lock()?;
-        let payload: Option<crate::MessagePayload> = s
-            .conn
-            .query_row(
-                LATEST_MMS_SQL,
-                params![conversation_id.to_string()],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .map(|json| crate::decode(json.as_bytes()))
-            .transpose()?;
-        let Some(payload) = payload.filter(|payload| payload.transport == Transport::Mms) else {
-            return Err(Error::NotFound);
-        };
-        // Locally created outgoing replies have no provider source; retain the latest immutable
-        // incoming/contextual source in this conversation for own-address confirmation.
-        let contextual: Option<crate::MessagePayload> = s
-            .conn
-            .query_row(
-                LATEST_CONTEXTUAL_MMS_SQL,
-                params![conversation_id.to_string()],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .map(|json| crate::decode(json.as_bytes()))
-            .transpose()?;
-        let identity = payload
-            .mms_context
-            .as_ref()
-            .map(|context| (&payload, context))
-            .or_else(|| {
-                contextual.as_ref().and_then(|message| {
-                    message
-                        .mms_context
-                        .as_ref()
-                        .map(|context| (message, context))
-                })
-            });
-        let own = match identity {
-            Some((message, context)) => s
-                .conn
+        mms_reply_context_for(&s.conn, conversation_id)
+    }
+}
+
+pub(crate) fn mms_reply_context_for(
+    conn: &rusqlite::Connection,
+    conversation_id: ConversationId,
+) -> Result<MmsReplyContext, Error> {
+    let payload: Option<crate::MessagePayload> = conn
+        .query_row(
+            LATEST_MMS_SQL,
+            params![conversation_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|json| crate::decode(json.as_bytes()))
+        .transpose()?;
+    let Some(payload) = payload.filter(|payload| payload.transport == Transport::Mms) else {
+        return Err(Error::NotFound);
+    };
+    // Locally created outgoing replies have no provider source; retain the latest immutable
+    // incoming/contextual source in this conversation for own-address confirmation.
+    let contextual: Option<crate::MessagePayload> = conn
+        .query_row(
+            LATEST_CONTEXTUAL_MMS_SQL,
+            params![conversation_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|json| crate::decode(json.as_bytes()))
+        .transpose()?;
+    let identity = payload
+        .mms_context
+        .as_ref()
+        .map(|context| (&payload, context))
+        .or_else(|| {
+            contextual.as_ref().and_then(|message| {
+                message
+                    .mms_context
+                    .as_ref()
+                    .map(|context| (message, context))
+            })
+        });
+    let own = match identity {
+            Some((message, context)) => conn
                 .query_row(
                     "SELECT address FROM mms_own_addresses WHERE source_device_id=? AND subscription_id=?",
                     params![message.source_device_id.to_string(), context.subscription_id],
@@ -134,55 +139,54 @@ impl Client {
                 .optional()?,
             None => None,
         };
-        let sender = payload.sender_address.clone();
-        let candidates = match payload.direction {
-            crate::Direction::Incoming => payload
-                .sender_address
-                .into_iter()
-                .chain(payload.recipients)
-                .collect::<Vec<_>>(),
-            // The provider sender of an outgoing MMS is self (and may be the literal AOSP
-            // insert-address-token), never a reply recipient.
-            crate::Direction::Outgoing => payload.recipients,
-        };
-        let region = crate::conversation_match::identity_region(&s.conn)?;
-        let mut unique_keys = BTreeSet::new();
-        let unique = candidates
+    let sender = payload.sender_address.clone();
+    let candidates = match payload.direction {
+        crate::Direction::Incoming => payload
+            .sender_address
+            .into_iter()
+            .chain(payload.recipients)
+            .collect::<Vec<_>>(),
+        // The provider sender of an outgoing MMS is self (and may be the literal AOSP
+        // insert-address-token), never a reply recipient.
+        crate::Direction::Outgoing => payload.recipients,
+    };
+    let region = crate::conversation_match::identity_region(conn)?;
+    let mut unique_keys = BTreeSet::new();
+    let unique = candidates
+        .into_iter()
+        .filter(|address| {
+            unique_keys.insert(crate::conversation_match::canonical_address(
+                address,
+                Some(&region),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let group = unique.len() > 1;
+    let confirmed_own = own.as_deref().filter(|own| {
+        unique.iter().any(|address| {
+            crate::conversation_match::confirmed_own_address(own, address, Some(&region))
+        })
+    });
+    let recipients = match confirmed_own {
+        Some(own) => unique
             .into_iter()
             .filter(|address| {
-                unique_keys.insert(crate::conversation_match::canonical_address(
-                    address,
-                    Some(&region),
-                ))
+                !crate::conversation_match::confirmed_own_address(own, address, Some(&region))
             })
-            .collect::<Vec<_>>();
-        let group = unique.len() > 1;
-        let confirmed_own = own.as_deref().filter(|own| {
-            unique.iter().any(|address| {
-                crate::conversation_match::confirmed_own_address(own, address, Some(&region))
-            })
-        });
-        let recipients = match confirmed_own {
-            Some(own) => unique
-                .into_iter()
-                .filter(|address| {
-                    !crate::conversation_match::confirmed_own_address(own, address, Some(&region))
-                })
-                .collect(),
-            None if payload.direction == crate::Direction::Incoming
-                && group
-                && unique.len() == 2
-                && sender.is_some() =>
-            {
-                vec![sender.unwrap()]
-            }
-            None => unique,
-        };
-        Ok(MmsReplyContext {
-            recipients,
-            subject: payload.subject,
-        })
-    }
+            .collect(),
+        None if payload.direction == crate::Direction::Incoming
+            && group
+            && unique.len() == 2
+            && sender.is_some() =>
+        {
+            vec![sender.unwrap()]
+        }
+        None => unique,
+    };
+    Ok(MmsReplyContext {
+        recipients,
+        subject: payload.subject,
+    })
 }
 
 pub(crate) fn valid_mms_own_address(subscription_id: &str, address: &str, revision: u64) -> bool {

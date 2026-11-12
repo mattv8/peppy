@@ -133,6 +133,15 @@ pub(crate) fn proved_member_revision(
     }))
 }
 
+/// A withdrawn mapping cannot be revived by a locally pinned quick reply.
+pub(crate) fn group_is_withdrawn(
+    conn: &Connection,
+    conversation_id: ConversationId,
+) -> Result<bool, Error> {
+    Ok(group_mapping(conn, conversation_id)?
+        .is_some_and(|mapping| mapping.state == GroupMappingState::Withdrawn))
+}
+
 /// The stored member digest of a Live group, read as advisory input for the Go prepare request.
 /// It is not a proof and carries no freshness: the fresh observation, re-proof, and the
 /// freshness-checked preparation that follow are what authorize a send.
@@ -699,7 +708,13 @@ pub(crate) struct GroupSendFields {
 }
 
 const SEND_FIELDS_PREFIX: &str = "rcs_group_send_v1/";
+const QUICK_REPLY_REVISION_PREFIX: &str = "quick_reply_revision_v1/";
 const GROUP_NAME_MAX_BYTES: usize = 256;
+
+#[derive(Deserialize, Serialize)]
+struct QuickReplyRevisionBinding {
+    expected_member_revision: Option<u64>,
+}
 
 fn send_fields_key(command_id: CommandId) -> String {
     format!("{SEND_FIELDS_PREFIX}{command_id}")
@@ -721,6 +736,51 @@ pub(crate) fn send_fields(
         Some(value) => serde_json::from_str(&value).map_err(|_| Error::Database),
         None => Ok(GroupSendFields::default()),
     }
+}
+
+fn quick_reply_revision_key(command_id: CommandId) -> String {
+    format!("{QUICK_REPLY_REVISION_PREFIX}{command_id}")
+}
+
+/// Exact caller-supplied revision bound to a locally queued quick reply.
+pub(crate) fn quick_reply_expected_revision(
+    conn: &Connection,
+    command_id: CommandId,
+) -> Result<Option<Option<u64>>, Error> {
+    conn.query_row(
+        "SELECT v FROM metadata WHERE k=?",
+        [quick_reply_revision_key(command_id)],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|value| {
+        serde_json::from_str::<QuickReplyRevisionBinding>(&value)
+            .map(|binding| binding.expected_member_revision)
+            .map_err(|_| Error::Database)
+    })
+    .transpose()
+}
+
+/// Records the caller-supplied revision once without replacing a prior command binding.
+pub(crate) fn record_quick_reply_expected_revision(
+    conn: &Connection,
+    command_id: CommandId,
+    expected_member_revision: Option<u64>,
+) -> Result<(), Error> {
+    let binding = QuickReplyRevisionBinding {
+        expected_member_revision,
+    };
+    conn.execute(
+        "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO NOTHING",
+        params![
+            quick_reply_revision_key(command_id),
+            serde_json::to_string(&binding).map_err(|_| Error::Database)?
+        ],
+    )?;
+    if quick_reply_expected_revision(conn, command_id)? != Some(expected_member_revision) {
+        return Err(Error::ExistingCommandConflict);
+    }
+    Ok(())
 }
 
 /// Records a received command's group fields once. Empty fields are not recorded.
@@ -834,6 +894,48 @@ pub(crate) fn prepare_group_send(
     Ok(Some(GroupSendFields {
         expected_member_revision,
         group_create,
+    }))
+}
+
+/// Prepares an existing carrier group reply without authorizing an RCS group create.
+/// When a legacy carrier group has no synced roster yet, its canonical members become the first
+/// synced roster in the same transaction as the reply command.
+pub(crate) fn prepare_quick_reply_group_send(
+    conn: &Connection,
+    ctx: &Ctx<'_>,
+    conversation_id: ConversationId,
+    recipients: &[String],
+    expected_member_revision: Option<u64>,
+    now_ms: i64,
+) -> Result<Option<GroupSendFields>, Error> {
+    let members = group_send_members(conn, recipients)?;
+    if members.len() < 2 {
+        return Ok(None);
+    }
+    let roster = roster(conn, conversation_id)?;
+    let expected_member_revision = if roster.is_empty() {
+        if expected_member_revision.is_some() {
+            return Err(Error::GroupMembersChanged);
+        }
+        Some(group_metadata::publish(
+            conn,
+            ctx,
+            conversation_id,
+            None,
+            &members,
+            now_ms,
+        )?)
+    } else {
+        if group_metadata::member_revision(conn, conversation_id)? != expected_member_revision
+            || roster != members
+        {
+            return Err(Error::GroupMembersChanged);
+        }
+        expected_member_revision
+    };
+    Ok(Some(GroupSendFields {
+        expected_member_revision,
+        group_create: None,
     }))
 }
 

@@ -5,7 +5,9 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$RepoPath,
   [Parameter(Mandatory = $true)]
-  [string]$CargoTargetDir
+  [string]$CargoTargetDir,
+  [ValidateSet('0', '1')]
+  [string]$NotificationQuickReply = '0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -109,13 +111,22 @@ function Assert-NativeToolchain {
 }
 
 function Invoke-WindowsDesktop {
-  param([string]$RequestedAction, [string]$Repository, [string]$TargetDirectory)
+  param(
+    [string]$RequestedAction,
+    [string]$Repository,
+    [string]$TargetDirectory,
+    [ValidateSet('0', '1')]
+    [string]$QuickReply = $NotificationQuickReply
+  )
   $Repository = (Resolve-Path -LiteralPath $Repository).ProviderPath
   $TargetDirectory = [System.IO.Path]::GetFullPath($TargetDirectory)
   $app = Join-Path $TargetDirectory 'release\peppy-desktop.exe'
   Push-Location $Repository
   try {
     if ($RequestedAction -eq 'open') {
+      if ($QuickReply -eq '1') {
+        throw 'Install the generated NSIS or MSI bundle, then launch Peppy_dev from the Start menu. Raw target debug and release executables do not qualify for native notification testing.'
+      }
       if (-not (Test-Path -LiteralPath $app -PathType Leaf)) {
         throw "No current Windows executable at $app; run desktop-bundle first."
       }
@@ -125,10 +136,14 @@ function Invoke-WindowsDesktop {
     $tools = Assert-NativeToolchain -Repository $Repository
     $env:CARGO_TARGET_DIR = $TargetDirectory
     Invoke-Checked -File $tools.Pnpm -Arguments @('install', '--frozen-lockfile')
+    $cargoArguments = @('--locked')
+    if ($QuickReply -eq '1') {
+      $cargoArguments += @('--features', 'notification-quick-reply')
+    }
     if ($RequestedAction -eq 'dev') {
-      Invoke-Checked -File $tools.Pnpm -Arguments @('--dir', 'apps/desktop', 'exec', 'tauri', 'dev', '--', '--locked')
+      Invoke-Checked -File $tools.Pnpm -Arguments (@('--dir', 'apps/desktop', 'exec', 'tauri', 'dev', '--') + $cargoArguments)
     } else {
-      Invoke-Checked -File $tools.Pnpm -Arguments @('--dir', 'apps/desktop', 'exec', 'tauri', 'build', '--bundles', 'nsis,msi', '--', '--locked')
+      Invoke-Checked -File $tools.Pnpm -Arguments (@('--dir', 'apps/desktop', 'exec', 'tauri', 'build', '--bundles', 'nsis,msi', '--') + $cargoArguments)
     }
   } finally {
     Pop-Location
@@ -137,7 +152,7 @@ function Invoke-WindowsDesktop {
 
 if ($MyInvocation.InvocationName -ne '.') {
   try {
-    Invoke-WindowsDesktop -RequestedAction $Action -Repository $RepoPath -TargetDirectory $CargoTargetDir
+    Invoke-WindowsDesktop -RequestedAction $Action -Repository $RepoPath -TargetDirectory $CargoTargetDir -QuickReply $NotificationQuickReply
   } catch {
     [Console]::Error.WriteLine("Windows desktop setup requires native Node/pnpm/Rust, Visual Studio C++ Build Tools with the Windows SDK, WebView2 Runtime, and native Strawberry Perl. $($_.Exception.Message)")
     exit 1

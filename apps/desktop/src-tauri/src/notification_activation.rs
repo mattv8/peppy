@@ -5,19 +5,51 @@ use peppy_desktop_api::{
     NotificationActivation, NotificationActivationDestination as Destination,
     NotificationActivationTarget,
 };
-use std::sync::{atomic::Ordering, Mutex};
+use std::sync::{atomic::Ordering, Arc, Mutex};
 use tauri::{Emitter, Manager};
+
+mod action_availability;
+use action_availability::ActionAvailability;
 
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod owner;
+pub(crate) mod quick_reply;
+mod recovery_store;
+mod test_notification;
 #[cfg(target_os = "windows")]
 mod windows;
+#[cfg(any(target_os = "windows", test))]
+mod windows_codec;
 #[cfg(any(target_os = "windows", test))]
 mod windows_xml;
 
 pub const EVENT: &str = "peppy://notification-activation";
+pub const MAX_REPLY_BYTES: usize = 64 * 1024;
+
+/// Native-only actions whose OS arguments carry only allowlisted action IDs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PopupAction {
+    Open,
+    Copy,
+    Reveal,
+    Reply(String),
+}
+
+/// Host-owned capability retained by the owner until terminal retirement.
+#[derive(Clone)]
+pub(crate) struct PopupActions {
+    pub reveal: bool,
+    pub reply: bool,
+    pub handler: Arc<dyn Fn(PopupAction) + Send + Sync>,
+}
+
+impl PopupActions {
+    pub(crate) fn enabled(&self) -> bool {
+        cfg!(feature = "notification-quick-reply") && (self.reveal || self.reply)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PostError {
@@ -41,8 +73,31 @@ pub(crate) mod fallback;
 #[derive(Default)]
 pub struct ActivationState {
     pending: Mutex<Pending>,
+    /// Serializes host queue admission with lock/session retirement.
+    pub(crate) effect_gate: Mutex<()>,
+    quick_reply_cancel: Mutex<tokio_util::sync::CancellationToken>,
+    pub(super) recovery: Arc<recovery_store::RecoveryStore>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     owner: Mutex<Option<owner::Owner>>,
+}
+
+impl ActivationState {
+    pub fn quick_reply_generation_cancel(&self) -> tokio_util::sync::CancellationToken {
+        self.quick_reply_cancel.lock().unwrap().clone()
+    }
+    /// QA feature builds still require a successfully installed native owner.
+    pub fn quick_reply_supported(&self) -> bool {
+        #[cfg(all(
+            feature = "notification-quick-reply",
+            any(target_os = "macos", target_os = "windows")
+        ))]
+        return self.owner.lock().unwrap().is_some();
+        #[cfg(not(all(
+            feature = "notification-quick-reply",
+            any(target_os = "macos", target_os = "windows")
+        )))]
+        false
+    }
 }
 
 pub fn destination(candidate: &peppy_client_core::BannerCandidate) -> Destination {
@@ -102,6 +157,13 @@ pub fn post(
 }
 
 pub fn post_test(app: &tauri::AppHandle, title: &str, body: &str) -> Result<(), ()> {
+    if test_notification::post(app).is_ok_and(|posted| posted) {
+        return Ok(());
+    }
+    post_ordinary_test(app, title, body)
+}
+
+fn post_ordinary_test(app: &tauri::AppHandle, title: &str, body: &str) -> Result<(), ()> {
     post_with_activation(
         app,
         None,
@@ -136,6 +198,7 @@ fn post_with_activation(
                 body,
                 icon,
                 copy,
+                popup_actions: None,
             });
             // OS completion can wake state listeners, and shutdown takes this
             // mutex. Never hold it while waiting for backend acceptance.
@@ -212,8 +275,23 @@ fn activation_admitted(
 }
 
 impl ActivationState {
+    pub fn invalidate_quick_reply(&self) {
+        let _gate = self.effect_gate.lock().unwrap_or_else(|p| p.into_inner());
+        self.invalidate_quick_reply_under_gate();
+    }
+
+    pub(crate) fn invalidate_quick_reply_under_gate(&self) {
+        let mut generation = self.quick_reply_cancel.lock().unwrap();
+        generation.cancel();
+        *generation = tokio_util::sync::CancellationToken::new();
+        drop(generation);
+        self.recovery.clear();
+        self.wake();
+    }
+
     pub fn retire(&self) {
         self.pending.lock().unwrap().0 = None;
+        self.recovery.clear();
         self.wake();
     }
 
@@ -225,6 +303,7 @@ impl ActivationState {
     }
 
     pub fn shutdown(&self) {
+        self.recovery.clear();
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let owner = self.owner.lock().unwrap().take();
@@ -623,6 +702,58 @@ mod tests {
         candidate.kind = "notification".into();
         candidate.notification_target = None;
         assert_eq!(destination(&candidate), Destination::Main);
+    }
+
+    #[test]
+    fn app_lock_check_state_transition_completes_and_invalidates_under_one_gate() {
+        let activation = Arc::new(ActivationState::default());
+        let stale = activation.quick_reply_generation_cancel();
+        let checking = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (completed, completion) = std::sync::mpsc::sync_channel(1);
+        let worker_activation = activation.clone();
+        let worker_checking = checking.clone();
+        std::thread::spawn(move || {
+            crate::begin_app_lock_check_state(&worker_checking, &worker_activation);
+            completed.send(()).unwrap();
+        });
+
+        completion
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("app-lock transition must acquire the effect gate only once");
+        assert!(checking.load(Ordering::Acquire));
+        assert!(stale.is_cancelled());
+        assert!(!activation.quick_reply_generation_cancel().is_cancelled());
+    }
+
+    #[test]
+    fn quick_reply_invalidation_under_effect_gate_completes_and_rotates_generation() {
+        let state = Arc::new(ActivationState::default());
+        let stale = state.quick_reply_generation_cancel();
+        let (completed, completion) = std::sync::mpsc::sync_channel(1);
+        let worker = state.clone();
+        std::thread::spawn(move || {
+            let _gate = worker.effect_gate.lock().unwrap();
+            worker.invalidate_quick_reply_under_gate();
+            completed.send(()).unwrap();
+        });
+
+        completion
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("under-gate invalidation must not relock the effect gate");
+        assert!(stale.is_cancelled());
+        assert!(!state.quick_reply_generation_cancel().is_cancelled());
+    }
+
+    #[test]
+    fn quick_reply_invalidation_cancels_the_current_generation_and_rotates_it() {
+        let state = ActivationState::default();
+        let stale = state.quick_reply_generation_cancel();
+        state.invalidate_quick_reply();
+        let fresh = state.quick_reply_generation_cancel();
+        assert!(stale.is_cancelled());
+        assert!(!fresh.is_cancelled());
+        state.invalidate_quick_reply();
+        assert!(fresh.is_cancelled());
     }
 
     #[test]

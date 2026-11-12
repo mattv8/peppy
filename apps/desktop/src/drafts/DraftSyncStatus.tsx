@@ -32,7 +32,7 @@ function expiryLabel(expiresAt: string | null, now: number): { label: string; ne
 }
 
 /** Returns the current time, re-rendering when an expiry reaches its 24-hour warning or passes. */
-export function useDraftExpiryClock(expiresAt: string | null | undefined): number {
+function useDraftExpiryClock(expiresAt: string | null | undefined): number {
   const [tick, setTick] = useState(0);
   useEffect(() => {
     const expiry = expiresAt ? Date.parse(expiresAt) : Number.NaN;
@@ -111,11 +111,11 @@ export function DraftSyncStatus({ draft, local, attachments, offline, localSaveS
   };
 
   return <footer id="draft-sync-status" data-draft-sync-state={sync.state} data-draft-sync-offline={offline || undefined}>
-    {message && <span data-draft-sync-message aria-live="polite">{message}</span>}
+    {message && <span data-draft-sync-message data-inline-status-message aria-live="polite" title={message}>{message}</span>}
     {sync.conflicts.length > 0 && <button id="draft-review-button" className="secondary-button" type="button" aria-haspopup="dialog" onClick={openReview}>Review</button>}
     {expiry?.nearExpiry && <DraftExpiryHelp draftId={draft.id} label={expiry.label} nearExpiry />}
-    {updatedFromOtherDevice && <span role="status" data-draft-sync-notice>Updated from your other device.</span>}
-    {notice && <span data-draft-sync-notice>{notice} <button type="button" aria-label="Dismiss" onClick={onAcknowledgeNotice}><X size={16} strokeWidth={1.75} aria-hidden /></button></span>}
+    {updatedFromOtherDevice && <span role="status" data-draft-sync-notice><span data-inline-status-message title="Updated from your other device.">Updated from your other device.</span></span>}
+    {notice && <span data-draft-sync-notice><span data-inline-status-message title={notice}>{notice}</span><button type="button" aria-label="Dismiss" onClick={onAcknowledgeNotice}><X size={16} strokeWidth={1.75} aria-hidden /></button></span>}
     {reviewOpen && sync.conflicts.length > 0 && <DraftConflictReviewDialog draftId={draft.id} local={local} conflicts={sync.conflicts} attachments={attachments} opener={reviewOpener} focusFallback={composerTextarea} onResolve={onResolveConflict} onClose={() => setReviewOpen(false)} />}
   </footer>;
 }
