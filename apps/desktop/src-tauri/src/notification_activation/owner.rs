@@ -1128,6 +1128,21 @@ mod tests {
         owner.stop();
     }
 
+    /// The reveal handler runs on its own thread, which holds the handler's reservation until
+    /// the thread ends. That can be after the owner has stopped.
+    fn reservation_is_released(recovery: &super::super::recovery_store::RecoveryStore) -> bool {
+        let deadline = std::time::Instant::now() + PLATFORM_TIMEOUT;
+        loop {
+            if recovery.reserve().is_some() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     #[test]
     fn failed_reveal_lookup_cancellation_retires_owner_and_releases_reservation() {
         let recovery = Arc::new(super::super::recovery_store::RecoveryStore::new(1));
@@ -1161,7 +1176,7 @@ mod tests {
 
         retirement.recv_timeout(PLATFORM_TIMEOUT).unwrap();
         owner.stop();
-        assert!(recovery.reserve().is_some());
+        assert!(reservation_is_released(&recovery));
     }
 
     #[test]
@@ -1204,7 +1219,7 @@ mod tests {
         owner.wake();
         retirement.recv_timeout(PLATFORM_TIMEOUT).unwrap();
         owner.stop();
-        assert!(recovery.reserve().is_some());
+        assert!(reservation_is_released(&recovery));
     }
 
     #[test]
