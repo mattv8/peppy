@@ -46,10 +46,13 @@ git -C "$repo" tag v1.2.3 "$sha"
 output=$(cd "$repo" && bash "$helper" discover desktop "$sha" 1.2.3)
 [ "$output" = $'version=1.2.3\nexisting=true' ] || { printf 'unexpected discovery output: %s\n' "$output" >&2; failures=$((failures + 1)); }
 checks=$((checks + 1))
+# shellcheck disable=SC2016 # Single quotes keep $1-$3 for the child bash, which receives them as arguments.
 expect_failure bash -c 'cd "$1" && bash "$2" discover android "$3" ""' _ "$repo" "$helper" "$sha"
 git -C "$repo" tag v1.2.4 "$sha"
+# shellcheck disable=SC2016 # Single quotes keep $1-$3 for the child bash, which receives them as arguments.
 expect_failure bash -c 'cd "$1" && bash "$2" discover desktop "$3" ""' _ "$repo" "$helper" "$sha"
 git -C "$repo" tag -d v1.2.4 >/dev/null
+# shellcheck disable=SC2016 # Single quotes keep $1-$3 for the child bash, which receives them as arguments.
 expect_failure bash -c 'cd "$1" && bash "$2" discover desktop "$3" 9.9.9' _ "$repo" "$helper" "$sha"
 if (cd "$repo" && bash "$helper" discover desktop "$sha" 9.9.9) >"$root/discover.out" 2>"$root/discover.err"; then
   echo 'explicit mismatch unexpectedly succeeded' >&2
@@ -150,6 +153,7 @@ jq -n --arg version 2.3.4 '
     "windows-x86_64-msi": {url:"https://github.com/mattv8/peppy/releases/download/v2.3.4/peppy-2.3.4-windows-x86_64.msi", signature:"signature"}
   }}' > "$root/assets/latest.json"
 find "$root/assets" -name '*.sig' ! -name SHA256SUMS.sig -exec sh -c 'printf signature > "$1"' _ {} \;
+# shellcheck disable=SC2094 # SHA256SUMS and SHA256SUMS.sig are excluded from the enumeration, so the output is never read.
 (cd "$root/assets" && find . -maxdepth 1 -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig -exec shasum -a 256 {} \; | sed 's#  \./#  #' | LC_ALL=C sort > SHA256SUMS)
 GNUPGHOME="$root/gpg-authority" gpg --batch --yes --detach-sign --output "$root/assets/SHA256SUMS.sig" "$root/assets/SHA256SUMS"
 find "$root/assets" -type f -exec basename {} \; | jq -R . | jq -s '{tagName:"v2.3.4",isDraft:false,isPrerelease:false,assets:map({name:.})}' > "$root/release.json"
@@ -256,6 +260,7 @@ run_case() {
   cases=$((cases + 1))
   checks=$((checks + 1))
   for log in gh downloads platform temps kills cleanup; do : > "$root/$log.log"; done
+  # shellcheck disable=SC2016 # Single quotes keep $1-$4 for the child bash, which receives them as arguments.
   if env PATH="$root/bin:$PATH" RUNNER_TEMP="$root/runner" \
       GH_LOG="$root/gh.log" DOWNLOAD_LOG="$root/downloads.log" PLATFORM_LOG="$root/platform.log" \
       TEMP_LOG="$root/temps.log" KILL_LOG="$root/kills.log" CLEANUP_LOG="$root/cleanup.log" \
@@ -380,12 +385,12 @@ platform_failure=cargo
 run_case updater-failure 42 'fixture updater rejected' desktop 16
 platform_failure=jarsigner case_component=android active_assets="$root/android-assets" active_metadata="$root/android-release.json"
 run_case android-verifier-failure 1 'AAB strict signature verification failed' android 4
-platform_failure= case_component=desktop active_assets="$root/assets" active_metadata="$root/release.json"
+platform_failure='' case_component=desktop active_assets="$root/assets" active_metadata="$root/release.json"
 cleanup_failure=true
 run_case cleanup-success-status 0 '' desktop 16
 platform_failure=cargo
 run_case cleanup-failure-status 42 'fixture updater rejected' desktop 16
-platform_failure= cleanup_failure=
+platform_failure='' cleanup_failure=''
 run_case restored-valid 0 '' desktop 16
 
 [ "$failures" -eq 0 ] || exit 1

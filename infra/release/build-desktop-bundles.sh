@@ -82,6 +82,7 @@ package_app_store() {
   local keychain_search_list_changed=false
   local keychain_created=false
   local -a previous_keychains=()
+  # shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap; diagnostic differs between ShellCheck 0.9 and 0.11.
   cleanup_app_store_keychain() {
     local status=$?
     trap - EXIT

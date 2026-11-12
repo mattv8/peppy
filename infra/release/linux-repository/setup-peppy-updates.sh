@@ -21,13 +21,13 @@ write_file() {
 }
 
 distro=''; repo_url=''; key_url=''; fingerprint=''; rpm_key_url=''; rpm_fingerprint=''; rpm_key_url_supplied=false; rpm_fingerprint_supplied=false; channel=''; dry_run=false
-while [ "$#" -gt 0 ]; do case "$1" in --distro) distro=${2:-}; shift 2;; --repo-url) repo_url=${2:-}; shift 2;; --key-url) key_url=${2:-}; shift 2;; --key-fingerprint) fingerprint=${2:-}; shift 2;; --rpm-key-url) rpm_key_url_supplied=true; [ "$#" -ge 2 ] && [[ "$2" != --* ]] || usage; rpm_key_url=$2; shift 2;; --rpm-key-fingerprint) rpm_fingerprint_supplied=true; [ "$#" -ge 2 ] && [[ "$2" != --* ]] || usage; rpm_fingerprint=$2; shift 2;; --channel) channel=${2:-}; shift 2;; --dry-run) dry_run=true; shift;; *) usage;; esac; done
+while [ "$#" -gt 0 ]; do case "$1" in --distro) distro=${2:-}; shift 2;; --repo-url) repo_url=${2:-}; shift 2;; --key-url) key_url=${2:-}; shift 2;; --key-fingerprint) fingerprint=${2:-}; shift 2;; --rpm-key-url) rpm_key_url_supplied=true; if [ "$#" -lt 2 ] || [[ "$2" == --* ]]; then usage; fi; rpm_key_url=$2; shift 2;; --rpm-key-fingerprint) rpm_fingerprint_supplied=true; if [ "$#" -lt 2 ] || [[ "$2" == --* ]]; then usage; fi; rpm_fingerprint=$2; shift 2;; --channel) channel=${2:-}; shift 2;; --dry-run) dry_run=true; shift;; *) usage;; esac; done
 case "$distro" in debian|fedora) ;; *) usage;; esac
 case "$channel" in stable|staging) ;; *) usage;; esac
 if "$rpm_key_url_supplied" || "$rpm_fingerprint_supplied"; then
   [ "$distro" = fedora ] || fail 'RPM key options are supported only for Fedora'
-  "$rpm_key_url_supplied" && "$rpm_fingerprint_supplied" || fail 'RPM key URL and fingerprint must be supplied together'
-  [ -n "$rpm_key_url" ] && [ -n "$rpm_fingerprint" ] || fail 'RPM key URL and fingerprint must not be empty'
+  if ! "$rpm_key_url_supplied" || ! "$rpm_fingerprint_supplied"; then fail 'RPM key URL and fingerprint must be supplied together'; fi
+  if [ -z "$rpm_key_url" ] || [ -z "$rpm_fingerprint" ]; then fail 'RPM key URL and fingerprint must not be empty'; fi
 fi
 if ! valid_url "$repo_url" || ! valid_url "$key_url"; then
   echo 'repository and key URLs must be strict HTTPS URLs' >&2

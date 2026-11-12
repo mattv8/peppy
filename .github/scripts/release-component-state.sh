@@ -119,6 +119,7 @@ verify_checksums() {
 verify() (
   [ "$#" -eq 3 ] || fail 'usage: verify <desktop|android> <version> <sha>' 2
   local component=$1 version=$2 sha=$3 tag temporary_dir='' gpg_private_home='' gpg_verify_home='' expected_json hashed_json
+  # shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap; diagnostic differs between ShellCheck 0.9 and 0.11.
   cleanup_verify() {
     local status=$?
     [ -z "$gpg_private_home" ] || [ ! -d "$gpg_private_home" ] || gpgconf --homedir "$gpg_private_home" --kill gpg-agent >/dev/null 2>&1 || :

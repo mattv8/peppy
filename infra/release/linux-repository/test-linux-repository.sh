@@ -172,6 +172,7 @@ for rpm_args in \
   "--rpm-key-url https://other.invalid/peppy/rpm-key.asc --rpm-key-fingerprint $rpm_fingerprint" \
   "--rpm-key-url https://packages.example.invalid/peppy/bad-rpm-key.asc --rpm-key-fingerprint $rpm_fingerprint"; do
   reset_setup_root
+  # shellcheck disable=SC2086 # Each $rpm_args entry is a deliberate "--flag value" pair that must word-split into arguments.
   if run_setup --distro fedora "${setup_common[@]}" $rpm_args >/dev/null 2>&1; then
     echo "expected Fedora RPM key validation failure: $rpm_args" >&2
     exit 1
