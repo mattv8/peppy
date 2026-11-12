@@ -224,24 +224,6 @@ impl Controller {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn set_discovered_controller_for_test(
-    state: &AppState,
-    origin: String,
-    mode: DeploymentMode,
-) {
-    let mut controller = state.enrollment.lock().unwrap();
-    controller.origin = Some(origin);
-    controller.info = Some(InstanceInfo {
-        mode,
-        claimed: true,
-        setup_required: false,
-        password_auth: false,
-        qr_pairing: false,
-        shared_secret_pairing: false,
-    });
-}
-
 /// Only an explicitly discovered, unclaimed community server without a setup requirement is open.
 /// Missing, claimed, and non-community state all fail closed to a native setup-token prompt,
 /// except resuming this device's own attempt on a claimed server: the server replays a matching

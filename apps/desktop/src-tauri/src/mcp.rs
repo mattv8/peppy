@@ -40,7 +40,7 @@ const WEBHOOK_ERRORS: &[(&str, &str)] = &[
     ("mcp_unavailable", "The MCP server client is unavailable."),
     (
         "mcp_device_required",
-        "Enable the Peppy server client before managing webhooks.",
+        "Enable Peppy MCP before managing webhooks.",
     ),
     (
         "mcp_worker_unavailable",
@@ -122,6 +122,19 @@ async fn current(
     Ok(())
 }
 
+async fn mcp_account_session(
+    state: &AppState,
+    hosted: &crate::hosted::HostedState,
+    origin: &str,
+) -> BridgeResult<Option<Zeroizing<String>>> {
+    if origin != crate::hosted::hosted_origin()? {
+        return Ok(None);
+    }
+    crate::hosted::enrollment_account_session(state, hosted, origin)
+        .await
+        .map(Some)
+}
+
 struct McpAccountAuthorization {
     account: Option<Zeroizing<String>>,
     revision: Option<u64>,
@@ -138,8 +151,7 @@ where
     T: DeserializeOwned,
     B: Serialize + ?Sized,
 {
-    let account =
-        crate::enrollment::hosted_account_header(state, hosted, session.api.origin()).await?;
+    let account = mcp_account_session(state, hosted, session.api.origin()).await?;
     let revision = match account.as_deref() {
         Some(bearer) => Some(hosted.capture_mcp_account_session(bearer).await?),
         None => None,
@@ -803,6 +815,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_account_session_uses_the_captured_hosted_origin() {
+        use crate::secure_store::SecretStore;
+
+        let hosted_origin = crate::hosted::hosted_origin().unwrap();
+        let store = std::sync::Arc::new(crate::secure_store::MemoryStore::default());
+        store
+            .set(
+                &format!("hosted-session:{hosted_origin}"),
+                br#"{"account_id":"account","bearer":"account-session","expires_at_unix":18446744073709551615}"#,
+            )
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::new(root.path().to_path_buf(), store, std::sync::Arc::new(|| {}));
+        let hosted = crate::hosted::HostedState::default();
+
+        let account = mcp_account_session(&state, &hosted, &hosted_origin)
+            .await
+            .unwrap();
+        assert_eq!(
+            account.as_deref().map(String::as_str),
+            Some("account-session")
+        );
+        assert!(
+            mcp_account_session(&state, &hosted, "https://community.example")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            root.path().to_path_buf(),
+            std::sync::Arc::new(crate::secure_store::MemoryStore::default()),
+            std::sync::Arc::new(|| {}),
+        );
+        assert_eq!(
+            mcp_account_session(
+                &state,
+                &crate::hosted::HostedState::default(),
+                &hosted_origin
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "hosted-session-required"
+        );
+    }
+
+    #[tokio::test]
     async fn admitted_command_blocks_restart_across_an_await() {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::new(
@@ -1212,7 +1273,6 @@ mod tests {
     #[tokio::test]
     async fn switched_mcp_post_selects_account_for_the_captured_destination() {
         use crate::secure_store::SecretStore;
-        use peppy_hosted_api::enrollment::DeploymentMode;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1261,11 +1321,6 @@ mod tests {
         *state.session.lock().await = Some(community_session.clone());
         let captured = state.require_session().await.unwrap();
 
-        crate::enrollment::set_discovered_controller_for_test(
-            &state,
-            hosted_origin.clone(),
-            DeploymentMode::Hosted,
-        );
         state
             .update_config(|config| {
                 config.origin = Some(hosted_fixture.binding.origin.clone());
@@ -1284,20 +1339,15 @@ mod tests {
         )
         .await
         {
-            Ok(_) => panic!("the captured community destination must reject Hosted authorization"),
+            Ok(_) => panic!("the captured community session must reject a switch to Hosted"),
             Err(error) => error,
         };
-        assert_eq!(error.code, "origin-binding");
+        assert_eq!(error.code, "session-changed");
         assert_eq!(
             error.message,
-            "The enrollment destination changed before account authorization."
+            "The active session changed during MCP enablement."
         );
 
-        crate::enrollment::set_discovered_controller_for_test(
-            &state,
-            community_origin,
-            DeploymentMode::Community,
-        );
         state
             .update_config(|config| {
                 config.origin = Some(community_fixture.binding.origin.clone());

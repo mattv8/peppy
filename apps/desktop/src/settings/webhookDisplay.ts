@@ -33,7 +33,7 @@ const SERVER_ERROR_MESSAGES = new Map<string, string>([
   ["webhook_filter_invalid", "Check the contacts and numbers in this filter."],
   ["webhook_limit", WEBHOOK_LIMIT_MESSAGE],
   ["webhook_not_found", "This webhook no longer exists."],
-  ["mcp_device_required", "Set up the Peppy server client in Devices first."],
+  ["mcp_device_required", "Enable Peppy MCP in Devices to manage webhooks."],
   ["mcp_unavailable", MCP_UNAVAILABLE_MESSAGE],
   ["mcp_worker_unavailable", MCP_UNAVAILABLE_MESSAGE],
   ["mcp_worker_invalid", MCP_UNAVAILABLE_MESSAGE],
