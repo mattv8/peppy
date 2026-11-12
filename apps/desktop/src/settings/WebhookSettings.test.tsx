@@ -98,7 +98,7 @@ describe("WebhookSettings", () => {
     it.each([
       ["no server client is enabled", noDeviceStatus],
       ["the server client was removed", revokedStatus],
-    ])("shows the header and a Set up in Devices callout when %s", async (_label, status) => {
+    ])("shows the header and an Enable Peppy MCP callout when %s", async (_label, status) => {
       vi.mocked(bridge.mcp_status).mockResolvedValue(status);
       const { onOpenDevices, container } = renderSettings();
 
@@ -109,9 +109,10 @@ describe("WebhookSettings", () => {
       });
       expect(screen.getByRole("heading", { level: 3, name: "Webhooks" })).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Add webhook" })).toBeDisabled();
-      expect(screen.getByRole("button", { name: "Add webhook" })).toHaveAttribute("title", "Set up the Peppy server client in Devices first.");
-      expect(callout).toHaveTextContent("Webhooks run on the Peppy server client");
-      fireEvent.click(within(callout).getByRole("button", { name: "Set up in Devices" }));
+      expect(screen.getByRole("button", { name: "Add webhook" })).toHaveAttribute("title", "Enable Peppy MCP in Devices first.");
+      expect(callout).toHaveTextContent("Enable Peppy MCP in Devices");
+      expect(callout).toHaveTextContent("once Peppy MCP shows Online");
+      fireEvent.click(within(callout).getByRole("button", { name: "Open Devices" }));
 
       expect(onOpenDevices).toHaveBeenCalledTimes(1);
     });

@@ -40,7 +40,7 @@ const WEBHOOK_ERRORS: &[(&str, &str)] = &[
     ("mcp_unavailable", "The MCP server client is unavailable."),
     (
         "mcp_device_required",
-        "Enable the Peppy server client before managing webhooks.",
+        "Enable Peppy MCP before managing webhooks.",
     ),
     (
         "mcp_worker_unavailable",

@@ -26,7 +26,7 @@ export type WebhookSettingsProps = {
 
 const INTRO = "Send incoming messages to your own apps. Runs on your server, even when your devices are offline.";
 const OFFLINE_ADD_MESSAGE = "Reconnect to the server to add webhooks.";
-const SETUP_ADD_MESSAGE = "Set up the Peppy server client in Devices first.";
+const SETUP_ADD_MESSAGE = "Enable Peppy MCP in Devices first.";
 const OFFLINE_NOTE = "The server is offline. Changes resume when it reconnects.";
 const DELETED_DURATION_MS = 4_000;
 
@@ -113,11 +113,12 @@ export function WebhookSettings({ sessionKey, unlocked, serverOffline, onOpenDev
             <WebhookHeader headingRef={headingRef} addDisabled addTitle={SETUP_ADD_MESSAGE} />
             <div id="webhooks-needs-server-client" className="webhooks-callout">
               <p>
-                Webhooks run on the <b>Peppy server client</b>, the same always-on client that powers MCP. Turning it on lets
-                your server operator hold this vault's keys. AI clients still need their own approval.
+                Webhooks run through <b>Peppy MCP</b>, the always-on server client. Enable Peppy MCP in Devices first; webhooks
+                deliver once Peppy MCP shows Online. Enabling it lets your server operator hold this vault's keys. AI clients
+                still need their own approval.
               </p>
               <button id="webhooks-setup-devices" type="button" className="primary-button webhook-compact-button" onClick={onOpenDevices}>
-                Set up in Devices
+                Open Devices
               </button>
             </div>
           </>
