@@ -60,6 +60,7 @@ type rcsPageProjection struct {
 type rcsPageSignal struct {
 	Code                 string `json:"code"`
 	GoogleConversationID string `json:"google_conversation_id"`
+	SentAtMS             int64  `json:"sent_at_ms"`
 }
 
 const rcsMessageType int64 = 4
@@ -195,7 +196,7 @@ func projectRcsPage(page *gmproto.ListMessagesResponse, conversation *gmproto.Co
 		case "ok":
 			result.Records = append(result.Records, *projection.Record)
 		case "protocol_switch":
-			result.Signals = append(result.Signals, rcsPageSignal{Code: projection.Code, GoogleConversationID: projection.GoogleConversationID})
+			result.Signals = append(result.Signals, rcsPageSignal{Code: projection.Code, GoogleConversationID: projection.GoogleConversationID, SentAtMS: time.UnixMicro(message.GetTimestamp()).UnixMilli()})
 		case "informational_tombstone":
 			// Known informational tombstones carry no history text and are not counted.
 		default:

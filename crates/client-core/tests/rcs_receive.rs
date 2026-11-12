@@ -2371,6 +2371,7 @@ fn claim_changed_google_id_begins_a_fenced_generation() {
                 session_generation: 7,
                 context_revision: 1,
             },
+            None,
         )
         .unwrap();
     client

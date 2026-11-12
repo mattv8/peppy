@@ -348,7 +348,7 @@ func TestFetchRcsGapKeepsProtocolSwitchSignalsAndText(t *testing.T) {
 			if got.Code != "ok" || !got.HasMore || got.NextCursor == "" || len(got.Records) != 1 {
 				t.Fatalf("page = %#v", got)
 			}
-			if len(got.Signals) != 1 || got.Signals[0] != (rcsPageSignal{Code: "protocol_switch", GoogleConversationID: "conversation-1"}) {
+			if len(got.Signals) != 1 || got.Signals[0] != (rcsPageSignal{Code: "protocol_switch", GoogleConversationID: "conversation-1", SentAtMS: 1735689600123}) {
 				t.Fatalf("signals = %#v", got.Signals)
 			}
 		})
@@ -550,8 +550,11 @@ func TestCarrierTransitionTombstonesRemainLiveAndHistoryControlSignals(t *testin
 					Messages: []*gmproto.Message{textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE).Message, textMessage(transition.status).Message},
 					Cursor:   &gmproto.Cursor{LastItemID: "page-id", LastItemTimestamp: 1234},
 				}, conversation)
-				if page.Code != "ok" || len(page.Records) != 1 || len(page.Signals) != 1 || page.Signals[0] != (rcsPageSignal{Code: "protocol_switch", GoogleConversationID: "conversation-1"}) {
+				if page.Code != "ok" || len(page.Records) != 1 || len(page.Signals) != 1 || page.Signals[0] != (rcsPageSignal{Code: "protocol_switch", GoogleConversationID: "conversation-1", SentAtMS: 1735689600123}) {
 					t.Fatalf("history page = %#v", page)
+				}
+				if page.Signals[0].SentAtMS <= 0 {
+					t.Fatalf("history signal timestamp = %d", page.Signals[0].SentAtMS)
 				}
 				if !page.HasMore || page.NextCursor != opaquePageToken(&gmproto.Cursor{LastItemID: "page-id", LastItemTimestamp: 1234}) {
 					t.Fatalf("history cursor = %#v", page)

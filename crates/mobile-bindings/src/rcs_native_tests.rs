@@ -1644,6 +1644,7 @@ fn receive_context_exports_require_current_local_link_ownership() {
                 context.conversation_id.clone(),
                 context.google_conversation_id.clone(),
                 changed_expectation,
+                None,
             ),
         Err(MobileBindingsError::InvalidRequest)
     ));
@@ -1654,11 +1655,11 @@ fn receive_context_exports_require_current_local_link_ownership() {
                 context.conversation_id.clone(),
                 context.google_conversation_id.clone(),
                 context.expectation,
+                None,
             )
             .unwrap(),
-        2
+        Some(2)
     );
-
     with_client(&fixture.gateway.client, |core| {
         core.begin_rcs_unlink_cutover(fixture.conversation_id.parse().unwrap())?;
         Ok(())
@@ -1711,6 +1712,72 @@ fn receive_context_exports_require_current_local_link_ownership() {
         fixture.gateway.gateway_rcs_link_owned_conversations(),
         Err(MobileBindingsError::InvalidRequest)
     ));
+}
+
+#[test]
+fn google_event_invalidation_binding_forwards_positive_history_timestamps() {
+    let fixture = fixture();
+    let verified_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    with_client(&fixture.gateway.client, |core| {
+        core.record_rcs_link_lifecycle(
+            RcsCapabilityState::Linked,
+            true,
+            true,
+            true,
+            verified_at_ms,
+            verified_at_ms,
+        )?;
+        let mut observation = fixture.observation.clone();
+        observation.observed_at_ms = verified_at_ms;
+        observation.carrier_binding.route_observed_at_ms = verified_at_ms;
+        observation.native_evidence.settings_observed_at_ms = verified_at_ms;
+        observation.native_evidence.settings_validated_at_ms = verified_at_ms;
+        observation.native_evidence.conversation_observed_at_ms = verified_at_ms;
+        observation.mapping_revision = 2;
+        core.verify_rcs_mapping(&observation, verified_at_ms)?;
+        core.begin_rcs_link_ownership(fixture.conversation_id.parse().unwrap(), 1)?;
+        Ok(())
+    })
+    .unwrap();
+    let context = fixture
+        .gateway
+        .gateway_rcs_receive_context(fixture.observation.google_conversation_id.clone())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fixture
+            .gateway
+            .gateway_invalidate_rcs_context_for_google_event(
+                context.conversation_id.clone(),
+                context.google_conversation_id.clone(),
+                context.expectation.clone(),
+                Some(verified_at_ms - 120_000),
+            )
+            .unwrap(),
+        None
+    );
+    assert!(
+        fixture
+            .gateway
+            .gateway_rcs_receive_context(context.google_conversation_id.clone())
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        fixture
+            .gateway
+            .gateway_invalidate_rcs_context_for_google_event(
+                context.conversation_id,
+                context.google_conversation_id,
+                context.expectation,
+                Some(verified_at_ms + 1),
+            )
+            .unwrap(),
+        Some(2)
+    );
 }
 
 #[test]

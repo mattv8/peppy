@@ -1,6 +1,7 @@
 package dev.peppy.mobile.googlemessages
 
 import androidx.test.core.app.ApplicationProvider
+import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import dev.peppy.mobile.gateway.GatewayTestBase
 import java.util.Collections
 import java.util.UUID
@@ -249,7 +250,7 @@ class RcsReceiveCoordinatorTest {
         val conv = conv("core-a", "google-a", watermarkMs = BASE)
         val core = FakeCore(listOf(conv)).apply { refusals["a"] = "identity_conflict" }
 
-        assertEquals(RcsRecoveryResult.ABORTED, coordinator(core).resumeConversation(google, "google-a"))
+        assertRecoveryAbort(259L) { coordinator(core).resumeConversation(google, "google-a") }
 
         assertTrue(core.progressWrites.isEmpty())
         assertEquals(BASE, conv.watermarkMs)
@@ -263,14 +264,98 @@ class RcsReceiveCoordinatorTest {
             onIngest = { _, _, _ -> cancelled.set(true); accepted() }
         }
 
-        val result = coordinator(core).resumeConversation(google, "google-a", cancelled)
+        val result = assertRecoveryAbort(258L) { coordinator(core).resumeConversation(google, "google-a", cancelled) }
 
         assertEquals(RcsRecoveryResult.ABORTED, result)
         assertEquals(1, core.ingestedRecords.size)
         assertTrue(core.progressWrites.isEmpty())
     }
 
-    @Test fun `stale signal invalidation stops the run without progress`() {
+    @Test fun `history signal superseded by core completes without a core write`() {
+        val google = FakeGoogle(emptyMap()).apply {
+            fetchHook = { _, _ -> signalPage("google-a", BASE - HOUR) }
+        }
+        val core = FakeCore(listOf(conv("core-a", "google-a", watermarkMs = BASE))).apply { invalidateResult = false }
+
+        assertEquals(RcsRecoveryResult.COMPLETE, coordinator(core).resumeConversation(google, "google-a"))
+
+        assertEquals(listOf("google-a" to (BASE - HOUR)), core.invalidations)
+        assertTrue(core.completions.isEmpty())
+    }
+
+    @Test fun `history signal that invalidates aborts immediately without a later write`() {
+        val google = FakeGoogle(emptyMap()).apply {
+            fetchHook = { _, _ -> signalPage("google-a", BASE + HOUR) }
+        }
+        val core = FakeCore(listOf(conv("core-a", "google-a", watermarkMs = BASE)))
+
+        assertEquals(RcsRecoveryResult.ABORTED, coordinator(core).resumeConversation(google, "google-a"))
+
+        assertEquals(listOf("google-a" to (BASE + HOUR)), core.invalidations)
+        assertTrue(core.progressWrites.isEmpty())
+        assertTrue(core.completions.isEmpty())
+    }
+
+    @Test fun `invalidating history signal records its coarse age before the abort`() {
+        val now = BASE + 24 * HOUR
+        val cases = listOf(
+            null to 266L,
+            now + 1 to 267L,
+            now - 2 * 60_000 + 1 to 268L,
+            now - 2 * 60_000 to 269L,
+            now - 15 * 60_000 + 1 to 269L,
+            now - HOUR to 271L,
+            now - 24 * HOUR to 272L,
+        )
+        cases.forEach { (sentAtMs, expectedAge) ->
+            val records = mutableListOf<String>()
+            val google = FakeGoogle(emptyMap()).apply { fetchHook = { _, _ -> signalPage("google-a", sentAtMs) } }
+            SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+                assertEquals(RcsRecoveryResult.ABORTED, coordinator(FakeCore(listOf(conv("core-a", "google-a"))), nowMs = { now })
+                    .resumeConversation(google, "google-a"))
+            }
+            assertEquals(listOf(expectedAge, 256L, 44L), records.map { it.substringAfter("29=").toLong() })
+        }
+    }
+
+    @Test fun `superseded history signal records its coarse skipped age`() {
+        val now = BASE + HOUR
+        val records = mutableListOf<String>()
+        val core = FakeCore(listOf(conv("core-a", "google-a"))).apply { invalidateResult = false }
+        val google = FakeGoogle(emptyMap()).apply { fetchHook = { _, _ -> signalPage("google-a", now - HOUR) } }
+
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            assertEquals(RcsRecoveryResult.COMPLETE, coordinator(core, nowMs = { now }).resumeConversation(google, "google-a"))
+        }
+
+        assertEquals(listOf(278L, 255L), records.map { it.substringAfter("29=").toLong() })
+    }
+
+    @Test fun `history signals for one conversation stay ordered and retain their times`() {
+        val google = FakeGoogle(emptyMap()).apply {
+            fetchHook = { _, _ -> signalPage("google-a", BASE - HOUR, BASE + HOUR) }
+        }
+        val core = FakeCore(listOf(conv("core-a", "google-a", watermarkMs = BASE))).apply {
+            invalidateResults += listOf(false, true)
+        }
+
+        assertEquals(RcsRecoveryResult.ABORTED, coordinator(core).resumeConversation(google, "google-a"))
+
+        assertEquals(listOf("google-a" to (BASE - HOUR), "google-a" to (BASE + HOUR)), core.invalidations)
+    }
+
+    @Test fun `history signal without sent time is passed as absent`() {
+        val google = FakeGoogle(emptyMap()).apply {
+            fetchHook = { _, _ -> signalPage("google-a", null) }
+        }
+        val core = FakeCore(listOf(conv("core-a", "google-a", watermarkMs = BASE)))
+
+        assertEquals(RcsRecoveryResult.ABORTED, coordinator(core).resumeConversation(google, "google-a"))
+
+        assertEquals(listOf("google-a" to null), core.invalidations)
+    }
+
+    @Test fun `group-lane history signal failure records its abort cause`() {
         val google = FakeGoogle(mapOf("google-a" to listOf(Msg("a", BASE + 2), Msg("b", BASE + 1)))).apply {
             fetchHook = { _, _ ->
                 JSONObject().put("code", "ok").put("records", JSONArray())
@@ -282,7 +367,7 @@ class RcsReceiveCoordinatorTest {
             invalidateFailure = IllegalStateException("stale expectation")
         }
 
-        assertEquals(RcsRecoveryResult.ABORTED, coordinator(core).resumeConversation(google, "google-a"))
+        assertRecoveryAbort(260L) { coordinator(core).resumeConversation(google, "google-a") }
 
         assertEquals(1, core.invalidations.size)
         assertTrue(core.progressWrites.isEmpty())
@@ -304,6 +389,32 @@ class RcsReceiveCoordinatorTest {
         assertEquals(2, google.requests.size)
         assertEquals(BASE, conv.watermarkMs)
         assertNull(conv.hint)
+    }
+
+    @Test fun `failed progress or context reload aborts recovery`() {
+        val google = FakeGoogle(mapOf("google-a" to listOf(Msg("a", BASE + 1), Msg("b", BASE + 2)))).apply { pageSize = 1 }
+        val progressFailure = FakeCore(listOf(conv("core-a", "google-a"))).apply { progressRejection = "stale" }
+        assertRecoveryAbort(261L) { coordinator(progressFailure).resumeConversation(google, "google-a") }
+
+        val reloadMissing = FakeCore(listOf(conv("core-a", "google-a"))).apply { contextMissingAfterProgress = true }
+        assertRecoveryAbort(262L) { coordinator(reloadMissing).resumeConversation(google, "google-a") }
+    }
+
+    @Test fun `failed finish or hint clearing aborts recovery`() {
+        val completionFailure = FakeCore(listOf(conv("core-a", "google-a"))).apply { completionRejection = "stale" }
+        assertRecoveryAbort(263L) {
+            coordinator(completionFailure).resumeConversation(FakeGoogle(mapOf("google-a" to listOf(Msg("a", BASE + 1)))), "google-a")
+        }
+
+        val clearFailure = FakeCore(listOf(conv("core-a", "google-a"))).apply { clearRejection = "stale" }
+        val badPage = FakeGoogle(emptyMap()).apply { fetchHook = { _, _ -> """{\"code\":\"failed\"}""" } }
+        assertRecoveryAbort(264L) { coordinator(clearFailure).resumeConversation(badPage, "google-a") }
+    }
+
+    @Test fun `missing initial context records only its abort cause`() {
+        assertRecoveryAbort(257L, recoveryAbort = false) {
+            coordinator(FakeCore(emptyList())).resumeConversation(FakeGoogle(emptyMap()), "google-a")
+        }
     }
 
     @Test fun `idle conversations are skipped by last message time but zero or missing activity is swept`() {
@@ -413,8 +524,28 @@ class RcsReceiveCoordinatorTest {
 
         coordinator(core).receive(JSONObject().put("code", "protocol_switch").put("google_conversation_id", "google-a").toString())
 
-        assertEquals(listOf("google-a"), core.invalidations)
+        assertEquals(listOf("google-a" to null), core.invalidations)
         assertTrue(core.ingestedRecords.isEmpty())
+    }
+
+    @Test fun `live protocol switch records invalidation but no signal age`() {
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            coordinator(FakeCore(listOf(conv("core-a", "google-a")))).receive(
+                JSONObject().put("code", "protocol_switch").put("google_conversation_id", "google-a").toString(),
+            )
+        }
+        assertTrue(records.none { it.substringAfter("29=").toLong() in 266L..279L })
+        assertEquals(listOf(265L), records.map { it.substringAfter("29=").toLong() })
+    }
+
+    @Test fun `live protocol switch without invalidation records no diagnostics`() {
+        val records = mutableListOf<String>()
+        val core = FakeCore(listOf(conv("core-a", "google-a"))).apply { invalidateResult = false }
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            coordinator(core).receive(JSONObject().put("code", "protocol_switch").put("google_conversation_id", "google-a").toString())
+        }
+        assertTrue(records.isEmpty())
     }
 
     @Test fun `live and gap ingestion preserve acquisition provenance`() {
@@ -442,13 +573,24 @@ class RcsReceiveCoordinatorTest {
         enabled: Boolean = true,
         bootstrapRequest: (String) -> Unit = {},
         reconcileGroups: () -> Boolean = { false },
+        nowMs: () -> Long = System::currentTimeMillis,
     ) = RcsReceiveCoordinator(
         ApplicationProvider.getApplicationContext(),
         core,
         { enabled },
         bootstrapRequest,
         reconcileGroups,
+        nowMs,
     )
+
+    private fun assertRecoveryAbort(code: Long, recoveryAbort: Boolean = true, action: () -> RcsRecoveryResult): RcsRecoveryResult {
+        val records = mutableListOf<String>()
+        val result = SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) { action() }
+        assertEquals(RcsRecoveryResult.ABORTED, result)
+        val reasons = records.map { it.substringAfter("29=").toLong() }
+        assertEquals(if (recoveryAbort) listOf(code, 44L) else listOf(code), reasons)
+        return result
+    }
 
     private fun thread(block: () -> Unit) = Thread(block).apply { start() }
 
@@ -513,7 +655,13 @@ private class FakeCore(initial: List<Conv>) : RcsReceiveCore {
     var contextsFailure: Throwable? = null
     val contextsCalls = AtomicInteger()
     var progressRejection: String? = null
+    var completionRejection: String? = null
+    var clearRejection: String? = null
+    var contextMissingAfterProgress = false
+    private var contextAvailable = true
     var invalidateFailure: Throwable? = null
+    var invalidateResult = true
+    val invalidateResults = ArrayDeque<Boolean>()
     var onIngest: ((NativeRcsReceiveContext, String, NativeRcsObservationProvenance) -> NativeRcsIngestOutcome)? = null
     val refusals = ConcurrentHashMap<String, String>()
     val messages: MutableSet<String> = ConcurrentHashMap.newKeySet()
@@ -522,12 +670,12 @@ private class FakeCore(initial: List<Conv>) : RcsReceiveCore {
     val progressWrites = Collections.synchronizedList(mutableListOf<Triple<String, Long, String>>())
     val completions = Collections.synchronizedList(mutableListOf<Pair<String, Long>>())
     val clears = AtomicInteger()
-    val invalidations = Collections.synchronizedList(mutableListOf<String>())
+    val invalidations = Collections.synchronizedList(mutableListOf<Pair<String, Long?>>())
 
     fun conversation(conversationId: String): Conv = conversations.single { it.conversationId == conversationId }
 
     override fun context(googleId: String): NativeRcsReceiveContext? = used {
-        conversations.firstOrNull { it.googleId == googleId }?.let(::snapshot)
+        if (contextAvailable) conversations.firstOrNull { it.googleId == googleId }?.let(::snapshot) else null
     }
 
     override fun contexts(): List<NativeRcsReceiveContext> = used {
@@ -552,12 +700,14 @@ private class FakeCore(initial: List<Conv>) : RcsReceiveCore {
     override fun recordProgress(context: NativeRcsReceiveContext, targetMs: Long, cursor: String): String = used {
         progressWrites += Triple(context.conversationId, targetMs, cursor)
         progressRejection?.let { return@used "rejected:$it" }
+        if (contextMissingAfterProgress) contextAvailable = false
         conversation(context.conversationId).apply { hint = targetMs to cursor; incomplete = true }
         "recorded"
     }
 
     override fun complete(context: NativeRcsReceiveContext, targetMs: Long): String = used {
         completions += context.conversationId to targetMs
+        completionRejection?.let { return@used "rejected:$it" }
         conversation(context.conversationId).apply {
             watermarkMs = maxOf(watermarkMs, targetMs)
             hint = null
@@ -568,15 +718,15 @@ private class FakeCore(initial: List<Conv>) : RcsReceiveCore {
 
     override fun clearHint(context: NativeRcsReceiveContext): String = used {
         clears.incrementAndGet()
+        clearRejection?.let { return@used "rejected:$it" }
         conversation(context.conversationId).apply { hint = null; incomplete = true }
         "recorded"
     }
 
-    override fun invalidate(context: NativeRcsReceiveContext, googleId: String) {
-        used {
-            invalidations += googleId
+    override fun invalidate(context: NativeRcsReceiveContext, googleId: String, eventAtMs: Long?): Boolean = used {
+            invalidations += googleId to eventAtMs
             invalidateFailure?.let { throw it }
-        }
+            return@used if (invalidateResults.isEmpty()) invalidateResult else invalidateResults.removeFirst()
     }
 
     private fun snapshot(conv: Conv) = NativeRcsReceiveContext(
@@ -658,6 +808,15 @@ private class FakeGoogle(
 }
 
 private fun accepted() = NativeRcsIngestOutcome("inserted", "status_applied")
+
+private fun signalPage(googleId: String, vararg sentAtMs: Long?) = JSONObject()
+    .put("code", "ok")
+    .put("records", JSONArray())
+    .put("signals", JSONArray(sentAtMs.map { time ->
+        JSONObject().put("google_conversation_id", googleId).apply { time?.let { put("sent_at_ms", it) } }
+    }))
+    .put("has_more", false)
+    .toString()
 
 /** Two group gap records with unresolved senders, in one page that completes the traversal. */
 private fun unknownGroupGapPage(googleId: String) = JSONObject()

@@ -141,6 +141,58 @@ class LinkCoreBridgeTest {
         assertEquals(1, attempts)
     }
 
+    @Test
+    fun `linked transition enqueues one gateway pass but a linked heartbeat does not`() {
+        var enqueues = 0
+        LinkCoreBridge.recorder = { _, _ -> true }
+        LinkCoreBridgeTestHooks.enqueueGatewayPass = { assertFalse(Thread.holdsLock(LinkCoreBridge)); enqueues += 1 }
+
+        assertTrue(LinkCoreBridge.recordIfNeeded(context, LinkStatus(0, "unlinked", false, false, false, 0, "")))
+        assertTrue(LinkCoreBridge.recordIfNeeded(context, LinkStatus(0, "linked", true, true, true, 0, "")))
+        assertTrue(LinkCoreBridge.recordIfNeeded(context, LinkStatus(0, "linked", true, true, true, 0, "")))
+
+        assertEquals(1, enqueues)
+    }
+
+    @Test
+    fun `changed linked facts are recorded without another gateway pass`() {
+        var enqueues = 0
+        val recorded = mutableListOf<LinkStatus>()
+        LinkCoreBridge.recorder = { _, status -> recorded += status; true }
+        LinkCoreBridgeTestHooks.enqueueGatewayPass = { assertFalse(Thread.holdsLock(LinkCoreBridge)); enqueues += 1 }
+
+        assertTrue(LinkCoreBridge.recordIfNeeded(context, LinkStatus(0, "unlinked", false, false, false, 0, "")))
+        assertTrue(LinkCoreBridge.recordIfNeeded(context, LinkStatus(0, "linked", true, true, true, 0, "")))
+        assertTrue(LinkCoreBridge.recordIfNeeded(context, LinkStatus(0, "linked", true, false, true, 0, "")))
+
+        assertEquals(3, recorded.size)
+        assertEquals(1, enqueues)
+    }
+
+    @Test
+    fun `failed lifecycle record and failed enqueue do not fail linking`() {
+        LinkCoreBridge.recorder = { _, _ -> false }
+        assertFalse(LinkCoreBridge.recordIfNeeded(context, LinkStatus(0, "linked", true, true, true, 0, "")))
+
+        LinkCoreBridge.recorder = { _, _ -> true }
+        var enqueueAttempts = 0
+        LinkCoreBridgeTestHooks.enqueueGatewayPass = { enqueueAttempts += 1; assertFalse(Thread.holdsLock(LinkCoreBridge)); throw IllegalStateException() }
+        assertTrue(LinkCoreBridge.recordIfNeeded(context, LinkStatus(0, "linked", true, true, true, 0, "")))
+        assertEquals(1, enqueueAttempts)
+    }
+
+    @Test
+    fun `linked observation transition enqueues one gateway pass outside the monitor`() {
+        var enqueues = 0
+        LinkCoreBridge.recorder = { _, _ -> true }
+        LinkCoreBridgeTestHooks.enqueueGatewayPass = { assertFalse(Thread.holdsLock(LinkCoreBridge)); enqueues += 1 }
+        val lease = observationLease()
+
+        assertTrue(LinkCoreBridge.recordObservation(LinkCoreBridge.observationToken(), lease, context, LinkStatus(0, "linked", true, true, true, 0, "")))
+
+        assertEquals(1, enqueues)
+    }
+
     private fun observationLease(): LinkHandleLease {
         LinkRuntimeTestHooks.engine = object : LinkEngine {
             override val available = true

@@ -1219,7 +1219,7 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func gatewayIngestRcsProjectedObservation(conversationId: String, ownershipGeneration: UInt64, goRecordJson: String, provenance: NativeRcsObservationProvenance) throws  -> NativeRcsIngestOutcome
     
-    func gatewayInvalidateRcsContextForGoogleEvent(conversationId: String, googleConversationId: String, expected: NativeRcsContextExpectation) throws  -> UInt64
+    func gatewayInvalidateRcsContextForGoogleEvent(conversationId: String, googleConversationId: String, expected: NativeRcsContextExpectation, eventAtMs: Int64?) throws  -> UInt64?
     
     /**
      * Marks a trusted host download as retryable/terminal without allowing a caller to fabricate
@@ -3637,14 +3637,15 @@ open func gatewayIngestRcsProjectedObservation(conversationId: String, ownership
 })
 }
     
-open func gatewayInvalidateRcsContextForGoogleEvent(conversationId: String, googleConversationId: String, expected: NativeRcsContextExpectation)throws  -> UInt64  {
-    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+open func gatewayInvalidateRcsContextForGoogleEvent(conversationId: String, googleConversationId: String, expected: NativeRcsContextExpectation, eventAtMs: Int64?)throws  -> UInt64?  {
+    return try  FfiConverterOptionUInt64.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_invalidate_rcs_context_for_google_event(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(conversationId),
         FfiConverterString.lower(googleConversationId),
-        FfiConverterTypeNativeRcsContextExpectation_lower(expected),uniffiCallStatus
+        FfiConverterTypeNativeRcsContextExpectation_lower(expected),
+        FfiConverterOptionInt64.lower(eventAtMs),uniffiCallStatus
     )
 })
 }
@@ -20502,7 +20503,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_ingest_rcs_projected_observation() != 24444) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_invalidate_rcs_context_for_google_event() != 56850) {
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_invalidate_rcs_context_for_google_event() != 57246) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_mark_rcs_media_download_state() != 37355) {

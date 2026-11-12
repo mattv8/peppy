@@ -1047,7 +1047,7 @@ class GoogleMessagesLinkServiceTest {
             return "recorded"
         }
         override fun clearHint(context: NativeRcsReceiveContext) = "recorded"
-        override fun invalidate(context: NativeRcsReceiveContext, googleId: String) = Unit
+        override fun invalidate(context: NativeRcsReceiveContext, googleId: String, eventAtMs: Long?) = false
     }
 
     private class ReconnectRunHandle : StatusHandle(LINKED_STATUS) {
@@ -1152,7 +1152,10 @@ class GoogleMessagesLinkServiceTest {
             override fun tuple(snapshot: JSONObject) = RcsNativeContextTuple(1u, 1u, 1u)
             override fun revision(conversationId: String) = 1uL
             override fun lifecycleGeneration() = 1uL
-            override fun verify(observation: String, nowMs: Long) = uniffi.peppy_mobile_bindings.NativeRcsMappingVerification.MAPPED
+            override fun verify(observation: String, nowMs: Long) = uniffi.peppy_mobile_bindings.NativeRcsMappingVerdict(
+                uniffi.peppy_mobile_bindings.NativeRcsMappingVerification.MAPPED,
+                null,
+            )
             override fun claim(json: String) = uniffi.peppy_mobile_bindings.NativeRcsLinkOwnershipClaimOutcome.CLAIMED
         },
         link = object : RcsBootstrapLinkPort {

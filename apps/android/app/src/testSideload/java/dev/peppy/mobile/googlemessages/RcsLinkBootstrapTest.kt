@@ -13,6 +13,7 @@ import org.robolectric.annotation.Config
 import uniffi.peppy_mobile_bindings.NativeRcsBootstrapResolution
 import uniffi.peppy_mobile_bindings.NativeRcsLinkOwnershipClaimOutcome
 import uniffi.peppy_mobile_bindings.NativeRcsMappingVerification
+import uniffi.peppy_mobile_bindings.NativeRcsMappingVerdict
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -34,7 +35,7 @@ class RcsLinkBootstrapTest {
         assertFalse(claim.has("backfillFromMs"))
     }
 
-    @Test fun `each failed bootstrap step records its own diagnostic reason`() {
+    @Test fun `bootstrap records resolution verification and claim diagnostics`() {
         fun reasons(fixture: Fixture): List<String> {
             val records = mutableListOf<String>()
             SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) { fixture.bootstrap().run() }
@@ -43,11 +44,20 @@ class RcsLinkBootstrapTest {
         val one = listOf(candidate("google-a", "+15550000001"))
 
         assertEquals(listOf("186"), reasons(Fixture(candidates = one, complete = false)))
-        assertEquals(listOf("190"), reasons(Fixture(candidates = one, resolution = { NativeRcsBootstrapResolution.Missing })))
+        assertEquals(listOf("234"), reasons(Fixture(candidates = one, resolution = { NativeRcsBootstrapResolution.Missing })))
+        assertEquals(listOf("235"), reasons(Fixture(candidates = one, resolution = { NativeRcsBootstrapResolution.Ambiguous })))
+        assertEquals(listOf("236"), reasons(Fixture(candidates = one, resolution = { NativeRcsBootstrapResolution.Uncertain })))
+        assertEquals(listOf("237"), reasons(Fixture(candidates = one, resolution = { NativeRcsBootstrapResolution.InvalidIdentity })))
+        assertEquals(listOf("238"), reasons(Fixture(candidates = one, resolution = { NativeRcsBootstrapResolution.AlreadyMappedElsewhere })))
         assertEquals(listOf("194"), reasons(Fixture(candidates = one).apply { observeFailure = setOf("google-a") }))
-        assertEquals(listOf("196"), reasons(Fixture(candidates = one).apply { verifyOutcome = { NativeRcsMappingVerification.REFUSED } }))
+        assertEquals(listOf("240", "196"), reasons(Fixture(candidates = one).apply {
+            verifyOutcome = { NativeRcsMappingVerdict(NativeRcsMappingVerification.REFUSED, "stale_observation") }
+        }))
+        assertEquals(listOf("196"), reasons(Fixture(candidates = one).apply {
+            verifyOutcome = { NativeRcsMappingVerdict(NativeRcsMappingVerification.REFUSED, null) }
+        }))
         assertEquals(listOf("197"), reasons(Fixture(candidates = one).apply { claimFailure = setOf("google-a") }))
-        assertEquals(emptyList<String>(), reasons(Fixture(candidates = one)))
+        assertEquals(listOf("239"), reasons(Fixture(candidates = one)))
     }
 
     @Test fun `owned conversations are skipped without consuming the per run cap`() {
@@ -91,7 +101,7 @@ class RcsLinkBootstrapTest {
             resolution = { id -> if (id == "missing") NativeRcsBootstrapResolution.Ambiguous else NativeRcsBootstrapResolution.Resolved("conv-$id") },
         ).apply {
             observeFailure = setOf("observe-fails")
-            verifyOutcome = { proof -> if (proof == "proof-verify-refused") NativeRcsMappingVerification.REFUSED else NativeRcsMappingVerification.MAPPED }
+            verifyOutcome = { proof -> NativeRcsMappingVerdict(if (proof == "proof-verify-refused") NativeRcsMappingVerification.REFUSED else NativeRcsMappingVerification.MAPPED, null) }
             claimFailure = setOf("claim-throws")
         }
 
@@ -249,7 +259,9 @@ class RcsLinkBootstrapTest {
         val swept = mutableListOf<String>()
         var observeFailure = emptySet<String>()
         var claimFailure = emptySet<String>()
-        var verifyOutcome: (String) -> NativeRcsMappingVerification = { NativeRcsMappingVerification.MAPPED }
+        var verifyOutcome: (String) -> NativeRcsMappingVerdict = {
+            NativeRcsMappingVerdict(NativeRcsMappingVerification.MAPPED, null)
+        }
         var recovery: (String) -> RcsRecoveryResult = { RcsRecoveryResult.COMPLETE }
 
         fun bootstrap(current: () -> Boolean = { true }) = RcsLinkBootstrap(

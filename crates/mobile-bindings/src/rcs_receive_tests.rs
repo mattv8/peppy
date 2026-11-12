@@ -452,6 +452,7 @@ fn google_event_invalidation_wrapper_rejects_stale_expectations_without_writes()
                     session_generation: 1,
                     context_revision: 1,
                 },
+                None,
             ),
         Err(MobileBindingsError::InvalidRequest)
     ));
@@ -490,6 +491,7 @@ fn new_receive_wrappers_reject_closed_clients() {
                     session_generation: 1,
                     context_revision: 1,
                 },
+                None,
             ),
         Err(MobileBindingsError::Closed)
     ));

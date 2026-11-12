@@ -3,6 +3,7 @@ mod common;
 
 use common::*;
 use rusqlite::{Connection, params};
+use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn now() -> i64 {
@@ -1830,9 +1831,14 @@ fn google_event_invalidation_bumps_once_and_replay_is_write_free() {
     let connection = sql(&config);
     assert_eq!(
         client
-            .invalidate_rcs_context_for_google_event(conversation, "google-conversation", expected,)
+            .invalidate_rcs_context_for_google_event(
+                conversation,
+                "google-conversation",
+                expected,
+                None
+            )
             .unwrap(),
-        2
+        Some(2)
     );
     let after = context_invalidation_snapshot(&connection, conversation);
     assert!(after.mappings.iter().all(|mapping| mapping.2.is_some()));
@@ -1844,6 +1850,7 @@ fn google_event_invalidation_bumps_once_and_replay_is_write_free() {
             conversation,
             "google-conversation",
             expected,
+            None,
         ),
         Err(Error::InvalidRequest(_))
     ));
@@ -1866,6 +1873,7 @@ fn google_event_invalidation_rejects_each_stale_context_field_without_writes() {
                 conversation,
                 "google-conversation",
                 expected,
+                None,
             ),
             Err(Error::InvalidRequest(_))
         ));
@@ -1925,6 +1933,7 @@ fn google_event_invalidation_rejects_stale_ownership_mapping_and_cutover_without
                 conversation,
                 "google-conversation",
                 expected,
+                None,
             ),
             Err(Error::InvalidRequest(_))
         ));
@@ -1950,6 +1959,7 @@ fn google_event_invalidation_rejects_revision_overflow_without_writes() {
             conversation,
             "google-conversation",
             expected,
+            None,
         ),
         Err(Error::InvalidRequest(_))
     ));
@@ -1971,13 +1981,254 @@ fn google_event_invalidation_rolls_back_context_when_mapping_update_aborts() {
         .unwrap();
     assert!(
         client
-            .invalidate_rcs_context_for_google_event(conversation, "google-conversation", expected,)
+            .invalidate_rcs_context_for_google_event(
+                conversation,
+                "google-conversation",
+                expected,
+                None
+            )
             .is_err()
     );
     assert_eq!(
         context_invalidation_snapshot(&connection, conversation),
         before
     );
+}
+
+#[test]
+fn google_event_invalidation_ignores_history_before_the_mapping_guard_band() {
+    let (_directory, _vault, config, client, conversation, _ownership, expected) = mapped_fixture();
+    let connection = sql(&config);
+    let verified_at_ms: i64 = connection
+        .query_row(
+            "SELECT verified_at_ms FROM rcs_conversation_mappings WHERE peppy_conversation_id=?",
+            [conversation.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let before = context_invalidation_snapshot(&connection, conversation);
+
+    assert_eq!(
+        client
+            .invalidate_rcs_context_for_google_event(
+                conversation,
+                "google-conversation",
+                expected,
+                Some(verified_at_ms - 120_000),
+            )
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        context_invalidation_snapshot(&connection, conversation),
+        before
+    );
+}
+
+#[test]
+fn google_event_invalidation_accepts_newer_or_untrusted_history_timestamps() {
+    for case in ["inside_band", "newer", "none", "zero", "negative"] {
+        let (_directory, _vault, config, client, conversation, _ownership, expected) =
+            mapped_fixture();
+        let connection = sql(&config);
+        let verified_at_ms: i64 = connection
+            .query_row(
+                "SELECT verified_at_ms FROM rcs_conversation_mappings WHERE peppy_conversation_id=?",
+                [conversation.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let event_at_ms = match case {
+            "inside_band" => Some(verified_at_ms - 120_000 + 1),
+            "newer" => Some(verified_at_ms + 1),
+            "none" => None,
+            "zero" => Some(0),
+            "negative" => Some(-1),
+            _ => unreachable!(),
+        };
+
+        assert_eq!(
+            client
+                .invalidate_rcs_context_for_google_event(
+                    conversation,
+                    "google-conversation",
+                    expected,
+                    event_at_ms,
+                )
+                .unwrap(),
+            Some(2),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn google_event_invalidation_ignores_an_old_history_signal_after_a_reproof() {
+    let (_directory, _vault, config, client, conversation, _ownership, expected) = mapped_fixture();
+    let connection = sql(&config);
+    let original_verified_at_ms: i64 = connection
+        .query_row(
+            "SELECT verified_at_ms FROM rcs_conversation_mappings WHERE peppy_conversation_id=?",
+            [conversation.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        client
+            .invalidate_rcs_context_for_google_event(
+                conversation,
+                "google-conversation",
+                expected,
+                Some(original_verified_at_ms - 120_000 + 1),
+            )
+            .unwrap(),
+        Some(2)
+    );
+    let reproof_at_ms = original_verified_at_ms + 240_000;
+    let mut observation = mapping_observation(reproof_at_ms);
+    observation.context_revision = 2;
+    observation.native_evidence.lifetime.context_revision = 2;
+    observation.carrier_binding.route_context_revision = 2;
+    observation.mapping_revision = 2;
+    assert!(matches!(
+        client
+            .verify_rcs_mapping(&observation, reproof_at_ms)
+            .unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    let before = context_invalidation_snapshot(&connection, conversation);
+    assert_eq!(
+        client
+            .invalidate_rcs_context_for_google_event(
+                conversation,
+                "google-conversation",
+                RcsContextExpectation {
+                    context_revision: 2,
+                    ..expected
+                },
+                Some(original_verified_at_ms - 120_000 + 1),
+            )
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        context_invalidation_snapshot(&connection, conversation),
+        before
+    );
+}
+
+#[test]
+fn google_event_invalidation_rejects_a_lane_without_a_one_to_one_mapping_at_any_time() {
+    for event_at_ms in [None, Some(1)] {
+        let (_directory, _vault, config, client, _conversation, _ownership) = fixture();
+        let observed_at_ms = now();
+        client
+            .record_rcs_link_lifecycle(
+                RcsCapabilityState::Linked,
+                true,
+                true,
+                true,
+                observed_at_ms,
+                observed_at_ms,
+            )
+            .unwrap();
+        sql(&config)
+            .execute(
+                "INSERT INTO metadata(k,v) VALUES('rcs_mapping_context_v1',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                [json!({
+                    "link_generation": 1,
+                    "session_generation": 1,
+                    "context_revision": 1,
+                    "link_state": 0,
+                })
+                .to_string()],
+            )
+            .unwrap();
+        let group_google_id = "group-google-conversation";
+        client
+            .ingest_group_candidates(
+                &json!({
+                    "code": "conversation_candidate_snapshot",
+                    "snapshot_token": "1:2:1",
+                    "generation": 1,
+                    "stream_epoch": 2,
+                    "revision": 1,
+                    "run_incarnation": "run",
+                    "pairing_evidence_id": "pairing",
+                    "complete": true,
+                    "conversations": [{
+                        "google_conversation_id": group_google_id,
+                        "conversation_type": 2,
+                        "conversation_status": 1,
+                        "classification": "eligible",
+                        "group": true,
+                        "visible_non_self_count": 2,
+                        "last_message_ms": observed_at_ms,
+                        "participants": [
+                            {"participant_id":"self","identifier_type":1,"raw_number":"+14155550100","formatted_number":"+14155550100","participant_id_present":true,"number_present":true,"visible":true,"self":true,"canonical_address":"+14155550100","canonical_address_present":true,"display_name":""},
+                            {"participant_id":"alex","identifier_type":1,"raw_number":"+14155552671","formatted_number":"+14155552671","participant_id_present":true,"number_present":true,"visible":true,"self":false,"canonical_address":"+14155552671","canonical_address_present":true,"display_name":""},
+                            {"participant_id":"sam","identifier_type":1,"raw_number":"+14155552672","formatted_number":"+14155552672","participant_id_present":true,"number_present":true,"visible":true,"self":false,"canonical_address":"+14155552672","canonical_address_present":true,"display_name":""}
+                        ],
+                        "name": "Weekend",
+                        "is_group_chat": true,
+                        "read_only": false,
+                        "invisible_participant_count": 0,
+                        "member_digest": "digest-2"
+                    }]
+                })
+                .to_string(),
+                observed_at_ms,
+            )
+            .unwrap();
+        let context = client
+            .rcs_receive_context(group_google_id)
+            .unwrap()
+            .unwrap();
+        let connection = sql(&config);
+        let before_context: String = connection
+            .query_row(
+                "SELECT v FROM metadata WHERE k='rcs_mapping_context_v1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let before_group_state: String = connection
+            .query_row(
+                "SELECT state FROM rcs_group_mapping WHERE conversation_id=?",
+                [context.conversation_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(matches!(
+            client.invalidate_rcs_context_for_google_event(
+                context.conversation_id,
+                group_google_id,
+                context.expectation,
+                event_at_ms,
+            ),
+            Err(Error::InvalidRequest(_))
+        ));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT v FROM metadata WHERE k='rcs_mapping_context_v1'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            before_context
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT state FROM rcs_group_mapping WHERE conversation_id=?",
+                    [context.conversation_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            before_group_state
+        );
+    }
 }
 
 /// Ingest never touches recovery: no resume hint and no open gap.

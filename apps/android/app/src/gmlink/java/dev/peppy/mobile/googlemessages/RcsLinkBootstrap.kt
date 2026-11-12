@@ -10,10 +10,11 @@ import uniffi.peppy_mobile_bindings.NativeClient
 import uniffi.peppy_mobile_bindings.NativeRcsBootstrapResolution
 import uniffi.peppy_mobile_bindings.NativeRcsLinkOwnershipClaimOutcome
 import uniffi.peppy_mobile_bindings.NativeRcsMappingVerification
+import uniffi.peppy_mobile_bindings.NativeRcsMappingVerdict
 import uniffi.peppy_mobile_bindings.gatewayNextRcsContextTuple
 import uniffi.peppy_mobile_bindings.gatewayNextRcsMappingRevision
 import uniffi.peppy_mobile_bindings.gatewayResolveRcsBootstrapConversations
-import uniffi.peppy_mobile_bindings.gatewayVerifyRcsMapping
+import uniffi.peppy_mobile_bindings.gatewayVerifyRcsMappingVerdict
 import uniffi.peppy_mobile_bindings.rcsCanonicalizerRevision
 
 internal interface RcsBootstrapCorePort {
@@ -22,7 +23,7 @@ internal interface RcsBootstrapCorePort {
     fun tuple(snapshot: JSONObject): RcsNativeContextTuple
     fun revision(conversationId: String): ULong
     fun lifecycleGeneration(): ULong?
-    fun verify(observation: String, nowMs: Long): NativeRcsMappingVerification
+    fun verify(observation: String, nowMs: Long): NativeRcsMappingVerdict
     fun claim(json: String): NativeRcsLinkOwnershipClaimOutcome
 }
 
@@ -101,18 +102,22 @@ internal class RcsLinkBootstrap(
 
     private fun attempt(candidate: Candidate, resolution: NativeRcsBootstrapResolution, snapshot: JSONObject, lifecycleGeneration: ULong): Attempt {
         val conversationId = (resolution as? NativeRcsBootstrapResolution.Resolved)?.conversationId
-            ?: return transientAttempt("unresolved")
+            ?: return transientAttempt(resolution.diagnosticCode())
         val tuple = quietly { core.tuple(snapshot) } ?: return transientAttempt("tuple_failed")
         val revision = quietly { core.revision(conversationId) } ?: return transientAttempt("revision_failed")
         val route = quietly { routeReader.currentRoute() } ?: return transientAttempt("route_unavailable")
         val proof = quietly { observe(candidate.googleId, snapshot, tuple, revision, route) }
             ?: return transientAttempt("observe_failed")
         val verification = quietly { core.verify(proof, clock.nowMs()) } ?: return transientAttempt("verify_failed")
-        if (verification != NativeRcsMappingVerification.MAPPED) return transientAttempt("not_mapped")
+        if (verification.verification != NativeRcsMappingVerification.MAPPED) {
+            verification.refusalCode?.let { recordGoogleMessagesLinkEvent(REFUSAL_KIND, it, 0) }
+            return transientAttempt("not_mapped")
+        }
         val outcome = quietly {
             core.claim(claimJson(conversationId, candidate.googleId, revision, tuple, lifecycleGeneration))
         } ?: return transientAttempt("claim_failed")
         if (outcome != NativeRcsLinkOwnershipClaimOutcome.CLAIMED) return transientAttempt("not_claimed")
+        recordGoogleMessagesLinkEvent(STEP_KIND, "claimed", 0)
         return Attempt.Claimed(conversationId, sweepConversation(candidate.googleId))
     }
 
@@ -183,7 +188,17 @@ internal class RcsLinkBootstrap(
     private companion object {
         const val MAX_CANDIDATES = 40
         const val STEP_KIND = "bootstrap"
+        const val REFUSAL_KIND = "bootstrap_refusal"
     }
+}
+
+private fun NativeRcsBootstrapResolution.diagnosticCode(): String = when (this) {
+    is NativeRcsBootstrapResolution.Missing -> "unresolved_missing"
+    is NativeRcsBootstrapResolution.Ambiguous -> "unresolved_ambiguous"
+    is NativeRcsBootstrapResolution.Uncertain -> "unresolved_uncertain"
+    is NativeRcsBootstrapResolution.InvalidIdentity -> "unresolved_invalid_identity"
+    is NativeRcsBootstrapResolution.AlreadyMappedElsewhere -> "unresolved_mapped_elsewhere"
+    is NativeRcsBootstrapResolution.Resolved -> error("resolved bootstrap resolution has no diagnostic code")
 }
 
 /** Per-candidate outcome. Refused is a terminal decision; Transient is retried on a later trigger. */
@@ -209,6 +224,6 @@ private class GeneratedRcsBootstrapCorePort(client: NativeClient?) : RcsBootstra
     override fun tuple(snapshot: JSONObject) = gatewayNextRcsContextTuple(client, snapshot.optString("run_incarnation"), snapshot.optLong("generation").toULong(), snapshot.optLong("stream_epoch").toULong(), snapshot.optString("pairing_evidence_id")).let { RcsNativeContextTuple(it.linkGeneration, it.sessionGeneration, it.contextRevision) }
     override fun revision(conversationId: String) = gatewayNextRcsMappingRevision(client, conversationId)
     override fun lifecycleGeneration() = client.gatewayRcsLinkLifecycleGeneration()
-    override fun verify(observation: String, nowMs: Long) = gatewayVerifyRcsMapping(client, observation, nowMs)
+    override fun verify(observation: String, nowMs: Long) = gatewayVerifyRcsMappingVerdict(client, observation, nowMs)
     override fun claim(json: String) = client.gatewayClaimRcsLinkOwnershipJson(json).outcome
 }
