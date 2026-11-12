@@ -23,6 +23,7 @@ export type GatewayPickerProps = {
   disabled?: boolean;
   onChange(value: string): void;
   describedBy?: string;
+  valueStatusOverride?: { label: string; availability: GatewayAvailability; title?: string };
 };
 
 type PopupPosition = Pick<CSSProperties, "top" | "left" | "width" | "maxHeight" | "transform">;
@@ -65,19 +66,19 @@ function optionId(listboxId: string, value: string) {
   return `${listboxId}-option-${encodeURIComponent(value)}`;
 }
 
-function routeBadges(option: GatewayPickerOption, id?: string) {
+function routeBadges(option: GatewayPickerOption, id?: string, statusOverride?: GatewayPickerProps["valueStatusOverride"]) {
   const showSim = option.simLabel && option.simLabel !== option.statusLabel;
   return (
     <span id={id} data-gateway-badges>
       <span data-route-badge="device">{option.name}</span>
       {showSim && <span data-route-badge="sim">{option.simLabel}</span>}
-      {option.statusLabel && <span data-route-badge="status" data-gateway-availability={option.availability}>{statusIcon(option.availability)}{option.statusLabel}</span>}
+      {(statusOverride ?? (option.statusLabel ? { label: option.statusLabel } : undefined)) && <span data-route-badge="status" data-gateway-availability={statusOverride?.availability ?? option.availability} data-route-send-state={statusOverride ? "blocked" : undefined} title={statusOverride?.title}>{statusIcon(statusOverride?.availability ?? option.availability)}{statusOverride?.label ?? option.statusLabel}</span>}
       {option.simulated && <span data-route-badge="simulated">Simulated</span>}
     </span>
   );
 }
 
-export function GatewayPicker({ options, value, placeholder, disabled = false, onChange, describedBy }: GatewayPickerProps): React.JSX.Element {
+export function GatewayPicker({ options, value, placeholder, disabled = false, onChange, describedBy, valueStatusOverride }: GatewayPickerProps): React.JSX.Element {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
   const typeaheadTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -275,7 +276,7 @@ export function GatewayPicker({ options, value, placeholder, disabled = false, o
           close();
         }}
       >
-        {selected ? routeBadges(selected, summaryId) : <span id={summaryId} data-gateway-picker-placeholder>{placeholder}</span>}
+        {selected ? routeBadges(selected, summaryId, valueStatusOverride) : <span id={summaryId} data-gateway-picker-placeholder>{placeholder}</span>}
         <ChevronDown aria-hidden size={14} />
       </button>
       {popup && createPortal(popup, popupHost)}

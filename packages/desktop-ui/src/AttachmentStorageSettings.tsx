@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactElement } from "react";
-import { Info, TriangleAlert } from "lucide-react";
+import { ExternalLink, Info, RefreshCw, TriangleAlert } from "lucide-react";
 import type { BillingSummaryView, PurchaseOptions, StoreProduct, AttachmentRetentionStatusResult } from "./bridge-contracts";
 import { BillingElsewhereNotice, conflictVariant, type BillingElsewhereCopy } from "./BillingElsewhereNotice";
 import { BusyIndicator } from "./BusyIndicator";
@@ -19,9 +19,8 @@ export type AttachmentStorageCopy = BillingElsewhereCopy & {
   attachment_storage_removed: string;
   attachment_storage_removed_local_copy: string;
   attachment_storage_stale_usage: string;
-  attachment_storage_usage: string;
-  attachment_storage_limit: string;
-  attachment_storage_base_included: string;
+  attachment_storage_used_of_limit: string;
+  attachment_storage_included_plus_addon: string;
   attachment_storage_billing_pending: string;
   attachment_storage_billing_unavailable: string;
   attachment_storage_billing_open_failed: string;
@@ -88,10 +87,14 @@ export type AttachmentStorageSettingsProps = {
 
 type AvailableStorage = Extract<AttachmentRetentionStatusResult, { kind: "available" }>;
 type CleanupMode = "active" | "pending" | "disabled" | "read_only" | "device_not_ready" | "billing_pending" | "billing_unavailable" | "unknown";
-type CapacityLevel = "normal" | "near-full" | "full" | "invalid";
+type CapacityLevel = "normal" | "near-full" | "full" | "stale" | "invalid";
 
 function formatBytes(value: number): string {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value / 1_000_000_000) + " GB";
+}
+
+function formatCopy(template: string, ...values: string[]): string {
+  return template.replace(/%(\d+)\$s/g, (match, index: string) => values[Number(index) - 1] ?? match);
 }
 
 function safeHttpsUrl(value: string | undefined): string | null {
@@ -217,8 +220,8 @@ export function AttachmentStorageSettings({ result, loading, stale, copy, onRefr
   }, [available?.scopeId]);
   const manageHref = safeHttpsUrl(manageStorageUrl);
   const manageAction: ReactElement | null = onManageStorage || manageHref ? <div id="attachment-storage-actions">
-    {manageHref ? <a id="attachment-storage-manage" className="secondary-button" href={manageHref} target="_blank" rel="noopener noreferrer">{copy.attachment_storage_manage_cta}<span className="visually-hidden"> (opens in a new tab)</span></a> : <button id="attachment-storage-manage" className="secondary-button" type="button" onClick={() => { onManageStorage?.(); }}>{copy.attachment_storage_manage_cta}</button>}
-    <p>{copy.attachment_storage_billing_handoff}</p>
+    {manageHref ? <a id="attachment-storage-manage" className="link-button" href={manageHref} target="_blank" rel="noopener noreferrer">{copy.attachment_storage_manage_cta}<ExternalLink size={14} aria-hidden="true" /><span className="visually-hidden"> (opens in a new tab)</span></a> : <button id="attachment-storage-manage" className="link-button" type="button" onClick={() => { onManageStorage?.(); }}>{copy.attachment_storage_manage_cta}<ExternalLink size={14} aria-hidden="true" /></button>}
+    <p className="settings-note">{copy.attachment_storage_billing_handoff}</p>
     {manageStorageError && <p id="attachment-storage-manage-error" className="settings-error" role="alert">{copy.attachment_storage_billing_open_failed}</p>}
   </div> : null;
   const openInfo = (opener: HTMLElement) => {
@@ -226,6 +229,7 @@ export function AttachmentStorageSettings({ result, loading, stale, copy, onRefr
     setInfoOpen(true);
   };
   const infoAction = available && <button id="attachment-storage-info-button" ref={infoButton} className="attachment-storage-info-button" type="button" aria-label={copy.attachment_storage_info_label} aria-haspopup="dialog" title={copy.attachment_storage_info_label} onClick={(event) => openInfo(event.currentTarget)}><Info size={16} aria-hidden="true" /></button>;
+  const refreshAction = onRefresh && <button id="attachment-storage-refresh" className="attachment-storage-info-button" type="button" aria-label={copy.attachment_storage_reload_cta} title={copy.attachment_storage_reload_cta} onClick={() => { if (!loading) onRefresh(); }} aria-disabled={loading || undefined}><RefreshCw size={16} aria-hidden="true" className={loading ? "attachment-storage-refresh-icon" : undefined} /></button>;
   const infoDialog = infoOpen && <Modal id="attachment-storage-info-dialog" title={copy.attachment_storage_info_title} opener={infoOpener} focusFallback={infoButton} onDismiss={() => setInfoOpen(false)} actions={<button id="attachment-storage-info-dismiss" className="secondary-button" type="button" onClick={() => setInfoOpen(false)}>{copy.attachment_storage_info_dismiss}</button>}>
     <div id="attachment-storage-info-body" data-attachment-storage-info>
       <p id="attachment-storage-info-body-cleanup">{copy.attachment_storage_info_body_cleanup}</p>
@@ -235,12 +239,12 @@ export function AttachmentStorageSettings({ result, loading, stale, copy, onRefr
   </Modal>;
 
   if (result?.kind === "unsupported") return <section id="attachment-storage" data-settings-section="attachment-storage" className="settings-card"><h3>{copy.attachment_storage_section_title}</h3>{manageAction}</section>;
-  const refresh = () => { if (!loading) onRefresh?.(); };
-  if (loading && !available) return <section id="attachment-storage" data-settings-section="attachment-storage" className="settings-card" aria-busy="true"><div id="attachment-storage-heading-row"><h3>{copy.attachment_storage_section_title}</h3></div><p id="attachment-storage-loading" role="status" className="settings-note">{copy.attachment_storage_loading}</p>{onRefresh && <button id="attachment-storage-refresh" className="secondary-button" type="button" onClick={refresh} aria-disabled="true">{copy.attachment_storage_reload_cta}</button>}{manageAction}</section>;
-  if (!available) return <section id="attachment-storage" data-settings-section="attachment-storage" className="settings-card"><div id="attachment-storage-heading-row"><h3>{copy.attachment_storage_section_title}</h3></div>{loading && <p id="attachment-storage-loading" role="status" className="settings-note">{copy.attachment_storage_loading}</p>}<p role="status">{copy.attachment_storage_unavailable}</p>{onRefresh && <button id="attachment-storage-refresh" className="secondary-button" type="button" onClick={refresh} aria-disabled={loading || undefined}>{copy.attachment_storage_reload_cta}</button>}{manageAction}</section>;
+  if (loading && !available) return <section id="attachment-storage" data-settings-section="attachment-storage" className="settings-card" aria-busy="true"><div id="attachment-storage-heading-row"><h3>{copy.attachment_storage_section_title}</h3>{refreshAction}</div><p id="attachment-storage-loading" role="status" className="settings-note">{copy.attachment_storage_loading}</p>{manageAction}</section>;
+  if (!available) return <section id="attachment-storage" data-settings-section="attachment-storage" className="settings-card"><div id="attachment-storage-heading-row"><h3>{copy.attachment_storage_section_title}</h3>{refreshAction}</div>{loading && <p id="attachment-storage-loading" role="status" className="settings-note">{copy.attachment_storage_loading}</p>}<p role="status">{copy.attachment_storage_unavailable}</p>{manageAction}</section>;
 
   const { status } = available;
-  const level = stale ? "invalid" : capacityLevel(status.usedBytes, status.limitBytes);
+  const capacity = capacityLevel(status.usedBytes, status.limitBytes);
+  const level = stale && capacity !== "invalid" ? "stale" : capacity;
   const mode = cleanupMode(status);
   const cause = cleanupStateCopy(mode, copy);
   const showLead = (mode === "active" && (level === "near-full" || level === "full")) || (mode !== "active" && mode !== "pending" && level === "near-full");
@@ -248,15 +252,14 @@ export function AttachmentStorageSettings({ result, loading, stale, copy, onRefr
   const leadCopy = level === "full" ? copy.attachment_storage_full_cleanup : copy.attachment_storage_near_full;
   const canLearnMore = showLead && (mode === "active" || level === "near-full");
   return <section id="attachment-storage" data-settings-section="attachment-storage" className="settings-card" aria-busy={loading || undefined}>
-    <div id="attachment-storage-heading-row"><h3>{copy.attachment_storage_section_title}</h3>{infoAction}</div>
+    <div id="attachment-storage-heading-row"><h3>{copy.attachment_storage_section_title}</h3>{infoAction}{refreshAction}</div>
     {stale && <p id="attachment-storage-stale-usage" className="settings-note">{copy.attachment_storage_stale_usage}</p>}
-    <dl id="attachment-storage-usage"><div><dt>{copy.attachment_storage_usage}</dt><dd>{formatBytes(status.usedBytes)}</dd></div><div><dt>{copy.attachment_storage_limit}</dt><dd>{formatBytes(status.limitBytes)}</dd></div><div><dt>{copy.attachment_storage_base_included}</dt><dd>{formatBytes(status.baseBytes)}</dd></div></dl>
-    <p>{copy.attachment_storage_allowance}</p>
+    <div id="attachment-storage-meter"><p>{formatCopy(copy.attachment_storage_used_of_limit, formatBytes(status.usedBytes), formatBytes(status.limitBytes))}</p>{level !== "invalid" && <div id="attachment-storage-bar" aria-hidden="true" data-capacity={level}><span style={{ width: `${Math.max(0, Math.min(100, status.usedBytes / status.limitBytes * 100))}%` }} /></div>}</div>
+    <p id="attachment-storage-allowance" className="settings-note">{status.packBytes > 0 ? formatCopy(copy.attachment_storage_included_plus_addon, formatBytes(status.baseBytes), formatBytes(status.packBytes)) : copy.attachment_storage_allowance}</p>
     <div id="attachment-storage-policy-state">
       {showLead && <div data-attachment-storage-capacity-row><p id="attachment-storage-capacity-notice" data-capacity={level} role="status">{leadCopy}</p>{canLearnMore && <button id="attachment-storage-learn-more" className="attachment-storage-learn-more" type="button" aria-describedby="attachment-storage-capacity-notice" onClick={(event) => openInfo(event.currentTarget)}>{copy.attachment_storage_learn_more}</button>}</div>}
       {showCause && cause && <p id="attachment-storage-cause" role="status">{cause}</p>}
     </div>
-    {onRefresh && <button id="attachment-storage-refresh" className="secondary-button" type="button" onClick={refresh} aria-disabled={loading || undefined}>{copy.attachment_storage_reload_cta}</button>}
     {purchase ? <StorageAddOns purchase={purchase} copy={copy} directManageAction={manageAction} /> : manageAction}
     {infoDialog}
   </section>;

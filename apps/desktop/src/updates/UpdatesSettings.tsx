@@ -53,7 +53,7 @@ export function UpdatesSettings() {
     {status && <>
       <p><strong>Peppy {status.currentVersion}</strong> · {status.channel}</p>
       {!disabledChannel && <p>Last checked: {status.lastCheckedAt ?? "Never checked"}</p>}
-      {!disabledChannel && <label className="settings-check"><input id="automatic-updates" type="checkbox" checked={status.automatic} disabled={actionDisabled} onChange={(event) => void run(() => updateApi.setAutomatic(event.target.checked))} /> Automatically download updates</label>}
+      {!disabledChannel && <div id="automatic-updates-row" className="settings-control-row"><label htmlFor="automatic-updates">Automatically download updates</label><span className="settings-switch"><input id="automatic-updates" type="checkbox" role="switch" checked={status.automatic} aria-checked={status.automatic} disabled={actionDisabled} onChange={(event) => void run(() => updateApi.setAutomatic(event.target.checked))} /><span aria-hidden /></span></div>}
       {(status.progressPercent !== null || status.phase === "downloading") && <progress id="update-progress" value={status.progressPercent ?? undefined} max={100} aria-label="Update download progress">{status.progressPercent ?? "Downloading"}</progress>}
       {status.phase === "error" && <p className="settings-error" role="alert">{status.message ?? "The update could not be completed."}</p>}
       {status.message && status.phase !== "error" && status.phase !== "installed" && <p className="settings-note">{status.message}</p>}

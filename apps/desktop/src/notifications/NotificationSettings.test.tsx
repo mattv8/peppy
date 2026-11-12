@@ -579,14 +579,16 @@ it("keeps the macOS status after a rejected refresh", async () => {
 });
 
 it("updates the macOS status after a focus refresh", async () => {
-  const settings = persistenceSettings({ seconds: 5, supported: true, platform: "macos", macosStyle: "banners" });
+  const settings = persistenceSettings({ seconds: 5, supported: true, platform: "macos", macosStyle: "alerts" });
   settings.load.mockResolvedValueOnce({ seconds: 5, supported: true, platform: "macos", macosStyle: "banners" });
-  settings.load.mockResolvedValueOnce({ seconds: 5, supported: true, platform: "macos", macosStyle: "alerts" });
   render(<NotificationSettings {...props()} persistenceSettings={settings} />);
 
-  await screen.findByRole("status");
-  fireEvent.focus(window);
-  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Current style: Alerts. They stay until you dismiss them."));
+  expect(await screen.findByRole("status")).toHaveTextContent("Current style: Banners. They fade on their own.");
+  // A focus that lands before the initial load settles is ignored, so keep focusing until a refresh runs.
+  await waitFor(() => {
+    fireEvent.focus(window);
+    expect(screen.getByRole("status")).toHaveTextContent("Current style: Alerts. They stay until you dismiss them.");
+  });
 });
 
 it("keeps the quick-reply preview consequence with the preview decision", async () => {

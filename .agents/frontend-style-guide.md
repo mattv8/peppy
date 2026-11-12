@@ -144,6 +144,45 @@ recipient-rail boundaries, pane resizing, and saved layouts when restyling.
 - Setup follows the server-advertised deployment mode. Never route a community
   browser into hosted sign-in because an outer UI preference defaults to Hosted.
 
+Settings controls:
+
+- An on/off preference is a switch, never a checkbox: a `.settings-control-row`
+  with the label on the left and `.settings-switch` (a checkbox with
+  `role="switch"` and `aria-checked`) on the right, and any hint below it linked
+  by `aria-describedby`. `#settings-view` styles every switch, so add no
+  per-section switch CSS. Keep checkboxes only for acknowledgements and consent
+  (enrollment codes match, MCP custody consent, delete confirmation) and for
+  multi-select lists (MCP scopes).
+- Two or three mutually exclusive choices are option cards: a
+  `fieldset.settings-option-cards` with a legend and an optional hint, and a
+  `.settings-option-card-list` of `<label>` cards that each wrap a real radio.
+  Cards sit side by side and wrap to one column when narrow (`auto-fit`,
+  `minmax(176px, 1fr)`). A choice's description stays visible in its card and is
+  the radio's accessible description, not part of its name. Do not stack bare
+  radios. A plain list of values that needs no description, such as Theme, stays
+  a `select`.
+- Actions size to their label and sit at the end of the row they act on, with
+  the explanation on the left. A settings card stretches its children, so give
+  standalone actions `justify-self: start` or put them in a row. Only provider
+  sign-in choices may span the card.
+- A section-level refresh is an icon button (`RefreshCw`) at the end of the
+  section heading, with an accessible name and `aria-disabled` while loading.
+- Leaving the app for Peppy's website is a link (`.link-button` with an
+  `ExternalLink` icon), not a button. Its sign-in or handoff note is 12px
+  secondary text below it.
+- A quantity against a limit reads "X of Y used" with a decorative
+  (`aria-hidden`) bar below. The bar is accent below 90%, warning from 90%, and
+  error when full. It turns muted when the figures are stale, and is omitted
+  when they are invalid. Show the limit once and explain how it is made up
+  ("50 GB included + 20 GB add-on storage") rather than listing values derived
+  from each other.
+- Account deletion and other irreversible actions sit last in their card, in a
+  row with a danger-tinted border: the consequence on the left, and a compact
+  solid `.destructive-button` on the right that opens a confirmation dialog.
+- Notes, hints, and status text inside cards use the 12px secondary size,
+  including in nested subsections. Separate subsections within one card with a
+  top border, not a nested card.
+
 ## Account website admin lists
 
 - One row per record in a table. Record identity (for example, email) sits in
@@ -246,6 +285,12 @@ notification previews and floating heads.
   resending seen IDs. A message is read only when actually visible.
 - The composer resize handle uses `resize-handle resize-handle-vertical
   composer-resize-grip`, which replaces the default handle classes.
+- Composer statuses render only in `#composer-inline-status` on the toolbar,
+  after the route badges. Pass non-draft statuses to `Composer` as
+  `statusItems` (`InlineStatusItem` from `@peppy/desktop-ui`) in priority order;
+  `InlineStatus` truncates the first, counts the rest as `+N`, and shows full
+  text, details and actions in an anchored popover. There is no status row above
+  the toolbar. See the mobile style guide's composer status section.
 
 ## Floating recipient rail
 

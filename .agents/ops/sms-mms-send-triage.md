@@ -191,7 +191,7 @@ Only after the phone evidence, and only if it leaves a question open. As of comm
 - The only send paths are [MmsDispatcher.kt](../../apps/android/app/src/main/java/dev/peppy/mobile/mms/MmsDispatcher.kt) and [SmsDispatcher.kt](../../apps/android/app/src/main/java/dev/peppy/mobile/sms/SmsDispatcher.kt), which call the system `SmsManager` for commands in Peppy's own pending queue.
 - Peppy can share the platform's per-subscription MMS queue with the default app. Step 4 shows whether it did.
 - The notification listener can invoke the default app's mark-as-read action and dismiss mirrored notifications. Neither affects an outgoing send.
-- The sideload Google Messages link has native send and receive disabled. Step 6 shows whether `GoogleMessagesLinkService` is running and whether the export has link events.
+- At that commit the sideload Google Messages link had native send and receive disabled. That no longer holds: `NATIVE_RCS_ENABLED` is `true`, and a linked phone blocks a carrier send to a one-to-one conversation until the link has decided the number has no RCS chat. Step 6 shows whether `GoogleMessagesLinkService` is running and whether the export has link events; for a linked phone continue with the [Google Messages link field notes](google-messages-link-triage.md).
 
 ## Report
 

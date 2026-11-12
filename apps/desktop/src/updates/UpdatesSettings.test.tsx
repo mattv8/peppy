@@ -99,7 +99,7 @@ describe("UpdatesSettings", () => {
     expect(screen.getByText(`Peppy ${UPDATE_STATUS_SERDE_FIXTURE.currentVersion}`)).toBeInTheDocument();
     expect(container.querySelector("#settings-updates")).toHaveAttribute("data-distribution", "app_store");
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
-    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Automatically download updates")).toBeNull();
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
     expect(screen.queryByText(/Last checked:/)).not.toBeInTheDocument();
     expect(screen.queryByText(/channel|stable|disabled/i)).not.toBeInTheDocument();
@@ -110,7 +110,7 @@ describe("UpdatesSettings", () => {
 
     expect(document.querySelector("#settings-updates")).not.toHaveAttribute("data-distribution");
     expect(screen.getByRole("button", { name: "Check now" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Automatically download updates")).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Automatically download updates" })).toBeInTheDocument();
     expect(screen.getByText(/Last checked:/)).toBeInTheDocument();
   });
 

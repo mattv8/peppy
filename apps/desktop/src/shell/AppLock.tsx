@@ -40,17 +40,22 @@ export function AppLockSettings({
   return (
     <section id="settings-app-lock" className="settings-card" data-settings-section="app-lock">
       <h2>App lock</h2>
-      <label className="settings-check">
-        <input
-          id="app-lock-enabled"
-          type="checkbox"
-          checked={status?.enabled ?? false}
-          disabled={pending || !status || !storageAvailable || status.pending}
-          aria-busy={pending || undefined}
-          onChange={(event) => void change(event.target.checked)}
-        />
-        Require a password when Peppy starts
-      </label>
+      <div id="app-lock-enabled-row" className="settings-control-row">
+        <label htmlFor="app-lock-enabled">Require a password when Peppy starts</label>
+        <span className="settings-switch">
+          <input
+            id="app-lock-enabled"
+            type="checkbox"
+            role="switch"
+            checked={status?.enabled ?? false}
+            aria-checked={status?.enabled ?? false}
+            disabled={pending || !status || !storageAvailable || status.pending}
+            aria-busy={pending || undefined}
+            onChange={(event) => void change(event.target.checked)}
+          />
+          <span aria-hidden />
+        </span>
+      </div>
       <p className="settings-field-hint">
         Changes apply the next time Peppy starts. Peppy does not lock while it is already open.
       </p>

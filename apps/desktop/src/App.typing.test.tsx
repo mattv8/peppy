@@ -57,14 +57,14 @@ describe("typing sharing", () => {
     await screen.findByRole("textbox", { name: "Message" });
     expect(setSharing).toHaveBeenCalledWith({ enabled: true });
     openSettings();
-    expect(await screen.findByRole("checkbox", { name: /Show others/ })).toBeChecked();
+    expect(await screen.findByRole("switch", { name: /Show others/ })).toBeChecked();
     cleanup();
 
     snapshot.rcsStatus = { ...snapshot.rcsStatus!, gateways: [{ ...snapshot.rcsStatus!.gateways[0], state: "unlinked" }] };
     render(<App />);
     await screen.findByRole("textbox", { name: "Message" });
     openSettings();
-    expect(screen.queryByRole("checkbox", { name: /Show others/ })).toBeNull();
+    expect(screen.queryByRole("switch", { name: /Show others/ })).toBeNull();
     cleanup();
 
     snapshot = await currentSnapshot();
@@ -73,7 +73,7 @@ describe("typing sharing", () => {
     render(<App />);
     await screen.findByRole("textbox", { name: "Message" });
     openSettings();
-    expect(screen.queryByRole("checkbox", { name: /Show others/ })).toBeNull();
+    expect(screen.queryByRole("switch", { name: /Show others/ })).toBeNull();
     bridge.send_typing = sendTyping;
   });
 
@@ -99,7 +99,7 @@ describe("typing sharing", () => {
     render(<App />);
     await screen.findByRole("textbox", { name: "Message" });
     openSettings();
-    const setting = await screen.findByRole<HTMLInputElement>("checkbox", { name: /Show others/ });
+    const setting = await screen.findByRole<HTMLInputElement>("switch", { name: /Show others/ });
     fireEvent.click(setting);
     expect(setting).toBeChecked();
     expect(await screen.findByRole("alert")).toHaveAttribute("id", "settings-share-typing-error");
@@ -112,7 +112,7 @@ describe("typing sharing", () => {
     setSharing.mockClear();
     setSharing.mockRejectedValueOnce(new Error("rejected"));
     openSettings();
-    const setting = await screen.findByRole<HTMLInputElement>("checkbox", { name: /Show others/ });
+    const setting = await screen.findByRole<HTMLInputElement>("switch", { name: /Show others/ });
     fireEvent.click(setting);
     expect(await screen.findByRole("alert")).toHaveAttribute("id", "settings-share-typing-error");
     expect(setting).toBeChecked();
@@ -125,7 +125,7 @@ describe("typing sharing", () => {
     render(<App />);
     await screen.findByRole("textbox", { name: "Message" });
     openSettings();
-    const setting = await screen.findByRole<HTMLInputElement>("checkbox", { name: /Show others/ });
+    const setting = await screen.findByRole<HTMLInputElement>("switch", { name: /Show others/ });
     setSharing.mockRejectedValueOnce(new Error("rejected"));
     fireEvent.click(setting);
     await waitFor(() => expect(setting).toBeChecked());
@@ -139,7 +139,7 @@ describe("typing sharing", () => {
     render(<App />);
     await screen.findByRole("textbox", { name: "Message" });
     openSettings();
-    const setting = await screen.findByRole<HTMLInputElement>("checkbox", { name: /Show others/ });
+    const setting = await screen.findByRole<HTMLInputElement>("switch", { name: /Show others/ });
     setSharing.mockClear();
 
     fireEvent.click(setting);
@@ -198,7 +198,7 @@ describe("typing sharing", () => {
     expect(sendTyping).toHaveBeenCalledWith({ conversationId: snapshot.activeConversationId, state: "started" });
 
     openSettings();
-    fireEvent.click(await screen.findByRole("checkbox", { name: /Show others/ }));
+    fireEvent.click(await screen.findByRole("switch", { name: /Show others/ }));
     await waitFor(() => expect(setSharing).toHaveBeenCalledWith({ enabled: false }));
     expect(sendTyping).toHaveBeenLastCalledWith({ conversationId: snapshot.activeConversationId, state: "stopped" });
     sendTyping.mockClear();

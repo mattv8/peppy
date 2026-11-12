@@ -57,6 +57,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import org.robolectric.RobolectricTestRunner
@@ -128,7 +129,9 @@ private fun ManagedLinkPanel(host: GoogleMessagesLinkPanelHost?) {
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class GoogleMessagesLinkPanelTest {
-    private val compose = createComposeRule()
+    // Panel effects resume on the main looper, as in production; the default unconfined test
+    // dispatcher would resume them on the Dispatchers.IO worker that finished the host call.
+    private val compose = createComposeRule(Dispatchers.Main)
     @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(compose)
 
     @After fun tearDown() {

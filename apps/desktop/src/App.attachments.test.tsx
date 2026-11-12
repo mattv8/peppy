@@ -205,9 +205,12 @@ describe("composer pasted attachments", () => {
     render(<App />);
     await screen.findByLabelText("Message");
     fireEvent.click(screen.getByRole("button", { name: /settings/i }));
+    expect(document.getElementById("settings-attachment-layout")).toHaveClass("settings-option-cards");
     const tiles = await screen.findByRole("radio", { name: "Preview tiles" });
     expect(tiles).toBeChecked();
-    fireEvent.click(screen.getByRole("radio", { name: "Compact rows" }));
+    const rows = screen.getByRole("radio", { name: "Compact rows" });
+    expect(rows).toBeInTheDocument();
+    fireEvent.click(rows);
     expect(JSON.parse(localStorage.getItem("peppy.layout.v1") ?? "{}")).toMatchObject({ composerAttachmentLayout: "rows" });
   });
 

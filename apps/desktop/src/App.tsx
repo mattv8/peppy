@@ -75,6 +75,7 @@ import {
   incomingToneSeed,
   toneStyle,
   paletteIndex,
+  type InlineStatusItem,
 } from "@peppy/desktop-ui";
 import "./settings/settings.css";
 import {
@@ -163,8 +164,8 @@ import { useTypingSender } from "./typing/useTypingSender";
 import { peppyCopy } from "./generated/peppyCopy";
 import { GroupDetailsDialog } from "./group/GroupDetailsDialog";
 import { GroupNameField } from "./group/GroupNameField";
-import { GroupMembersChangedNotice } from "./group/GroupMembersChangedNotice";
-import { GroupCreateNotRcsInfo, GroupCreateProgress, GroupCreateUnconfirmed, GroupUpdateRequiredNotice, GroupWithdrawnNotice } from "./group/GroupComposerNotices";
+import { groupComposerStatusItems } from "./group/groupComposerStatus";
+import { composerStatusItems } from "./composer/composerStatusModel";
 import { GroupNotice } from "./group/GroupNotice";
 import { groupNoticeItems } from "./group/groupNotices";
 import { interleaveGroupNotices } from "./group/groupTimeline";
@@ -653,18 +654,28 @@ const planDraftMms = (content: DraftContent, route: RouteChoice, attachments: Re
 
 type Theme = "light" | "dark" | "system";
 
+function rcsStatusPresentation(block: ReturnType<typeof rcsSendBlock>) {
+  if (block.kind === "unproven") return { label: peppyCopy.rcs_composer_badge_unproven, message: peppyCopy.rcs_composer_status_unproven };
+  if (block.kind === "link") return block.help === "relink"
+    ? { label: peppyCopy.rcs_composer_badge_relink, message: peppyCopy.rcs_composer_status_relink }
+    : { label: peppyCopy.rcs_composer_badge_phone, message: peppyCopy.rcs_composer_status_phone };
+  return undefined;
+}
+
 function GatewaySelector({
   gateways,
   content,
   problem,
   onSelect,
   accountReadOnly = false,
+  rcsBlock = { kind: "none" },
 }: {
   gateways: GatewayView[];
   content: DraftContent;
   problem?: string;
   onSelect(gateway: GatewayView): void;
   accountReadOnly?: boolean;
+  rcsBlock?: ReturnType<typeof rcsSendBlock>;
 }) {
   const route = resolveRoute(content, gateways);
   const labels = simLabels(gateways);
@@ -684,6 +695,7 @@ function GatewaySelector({
   const selectedGateway = route.kind === "route" ? route.gateway : undefined;
   const selectedAvailability = selectedGateway && gatewayAvailability(selectedGateway);
   const presenceHint = selectedGateway && (availabilityProblem(selectedGateway) ?? (selectedAvailability === "unknown" ? `${selectedGateway.name}'s status is unknown.` : undefined));
+  const rcsStatus = rcsStatusPresentation(rcsBlock);
   return (
     <section id="gateway-selector" aria-label="Phone and SIM" aria-describedby={presenceHint ? "gateway-presence-hint" : undefined} data-route-state={problem ? "blocked" : selectedAvailability === "delayed" ? "delayed" : "ready"}>
       <GatewayPicker
@@ -715,6 +727,7 @@ function GatewaySelector({
         disabled={!gateways.length}
         onChange={choose}
         describedBy={presenceHint ? "gateway-presence-hint" : undefined}
+        valueStatusOverride={rcsStatus ? { label: rcsStatus.label, availability: "unsupported_platform", title: rcsStatus.message } : undefined}
       />
       <span id="gateway-presence-hint" className="visually-hidden" role="status" aria-live="polite">{presenceHint}</span>
     </section>
@@ -741,19 +754,21 @@ function headRoutePresentation(route: RouteChoice, gateways: GatewayView[], acco
   return { sim: simLabel, state, label: `${simLabel}, ${state}` };
 }
 
-function HeadRoutePill({ content, gateways, accountReadOnly = false }: { content: DraftContent; gateways: GatewayView[]; accountReadOnly?: boolean }) {
+function HeadRoutePill({ content, gateways, accountReadOnly = false, rcsBlock = { kind: "none" } }: { content: DraftContent; gateways: GatewayView[]; accountReadOnly?: boolean; rcsBlock?: ReturnType<typeof rcsSendBlock> }) {
   const route = resolveRoute(content, gateways);
   const { sim, state, label } = headRoutePresentation(route, gateways, accountReadOnly);
-  const tooltip = route.kind === "route"
+  const rcsStatus = rcsStatusPresentation(rcsBlock);
+  const shownState = rcsStatus?.label ?? state;
+  const tooltip = rcsStatus?.message ?? (route.kind === "route"
     ? `${route.gateway.name}: choose this phone and SIM in the main window.`
-    : "Choose a phone and SIM in the main window.";
+    : "Choose a phone and SIM in the main window.");
   const description = route.kind === "route"
-    ? `${route.gateway.name}, ${sim ?? state}. Phone and SIM are selected in the main window.`
+    ? `${route.gateway.name}, ${sim ?? shownState}. ${rcsStatus?.message ?? "Phone and SIM are selected in the main window."}`
     : "Choose a phone and SIM in the main window.";
   return <section id="head-panel-route-section" aria-label="Phone and SIM" aria-describedby="head-panel-route-description" data-route-state={route.kind === "route" ? gatewayAvailability(route.gateway) : route.kind}>
-    <span id="head-panel-route" className="head-panel-route" title={tooltip} data-gateway-availability={route.kind === "route" ? gatewayAvailability(route.gateway) : undefined}>{sim && <span data-head-route-sim data-route-badge="sim">{sim}</span>}<span data-head-route-state data-route-badge="status" data-gateway-availability={route.kind === "route" ? gatewayAvailability(route.gateway) : undefined}>{state}</span></span>
+    <span id="head-panel-route" className="head-panel-route" title={tooltip} data-gateway-availability={route.kind === "route" ? gatewayAvailability(route.gateway) : undefined}>{sim && <span data-head-route-sim data-route-badge="sim">{sim}</span>}<span data-head-route-state data-route-badge="status" data-route-send-state={rcsStatus ? "blocked" : undefined} data-gateway-availability={route.kind === "route" ? gatewayAvailability(route.gateway) : undefined}>{shownState}</span></span>
     <span id="head-panel-route-description" className="visually-hidden">{description}</span>
-    <span className="visually-hidden" role="status" aria-live="polite">{label}</span>
+    <span className="visually-hidden" role="status" aria-live="polite">{rcsStatus ? `${sim ?? "Phone and SIM"}, ${shownState}. ${rcsStatus.message}` : label}</span>
   </section>;
 }
 
@@ -1757,101 +1772,113 @@ function SettingsView({
           </div>
           {accentError && <p id="settings-accent-color-error" className="settings-error" role="alert">{accentError}</p>}
         </div>
-        <fieldset id="settings-navigation-position" aria-describedby="settings-navigation-position-hint">
+        <fieldset id="settings-navigation-position" className="settings-option-cards" aria-describedby="settings-navigation-position-hint">
           <legend>Navigation position</legend>
           <p id="settings-navigation-position-hint" className="settings-field-hint">Choose where the navigation buttons appear.</p>
-          <label className="settings-check">
-            <input
-              type="radio"
-              name="navigation-position"
-              value="side-rail"
-              checked={navigationPosition === "side-rail"}
-              onChange={() => onNavigationPosition("side-rail")}
-            />
-            Side rail
-          </label>
-          <label className="settings-check">
-            <input
-              type="radio"
-              name="navigation-position"
-              value="title-bar"
-              checked={navigationPosition === "title-bar"}
-              onChange={() => onNavigationPosition("title-bar")}
-            />
-            Title bar
-          </label>
+          <div className="settings-option-card-list">
+            <label data-option="side-rail">
+              <input
+                type="radio"
+                name="navigation-position"
+                value="side-rail"
+                checked={navigationPosition === "side-rail"}
+                onChange={() => onNavigationPosition("side-rail")}
+              />
+              <span>Side rail</span>
+            </label>
+            <label data-option="title-bar">
+              <input
+                type="radio"
+                name="navigation-position"
+                value="title-bar"
+                checked={navigationPosition === "title-bar"}
+                onChange={() => onNavigationPosition("title-bar")}
+              />
+              <span>Title bar</span>
+            </label>
+          </div>
         </fieldset>
-        {!browserHost && <fieldset id="settings-popout-mode" aria-describedby="settings-popout-mode-hint">
+        {!browserHost && <fieldset id="settings-popout-mode" className="settings-option-cards" aria-describedby="settings-popout-mode-hint">
           <legend>Pop-out button opens</legend>
           <p id="settings-popout-mode-hint" className="settings-field-hint">Applies to the pop-out button in the conversation header and in the conversation list.</p>
-          <label className="settings-check settings-check-described">
-            <input
-              type="radio"
-              name="popout-mode"
-              value="bubble"
-              checked={popoutMode === "bubble"}
-              onChange={() => onPopoutMode("bubble")}
-            />
-            <span className="settings-check-text">
-              <span>Chat bubble</span>
-              <span className="settings-field-hint">Floating bubble that stays on top and expands into the conversation.</span>
-            </span>
-          </label>
-          <label className="settings-check settings-check-described">
-            <input
-              type="radio"
-              name="popout-mode"
-              value="window"
-              checked={popoutMode === "window"}
-              onChange={() => onPopoutMode("window")}
-            />
-            <span className="settings-check-text">
-              <span>Window</span>
-              <span className="settings-field-hint">A normal conversation window without a bubble.</span>
-            </span>
-          </label>
+          <div className="settings-option-card-list">
+            <label data-option="chat-bubble">
+              <input
+                type="radio"
+                name="popout-mode"
+                value="bubble"
+                checked={popoutMode === "bubble"}
+                aria-labelledby="settings-popout-mode-bubble-title"
+                aria-describedby="settings-popout-mode-bubble-description"
+                onChange={() => onPopoutMode("bubble")}
+              />
+              <span id="settings-popout-mode-bubble-title">Chat bubble</span>
+              <span id="settings-popout-mode-bubble-description">Floating bubble that stays on top and expands into the conversation.</span>
+            </label>
+            <label data-option="window">
+              <input
+                type="radio"
+                name="popout-mode"
+                value="window"
+                checked={popoutMode === "window"}
+                aria-labelledby="settings-popout-mode-window-title"
+                aria-describedby="settings-popout-mode-window-description"
+                onChange={() => onPopoutMode("window")}
+              />
+              <span id="settings-popout-mode-window-title">Window</span>
+              <span id="settings-popout-mode-window-description">A normal conversation window without a bubble.</span>
+            </label>
+          </div>
         </fieldset>}
         <div id="settings-compact-timestamps-group">
-          <label className="settings-check">
-            <input id="settings-compact-timestamps" type="checkbox" checked={compactTimestamps} aria-describedby="settings-compact-timestamps-hint" onChange={(event) => onCompactTimestamps(event.target.checked)} />
-            Show times only after a pause
-          </label>
+          <div id="settings-compact-timestamps-row" className="settings-control-row">
+            <label htmlFor="settings-compact-timestamps">Show times only after a pause</label>
+            <span className="settings-switch">
+              <input id="settings-compact-timestamps" type="checkbox" role="switch" checked={compactTimestamps} aria-checked={compactTimestamps} aria-describedby="settings-compact-timestamps-hint" onChange={(event) => onCompactTimestamps(event.target.checked)} />
+              <span aria-hidden />
+            </span>
+          </div>
           <p id="settings-compact-timestamps-hint" className="settings-field-hint">Hides times on messages sent within an hour of the next one.</p>
         </div>
-        <fieldset id="settings-attachment-layout">
+        <fieldset id="settings-attachment-layout" className="settings-option-cards">
           <legend>Attached image layout</legend>
-          <label className="settings-check">
-            <input type="radio" name="attachment-layout" value="tiles" checked={attachmentLayout === "tiles"} onChange={() => onAttachmentLayout("tiles")} />
-            Preview tiles
-          </label>
-          <label className="settings-check">
-            <input type="radio" name="attachment-layout" value="rows" checked={attachmentLayout === "rows"} onChange={() => onAttachmentLayout("rows")} />
-            Compact rows
-          </label>
+          <div className="settings-option-card-list">
+            <label data-option="preview-tiles">
+              <input type="radio" name="attachment-layout" value="tiles" checked={attachmentLayout === "tiles"} onChange={() => onAttachmentLayout("tiles")} />
+              <span>Preview tiles</span>
+            </label>
+            <label data-option="compact-rows">
+              <input type="radio" name="attachment-layout" value="rows" checked={attachmentLayout === "rows"} onChange={() => onAttachmentLayout("rows")} />
+              <span>Compact rows</span>
+            </label>
+          </div>
         </fieldset>
         <div id="settings-group-sender-avatars-group">
-          <label className="settings-check">
-            <input id="settings-group-sender-avatars" type="checkbox" checked={groupSenderAvatars} aria-describedby="settings-group-sender-avatars-hint" onChange={(event) => onGroupSenderAvatars(event.target.checked)} />
-            Show sender avatars in group conversations
-          </label>
+          <div id="settings-group-sender-avatars-row" className="settings-control-row">
+            <label htmlFor="settings-group-sender-avatars">Show sender avatars in group conversations</label>
+            <span className="settings-switch">
+              <input id="settings-group-sender-avatars" type="checkbox" role="switch" checked={groupSenderAvatars} aria-checked={groupSenderAvatars} aria-describedby="settings-group-sender-avatars-hint" onChange={(event) => onGroupSenderAvatars(event.target.checked)} />
+              <span aria-hidden />
+            </span>
+          </div>
           <p id="settings-group-sender-avatars-hint" className="settings-field-hint">Shows a photo or initials beside the last message in each stretch from one person. Names always show.</p>
         </div>
       </section>
       {desktop?.startupSupported && <section id="settings-startup" className="settings-card" data-settings-section="startup" data-startup-state={startupStatus?.state ?? (desktop.startAtLogin ? "on" : "off")}>
         <h2>Startup</h2>
-        <label className="settings-check"><input id="start-at-login" type="checkbox" checked={startupStatus ? startupStatus.state === "on" || startupStatus.state === "approval_needed" : desktop.startAtLogin} disabled={savingStartup || startupStatus?.state === "unavailable"} onChange={async event => {
+        <div id="start-at-login-row" className="settings-control-row"><label htmlFor="start-at-login">{peppyCopy.startup_login_label}</label><span className="settings-switch"><input id="start-at-login" type="checkbox" role="switch" checked={startupStatus ? startupStatus.state === "on" || startupStatus.state === "approval_needed" : desktop.startAtLogin} aria-checked={startupStatus ? startupStatus.state === "on" || startupStatus.state === "approval_needed" : desktop.startAtLogin} disabled={savingStartup || startupStatus?.state === "unavailable"} onChange={async event => {
           setSavingStartup(true); setStartupError("");
           try { await onStartAtLogin(event.target.checked); await reloadStartupStatus(); }
           catch (error) { setStartupError(errorText(error)); }
           finally { setSavingStartup(false); }
-        }} /> {peppyCopy.startup_login_label}</label>
-        <label className="settings-check"><input id="startup-open-background" type="checkbox" checked={startupStatus?.background ?? desktop.background} disabled={savingStartup || !startupStatus || startupStatus.state === "off" || startupStatus.state === "unavailable"} aria-describedby="startup-open-background-hint" onChange={async event => {
+        }} /><span aria-hidden /></span></div>
+        <div id="startup-open-background-row" className="settings-control-row"><label htmlFor="startup-open-background">{peppyCopy.startup_background_label}</label><span className="settings-switch"><input id="startup-open-background" type="checkbox" role="switch" checked={startupStatus?.background ?? desktop.background} aria-checked={startupStatus?.background ?? desktop.background} disabled={savingStartup || !startupStatus || startupStatus.state === "off" || startupStatus.state === "unavailable"} aria-describedby="startup-open-background-hint" onChange={async event => {
           const background = event.target.checked;
           setSavingStartup(true); setStartupError("");
           try { await bridge.set_open_in_background(background); await reloadStartupStatus(); }
           catch (error) { setStartupError(errorText(error)); await reloadStartupStatus().catch(() => undefined); }
           finally { setSavingStartup(false); }
-        }} /> {peppyCopy.startup_background_label}</label>
+        }} /><span aria-hidden /></span></div>
         <p id="startup-open-background-hint" className="settings-field-hint">{startupStatus?.state === "off" ? peppyCopy.startup_background_needs_login : platform === "macos" ? peppyCopy.startup_background_hint_menu_bar : peppyCopy.startup_background_hint_notification_area}</p>
         <p id="startup-status" role="status">{startupStatus?.state === "approval_needed" ? platform === "macos" ? peppyCopy.startup_approval_macos : peppyCopy.startup_approval_windows : startupStatus?.state === "unavailable" ? peppyCopy.startup_unavailable : ""}</p>
         {startupStatus?.state === "approval_needed" && platform === "macos" && <button id="startup-open-login-items" className="secondary-button" type="button" disabled={savingStartup} onClick={() => { setOpenLoginItemsError(false); void bridge.open_login_items().catch(() => setOpenLoginItemsError(true)); }}>{peppyCopy.startup_open_login_items_cta}</button>}
@@ -2022,7 +2049,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       setPendingSends([]);
     pendingSendSessionScope.current = snapshot?.sessionScopeId;
   }, [snapshot?.sessionScopeId]);
-  const [notificationRecoveryCount, setNotificationRecoveryCount] = useState(0);
   const [conversationTab, setConversationTab] = useState<ConversationTab>("messages");
   const [lightboxItems, setLightboxItems] = useState<GalleryMediaPageItem[] | null>(null);
   const [lightboxAttachmentId, setLightboxAttachmentId] = useState<string>();
@@ -2767,7 +2793,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (paneRef.current) observer.observe(paneRef.current);
     const composerArea = document.getElementById("composer-area");
     if (composerArea) observer.observe(composerArea);
-    document.querySelectorAll("#composer-field, #composer-status-row, #attachment-tray, #composer-toolbar").forEach((element) => observer.observe(element));
+    document.querySelectorAll("#composer-field, #attachment-tray, #composer-toolbar").forEach((element) => observer.observe(element));
     return () => observer.disconnect();
   }, [activeView, headPanel, loading, Boolean(snapshot), snapshot?.connection.state, Boolean(selected), draftsVersion]);
   useEffect(() => {
@@ -5157,27 +5183,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setGroupNotice({ kind: "create-unconfirmed", key: slotKey });
   };
   const composerGroupNotice = groupNotice && groupNotice.key === slotKey ? groupNotice : null;
-  const hasGroupStatusNotices = Boolean(
-    (sending && isNewConversation && content.recipientIds.length > 1)
-    || composerGroupNotice
-    || groupLeft,
-  );
-  const groupStatusNotices = <>
-    {sending && isNewConversation && content.recipientIds.length > 1 && <GroupCreateProgress />}
-    {composerGroupNotice?.kind === "members-changed" && <GroupMembersChangedNotice
-      memberRevision={composerGroupNotice.memberRevision ?? active?.group?.memberRevision ?? ""}
-      members={composerGroupNotice.members}
-      displayName={(address) => displayAddressName(address, resolution)}
-      canResend={active?.group?.state === "live" || active?.group?.state === "paused"}
-      checking={active?.group?.state === "paused"}
-      onResend={() => void send({ expectedMemberRevision: composerGroupNotice.memberRevision })}
-      onReview={() => setGroupDetailsOpen(true)}
-    />}
-    {composerGroupNotice?.kind === "create-unconfirmed" && <GroupCreateUnconfirmed onCreateAgain={() => void send({ groupCreateConfirmDuplicate: true })} />}
-    {composerGroupNotice?.kind === "create-not-rcs" && <GroupCreateNotRcsInfo />}
-    {composerGroupNotice?.kind === "update-required" && <GroupUpdateRequiredNotice />}
-    {(groupLeft || composerGroupNotice?.kind === "withdrawn") && <GroupWithdrawnNotice onStartNewMms={() => void startGroupMmsDraft(active ? groupMembers(active) : [])} />}
-  </>;
   const maxAutoGrowHeight = paneHeight
     ? Math.max(
         TEXTAREA_LINE_HEIGHT,
@@ -5245,13 +5250,37 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const localSaveState = slotKey ? store.saveState(slotKey) : "idle";
   const hasDraftConflicts = Boolean(activeDraftView?.sync?.conflicts.length);
   const draftSyncLocalSaveState = visibleDraftNotice?.kind === "save-failed" ? "idle" : localSaveState;
-  const statusActive = Boolean(
-    notificationRecoveryCount
-    || (unavailableReason && !hasDraftConflicts)
-    || rcsBlock.kind !== "none"
-    || hasGroupStatusNotices
-    || (mmsLimitShown && route.kind === "route"),
-  );
+  const groupStatusItems = groupComposerStatusItems({
+    creating: sending && isNewConversation && content.recipientIds.length > 1,
+    notice: composerGroupNotice?.kind === "members-changed"
+      ? { kind: "members-changed", memberRevision: composerGroupNotice.memberRevision ?? active?.group?.memberRevision ?? "", members: composerGroupNotice.members }
+      : composerGroupNotice ? { kind: composerGroupNotice.kind } : null,
+    groupLeft,
+    displayName: (address) => displayAddressName(address, resolution),
+    canResend: active?.group?.state === "live" || active?.group?.state === "paused",
+    checking: active?.group?.state === "paused",
+    onResend: () => void send({ expectedMemberRevision: composerGroupNotice?.kind === "members-changed" ? composerGroupNotice.memberRevision : undefined }),
+    onReview: () => setGroupDetailsOpen(true),
+    onCreateAgain: () => void send({ groupCreateConfirmDuplicate: true }),
+    onStartNewMms: () => void startGroupMmsDraft(active ? groupMembers(active) : []),
+  });
+  const draftBlockKind = attachments.some((attachment) => attachment.block)
+    ? "attachment" as const
+    : draftConflict ? "conflict" as const
+    : failedDraftAttachment ? "failed-attachment" as const
+    : syncedOffline ? "offline" as const
+    : undefined;
+  const statusItems: InlineStatusItem[] = composerStatusItems({
+    pendingRecipientReason: effectivePendingRecipient ? pendingRecipientReason : undefined,
+    groupLeft,
+    draftSendBlock,
+    draftBlockKind,
+    routeProblem: problem,
+    rcsBlock,
+    mainWindowRecovery: mainWindowRouteRecovery,
+    groupItems: groupStatusItems,
+    composerFeedback: composerFeedback?.key === slotKey ? composerFeedback : undefined,
+  });
   const resolveDraftConflict = async (branchId: string | null): Promise<DraftResolutionResult> => {
     if (resolutionRef.current !== undefined) return { ok: false, message: "A version is already being applied." };
     if (!activeDraftView?.id || !slotKey)
@@ -5438,44 +5467,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           />
         </span> : undefined}
         maxAttachments={MAX_DRAFT_ATTACHMENTS}
-        statusActive={statusActive}
-        statusSlot={
-          <>
-            <span id="unavailable-hint" className={unavailableReason === draftSendBlock && failedDraftAttachment ? "sr-only" : undefined} hidden={!unavailableReason || hasDraftConflicts}>
-              {unavailableReason && <>Sending unavailable: {composerUnavailableReason}</>}
-            </span>
-            <div id="composer-route-notice" role="status" data-route-block={rcsBlock.kind === "link" ? `link-${rcsBlock.help}` : rcsBlock.kind}>
-              {rcsBlock.kind !== "none" && <p id="composer-route-help">{rcsBlock.kind === "unproven" ? peppyCopy.rcs_composer_help_unproven : rcsBlock.help === "relink" ? peppyCopy.rcs_composer_help_relink : peppyCopy.rcs_composer_help_phone} {peppyCopy.rcs_composer_draft_kept}</p>}
-            </div>
-            {groupStatusNotices}
-            {mmsLimitShown && route.kind === "route" && (
-              <span className="mms-limit" data-mms-limit-source={route.gateway.mmsLimitSource ?? "fallback"}>
-                {fileSize(estimateBytes)} used · {fileSize(route.gateway.mmsMaxBytes ?? DEFAULT_MMS_LIMIT_BYTES)} limit ({route.gateway.mmsLimitSource === "carrier" ? "carrier" : "fallback"}) · up to {Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)} recipients
-              </span>
-            )}
-            {!browserHost && !composerConversation && notificationRecoveryBridge && (
-              <NotificationReplyRecovery
-                bridge={notificationRecoveryBridge}
-                conversationId={active?.id}
-                sessionKey={renderedSearchSessionKey}
-                refreshSignal={snapshot}
-                unlocked={snapshot?.encryption.state === "unlocked" && !appLock?.locked}
-                draftText={content.text}
-                onCountChange={setNotificationRecoveryCount}
-                onAppend={async body => {
-                  const session = renderedSearchSessionKey;
-                  if (!slotKey || deletingId === slotKey || resolvingDraftConflict || appLockRef.current?.locked || snapshotRef.current?.encryption.state !== "unlocked" || session !== currentSearchSessionKey()) throw new Error("Draft is unavailable.");
-                  const currentDraft = store.get(slotKey);
-                  const text = currentDraft?.content.text && body ? `${currentDraft.content.text}\n${body}` : `${currentDraft?.content.text ?? ""}${body}`;
-                  if (new TextEncoder().encode(text).byteLength > 64 * 1024) throw new DefinitivePreEditRefusal();
-                  autoAcknowledgeDraftSyncNotice();
-                  const outcome = await store.edit(slotKey, { text });
-                  if (!outcome.ok) throw new Error(outcome.error);
-                }}
-              />
-            )}
-          </>
-        }
         inlineStatusSlot={<>
           <DraftNotice notice={visibleDraftNotice} noticeKey={slotKey} onAction={onDraftNoticeAction} busy={sending || noticeActionBusy} />
           <DraftSyncStatus
@@ -5489,18 +5480,41 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             onAutoAcknowledgeNotice={() => acknowledgeDraftSyncNotice(false)}
           />
         </>}
+        statusItems={statusItems}
+        statusLabels={{ more: (count) => peppyCopy.composer_status_more_sr.replace("{count}", String(count)) }}
+        statusTrailingSlot={!browserHost && !composerConversation && notificationRecoveryBridge && (
+            <NotificationReplyRecovery
+              bridge={notificationRecoveryBridge}
+              conversationId={active?.id}
+              sessionKey={renderedSearchSessionKey}
+              refreshSignal={snapshot}
+              unlocked={snapshot?.encryption.state === "unlocked" && !appLock?.locked}
+              draftText={content.text}
+              onAppend={async body => {
+                const session = renderedSearchSessionKey;
+                if (!slotKey || deletingId === slotKey || resolvingDraftConflict || appLockRef.current?.locked || snapshotRef.current?.encryption.state !== "unlocked" || session !== currentSearchSessionKey()) throw new Error("Draft is unavailable.");
+                const currentDraft = store.get(slotKey);
+                const text = currentDraft?.content.text && body ? `${currentDraft.content.text}\n${body}` : `${currentDraft?.content.text ?? ""}${body}`;
+                if (new TextEncoder().encode(text).byteLength > 64 * 1024) throw new DefinitivePreEditRefusal();
+                autoAcknowledgeDraftSyncNotice();
+                const outcome = await store.edit(slotKey, { text });
+                if (!outcome.ok) throw new Error(outcome.error);
+              }}
+            />
+        )}
         composerName={title}
         composerUserSized={composerHeight !== null}
         maxAutoGrowHeight={maxAutoGrowHeight}
         platform={platform}
         gatewaySlot={snapshot ? (headPanel ? (
-          <HeadRoutePill content={content} gateways={gateways} accountReadOnly={accountReadOnly} />
+          <HeadRoutePill content={content} gateways={gateways} accountReadOnly={accountReadOnly} rcsBlock={rcsBlock} />
         ) : (
           <GatewaySelector
           accountReadOnly={accountReadOnly}
             gateways={gateways}
             content={content}
             problem={unavailableReason}
+            rcsBlock={rcsBlock}
             onSelect={(gateway) =>
               edit({ gatewayId: gateway.id, simId: gateway.simId })
             }

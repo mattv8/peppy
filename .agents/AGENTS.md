@@ -9,6 +9,7 @@ This reference records non-obvious Peppy domain constraints.
 - [Browser bindings](crates/browser-bindings.md), [mobile bindings](crates/mobile-bindings.md), and [tester cryptography](crates/tester-crypto.md): Rust binding and cryptography boundaries.
 - [Browser runtime](packages/browser-runtime.md) and [push relay](services/push-relay.md): package and service runtime behavior.
 - [Backup and restore](ops/backup-restore.md), [release updates](ops/release-updates.md), [Linux repository](ops/linux-repository.md), [release keys](ops/release-keys.md), and [packaging assets](ops/packaging-assets.md): operational and release procedures.
+- [SMS/MMS send-failure triage](ops/sms-mms-send-triage.md) and [Google Messages link field notes](ops/google-messages-link-triage.md): on-phone triage for carrier sends and for RCS through the link.
 - [Infrastructure and release boundaries](infra.md), [data, trust, and recovery boundaries](data-boundaries.md), [hosted platform security](platform-security.md), [desktop frontend](frontend-style-guide.md), and [native mobile](mobile-style-guide.md): shared implementation guidance.
 
 ## Ownership boundaries

@@ -38,22 +38,22 @@ describe("group conversation CSS contracts", () => {
     expect(rule("#new-group-name")).toMatch(/height:\s*var\(--peppy-control-height\)/);
   });
 
-  it("holds the resend action with aria-disabled instead of hiding it", () => {
-    expect(css).toMatch(/#group-send-updated\[aria-disabled="true"\]/);
+  it("removes retired composer-card styling now owned by the shared inline-status primitive", () => {
+    expect(css).not.toMatch(/#group-send-updated\[aria-disabled="true"\]/);
   });
 
-  it("uses 44px targets for the new buttons on coarse pointers", () => {
+  it("uses 44px targets for group details controls on coarse pointers", () => {
     const coarse = css.slice(css.indexOf("@media (pointer: coarse) {\n  #header-group-details"));
-    for (const selector of ["#header-group-details", ".group-member-row", "#group-send-updated", "#group-send-review", "#group-create-again", "#group-start-new-mms", "[id^=\"group-message-edit-\"]"]) {
+    for (const selector of ["#header-group-details", ".group-member-row", "[id^=\"group-message-edit-\"]"]) {
       expect(coarse).toContain(selector);
     }
     expect(coarse).toMatch(/min-height:\s*44px/);
   });
 
-  it("keeps the new surfaces readable under forced colors, with no shadows", () => {
+  it("keeps remaining group surfaces readable under forced colors, with no shadows", () => {
     const block = forcedColors();
     expect(block).toMatch(/@media \(forced-colors: active\)/);
-    expect(block).toMatch(/#composer-group-changed[^{]*\{ ?border-color: CanvasText; background: Canvas; color: CanvasText; box-shadow: none; \}/);
+    expect(block).toMatch(/#new-group-name \{ border-color: CanvasText; background: Canvas; color: CanvasText; box-shadow: none; \}/);
     expect(block).toMatch(/\.timeline-notice::before, \.timeline-notice::after \{ ?border-color: CanvasText; \}/);
   });
 

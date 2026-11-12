@@ -154,7 +154,7 @@ describe("group sender attribution", () => {
     expect(document.querySelector("[data-sender-gutter]")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const avatars = await screen.findByRole("checkbox", { name: "Show sender avatars in group conversations" });
+    const avatars = await screen.findByRole("switch", { name: "Show sender avatars in group conversations" });
     expect(avatars).not.toBeChecked();
     fireEvent.click(avatars);
     expect(JSON.parse(localStorage.getItem("peppy.layout.v1")!)).toMatchObject({ groupSenderAvatars: true });
@@ -1984,7 +1984,7 @@ describe("lazy conversation history", () => {
     expect(sentProgress.querySelector("time")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const compactTimestamps = await screen.findByRole("checkbox", { name: "Show times only after a pause" });
+    const compactTimestamps = await screen.findByRole("switch", { name: "Show times only after a pause" });
     expect(compactTimestamps).toBeChecked();
     fireEvent.click(compactTimestamps);
     fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
@@ -3115,7 +3115,7 @@ describe("new-recipient drafts", () => {
     fireEvent.change(recipients, { target: { value: "+1 202" } });
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
     expect(document.getElementById("unavailable-hint")).toHaveTextContent(
-      "finish adding the recipient",
+      "Finish adding the recipient before sending.",
     );
 
     fireEvent.change(recipients, { target: { value: "+1 202 555 0101" } });
@@ -3384,7 +3384,7 @@ describe("draft durability", () => {
     expect(notice).toHaveTextContent("Error saving draft.");
     expect(notice.closest("#composer-inline-status")).not.toBeNull();
     expect(within(document.getElementById("composer-inline-status")!).getAllByText("Error saving draft.")).toHaveLength(1);
-    expect(document.getElementById("composer-status-row")).toHaveAttribute("hidden");
+    expect(document.getElementById("composer-status-row")).toBeNull();
     expect(within(notice).getByRole("button", { name: "Retry" })).toBeEnabled();
   });
 
@@ -3413,7 +3413,7 @@ describe("draft durability", () => {
   it("keeps ordinary autosaves quiet with no saved notice", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
-    expect(document.getElementById("composer-inline-status")).toBeEmptyDOMElement();
+    expect(document.getElementById("composer-inline-status")).toHaveTextContent("Choose a phone and SIM.");
 
     type("first quiet edit");
     await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("first quiet edit"));
@@ -4769,7 +4769,7 @@ describe("composer window", () => {
     openComposerWindow("aurora", true);
     render(<App />);
     await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent("No SIM chosen"));
-    expect(document.getElementById("unavailable-hint")).toHaveTextContent("choose a phone and SIM in the main window");
+    expect(document.getElementById("unavailable-hint")).toHaveTextContent("Choose a phone and SIM in the main window.");
 
     cleanup();
     host.gateways = [SMS_ONLY];
@@ -4785,14 +4785,14 @@ describe("composer window", () => {
     });
     render(<App />);
     await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent("SIM unavailable"));
-    expect(document.getElementById("unavailable-hint")).toHaveTextContent("the selected phone/SIM is no longer reported; choose another route in the main window");
+    expect(document.getElementById("unavailable-hint")).toHaveTextContent("The selected phone/SIM is no longer reported; choose another route in the main window.");
 
     cleanup();
     host.gateways = [];
     host.drafts.clear();
     render(<App />);
     await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent("No phone"));
-    expect(document.getElementById("unavailable-hint")).toHaveTextContent("no phone is configured");
+    expect(document.getElementById("unavailable-hint")).toHaveTextContent("No phone is configured.");
   });
   it("renders each supported head route state without a picker", async () => {
     const selectedDraft = (simId: string) => ({
@@ -5070,7 +5070,7 @@ describe("gateway routes", () => {
     await waitFor(() => expect(bridge.save_draft).toHaveBeenCalledOnce());
 
     expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
-    expect(document.getElementById("unavailable-hint")).toBeEmptyDOMElement();
+    expect(document.getElementById("unavailable-hint")).toBeNull();
     fireEvent.keyDown(message(), { key: "Enter" });
     expect(bridge.send_draft).not.toHaveBeenCalled();
 
@@ -5327,9 +5327,7 @@ describe("gateway routes", () => {
         simId: "sim-2",
       }),
     );
-    expect(document.getElementById("unavailable-hint")).toHaveAttribute(
-      "hidden",
-    );
+    expect(document.getElementById("unavailable-hint")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
       expect(bridge.send_draft).toHaveBeenCalledWith(
@@ -5512,7 +5510,7 @@ describe("host state display", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
-    expect(await screen.findByText("Storage used")).toBeInTheDocument();
+    await waitFor(() => expect(document.getElementById("attachment-storage-meter")).toBeInTheDocument());
     expect(storageStatus).toHaveBeenCalledOnce();
     expect(screen.queryByRole("button", { name: "Sign out of Peppy" })).not.toBeInTheDocument();
   });
@@ -5899,7 +5897,7 @@ describe("host state display", () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const startup = screen.getByRole("checkbox", { name: "Start at login" });
+    const startup = screen.getByRole("switch", { name: "Start at login" });
     fireEvent.click(startup);
     expect(startup).toBeDisabled();
     expect(startup).not.toBeChecked();
@@ -5922,8 +5920,8 @@ describe("host state display", () => {
 
     const card = document.getElementById("settings-startup")!;
     await waitFor(() => expect(card).toHaveAttribute("data-startup-state", state));
-    expect(screen.getByRole("checkbox", { name: "Start at login" })).toHaveProperty("checked", checked);
-    const backgroundToggle = screen.getByRole("checkbox", { name: "Open in the background" });
+    expect(screen.getByRole("switch", { name: "Start at login" })).toHaveProperty("checked", checked);
+    const backgroundToggle = screen.getByRole("switch", { name: "Open in the background" });
     expect(backgroundToggle).toHaveProperty("checked", background);
     if (state === "unavailable") expect(backgroundToggle).toBeDisabled();
   });
@@ -5934,7 +5932,7 @@ describe("host state display", () => {
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
-    expect(await screen.findByRole("checkbox", { name: "Open in the background" })).toBeDisabled();
+    expect(await screen.findByRole("switch", { name: "Open in the background" })).toBeDisabled();
     expect(document.getElementById("startup-open-background-hint")).toHaveTextContent("Turn on Start at login to use this.");
   });
 
@@ -5945,7 +5943,7 @@ describe("host state display", () => {
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
-    fireEvent.click(await screen.findByRole("checkbox", { name: "Open in the background" }));
+    fireEvent.click(await screen.findByRole("switch", { name: "Open in the background" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Permission denied.");
     expect(screen.queryByText(/Start at login was not changed/)).not.toBeInTheDocument();
@@ -6410,8 +6408,10 @@ describe("desktop presentation controls", () => {
       await screen.findByText("Hello from Aurora");
       fireEvent.click(screen.getByRole("button", { name: "Settings" }));
       const position = document.getElementById("settings-navigation-position")!;
+      expect(position).toHaveClass("settings-option-cards");
       expect(within(position).getByRole("radio", { name: "Side rail" })).toBeChecked();
       const titleBar = within(position).getByRole("radio", { name: "Title bar" });
+      expect(titleBar).toBeInTheDocument();
       fireEvent.click(titleBar);
 
       expect(document.getElementById("desktop-rail")).not.toBeInTheDocument();
@@ -6440,7 +6440,10 @@ describe("desktop presentation controls", () => {
       await screen.findByText("Hello from Aurora");
       fireEvent.click(screen.getByRole("button", { name: "Settings" }));
       const mode = document.getElementById("settings-popout-mode")!;
+      expect(mode).toHaveClass("settings-option-cards");
       expect(within(mode).getByDisplayValue("bubble")).toBeChecked();
+      expect(within(mode).getByRole("radio", { name: "Chat bubble" })).toHaveAccessibleDescription("Floating bubble that stays on top and expands into the conversation.");
+      expect(within(mode).getByRole("radio", { name: "Window" })).toHaveAccessibleDescription("A normal conversation window without a bubble.");
       fireEvent.click(within(mode).getByDisplayValue("window"));
       expect(JSON.parse(localStorage.getItem("peppy.layout.v1")!)).toMatchObject({ popoutMode: "window" });
       unmount();
@@ -7242,7 +7245,7 @@ describe("desktop app lock", () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const checkbox = await screen.findByRole("checkbox", { name: "Require a password when Peppy starts" });
+    const checkbox = await screen.findByRole("switch", { name: "Require a password when Peppy starts" });
     expect(checkbox).not.toBeChecked();
     expect(document.querySelector("input[type=\"password\"]")).toBeNull();
     expect(screen.getByText(/Changes apply the next time Peppy starts/)).toBeInTheDocument();
@@ -7257,10 +7260,10 @@ describe("desktop app lock", () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const checkbox = await screen.findByRole("checkbox", { name: "Require a password when Peppy starts" });
+    const checkbox = await screen.findByRole("switch", { name: "Require a password when Peppy starts" });
     fireEvent.click(checkbox);
     await waitFor(() => expect(setLock).toHaveBeenCalledWith(true));
-    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Require a password when Peppy starts" })).toBeChecked());
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Require a password when Peppy starts" })).toBeChecked());
     expect(document.querySelector("input[type=\"password\"]")).toBeNull();
   });
 
@@ -7269,11 +7272,11 @@ describe("desktop app lock", () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const checkbox = await screen.findByRole("checkbox", { name: "Require a password when Peppy starts" });
+    const checkbox = await screen.findByRole("switch", { name: "Require a password when Peppy starts" });
     fireEvent.click(checkbox);
     await waitFor(() => expect(setLock).toHaveBeenCalledWith(true));
     expect(await screen.findByText("The password requirement was not changed.")).toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: "Require a password when Peppy starts" })).not.toBeChecked();
+    expect(screen.getByRole("switch", { name: "Require a password when Peppy starts" })).not.toBeChecked();
   });
 
   it("disables the control and explains storage failure when secure storage is unavailable", async () => {
@@ -7281,7 +7284,7 @@ describe("desktop app lock", () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(await screen.findByRole("checkbox", { name: "Require a password when Peppy starts" })).toBeDisabled();
+    expect(await screen.findByRole("switch", { name: "Require a password when Peppy starts" })).toBeDisabled();
     expect(screen.getByText("Secure storage is unavailable, so this setting cannot be changed.")).toBeInTheDocument();
   });
 
@@ -7347,7 +7350,7 @@ describe("desktop app lock", () => {
 
     await act(async () => { hint?.(); });
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
-    expect(screen.getByRole("checkbox", { name: "Require a password when Peppy starts" })).toBeChecked();
+    expect(screen.getByRole("switch", { name: "Require a password when Peppy starts" })).toBeChecked();
   });
 
   it("starts a fresh app lock check when storage retry is selected", async () => {
@@ -7373,7 +7376,7 @@ describe("desktop app lock", () => {
 
     await waitFor(() => expect(bridge.get_app_lock_status).toHaveBeenCalledTimes(2));
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const checkbox = screen.getByRole("checkbox", { name: "Require a password when Peppy starts" });
+    const checkbox = screen.getByRole("switch", { name: "Require a password when Peppy starts" });
     expect(checkbox).toBeChecked();
     expect(checkbox).toBeEnabled();
   });
@@ -7393,7 +7396,7 @@ describe("desktop app lock", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
 
     await waitFor(() => expect(bridge.get_app_lock_status).toHaveBeenCalledTimes(2));
-    const checkbox = screen.getByRole("checkbox", { name: "Require a password when Peppy starts" });
+    const checkbox = screen.getByRole("switch", { name: "Require a password when Peppy starts" });
     expect(checkbox).toBeChecked();
     expect(checkbox).toBeEnabled();
   });
@@ -7406,7 +7409,7 @@ describe("desktop app lock", () => {
     expect(screen.queryByRole("heading", { name: "Peppy is locked" })).not.toBeInTheDocument();
     expect(status).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(screen.queryByRole("checkbox", { name: "Require a password when Peppy starts" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch", { name: "Require a password when Peppy starts" })).not.toBeInTheDocument();
   });
 });
 

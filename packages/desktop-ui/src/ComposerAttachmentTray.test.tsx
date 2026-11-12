@@ -156,7 +156,7 @@ describe("Composer paste", () => {
     render(<Composer {...baseProps} attachments={attachments} maxAttachments={3} onPasteImages={onPasteImages} />);
     fireEvent.paste(screen.getByRole("list", { name: "Image list" }), { clipboardData: pasteData([new File(["x"], "image.png", { type: "image/png" }), new File(["x"], "second.png", { type: "image/png" })]) });
     expect(onPasteImages).toHaveBeenCalledWith([expect.any(File)]);
-    expect(screen.getByText("Couldn't add second.png. Up to 3 images per message.")).toHaveAttribute("role", "alert");
+    expect(screen.getByRole("alert")).toHaveTextContent("Couldn't add second.png. Up to 3 images per message.");
   });
 
   it("clears a paste rejection and tray history when changing drafts", () => {

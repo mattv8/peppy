@@ -1,4 +1,14 @@
-#notification-reply-recovery-status { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 12px; }
+#notification-reply-recovery-status { display: inline-flex; flex: 0 0 auto; flex-wrap: nowrap; align-items: center; gap: 4px; max-width: 100%; font-size: 12px; white-space: nowrap; }
+.notification-reply-recovery-action {
+  flex: 0 0 auto; min-height: 24px; padding: 0 6px; border: 0; border-radius: var(--peppy-control-radius); background: transparent;
+  color: var(--peppy-text-primary); font: inherit; font-size: 12px; text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+}
+.notification-reply-recovery-action:hover { background: var(--peppy-surface-hover); }
+.notification-reply-recovery-action:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 1px; }
+.notification-reply-recovery-action[data-checking] { color: var(--peppy-text-muted); cursor: default; }
+.notification-reply-recovery-error {
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--peppy-error-text);
+}
 #notification-reply-recovery-panel { display: grid; gap: 8px; }
 #notification-reply-recovery-text { white-space: pre-wrap; overflow-wrap: anywhere; max-block-size: 18rem; overflow: auto; padding: 8px; background: var(--peppy-surface-widget); border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-sm); }
 #notification-reply-recovery-actions { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -15,4 +25,11 @@
   .notification-reply-recovery-modal #notification-reply-recovery-actions { position: sticky; bottom: 0; background: var(--peppy-surface-panel); padding-block: 8px; }
   .notification-reply-recovery-modal .peppy-modal-actions { background: var(--peppy-surface-panel); }
 }
-@media (pointer: coarse) { #notification-reply-recovery-status button, #notification-reply-recovery-dialog button { min-height: 48px; } }
+@media (pointer: coarse) {
+  #notification-reply-recovery-status .notification-reply-recovery-action,
+  #notification-reply-recovery-dialog button { min-height: 48px; }
+}
+@media (forced-colors: active) {
+  .notification-reply-recovery-action { border: 1px solid ButtonText; }
+  .notification-reply-recovery-action:focus-visible { outline-color: Highlight; }
+}

@@ -34,7 +34,6 @@ function mockElement(
 interface ComposerOptions {
   areaHeight?: number;
   textareaHeight?: number;
-  status?: { height: number; hidden?: boolean };
   banner?: { height: number; hidden?: boolean };
   attachments?: boolean;
   rowSibling?: boolean;
@@ -70,10 +69,6 @@ function buildComposer(options: ComposerOptions = {}) {
   });
   if (options.rowSibling) mockElement(row, "span", "row-sibling", 50);
   const textarea = mockElement(row, "textarea", "composer-textarea", options.textareaHeight ?? 22);
-  if (options.status) {
-    const status = mockElement(field, "div", "composer-status-row", options.status.height);
-    status.hidden = options.status.hidden ?? false;
-  }
   mockElement(field, "div", "composer-toolbar", 44);
   if (options.grip) {
     mockElement(area, "div", "composer-resize-grip", 12, { position: "absolute" });
@@ -95,19 +90,6 @@ describe("measureComposerChrome", () => {
     document.body.innerHTML = "";
   });
 
-  it("counts a two-line status row in a 96px clipped composer instead of trusting the outer height", () => {
-    const { area, textarea } = buildComposer({ status: { height: 36 } });
-
-    // 14 input row + 36 status + 44 toolbar + 4 field border + 16 area padding
-    expect(measureComposerChrome(area, textarea)).toBe(114);
-    expect(area.offsetHeight - textarea.offsetHeight).toBe(74);
-  });
-
-  it("omits a hidden status row", () => {
-    const { area, textarea } = buildComposer({ status: { height: 36, hidden: true } });
-
-    expect(measureComposerChrome(area, textarea)).toBe(78);
-  });
 
   it("includes the attachment tray with its margin", () => {
     const { area, textarea } = buildComposer({ attachments: true });
@@ -129,10 +111,10 @@ describe("measureComposerChrome", () => {
   });
 
   it("adds column row gaps between stacked children", () => {
-    const { area, textarea } = buildComposer({ status: { height: 36 }, fieldGap: "4px" });
+    const { area, textarea } = buildComposer({ fieldGap: "4px" });
 
-    // 114 base + 2 gaps between input row, status, and toolbar
-    expect(measureComposerChrome(area, textarea)).toBe(122);
+    // 78 base + one gap between input row and toolbar
+    expect(measureComposerChrome(area, textarea)).toBe(82);
   });
 
   it("does not add row-flex siblings of the textarea vertically", () => {

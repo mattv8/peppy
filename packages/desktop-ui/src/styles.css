@@ -712,19 +712,13 @@ select:focus-visible {
 #composer-area[data-user-sized="true"] .composer {
   flex: 1;
 }
-#composer-status-row {
-  order: 5;
-  padding: 0 8px;
-}
-#composer-status-row[hidden] {
-  display: none;
-}
 #composer-toolbar {
   display: flex;
   order: 6;
   align-items: center;
   gap: 4px;
   padding: 4px 8px 8px;
+  container-type: inline-size;
 }
 .composer-toolbar-spacer {
   flex: 1;
@@ -743,7 +737,8 @@ select:focus-visible {
   color: var(--peppy-text-secondary);
 }
 #composer-inline-status:empty { display: none; }
-#composer-toolbar:has(#composer-inline-status :is([data-tone="error"], [data-tone="warning"], #draft-sync-status, #draft-notice-action)) #shift-enter-hint { display: none; }
+#composer-inline-status:has([data-inline-status-item]) { min-width: min-content; }
+#composer-toolbar:has(#composer-inline-status :is([data-tone="error"], [data-tone="warning"], #draft-sync-status, #draft-notice-action, [data-inline-status-item], [data-inline-status-action])) #shift-enter-hint { display: none; }
 #composer-toolbar button {
   display: grid;
   width: 28px;
@@ -761,6 +756,7 @@ select:focus-visible {
   height: auto;
   flex: 0 0 auto;
 }
+#composer-toolbar #composer-inline-status :is([data-inline-status-trigger], [data-inline-status-action], .notification-reply-recovery-action) { display: inline-flex; width: auto; height: auto; }
 #composer-toolbar #composer-inline-status :is(dialog, [role="dialog"], [role="alertdialog"]) { white-space: normal; font-size: var(--peppy-font-size, 13px); line-height: normal; }
 #composer-toolbar .send-button {
   width: 32px;
@@ -807,12 +803,6 @@ select:focus-visible {
 #attachment-tray[data-attachment-layout="rows"] .attachment-name, #attachment-tray[data-attachment-layout="rows"] .attachment-state { grid-column: 1; }
 #attachment-tray[data-attachment-layout="rows"] .attachment-retry { grid-column: 2; grid-row: 1 / span 2; }
 #attachment-tray[data-attachment-layout="rows"] .attachment-remove { position: static; grid-column: 3; grid-row: 1; width: 24px; height: 24px; border: 0; background: transparent; }
-.composer-paste-rejection { margin: 4px 0; overflow-wrap: anywhere; color: var(--peppy-error-text); font-size: 12px; }
-.composer-status {
-  margin: 4px 0;
-  color: var(--peppy-text-secondary);
-  font-size: 12px;
-}
 #draft-notice {
   display: flex;
   flex-wrap: wrap;
@@ -834,9 +824,8 @@ select:focus-visible {
   flex: 0 1 auto;
 }
 #composer-inline-status > * + * { margin-left: 8px; }
-#composer-inline-status #draft-sync-status { flex-shrink: 3; }
-#composer-inline-status #draft-notice .draft-notice-message,
-#composer-inline-status [data-inline-status-message] {
+#composer-inline-status #draft-sync-status, #composer-inline-status #draft-notice { flex-shrink: 3; }
+#composer-inline-status #draft-notice .draft-notice-message {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -844,6 +833,35 @@ select:focus-visible {
   min-width: 3ch;
   flex: 0 1 auto;
 }
+[data-inline-status] { display: flex; min-width: min-content; flex: 0 1 auto; }
+[data-inline-status-item] { display: inline-flex; min-width: min-content; align-items: center; gap: 4px; border: 0; background: transparent; color: var(--peppy-text-secondary); flex: 0 1 auto; }
+[data-inline-status-item][data-inline-status-tone="warning"] { color: var(--peppy-warning-text); }
+[data-inline-status-item][data-inline-status-tone="error"] { color: var(--peppy-error-text); }
+[data-inline-status-live] { display: flex; min-width: calc(12px + 4px + 12ch); flex: 0 1 auto; align-items: center; gap: 4px; overflow: hidden; }
+[data-inline-status-icon] { flex: none; forced-color-adjust: auto; }
+[data-inline-status-trigger] { display: inline-flex; min-width: 0; min-height: 24px; align-items: center; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+[data-inline-status-message] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+[data-inline-status-trigger]:hover, [data-inline-status-trigger]:focus-visible { text-decoration: underline dotted; text-underline-offset: 2px; }
+[data-inline-status-trigger]:focus-visible, [data-inline-status-action]:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 1px; }
+[data-inline-status-more] { flex: none; height: 16px; margin-left: 4px; padding: 0 5px; border-radius: var(--peppy-radius-pill); background: var(--peppy-surface-active); color: var(--peppy-text-secondary); font-size: 11px; font-variant-numeric: tabular-nums; line-height: 16px; }
+[data-inline-status-more]::before { content: "+" attr(data-count); }
+[data-inline-status-action] { flex: 0 0 auto; min-height: 24px; padding: 0 6px; border: 0; background: transparent; color: var(--peppy-text-primary); font: inherit; line-height: 16px; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; white-space: nowrap; }
+[data-inline-status-action]:hover { background: var(--peppy-surface-hover); }
+[data-inline-status-action][aria-disabled="true"] { background: transparent; color: var(--peppy-text-muted); cursor: default; }
+[data-inline-status-popover], [data-inline-status-confirmation] { position: fixed; z-index: 10; display: grid; gap: 8px; box-sizing: border-box; padding: 10px; overflow: auto; border: 1px solid var(--peppy-border-strong); border-radius: var(--peppy-control-radius); background: var(--peppy-surface-panel); box-shadow: var(--peppy-shadow-floating); color: var(--peppy-text-primary); font-size: var(--peppy-font-size, 13px); line-height: normal; white-space: normal; }
+[data-inline-status-popover] section { display: grid; gap: 6px; }
+[data-inline-status-popover] section + section { padding-top: 10px; border-top: 1px solid var(--peppy-border); }
+[data-inline-status-popover] p, [data-inline-status-confirmation] p, [data-inline-status-popover] ul { margin: 0; }
+[data-inline-status-popover] ul { padding-left: 18px; }
+[data-inline-status-popover-message] { display: flex; align-items: center; gap: 4px; font-weight: 600; }
+[data-inline-status-popover-message][data-inline-status-tone="info"] { color: var(--peppy-text-secondary); }
+[data-inline-status-popover-message][data-inline-status-tone="warning"] { color: var(--peppy-warning-text); }
+[data-inline-status-popover-message][data-inline-status-tone="error"] { color: var(--peppy-error-text); }
+[data-inline-status-popover-actions], [data-inline-status-confirmation-actions] { display: flex; flex-wrap: wrap; justify-content: end; gap: 8px; }
+[data-inline-status-popover-actions] button, [data-inline-status-confirmation-actions] button { min-height: 28px; padding: 0 8px; border: 1px solid var(--peppy-border-strong); border-radius: var(--peppy-radius-sm); background: transparent; color: var(--peppy-text-primary); }
+@container (width < 560px) { #composer-toolbar #composer-inline-status [data-inline-status-item] > [data-inline-status-action]:nth-of-type(n + 2) { display: none; } }
+@container (width < 420px) { #composer-toolbar #composer-inline-status [data-inline-status-item] > [data-inline-status-action] { display: none; } }
+@container (width < 480px) { #shift-enter-hint { display: none; } }
 #composer-inline-status :is(#draft-notice > button, #draft-sync-status > button, [data-draft-sync-notice] > button) {
   flex: 0 0 auto;
   min-height: 24px;
@@ -919,13 +937,6 @@ select:focus-visible {
   #sync-progress .sync-progress-cursors { grid-template-columns: minmax(0, 1fr); }
   #sync-progress .sync-progress-cursors dd { margin-bottom: 4px; }
 }
-#unavailable-hint {
-  display: block;
-  margin-top: 4px;
-  color: var(--peppy-warning-text);
-  font-size: 11px;
-}
-#unavailable-hint[hidden] { display: none; }
 #draft-recipients {
   position: absolute;
   z-index: 10;
@@ -1281,6 +1292,7 @@ select:focus-visible {
 .peppy-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 #attachment-storage-heading-row { display: flex; align-items: center; gap: 4px; }
+#attachment-storage-refresh { margin-left: auto; }
 .attachment-storage-info-button, .info-button {
   display: inline-grid;
   place-items: center;
@@ -1293,12 +1305,17 @@ select:focus-visible {
   color: var(--peppy-text-secondary);
 }
 .attachment-storage-info-button:hover, .info-button:hover { background: var(--peppy-surface-hover); }
+.attachment-storage-info-button[aria-disabled="true"] { cursor: default; opacity: .5; }
+.attachment-storage-info-button[aria-disabled="true"]:hover { background: transparent; }
 .attachment-storage-info-button:focus-visible, .info-button:focus-visible { outline: 2px solid var(--peppy-focus-ring, var(--peppy-accent)); outline-offset: 2px; }
 #attachment-storage-info-body { display: grid; gap: 12px; }
 [data-attachment-storage-capacity-row] { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
-.attachment-storage-learn-more { padding: 0; border: 0; background: transparent; color: var(--peppy-accent); text-decoration: underline; }
+.attachment-storage-learn-more { padding: 0; border: 0; background: transparent; color: var(--peppy-accent); font: inherit; font-size: 12px; font-weight: 400; text-decoration: underline; cursor: pointer; }
+.attachment-storage-learn-more:hover { color: var(--peppy-accent-hover); }
 .attachment-storage-learn-more:focus-visible { outline: 2px solid var(--peppy-focus-ring, var(--peppy-accent)); outline-offset: 2px; }
-.link-button { padding: 0; border: 0; background: transparent; color: var(--peppy-accent); text-decoration: underline; }
+.link-button { display: inline-flex; align-items: center; gap: 4px; justify-self: start; padding: 0; border: 0; background: transparent; color: var(--peppy-accent); font: inherit; font-size: 13px; text-decoration: underline; cursor: pointer; }
+.link-button svg { flex: none; }
+.link-button:hover { color: var(--peppy-accent-hover); }
 .link-button:focus-visible { outline: 2px solid var(--peppy-focus-ring); outline-offset: 2px; }
 .badge { display: inline-flex; align-items: center; padding: 2px 6px; border-radius: var(--peppy-radius-pill); background: var(--peppy-surface-active); color: var(--peppy-text-primary); font-size: 11px; font-weight: 700; }
 [data-tone="warning"] { border-color: var(--peppy-warning-border); background: var(--peppy-warning-surface); color: var(--peppy-warning-text); }
@@ -1309,11 +1326,26 @@ select:focus-visible {
 #hosted-plan-options { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
 #attachment-storage-addon-lapsed-warning { display: flex; align-items: flex-start; gap: 8px; padding: 8px; border: 1px solid var(--peppy-warning-border); border-radius: var(--peppy-radius-sm); }
 #attachment-storage-addon-skeleton { min-height: 44px; padding: 8px; border-radius: var(--peppy-radius-sm); background: var(--peppy-surface-active); }
+#attachment-storage-meter { display: grid; gap: 4px; }
+#attachment-storage-meter p, #attachment-storage-allowance { margin: 0; }
+#attachment-storage-meter p { color: var(--peppy-text-primary); font-size: 13px; }
+#attachment-storage-bar { height: 8px; overflow: hidden; border: 1px solid var(--peppy-border-strong); border-radius: var(--peppy-radius-pill); background: var(--peppy-surface-active); }
+#attachment-storage-bar > span { display: block; height: 100%; background: var(--peppy-accent); transition: width var(--peppy-duration-base) var(--peppy-ease-out); }
+#attachment-storage-bar[data-capacity="near-full"] > span { background: var(--peppy-warning-text); }
+#attachment-storage-bar[data-capacity="full"] > span { background: var(--peppy-error); }
+#attachment-storage-bar[data-capacity="stale"] > span { background: var(--peppy-text-muted); }
+.attachment-storage-refresh-icon { animation: busy-indicator-spin 1s linear infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .attachment-storage-refresh-icon { animation: none; }
+}
 
 @media (pointer: coarse) {
   .attachment-storage-info-button, .info-button, .link-button, #billing-elsewhere-manage, #attachment-storage-addon-manage, #attachment-storage-addon-retry, #hosted-store-retry, #hosted-restore-button, #hosted-plan-options .primary-button { min-width: 44px; min-height: 44px; }
   #composer-toolbar button, .attachment-remove, .attachment-retry { min-width: 48px; min-height: 48px; }
   #composer-toolbar #composer-inline-status :is(#draft-notice > button, #draft-sync-status > button, [data-draft-sync-notice] > button, [data-draft-expiry-warning] > button) { min-width: 48px; min-height: 48px; }
+  #composer-toolbar [data-inline-status-trigger], #composer-toolbar [data-inline-status-action] { min-width: 48px; min-height: 48px; }
+  [data-inline-status-popover-actions] button, [data-inline-status-confirmation-actions] button { min-height: 44px; }
   .attachment-chip { grid-template-columns: minmax(0, 1fr) 48px; }
   .attachment-remove { width: 48px; height: 48px; }
   #attachment-tray[data-attachment-layout="rows"] .attachment-chip { grid-template-columns: 46px minmax(0, 1fr) 48px; }
@@ -1328,6 +1360,9 @@ select:focus-visible {
 }
 
 @media (forced-colors: active) {
+  [data-inline-status-popover], [data-inline-status-confirmation] { border-color: CanvasText; background: Canvas; box-shadow: none; }
+  [data-inline-status-more], [data-inline-status-popover-actions] button, [data-inline-status-confirmation-actions] button { border: 1px solid ButtonText; }
+  [data-inline-status-trigger]:focus-visible, [data-inline-status-action]:focus-visible { outline-color: Highlight; }
   .busy-indicator {
     color: CanvasText;
   }
@@ -1347,6 +1382,11 @@ select:focus-visible {
   .conversation-folder-action[aria-expanded="true"], .conversation-folder-action.pending { outline: 1px solid ButtonText; outline-offset: -1px; }
   .conversation-delete.confirming { background: Highlight; color: HighlightText; }
   .attachment-storage-info-button:focus-visible, .info-button:focus-visible, .attachment-storage-learn-more:focus-visible, .link-button:focus-visible, #billing-elsewhere-manage:focus-visible, #attachment-storage-addon-manage:focus-visible, #attachment-storage-addon-retry:focus-visible, #hosted-store-retry:focus-visible, #hosted-restore-button:focus-visible, #hosted-plan-options .primary-button:focus-visible { outline-color: Highlight; }
+  #attachment-storage-bar { border-color: CanvasText; background: Canvas; }
+  #attachment-storage-bar[data-capacity] > span { background: Highlight; }
+  #attachment-storage-bar[data-capacity="stale"] > span { background: GrayText; }
+  a.link-button { color: LinkText; }
+  button.link-button { color: ButtonText; }
   #billing-elsewhere-notice, #attachment-storage-addons, #hosted-store-plan-options, #attachment-storage-addon-options > li, #hosted-plan-options > li, #attachment-storage-addon-skeleton { border-color: CanvasText; background: Canvas; color: CanvasText; box-shadow: none; }
   [data-tone="warning"] { border-color: Highlight; background: Canvas; color: CanvasText; }
   .conversation-copy .conversation-delete-warning { color: CanvasText; }

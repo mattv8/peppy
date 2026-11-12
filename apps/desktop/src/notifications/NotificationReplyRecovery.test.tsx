@@ -1,6 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
+import { peppyCopy } from "../generated/peppyCopy";
 import { NotificationReplyRecovery } from "./NotificationReplyRecovery";
 
 afterEach(cleanup);
@@ -19,7 +20,7 @@ it("adds a claimed reply once and preserves the existing draft text", async () =
   const native = bridge();
   const append = vi.fn().mockResolvedValue(undefined);
   render(<NotificationReplyRecovery bridge={native} conversationId="conversation-1" sessionKey="session-1" unlocked draftText="Existing draft" onAppend={append} />);
-  fireEvent.click(await screen.findByRole("button", { name: "Unsent notification replies (1)" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Unsent replies (1)" }));
   fireEvent.click(screen.getByRole("button", { name: "Add to draft" }));
   await waitFor(() => expect(append).toHaveBeenCalledWith("A reply"));
   expect(native.claim).toHaveBeenCalledTimes(1);
@@ -31,7 +32,7 @@ it("retries only acknowledgement after an acknowledgement failure", async () => 
   native.acknowledge.mockRejectedValueOnce(new Error("lost"));
   const append = vi.fn().mockResolvedValue(undefined);
   render(<NotificationReplyRecovery bridge={native} conversationId="conversation-1" sessionKey="session-1" unlocked draftText="" onAppend={append} />);
-  fireEvent.click(await screen.findByRole("button", { name: "Unsent notification replies (1)" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Unsent replies (1)" }));
   fireEvent.click(screen.getByRole("button", { name: "Add to draft" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Could not finish removing");
   fireEvent.click(screen.getByRole("button", { name: "Finish removing reply" }));
@@ -42,7 +43,7 @@ it("retries only acknowledgement after an acknowledgement failure", async () => 
 it("does not claim an overflowing combined draft", async () => {
   const native = bridge();
   render(<NotificationReplyRecovery bridge={native} conversationId="conversation-1" sessionKey="session-1" unlocked draftText={"x".repeat(64 * 1024)} onAppend={vi.fn()} />);
-  fireEvent.click(await screen.findByRole("button", { name: "Unsent notification replies (1)" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Unsent replies (1)" }));
   fireEvent.click(screen.getByRole("button", { name: "Add to draft" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("too long to combine");
   expect(native.claim).not.toHaveBeenCalled();
@@ -52,7 +53,7 @@ it("keeps Add disabled after a reload reports a claimed reply", async () => {
   const native = bridge();
   native.load.mockResolvedValue({ sessionGeneration: "generation-2", items: [{ ...recovery, state: "claimed" }] });
   render(<NotificationReplyRecovery bridge={native} conversationId="conversation-1" sessionKey="session-2" unlocked draftText="" onAppend={vi.fn()} />);
-  fireEvent.click(await screen.findByRole("button", { name: "Unsent notification replies (1)" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Unsent replies (1)" }));
   expect(screen.getByRole("button", { name: "Add to draft" })).toBeDisabled();
   expect(native.claim).not.toHaveBeenCalled();
 });
@@ -73,10 +74,35 @@ it("claims once when rapid clicks race a deferred claim", async () => {
   native.claim.mockImplementationOnce(() => new Promise(resolve => { resolveClaim = resolve; }));
   const append = vi.fn().mockResolvedValue(undefined);
   render(<NotificationReplyRecovery bridge={native} conversationId="conversation-1" sessionKey="session-1" unlocked draftText="" onAppend={append} />);
-  fireEvent.click(await screen.findByRole("button", { name: "Unsent notification replies (1)" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Unsent replies (1)" }));
   const add = screen.getByRole("button", { name: "Add to draft" });
   fireEvent.click(add); fireEvent.click(add);
   expect(native.claim).toHaveBeenCalledTimes(1);
   resolveClaim(true);
   await waitFor(() => expect(append).toHaveBeenCalledTimes(1));
+});
+
+it("shows a one-line opener with the unsent count and title", async () => {
+  const native = bridge();
+  render(<NotificationReplyRecovery bridge={native} conversationId="conversation-1" sessionKey="session-1" unlocked draftText="" onAppend={vi.fn()} />);
+  const opener = await screen.findByRole("button", { name: "Unsent replies (1)" });
+  expect(opener).toHaveAttribute("title", peppyCopy.composer_status_unsent_replies_title);
+  expect(opener.closest("#notification-reply-recovery-status")).toBeInTheDocument();
+});
+
+it("shows the checking label while every reply is uncertain", async () => {
+  const native = bridge();
+  native.load.mockResolvedValue({ sessionGeneration: "generation-1", items: [{ ...recovery, state: "uncertain" }] });
+  render(<NotificationReplyRecovery bridge={native} conversationId="conversation-1" sessionKey="session-1" unlocked draftText="" onAppend={vi.fn()} />);
+  expect(await screen.findByRole("button", { name: "Checking replies…" })).toBeInTheDocument();
+});
+
+it("shows a one-line load error with a retry that reloads", async () => {
+  const native = bridge();
+  native.load.mockRejectedValueOnce(new Error("offline")).mockRejectedValueOnce(new Error("offline")).mockResolvedValue({ sessionGeneration: "generation-1", items: [recovery] });
+  render(<NotificationReplyRecovery bridge={native} conversationId="conversation-1" sessionKey="session-1" unlocked draftText="" onAppend={vi.fn()} />);
+  expect(await screen.findByRole("alert")).toHaveTextContent(peppyCopy.composer_status_unsent_replies_error);
+  fireEvent.click(screen.getByRole("button", { name: peppyCopy.composer_status_unsent_replies_retry }));
+  expect(await screen.findByRole("button", { name: "Unsent replies (1)" })).toBeInTheDocument();
+  expect(native.load).toHaveBeenCalledTimes(3);
 });

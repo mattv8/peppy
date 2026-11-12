@@ -29,6 +29,15 @@ describe("GatewayPicker", () => {
     vi.unstubAllGlobals();
   });
 
+  it("shows a selected-route send block without changing dropdown option states", () => {
+    const { trigger } = renderPicker({ valueStatusOverride: { label: "RCS unconfirmed", availability: "unsupported_platform", title: "Can’t confirm RCS for this chat." } });
+
+    expect(trigger).toHaveTextContent("RCS unconfirmed");
+    expect(trigger.querySelector('[data-route-send-state="blocked"]')).toHaveAttribute("title", "Can’t confirm RCS for this chat.");
+    fireEvent.click(trigger);
+    expect(screen.getByRole("option", { name: /Pixel 8/ })).toHaveTextContent("Connected");
+  });
+
   it("commits the exact route value selected by pointer", () => {
     const { onChange, trigger } = renderPicker();
 
