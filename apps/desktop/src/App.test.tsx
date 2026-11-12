@@ -6408,8 +6408,10 @@ describe("desktop presentation controls", () => {
       await screen.findByText("Hello from Aurora");
       fireEvent.click(screen.getByRole("button", { name: "Settings" }));
       const position = document.getElementById("settings-navigation-position")!;
+      expect(position).toHaveClass("settings-option-cards");
       expect(within(position).getByRole("radio", { name: "Side rail" })).toBeChecked();
       const titleBar = within(position).getByRole("radio", { name: "Title bar" });
+      expect(titleBar).toBeInTheDocument();
       fireEvent.click(titleBar);
 
       expect(document.getElementById("desktop-rail")).not.toBeInTheDocument();
@@ -6438,7 +6440,10 @@ describe("desktop presentation controls", () => {
       await screen.findByText("Hello from Aurora");
       fireEvent.click(screen.getByRole("button", { name: "Settings" }));
       const mode = document.getElementById("settings-popout-mode")!;
+      expect(mode).toHaveClass("settings-option-cards");
       expect(within(mode).getByDisplayValue("bubble")).toBeChecked();
+      expect(within(mode).getByRole("radio", { name: "Chat bubble" })).toHaveAccessibleDescription("Floating bubble that stays on top and expands into the conversation.");
+      expect(within(mode).getByRole("radio", { name: "Window" })).toHaveAccessibleDescription("A normal conversation window without a bubble.");
       fireEvent.click(within(mode).getByDisplayValue("window"));
       expect(JSON.parse(localStorage.getItem("peppy.layout.v1")!)).toMatchObject({ popoutMode: "window" });
       unmount();

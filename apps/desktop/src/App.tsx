@@ -1772,59 +1772,63 @@ function SettingsView({
           </div>
           {accentError && <p id="settings-accent-color-error" className="settings-error" role="alert">{accentError}</p>}
         </div>
-        <fieldset id="settings-navigation-position" aria-describedby="settings-navigation-position-hint">
+        <fieldset id="settings-navigation-position" className="settings-option-cards" aria-describedby="settings-navigation-position-hint">
           <legend>Navigation position</legend>
           <p id="settings-navigation-position-hint" className="settings-field-hint">Choose where the navigation buttons appear.</p>
-          <label className="settings-check">
-            <input
-              type="radio"
-              name="navigation-position"
-              value="side-rail"
-              checked={navigationPosition === "side-rail"}
-              onChange={() => onNavigationPosition("side-rail")}
-            />
-            Side rail
-          </label>
-          <label className="settings-check">
-            <input
-              type="radio"
-              name="navigation-position"
-              value="title-bar"
-              checked={navigationPosition === "title-bar"}
-              onChange={() => onNavigationPosition("title-bar")}
-            />
-            Title bar
-          </label>
+          <div className="settings-option-card-list">
+            <label data-option="side-rail">
+              <input
+                type="radio"
+                name="navigation-position"
+                value="side-rail"
+                checked={navigationPosition === "side-rail"}
+                onChange={() => onNavigationPosition("side-rail")}
+              />
+              <span>Side rail</span>
+            </label>
+            <label data-option="title-bar">
+              <input
+                type="radio"
+                name="navigation-position"
+                value="title-bar"
+                checked={navigationPosition === "title-bar"}
+                onChange={() => onNavigationPosition("title-bar")}
+              />
+              <span>Title bar</span>
+            </label>
+          </div>
         </fieldset>
-        {!browserHost && <fieldset id="settings-popout-mode" aria-describedby="settings-popout-mode-hint">
+        {!browserHost && <fieldset id="settings-popout-mode" className="settings-option-cards" aria-describedby="settings-popout-mode-hint">
           <legend>Pop-out button opens</legend>
           <p id="settings-popout-mode-hint" className="settings-field-hint">Applies to the pop-out button in the conversation header and in the conversation list.</p>
-          <label className="settings-check settings-check-described">
-            <input
-              type="radio"
-              name="popout-mode"
-              value="bubble"
-              checked={popoutMode === "bubble"}
-              onChange={() => onPopoutMode("bubble")}
-            />
-            <span className="settings-check-text">
-              <span>Chat bubble</span>
-              <span className="settings-field-hint">Floating bubble that stays on top and expands into the conversation.</span>
-            </span>
-          </label>
-          <label className="settings-check settings-check-described">
-            <input
-              type="radio"
-              name="popout-mode"
-              value="window"
-              checked={popoutMode === "window"}
-              onChange={() => onPopoutMode("window")}
-            />
-            <span className="settings-check-text">
-              <span>Window</span>
-              <span className="settings-field-hint">A normal conversation window without a bubble.</span>
-            </span>
-          </label>
+          <div className="settings-option-card-list">
+            <label data-option="chat-bubble">
+              <input
+                type="radio"
+                name="popout-mode"
+                value="bubble"
+                checked={popoutMode === "bubble"}
+                aria-labelledby="settings-popout-mode-bubble-title"
+                aria-describedby="settings-popout-mode-bubble-description"
+                onChange={() => onPopoutMode("bubble")}
+              />
+              <span id="settings-popout-mode-bubble-title">Chat bubble</span>
+              <span id="settings-popout-mode-bubble-description">Floating bubble that stays on top and expands into the conversation.</span>
+            </label>
+            <label data-option="window">
+              <input
+                type="radio"
+                name="popout-mode"
+                value="window"
+                checked={popoutMode === "window"}
+                aria-labelledby="settings-popout-mode-window-title"
+                aria-describedby="settings-popout-mode-window-description"
+                onChange={() => onPopoutMode("window")}
+              />
+              <span id="settings-popout-mode-window-title">Window</span>
+              <span id="settings-popout-mode-window-description">A normal conversation window without a bubble.</span>
+            </label>
+          </div>
         </fieldset>}
         <div id="settings-compact-timestamps-group">
           <div id="settings-compact-timestamps-row" className="settings-control-row">
@@ -1836,16 +1840,18 @@ function SettingsView({
           </div>
           <p id="settings-compact-timestamps-hint" className="settings-field-hint">Hides times on messages sent within an hour of the next one.</p>
         </div>
-        <fieldset id="settings-attachment-layout">
+        <fieldset id="settings-attachment-layout" className="settings-option-cards">
           <legend>Attached image layout</legend>
-          <label className="settings-check">
-            <input type="radio" name="attachment-layout" value="tiles" checked={attachmentLayout === "tiles"} onChange={() => onAttachmentLayout("tiles")} />
-            Preview tiles
-          </label>
-          <label className="settings-check">
-            <input type="radio" name="attachment-layout" value="rows" checked={attachmentLayout === "rows"} onChange={() => onAttachmentLayout("rows")} />
-            Compact rows
-          </label>
+          <div className="settings-option-card-list">
+            <label data-option="preview-tiles">
+              <input type="radio" name="attachment-layout" value="tiles" checked={attachmentLayout === "tiles"} onChange={() => onAttachmentLayout("tiles")} />
+              <span>Preview tiles</span>
+            </label>
+            <label data-option="compact-rows">
+              <input type="radio" name="attachment-layout" value="rows" checked={attachmentLayout === "rows"} onChange={() => onAttachmentLayout("rows")} />
+              <span>Compact rows</span>
+            </label>
+          </div>
         </fieldset>
         <div id="settings-group-sender-avatars-group">
           <div id="settings-group-sender-avatars-row" className="settings-control-row">

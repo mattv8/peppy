@@ -1382,26 +1382,86 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   flex: 1 1 100%;
   margin: 0;
 }
-#settings-navigation-position, #settings-popout-mode {
+#settings-view .settings-option-cards {
   display: grid;
-  gap: 6px;
+  gap: 8px;
   padding: 0;
   border: 0;
-  margin: 0;
+  margin: 4px 0;
+  min-width: 0;
 }
-#settings-navigation-position legend, #settings-popout-mode legend {
+#settings-view .settings-option-card-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(176px, 1fr));
+  gap: 8px;
+}
+#settings-view .settings-option-cards legend {
   padding: 0;
   color: var(--peppy-text-primary);
   font-size: 12px;
+}
+#settings-view .settings-option-card-list > label {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--peppy-border-strong);
+  border-radius: var(--peppy-radius-sm);
+  align-items: start;
+  align-content: start;
+  gap: 4px 8px;
+  cursor: pointer;
+}
+#settings-view .settings-option-card-list > label:hover { background: var(--peppy-surface-hover); }
+#settings-view .settings-option-card-list > label:has(input:checked) {
+  border-color: var(--peppy-accent);
+  background: color-mix(in srgb, var(--peppy-accent) 8%, transparent);
+}
+#settings-view .settings-option-card-list > label:has(input:focus-visible) {
+  outline: 2px solid var(--peppy-focus);
+  outline-offset: 2px;
+}
+#settings-view .settings-option-card-list > label:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: .55;
+}
+#settings-view .settings-option-card-list > label:has(input:disabled):hover { background: transparent; }
+#settings-view .settings-option-cards input[type="radio"] {
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--peppy-accent);
+}
+#settings-view .settings-option-card-list > label > span {
+  grid-column: 2;
+  color: var(--peppy-text-primary);
+  font-size: 12px;
+}
+#settings-view .settings-option-card-list > label > span + span {
+  color: var(--peppy-text-secondary);
+  overflow-wrap: anywhere;
+}
+@media (pointer: coarse) {
+  #settings-view .settings-option-card-list > label { min-height: 44px; }
+}
+@media (forced-colors: active) {
+  #settings-view .settings-option-card-list > label { border-color: ButtonText; }
+  #settings-view .settings-option-card-list > label:has(input:checked) {
+    border-color: Highlight;
+    outline: 1px solid Highlight;
+    outline-offset: -2px;
+  }
+  #settings-view .settings-option-card-list > label:has(input:focus-visible) {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+  #settings-view .settings-option-card-list > label:has(input:disabled) { border-color: GrayText; }
 }
 .settings-field-hint {
   margin: 0;
   color: var(--peppy-text-secondary);
   font-size: 12px;
 }
-.settings-check-described { align-items: flex-start; }
-.settings-check-text { display: grid; gap: 2px; }
-.settings-check-text .settings-field-hint { margin: 0; }
 .settings-error, #settings-view .settings-error { color: var(--peppy-error); font-size: 12px; }
 #startup-open-login-items { justify-self: start; }
 #reenrol-screen { display: grid; max-width: 42rem; gap: 12px; padding: 24px; margin: auto; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-md); background: var(--peppy-surface-panel); color: var(--peppy-text-primary); }
