@@ -260,10 +260,22 @@ These match the desktop composer; keep them consistent across platforms.
   with a separator. Use a neutral raised surface fill with a small corner radius.
   Only the state badge takes a semantic availability color, and its text still
   states the meaning, so color is never the only signal.
-- Show every draft status on the composer action row, directly after the route
-  badges, on one line. This includes saving, loading, save failures, sync review,
-  moved or replaced drafts, and send failures. Non-draft route or sending
-  blockers keep their own line above the action row.
+- Show every composer status on the composer action row, directly after the route
+  badges, on one line. Draft statuses (saving, loading, save failures, sync
+  review, moved or replaced drafts, send failures) come first, then route and
+  sending blockers, group refusals and progress. Never add a second status row
+  above the action row.
+- When the selected route cannot send to this chat, the state badge says so (for
+  example `RCS unconfirmed` or `Relink needed`) instead of `Online`, so the badge
+  never contradicts the status message.
+- Write each status as one sentence: what is wrong and how to fix it. Do not
+  prefix it with "Sending unavailable". Use one color per tone everywhere: error
+  for a send that was attempted and did not go out, warning for a blocker or an
+  uncertain outcome, secondary text for progress. A small tone icon goes with
+  the color.
+- When several statuses apply, show the most important one with a `+N` count.
+  Hover, tap or keyboard activation opens an anchored popover above the action
+  row with the full text, details and actions for every status.
 - Keep draft status short and direct; for example, use **Error saving draft.**
   with **Retry**, not a sentence that explains internal save state. When space
   runs out, truncate the message with an ellipsis. Action buttons, badges and

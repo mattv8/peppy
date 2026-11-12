@@ -246,6 +246,12 @@ notification previews and floating heads.
   resending seen IDs. A message is read only when actually visible.
 - The composer resize handle uses `resize-handle resize-handle-vertical
   composer-resize-grip`, which replaces the default handle classes.
+- Composer statuses render only in `#composer-inline-status` on the toolbar,
+  after the route badges. Pass non-draft statuses to `Composer` as
+  `statusItems` (`InlineStatusItem` from `@peppy/desktop-ui`) in priority order;
+  `InlineStatus` truncates the first, counts the rest as `+N`, and shows full
+  text, details and actions in an anchored popover. There is no status row above
+  the toolbar. See the mobile style guide's composer status section.
 
 ## Floating recipient rail
 
