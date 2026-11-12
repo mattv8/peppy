@@ -1,3 +1,4 @@
+use crate::rcs_mirror::{MirrorKey, MirrorSource};
 use crate::{
     AttachmentId, Captured, Client, ConversationId, Direction, Error, Inserted, MessageId,
     MessagePayload, MessageRecord, PrivatePayload, SourceSequence, Transport,
@@ -755,7 +756,26 @@ impl Client {
         if input.body.is_empty() && attachments.is_empty() {
             return Err(Error::InvalidRequest("MMS requires text or parts"));
         }
-        match reconcile_outgoing_provider_send(&tx, ctx.device_id, &input)? {
+        // Recorded before a link copy is looked for: a second row naming the same Google
+        // message id makes the id untrusted, and then neither row is taken for that copy.
+        if let Some(mirror_id) = mirrored_message_id(&input) {
+            let captured = MirrorKey {
+                mirror_id: &mirror_id,
+                conversation_id,
+                source: MirrorSource::Capture,
+            };
+            crate::rcs_mirror::record(&tx, captured, message_id)?;
+        }
+        let link_delivered = if attachments.is_empty() {
+            text_the_link_delivered(&tx, &input, conversation_id)?
+        } else {
+            None
+        };
+        let reconciliation = match link_delivered {
+            Some(matched) => matched,
+            None => reconcile_outgoing_provider_send(&tx, ctx.device_id, &input)?,
+        };
+        match reconciliation {
             Reconciliation::Matched {
                 message_id,
                 conversation_id,
@@ -1490,6 +1510,45 @@ enum Reconciliation {
     },
     Ambiguous,
     OriginalProviderMessage,
+}
+
+/// A text row that repeats a chat message the link already delivered to the row's own
+/// conversation. Rows with attachments are never matched, and neither is a link message with a
+/// picture: the two copies can hold different media, so both are kept.
+fn text_the_link_delivered(
+    conn: &rusqlite::Connection,
+    input: &MmsAcquisitionInput,
+    conversation_id: ConversationId,
+) -> Result<Option<Reconciliation>, Error> {
+    let Some(mirror_id) = mirrored_message_id(input) else {
+        return Ok(None);
+    };
+    let delivered = MirrorKey {
+        mirror_id: &mirror_id,
+        conversation_id,
+        source: MirrorSource::Link,
+    };
+    let Some(message_id) = crate::rcs_mirror::message(conn, delivered)? else {
+        return Ok(None);
+    };
+    if !crate::rcs_mirror::is_text_only(conn, message_id)? {
+        return Ok(None);
+    }
+    let (conversation_id, source_sequence) =
+        crate::message_origin::message_identity(conn, &message_id)?;
+    Ok(Some(Reconciliation::Matched {
+        message_id,
+        conversation_id,
+        source_sequence,
+    }))
+}
+
+/// The Google message id of a chat message's copy in the phone's store.
+fn mirrored_message_id(input: &MmsAcquisitionInput) -> Option<String> {
+    input
+        .transaction_id
+        .as_deref()
+        .and_then(crate::rcs_mirror::mirrored_message_id)
 }
 
 fn reconcile_outgoing_provider_send(

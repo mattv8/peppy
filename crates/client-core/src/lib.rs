@@ -97,6 +97,7 @@ mod phone_read;
 mod rcs_capability;
 mod rcs_mapping;
 mod rcs_media;
+mod rcs_mirror;
 pub use rcs_media::PendingReceiveTask;
 pub use rcs_media::{RcsMediaReceiveView, ReceiveDownloadAdmission};
 mod rcs_native;
@@ -4191,9 +4192,8 @@ fn queue_split_draft_messages(
 }
 
 /// The longest text queued as SMS, in UTF-16 units. A phone sends at most 255 parts and a part of
-/// text outside the GSM alphabet holds 67 units, but it never splits an emoji, a flag or another
-/// cluster across parts. Half of that capacity leaves room for any cluster shorter than half a
-/// part.
+/// text outside the GSM alphabet holds 67 units, but it keeps an emoji or a flag whole, so a part
+/// can end early. Half of that capacity is enough even when every part does.
 pub const MAX_SMS_TEXT_UTF16_UNITS: usize = 255 * 67 / 2;
 
 /// The transport a composed message is queued with. A text to one party is plain text whatever
@@ -9833,6 +9833,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     mms_backfill::initialize(conn)?;
     attachment_retention::initialize(conn)?;
     mcp_commands::initialize(conn)?;
+    rcs_mirror::initialize(conn)?;
     media_cache::initialize(conn)?;
     draft_sync::repair_unqueued_intent_media_references(conn)?;
     deferred_media::initialize(conn)?;

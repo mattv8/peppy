@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
@@ -26,6 +27,9 @@ type rcsReceiveRecord struct {
 	SenderUnknown        bool                  `json:"sender_unknown,omitempty"`
 	SelfSent             bool                  `json:"self_sent,omitempty"`
 	Attachments          *[]rcsMediaAttachment `json:"attachments,omitempty"`
+	// The other ids Google gives this message. The copy of the message in the phone's
+	// message store carries one of the message's ids.
+	AlternateMessageIDs *[]string `json:"alternate_message_ids,omitempty"`
 }
 
 type rcsMediaAttachment struct {
@@ -59,6 +63,21 @@ type rcsPageSignal struct {
 }
 
 const rcsMessageType int64 = 4
+
+// maxMessageIDBytes matches the id bound the core accepts.
+const maxMessageIDBytes = 512
+
+func alternateMessageIDs(message *gmproto.Message) []string {
+	another := message.GetAnotherMessageID()
+	var alternates []string
+	for _, id := range []string{another.GetMessageID(), another.GetAnotherID()} {
+		if id == "" || len(id) > maxMessageIDBytes || id == message.GetMessageID() || slices.Contains(alternates, id) {
+			continue
+		}
+		alternates = append(alternates, id)
+	}
+	return alternates
+}
 
 func projectRcsControlSignal(message *gmproto.Message) (rcsProjection, bool) {
 	code := protocolSwitchCode(message.GetMessageStatus().GetStatus())
@@ -111,6 +130,9 @@ func projectRcsMessage(wrapped *libgm.WrappedMessage, conversation *gmproto.Conv
 	}
 	if len(attachments) != 0 {
 		record.Attachments = &attachments
+	}
+	if alternates := alternateMessageIDs(message); len(alternates) != 0 {
+		record.AlternateMessageIDs = &alternates
 	}
 	if conversation.GetIsGroupChat() {
 		if direction == "outgoing" {

@@ -19504,7 +19504,10 @@ enum class NativeRcsProviderRouteReason {
     NOT_RESTRICTED_TEXT,
     NOT_LINK_OWNED,
     PRE_PROOF,
-    GUARD_BAND;
+    GUARD_BAND,
+    LINK_LATE,
+    UNIDENTIFIED,
+    MEDIA;
 
     
 
@@ -19539,7 +19542,8 @@ enum class NativeRcsProviderRowRoute {
     
     PROVIDER,
     DETECTOR_RECORDED,
-    ALERT;
+    ALERT,
+    DEFER;
 
     
 

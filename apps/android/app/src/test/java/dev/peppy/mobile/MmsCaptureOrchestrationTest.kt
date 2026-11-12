@@ -77,6 +77,21 @@ class MmsCaptureOrchestrationTest {
         assertEquals(listOf(MmsBackfillPhase.HISTORY to "1"), core.advanced)
         assertEquals(0, result.captured)
     }
+
+    @Test fun deferredMirroredRowDefersAcquisitionAndCheckpoint() {
+        var routedJson: String? = null
+        val core = FakeCore(providerRouter = RcsProviderRowRouter {
+            routedJson = it
+            NativeRcsProviderRoute(NativeRcsProviderRowRoute.DEFER, null)
+        })
+
+        val result = MmsCapture.run(plan(), core, FakeProvider(listOf(record(1).copy(transactionId = "proto:abc", restricted = true, textOnly = true))), temp())
+
+        assertEquals(0, core.inputs.size)
+        assertTrue(core.advanced.isEmpty())
+        assertTrue(result.more)
+        assertTrue(routedJson!!.contains("\"transactionId\":\"proto:abc\""))
+    }
     @Test fun recheckCompletesExistingPartUnavailableSentSmilAcquisition() {
         val smil = MmsProviderPart(10, -1, "application/smil", null, null, "<smil/>", Uri.parse("content://mms/part/10"))
         val text = MmsProviderPart(11, 0, "text/plain", null, 106, "sent body", Uri.parse("content://mms/part/11"))

@@ -91,6 +91,7 @@ fn seeded_client() -> Fixture {
                 tmp_id: Some(TMP_ID_SENTINEL.into()),
                 rcs_reported: true,
                 e2ee_reported: Some(true),
+                alternate_message_ids: Vec::new(),
                 attachments: vec![
                     RcsIncomingAttachment {
                         original_index: 0,
@@ -146,6 +147,7 @@ fn seeded_client() -> Fixture {
                 tmp_id: None,
                 rcs_reported: true,
                 e2ee_reported: None,
+                alternate_message_ids: Vec::new(),
                 attachments: vec![],
             },
         )

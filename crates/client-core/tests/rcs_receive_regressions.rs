@@ -77,6 +77,7 @@ fn record(id: &str) -> RcsProjectedRecord {
         tmp_id: None,
         rcs_reported: false,
         e2ee_reported: None,
+        alternate_message_ids: Vec::new(),
         attachments: Vec::new(),
     }
 }

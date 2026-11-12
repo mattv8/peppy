@@ -236,6 +236,10 @@ internal object GoogleMessagesLinkDiagnosticReason {
         ("provider_route" to "pre_proof") to 227L,
         ("provider_route" to "guard_band") to 228L,
         ("provider_route" to "not_link_owned") to 229L,
+        ("provider_route" to "deferred") to 230L,
+        ("provider_route" to "link_late") to 231L,
+        ("provider_route" to "unidentified") to 232L,
+        ("provider_route" to "media") to 233L,
     )
 }
 

@@ -1,4 +1,5 @@
 use crate::rcs_media;
+use crate::rcs_mirror::{MirrorKey, MirrorSource};
 use crate::{
     Client, ConversationId, Ctx, DeviceId, Direction, EnvelopePurpose, Error, Inserted, MessageId,
     MessagePayload, MessageRecord, PrivatePayload, RcsMessageStatus, Transport, enqueue, get_meta,
@@ -12,6 +13,13 @@ use uuid::Uuid;
 const MAX_DETECTORS_PER_CONVERSATION: i64 = 1_024;
 const RCS_PROVIDER_GUARD_BAND_MS: i64 = 120_000;
 const RCS_CLAIM_BACKFILL_WINDOW_MS: i64 = 15 * 60 * 1_000;
+/// How old a mirrored row may be while the capture still waits for the link to deliver its
+/// message. Shorter than the delay before the capture's next pass, so the row is decided then.
+const RCS_LINK_DELIVERY_GRACE_MS: i64 = 10_000;
+/// How long the capture waits for the link to report back a chat message Peppy itself sent.
+const RCS_SENT_ECHO_GRACE_MS: i64 = 120_000;
+/// The message box of a received row in the phone's message store.
+const PROVIDER_BOX_INBOX: i64 = 1;
 
 /// Link-owned lanes for 1:1 conversations, keyed by Google conversation id. A lane exists only on
 /// a mapping revision whose thread passed the one-to-one guard (`rcs_mapping::receive_guarded`).
@@ -91,6 +99,8 @@ pub struct RcsProviderRow {
     pub addresses: Vec<String>,
     pub restricted: bool,
     pub text_only: bool,
+    /// The row's transaction id. A mirrored chat row names its Google message id here.
+    pub transaction_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,8 +124,11 @@ pub enum RcsLinkOwnershipClaimOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RcsProviderRowRoute {
     Provider,
+    /// The link already delivered this message: the capture leaves the row alone.
     DetectorRecorded,
     Alert,
+    /// The row is seconds old and the link has not delivered it yet: ask again on a later pass.
+    Defer,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,6 +137,12 @@ pub enum RcsProviderRouteReason {
     NotLinkOwned,
     PreProof,
     GuardBand,
+    /// The link owns the chat but has not delivered this message, so the capture takes the row.
+    LinkLate,
+    /// The link owns the chat and the row does not name its Google message id.
+    Unidentified,
+    /// The link owns the chat and the row carries a picture or another attachment.
+    Media,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,6 +176,9 @@ pub struct RcsProjectedRecord {
     pub body: String,
     pub sent_at_ms: Option<i64>,
     pub tmp_id: Option<String>,
+    /// Other ids Google gives the same message. The copy in the phone's message store carries
+    /// one of this message's ids.
+    pub alternate_message_ids: Vec<String>,
     pub rcs_reported: bool,
     pub e2ee_reported: Option<bool>,
     /// Gateway-local media references never enter this record. The bounded, sanitized manifest
@@ -741,6 +763,7 @@ impl Client {
             if let RcsIdentityOutcome::Rejected(code) = identity {
                 return Ok(RcsReceiveOutcome::Rejected(code));
             }
+            record_link_report(&tx, &mirror_ids(&record), conversation_id, message_id)?;
             set_meta(
                 &tx,
                 &rcs_media::echo_identity_key(
@@ -775,6 +798,8 @@ impl Client {
                     .optional()?
         {
                 let message_id = message_id.parse().map_err(|_| Error::Database)?;
+                // Rolled back with the transaction when the identity is rejected.
+                record_link_report(&tx, &mirror_ids(&record), conversation_id, message_id)?;
                 return match record_identity(
                     &tx,
                     conversation_id,
@@ -821,6 +846,28 @@ impl Client {
             &record.google_conversation_id,
             &record.google_message_id,
         )?;
+        // Reported before any copy is looked for: a second message reporting one of these ids
+        // makes the id untrusted, and then neither message is taken for a stored copy.
+        let link_identity = linked_message(&tx, &record)?.unwrap_or(message_id);
+        record_link_report(&tx, &mirror_ids(&record), conversation_id, link_identity)?;
+        if captured_text_copy(&tx, &record, conversation_id)?.is_some() {
+            // The capture stored this text from its copy in the phone's store. The link keeps
+            // the id without a message of its own, so a replay is a duplicate as well.
+            let identity = record_identity(
+                &tx,
+                conversation_id,
+                ownership_generation,
+                &record.google_message_id,
+                &record.google_conversation_id,
+                None,
+                false,
+            )?;
+            if let RcsIdentityOutcome::Rejected(code) = identity {
+                return Ok(RcsReceiveOutcome::Rejected(code));
+            }
+            tx.commit()?;
+            return Ok(RcsReceiveOutcome::Duplicate);
+        }
         let identity = record_identity(
             &tx,
             conversation_id,
@@ -1056,6 +1103,15 @@ impl Client {
             }
         }
         let Some(message_id) = message_id else {
+            // The capture holds this text as an ordinary message, which carries no chat status.
+            if crate::rcs_mirror::link_left_message_to_capture(
+                &tx,
+                &application.google_message_id,
+                conversation_id,
+            )? {
+                tx.commit()?;
+                return Ok(RcsReceiveOutcome::StatusUnchanged);
+            }
             return Ok(RcsReceiveOutcome::Rejected(
                 RcsReceiveCode::IdentityConflict,
             ));
@@ -1381,7 +1437,9 @@ impl Client {
                 .addresses
                 .iter()
                 .filter(|address| {
-                    !crate::conversation_match::confirmed_own_address(&own, address, Some(&region))
+                    // Exactly the phone's number: a number that merely ends like it is someone else.
+                    crate::conversation_match::canonical_address(address, Some(&region))
+                        != crate::conversation_match::canonical_address(&own, Some(&region))
                 })
                 .filter_map(|address| crate::rcs_mapping::canonical_recipient(address))
                 .collect::<BTreeSet<_>>();
@@ -1457,6 +1515,49 @@ impl Client {
             tx.commit()?;
             return Ok(provider_route(RcsProviderRouteReason::GuardBand));
         }
+        // The link owning the chat does not prove it delivered this message. The row is left
+        // alone only once the link has stored, in this conversation, the text its Google message
+        // id names. A row with a picture is always captured: the two copies can hold different
+        // media.
+        if !row.text_only {
+            tx.commit()?;
+            return Ok(provider_route(RcsProviderRouteReason::Media));
+        }
+        let Some(mirror_id) = row
+            .transaction_id
+            .as_deref()
+            .and_then(crate::rcs_mirror::mirrored_message_id)
+        else {
+            tx.commit()?;
+            return Ok(provider_route(RcsProviderRouteReason::Unidentified));
+        };
+        let delivered = MirrorKey {
+            mirror_id: &mirror_id,
+            conversation_id,
+            source: MirrorSource::Link,
+        };
+        let delivered_text = match crate::rcs_mirror::message(&tx, delivered)? {
+            Some(message_id) => crate::rcs_mirror::is_text_only(&tx, message_id)?,
+            None => false,
+        };
+        if !delivered_text {
+            let now_ms = crate::notifications::now_ms();
+            let age_ms = now_ms.saturating_sub(row.observed_at_ms);
+            let outgoing = row.provider_type != PROVIDER_BOX_INBOX;
+            let link_may_still_deliver = (0..RCS_LINK_DELIVERY_GRACE_MS).contains(&age_ms)
+                || (0..RCS_SENT_ECHO_GRACE_MS).contains(&age_ms)
+                    && outgoing
+                    && sent_message_awaits_its_echo(&tx, conversation_id, now_ms)?;
+            tx.commit()?;
+            return Ok(if link_may_still_deliver {
+                RcsProviderRowRouteResult {
+                    route: RcsProviderRowRoute::Defer,
+                    reason: None,
+                }
+            } else {
+                provider_route(RcsProviderRouteReason::LinkLate)
+            });
+        }
         record_provider_detector_in_transaction(
             &tx,
             &ctx,
@@ -1468,6 +1569,10 @@ impl Client {
                 observed_at_ms: row.observed_at_ms,
                 observed_generation: ownership.ownership_generation,
             },
+        )?;
+        tx.execute(
+            "UPDATE rcs_provider_detectors SET resolved=1 WHERE conversation_id=? AND provider_row_id=?",
+            params![conversation_id.to_string(), row.provider_row_id],
         )?;
         tx.commit()?;
         Ok(RcsProviderRowRouteResult {
@@ -1815,6 +1920,93 @@ fn validate_provider_row(row: &RcsProviderRow) -> Result<(), Error> {
         return Err(Error::InvalidRequest("invalid RCS provider row"));
     }
     Ok(())
+}
+
+/// Every id Google gives one chat message. Its copy in the phone's store carries one of them.
+fn mirror_ids(record: &RcsProjectedRecord) -> Vec<String> {
+    std::iter::once(&record.google_message_id)
+        .chain(&record.alternate_message_ids)
+        .cloned()
+        .collect()
+}
+
+/// Remembers the ids the link reported for one message, under the link's own identity for it,
+/// so its copy in the phone's store is recognised later and an id reported for two messages is
+/// found out.
+fn record_link_report(
+    tx: &Connection,
+    mirror_ids: &[String],
+    conversation_id: ConversationId,
+    message_id: MessageId,
+) -> Result<(), Error> {
+    for mirror_id in mirror_ids {
+        let key = MirrorKey {
+            mirror_id,
+            conversation_id,
+            source: MirrorSource::Link,
+        };
+        crate::rcs_mirror::record(tx, key, message_id)?;
+    }
+    Ok(())
+}
+
+/// The message the link already holds for a record's own Google message id.
+fn linked_message(
+    tx: &Connection,
+    record: &RcsProjectedRecord,
+) -> Result<Option<MessageId>, Error> {
+    tx.query_row(
+        "SELECT message_id FROM rcs_message_identities WHERE google_message_id=? AND google_conversation_id=?",
+        params![record.google_message_id, record.google_conversation_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()?
+    .flatten()
+    .map(|message_id| message_id.parse().map_err(|_| Error::Database))
+    .transpose()
+}
+
+/// The message the capture already stored in this conversation from the copy of a text the link
+/// now reports. A message with a picture on either side is never matched: the two copies can
+/// hold different media, so both are kept.
+fn captured_text_copy(
+    tx: &Connection,
+    record: &RcsProjectedRecord,
+    conversation_id: ConversationId,
+) -> Result<Option<MessageId>, Error> {
+    if !record.attachments.is_empty() {
+        return Ok(None);
+    }
+    for mirror_id in &mirror_ids(record) {
+        let key = MirrorKey {
+            mirror_id,
+            conversation_id,
+            source: MirrorSource::Capture,
+        };
+        if let Some(message_id) = crate::rcs_mirror::message(tx, key)?
+            && crate::rcs_mirror::is_text_only(tx, message_id)?
+        {
+            return Ok(Some(message_id));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether Peppy sent a chat message in this conversation moments ago that the link has not
+/// reported back yet. Its copy in the phone's store must not be captured as a second message.
+fn sent_message_awaits_its_echo(
+    tx: &Connection,
+    conversation_id: ConversationId,
+    now_ms: i64,
+) -> Result<bool, Error> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rcs_send_ledger l JOIN commands c ON c.command_id=l.command_id JOIN messages m ON m.id=c.message_id
+          WHERE m.conversation_id=?1 AND l.attempted_at_ms>?2
+            AND NOT EXISTS(SELECT 1 FROM rcs_message_identities i WHERE i.message_id=c.message_id))",
+        params![conversation_id.to_string(), now_ms.saturating_sub(RCS_SENT_ECHO_GRACE_MS)],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
 }
 
 fn record_provider_detector_in_transaction(

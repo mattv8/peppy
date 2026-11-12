@@ -16294,6 +16294,9 @@ public enum NativeRcsProviderRouteReason: Equatable, Hashable {
     case notLinkOwned
     case preProof
     case guardBand
+    case linkLate
+    case unidentified
+    case media
 
 
 
@@ -16323,6 +16326,12 @@ public struct FfiConverterTypeNativeRcsProviderRouteReason: FfiConverterRustBuff
         
         case 4: return .guardBand
         
+        case 5: return .linkLate
+        
+        case 6: return .unidentified
+        
+        case 7: return .media
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -16345,6 +16354,18 @@ public struct FfiConverterTypeNativeRcsProviderRouteReason: FfiConverterRustBuff
         
         case .guardBand:
             writeInt(&buf, Int32(4))
+        
+        
+        case .linkLate:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .unidentified:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .media:
+            writeInt(&buf, Int32(7))
         
         }
     }
@@ -16373,6 +16394,7 @@ public enum NativeRcsProviderRowRoute: Equatable, Hashable {
     case provider
     case detectorRecorded
     case alert
+    case `defer`
 
 
 
@@ -16400,6 +16422,8 @@ public struct FfiConverterTypeNativeRcsProviderRowRoute: FfiConverterRustBuffer 
         
         case 3: return .alert
         
+        case 4: return .`defer`
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -16418,6 +16442,10 @@ public struct FfiConverterTypeNativeRcsProviderRowRoute: FfiConverterRustBuffer 
         
         case .alert:
             writeInt(&buf, Int32(3))
+        
+        
+        case .`defer`:
+            writeInt(&buf, Int32(4))
         
         }
     }

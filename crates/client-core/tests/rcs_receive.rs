@@ -944,6 +944,7 @@ fn provider_row_routing_uses_exact_proofs_without_creating_domain_rows() {
             provider_thread_id: 3,
             provider_type: 1,
             observed_at_ms: 1_000,
+            transaction_id: None,
             addresses: vec!["+1 (415) 555-2671".into()],
             restricted: true,
             text_only: true,
@@ -975,6 +976,7 @@ fn provider_row_routing_uses_exact_proofs_without_creating_domain_rows() {
                 provider_thread_id: 4,
                 provider_type: 1,
                 observed_at_ms: 1_001,
+                transaction_id: None,
                 addresses: vec!["+14155552671".into()],
                 restricted: true,
                 text_only: true,
@@ -989,6 +991,7 @@ fn provider_row_routing_uses_exact_proofs_without_creating_domain_rows() {
                 provider_thread_id: 6,
                 provider_type: 1,
                 observed_at_ms: 1_001,
+                transaction_id: None,
                 addresses: vec!["+14155559999".into()],
                 restricted: true,
                 text_only: true,
@@ -1005,6 +1008,7 @@ fn provider_row_routing_uses_exact_proofs_without_creating_domain_rows() {
                 provider_thread_id: 5,
                 provider_type: 1,
                 observed_at_ms: 1_002,
+                transaction_id: None,
                 addresses: vec!["+14155552671".into()],
                 restricted: true,
                 text_only: true,
@@ -1031,6 +1035,7 @@ fn provider_row_routing_refuses_a_foreign_current_gateway() {
                 provider_thread_id: 1,
                 provider_type: 1,
                 observed_at_ms: 1_000,
+                transaction_id: None,
                 addresses: vec!["+14155552671".into()],
                 restricted: true,
                 text_only: true,
@@ -1063,6 +1068,7 @@ fn unrestricted_provider_row_returns_provider_without_reading_mapping_state() {
                 provider_thread_id: 1,
                 provider_type: 1,
                 observed_at_ms: 1_000,
+                transaction_id: None,
                 addresses: vec!["+14155552671".into()],
                 restricted: false,
                 text_only: true,
@@ -1101,6 +1107,7 @@ fn restricted_text_row_before_proof_time_returns_provider() {
                 provider_thread_id: 17,
                 provider_type: 1,
                 observed_at_ms: 1_000,
+                transaction_id: None,
                 addresses: vec!["peer-local".into()],
                 restricted: true,
                 text_only: true,
@@ -1132,6 +1139,7 @@ fn restricted_text_row_without_mapping_returns_provider() {
                 provider_thread_id: 18,
                 provider_type: 1,
                 observed_at_ms: 1_000,
+                transaction_id: None,
                 addresses: vec!["unmapped-peer".into()],
                 restricted: true,
                 text_only: true,
@@ -1192,6 +1200,7 @@ fn outage_provider_routing_preserves_detector_floor_for_local_link_lane() {
                     provider_thread_id: 20,
                     provider_type: 1,
                     observed_at_ms,
+                    transaction_id: None,
                     addresses: vec!["outage-peer".into()],
                     restricted: true,
                     text_only: true,
@@ -1232,6 +1241,7 @@ fn group_provider_row_never_routes_into_a_single_participant_link_lane() {
                 provider_thread_id: 21,
                 provider_type: 2,
                 observed_at_ms: 1_000,
+                transaction_id: None,
                 addresses: vec!["group-peer-a".into(), "group-peer-b".into()],
                 restricted: true,
                 text_only: true,
@@ -1502,8 +1512,8 @@ fn claim_initial_floor_and_router_guard_band() {
             121_000,
             true,
             true,
-            RcsProviderRowRoute::DetectorRecorded,
-            None,
+            RcsProviderRowRoute::Provider,
+            Some(RcsProviderRouteReason::Unidentified),
         ),
         (
             60_000,
@@ -1516,8 +1526,8 @@ fn claim_initial_floor_and_router_guard_band() {
             121_000,
             true,
             false,
-            RcsProviderRowRoute::DetectorRecorded,
-            None,
+            RcsProviderRowRoute::Provider,
+            Some(RcsProviderRouteReason::Media),
         ),
         (
             60_000,
@@ -1547,6 +1557,7 @@ fn claim_initial_floor_and_router_guard_band() {
                 provider_thread_id: 1,
                 provider_type: 1,
                 observed_at_ms: ownership.proof_time_ms + offset,
+                transaction_id: None,
                 addresses: vec![CLAIM_PARTICIPANT.into()],
                 restricted,
                 text_only,
@@ -1561,6 +1572,7 @@ fn claim_initial_floor_and_router_guard_band() {
             provider_thread_id: 1,
             provider_type: 1,
             observed_at_ms: ownership.proof_time_ms,
+            transaction_id: None,
             addresses: vec![CLAIM_PARTICIPANT.into()],
             restricted: true,
             text_only: true,
@@ -1623,7 +1635,7 @@ fn send_proof_gateway() -> SendProofGateway {
 
 impl SendProofGateway {
     /// Proves the chat for a text another device queued to the participant in this thread.
-    fn prove_by_send(&mut self, sender_name: &str, revision: u64) {
+    fn prove_by_send(&mut self, sender_name: &str, revision: u64) -> CommandId {
         let sender = common::unlocked(
             &config(&self.directory, sender_name, &self.vault),
             &self.vault,
@@ -1654,6 +1666,7 @@ impl SendProofGateway {
             matches!(outcome, RcsMappingOutcome::Mapped(_)),
             "{outcome:?}"
         );
+        queued.command_id
     }
 
     fn claim(&self, revision: u64) -> RcsLinkOwnershipClaimOutcome {
@@ -1705,59 +1718,504 @@ fn a_send_proof_on_a_thread_with_another_party_cannot_claim_the_receive_lane() {
     assert_eq!(gateway.owned_lanes(), 0);
 }
 
-/// Google Messages mirrors chat messages into the phone's message store, and the provider capture
-/// stored such rows before the link owned the lane. Those earlier rows must not make the capture
-/// take a new mirrored row as well: the link already delivers that message.
-#[test]
-fn a_mirrored_chat_row_is_left_to_the_link_despite_earlier_captured_rows_naming_the_participant() {
+const OWN_NUMBER: &str = "+12025550100";
+const MIRRORED_MESSAGE_ID: &str = "MxAbCdEfGhIjKlMnOpQr=StU";
+
+fn wall_clock_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+/// The copy of a chat message with the participant, as the phone's message store holds it.
+fn mirrored_row(transaction_id: Option<String>, observed_at_ms: i64) -> RcsProviderRow {
+    RcsProviderRow {
+        provider_row_id: 77,
+        provider_thread_id: 5,
+        provider_type: 1,
+        observed_at_ms,
+        transaction_id,
+        addresses: vec![CLAIM_PARTICIPANT.into(), OWN_NUMBER.into()],
+        restricted: true,
+        text_only: true,
+    }
+}
+
+fn mirrored_acquisition(provider_message_id: &str) -> MmsAcquisitionInput {
+    MmsAcquisitionInput {
+        source: MmsSource {
+            source_generation: "phone-install-a".into(),
+            subscription_id: "android-subscription-7".into(),
+            provider_message_id: provider_message_id.into(),
+            provider_thread_id: Some("thread-mirror".into()),
+        },
+        direction: Direction::Incoming,
+        sender_address: Some(CLAIM_PARTICIPANT.into()),
+        recipients: vec![OWN_NUMBER.into()],
+        subject: None,
+        body: "mirrored chat message".into(),
+        imported: false,
+        observed_at_ms: wall_clock_ms(),
+        transaction_id: Some(mirrored_transaction_id(MIRRORED_MESSAGE_ID)),
+    }
+}
+
+/// The link's record of the chat message whose copy carries `MIRRORED_MESSAGE_ID`.
+fn link_record() -> RcsProjectedRecord {
+    RcsProjectedRecord {
+        alternate_message_ids: vec![MIRRORED_MESSAGE_ID.into()],
+        ..historical_record("link-message", wall_clock_ms())
+    }
+}
+
+/// A gateway whose link owns the participant's chat, with that chat's ownership generation.
+fn link_owned_gateway() -> (SendProofGateway, u64) {
+    let (gateway, generation, _sent) = link_owned_gateway_with_its_send();
+    (gateway, generation)
+}
+
+/// As `link_owned_gateway`, plus the text another device queued to prove the chat.
+fn link_owned_gateway_with_its_send() -> (SendProofGateway, u64, CommandId) {
     let mut gateway = send_proof_gateway();
-    gateway.prove_by_send("sender-a", 1);
-    assert!(matches!(
-        gateway.claim(1),
-        RcsLinkOwnershipClaimOutcome::Claimed(_)
-    ));
-    let earlier = gateway
+    gateway
         .client
-        .begin_mms_acquisition(MmsAcquisitionInput {
-            source: MmsSource {
+        .set_mms_own_address("android-subscription-7", OWN_NUMBER)
+        .unwrap();
+    // A text captured from the phone's store ties that store's thread to the conversation, as
+    // it does on a phone: the thread's later rows, mirrored ones included, land in it.
+    let text = gateway
+        .client
+        .begin_sms_acquisition(SmsAcquisitionInput {
+            source: SmsSource {
                 source_generation: "phone-install-a".into(),
                 subscription_id: "android-subscription-7".into(),
-                provider_message_id: "mirrored-earlier".into(),
+                provider_message_id: "thread-text".into(),
                 provider_thread_id: Some("thread-mirror".into()),
+                broadcast_id: None,
             },
             direction: Direction::Incoming,
             sender_address: Some(CLAIM_PARTICIPANT.into()),
-            recipients: vec!["+12025550100".into()],
-            subject: None,
-            body: "mirrored chat message".into(),
+            recipients: Vec::new(),
+            body: "text".into(),
+            imported: true,
+            sent_at_ms: Some(1),
+            date_sent_ms: Some(1),
+            creator: None,
+            source_row_fingerprint: "thread-text-fingerprint".into(),
+        })
+        .unwrap();
+    assert_eq!(text.conversation_id, gateway.conversation);
+    let sent = gateway.prove_by_send("sender-a", 1);
+    let RcsLinkOwnershipClaimOutcome::Claimed(ownership) = gateway.claim(1) else {
+        panic!("the participant's own thread opens a lane");
+    };
+    (gateway, ownership.ownership_generation, sent)
+}
+
+fn message_count(gateway: &SendProofGateway) -> usize {
+    gateway.client.messages(gateway.conversation).unwrap().len()
+}
+
+/// Google Messages mirrors chat messages into the phone's message store, and the provider capture
+/// stored such rows before the link owned the lane. Those earlier rows must not make the capture
+/// take the copy of a message the link has delivered.
+#[test]
+fn a_mirrored_row_the_link_delivered_is_left_alone_despite_earlier_captured_rows() {
+    let (gateway, generation) = link_owned_gateway();
+    let earlier = gateway
+        .client
+        .begin_mms_acquisition(MmsAcquisitionInput {
+            transaction_id: Some(mirrored_transaction_id("MxEarlierCopy")),
             imported: true,
             observed_at_ms: 1,
-            transaction_id: None,
+            ..mirrored_acquisition("mirrored-earlier")
         })
         .unwrap();
     gateway
         .client
         .complete_mms_acquisition(&earlier.acquisition_id)
         .unwrap();
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    gateway
+        .client
+        .ingest_rcs_projected_record(gateway.conversation, generation, link_record())
+        .unwrap();
 
     let route = gateway
         .client
-        .route_rcs_provider_row(RcsProviderRow {
-            provider_row_id: 77,
-            provider_thread_id: 5,
-            provider_type: 1,
-            observed_at_ms: now_ms,
-            addresses: vec![CLAIM_PARTICIPANT.into(), "+12025550100".into()],
-            restricted: true,
-            text_only: true,
-        })
+        .route_rcs_provider_row(mirrored_row(
+            Some(mirrored_transaction_id(MIRRORED_MESSAGE_ID)),
+            wall_clock_ms(),
+        ))
         .unwrap();
 
     assert_eq!(route, RcsProviderRowRoute::DetectorRecorded);
+}
+
+/// The capture runs moments after a message lands, sometimes before the link has reported it.
+#[test]
+fn a_mirrored_row_seconds_old_waits_for_the_link() {
+    let (gateway, _generation) = link_owned_gateway();
+
+    let route = gateway
+        .client
+        .route_rcs_provider_row(mirrored_row(
+            Some(mirrored_transaction_id(MIRRORED_MESSAGE_ID)),
+            wall_clock_ms(),
+        ))
+        .unwrap();
+
+    assert_eq!(route, RcsProviderRowRoute::Defer);
+}
+
+/// The link owning a chat does not prove it delivered every message: a copy it has not
+/// delivered in time is captured, so a message the link missed is never lost.
+#[test]
+fn a_mirrored_row_the_link_did_not_deliver_is_captured() {
+    let (gateway, _generation) = link_owned_gateway();
+    let a_minute_ago = wall_clock_ms() - 60_000;
+
+    let undelivered = gateway
+        .client
+        .route_rcs_provider_row_result(mirrored_row(
+            Some(mirrored_transaction_id(MIRRORED_MESSAGE_ID)),
+            a_minute_ago,
+        ))
+        .unwrap();
+    let unidentified = gateway
+        .client
+        .route_rcs_provider_row_result(mirrored_row(None, a_minute_ago))
+        .unwrap();
+
+    assert_eq!(
+        (undelivered.route, undelivered.reason),
+        (
+            RcsProviderRowRoute::Provider,
+            Some(RcsProviderRouteReason::LinkLate)
+        )
+    );
+    assert_eq!(
+        (unidentified.route, unidentified.reason),
+        (
+            RcsProviderRowRoute::Provider,
+            Some(RcsProviderRouteReason::Unidentified)
+        )
+    );
+}
+
+/// A row that names the participant, the phone's number and a third number is a group message,
+/// even when the third number ends like the phone's own.
+#[test]
+fn a_row_naming_a_number_that_only_resembles_the_phones_own_is_not_the_participants_chat() {
+    let (gateway, _generation) = link_owned_gateway();
+    let mut group_row = mirrored_row(None, wall_clock_ms() - 60_000);
+    group_row.addresses.push("2025550100".into());
+
+    let route = gateway.client.route_rcs_provider_row(group_row).unwrap();
+
+    assert_eq!(route, RcsProviderRowRoute::Alert);
+}
+
+/// Whichever copy of a chat message arrives second is recognised by Google's message id.
+#[test]
+fn the_capture_does_not_store_a_chat_message_the_link_already_delivered() {
+    let (gateway, generation) = link_owned_gateway();
+    gateway
+        .client
+        .ingest_rcs_projected_record(gateway.conversation, generation, link_record())
+        .unwrap();
+    let delivered = message_count(&gateway);
+    let acquisition = gateway
+        .client
+        .begin_mms_acquisition(mirrored_acquisition("mirrored-after-link"))
+        .unwrap();
+
+    let captured = gateway
+        .client
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+
+    assert!(captured.duplicate);
+    assert_eq!(captured.conversation_id, gateway.conversation);
+    assert_eq!(message_count(&gateway), delivered);
+}
+
+fn photo() -> RcsIncomingAttachment {
+    RcsIncomingAttachment {
+        original_index: 0,
+        media_type: "image/jpeg".into(),
+        display_name: "photo.jpg".into(),
+        plaintext_bytes: 1_024,
+        too_large: false,
+        media_ref: "google-media-ref".into(),
+    }
+}
+
+/// The two copies of a picture message can hold different media, so neither replaces the other.
+#[test]
+fn both_copies_of_a_picture_message_are_kept() {
+    let (link_first, generation) = link_owned_gateway();
+    let with_photo = || RcsProjectedRecord {
+        attachments: vec![photo()],
+        ..link_record()
+    };
+    link_first
+        .client
+        .ingest_rcs_projected_record(link_first.conversation, generation, with_photo())
+        .unwrap();
+    let delivered = message_count(&link_first);
+    let media_row = RcsProviderRow {
+        text_only: false,
+        ..mirrored_row(
+            Some(mirrored_transaction_id(MIRRORED_MESSAGE_ID)),
+            wall_clock_ms() - 60_000,
+        )
+    };
+    let text_row = mirrored_row(
+        Some(mirrored_transaction_id(MIRRORED_MESSAGE_ID)),
+        wall_clock_ms() - 60_000,
+    );
+
+    let routed_media = link_first
+        .client
+        .route_rcs_provider_row_result(media_row)
+        .unwrap();
+    let routed_text = link_first
+        .client
+        .route_rcs_provider_row_result(text_row)
+        .unwrap();
+    let acquisition = link_first
+        .client
+        .begin_mms_acquisition(mirrored_acquisition("mirrored-photo-caption"))
+        .unwrap();
+    let captured = link_first
+        .client
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+
+    assert_eq!(
+        (routed_media.route, routed_media.reason),
+        (
+            RcsProviderRowRoute::Provider,
+            Some(RcsProviderRouteReason::Media)
+        )
+    );
+    assert_eq!(
+        (routed_text.route, routed_text.reason),
+        (
+            RcsProviderRowRoute::Provider,
+            Some(RcsProviderRouteReason::LinkLate)
+        )
+    );
+    assert!(!captured.duplicate);
+    assert_eq!(message_count(&link_first), delivered + 1);
+
+    let (capture_first, generation) = link_owned_gateway();
+    let acquisition = capture_first
+        .client
+        .begin_mms_acquisition(mirrored_acquisition("mirrored-caption-first"))
+        .unwrap();
+    capture_first
+        .client
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+    let captured = message_count(&capture_first);
+
+    let outcome = capture_first
+        .client
+        .ingest_rcs_projected_record(capture_first.conversation, generation, with_photo())
+        .unwrap();
+
+    assert_eq!(outcome, RcsReceiveOutcome::Inserted);
+    assert_eq!(message_count(&capture_first), captured + 1);
+}
+
+/// The link's ids are matched to a copy in the phone's store, never to each other: one message
+/// naming another message's id among its own is still a message of its own.
+#[test]
+fn the_link_stores_two_messages_that_share_an_id() {
+    let (gateway, generation) = link_owned_gateway();
+    let first = RcsProjectedRecord {
+        alternate_message_ids: vec![MIRRORED_MESSAGE_ID.into()],
+        ..historical_record("123", wall_clock_ms())
+    };
+    let second = RcsProjectedRecord {
+        alternate_message_ids: vec!["123".into(), MIRRORED_MESSAGE_ID.into()],
+        ..historical_record("456", wall_clock_ms())
+    };
+    let before = message_count(&gateway);
+    let ingest = |record| {
+        gateway
+            .client
+            .ingest_rcs_projected_record(gateway.conversation, generation, record)
+            .unwrap()
+    };
+
+    let outcomes = [ingest(first), ingest(second)];
+    let shared_id_row = gateway
+        .client
+        .route_rcs_provider_row_result(mirrored_row(
+            Some(mirrored_transaction_id(MIRRORED_MESSAGE_ID)),
+            wall_clock_ms() - 60_000,
+        ))
+        .unwrap();
+
+    assert_eq!(outcomes, [RcsReceiveOutcome::Inserted; 2]);
+    assert_eq!(message_count(&gateway), before + 2);
+    assert_eq!(
+        (shared_id_row.route, shared_id_row.reason),
+        (
+            RcsProviderRowRoute::Provider,
+            Some(RcsProviderRouteReason::LinkLate)
+        ),
+        "an id the link gave two messages cannot say which one a row copies"
+    );
+}
+
+/// A text the capture stored first, with the gateway that holds it and its ownership generation.
+fn captured_first_gateway() -> (SendProofGateway, u64) {
+    let (gateway, generation) = link_owned_gateway();
+    let acquisition = gateway
+        .client
+        .begin_mms_acquisition(mirrored_acquisition("mirrored-before-link"))
+        .unwrap();
+    gateway
+        .client
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+    (gateway, generation)
+}
+
+/// Two link messages cannot both be the one text the capture stored: once a second message
+/// names the stored copy's id, the id says nothing and the message is kept.
+#[test]
+fn a_second_link_message_naming_a_captured_id_is_stored() {
+    let (gateway, generation) = captured_first_gateway();
+    let captured = message_count(&gateway);
+    let naming_the_copy = |google_message_id: &str| RcsProjectedRecord {
+        alternate_message_ids: vec![MIRRORED_MESSAGE_ID.into()],
+        ..historical_record(google_message_id, wall_clock_ms())
+    };
+    let ingest = |record| {
+        gateway
+            .client
+            .ingest_rcs_projected_record(gateway.conversation, generation, record)
+            .unwrap()
+    };
+
+    let outcomes = [
+        ingest(naming_the_copy("123")),
+        ingest(naming_the_copy("456")),
+    ];
+
+    assert_eq!(
+        outcomes,
+        [RcsReceiveOutcome::Duplicate, RcsReceiveOutcome::Inserted]
+    );
+    assert_eq!(message_count(&gateway), captured + 1);
+}
+
+/// Google reports a delivery status with the message. For a text the capture holds as an
+/// ordinary message there is nothing to apply it to, and that must not stop history recovery.
+#[test]
+fn a_status_for_a_text_left_to_the_capture_is_accepted_and_recovery_goes_on() {
+    let (gateway, generation) = captured_first_gateway();
+    let record = link_record();
+    let status = RcsStatusApplication {
+        google_message_id: record.google_message_id.clone(),
+        google_conversation_id: record.google_conversation_id.clone(),
+        tmp_id: None,
+        status: RcsProjectedStatus::Sent,
+    };
+    let unknown_message = RcsStatusApplication {
+        google_message_id: "never-reported".into(),
+        ..status.clone()
+    };
+    let recorded = gateway
+        .client
+        .ingest_rcs_projected_record(gateway.conversation, generation, record)
+        .unwrap();
+
+    let apply = |application| {
+        gateway
+            .client
+            .apply_rcs_projected_status(gateway.conversation, generation, application)
+            .unwrap()
+    };
+    let outcomes = [apply(status), apply(unknown_message)];
+    let recovery = gateway
+        .client
+        .complete_rcs_recovery(gateway.conversation, generation, wall_clock_ms())
+        .unwrap();
+
+    assert_eq!(recorded, RcsReceiveOutcome::Duplicate);
+    assert_eq!(
+        outcomes,
+        [
+            RcsReceiveOutcome::StatusUnchanged,
+            RcsReceiveOutcome::Rejected(RcsReceiveCode::IdentityConflict)
+        ]
+    );
+    assert_eq!(recovery, RcsRecoveryOutcome::Recorded);
+}
+
+/// The copy of a text Peppy itself just sent waits for the link to report that text back, so
+/// the capture does not store it as a second message.
+#[test]
+fn the_copy_of_a_text_peppy_just_sent_waits_for_the_link_to_report_it() {
+    let (gateway, generation, sent) = link_owned_gateway_with_its_send();
+    let now_ms = wall_clock_ms();
+    sqlcipher(&gateway.config.database_path)
+        .execute(
+            "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms) VALUES(?,'tmp-sent',1,?,?,?)",
+            rusqlite::params![sent.to_string(), vec![0_u8; 32], CLAIM_GOOGLE_ID, now_ms],
+        )
+        .unwrap();
+    let half_a_minute_old = |provider_type| RcsProviderRow {
+        provider_type,
+        ..mirrored_row(
+            Some(mirrored_transaction_id(MIRRORED_MESSAGE_ID)),
+            now_ms - 30_000,
+        )
+    };
+    let (sent_box, inbox) = (2, 1);
+    let route = |row| gateway.client.route_rcs_provider_row(row).unwrap();
+
+    let before_echo = [
+        route(half_a_minute_old(sent_box)),
+        route(half_a_minute_old(inbox)),
+    ];
+    let echo = RcsProjectedRecord {
+        direction: Direction::Outgoing,
+        tmp_id: Some("tmp-sent".into()),
+        ..link_record()
+    };
+    let echoed = gateway
+        .client
+        .ingest_rcs_projected_record(gateway.conversation, generation, echo)
+        .unwrap();
+    let after_echo = route(half_a_minute_old(sent_box));
+
+    assert_eq!(
+        before_echo,
+        [RcsProviderRowRoute::Defer, RcsProviderRowRoute::Provider]
+    );
+    assert_eq!(echoed, RcsReceiveOutcome::OutgoingMatched);
+    assert_eq!(after_echo, RcsProviderRowRoute::DetectorRecorded);
+}
+
+#[test]
+fn the_link_does_not_store_a_chat_message_the_capture_already_took() {
+    let (gateway, generation) = captured_first_gateway();
+    let captured = message_count(&gateway);
+
+    let outcome = gateway
+        .client
+        .ingest_rcs_projected_record(gateway.conversation, generation, link_record())
+        .unwrap();
+
+    assert_eq!(outcome, RcsReceiveOutcome::Duplicate);
+    assert_eq!(message_count(&gateway), captured);
 }
 
 /// A receive context fetched while the thread was the participant's alone must not be usable
@@ -1848,6 +2306,7 @@ fn historical_record(google_message_id: &str, sent_at_ms: i64) -> RcsProjectedRe
         tmp_id: None,
         rcs_reported: false,
         e2ee_reported: None,
+        alternate_message_ids: Vec::new(),
         attachments: Vec::new(),
     }
 }
@@ -1950,6 +2409,7 @@ fn claim_changed_google_id_begins_a_fenced_generation() {
             provider_thread_id: 7,
             provider_type: 1,
             observed_at_ms: now_ms(),
+            transaction_id: None,
             addresses: vec![CLAIM_PARTICIPANT.into()],
             restricted: true,
             text_only: true,

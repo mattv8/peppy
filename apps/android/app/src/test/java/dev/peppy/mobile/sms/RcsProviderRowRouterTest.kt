@@ -26,6 +26,31 @@ class RcsProviderRowRouterTest {
         assertEquals(ProviderAcquisitionRoute.ACQUIRE, router.route(1, 2, 1, 3, listOf("+15550001")))
     }
 
+    @Test fun mediaAcquires() {
+        val router = RcsProviderRowRouter { NativeRcsProviderRoute(NativeRcsProviderRowRoute.PROVIDER, NativeRcsProviderRouteReason.MEDIA) }
+        assertEquals(ProviderAcquisitionRoute.ACQUIRE, router.route(1, 2, 1, 3, listOf("+15550001")))
+    }
+
+    @Test fun transactionIdIsPassedWhenValidAndOmittedOtherwise() {
+        val json = mutableListOf<String>()
+        val router = RcsProviderRowRouter { json += it; route(NativeRcsProviderRowRoute.PROVIDER) }
+
+        router.route(1, 2, 1, 3, listOf("+15550001"), transactionId = "proto:abc")
+        router.route(2, 2, 1, 3, listOf("+15550001"), transactionId = null)
+        router.route(3, 2, 1, 3, listOf("+15550001"), transactionId = " ")
+        router.route(4, 2, 1, 3, listOf("+15550001"), transactionId = "a".repeat(513))
+
+        assertTrue(json[0].contains("\"transactionId\":\"proto:abc\""))
+        assertEquals(4, json.size)
+        assertTrue(json.drop(1).none { it.contains("\"transactionId\"") })
+    }
+
+    @Test fun deferMapsToDeferredAcquisition() {
+        val router = RcsProviderRowRouter { route(NativeRcsProviderRowRoute.DEFER) }
+
+        assertEquals(ProviderAcquisitionRoute.DEFER, router.route(1, 2, 1, 3, listOf("+15550001")))
+    }
+
     @Test fun detectorRecordedSkipsAndAdvancesSmsCheckpoint() {
         val core = SmsCore(RcsProviderRowRouter { route(NativeRcsProviderRowRoute.DETECTOR_RECORDED) })
         val summary = SmsCapture.run(SmsCapturePlan("generation", false, 0), core, SmsProvider(row()))
@@ -59,6 +84,10 @@ class RcsProviderRowRouterTest {
             NativeRcsProviderRoute(NativeRcsProviderRowRoute.PROVIDER, NativeRcsProviderRouteReason.PRE_PROOF) to 227L,
             NativeRcsProviderRoute(NativeRcsProviderRowRoute.PROVIDER, NativeRcsProviderRouteReason.GUARD_BAND) to 228L,
             NativeRcsProviderRoute(NativeRcsProviderRowRoute.PROVIDER, NativeRcsProviderRouteReason.NOT_LINK_OWNED) to 229L,
+            NativeRcsProviderRoute(NativeRcsProviderRowRoute.DEFER, null) to 230L,
+            NativeRcsProviderRoute(NativeRcsProviderRowRoute.PROVIDER, NativeRcsProviderRouteReason.LINK_LATE) to 231L,
+            NativeRcsProviderRoute(NativeRcsProviderRowRoute.PROVIDER, NativeRcsProviderRouteReason.UNIDENTIFIED) to 232L,
+            NativeRcsProviderRoute(NativeRcsProviderRowRoute.PROVIDER, NativeRcsProviderRouteReason.MEDIA) to 233L,
         )
         for ((outcome, reason) in outcomes) {
             val events = mutableListOf<String>()

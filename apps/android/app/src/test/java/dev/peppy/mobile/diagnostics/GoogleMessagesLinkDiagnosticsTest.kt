@@ -120,6 +120,8 @@ class GoogleMessagesLinkDiagnosticsTest {
         "mapping_refusal" to "recipient_mismatch",
         "provider_route" to "alert", "provider_route" to "left_to_link", "provider_route" to "pre_proof",
         "provider_route" to "guard_band", "provider_route" to "not_link_owned",
+        "provider_route" to "deferred", "provider_route" to "link_late", "provider_route" to "unidentified",
+        "provider_route" to "media",
     )
 
     @Test fun everyPairRecordsOnlyItsStableNumericReason() {
@@ -127,7 +129,7 @@ class GoogleMessagesLinkDiagnosticsTest {
         SyncDiagnostics.withTestConfiguration(true, { 10L }, { error("CPU unused") }, records::add) {
             stablePairs.forEach { (kind, code) -> recordGoogleMessagesLinkEvent(kind, code, Long.MAX_VALUE) }
         }
-		assertEquals(229, records.size)
+		assertEquals(233, records.size)
         records.forEachIndexed { index, record ->
             assertEquals("event=27 session=1 timestamp_ms=10 trace=0 29=${index + 1}", record)
         }

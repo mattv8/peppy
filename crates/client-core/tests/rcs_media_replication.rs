@@ -43,6 +43,7 @@ fn incoming_media_record() -> RcsProjectedRecord {
         tmp_id: None,
         rcs_reported: true,
         e2ee_reported: Some(true),
+        alternate_message_ids: Vec::new(),
         attachments: vec![
             RcsIncomingAttachment {
                 original_index: 0,

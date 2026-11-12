@@ -94,16 +94,15 @@ pub(crate) fn message_view(
     message: Message,
 ) -> Result<NativeMessage, peppy_client_core::Error> {
     let is_rcs = message.payload.transport == Transport::Rcs;
-    let (rcs, rcs_reported) =
-        if is_rcs || message.payload.direction == Direction::Outgoing {
-            let message_id = message.payload.record.message_id;
-            (
-                client.rcs_message_status(message_id)?,
-                client.rcs_message_reported(message_id)?,
-            )
-        } else {
-            (None, None)
-        };
+    let (rcs, rcs_reported) = if is_rcs || message.payload.direction == Direction::Outgoing {
+        let message_id = message.payload.record.message_id;
+        (
+            client.rcs_message_status(message_id)?,
+            client.rcs_message_reported(message_id)?,
+        )
+    } else {
+        (None, None)
+    };
     let has_rcs_evidence = rcs.is_some() || rcs_reported == Some(true);
     Ok(NativeMessage {
         message_id: message.payload.record.message_id.to_string(),
@@ -194,6 +193,7 @@ const GO_RECORD_JSON_CAP: usize = 65_536;
 const GO_ID_CAP: usize = 512;
 const GO_BODY_CAP: usize = 16_384;
 const GO_CURSOR_CAP: usize = 4_096;
+const MAX_ALTERNATE_MESSAGE_IDS: usize = 4;
 
 /// Exact shape of Go's `rcsReceiveRecord` (`apps/android/googlemessages/gmlink/receive.go`).
 /// `tmp_id` and `e2ee_reported` are `omitempty` on the Go side; all other keys are always emitted.
@@ -221,6 +221,9 @@ struct GoReceiveRecord {
     self_sent: bool,
     #[serde(default)]
     attachments: Vec<GoReceiveAttachment>,
+    /// Other ids Google gives the same message; `omitempty` on the Go side.
+    #[serde(default)]
+    alternate_message_ids: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -277,8 +280,7 @@ fn bounded_text(value: &str, max: usize) -> Result<(), MobileBindingsError> {
 mod tests {
     use super::*;
     use peppy_client_core::{
-        ClientConfig, DatabaseKey, DeviceId, MessagePayload, MessageRecord, SourceSequence,
-        VaultId,
+        ClientConfig, DatabaseKey, DeviceId, MessagePayload, MessageRecord, SourceSequence, VaultId,
     };
 
     const SQLCIPHER_KEY: &str =
@@ -315,8 +317,7 @@ mod tests {
     }
 
     fn client() -> (Client, std::path::PathBuf) {
-        let path = std::env::temp_dir()
-            .join(format!("peppy-rcs-view-{}.db", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("peppy-rcs-view-{}.db", uuid::Uuid::new_v4()));
         let client = Client::open(
             ClientConfig {
                 database_path: path.clone(),
@@ -335,7 +336,11 @@ mod tests {
             .unwrap();
         db.execute(
             "INSERT INTO rcs_message_status(message_id,status_rank,rcs_reported) VALUES(?,?,?)",
-            rusqlite::params![message.payload.record.message_id.to_string(), rank, reported],
+            rusqlite::params![
+                message.payload.record.message_id.to_string(),
+                rank,
+                reported
+            ],
         )
         .unwrap();
     }
@@ -436,6 +441,12 @@ impl GoReceiveRecord {
         if let Some(tmp_id) = self.tmp_id.as_deref() {
             bounded_text(tmp_id, GO_ID_CAP)?;
         }
+        if self.alternate_message_ids.len() > MAX_ALTERNATE_MESSAGE_IDS {
+            return Err(MobileBindingsError::InvalidRequest);
+        }
+        for alternate in &self.alternate_message_ids {
+            bounded_text(alternate, GO_ID_CAP)?;
+        }
         let direction = match self.direction.as_str() {
             "incoming" => Direction::Incoming,
             "outgoing" => Direction::Outgoing,
@@ -497,6 +508,7 @@ impl GoReceiveRecord {
                 tmp_id: self.tmp_id.clone(),
                 rcs_reported: self.rcs_reported,
                 e2ee_reported,
+                alternate_message_ids: self.alternate_message_ids,
                 attachments,
             },
             group_sender,
@@ -557,6 +569,7 @@ pub enum NativeRcsProviderRowRoute {
     Provider,
     DetectorRecorded,
     Alert,
+    Defer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -565,6 +578,9 @@ pub enum NativeRcsProviderRouteReason {
     NotLinkOwned,
     PreProof,
     GuardBand,
+    LinkLate,
+    Unidentified,
+    Media,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -585,6 +601,8 @@ struct ProviderRowJson {
     restricted: bool,
     #[serde(default)]
     text_only: bool,
+    #[serde(default)]
+    transaction_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -686,6 +704,7 @@ fn provider_row_route(value: RcsProviderRowRoute) -> NativeRcsProviderRowRoute {
         RcsProviderRowRoute::Provider => NativeRcsProviderRowRoute::Provider,
         RcsProviderRowRoute::DetectorRecorded => NativeRcsProviderRowRoute::DetectorRecorded,
         RcsProviderRowRoute::Alert => NativeRcsProviderRowRoute::Alert,
+        RcsProviderRowRoute::Defer => NativeRcsProviderRowRoute::Defer,
     }
 }
 
@@ -697,6 +716,9 @@ fn provider_route_reason(value: RcsProviderRouteReason) -> NativeRcsProviderRout
         RcsProviderRouteReason::NotLinkOwned => NativeRcsProviderRouteReason::NotLinkOwned,
         RcsProviderRouteReason::PreProof => NativeRcsProviderRouteReason::PreProof,
         RcsProviderRouteReason::GuardBand => NativeRcsProviderRouteReason::GuardBand,
+        RcsProviderRouteReason::LinkLate => NativeRcsProviderRouteReason::LinkLate,
+        RcsProviderRouteReason::Unidentified => NativeRcsProviderRouteReason::Unidentified,
+        RcsProviderRouteReason::Media => NativeRcsProviderRouteReason::Media,
     }
 }
 
@@ -1079,6 +1101,7 @@ impl NativeClient {
                 provider_thread_id: row.provider_thread_id,
                 provider_type: row.provider_type,
                 observed_at_ms: row.observed_at_ms,
+                transaction_id: row.transaction_id,
                 addresses: row.addresses,
                 restricted: row.restricted,
                 text_only: row.text_only,
