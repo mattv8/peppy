@@ -464,7 +464,7 @@ class GoogleMessagesLinkServiceTest {
         handle.allowRunReturn.countDown()
     }
 
-    @Test fun `ready publishes eligibility for linked mapped conversations`() {
+    @Test fun `ready and recovered publish eligibility for linked mapped conversations`() {
         val handle = MutableStatusRunHandle()
         val enumerations = AtomicInteger()
         GoogleMessagesLinkService.testHooks = ServiceTestHooks(
@@ -477,7 +477,83 @@ class GoogleMessagesLinkServiceTest {
 
         handle.status = READY_STATUS
         GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+        GoogleMessagesLinkService.onLinkEvent("conn", "recovered")
 
+        assertEquals(2, enumerations.get())
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `index stale records lifecycle and queues eligibility publication`() {
+        val handle = MutableStatusRunHandle()
+        val executor = QueueExecutor()
+        val recorded = mutableListOf<LinkStatus>()
+        val enumerations = AtomicInteger()
+        LinkCoreBridge.recorder = { _, status -> synchronized(recorded) { recorded += status }; true }
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            eligibilityExecutor = executor,
+            notificationExecutor = Executor(Runnable::run),
+            beforeEligibilityEnumeration = { enumerations.incrementAndGet() },
+        )
+        installEngine(handle)
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+
+        handle.status = READY_STATUS
+        GoogleMessagesLinkService.onLinkEvent("index", "stale")
+
+        assertTrue(synchronized(recorded) { READY_STATUS_PARSED in recorded })
+        assertEquals(1, executor.size)
+        executor.runAll()
+        assertEquals(1, enumerations.get())
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `refused lifecycle prevents index stale eligibility publication`() {
+        val handle = MutableStatusRunHandle()
+        val executor = QueueExecutor()
+        val enumerations = AtomicInteger()
+        val refuseLifecycle = AtomicBoolean(false)
+        LinkCoreBridge.recorder = { _, _ -> !refuseLifecycle.get() }
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            eligibilityExecutor = executor,
+            notificationExecutor = Executor(Runnable::run),
+            beforeEligibilityEnumeration = { enumerations.incrementAndGet() },
+        )
+        installEngine(handle)
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+
+        refuseLifecycle.set(true)
+        handle.status = READY_STATUS
+        GoogleMessagesLinkService.onLinkEvent("index", "stale")
+
+        assertEquals(0, executor.size)
+        assertEquals(0, enumerations.get())
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `conversation updates continue to coalesce eligibility publication`() {
+        val handle = MutableStatusRunHandle()
+        val executor = QueueExecutor()
+        val enumerations = AtomicInteger()
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            eligibilityExecutor = executor,
+            notificationExecutor = Executor(Runnable::run),
+            beforeEligibilityEnumeration = { enumerations.incrementAndGet() },
+        )
+        installEngine(handle)
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+
+        handle.status = READY_STATUS
+        GoogleMessagesLinkService.onLinkEvent("conversation", "updated")
+        GoogleMessagesLinkService.onLinkEvent("conversation", "updated")
+
+        assertEquals(1, executor.size)
+        executor.runAll()
         assertEquals(1, enumerations.get())
         controller.destroy()
         handle.allowRunReturn.countDown()

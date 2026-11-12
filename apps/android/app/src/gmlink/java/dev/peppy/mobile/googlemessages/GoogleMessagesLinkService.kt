@@ -933,7 +933,7 @@ class GoogleMessagesLinkService : Service() {
                     if (publishesEligibility && lifecycleRecorded) {
                         service.requestRcsBootstrap()
                         if (connectionReady) service.publishNativeRcsEligibility()
-                        else if (kind == "conversation" && code == "updated") service.queueNativeRcsEligibility()
+                        else service.queueNativeRcsEligibility()
                     }
 					service.refreshNotificationAfterEvent()
                 }.onFailure { recordGoogleMessagesLinkEvent("link", "rcs_callback_failed", 0) }
