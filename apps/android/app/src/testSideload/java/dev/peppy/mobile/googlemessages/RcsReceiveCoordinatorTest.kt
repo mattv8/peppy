@@ -250,7 +250,7 @@ class RcsReceiveCoordinatorTest {
         val conv = conv("core-a", "google-a", watermarkMs = BASE)
         val core = FakeCore(listOf(conv)).apply { refusals["a"] = "identity_conflict" }
 
-        assertEquals(RcsRecoveryResult.ABORTED, coordinator(core).resumeConversation(google, "google-a"))
+        assertRecoveryAbort(259L) { coordinator(core).resumeConversation(google, "google-a") }
 
         assertTrue(core.progressWrites.isEmpty())
         assertEquals(BASE, conv.watermarkMs)
@@ -264,7 +264,7 @@ class RcsReceiveCoordinatorTest {
             onIngest = { _, _, _ -> cancelled.set(true); accepted() }
         }
 
-        val result = coordinator(core).resumeConversation(google, "google-a", cancelled)
+        val result = assertRecoveryAbort(258L) { coordinator(core).resumeConversation(google, "google-a", cancelled) }
 
         assertEquals(RcsRecoveryResult.ABORTED, result)
         assertEquals(1, core.ingestedRecords.size)
@@ -355,7 +355,7 @@ class RcsReceiveCoordinatorTest {
         assertEquals(listOf("google-a" to null), core.invalidations)
     }
 
-    @Test fun `throwing history signal invalidation aborts without progress`() {
+    @Test fun `group-lane history signal failure records its abort cause`() {
         val google = FakeGoogle(mapOf("google-a" to listOf(Msg("a", BASE + 2), Msg("b", BASE + 1)))).apply {
             fetchHook = { _, _ ->
                 JSONObject().put("code", "ok").put("records", JSONArray())
@@ -367,7 +367,7 @@ class RcsReceiveCoordinatorTest {
             invalidateFailure = IllegalStateException("stale expectation")
         }
 
-        assertEquals(RcsRecoveryResult.ABORTED, coordinator(core).resumeConversation(google, "google-a"))
+        assertRecoveryAbort(260L) { coordinator(core).resumeConversation(google, "google-a") }
 
         assertEquals(1, core.invalidations.size)
         assertTrue(core.progressWrites.isEmpty())
@@ -394,19 +394,27 @@ class RcsReceiveCoordinatorTest {
     @Test fun `failed progress or context reload aborts recovery`() {
         val google = FakeGoogle(mapOf("google-a" to listOf(Msg("a", BASE + 1), Msg("b", BASE + 2)))).apply { pageSize = 1 }
         val progressFailure = FakeCore(listOf(conv("core-a", "google-a"))).apply { progressRejection = "stale" }
-        assertEquals(RcsRecoveryResult.ABORTED, coordinator(progressFailure).resumeConversation(google, "google-a"))
+        assertRecoveryAbort(261L) { coordinator(progressFailure).resumeConversation(google, "google-a") }
 
         val reloadMissing = FakeCore(listOf(conv("core-a", "google-a"))).apply { contextMissingAfterProgress = true }
-        assertEquals(RcsRecoveryResult.ABORTED, coordinator(reloadMissing).resumeConversation(google, "google-a"))
+        assertRecoveryAbort(262L) { coordinator(reloadMissing).resumeConversation(google, "google-a") }
     }
 
     @Test fun `failed finish or hint clearing aborts recovery`() {
         val completionFailure = FakeCore(listOf(conv("core-a", "google-a"))).apply { completionRejection = "stale" }
-        assertEquals(RcsRecoveryResult.ABORTED, coordinator(completionFailure).resumeConversation(FakeGoogle(mapOf("google-a" to listOf(Msg("a", BASE + 1)))), "google-a"))
+        assertRecoveryAbort(263L) {
+            coordinator(completionFailure).resumeConversation(FakeGoogle(mapOf("google-a" to listOf(Msg("a", BASE + 1)))), "google-a")
+        }
 
         val clearFailure = FakeCore(listOf(conv("core-a", "google-a"))).apply { clearRejection = "stale" }
         val badPage = FakeGoogle(emptyMap()).apply { fetchHook = { _, _ -> """{\"code\":\"failed\"}""" } }
-        assertEquals(RcsRecoveryResult.ABORTED, coordinator(clearFailure).resumeConversation(badPage, "google-a"))
+        assertRecoveryAbort(264L) { coordinator(clearFailure).resumeConversation(badPage, "google-a") }
+    }
+
+    @Test fun `missing initial context records only its abort cause`() {
+        assertRecoveryAbort(257L, recoveryAbort = false) {
+            coordinator(FakeCore(emptyList())).resumeConversation(FakeGoogle(emptyMap()), "google-a")
+        }
     }
 
     @Test fun `idle conversations are skipped by last message time but zero or missing activity is swept`() {
@@ -520,7 +528,7 @@ class RcsReceiveCoordinatorTest {
         assertTrue(core.ingestedRecords.isEmpty())
     }
 
-    @Test fun `live protocol switch records no signal age`() {
+    @Test fun `live protocol switch records invalidation but no signal age`() {
         val records = mutableListOf<String>()
         SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
             coordinator(FakeCore(listOf(conv("core-a", "google-a")))).receive(
@@ -528,6 +536,16 @@ class RcsReceiveCoordinatorTest {
             )
         }
         assertTrue(records.none { it.substringAfter("29=").toLong() in 266L..279L })
+        assertEquals(listOf(265L), records.map { it.substringAfter("29=").toLong() })
+    }
+
+    @Test fun `live protocol switch without invalidation records no diagnostics`() {
+        val records = mutableListOf<String>()
+        val core = FakeCore(listOf(conv("core-a", "google-a"))).apply { invalidateResult = false }
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            coordinator(core).receive(JSONObject().put("code", "protocol_switch").put("google_conversation_id", "google-a").toString())
+        }
+        assertTrue(records.isEmpty())
     }
 
     @Test fun `live and gap ingestion preserve acquisition provenance`() {
@@ -564,6 +582,15 @@ class RcsReceiveCoordinatorTest {
         reconcileGroups,
         nowMs,
     )
+
+    private fun assertRecoveryAbort(code: Long, recoveryAbort: Boolean = true, action: () -> RcsRecoveryResult): RcsRecoveryResult {
+        val records = mutableListOf<String>()
+        val result = SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) { action() }
+        assertEquals(RcsRecoveryResult.ABORTED, result)
+        val reasons = records.map { it.substringAfter("29=").toLong() }
+        assertEquals(if (recoveryAbort) listOf(code, 44L) else listOf(code), reasons)
+        return result
+    }
 
     private fun thread(block: () -> Unit) = Thread(block).apply { start() }
 
