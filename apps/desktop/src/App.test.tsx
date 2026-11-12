@@ -5510,7 +5510,7 @@ describe("host state display", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
-    expect(await screen.findByText("Storage used")).toBeInTheDocument();
+    await waitFor(() => expect(document.getElementById("attachment-storage-meter")).toBeInTheDocument());
     expect(storageStatus).toHaveBeenCalledOnce();
     expect(screen.queryByRole("button", { name: "Sign out of Peppy" })).not.toBeInTheDocument();
   });

@@ -1019,6 +1019,8 @@ export const nativeCatalog = Object.freeze(
 
 /** Desktop wording overrides and desktop-only keys. Mobile outputs use `catalog` only. */
 export const desktopOverrides = Object.freeze({
+  attachment_storage_used_of_limit: "%1$s of %2$s used",
+  attachment_storage_included_plus_addon: "%1$s included + %2$s add-on storage",
   group_details_open_label: "Group details",
   group_details_title: "Group details",
   group_details_name_label: "Name",

@@ -44,6 +44,15 @@ describe("HostedAccountSettings", () => {
     expect(screen.queryByText("Google")).not.toBeInTheDocument();
   });
 
+  it("groups signed-in account actions into compact account rows", async () => {
+    vi.mocked(bridge.hosted_account).mockResolvedValue(account({ signedIn: true, accountLabel: "Ada" }));
+    render(<HostedAccountSettings />);
+
+    expect(await screen.findByRole("button", { name: "Sign out of Peppy" })).toBeInTheDocument();
+    expect(document.getElementById("hosted-account-sign-out-row")).toContainElement(document.getElementById("hosted-account-sign-out"));
+    expect(document.getElementById("hosted-account-delete")).toContainElement(document.getElementById("hosted-account-delete-open"));
+  });
+
   it("refreshes to the signed-out state after sign-out and focuses its action", async () => {
     vi.mocked(bridge.hosted_account)
       .mockResolvedValueOnce(account({ signedIn: true, accountLabel: "Ada" }))
@@ -222,12 +231,12 @@ describe("AttachmentStorageSettingsHost", () => {
       .mockResolvedValueOnce(status())
       .mockResolvedValueOnce({ kind: "temporarily_unavailable" });
     render(<AttachmentStorageSettingsHost />);
-    await screen.findByText("20 GB");
+    await screen.findByText(/20 GB of/);
 
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
 
     expect(await screen.findByText("Last known storage usage")).toBeInTheDocument();
-    expect(screen.getByText("20 GB")).toBeInTheDocument();
+    expect(screen.getByText(/20 GB of/)).toBeInTheDocument();
   });
 
   it("keeps loading billing controls after a retention-status failure", async () => {
@@ -247,14 +256,14 @@ describe("AttachmentStorageSettingsHost", () => {
       .mockReturnValueOnce(deviceB.promise);
     const { rerender } = render(<AttachmentStorageSettingsHost sessionScopeId="device-a" />);
     await act(async () => deviceA.resolve(status({ usedBytes: 20_000_000_000 })));
-    expect(await screen.findByText("20 GB")).toBeInTheDocument();
+    expect(await screen.findByText(/20 GB of/)).toBeInTheDocument();
 
     rerender(<AttachmentStorageSettingsHost sessionScopeId="device-b" />);
-    expect(screen.queryByText("20 GB")).not.toBeInTheDocument();
+    expect(screen.queryByText(/20 GB of/)).not.toBeInTheDocument();
 
     await act(async () => deviceB.resolve({ kind: "temporarily_unavailable" }));
     expect(await screen.findByText(/Storage policy status is unavailable/)).toBeInTheDocument();
-    expect(screen.queryByText("20 GB")).not.toBeInTheDocument();
+    expect(screen.queryByText(/20 GB of/)).not.toBeInTheDocument();
   });
 
   it("keeps the billing handoff after an unsupported retention response", async () => {

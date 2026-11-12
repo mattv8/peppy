@@ -7,7 +7,7 @@ import { AttachmentStorageSettings, attachmentStorageRemovalText, type Attachmen
 afterEach(cleanup);
 
 const copy = {
-  attachment_storage_section_title: "Hosted attachment storage", attachment_storage_allowance: "Included storage", attachment_storage_billing_handoff: "Manage storage online.", attachment_storage_disabled: "Automatic cleanup is not enabled", attachment_storage_read_only: "Your subscription is read-only", attachment_storage_unavailable: "Automatic cleanup status is unavailable.", attachment_storage_reload_cta: "Refresh", attachment_storage_manage_cta: "Manage storage on the website", attachment_storage_cleanup_pending: "Storage cleanup is pending.", attachment_storage_removed_title: "Hosted media removed", attachment_storage_removed: "This attachment was removed from hosted storage to make room. The message remains.", attachment_storage_removed_local_copy: "Hosted copy removed. Available on this device.", attachment_storage_stale_usage: "Last known storage usage", attachment_storage_usage: "Used", attachment_storage_limit: "Limit", attachment_storage_base_included: "Included", attachment_storage_billing_pending: "Your storage change is still processing", attachment_storage_billing_unavailable: "Storage billing is unavailable", attachment_storage_billing_open_failed: "Could not open billing", attachment_storage_device_update_required: "Automatic cleanup is waiting for compatible, ready devices", attachment_storage_loading: "Loading storage", attachment_storage_info_label: "About storage cleanup", attachment_storage_info_title: "How storage cleanup works", attachment_storage_info_body_cleanup: "When storage is full, Peppy may remove the oldest eligible hosted message media to make room for new uploads. Messages, phone originals, and downloaded copies are not actively deleted by cleanup; normal device cache limits still apply.", attachment_storage_info_body_protected: "Attachments stored before this policy, and other protected attachments, are not removed automatically.", attachment_storage_info_body_purchase: "More storage can reduce future removals. It cannot restore files already removed.", attachment_storage_info_dismiss: "Got it", attachment_storage_near_full: "Hosted attachment storage is almost full.", attachment_storage_full_cleanup: "Storage is full. New uploads may remove the oldest eligible hosted message media. Messages remain.", attachment_storage_learn_more: "Learn more",
+  attachment_storage_section_title: "Hosted attachment storage", attachment_storage_allowance: "Included storage", attachment_storage_used_of_limit: "%1$s of %2$s used", attachment_storage_included_plus_addon: "%1$s included + %2$s add-on storage", attachment_storage_billing_handoff: "Manage storage online.", attachment_storage_disabled: "Automatic cleanup is not enabled", attachment_storage_read_only: "Your subscription is read-only", attachment_storage_unavailable: "Automatic cleanup status is unavailable.", attachment_storage_reload_cta: "Refresh", attachment_storage_manage_cta: "Manage storage on the website", attachment_storage_cleanup_pending: "Storage cleanup is pending.", attachment_storage_removed_title: "Hosted media removed", attachment_storage_removed: "This attachment was removed from hosted storage to make room. The message remains.", attachment_storage_removed_local_copy: "Hosted copy removed. Available on this device.", attachment_storage_stale_usage: "Last known storage usage", attachment_storage_billing_pending: "Your storage change is still processing", attachment_storage_billing_unavailable: "Storage billing is unavailable", attachment_storage_billing_open_failed: "Could not open billing", attachment_storage_device_update_required: "Automatic cleanup is waiting for compatible, ready devices", attachment_storage_loading: "Loading storage", attachment_storage_info_label: "About storage cleanup", attachment_storage_info_title: "How storage cleanup works", attachment_storage_info_body_cleanup: "When storage is full, Peppy may remove the oldest eligible hosted message media to make room for new uploads. Messages, phone originals, and downloaded copies are not actively deleted by cleanup; normal device cache limits still apply.", attachment_storage_info_body_protected: "Attachments stored before this policy, and other protected attachments, are not removed automatically.", attachment_storage_info_body_purchase: "More storage can reduce future removals. It cannot restore files already removed.", attachment_storage_info_dismiss: "Got it", attachment_storage_near_full: "Hosted attachment storage is almost full.", attachment_storage_full_cleanup: "Storage is full. New uploads may remove the oldest eligible hosted message media. Messages remain.", attachment_storage_learn_more: "Learn more",
 } as AttachmentStorageCopy;
 
 const available = (overrides: Record<string, unknown> = {}): AttachmentRetentionStatusResult => ({ kind: "available", scopeId: "session-one", status: { usedBytes: 20, limitBytes: 100, baseBytes: 50, packBytes: 50, protectedBytes: 4, removedBytes: 0, cleanupState: "available", cleanupUnavailableReason: null, ...overrides } } as unknown as AttachmentRetentionStatusResult);
@@ -34,21 +34,30 @@ describe("AttachmentStorageSettings", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it.each([[89, "normal"], [90, "near-full"], [99, "near-full"], [100, "full"]])("uses integer capacity boundaries at %i%%", (usedBytes, level) => {
-    render(<AttachmentStorageSettings result={available({ usedBytes })} copy={copy} />);
-    const notice = document.getElementById("attachment-storage-capacity-notice");
-    if (level === "normal") expect(notice).toBeNull();
-    else expect(notice).toHaveAttribute("data-capacity", level);
+  it.each([[20_000_000_000, "normal", "20 GB"], [90_000_000_000, "near-full", "90 GB"], [100_000_000_000, "full", "100 GB"]])("renders the usage meter and capacity bar at %i bytes", (usedBytes, level, usedText) => {
+    render(<AttachmentStorageSettings result={available({ usedBytes, limitBytes: 100_000_000_000 })} copy={copy} />);
+    expect(document.getElementById("attachment-storage-meter")).toHaveTextContent(`${usedText} of 100 GB used`);
+    expect(document.getElementById("attachment-storage-bar")).toHaveAttribute("data-capacity", level);
   });
 
   it("suppresses predictions for stale or invalid capacity and does not imply cleanup for unknown state", () => {
     const { rerender } = render(<AttachmentStorageSettings result={available({ usedBytes: 100 })} copy={copy} stale />);
+    expect(document.getElementById("attachment-storage-bar")).toHaveAttribute("data-capacity", "stale");
     expect(document.getElementById("attachment-storage-capacity-notice")).toBeNull();
     rerender(<AttachmentStorageSettings result={available({ usedBytes: 100, limitBytes: 0 })} copy={copy} />);
+    expect(document.getElementById("attachment-storage-bar")).toBeNull();
     expect(document.getElementById("attachment-storage-capacity-notice")).toBeNull();
     rerender(<AttachmentStorageSettings result={available({ usedBytes: 100, cleanupState: "blocked", cleanupUnavailableReason: "unknown_reason" })} copy={copy} />);
     expect(screen.getByText(copy.attachment_storage_unavailable)).toBeInTheDocument();
     expect(screen.queryByText(copy.attachment_storage_full_cleanup)).not.toBeInTheDocument();
+  });
+
+  it("does not render a stale bar for invalid capacity and clamps over-limit usage", () => {
+    const { rerender } = render(<AttachmentStorageSettings result={available({ usedBytes: 0, limitBytes: 0 })} copy={copy} stale />);
+    expect(document.getElementById("attachment-storage-bar")).toBeNull();
+
+    rerender(<AttachmentStorageSettings result={available({ usedBytes: 200, limitBytes: 100 })} copy={copy} />);
+    expect(document.querySelector("#attachment-storage-bar > span")).toHaveStyle({ width: "100%" });
   });
 
   it("keeps blocked full states conservative and preserves their causes", () => {
@@ -95,12 +104,18 @@ describe("AttachmentStorageSettings", () => {
     const { rerender } = render(<AttachmentStorageSettings result={available()} copy={copy} stale loading onRefresh={refresh} />);
     expect(document.getElementById("attachment-storage-stale-usage")).toHaveTextContent(copy.attachment_storage_stale_usage);
     const button = screen.getByRole("button", { name: copy.attachment_storage_reload_cta });
+    expect(button).toHaveAttribute("aria-disabled", "true");
     fireEvent.click(button);
     expect(refresh).not.toHaveBeenCalled();
 
     rerender(<AttachmentStorageSettings result={available()} copy={copy} onRefresh={refresh} />);
     fireEvent.click(button);
     expect(refresh).toHaveBeenCalledOnce();
+  });
+
+  it("shows add-on storage separately from the included allowance", () => {
+    render(<AttachmentStorageSettings result={available({ baseBytes: 50_000_000_000, packBytes: 20_000_000_000 })} copy={copy} />);
+    expect(document.getElementById("attachment-storage-allowance")).toHaveTextContent("50 GB included + 20 GB add-on storage");
   });
 
   it("keeps direct storage management and offers App Store add-ons by origin", async () => {

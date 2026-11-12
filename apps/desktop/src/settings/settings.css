@@ -257,6 +257,34 @@
   margin: 0;
 }
 
+#hosted-account-sign-out-row,
+#hosted-account-delete {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.hosted-account-row-copy {
+  display: grid;
+  flex: 1 1 220px;
+  min-width: 0;
+  gap: 4px;
+}
+
+.hosted-account-row-copy > p,
+#hosted-account-delete-title { margin: 0; }
+#hosted-account-label { color: var(--peppy-text-strong); font-size: 13px; }
+#hosted-account-sign-out-scope,
+#hosted-account-delete p { color: var(--peppy-text-secondary); font-size: 12px; }
+#hosted-account-delete { padding: 12px; border: 1px solid color-mix(in srgb, var(--peppy-error) 35%, var(--peppy-border)); border-radius: var(--peppy-radius-sm); }
+#hosted-account-delete-title { color: var(--peppy-text-strong); font-size: 13px; }
+#hosted-account-sign-out,
+#hosted-account-delete-open { flex: 0 0 auto; width: auto; min-height: 28px; padding: 4px 10px; font-size: 13px; line-height: 1.4; white-space: normal; }
+#hosted-account-delete-open:hover:not(:disabled) { background: color-mix(in srgb, var(--peppy-danger-hover) 85%, black); }
+#settings-account-portal-link { justify-self: start; }
+
 #settings-updates progress {
   width: 100%;
   height: 8px;
@@ -304,13 +332,15 @@
   }
 }
 /* Shared hosted-storage subsection within the account card. */
-#attachment-storage.settings-card { padding: 0; border: 0; background: transparent; box-shadow: none; }
-#attachment-storage-usage { display: grid; gap: 0.35rem; margin: 0.75rem 0; }
-#attachment-storage-usage > div { display: flex; justify-content: space-between; gap: 1rem; }
-#attachment-storage-usage dd { margin: 0; font-weight: 600; }
-#attachment-storage-policy-state { display: grid; gap: 0.4rem; margin: 0.65rem 0 0; font-weight: 600; }
+#attachment-storage.settings-card { padding: 16px 0 0; margin-top: 8px; border: 0; border-top: 1px solid var(--peppy-border); border-radius: 0; background: transparent; box-shadow: none; }
+#attachment-storage-manage { font-size: 12px; }
+#attachment-storage-policy-state { display: grid; gap: 4px; margin: 0; color: var(--peppy-text-secondary); font-size: 12px; font-weight: 400; }
+#attachment-storage-capacity-notice,
+#attachment-storage-cause { margin: 0; }
+#attachment-storage-capacity-notice { color: var(--peppy-text-primary); font-weight: 600; }
+#attachment-storage-capacity-notice[data-capacity="near-full"] { color: var(--peppy-warning-text); }
+#attachment-storage-capacity-notice[data-capacity="full"] { color: var(--peppy-error-text); }
 
-#hosted-account-delete,
 #account-delete-body,
 #hosted-account-sign-in-options {
   display: grid;
@@ -331,6 +361,8 @@
 }
 
 @media (forced-colors: active) {
+  #attachment-storage.settings-card { border-top-color: CanvasText; }
+  #hosted-account-delete { border-color: CanvasText; }
   #hosted-account-delete-status,
   #account-delete-apple-notice {
     border: 1px solid CanvasText;

@@ -1300,7 +1300,7 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   font-size: 13px;
   line-height: 26px;
 }
-.destructive-button:hover:not(:disabled) { background: var(--peppy-danger-hover); }
+.destructive-button:hover:not(:disabled) { background: color-mix(in srgb, var(--peppy-danger-hover) 85%, black); }
 .btn,
 .secondary-button {
   height: 28px;

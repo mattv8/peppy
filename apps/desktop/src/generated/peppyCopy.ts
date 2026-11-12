@@ -999,6 +999,8 @@ export const peppyCopy = {
   enrollment_error_vault_request_limited: "Too many requests from this device. Wait a moment and try again.",
   enrollment_error_create_vault_limited: "Too many vault creation attempts. Wait a moment and try again.",
   enrollment_error_manual_owner_limited: "Too many connection attempts. Wait a moment and try again.",
+  attachment_storage_used_of_limit: "%1$s of %2$s used",
+  attachment_storage_included_plus_addon: "%1$s included + %2$s add-on storage",
   group_details_open_label: "Group details",
   group_details_title: "Group details",
   group_details_name_label: "Name",
