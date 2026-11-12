@@ -1889,6 +1889,7 @@ fn google_event_invalidation_rejects_each_stale_context_field_without_writes() {
         let connection = sql(&config);
         replace_context_field(&connection, field, 99);
         let before = context_invalidation_snapshot(&connection, conversation);
+        let before_outbox = outbox_count(&config);
         assert!(matches!(
             client.invalidate_rcs_context_for_google_event(
                 conversation,
@@ -1903,6 +1904,7 @@ fn google_event_invalidation_rejects_each_stale_context_field_without_writes() {
             before,
             "{field}"
         );
+        assert_eq!(outbox_count(&config), before_outbox, "{field}");
     }
 }
 
@@ -2028,6 +2030,7 @@ fn google_event_invalidation_ignores_history_before_the_mapping_guard_band() {
         )
         .unwrap();
     let before = context_invalidation_snapshot(&connection, conversation);
+    let before_outbox = outbox_count(&config);
 
     assert_eq!(
         client
@@ -2044,6 +2047,125 @@ fn google_event_invalidation_ignores_history_before_the_mapping_guard_band() {
         context_invalidation_snapshot(&connection, conversation),
         before
     );
+    assert_eq!(outbox_count(&config), before_outbox);
+}
+
+#[test]
+fn google_event_invalidation_from_current_history_publishes_not_eligible() {
+    let (_directory, _vault, config, client, conversation, _ownership, expected) = mapped_fixture();
+    let observed_at_ms = now();
+    client
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Linked,
+            true,
+            true,
+            true,
+            observed_at_ms,
+            observed_at_ms,
+        )
+        .unwrap();
+    let connection = sql(&config);
+    let verified_at_ms: i64 = connection
+        .query_row(
+            "SELECT verified_at_ms FROM rcs_conversation_mappings WHERE peppy_conversation_id=?",
+            [conversation.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let before_outbox = outbox_count(&config);
+
+    assert_eq!(
+        client
+            .invalidate_rcs_context_for_google_event(
+                conversation,
+                "google-conversation",
+                expected,
+                Some(verified_at_ms - 120_000 + 1),
+            )
+            .unwrap(),
+        Some(2)
+    );
+    assert_eq!(outbox_count(&config), before_outbox + 1);
+    assert_eq!(
+        client
+            .rcs_eligibility_projection(conversation, config.device_id, now())
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::NotEligible
+    );
+}
+
+#[test]
+fn google_event_invalidation_keeps_invalidation_when_eligibility_publication_fails() {
+    let (_directory, _vault, config, client, conversation, _ownership, expected) = mapped_fixture();
+    let connection = sql(&config);
+    let before_outbox = outbox_count(&config);
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_eligibility_publication BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT, 'reject'); END;",
+        )
+        .unwrap();
+
+    assert_eq!(
+        client
+            .invalidate_rcs_context_for_google_event(
+                conversation,
+                "google-conversation",
+                expected,
+                None,
+            )
+            .unwrap(),
+        Some(2)
+    );
+    let after = context_invalidation_snapshot(&connection, conversation);
+    assert_eq!(after.outbox, before_outbox);
+    assert!(after.mappings.iter().all(|mapping| mapping.2.is_some()));
+    let context: serde_json::Value =
+        serde_json::from_str(after.context.as_deref().unwrap()).unwrap();
+    assert_eq!(context["context_revision"].as_u64(), Some(2));
+}
+
+#[test]
+fn google_event_invalidation_skips_publication_before_linked_since() {
+    let (_directory, _vault, config, client, conversation, _ownership, expected) = mapped_fixture();
+    let observed_at_ms = now();
+    client
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Linked,
+            true,
+            true,
+            true,
+            observed_at_ms,
+            observed_at_ms,
+        )
+        .unwrap();
+    let connection = sql(&config);
+    connection
+        .execute(
+            "UPDATE metadata SET v=? WHERE k=?",
+            params![
+                now() + 60_000,
+                format!("rcs_linked_since_v1/{}", config.device_id)
+            ],
+        )
+        .unwrap();
+    let before_outbox = outbox_count(&config);
+
+    assert_eq!(
+        client
+            .invalidate_rcs_context_for_google_event(
+                conversation,
+                "google-conversation",
+                expected,
+                None,
+            )
+            .unwrap(),
+        Some(2)
+    );
+    let after = context_invalidation_snapshot(&connection, conversation);
+    assert_eq!(after.outbox, before_outbox);
+    assert!(after.mappings.iter().all(|mapping| mapping.2.is_some()));
 }
 
 #[test]
@@ -2206,6 +2328,7 @@ fn google_event_invalidation_rejects_a_lane_without_a_one_to_one_mapping_at_any_
             .unwrap()
             .unwrap();
         let connection = sql(&config);
+        let before_outbox = outbox_count(&config);
         let before_context: String = connection
             .query_row(
                 "SELECT v FROM metadata WHERE k='rcs_mapping_context_v1'",
@@ -2249,6 +2372,7 @@ fn google_event_invalidation_rejects_a_lane_without_a_one_to_one_mapping_at_any_
                 .unwrap(),
             before_group_state
         );
+        assert_eq!(outbox_count(&config), before_outbox);
     }
 }
 
