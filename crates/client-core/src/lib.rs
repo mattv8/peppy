@@ -1951,9 +1951,7 @@ impl Client {
                     else {
                         return None;
                     };
-                    (payload.eligibility.observed_at_ms < linked_since_ms
-                        || now_ms.saturating_sub(payload.eligibility.observed_at_ms)
-                            >= RCS_CAPABILITY_KEEPALIVE_MS)
+                    (payload.eligibility.observed_at_ms < linked_since_ms)
                         .then_some((payload.eligibility.observed_at_ms, conversation_id))
                 })
                 .collect::<Vec<_>>();
