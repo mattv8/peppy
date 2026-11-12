@@ -806,6 +806,23 @@ mod tests {
     }
 
     #[test]
+    fn popup_actions_are_enabled_when_configured() {
+        let handler: Arc<dyn Fn(PopupAction) + Send + Sync> = Arc::new(|_| {});
+        assert!(PopupActions {
+            reveal: false,
+            reply: true,
+            handler: handler.clone(),
+        }
+        .enabled());
+        assert!(!PopupActions {
+            reveal: false,
+            reply: false,
+            handler,
+        }
+        .enabled());
+    }
+
+    #[test]
     fn synthetic_test_presentations_have_unique_identities_and_terminal_cleanup() {
         let mut registry = registry();
         let full = super::super::test_notification::presentation(
@@ -860,15 +877,9 @@ mod tests {
         );
         assert!(!registry.backend.popup_actions[0].copy);
         assert!(!registry.backend.popup_actions[0].reveal);
-        assert_eq!(
-            registry.backend.popup_actions[0].reply,
-            cfg!(feature = "notification-quick-reply")
-        );
+        assert!(registry.backend.popup_actions[0].reply);
         assert!(!registry.backend.popup_actions[1].copy);
-        assert_eq!(
-            registry.backend.popup_actions[1].reveal,
-            cfg!(feature = "notification-quick-reply")
-        );
+        assert!(registry.backend.popup_actions[1].reveal);
         assert!(!registry.backend.popup_actions[1].reply);
 
         registry.entries[0]
