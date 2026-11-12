@@ -978,7 +978,7 @@ describe("desktop UI controls", () => {
       />,
     );
     expect(document.querySelectorAll("#unavailable-hint")).toHaveLength(1);
-    expect(screen.getByText("Sending unavailable: choose a gateway and SIM")).toBeInTheDocument();
+    expect(screen.getByText("Choose a gateway and SIM.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
     rerender(
       <Composer

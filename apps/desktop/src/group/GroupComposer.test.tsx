@@ -2,10 +2,9 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { peppyCopy } from "../generated/peppyCopy";
-import { GroupCreateNotRcsInfo, GroupCreateProgress, GroupCreateUnconfirmed, GroupUpdateRequiredNotice, GroupWithdrawnNotice } from "./GroupComposerNotices";
-import { GroupMembersChangedNotice } from "./GroupMembersChangedNotice";
 import { GroupNameField } from "./GroupNameField";
 import { GroupNotice } from "./GroupNotice";
+import { groupComposerStatusItems, type GroupComposerStatusInput } from "./groupComposerStatus";
 
 const displayName = (address: string) => ({ "+15551230001": "Alex", "+15551230002": "Sam" } as Record<string, string>)[address] ?? address;
 
@@ -69,93 +68,77 @@ describe("GroupNameField", () => {
   });
 });
 
-describe("GroupMembersChangedNotice", () => {
-  const base = { memberRevision: "6", displayName, canResend: true, checking: false, onResend: vi.fn(), onReview: vi.fn() };
-
-  it("is an alert with the refusal hooks and the new member list", () => {
-    const { container } = render(<GroupMembersChangedNotice {...base} members={["+15551230001", "+15551230002"]} />);
-    const region = container.querySelector("#composer-group-changed")!;
-    expect(region).toHaveAttribute("role", "alert");
-    expect(region).toHaveAttribute("data-group-send-refusal", "members-changed");
-    expect(region).toHaveAttribute("data-member-revision", "6");
-    expect(region).toHaveTextContent(peppyCopy.group_send_members_changed);
-    expect(container.querySelector("#composer-group-changed-members")).toHaveTextContent("Now in this group: Alex, Sam.");
+describe("groupComposerStatusItems", () => {
+  const base = (): GroupComposerStatusInput => ({
+    creating: false,
+    notice: null,
+    groupLeft: false,
+    displayName,
+    canResend: true,
+    checking: false,
+    onResend: vi.fn(),
+    onReview: vi.fn(),
+    onCreateAgain: vi.fn(),
+    onStartNewMms: vi.fn(),
   });
 
-  it("shows only the generic line until the metadata arrives", () => {
-    const { container } = render(<GroupMembersChangedNotice {...base} />);
-    expect(container.querySelector("#composer-group-changed")).toHaveTextContent(peppyCopy.group_send_members_changed);
-    expect(container.querySelector("#composer-group-changed-members")).toBeNull();
+  it("builds the members-changed refusal with its detail and actions", () => {
+    const input = { ...base(), notice: { kind: "members-changed" as const, memberRevision: "6", members: ["+15551230001", "+15551230002"] } };
+    const [item] = groupComposerStatusItems(input);
+    expect(item).toMatchObject({
+      key: "group-members-changed",
+      id: "composer-group-changed",
+      tone: "error",
+      role: "alert",
+      message: peppyCopy.composer_status_group_changed,
+      detail: peppyCopy.composer_status_group_changed_detail,
+      detailItems: ["Now in this group: Alex, Sam."],
+      hooks: { "data-group-send-refusal": "members-changed", "data-member-revision": "6" },
+    });
+    expect(item.actions?.map(action => action.id)).toEqual(["group-send-updated", "group-send-review"]);
   });
 
-  it("summarises more than five members with a count of the rest", () => {
+  it("holds or hides resend while preserving review", () => {
+    const checking = groupComposerStatusItems({ ...base(), checking: true, notice: { kind: "members-changed", memberRevision: "6" } })[0];
+    expect(checking.actions?.[0]).toMatchObject({ id: "group-send-updated", label: peppyCopy.composer_status_group_checking, disabled: true });
+
+    const cannotResend = groupComposerStatusItems({ ...base(), canResend: false, notice: { kind: "members-changed", memberRevision: "6" } })[0];
+    expect(cannotResend.actions?.map(action => action.id)).toEqual(["group-send-review"]);
+  });
+
+  it("omits unknown members and summarizes large member lists", () => {
+    const unknownMembers = groupComposerStatusItems({ ...base(), notice: { kind: "members-changed", memberRevision: "6" } })[0];
+    expect(unknownMembers.detailItems).toBeUndefined();
+
     const members = ["+15551230001", "+15551230002", "+15551230003", "+15551230004", "+15551230005", "+15551230006", "+15551230007"];
-    const { container } = render(<GroupMembersChangedNotice {...base} members={members} />);
-    expect(container.querySelector("#composer-group-changed-members")).toHaveTextContent("Alex, Sam, +15551230003, +15551230004, +15551230005 and 2 more");
+    const item = groupComposerStatusItems({ ...base(), notice: { kind: "members-changed", memberRevision: "6", members } })[0];
+    expect(item.detailItems).toEqual(["Now in this group: Alex, Sam, +15551230003, +15551230004, +15551230005 and 2 more."]);
   });
 
-  it("resends to the updated group and reviews members through their callbacks", () => {
-    const onResend = vi.fn();
-    const onReview = vi.fn();
-    const { container } = render(<GroupMembersChangedNotice {...base} onResend={onResend} onReview={onReview} />);
-    fireEvent.click(container.querySelector("#group-send-updated")!);
-    fireEvent.click(container.querySelector("#group-send-review")!);
-    expect(onResend).toHaveBeenCalledTimes(1);
-    expect(onReview).toHaveBeenCalledTimes(1);
+  it("keeps legacy hooks and action ids for the remaining statuses", () => {
+    const createAgain = vi.fn();
+    const unconfirmed = groupComposerStatusItems({ ...base(), onCreateAgain: createAgain, notice: { kind: "create-unconfirmed" } })[0];
+    expect(unconfirmed).toMatchObject({ key: "group-create-unconfirmed", id: "composer-group-create-unconfirmed", tone: "warning", role: "alert", hooks: { "data-group-create": "unconfirmed" } });
+    expect(unconfirmed.actions?.[0]).toMatchObject({ id: "group-create-again", confirm: { confirmLabel: peppyCopy.composer_status_create_again } });
+    unconfirmed.actions?.[0]?.onAction();
+    expect(createAgain).toHaveBeenCalledTimes(1);
+
+    const startNewMms = vi.fn();
+    const withdrawn = groupComposerStatusItems({ ...base(), onStartNewMms: startNewMms, notice: { kind: "withdrawn" } })[0];
+    expect(withdrawn).toMatchObject({ key: "group-withdrawn", id: "composer-group-withdrawn", hooks: { "data-group-send-refusal": "withdrawn" } });
+    expect(withdrawn.actions?.[0].id).toBe("group-start-new-mms");
+    withdrawn.actions?.[0]?.onAction();
+    expect(startNewMms).toHaveBeenCalledTimes(1);
   });
 
-  it("holds the resend action while the group is being checked and does not fire it", () => {
-    const onResend = vi.fn();
-    const { container } = render(<GroupMembersChangedNotice {...base} checking onResend={onResend} />);
-    const resend = container.querySelector("#group-send-updated")!;
-    expect(resend).toHaveAttribute("aria-disabled", "true");
-    expect(resend).toHaveTextContent(peppyCopy.group_send_checking);
-    fireEvent.click(resend);
-    expect(onResend).not.toHaveBeenCalled();
+  it("orders action-required statuses before blockers and creating progress", () => {
+    const items = groupComposerStatusItems({ ...base(), creating: true, groupLeft: true, notice: { kind: "members-changed", memberRevision: "6" } });
+    expect(items.map(item => item.key)).toEqual(["group-members-changed", "group-left", "group-creating"]);
+    expect(items[1]).toMatchObject({ id: "composer-group-withdrawn", message: peppyCopy.composer_status_group_left });
   });
 
-  it("removes the resend action when the group can no longer take the send", () => {
-    const { container } = render(<GroupMembersChangedNotice {...base} canResend={false} />);
-    expect(container.querySelector("#group-send-updated")).toBeNull();
-    expect(container.querySelector("#group-send-review")).not.toBeNull();
-  });
-});
-
-describe("GroupComposerNotices", () => {
-  it("shows the create progress as a status line", () => {
-    const { container } = render(<GroupCreateProgress />);
-    expect(container.querySelector("#composer-group-create-status")).toHaveAttribute("role", "status");
-    expect(container).toHaveTextContent(peppyCopy.group_create_progress);
-  });
-
-  it("explains an unconfirmed create and calls back only on Create it again", () => {
-    const onCreateAgain = vi.fn();
-    const { container } = render(<GroupCreateUnconfirmed onCreateAgain={onCreateAgain} />);
-    const region = container.querySelector("#composer-group-create-unconfirmed")!;
-    expect(region).toHaveAttribute("role", "alert");
-    expect(region).toHaveAttribute("data-group-create", "unconfirmed");
-    expect(region).toHaveTextContent(peppyCopy.group_create_again_confirm);
-    expect(onCreateAgain).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: peppyCopy.group_create_again_action }));
-    expect(onCreateAgain).toHaveBeenCalledTimes(1);
-  });
-
-  it("reports an MMS fallback that kept the name only in Peppy", () => {
-    const { container } = render(<GroupCreateNotRcsInfo />);
-    expect(container.querySelector("#composer-group-create-not-rcs")).toHaveTextContent("Created as a group MMS. The name is only visible in Peppy.");
-  });
-
-  it("tells a stale device to update, without a retry", () => {
-    const { container } = render(<GroupUpdateRequiredNotice />);
-    expect(container.querySelector("#composer-group-update-required")).toHaveAttribute("data-group-send-refusal", "update-required");
-    expect(container.querySelector("button")).toBeNull();
-  });
-
-  it("offers a new MMS group for a withdrawn group", () => {
-    const onStartNewMms = vi.fn();
-    const { container } = render(<GroupWithdrawnNotice onStartNewMms={onStartNewMms} />);
-    expect(container.querySelector("#composer-group-withdrawn")).toHaveAttribute("data-group-send-refusal", "withdrawn");
-    fireEvent.click(container.querySelector("#group-start-new-mms")!);
-    expect(onStartNewMms).toHaveBeenCalledTimes(1);
+  it("uses the expected info and update-required items", () => {
+    expect(groupComposerStatusItems({ ...base(), notice: { kind: "create-not-rcs" } })[0]).toMatchObject({ key: "group-create-not-rcs", id: "composer-group-create-not-rcs", tone: "info", hooks: { "data-group-create": "not-rcs" } });
+    expect(groupComposerStatusItems({ ...base(), notice: { kind: "update-required" } })[0]).toMatchObject({ key: "group-update-required", id: "composer-group-update-required", tone: "warning", hooks: { "data-group-send-refusal": "update-required" } });
   });
 });

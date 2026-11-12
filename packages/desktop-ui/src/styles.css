@@ -712,19 +712,13 @@ select:focus-visible {
 #composer-area[data-user-sized="true"] .composer {
   flex: 1;
 }
-#composer-status-row {
-  order: 5;
-  padding: 0 8px;
-}
-#composer-status-row[hidden] {
-  display: none;
-}
 #composer-toolbar {
   display: flex;
   order: 6;
   align-items: center;
   gap: 4px;
   padding: 4px 8px 8px;
+  container-type: inline-size;
 }
 .composer-toolbar-spacer {
   flex: 1;
@@ -743,7 +737,8 @@ select:focus-visible {
   color: var(--peppy-text-secondary);
 }
 #composer-inline-status:empty { display: none; }
-#composer-toolbar:has(#composer-inline-status :is([data-tone="error"], [data-tone="warning"], #draft-sync-status, #draft-notice-action)) #shift-enter-hint { display: none; }
+#composer-inline-status:has([data-inline-status-item]) { min-width: min-content; }
+#composer-toolbar:has(#composer-inline-status :is([data-tone="error"], [data-tone="warning"], #draft-sync-status, #draft-notice-action, [data-inline-status-item], [data-inline-status-action])) #shift-enter-hint { display: none; }
 #composer-toolbar button {
   display: grid;
   width: 28px;
@@ -761,6 +756,7 @@ select:focus-visible {
   height: auto;
   flex: 0 0 auto;
 }
+#composer-toolbar #composer-inline-status :is([data-inline-status-trigger], [data-inline-status-action], .notification-reply-recovery-action) { display: inline-flex; width: auto; height: auto; }
 #composer-toolbar #composer-inline-status :is(dialog, [role="dialog"], [role="alertdialog"]) { white-space: normal; font-size: var(--peppy-font-size, 13px); line-height: normal; }
 #composer-toolbar .send-button {
   width: 32px;
@@ -807,12 +803,6 @@ select:focus-visible {
 #attachment-tray[data-attachment-layout="rows"] .attachment-name, #attachment-tray[data-attachment-layout="rows"] .attachment-state { grid-column: 1; }
 #attachment-tray[data-attachment-layout="rows"] .attachment-retry { grid-column: 2; grid-row: 1 / span 2; }
 #attachment-tray[data-attachment-layout="rows"] .attachment-remove { position: static; grid-column: 3; grid-row: 1; width: 24px; height: 24px; border: 0; background: transparent; }
-.composer-paste-rejection { margin: 4px 0; overflow-wrap: anywhere; color: var(--peppy-error-text); font-size: 12px; }
-.composer-status {
-  margin: 4px 0;
-  color: var(--peppy-text-secondary);
-  font-size: 12px;
-}
 #draft-notice {
   display: flex;
   flex-wrap: wrap;
@@ -834,9 +824,8 @@ select:focus-visible {
   flex: 0 1 auto;
 }
 #composer-inline-status > * + * { margin-left: 8px; }
-#composer-inline-status #draft-sync-status { flex-shrink: 3; }
-#composer-inline-status #draft-notice .draft-notice-message,
-#composer-inline-status [data-inline-status-message] {
+#composer-inline-status #draft-sync-status, #composer-inline-status #draft-notice { flex-shrink: 3; }
+#composer-inline-status #draft-notice .draft-notice-message {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -844,6 +833,35 @@ select:focus-visible {
   min-width: 3ch;
   flex: 0 1 auto;
 }
+[data-inline-status] { display: flex; min-width: min-content; flex: 0 1 auto; }
+[data-inline-status-item] { display: inline-flex; min-width: min-content; align-items: center; gap: 4px; border: 0; background: transparent; color: var(--peppy-text-secondary); flex: 0 1 auto; }
+[data-inline-status-item][data-inline-status-tone="warning"] { color: var(--peppy-warning-text); }
+[data-inline-status-item][data-inline-status-tone="error"] { color: var(--peppy-error-text); }
+[data-inline-status-live] { display: flex; min-width: calc(12px + 4px + 12ch); flex: 0 1 auto; align-items: center; gap: 4px; overflow: hidden; }
+[data-inline-status-icon] { flex: none; forced-color-adjust: auto; }
+[data-inline-status-trigger] { display: inline-flex; min-width: 0; min-height: 24px; align-items: center; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+[data-inline-status-message] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+[data-inline-status-trigger]:hover, [data-inline-status-trigger]:focus-visible { text-decoration: underline dotted; text-underline-offset: 2px; }
+[data-inline-status-trigger]:focus-visible, [data-inline-status-action]:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 1px; }
+[data-inline-status-more] { flex: none; height: 16px; margin-left: 4px; padding: 0 5px; border-radius: var(--peppy-radius-pill); background: var(--peppy-surface-active); color: var(--peppy-text-secondary); font-size: 11px; font-variant-numeric: tabular-nums; line-height: 16px; }
+[data-inline-status-more]::before { content: "+" attr(data-count); }
+[data-inline-status-action] { flex: 0 0 auto; min-height: 24px; padding: 0 6px; border: 0; background: transparent; color: var(--peppy-text-primary); font: inherit; line-height: 16px; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; white-space: nowrap; }
+[data-inline-status-action]:hover { background: var(--peppy-surface-hover); }
+[data-inline-status-action][aria-disabled="true"] { background: transparent; color: var(--peppy-text-muted); cursor: default; }
+[data-inline-status-popover], [data-inline-status-confirmation] { position: fixed; z-index: 10; display: grid; gap: 8px; box-sizing: border-box; padding: 10px; overflow: auto; border: 1px solid var(--peppy-border-strong); border-radius: var(--peppy-control-radius); background: var(--peppy-surface-panel); box-shadow: var(--peppy-shadow-floating); color: var(--peppy-text-primary); font-size: var(--peppy-font-size, 13px); line-height: normal; white-space: normal; }
+[data-inline-status-popover] section { display: grid; gap: 6px; }
+[data-inline-status-popover] section + section { padding-top: 10px; border-top: 1px solid var(--peppy-border); }
+[data-inline-status-popover] p, [data-inline-status-confirmation] p, [data-inline-status-popover] ul { margin: 0; }
+[data-inline-status-popover] ul { padding-left: 18px; }
+[data-inline-status-popover-message] { display: flex; align-items: center; gap: 4px; font-weight: 600; }
+[data-inline-status-popover-message][data-inline-status-tone="info"] { color: var(--peppy-text-secondary); }
+[data-inline-status-popover-message][data-inline-status-tone="warning"] { color: var(--peppy-warning-text); }
+[data-inline-status-popover-message][data-inline-status-tone="error"] { color: var(--peppy-error-text); }
+[data-inline-status-popover-actions], [data-inline-status-confirmation-actions] { display: flex; flex-wrap: wrap; justify-content: end; gap: 8px; }
+[data-inline-status-popover-actions] button, [data-inline-status-confirmation-actions] button { min-height: 28px; padding: 0 8px; border: 1px solid var(--peppy-border-strong); border-radius: var(--peppy-radius-sm); background: transparent; color: var(--peppy-text-primary); }
+@container (width < 560px) { #composer-toolbar #composer-inline-status [data-inline-status-item] > [data-inline-status-action]:nth-of-type(n + 2) { display: none; } }
+@container (width < 420px) { #composer-toolbar #composer-inline-status [data-inline-status-item] > [data-inline-status-action] { display: none; } }
+@container (width < 480px) { #shift-enter-hint { display: none; } }
 #composer-inline-status :is(#draft-notice > button, #draft-sync-status > button, [data-draft-sync-notice] > button) {
   flex: 0 0 auto;
   min-height: 24px;
@@ -919,13 +937,6 @@ select:focus-visible {
   #sync-progress .sync-progress-cursors { grid-template-columns: minmax(0, 1fr); }
   #sync-progress .sync-progress-cursors dd { margin-bottom: 4px; }
 }
-#unavailable-hint {
-  display: block;
-  margin-top: 4px;
-  color: var(--peppy-warning-text);
-  font-size: 11px;
-}
-#unavailable-hint[hidden] { display: none; }
 #draft-recipients {
   position: absolute;
   z-index: 10;
@@ -1314,6 +1325,8 @@ select:focus-visible {
   .attachment-storage-info-button, .info-button, .link-button, #billing-elsewhere-manage, #attachment-storage-addon-manage, #attachment-storage-addon-retry, #hosted-store-retry, #hosted-restore-button, #hosted-plan-options .primary-button { min-width: 44px; min-height: 44px; }
   #composer-toolbar button, .attachment-remove, .attachment-retry { min-width: 48px; min-height: 48px; }
   #composer-toolbar #composer-inline-status :is(#draft-notice > button, #draft-sync-status > button, [data-draft-sync-notice] > button, [data-draft-expiry-warning] > button) { min-width: 48px; min-height: 48px; }
+  #composer-toolbar [data-inline-status-trigger], #composer-toolbar [data-inline-status-action] { min-width: 48px; min-height: 48px; }
+  [data-inline-status-popover-actions] button, [data-inline-status-confirmation-actions] button { min-height: 44px; }
   .attachment-chip { grid-template-columns: minmax(0, 1fr) 48px; }
   .attachment-remove { width: 48px; height: 48px; }
   #attachment-tray[data-attachment-layout="rows"] .attachment-chip { grid-template-columns: 46px minmax(0, 1fr) 48px; }
@@ -1328,6 +1341,9 @@ select:focus-visible {
 }
 
 @media (forced-colors: active) {
+  [data-inline-status-popover], [data-inline-status-confirmation] { border-color: CanvasText; background: Canvas; box-shadow: none; }
+  [data-inline-status-more], [data-inline-status-popover-actions] button, [data-inline-status-confirmation-actions] button { border: 1px solid ButtonText; }
+  [data-inline-status-trigger]:focus-visible, [data-inline-status-action]:focus-visible { outline-color: Highlight; }
   .busy-indicator {
     color: CanvasText;
   }

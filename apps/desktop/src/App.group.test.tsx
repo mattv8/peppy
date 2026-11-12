@@ -227,8 +227,9 @@ describe("send refusals", () => {
       expect(found).toHaveAttribute("role", "alert");
       return found!;
     });
-    expect(alert).toHaveTextContent(peppyCopy.group_send_members_changed);
-    expect(alert).toHaveTextContent("Now in this group:");
+    expect(alert).toHaveTextContent(peppyCopy.composer_status_group_changed);
+    fireEvent.click(alert.querySelector<HTMLButtonElement>("[data-inline-status-trigger]")!);
+    await waitFor(() => expect(document.querySelector("[data-inline-status-popover]")).toHaveTextContent("Now in this group:"));
     expect(textarea).toHaveValue("Keep me");
     expect(sendDraft).toHaveBeenCalledTimes(1);
 
@@ -249,8 +250,7 @@ describe("send refusals", () => {
       expect(found).toBeInTheDocument();
       return found!;
     });
-    expect(alert).toHaveTextContent(peppyCopy.group_send_members_changed);
-    expect(document.getElementById("composer-group-changed-members")).toBeNull();
+    expect(alert).toHaveTextContent(peppyCopy.composer_status_group_changed);
   });
 
   it("asks before creating the group again after an unknown create outcome", async () => {
@@ -268,6 +268,7 @@ describe("send refusals", () => {
       return again!;
     }));
     expect(sentAt(sendDraft, 0)).not.toHaveProperty("groupCreateConfirmDuplicate");
+    fireEvent.click((await screen.findByRole("alertdialog")).querySelector<HTMLButtonElement>("[data-inline-status-tone='warning']")!);
     await waitFor(() => expect(sendDraft).toHaveBeenCalledTimes(2));
     expect(sentAt(sendDraft, 1)).toMatchObject({ groupCreateConfirmDuplicate: true });
   });
@@ -320,6 +321,7 @@ describe("send refusals", () => {
     expect(await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Message" })).toHaveValue("Hello team");
     expect(sendDraft).not.toHaveBeenCalled();
     fireEvent.click(document.getElementById("group-create-again")!);
+    fireEvent.click((await screen.findByRole("alertdialog")).querySelector<HTMLButtonElement>("[data-inline-status-tone='warning']")!);
     await waitFor(() => expect(sendDraft).toHaveBeenCalledWith(expect.objectContaining({ groupCreateConfirmDuplicate: true })));
   });
 
@@ -341,11 +343,11 @@ describe("withdrawn groups", () => {
     render(<App />);
     const textarea = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
     expect(textarea).toHaveAttribute("readonly");
-    expect(document.getElementById("unavailable-hint")).toHaveTextContent(`Sending unavailable: ${peppyCopy.group_composer_reason_left}`);
+    expect(document.getElementById("unavailable-hint")).toHaveTextContent(peppyCopy.composer_status_group_left);
     expect(document.getElementById("conversation-rcs-badge")).toBeNull();
     expect(document.getElementById("conversation-mms-badge")).toBeNull();
     expect(document.getElementById("conversation-rcs-notice")).toHaveAttribute("data-rcs-notice", "group-left");
-    expect(document.getElementById("composer-group-withdrawn")).toBeInTheDocument();
+    expect(document.getElementById("unavailable-hint")).toBeInTheDocument();
 
     fireEvent.click(document.getElementById("group-start-new-mms")!);
     await waitFor(() => expect(document.getElementById("new-group-name")).toBeInTheDocument());

@@ -96,7 +96,7 @@ describe("RCS conversation route", () => {
     await screen.findByRole("textbox", { name: "Message" });
     expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
     expect(document.getElementById("attachment-tray-region")).toHaveTextContent("Up to 32 MiB each");
-    expect(document.getElementById("unavailable-hint")).not.toHaveTextContent(/MMS/);
+    expect(document.getElementById("unavailable-hint")).toBeNull();
   });
 
   it("restores only a refused RCS attachment after the send is rejected", async () => {
@@ -209,12 +209,11 @@ describe("RCS conversation route", () => {
 
     const textarea = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
     const send = screen.getByRole("button", { name: "Send" });
-    const reason = peppyCopy.rcs_composer_reason_unproven;
     expect(send).toBeDisabled();
     expect(textarea).toHaveValue("Keep this draft");
-    expect(document.getElementById("unavailable-hint")).toHaveTextContent(`Sending unavailable: ${reason}`);
-    expect(document.getElementById("composer-route-notice")).toHaveAttribute("role", "status");
-    expect(document.getElementById("composer-route-help")).toHaveTextContent(peppyCopy.rcs_composer_draft_kept);
+    expect(document.getElementById("unavailable-hint")).toHaveTextContent(peppyCopy.rcs_composer_status_unproven);
+    expect(document.getElementById("unavailable-hint")).toHaveAttribute("data-route-block", "unproven");
+    expect(document.querySelector('[data-route-badge="status"][data-route-send-state="blocked"]')).toHaveTextContent(peppyCopy.rcs_composer_badge_unproven);
     expect(document.getElementById("sms-counter")).toBeNull();
     fireEvent.keyDown(textarea, { key: "Enter" });
     expect(sendDraft).not.toHaveBeenCalled();
@@ -409,7 +408,8 @@ describe("member-change media recovery", () => {
     if (mixed) expect(tray.querySelector('[data-attachment-id="never-sent"]')).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(mixed ? "" : "Original caption");
     expect(document.getElementById("composer-group-changed")).toHaveAttribute("data-member-revision", "reviewed-7");
-    expect(document.getElementById("composer-group-changed-members")).toHaveTextContent("+15555550101");
+    fireEvent.click(document.getElementById("composer-group-changed")!.querySelector<HTMLButtonElement>("[data-inline-status-trigger]")!);
+    await waitFor(() => expect(document.querySelector("[data-inline-status-popover]")).toHaveTextContent("+15555550101"));
     expect(sendDraft).not.toHaveBeenCalled();
   });
 

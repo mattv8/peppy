@@ -3115,7 +3115,7 @@ describe("new-recipient drafts", () => {
     fireEvent.change(recipients, { target: { value: "+1 202" } });
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
     expect(document.getElementById("unavailable-hint")).toHaveTextContent(
-      "finish adding the recipient",
+      "Finish adding the recipient before sending.",
     );
 
     fireEvent.change(recipients, { target: { value: "+1 202 555 0101" } });
@@ -3384,7 +3384,7 @@ describe("draft durability", () => {
     expect(notice).toHaveTextContent("Error saving draft.");
     expect(notice.closest("#composer-inline-status")).not.toBeNull();
     expect(within(document.getElementById("composer-inline-status")!).getAllByText("Error saving draft.")).toHaveLength(1);
-    expect(document.getElementById("composer-status-row")).toHaveAttribute("hidden");
+    expect(document.getElementById("composer-status-row")).toBeNull();
     expect(within(notice).getByRole("button", { name: "Retry" })).toBeEnabled();
   });
 
@@ -3413,7 +3413,7 @@ describe("draft durability", () => {
   it("keeps ordinary autosaves quiet with no saved notice", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
-    expect(document.getElementById("composer-inline-status")).toBeEmptyDOMElement();
+    expect(document.getElementById("composer-inline-status")).toHaveTextContent("Choose a phone and SIM.");
 
     type("first quiet edit");
     await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("first quiet edit"));
@@ -4769,7 +4769,7 @@ describe("composer window", () => {
     openComposerWindow("aurora", true);
     render(<App />);
     await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent("No SIM chosen"));
-    expect(document.getElementById("unavailable-hint")).toHaveTextContent("choose a phone and SIM in the main window");
+    expect(document.getElementById("unavailable-hint")).toHaveTextContent("Choose a phone and SIM in the main window.");
 
     cleanup();
     host.gateways = [SMS_ONLY];
@@ -4785,14 +4785,14 @@ describe("composer window", () => {
     });
     render(<App />);
     await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent("SIM unavailable"));
-    expect(document.getElementById("unavailable-hint")).toHaveTextContent("the selected phone/SIM is no longer reported; choose another route in the main window");
+    expect(document.getElementById("unavailable-hint")).toHaveTextContent("The selected phone/SIM is no longer reported; choose another route in the main window.");
 
     cleanup();
     host.gateways = [];
     host.drafts.clear();
     render(<App />);
     await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent("No phone"));
-    expect(document.getElementById("unavailable-hint")).toHaveTextContent("no phone is configured");
+    expect(document.getElementById("unavailable-hint")).toHaveTextContent("No phone is configured.");
   });
   it("renders each supported head route state without a picker", async () => {
     const selectedDraft = (simId: string) => ({
@@ -5070,7 +5070,7 @@ describe("gateway routes", () => {
     await waitFor(() => expect(bridge.save_draft).toHaveBeenCalledOnce());
 
     expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
-    expect(document.getElementById("unavailable-hint")).toBeEmptyDOMElement();
+    expect(document.getElementById("unavailable-hint")).toBeNull();
     fireEvent.keyDown(message(), { key: "Enter" });
     expect(bridge.send_draft).not.toHaveBeenCalled();
 
@@ -5327,9 +5327,7 @@ describe("gateway routes", () => {
         simId: "sim-2",
       }),
     );
-    expect(document.getElementById("unavailable-hint")).toHaveAttribute(
-      "hidden",
-    );
+    expect(document.getElementById("unavailable-hint")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
       expect(bridge.send_draft).toHaveBeenCalledWith(

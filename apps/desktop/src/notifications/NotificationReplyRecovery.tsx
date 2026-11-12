@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Modal } from "@peppy/desktop-ui";
 import type { NotificationReplyRecoveries } from "@peppy/desktop-ui/bridge-contracts";
+import { peppyCopy } from "../generated/peppyCopy";
 import "./notificationReplyRecovery.css";
 
 const MAX_DRAFT_BYTES = 64 * 1024;
@@ -25,7 +26,7 @@ export class DefinitivePreEditRefusal extends Error {
 }
 type Context = { key: string; conversationId?: string; unlocked: boolean; generation: number };
 
-export function NotificationReplyRecovery({ bridge, conversationId, sessionKey, refreshSignal, unlocked, draftText, onAppend, onCountChange }: {
+export function NotificationReplyRecovery({ bridge, conversationId, sessionKey, refreshSignal, unlocked, draftText, onAppend }: {
   bridge?: RecoveryBridge;
   conversationId?: string;
   sessionKey: string;
@@ -33,7 +34,6 @@ export function NotificationReplyRecovery({ bridge, conversationId, sessionKey, 
   unlocked: boolean;
   draftText: string;
   onAppend(reply: string): Promise<void>;
-  onCountChange?(count: number): void;
 }) {
   const [recoveries, setRecoveries] = useState<NotificationReplyRecoveries>();
   const [open, setOpen] = useState(false);
@@ -55,19 +55,18 @@ export function NotificationReplyRecovery({ bridge, conversationId, sessionKey, 
   const applyRecoveries = (value: NotificationReplyRecoveries, request: Context) => {
     if (!current(request)) return;
     setRecoveries(value);
-    onCountChange?.(value.items.length);
   };
   const reload = () => {
     const request = contextRef.current;
     if (!bridge || !request.conversationId || !request.unlocked) return;
     void bridge.load(request.conversationId).then(value => applyRecoveries(value, request)).catch(() => {
-      if (current(request)) setError("Could not load this reply. Try again.");
+      if (current(request)) setError(peppyCopy.composer_status_unsent_replies_error);
     });
   };
   useEffect(() => {
     inFlight.current = false;
     setBusy(false); setOpen(false); setSelectedId(undefined); setAckPending(undefined); setConfirmDiscard(false); setError("");
-    setRecoveries(undefined); onCountChange?.(0); reload();
+    setRecoveries(undefined); reload();
   // Context values are read from the render-updated ref by reload.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bridge, conversationId, sessionKey, unlocked]);
@@ -81,7 +80,6 @@ export function NotificationReplyRecovery({ bridge, conversationId, sessionKey, 
   const remove = (id: string) => setRecoveries(value => {
     if (!value) return value;
     const next = { ...value, items: value.items.filter(item => item.id !== id) };
-    onCountChange?.(next.items.length);
     return next;
   });
   const add = async () => {
@@ -146,9 +144,10 @@ export function NotificationReplyRecovery({ bridge, conversationId, sessionKey, 
     finally { if (current(request)) setBusy(false); inFlight.current = false; }
   };
   if (!bridge || !conversationId || !unlocked || (!recoveries?.items.length && !error)) return null;
+  const checking = restorableItems.length === 0;
   return <div id="notification-reply-recovery-status">
-    {error && !recoveries && <><p role="alert">{error}</p><button className="secondary-button" type="button" onClick={reload}>Try again</button></>}
-    {recoveries && <button id="notification-reply-recovery-open" ref={opener} className="secondary-button" type="button" aria-haspopup="dialog" onClick={() => { setOpen(true); setSelectedId(ackPending?.id ?? (restorableItems.length === 1 ? restorableItems[0]!.id : undefined)); }}>{restorableItems.length ? `Unsent notification replies (${restorableItems.length})` : "Checking notification reply status"}</button>}
+    {error && !recoveries && <><span id="notification-reply-recovery-error" className="notification-reply-recovery-error" role="alert">{error}</span><button className="notification-reply-recovery-action" type="button" onClick={reload}>{peppyCopy.composer_status_unsent_replies_retry}</button></>}
+    {recoveries && <button id="notification-reply-recovery-open" ref={opener} className="notification-reply-recovery-action" data-checking={checking || undefined} type="button" aria-haspopup="dialog" title={peppyCopy.composer_status_unsent_replies_title} onClick={() => { setOpen(true); setSelectedId(ackPending?.id ?? (restorableItems.length === 1 ? restorableItems[0]!.id : undefined)); }}>{checking ? peppyCopy.composer_status_unsent_replies_checking : peppyCopy.composer_status_unsent_replies.replace("{count}", String(restorableItems.length))}</button>}
     {open && recoveries && <Modal id="notification-reply-recovery-dialog" className="notification-reply-recovery-modal" title="Unsent notification replies" onDismiss={() => { if (!busy) close(); }} opener={opener} focusFallback={{ current: document.getElementById("composer-textarea") }} busy={busy} actions={<button className="secondary-button" type="button" disabled={busy} onClick={close}>Close</button>}>
       {active ? <section id="notification-reply-recovery-panel" data-notification-recovery-id={active.id} aria-busy={busy} aria-labelledby="notification-reply-recovery-heading"><h3 id="notification-reply-recovery-heading" tabIndex={-1}>Review reply</h3><p>{reasonText(active.reason)}</p><p id="notification-reply-recovery-warning">Kept only while Peppy stays unlocked and running.</p><div id="notification-reply-recovery-text" role="region" aria-label="Reply text" tabIndex={0}>{active.body}</div><p id="notification-reply-recovery-consequence">Adds this reply to the end of your current draft. Nothing is sent.</p>{busy && <p role="status">{ackPending ? "Reply added to draft. Finishing…" : "Adding to draft…"}</p>}{(error || stateNotice) && <p role={error ? "alert" : "status"}>{error || stateNotice}</p>}<div id="notification-reply-recovery-actions">{recoveries.items.length > 1 && <button className="secondary-button" type="button" disabled={busy || ackPending?.id === active.id} onClick={() => { setSelectedId(undefined); window.setTimeout(() => document.getElementById(`notification-reply-recovery-review-${active.id}`)?.focus()); }}>Back to replies</button>}{active.state !== "uncertain" && (confirmDiscard ? <div id="notification-reply-recovery-discard-confirmation" role="region" aria-label="Discard reply confirmation"><span>Discard this reply? This cannot be undone.</span><button className="secondary-button" type="button" disabled={busy} onClick={() => setConfirmDiscard(false)}>Cancel</button><button className="secondary-button" type="button" disabled={busy} onClick={() => void discard()}>Discard reply</button></div> : <button className="secondary-button" type="button" disabled={busy || ackPending?.id === active.id} onClick={() => setConfirmDiscard(true)}>Discard</button>)}{!confirmDiscard && <button className="primary-button" type="button" aria-describedby="notification-reply-recovery-warning notification-reply-recovery-consequence" disabled={busy || (!ackPending && active.state !== "ready")} onClick={() => void (ackPending?.id === active.id ? retryAcknowledgement() : add())}>{ackPending?.id === active.id ? "Finish removing reply" : "Add to draft"}</button>}</div></section> : <><p id="notification-reply-recovery-warning">Kept only while Peppy stays unlocked and running.</p><ul id="notification-reply-recovery-list" aria-label="Unsent notification replies">{recoveries.items.map(item => <li key={item.id} data-notification-recovery-id={item.id}><span>{item.state === "uncertain" ? "Checking reply status. Do not resend yet." : reasonText(item.reason)}</span><button id={`notification-reply-recovery-review-${item.id}`} className="secondary-button" type="button" disabled={busy || (ackPending ? ackPending.id !== item.id : false)} onClick={() => { setSelectedId(item.id); window.setTimeout(() => document.getElementById("notification-reply-recovery-heading")?.focus()); }}>Review reply</button></li>)}</ul></>}
     </Modal>}

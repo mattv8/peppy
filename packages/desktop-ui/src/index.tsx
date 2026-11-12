@@ -44,6 +44,7 @@ import {
   extractComposerPaste,
 } from "./composerPaste";
 import type { DraftAttachmentState } from "./bridge-contracts";
+import { formatComposerReason, InlineStatus, type InlineStatusItem, type InlineStatusLabels } from "./InlineStatus";
 export { ComposerAttachmentTray, type Attachment, type AttachmentLayout } from "./ComposerAttachmentTray";
 export {
   MAX_COMPOSER_ATTACHMENTS,
@@ -55,6 +56,7 @@ export {
 } from "./composerPaste";
 export type { DraftAttachmentState };
 export { BusyIndicator } from "./BusyIndicator";
+export { formatComposerReason, InlineStatus, type InlineStatusAction, type InlineStatusItem, type InlineStatusLabels, type InlineStatusTone } from "./InlineStatus";
 import type { ConversationFolder } from "./bridge-contracts";
 export { TonePicker, TONE_PRESETS, type TonePickerProps } from "./TonePicker";
 export { ToneOverridesProvider, incomingToneSeed, toneIndex, toneStyle, useToneOverrides, useToneStyle, type ToneOverrides } from "./tone";
@@ -793,14 +795,13 @@ function smsCounter(text: string): string | null {
   return `${segments} SMS · ${remaining} left`;
 }
 
-function formatPasteRejections(rejections: { name: string; reason: "type" | "size" | "limit" }[], maxAttachments: number): string | null {
-  if (!rejections.length) return null;
+function formatPasteRejections(rejections: { name: string; reason: "type" | "size" | "limit" }[], maxAttachments: number): string[] {
   const copy = {
     type: "Use PNG, JPEG, GIF or WebP.",
     size: `Images can be up to ${MAX_COMPOSER_ATTACHMENT_SIZE_LABEL}.`,
     limit: `Up to ${maxAttachments} images per message.`,
   } as const;
-  return rejections.map((rejection) => `Couldn't add ${rejection.name}. ${copy[rejection.reason]}`).join(" ");
+  return rejections.map((rejection) => `Couldn't add ${rejection.name}. ${copy[rejection.reason]}`);
 }
 
 export function detectPlatform(): "macos" | "windows" | "linux" {
@@ -1416,9 +1417,10 @@ export function Composer({
   unavailableReason,
   gatewaySlot,
   inlineStatusSlot,
+  statusTrailingSlot,
+  statusLabels,
   bannerSlot,
-  statusSlot,
-  statusActive = false,
+  statusItems,
   composerName,
   placeholder,
   composerUserSized = false,
@@ -1448,9 +1450,10 @@ export function Composer({
   unavailableReason?: string;
   gatewaySlot?: ReactNode;
   inlineStatusSlot?: ReactNode;
+  statusTrailingSlot?: ReactNode;
+  statusLabels?: InlineStatusLabels;
   bannerSlot?: ReactNode;
-  statusSlot?: ReactNode;
-  statusActive?: boolean;
+  statusItems?: InlineStatusItem[];
   composerName?: string;
   placeholder?: string;
   composerUserSized?: boolean;
@@ -1471,6 +1474,7 @@ export function Composer({
   maxAttachments?: number;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const pasteRejectionCountRef = useRef(0);
   const pastedCaretRef = useRef<{ draft: string; position: number } | null>(null);
   const previousDraftRef = useRef(draft);
   const logicalDraftIdentity = draftIdentity ?? draftKey;
@@ -1480,11 +1484,28 @@ export function Composer({
   const compositionHasLocalEditRef = useRef(false);
   const pendingSelectionRef = useRef<{ draft: string; start: number; end: number } | null>(null);
   const [isComposing, setIsComposing] = useState(false);
-  const [pasteRejection, setPasteRejection] = useState<string | null>(null);
+  const [pasteRejection, setPasteRejection] = useState<{ message: string; details: string[]; key: number } | null>(null);
   const hasContent = Boolean(draft.trim()) || attachments.length > 0;
   const canSend = sendSupported && !readOnly && hasContent;
   const counter = !attachments.length ? smsCounter(draft) : null;
-  const fallbackShown = !sendSupported && !gatewaySlot && !inlineStatusSlot && !statusSlot;
+  const fallbackShown = !sendSupported && !gatewaySlot && !inlineStatusSlot && !statusTrailingSlot && !statusItems?.length;
+  const ownStatusItems: InlineStatusItem[] = [
+    ...(pasteRejection ? [{
+      key: `paste-rejected-${pasteRejection.key}`,
+      tone: "error" as const,
+      message: pasteRejection.message,
+      detailItems: pasteRejection.details.length > 1 ? pasteRejection.details : undefined,
+      role: "alert" as const,
+    }] : []),
+    ...(status ? [{ key: "composer-status", tone: "info" as const, message: status }] : []),
+    ...(fallbackShown ? [{
+      key: "unavailable-hint",
+      tone: "warning" as const,
+      id: "unavailable-hint",
+      message: unavailableReason ? formatComposerReason(unavailableReason) : "Phone is offline. Check it and try again.",
+    }] : []),
+  ];
+  const mergedStatusItems = [...(statusItems ?? []), ...ownStatusItems];
   if (logicalDraftIdentity !== previousDraftIdentityRef.current) {
     previousDraftIdentityRef.current = logicalDraftIdentity;
     previousDraftRef.current = draft;
@@ -1563,7 +1584,13 @@ export function Composer({
       onDraftChange(nextDraft);
     }
     if (pasted.images.length) onPasteImages(pasted.images);
-    setPasteRejection(formatPasteRejections(pasted.rejected, maxAttachments));
+    const details = formatPasteRejections(pasted.rejected, maxAttachments);
+    const sharedReason = pasted.rejected.every((rejection) => rejection.reason === pasted.rejected[0]?.reason);
+    setPasteRejection(details.length ? {
+      key: ++pasteRejectionCountRef.current,
+      message: details.length === 1 ? details[0] : sharedReason ? `Couldn't add ${pasted.rejected.length} images. ${details[0]?.replace(/^Couldn't add .*?\. /, "")}` : `Couldn't add ${pasted.rejected.length} images.`,
+      details,
+    } : null);
   };
   return (
     <section
@@ -1629,19 +1656,6 @@ export function Composer({
           rows={1}
         />
       </div>
-        <div
-          id="composer-status-row"
-          hidden={!(statusActive || status || fallbackShown || pasteRejection)}
-        >
-          {statusSlot}
-          {status && (
-            <p className="composer-status" role="status">
-              {status}
-            </p>
-          )}
-          {pasteRejection && <p data-composer-paste-rejection className="composer-paste-rejection" role="alert">{pasteRejection}</p>}
-           {fallbackShown && <span id="unavailable-hint">Sending unavailable: {unavailableReason ?? "phone is offline"}</span>}
-        </div>
         <div id="composer-toolbar">
         <button
           type="button"
@@ -1653,7 +1667,7 @@ export function Composer({
           <Paperclip size={16} aria-hidden />
         </button>
         {gatewaySlot}
-        {inlineStatusSlot && <div id="composer-inline-status">{inlineStatusSlot}</div>}
+        {(inlineStatusSlot || mergedStatusItems.length > 0 || statusTrailingSlot) && <div id="composer-inline-status">{inlineStatusSlot}{mergedStatusItems.length > 0 && <InlineStatus items={mergedStatusItems} idPrefix="composer-status" labels={statusLabels} />}{statusTrailingSlot}</div>}
         <div id="composer-typing-slot" className="composer-toolbar-spacer">{typingSlot}</div>
         {!hideSmsCounter && counter && (
           <span id="sms-counter" aria-live="polite" aria-label="SMS character count">
