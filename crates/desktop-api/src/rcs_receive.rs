@@ -117,15 +117,14 @@ pub fn message_view(
 ) -> Result<MessageView, Error> {
     let is_rcs = message.payload.transport == Transport::Rcs;
     let message_id = message.payload.record.message_id;
-    let (rcs_status, rcs_reported) =
-        if is_rcs || message.payload.direction == Direction::Outgoing {
-            (
-                client.rcs_message_status(message_id)?,
-                client.rcs_message_reported(message_id)?,
-            )
-        } else {
-            (None, None)
-        };
+    let (rcs_status, rcs_reported) = if is_rcs || message.payload.direction == Direction::Outgoing {
+        (
+            client.rcs_message_status(message_id)?,
+            client.rcs_message_reported(message_id)?,
+        )
+    } else {
+        (None, None)
+    };
     let has_rcs_evidence = rcs_status.is_some() || rcs_reported == Some(true);
     let mut has_outgoing_rcs_media = false;
     let mut outgoing_outcome = OutgoingMediaOutcome::default();
@@ -394,12 +393,7 @@ mod tests {
             self.seed_reported(slots, receipt_rank, true);
         }
 
-        fn seed_reported(
-            &self,
-            slots: &[(u32, &str)],
-            receipt_rank: Option<i64>,
-            reported: bool,
-        ) {
+        fn seed_reported(&self, slots: &[(u32, &str)], receipt_rank: Option<i64>, reported: bool) {
             let db = rusqlite::Connection::open(&self.database_path).unwrap();
             db.execute_batch(&format!("PRAGMA key = \"{SQLCIPHER_KEY}\";"))
                 .unwrap();
@@ -436,7 +430,10 @@ mod tests {
                 .iter()
                 .map(|reference| {
                     crate::attachment_view(
-                        &self.client.attachment_info(reference.attachment_id).unwrap(),
+                        &self
+                            .client
+                            .attachment_info(reference.attachment_id)
+                            .unwrap(),
                         None,
                         None,
                     )

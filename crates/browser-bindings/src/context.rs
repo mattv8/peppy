@@ -174,7 +174,10 @@ mod tests {
         assert_eq!(applied["connection"], "error");
         assert_eq!(applied["gateways"][0]["id"], gateway.to_string());
         assert!(core.context.rcs_roster_validated);
-        assert_eq!(response(&mut core, "snapshot", json!({}))["connection"]["state"], "error");
+        assert_eq!(
+            response(&mut core, "snapshot", json!({}))["connection"]["state"],
+            "error"
+        );
     }
 
     #[test]

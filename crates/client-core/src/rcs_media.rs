@@ -334,7 +334,11 @@ pub(crate) fn apply_echo_receipt(
         .map(|value| value.parse::<u8>().map_err(|_| Error::Database))
         .transpose()?
         .unwrap_or(0);
-    let receipt_changed = (!failed || matches!(status, RcsProjectedStatus::Delivered | RcsProjectedStatus::Read))
+    let receipt_changed = (!failed
+        || matches!(
+            status,
+            RcsProjectedStatus::Delivered | RcsProjectedStatus::Read
+        ))
         && rank > previous;
     if receipt_changed {
         set_meta(conn, &key, &rank.to_string())?;
@@ -368,12 +372,19 @@ pub(crate) fn apply_echo_receipt(
         [message.to_string()],
         |row| row.get(0),
     )?;
-    Ok((changed, if any_failed { None } else { match minimum {
-        1 => Some(RcsMessageStatus::Sent),
-        2 => Some(RcsMessageStatus::Delivered),
-        3 => Some(RcsMessageStatus::Read),
-        _ => None,
-    }}))
+    Ok((
+        changed,
+        if any_failed {
+            None
+        } else {
+            match minimum {
+                1 => Some(RcsMessageStatus::Sent),
+                2 => Some(RcsMessageStatus::Delivered),
+                3 => Some(RcsMessageStatus::Read),
+                _ => None,
+            }
+        },
+    ))
 }
 
 pub(crate) fn ledger_rows(
@@ -1860,12 +1871,8 @@ fn apply_authorized_state(
         .optional()?;
     if current.is_some_and(|current| {
         !(state == RcsMediaSyncState::SendFailed
-            && matches!(
-                current.as_str(),
-                "sending" | "sent" | "outcome_unknown"
-            ))
-            &&
-        current != RcsMediaSyncState::Sending.code()
+            && matches!(current.as_str(), "sending" | "sent" | "outcome_unknown"))
+            && current != RcsMediaSyncState::Sending.code()
             && !(current == RcsMediaSyncState::OutcomeUnknown.code()
                 && state == RcsMediaSyncState::Sent)
     }) {
@@ -2638,10 +2645,8 @@ mod tests {
         step(&mut conn, |tx| issue_permit(tx, command, 1, 2)).unwrap();
         step(&mut conn, |tx| record_commit(tx, command, 1)).unwrap();
 
-        let refused_indexes = step(&mut conn, |tx| {
-            refuse_remaining_unattempted(tx, command, 0)
-        })
-        .unwrap();
+        let refused_indexes =
+            step(&mut conn, |tx| refuse_remaining_unattempted(tx, command, 0)).unwrap();
 
         assert_eq!(refused_indexes, vec![2]);
         assert_eq!(state_of(&conn, command, 1), "committed");

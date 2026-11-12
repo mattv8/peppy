@@ -662,11 +662,15 @@ fn conversation_name_search_refreshes_changed_contacts_without_manual_resolution
             })
             .unwrap()
     };
-    assert!(matches!(search("Ada").items.as_slice(), [LocalSearchHit::Conversation { title, .. }] if title == "Ada"));
+    assert!(
+        matches!(search("Ada").items.as_slice(), [LocalSearchHit::Conversation { title, .. }] if title == "Ada")
+    );
 
     capture("2", "Bea");
     assert!(search("Ada").items.is_empty());
-    assert!(matches!(search("Bea").items.as_slice(), [LocalSearchHit::Conversation { title, .. }] if title == "Bea"));
+    assert!(
+        matches!(search("Bea").items.as_slice(), [LocalSearchHit::Conversation { title, .. }] if title == "Bea")
+    );
 }
 
 #[test]

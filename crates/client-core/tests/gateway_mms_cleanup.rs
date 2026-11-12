@@ -178,7 +178,9 @@ fn gateway_cleanup_respects_durable_intent_and_conflict_references_until_release
     let vault = Vault::new();
     let config = config(&directory, "gateway-draft-reference", &vault);
     let client = unlocked(&config, &vault);
-    let acquisition = client.begin_mms_acquisition(input("draft-reference")).unwrap();
+    let acquisition = client
+        .begin_mms_acquisition(input("draft-reference"))
+        .unwrap();
     let original = prepare(&client, &directory, "original.png");
     let preview = prepare(&client, &directory, "preview.png");
     client
@@ -194,7 +196,9 @@ fn gateway_cleanup_respects_durable_intent_and_conflict_references_until_release
             Some(preview),
         )
         .unwrap();
-    client.complete_mms_acquisition(&acquisition.acquisition_id).unwrap();
+    client
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
     client.cleanup_uploaded_gateway_mms_ciphertext(10).unwrap();
     client.cleanup_uploaded_gateway_mms_ciphertext(10).unwrap();
     for object in client.pending_uploads().unwrap() {

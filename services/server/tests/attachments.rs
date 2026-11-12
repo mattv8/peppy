@@ -14,7 +14,10 @@ use aws_sigv4::{
 };
 use peppy_server::{
     ServerBuilder,
-    api::{AccessPolicy, AccessPrincipal, AttachmentStoragePolicy, Operation, PolicyFuture, create_owner},
+    api::{
+        AccessPolicy, AccessPrincipal, AttachmentStoragePolicy, Operation, PolicyFuture,
+        create_owner,
+    },
     config::{Config, S3Config},
     storage::{Storage, StorageError},
 };
@@ -411,18 +414,20 @@ async fn reserve_rejects_a_credential_revoked_while_waiting_for_the_vault_lock()
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let token = server.add_device("device").await;
-    let device_id = sqlx::query_scalar("SELECT device_id FROM device_credentials WHERE token_digest=$1")
-        .bind(Sha256::digest(token.as_bytes()).as_slice())
-        .fetch_one(&server.pool)
-        .await
-        .unwrap();
+    let device_id =
+        sqlx::query_scalar("SELECT device_id FROM device_credentials WHERE token_digest=$1")
+            .bind(Sha256::digest(token.as_bytes()).as_slice())
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
 
     revoked_reserve(&server, token, device_id).await;
-    let reservations: i64 = sqlx::query_scalar("SELECT count(*) FROM upload_reservations WHERE vault_id=$1")
-        .bind(server.vault)
-        .fetch_one(&server.pool)
-        .await
-        .unwrap();
+    let reservations: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM upload_reservations WHERE vault_id=$1")
+            .bind(server.vault)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
     assert_eq!(reservations, 0);
     server.shutdown().await;
 }
@@ -430,18 +435,23 @@ async fn reserve_rejects_a_credential_revoked_while_waiting_for_the_vault_lock()
 #[tokio::test]
 async fn revoked_reserve_cannot_queue_cleanup_or_tombstone_attachments() {
     let _guard = TEST_LOCK.lock().await;
-    let server = TestServer::start_with_s3_and_policy(None, Some(Arc::new(CleanupPolicy { limit_bytes: 1 }))).await;
+    let server = TestServer::start_with_s3_and_policy(
+        None,
+        Some(Arc::new(CleanupPolicy { limit_bytes: 1 })),
+    )
+    .await;
     let attachment_id = Uuid::new_v4();
     sqlx::query("UPDATE attachment_retention_devices SET cleanup_ready=TRUE,reconciliation_needed=FALSE WHERE vault_id=$1")
         .bind(server.vault)
         .execute(&server.pool)
         .await
         .unwrap();
-    let device_id = sqlx::query_scalar("SELECT device_id FROM device_credentials WHERE vault_id=$1")
-        .bind(server.vault)
-        .fetch_one(&server.pool)
-        .await
-        .unwrap();
+    let device_id =
+        sqlx::query_scalar("SELECT device_id FROM device_credentials WHERE vault_id=$1")
+            .bind(server.vault)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
     sqlx::query("INSERT INTO attachments(vault_id,attachment_id,object_key,ciphertext_bytes,ciphertext_sha256,created_by_device_id,retention_class) VALUES($1,$2,'private/cleanup-candidate',1,$3,$4,'message_media')")
         .bind(server.vault)
         .bind(attachment_id)

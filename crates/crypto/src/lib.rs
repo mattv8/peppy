@@ -580,7 +580,7 @@ fn read_frame(input: &mut impl Read) -> Result<Vec<u8>, CryptoError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{promote_noclobber_with_cleanup, KeyPurpose};
+    use crate::{KeyPurpose, promote_noclobber_with_cleanup};
 
     #[test]
     fn key_purpose_discriminants_are_unique_and_draft_remains_seven() {

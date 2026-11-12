@@ -65,13 +65,11 @@ pub(crate) fn list_books(conn: &Connection) -> Result<String, Error> {
             if let Some(obj) = book.as_object_mut() {
                 // Count live (non-deleted) contacts in this book
                 let book_id = obj.get("id").and_then(Value::as_str).unwrap_or("");
-                let count = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM contacts WHERE book_id=? AND deleted_at IS NULL",
-                        [book_id],
-                        |r| r.get::<_, i64>(0),
-                    )
-                    ?;
+                let count = conn.query_row(
+                    "SELECT COUNT(*) FROM contacts WHERE book_id=? AND deleted_at IS NULL",
+                    [book_id],
+                    |r| r.get::<_, i64>(0),
+                )?;
                 obj.insert("contact_count".to_string(), json!(count));
             }
             let effective = effective_remote_edits(&book);
