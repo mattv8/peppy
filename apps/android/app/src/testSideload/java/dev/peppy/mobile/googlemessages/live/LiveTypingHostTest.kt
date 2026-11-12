@@ -42,7 +42,7 @@ class LiveTypingHostTest {
     }
 
     private class Scheduler : LiveScheduler {
-        data class Entry(val delayMs: Long, val action: () -> Unit, var cancelled: Boolean = false)
+        data class Entry(val delayMs: Long, val action: () -> Unit, @Volatile var cancelled: Boolean = false)
         val entries = CopyOnWriteArrayList<Entry>()
         override fun schedule(delayMs: Long, action: () -> Unit): LiveScheduledTask {
             val entry = Entry(delayMs, action); entries += entry
@@ -256,35 +256,40 @@ class LiveTypingHostTest {
 
     @Test
     fun `membership response timeout disables then reconnects and enables after the next bootstrap`() {
-        val factory = Factory(); val listener = Listener(); val scheduler = Scheduler(); val clock = Clock()
-        val host = LiveTypingHost.forTest(factory::create, scheduler, clock)
+        val factory = Factory(); val listener = Listener(); val scheduler = Scheduler(); val clock = Clock(); val executor = QueueExecutor()
+        val host = LiveTypingHost.forTest(factory::create, scheduler, clock, executor)
         host.start(LiveTypingCredentials("https://example.test", "secret", local), listener)
-        assertTrue(factory.created.await(1, TimeUnit.SECONDS))
+        executor.runAll()
         val socket = factory.sockets.single(); val callback = factory.listeners.single()
         callback.onMessage(socket, bootstrap(device(local)))
-        await { socket.sent.isNotEmpty() }
+        executor.runAll()
         var challenge = Regex("\\\"challenge_id\\\":\\\"([^\\\"]+)\\\"").find(socket.sent.single())!!.groupValues[1]
         callback.onMessage(socket, "{\"type\":\"membership_response\",\"version\":1,\"connection_id\":\"$connectionId\",\"challenge_id\":\"$challenge\",\"membership_version\":\"1\",\"roster\":[${device(local)}]}")
-        assertTrue(listener.enabledLatch.await(1, TimeUnit.SECONDS))
+        executor.runAll()
+        assertEquals(1, listener.enabled.size)
 
         clock.now = 20_000L
-        await { scheduler.entries.any { !it.cancelled } }
         scheduler.runNext()
-        await { socket.sent.size == 2 }
+        executor.runAll()
+        assertEquals(2, socket.sent.size)
         clock.now = 25_001L
         scheduler.runNext()
+        executor.runAll()
 
-        await { listener.disabled.size == 1 }
-        await { scheduler.entries.any { !it.cancelled && it.delayMs == 1_000L } }
+        assertEquals(listOf(LiveTypingDisabledReason.CONNECTION_LOST), listener.disabled)
+        assertTrue(scheduler.entries.any { !it.cancelled && it.delayMs == 1_000L })
         scheduler.runNext()
-        await { factory.sockets.size == 2 }
+        executor.runAll()
+        assertEquals(2, factory.sockets.size)
         val nextSocket = factory.sockets.last(); val nextCallback = factory.listeners.last()
         nextCallback.onMessage(nextSocket, bootstrap(device(local)))
-        await { nextSocket.sent.isNotEmpty() }
+        executor.runAll()
         challenge = Regex("\\\"challenge_id\\\":\\\"([^\\\"]+)\\\"").find(nextSocket.sent.single())!!.groupValues[1]
         nextCallback.onMessage(nextSocket, "{\"type\":\"membership_response\",\"version\":1,\"connection_id\":\"$connectionId\",\"challenge_id\":\"$challenge\",\"membership_version\":\"1\",\"roster\":[${device(local)}]}")
-        await { listener.enabled.size == 2 }
+        executor.runAll()
+        assertEquals(2, listener.enabled.size)
         host.stop()
+        executor.runAll()
     }
 
     @Test
