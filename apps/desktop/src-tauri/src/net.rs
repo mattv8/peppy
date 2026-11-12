@@ -230,10 +230,9 @@ impl Api {
         &self,
         request: RequestBuilder,
         cap: usize,
-        account_session_attached: bool,
     ) -> Result<T, NetError> {
         let body = read_bounded(
-            self.execute_preserving_unauthorized_status(request, account_session_attached)
+            self.execute_preserving_unauthorized_status(request, true)
                 .await?,
             cap,
         )
@@ -287,8 +286,7 @@ impl Api {
         if let Some(account_session) = account_session {
             request = request.header("Peppy-Account-Session", account_session);
         }
-        self.json_with_account(request, MAX_JSON_BYTES, account_session.is_some())
-            .await
+        self.json_with_account(request, MAX_JSON_BYTES).await
     }
 
     pub async fn put_json<B: Serialize + ?Sized, T: DeserializeOwned>(
@@ -972,7 +970,10 @@ pub mod tests {
                 "401 Unauthorized",
                 "mcp_enrollment_unauthorized",
                 None,
-                NetError::Revoked,
+                NetError::Status {
+                    status: 401,
+                    code: Some("mcp_enrollment_unauthorized".into()),
+                },
             ),
         ] {
             let body = format!(r#"{{"code":"{code}"}}"#).into_bytes();
