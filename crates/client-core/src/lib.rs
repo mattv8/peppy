@@ -1888,6 +1888,14 @@ impl Client {
                 [],
             )?;
         }
+        if matches!(
+            state,
+            RcsCapabilityState::SignedOut
+                | RcsCapabilityState::NeedsRelink
+                | RcsCapabilityState::Unlinked
+        ) {
+            rcs_capability::clear_linked_since_resume(&tx, ctx.device_id)?;
+        }
         let identity = format!("status:{}", ctx.device_id);
         let previous_revision = tx
             .query_row(
@@ -1904,13 +1912,17 @@ impl Client {
             if previous_state == Some(RcsCapabilityState::Linked) {
                 rcs_capability::linked_since(&tx, ctx.device_id)?.unwrap_or(observed_at_ms)
             } else {
-                rcs_capability::next_linked_since(&tx, ctx.device_id, observed_at_ms)?
+                match rcs_capability::linked_since_resume(&tx, ctx.device_id)? {
+                    Some(resumed_ms) => resumed_ms,
+                    None => rcs_capability::next_linked_since(&tx, ctx.device_id, observed_at_ms)?,
+                }
             }
         } else {
             0
         };
         if state == RcsCapabilityState::Linked {
             rcs_capability::record_linked_since(&tx, ctx.device_id, linked_since_ms)?;
+            rcs_capability::record_linked_since_resume(&tx, ctx.device_id, linked_since_ms)?;
         }
         let status = RcsLinkStatusEvent {
             gateway_device_id: ctx.device_id,
@@ -1933,6 +1945,7 @@ impl Client {
         )?;
         if state == RcsCapabilityState::Linked && now_ms >= linked_since_ms {
             let prefix = format!("eligibility:{}:", ctx.device_id);
+            let derivation = eligibility_derivation_context(&tx, &ctx, now_ms)?;
             let mut due = tx
                 .prepare(
                     "SELECT identity,body FROM rcs_capability_published WHERE identity LIKE ?",
@@ -1946,13 +1959,23 @@ impl Client {
                     let conversation_id = identity
                         .strip_prefix(&prefix)
                         .and_then(|value| ConversationId::from_str(value).ok())?;
-                    let PrivatePayload::RcsLinkEligibility(payload) =
-                        serde_json::from_str(&body).ok()?
-                    else {
-                        return None;
+                    let (observed_at_ms, due) = match serde_json::from_str(&body) {
+                        Ok(PrivatePayload::RcsLinkEligibility(payload)) => {
+                            let published = payload.eligibility;
+                            let unchanged =
+                                derive_rcs_eligibility(&tx, conversation_id, derivation).is_ok_and(
+                                    |derived| published_eligibility_matches(&published, derived),
+                                );
+                            (
+                                published.observed_at_ms,
+                                published.observed_at_ms < linked_since_ms || !unchanged,
+                            )
+                        }
+                        // Nothing else corrects a publication this build cannot read, so it is
+                        // published again.
+                        _ => (i64::MIN, true),
                     };
-                    (payload.eligibility.observed_at_ms < linked_since_ms)
-                        .then_some((payload.eligibility.observed_at_ms, conversation_id))
+                    due.then_some((observed_at_ms, conversation_id))
                 })
                 .collect::<Vec<_>>();
             due.sort_unstable_by_key(|(observed_at_ms, _)| *observed_at_ms);
@@ -11800,19 +11823,34 @@ fn eligibility_already_published(
     let recent = |at_ms: i64| {
         (0..RCS_ELIGIBILITY_REPUBLISH_FLOOR_MS).contains(&now_ms.saturating_sub(at_ms))
     };
-    previous.eligibility == eligibility
-        && previous.feature_bits == feature_bits
-        && linked_since_ms.is_none_or(|since| previous.observed_at_ms >= since)
+    published_eligibility_matches(
+        &previous,
+        RcsEligibilityDerivation {
+            eligibility,
+            feature_bits,
+        },
+    ) && linked_since_ms.is_none_or(|since| previous.observed_at_ms >= since)
         && recent(published_at_ms)
         && recent(previous.observed_at_ms)
 }
 
-fn publish_rcs_eligibility_for_conversation(
+#[derive(Clone, Copy)]
+struct RcsEligibilityDerivationContext {
+    linked: bool,
+    feature_bits: u32,
+}
+
+#[derive(Clone, Copy)]
+struct RcsEligibilityDerivation {
+    eligibility: RcsEligibility,
+    feature_bits: u32,
+}
+
+fn eligibility_derivation_context(
     conn: &Connection,
     ctx: &Ctx,
-    conversation_id: ConversationId,
     now_ms: i64,
-) -> Result<bool, Error> {
+) -> Result<RcsEligibilityDerivationContext, Error> {
     let lifecycle = rcs_mapping::recorded_link_lifecycle_metadata(conn)?;
     let status = rcs_capability::status_projection(conn, ctx.device_id, now_ms)?;
     let linked = lifecycle.as_ref().is_some_and(|lifecycle| {
@@ -11821,21 +11859,54 @@ fn publish_rcs_eligibility_for_conversation(
                 status.current && status.status.state == RcsCapabilityState::Linked
             })
     });
-    let feature_bits = status
-        .as_ref()
-        .filter(|status| linked && status.status.state == RcsCapabilityState::Linked)
-        .map_or(0, |status| status.status.feature_bits);
+    Ok(RcsEligibilityDerivationContext {
+        linked,
+        feature_bits: status
+            .as_ref()
+            .filter(|status| linked && status.status.state == RcsCapabilityState::Linked)
+            .map_or(0, |status| status.status.feature_bits),
+    })
+}
+
+fn derive_rcs_eligibility(
+    conn: &Connection,
+    conversation_id: ConversationId,
+    context: RcsEligibilityDerivationContext,
+) -> Result<RcsEligibilityDerivation, Error> {
     // A 1:1 mapping, or a group mapping that is Live (only Live groups are eligible).
-    let mapped = linked
+    let mapped = context.linked
         && (rcs_mapping::get(conn, conversation_id)?.is_some()
             || rcs_group::proved_member_revision(conn, conversation_id)?.is_some());
-    let eligibility = if !linked {
-        RcsEligibility::Unknown
-    } else if mapped {
-        RcsEligibility::Eligible
-    } else {
-        RcsEligibility::NotEligible
-    };
+    Ok(RcsEligibilityDerivation {
+        eligibility: if !context.linked {
+            RcsEligibility::Unknown
+        } else if mapped {
+            RcsEligibility::Eligible
+        } else {
+            RcsEligibility::NotEligible
+        },
+        feature_bits: context.feature_bits,
+    })
+}
+
+fn published_eligibility_matches(
+    published: &RcsEligibilityProjection,
+    derived: RcsEligibilityDerivation,
+) -> bool {
+    published.eligibility == derived.eligibility && published.feature_bits == derived.feature_bits
+}
+
+fn publish_rcs_eligibility_for_conversation(
+    conn: &Connection,
+    ctx: &Ctx,
+    conversation_id: ConversationId,
+    now_ms: i64,
+) -> Result<bool, Error> {
+    let derivation = derive_rcs_eligibility(
+        conn,
+        conversation_id,
+        eligibility_derivation_context(conn, ctx, now_ms)?,
+    )?;
     let identity = format!("eligibility:{}:{conversation_id}", ctx.device_id);
     let previous: Option<(u64, String, i64)> = conn
         .query_row(
@@ -11849,8 +11920,8 @@ fn publish_rcs_eligibility_for_conversation(
         eligibility_already_published(
             body,
             *published_at_ms,
-            eligibility,
-            feature_bits,
+            derivation.eligibility,
+            derivation.feature_bits,
             linked_since_ms,
             now_ms,
         )
@@ -11864,8 +11935,8 @@ fn publish_rcs_eligibility_for_conversation(
         .ok_or(Error::InvalidRequest("RCS eligibility revision exhausted"))?;
     let projection = RcsEligibilityProjection {
         conversation_id,
-        eligibility,
-        feature_bits,
+        eligibility: derivation.eligibility,
+        feature_bits: derivation.feature_bits,
         mapping_revision: revision,
         observed_at_ms: now_ms,
         gateway_device_id: ctx.device_id,

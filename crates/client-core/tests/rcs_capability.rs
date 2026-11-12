@@ -674,7 +674,7 @@ fn missing_fence_metadata_recovers_on_fresh_eligibility() {
 }
 
 #[test]
-fn linked_heartbeat_with_interleaved_messages_preserves_eligibility() {
+fn linked_heartbeat_rederives_raw_capability_from_local_mappings() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
     let config = config(&directory, "rcs-capability-heartbeat", &vault);
@@ -701,7 +701,7 @@ fn linked_heartbeat_with_interleaved_messages_preserves_eligibility() {
             .unwrap()
             .unwrap()
             .eligibility,
-        RcsEligibility::Eligible
+        RcsEligibility::NotEligible
     );
 }
 
@@ -1631,7 +1631,7 @@ fn unchanged_eligibility_is_published_once_until_the_republish_floor_elapses() {
 }
 
 #[test]
-fn unchanged_eligibility_is_published_again_after_the_link_returns() {
+fn unchanged_eligibility_is_not_published_again_after_unavailable_returns() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
     let config = config(&directory, "rcs-eligibility-relinked", &vault);
@@ -1656,6 +1656,8 @@ fn unchanged_eligibility_is_published_again_after_the_link_returns() {
     client
         .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_002, 1_002)
         .unwrap();
+
+    assert_eq!(client.pending_outbox_count().unwrap(), 4);
 
     assert_eq!(
         client
@@ -1900,7 +1902,7 @@ fn linked_record_refreshes_all_due_published_rows() {
     client
         .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_002, 1_002)
         .unwrap();
-    assert_eq!(client.pending_outbox_count().unwrap(), before + 103);
+    assert_eq!(client.pending_outbox_count().unwrap(), before + 2);
 }
 
 #[test]
@@ -2160,7 +2162,7 @@ fn failed_due_row_is_contained_while_other_rows_refresh() {
     let client = unlocked(&config, &vault);
     client
         .record_rcs_link_lifecycle(
-            RcsCapabilityState::Unavailable,
+            RcsCapabilityState::NeedsRelink,
             false,
             false,
             false,

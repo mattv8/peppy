@@ -231,6 +231,41 @@ pub(crate) fn record_linked_since(
     Ok(())
 }
 
+/// The last Linked period's fence survives Unavailable but is void after a terminal state.
+pub(crate) fn linked_since_resume(
+    conn: &Connection,
+    gateway: DeviceId,
+) -> Result<Option<i64>, Error> {
+    conn.query_row(
+        "SELECT v FROM metadata WHERE k=?",
+        [linked_since_resume_key(gateway)],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|value| value.parse::<i64>().map_err(|_| Error::Database))
+    .transpose()
+}
+
+pub(crate) fn record_linked_since_resume(
+    conn: &Connection,
+    gateway: DeviceId,
+    linked_since_ms: i64,
+) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        params![linked_since_resume_key(gateway), linked_since_ms],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn clear_linked_since_resume(conn: &Connection, gateway: DeviceId) -> Result<(), Error> {
+    conn.execute(
+        "DELETE FROM metadata WHERE k=?",
+        [linked_since_resume_key(gateway)],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn next_linked_since(
     conn: &Connection,
     gateway: DeviceId,
@@ -271,6 +306,10 @@ fn observed_high_watermark(conn: &Connection, gateway: DeviceId) -> Result<Optio
 
 fn linked_since_key(gateway: DeviceId) -> String {
     format!("rcs_linked_since_v1/{gateway}")
+}
+
+fn linked_since_resume_key(gateway: DeviceId) -> String {
+    format!("rcs_linked_since_resume_v1/{gateway}")
 }
 
 fn observed_high_watermark_key(gateway: DeviceId) -> String {

@@ -1828,7 +1828,19 @@ fn replace_context_field(connection: &Connection, field: &str, value: u64) {
 #[test]
 fn google_event_invalidation_bumps_once_and_replay_is_write_free() {
     let (_directory, _vault, config, client, conversation, _ownership, expected) = mapped_fixture();
+    let observed_at_ms = now();
+    client
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Linked,
+            true,
+            true,
+            true,
+            observed_at_ms,
+            observed_at_ms,
+        )
+        .unwrap();
     let connection = sql(&config);
+    let before_outbox = outbox_count(&config);
     assert_eq!(
         client
             .invalidate_rcs_context_for_google_event(
@@ -1841,6 +1853,15 @@ fn google_event_invalidation_bumps_once_and_replay_is_write_free() {
         Some(2)
     );
     let after = context_invalidation_snapshot(&connection, conversation);
+    assert_eq!(after.outbox, before_outbox + 1);
+    assert_eq!(
+        client
+            .rcs_eligibility_projection(conversation, config.device_id, now())
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::NotEligible
+    );
     assert!(after.mappings.iter().all(|mapping| mapping.2.is_some()));
     let context: serde_json::Value =
         serde_json::from_str(after.context.as_deref().unwrap()).unwrap();
