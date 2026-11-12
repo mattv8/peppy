@@ -1709,10 +1709,14 @@ mod tests {
     #[tokio::test]
     async fn admission_is_atomic_across_independent_relay_instances() {
         let (pool, schema) = test_pool_with_connections(4).await;
-        let first = AppState::with_provider(pool.clone(), Arc::new(FakeProvider::default()));
-        let second = AppState::with_provider(pool.clone(), Arc::new(FakeProvider::default()));
-        let address: SocketAddr = "[2001:db8:1:2::1]:443".parse().unwrap();
-        for _ in 0..3 {
+        for round in 0..3 {
+            // An attempt that crosses a minute boundary spends the new window's budget for the
+            // relays and source it used, so each attempt gets its own.
+            let first = AppState::with_provider(pool.clone(), Arc::new(FakeProvider::default()));
+            let second = AppState::with_provider(pool.clone(), Arc::new(FakeProvider::default()));
+            let address: SocketAddr = format!("[2001:db8:1:{}::1]:443", round + 2)
+                .parse()
+                .unwrap();
             let before = database_window(&pool).await;
             let attempts = u32::from(ADMISSION_LIMIT) * 2;
             let mut tasks = Vec::new();
@@ -1733,8 +1737,9 @@ mod tests {
             if before == database_window(&pool).await {
                 assert_eq!(admitted, u32::from(ADMISSION_LIMIT));
                 let stored: i32 = sqlx::query_scalar(
-                    "SELECT attempts FROM relay_admissions WHERE admission_kind='registration' ORDER BY window_started_at DESC LIMIT 1",
+                    "SELECT attempts FROM relay_admissions WHERE admission_kind='registration' AND source=$1 ORDER BY window_started_at DESC LIMIT 1",
                 )
+                .bind(admission_source(address.ip()))
                 .fetch_one(&pool)
                 .await
                 .unwrap();
