@@ -1671,6 +1671,15 @@ fn unchanged_eligibility_is_not_published_again_after_unavailable_returns() {
         .unwrap();
 
     assert_eq!(client.pending_outbox_count().unwrap(), 4);
+    assert_eq!(
+        client
+            .rcs_link_status(config.device_id, 1_002)
+            .unwrap()
+            .unwrap()
+            .status
+            .linked_since_ms,
+        Some(1_000)
+    );
 
     assert_eq!(
         client
@@ -1690,64 +1699,93 @@ fn unchanged_eligibility_is_not_published_again_after_unavailable_returns() {
 
 #[test]
 fn linked_heartbeat_refreshes_an_invalidated_mapping() {
-    let directory = tempfile::tempdir().unwrap();
-    let vault = Vault::new();
-    let config = config(&directory, "rcs-capability-return", &vault);
-    let client = unlocked(&config, &vault);
-    let mapped = client
-        .capture_incoming(IncomingSms {
-            conversation_id: None,
-            sender_address: "+12025550123".into(),
-            body: String::new(),
-            provider_message_id: Some("provider-return".into()),
-            imported: true,
-        })
-        .unwrap()
-        .conversation_id;
-    assert!(matches!(
+    // The second pass invalidates after an Unavailable return that resumed linked-since.
+    for restarted in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::new();
+        let config = config(
+            &directory,
+            &format!("rcs-capability-return-{restarted}"),
+            &vault,
+        );
+        let client = unlocked(&config, &vault);
+        let mapped = client
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+12025550123".into(),
+                body: String::new(),
+                provider_message_id: Some("provider-return".into()),
+                imported: true,
+            })
+            .unwrap()
+            .conversation_id;
+        assert!(matches!(
+            client
+                .verify_rcs_mapping(&mapping_observation("+12025550123"), 1_000)
+                .unwrap(),
+            RcsMappingOutcome::Mapped(_)
+        ));
         client
-            .verify_rcs_mapping(&mapping_observation("+12025550123"), 1_000)
-            .unwrap(),
-        RcsMappingOutcome::Mapped(_)
-    ));
-    client
-        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
-        .unwrap();
-    assert_eq!(
+            .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+            .unwrap();
+        assert_eq!(
+            client
+                .publish_rcs_eligibility_from_lifecycle(&[mapped], 1_000)
+                .unwrap(),
+            1
+        );
+        if restarted {
+            client
+                .record_rcs_link_lifecycle(
+                    RcsCapabilityState::Unavailable,
+                    false,
+                    false,
+                    false,
+                    1_001,
+                    1_001,
+                )
+                .unwrap();
+            client
+                .record_rcs_link_lifecycle(
+                    RcsCapabilityState::Linked,
+                    true,
+                    true,
+                    true,
+                    1_002,
+                    1_002,
+                )
+                .unwrap();
+        }
+        drop(client);
+        let connection = Connection::open(&config.database_path).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE rcs_conversation_mappings SET invalidated_at_ms=1002,invalidation_code='test' WHERE peppy_conversation_id=?",
+                [mapped.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+        let client = unlocked(&config, &vault);
+        let before = client.pending_outbox_count().unwrap();
         client
-            .publish_rcs_eligibility_from_lifecycle(&[mapped], 1_000)
-            .unwrap(),
-        1
-    );
-    drop(client);
-    let connection = Connection::open(&config.database_path).unwrap();
-    connection
-        .execute_batch(
-            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
-        )
-        .unwrap();
-    connection
-        .execute(
-            "UPDATE rcs_conversation_mappings SET invalidated_at_ms=1001,invalidation_code='test' WHERE peppy_conversation_id=?",
-            [mapped.to_string()],
-        )
-        .unwrap();
-    drop(connection);
-    let client = unlocked(&config, &vault);
-    let before = client.pending_outbox_count().unwrap();
-    client
-        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_001, 1_001)
-        .unwrap();
-    assert_eq!(client.pending_outbox_count().unwrap(), before + 2);
+            .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_003, 1_003)
+            .unwrap();
+        assert_eq!(client.pending_outbox_count().unwrap(), before + 2);
 
-    assert_eq!(
-        client
-            .rcs_eligibility_projection(mapped, config.device_id, 1_001)
-            .unwrap()
-            .unwrap()
-            .eligibility,
-        RcsEligibility::NotEligible
-    );
+        assert_eq!(
+            client
+                .rcs_eligibility_projection(mapped, config.device_id, 1_003)
+                .unwrap()
+                .unwrap()
+                .eligibility,
+            RcsEligibility::NotEligible
+        );
+    }
 }
 
 #[test]
@@ -2331,6 +2369,15 @@ fn terminal_records_clear_the_resume_fence_before_an_unavailable_return() {
             .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_003, 1_003)
             .unwrap();
         assert_eq!(client.pending_outbox_count().unwrap(), before + 4);
+        assert_eq!(
+            client
+                .rcs_link_status(config.device_id, 1_003)
+                .unwrap()
+                .unwrap()
+                .status
+                .linked_since_ms,
+            Some(1_003)
+        );
     }
 }
 
@@ -2367,6 +2414,10 @@ fn linked_heartbeat_repairs_a_published_row_with_a_garbage_body() {
         .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_001, 1_001)
         .unwrap();
     assert_eq!(client.pending_outbox_count().unwrap(), before + 2);
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_002, 1_002)
+        .unwrap();
+    assert_eq!(client.pending_outbox_count().unwrap(), before + 3);
 }
 
 #[test]
@@ -2391,4 +2442,89 @@ fn linked_heartbeat_repairs_a_feature_bits_only_difference() {
         .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_001, 1_001)
         .unwrap();
     assert_eq!(client.pending_outbox_count().unwrap(), before + 2);
+}
+
+#[test]
+fn first_linked_record_after_unavailable_starts_a_new_linked_since() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-capability-first-linked", &vault);
+    let client = unlocked(&config, &vault);
+    client
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Unavailable,
+            false,
+            false,
+            false,
+            1_000,
+            1_000,
+        )
+        .unwrap();
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_001, 1_001)
+        .unwrap();
+
+    assert_eq!(
+        client
+            .rcs_link_status(config.device_id, 1_001)
+            .unwrap()
+            .unwrap()
+            .status
+            .linked_since_ms,
+        Some(1_001)
+    );
+}
+
+#[test]
+fn replayed_older_statuses_cannot_restore_an_earlier_linked_since() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let target_config = config(&directory, "rcs-capability-fence-order", &vault);
+    let target = unlocked(&target_config, &vault);
+    let gateway = DeviceId::new();
+    let conversation = ConversationId::new();
+    let status_event = |status: RcsLinkStatusEvent, sequence: u64| {
+        sealed(
+            &vault,
+            gateway,
+            sequence,
+            PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload { status }),
+        )
+    };
+    let mut older_unavailable = status(gateway, 2, 1_800);
+    older_unavailable.state = RcsCapabilityState::Unavailable;
+    older_unavailable.availability = false;
+    older_unavailable.linked_since_ms = None;
+    let envelopes = [
+        sealed(
+            &vault,
+            gateway,
+            10,
+            PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
+                eligibility: eligibility(gateway, conversation, 1, 1_500),
+            }),
+        ),
+        status_event(status(gateway, 3, 2_000), 11),
+        status_event(older_unavailable, 12),
+        status_event(status(gateway, 1, 1_000), 13),
+    ];
+    for (index, envelope) in envelopes.iter().enumerate() {
+        assert_eq!(
+            target.ingest(envelope, Cursor(index as u64 + 1)).unwrap(),
+            IngestResult::Journaled
+        );
+    }
+    assert_eq!(target.apply_pending(20).unwrap().quarantined, 0);
+
+    let projected = target.rcs_link_status(gateway, 2_001).unwrap().unwrap();
+    assert_eq!(projected.status.capability_revision, 3);
+    assert_eq!(projected.status.linked_since_ms, Some(2_000));
+    assert_eq!(
+        target
+            .rcs_eligibility_projection(conversation, gateway, 2_001)
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Unknown
+    );
 }
