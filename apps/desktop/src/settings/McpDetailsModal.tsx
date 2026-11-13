@@ -1,6 +1,8 @@
-import { useEffect, useRef, type RefObject } from "react";
-import { Modal } from "@peppy/desktop-ui";
+import { useEffect, useRef, useState, type RefObject } from "react";
+import { peppyCopy } from "../generated/peppyCopy";
+import { ExternalLink, Modal } from "@peppy/desktop-ui";
 import type { McpDeviceStatus } from "@peppy/desktop-ui/bridge-contracts";
+import { bridge } from "../bridge/bridge";
 import { McpGrantsSection, type McpGrantsSectionProps } from "./McpGrantsSection";
 import { hasUsableEndpoint, isRemovedDevice, mcpStateLabel } from "./mcpDisplay";
 
@@ -17,6 +19,7 @@ export type McpDetailsModalProps = {
   statusNotice: string;
   statusError: string;
   grants: McpGrantsSectionProps;
+  browserHost: boolean;
   onCopy(): void;
   onRefresh(): void;
   onClose(): void;
@@ -24,14 +27,16 @@ export type McpDetailsModalProps = {
 
 const REMOVED_NOTICE = "Peppy MCP was removed.";
 const REENABLE_GUIDANCE = "Close this and select Re-enable to set it up again.";
+const MCP_GUIDE_URL = "https://peppy.pro/docs/mcp";
 
-export function McpDetailsModal({ opener, focusFallback, status, device, canReenable, refreshing, copyStatus, statusNotice, statusError, grants, onCopy, onRefresh, onClose }: McpDetailsModalProps) {
+export function McpDetailsModal({ opener, focusFallback, status, device, canReenable, refreshing, copyStatus, statusNotice, statusError, grants, browserHost, onCopy, onRefresh, onClose }: McpDetailsModalProps) {
   const endpoint = `${status.serverOrigin}/mcp`;
   const removed = isRemovedDevice(device);
   const endpointUsable = hasUsableEndpoint(device);
   const closeButton = useRef<HTMLButtonElement>(null);
   const refreshButton = useRef<HTMLButtonElement>(null);
   const refreshWasFocused = useRef(false);
+  const [guideError, setGuideError] = useState(false);
 
   /** Refresh unmounts when the device is removed; keep keyboard focus on a control instead of the page body. */
   useEffect(() => {
@@ -47,6 +52,13 @@ export function McpDetailsModal({ opener, focusFallback, status, device, canReen
   const refresh = () => {
     refreshWasFocused.current = document.activeElement === refreshButton.current;
     onRefresh();
+  };
+  const openGuide = async () => {
+    setGuideError(false);
+    try {
+      if (!bridge.open_external_url) throw new Error("missing opener");
+      await bridge.open_external_url(MCP_GUIDE_URL);
+    } catch { setGuideError(true); }
   };
 
   return (
@@ -100,6 +112,12 @@ export function McpDetailsModal({ opener, focusFallback, status, device, canReen
             </li>
           </ol>
           <small className="settings-note">The AI client must be able to reach this server address. A cloud-hosted client cannot use an address that works only on a private network.</small>
+          <div id="mcp-guide-entry">{browserHost ? (
+            <a id="mcp-guide-link" className="link-button" href={MCP_GUIDE_URL} target="_blank" rel="noopener noreferrer"><ExternalLink size={13} aria-hidden />{peppyCopy.mcp_guide}<span className="visually-hidden"> (opens in a new tab)</span></a>
+          ) : (
+            <button id="mcp-guide-link" type="button" className="link-button" onClick={() => void openGuide()}><ExternalLink size={13} aria-hidden />{peppyCopy.mcp_guide}<span className="visually-hidden"> (opens in your browser)</span></button>
+          )}
+          {guideError && <p id="mcp-guide-error" className="settings-error" role="alert">{peppyCopy.guide_open_failed}</p>}</div>
         </section>
       )}
       {!removed && <McpGrantsSection {...grants} />}

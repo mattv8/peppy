@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { Plus } from "@peppy/desktop-ui";
+import { ExternalLink, Plus } from "@peppy/desktop-ui";
 import type { McpDeviceStatus, McpDeviceView, WebhookView } from "@peppy/desktop-ui/bridge-contracts";
+import { bridge } from "../bridge/bridge";
+import { peppyCopy } from "../generated/peppyCopy";
 import { isRemovedDevice } from "./mcpDisplay";
 import { WebhookEditorModal } from "./WebhookEditorModal";
 import { WebhookList } from "./WebhookList";
@@ -21,6 +23,7 @@ export type WebhookSettingsProps = {
   sessionKey: string;
   unlocked: boolean;
   serverOffline: boolean;
+  browserHost?: boolean;
   onOpenDevices(): void;
 };
 
@@ -29,6 +32,7 @@ const OFFLINE_ADD_MESSAGE = "Reconnect to the server to add webhooks.";
 const SETUP_ADD_MESSAGE = "Enable Peppy MCP in Devices first.";
 const OFFLINE_NOTE = "The server is offline. Changes resume when it reconnects.";
 const DELETED_DURATION_MS = 4_000;
+const WEBHOOKS_GUIDE_URL = "https://peppy.pro/docs/webhooks";
 
 type Stage =
   | { kind: "locked" }
@@ -56,10 +60,11 @@ function settingsStage(unlocked: boolean, data: WebhookSettingsData | null, load
   return { kind: "ready", device, webhooks: data.list.webhooks };
 }
 
-export function WebhookSettings({ sessionKey, unlocked, serverOffline, onOpenDevices }: WebhookSettingsProps) {
+export function WebhookSettings({ sessionKey, unlocked, serverOffline, browserHost = false, onOpenDevices }: WebhookSettingsProps) {
   const settings = useWebhookSettings(sessionKey, unlocked);
   const stage = settingsStage(unlocked, settings.data, settings.loadError);
   const [editing, setEditing] = useState<{ target: WebhookView | "new"; onChanged: (view: WebhookView) => void } | null>(null);
+  const [guideError, setGuideError] = useState(false);
   const notice = useTransientMessage();
   const opener = useRef<HTMLElement | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -88,6 +93,13 @@ export function WebhookSettings({ sessionKey, unlocked, serverOffline, onOpenDev
     await settings.deleteWebhook(webhook.id);
     notice.show(`Deleted ${webhook.name}.`, DELETED_DURATION_MS);
     headingRef.current?.focus();
+  };
+  const openGuide = async () => {
+    setGuideError(false);
+    try {
+      if (!bridge.open_external_url) throw new Error("missing opener");
+      await bridge.open_external_url(WEBHOOKS_GUIDE_URL);
+    } catch { setGuideError(true); }
   };
 
   const renderStage = () => {
@@ -140,7 +152,10 @@ export function WebhookSettings({ sessionKey, unlocked, serverOffline, onOpenDev
             device={stage.device}
             webhooks={stage.webhooks}
             serverOffline={serverOffline}
+            browserHost={browserHost}
+            guideError={guideError}
             headingRef={headingRef}
+            onOpenGuide={openGuide}
             onAdd={(trigger) => openEditor("new", trigger)}
             onEdit={openEditor}
             onSetPaused={settings.setPaused}
@@ -172,15 +187,22 @@ type WebhookHeaderProps = {
   headingRef: RefObject<HTMLHeadingElement | null>;
   addDisabled: boolean;
   addTitle?: string;
+  browserHost?: boolean;
+  onOpenGuide?(): void;
   onAdd?(trigger: HTMLElement): void;
 };
 
-function WebhookHeader({ headingRef, addDisabled, addTitle, onAdd }: WebhookHeaderProps) {
+function WebhookHeader({ headingRef, addDisabled, addTitle, browserHost, onAdd, onOpenGuide }: WebhookHeaderProps) {
   return (
     <header id="webhooks-header" className="webhooks-header">
       <div className="webhooks-heading">
         <h3 id="webhooks-heading" ref={headingRef} tabIndex={-1}>Webhooks</h3>
         <p className="settings-note">{INTRO}</p>
+        {browserHost ? (
+          <a id="webhooks-guide-link" className="link-button" href={WEBHOOKS_GUIDE_URL} target="_blank" rel="noopener noreferrer"><ExternalLink size={13} aria-hidden />{peppyCopy.webhooks_guide}<span className="visually-hidden"> (opens in a new tab)</span></a>
+        ) : onOpenGuide && (
+          <button id="webhooks-guide-link" type="button" className="link-button" onClick={onOpenGuide}><ExternalLink size={13} aria-hidden />{peppyCopy.webhooks_guide}<span className="visually-hidden"> (opens in your browser)</span></button>
+        )}
       </div>
       <button
         id="webhook-add"
@@ -201,14 +223,17 @@ type WebhookReadyViewProps = {
   device: McpDeviceView;
   webhooks: WebhookView[];
   serverOffline: boolean;
+  browserHost: boolean;
+  guideError: boolean;
   headingRef: RefObject<HTMLHeadingElement | null>;
   onAdd(trigger: HTMLElement): void;
+  onOpenGuide(): void;
   onEdit(webhook: WebhookView, trigger: HTMLElement): void;
   onSetPaused(webhook: WebhookView, paused: boolean): Promise<void>;
   onDelete(webhook: WebhookView): Promise<void>;
 };
 
-function WebhookReadyView({ device, webhooks, serverOffline, headingRef, onAdd, onEdit, onSetPaused, onDelete }: WebhookReadyViewProps) {
+function WebhookReadyView({ device, webhooks, serverOffline, browserHost, guideError, headingRef, onAdd, onOpenGuide, onEdit, onSetPaused, onDelete }: WebhookReadyViewProps) {
   const atLimit = webhooks.length >= MAX_WEBHOOKS;
   const addDisabled = serverOffline || atLimit;
   const addTitle = atLimit ? WEBHOOK_LIMIT_MESSAGE : serverOffline ? OFFLINE_ADD_MESSAGE : undefined;
@@ -216,7 +241,8 @@ function WebhookReadyView({ device, webhooks, serverOffline, headingRef, onAdd, 
 
   return (
     <>
-      <WebhookHeader headingRef={headingRef} addDisabled={addDisabled} addTitle={addTitle} onAdd={onAdd} />
+      <WebhookHeader headingRef={headingRef} addDisabled={addDisabled} addTitle={addTitle} browserHost={browserHost} onOpenGuide={onOpenGuide} onAdd={onAdd} />
+      {guideError && <p id="webhooks-guide-error" className="settings-error" role="alert">{peppyCopy.guide_open_failed}</p>}
       <p id="webhooks-status" className="webhooks-status">
         <span className="webhook-dot" data-tone={status.tone} aria-hidden="true" />
         {status.text}

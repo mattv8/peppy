@@ -112,6 +112,7 @@ describe("WebhookSettings", () => {
       expect(screen.getByRole("button", { name: "Add webhook" })).toHaveAttribute("title", "Enable Peppy MCP in Devices first.");
       expect(callout).toHaveTextContent("Enable Peppy MCP in Devices");
       expect(callout).toHaveTextContent("once Peppy MCP shows Online");
+      expect(screen.queryByRole("button", { name: /Webhooks guide/i })).not.toBeInTheDocument();
       fireEvent.click(within(callout).getByRole("button", { name: "Open Devices" }));
 
       expect(onOpenDevices).toHaveBeenCalledTimes(1);
@@ -145,6 +146,39 @@ describe("WebhookSettings", () => {
       expect(container.querySelector("#webhooks-status")).toHaveTextContent("Server client online · synced");
       expect(screen.getByRole("list", { name: "Webhooks" })).toBeInTheDocument();
       expect(container.querySelectorAll("li[data-webhook]")).toHaveLength(3);
+    });
+
+    it("opens the Webhooks guide through the bridge and clears its fixed error on retry", async () => {
+      vi.mocked(bridge.open_external_url!).mockRejectedValueOnce(new Error("app-locked")).mockResolvedValue(undefined);
+      renderSettings();
+
+      fireEvent.click(await screen.findByRole("button", { name: /Webhooks guide/i }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't open the guide.");
+      expect(screen.queryByText("app-locked")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /Webhooks guide/i }));
+      await waitFor(() => expect(bridge.open_external_url).toHaveBeenLastCalledWith("https://peppy.pro/docs/webhooks"));
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("shows a fixed Webhooks guide error when the bridge has no opener", async () => {
+      const opener = bridge.open_external_url;
+      (bridge as { open_external_url?: typeof opener }).open_external_url = undefined;
+      renderSettings();
+
+      fireEvent.click(await screen.findByRole("button", { name: /Webhooks guide/i }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't open the guide.");
+      (bridge as { open_external_url?: typeof opener }).open_external_url = opener;
+    });
+
+    it("uses a safe browser link for the Webhooks guide", async () => {
+      renderSettings({ browserHost: true });
+
+      const link = await screen.findByRole("link", { name: /Webhooks guide/i });
+      expect(link).toHaveAttribute("href", "https://peppy.pro/docs/webhooks");
+      expect(link).toHaveAttribute("target", "_blank");
+      expect(link).toHaveAttribute("rel", "noopener noreferrer");
     });
 
     it("reports an offline server client", async () => {

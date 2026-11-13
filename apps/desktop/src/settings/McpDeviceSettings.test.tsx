@@ -945,5 +945,42 @@ describe("McpDeviceSettings", () => {
       expect(dialog.querySelector("#mcp-removed-notice")).toBeNull();
       await waitFor(() => expect(bridge.mcp_grants).toHaveBeenCalled());
     });
+
+    it("opens the MCP guide through the bridge and shows a fixed error", async () => {
+      vi.mocked(bridge.mcp_status).mockResolvedValue(onlineStatus);
+      vi.mocked(bridge.open_external_url!).mockRejectedValueOnce(new Error("app-locked"));
+      renderSettings();
+      const dialog = await openDetailsDialog();
+
+      fireEvent.click(within(dialog).getByRole("button", { name: /MCP guide/i }));
+
+      await waitFor(() => expect(bridge.open_external_url).toHaveBeenCalledWith("https://peppy.pro/docs/mcp"));
+      expect(within(dialog).getByRole("alert")).toHaveTextContent("Couldn't open the guide.");
+      expect(within(dialog).queryByText("app-locked")).not.toBeInTheDocument();
+    });
+
+    it("shows a fixed MCP guide error when the bridge has no opener", async () => {
+      vi.mocked(bridge.mcp_status).mockResolvedValue(onlineStatus);
+      const opener = bridge.open_external_url;
+      (bridge as { open_external_url?: typeof opener }).open_external_url = undefined;
+      renderSettings();
+      const dialog = await openDetailsDialog();
+
+      fireEvent.click(within(dialog).getByRole("button", { name: /MCP guide/i }));
+
+      expect(await within(dialog).findByRole("alert")).toHaveTextContent("Couldn't open the guide.");
+      (bridge as { open_external_url?: typeof opener }).open_external_url = opener;
+    });
+
+    it("uses a safe browser link for the MCP guide", async () => {
+      vi.mocked(bridge.mcp_status).mockResolvedValue(onlineStatus);
+      renderSettings({ browserHost: true });
+      const dialog = await openDetailsDialog();
+
+      const link = within(dialog).getByRole("link", { name: /MCP guide/i });
+      expect(link).toHaveAttribute("href", "https://peppy.pro/docs/mcp");
+      expect(link).toHaveAttribute("target", "_blank");
+      expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    });
   });
 });
