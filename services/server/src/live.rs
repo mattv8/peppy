@@ -1,5 +1,5 @@
 use peppy_domain::{DeviceId, VaultId};
-use peppy_protocol::EphemeralSignalV2;
+use peppy_protocol::{EPHEMERAL_FUTURE_TOLERANCE_MS, EphemeralSignalV2};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -13,7 +13,6 @@ use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
 const LIVE_CHANNEL_CAPACITY: usize = 32;
-const FUTURE_TOLERANCE_MS: u64 = 30_000;
 
 /// A relay is required before the live route accepts upgrades. An in-process
 /// hub alone cannot provide the cross-replica delivery promise.
@@ -611,7 +610,7 @@ impl LiveHub {
         if expires_at_ms <= now_ms {
             return Err(LiveReject::Expired);
         }
-        if sent_at_ms > now_ms.saturating_add(FUTURE_TOLERANCE_MS) {
+        if sent_at_ms > now_ms.saturating_add(EPHEMERAL_FUTURE_TOLERANCE_MS) {
             return Err(LiveReject::FutureTimestamp);
         }
         Ok(())

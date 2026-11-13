@@ -151,7 +151,7 @@ describe("typing sharing", () => {
     expect(setSharing).toHaveBeenCalledExactlyOnceWith({ enabled: true });
   });
 
-  it("renders a current chat typing indicator from the bridge", async () => {
+  it("renders a current chat typing row at the end of the message list and announces outside the log", async () => {
     let receive: (signal: { conversationId: string; state: "started" | "stopped"; expiresAtMs?: string }) => void = () => undefined;
     vi.spyOn(bridge, "subscribe_typing").mockImplementation(listener => {
       receive = listener;
@@ -161,7 +161,15 @@ describe("typing sharing", () => {
     await screen.findByRole("textbox", { name: "Message" });
     await waitFor(() => expect(document.getElementById("conversation-rcs-badge")).toBeInTheDocument());
     act(() => receive({ conversationId: snapshot.activeConversationId!, state: "started" }));
-    expect(document.getElementById("typing-indicator")).toHaveAttribute("data-typing-visible", "true");
+    const indicator = document.getElementById("typing-indicator")!;
+    expect(indicator).toHaveAttribute("data-typing-row");
+    expect(indicator).toHaveAttribute("aria-hidden", "true");
+    expect(document.getElementById("message-list-content")!.lastElementChild).toBe(indicator);
+    expect(indicator.querySelector("[data-sender-avatar]")).toBeNull();
+    expect(indicator.querySelector("[data-typing-bubble]")).toHaveAttribute("data-peppy-tone");
+    const incomingBubble = document.querySelector<HTMLElement>('[data-message-id="message-aurora-3"]')!;
+    expect(indicator.querySelector("[data-typing-bubble]")).toHaveAttribute("style", incomingBubble.getAttribute("style"));
+    expect(document.getElementById("message-list")!.contains(document.getElementById("typing-announcer")!)).toBe(false);
   });
 
   it.each([false, true])("uses actual local activity, not a restored draft, for announcements (active=%s)", async (active) => {
@@ -181,7 +189,7 @@ describe("typing sharing", () => {
 
     act(() => receive({ conversationId: snapshot.activeConversationId!, state: "started" }));
 
-    expect(document.getElementById("typing-indicator")).toHaveAttribute("data-typing-visible", "true");
+    expect(document.getElementById("typing-indicator")).toHaveAttribute("data-typing-row");
     if (active) expect(document.getElementById("typing-announcer")).toBeEmptyDOMElement();
     else expect(document.getElementById("typing-announcer")).not.toBeEmptyDOMElement();
   });

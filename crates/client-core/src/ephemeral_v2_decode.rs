@@ -8,8 +8,8 @@ use base64::{
 };
 use peppy_crypto::{EncryptedEnvelope, decrypt};
 use peppy_protocol::{
-    ChallengePlaintextV2, EphemeralSignalV2, EphemeralSignalV2Kind, SessionAckPlaintextV2,
-    TypingOriginV2, TypingPlaintextV2,
+    ChallengePlaintextV2, EPHEMERAL_FUTURE_TOLERANCE_MS, EphemeralSignalV2, EphemeralSignalV2Kind,
+    SessionAckPlaintextV2, TypingOriginV2, TypingPlaintextV2,
 };
 
 use super::{DeviceId, EpochKeys, VaultId};
@@ -49,10 +49,14 @@ pub(crate) fn decode_authenticated_frame(
 
     let sent_at_ms = frame.sent_at_ms.parse::<u64>().ok()?;
     let expires_at_ms = frame.expires_at_ms.parse::<u64>().ok()?;
-    if sent_at_ms > effective_wall_ms || effective_wall_ms >= expires_at_ms {
+    if sent_at_ms > effective_wall_ms.saturating_add(EPHEMERAL_FUTURE_TOLERANCE_MS)
+        || effective_wall_ms >= expires_at_ms
+    {
         return None;
     }
-    let remaining_ttl_ms = expires_at_ms.checked_sub(effective_wall_ms)?;
+    let remaining_ttl_ms = expires_at_ms
+        .checked_sub(effective_wall_ms)?
+        .min(expires_at_ms.checked_sub(sent_at_ms)?);
     let sequence = frame.sequence.parse::<u64>().ok()?;
     let session_id = parse_session_id(&frame.session_id)?;
     let key = &unlocked_epochs.get(&frame.key_epoch)?.event;
@@ -130,7 +134,9 @@ fn deserialize_and_check(
 mod tests {
     use super::*;
     use peppy_crypto::{KeyProfile, KeyPurpose, derive_purpose_key, derive_root_key, encrypt};
-    use peppy_protocol::{EPHEMERAL_V2_PROTOCOL_VERSION, TypingStateV2};
+    use peppy_protocol::{
+        EPHEMERAL_FUTURE_TOLERANCE_MS, EPHEMERAL_V2_PROTOCOL_VERSION, TypingStateV2,
+    };
     use uuid::Uuid;
 
     fn device(value: u128) -> DeviceId {
@@ -576,9 +582,20 @@ mod tests {
         assert_eq!(decoded.session_id, [44; 16]);
         assert_eq!(decoded.sequence, 45);
         assert_eq!(decoded.remaining_ttl_ms, 15_000);
+        let decoded = decode_authenticated_frame(
+            sent_at_ms - EPHEMERAL_FUTURE_TOLERANCE_MS,
+            vault_id,
+            local,
+            [46; 16],
+            &[sender],
+            &frame,
+            &keys,
+        )
+        .unwrap();
+        assert_eq!(decoded.remaining_ttl_ms, 15_000);
         assert!(
             decode_authenticated_frame(
-                sent_at_ms - 1,
+                sent_at_ms - EPHEMERAL_FUTURE_TOLERANCE_MS - 1,
                 vault_id,
                 local,
                 [46; 16],

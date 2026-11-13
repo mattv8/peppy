@@ -64,6 +64,11 @@ Diagnostics are off unless enabled in **Settings → Diagnostics**. When on, eac
 | 227, 228 | The row predates the receive claim (claim time minus 15 minutes) or falls in the 120-second guard band after it; the capture takes it. |
 | 190 in bulk | Bootstrap could not bind a chat for receive, for example no recorded own number for the SIM or a thread that also holds a group. Those chats arrive only as provider copies. |
 | 44, 45 | History recovery aborted or incomplete for a chat. |
+| 59 on every desktop typing refresh with no 57 | The frame could not be opened, replied to, or admitted as a typing intent, so nothing was forwarded. Check that the native client is available, that the desktop peer passed session validation (a failed handshake, for example from clock skew beyond the tolerance, leaves it unvalidated), and that the conversation is eligible. A future timestamp often yields an empty result rather than an exception. |
+| 57 | A desktop typing start was forwarded to Google Messages. |
+| 56 | A contact's typing was sealed to the vault. |
+| 280 | An admitted typing intent was not forwarded: the native client was unavailable, the conversation has no link-owned Google conversation ID, or the lookup threw. |
+| 281 | The Google typing forwarder refused the effect (`typing_unavailable`, `typing_stale`, `typing_expired`, or `typing_failed`); no suppression window opened. LinkRuntime can reject locally, so this does not always mean Google Messages refused it. |
 
 ## Phone access traps
 

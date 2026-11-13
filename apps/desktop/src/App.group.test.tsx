@@ -126,7 +126,7 @@ async function sendButton() {
 
 describe("group header and details", () => {
   it("opens the details dialog from the header and returns focus to the button", async () => {
-    useSnapshot([groupConversation()]);
+    useSnapshot([groupConversation({ messages: [message({ id: "typing-message" })] })]);
     render(<App />);
 
     const button = await waitFor(() => {
@@ -397,7 +397,6 @@ describe("typing in groups", () => {
     const sendTyping = vi.spyOn(bridge, "send_typing").mockResolvedValue();
     render(<App />);
     const textarea = await screen.findByRole("textbox", { name: "Message" });
-    await waitFor(() => expect(document.getElementById("conversation-rcs-badge")).toBeInTheDocument());
     sendTyping.mockClear();
     fireEvent.change(textarea, { target: { value: "hello" } });
     expect(sendTyping).toHaveBeenCalledWith({ conversationId: GROUP_ID, state: "started" });
@@ -407,17 +406,37 @@ describe("typing in groups", () => {
     [[MEMBERS[0]], / is typing$/],
     [MEMBERS, / are typing$/],
   ])("attributes typing to the members who are typing (%#)", async (participants, pattern) => {
-    useSnapshot([groupConversation()]);
+    useSnapshot([groupConversation({ messages: [message({ id: "typing-message" })] })]);
     let receive: (signal: TypingSignal) => void = () => undefined;
     vi.spyOn(bridge, "subscribe_typing").mockImplementation((listener) => {
       receive = listener;
       return () => undefined;
     });
     render(<App />);
-    await waitFor(() => expect(document.getElementById("conversation-rcs-badge")).toBeInTheDocument());
+    await screen.findByRole("textbox", { name: "Message" });
     for (const participant of participants) act(() => receive({ conversationId: GROUP_ID, state: "started", participant }));
 
-    expect(document.getElementById("typing-indicator")).toHaveAttribute("data-typing-visible", "true");
+    expect(document.getElementById("typing-indicator")).toHaveAttribute("data-typing-row");
+    expect(document.getElementById("typing-indicator")).toHaveAttribute("data-typing-count", String(participants.length));
     expect(document.getElementById("typing-indicator-label")!.textContent).toMatch(pattern);
+    if (participants.length === 1) expect(document.querySelector(`[data-sender-avatar="${participants[0]}"]`)).toBeInTheDocument();
+    else expect(document.querySelector("#typing-indicator [data-typing-bubble]")).not.toHaveAttribute("data-peppy-tone");
+  });
+
+  it.each([
+    ["an empty group thread", groupConversation()],
+    ["a group the reader left", groupConversation({ messages: [message({ id: "withdrawn-message" })], group: group({ state: "withdrawn", name: "Weekend crew" }) })],
+  ])("suppresses the typing row for %s", async (_name, conversation) => {
+    useSnapshot([conversation]);
+    let receive: (signal: TypingSignal) => void = () => undefined;
+    vi.spyOn(bridge, "subscribe_typing").mockImplementation((listener) => {
+      receive = listener;
+      return () => undefined;
+    });
+    render(<App />);
+    await screen.findByRole("textbox", { name: "Message" });
+    act(() => receive({ conversationId: GROUP_ID, state: "started", participant: MEMBERS[0] }));
+
+    expect(document.getElementById("typing-indicator")).toBeNull();
   });
 });

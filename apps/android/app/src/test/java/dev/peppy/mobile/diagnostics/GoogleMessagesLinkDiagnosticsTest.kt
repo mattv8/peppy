@@ -146,6 +146,7 @@ class GoogleMessagesLinkDiagnosticsTest {
         "recovery_skipped_age" to "future", "recovery_skipped_age" to "under_2m",
         "recovery_skipped_age" to "under_15m", "recovery_skipped_age" to "under_1h",
         "recovery_skipped_age" to "under_24h", "recovery_skipped_age" to "older",
+        "typing" to "outbound_not_owned", "typing" to "outbound_refused",
     )
 
     @Test fun everyPairRecordsOnlyItsStableNumericReason() {
@@ -153,7 +154,7 @@ class GoogleMessagesLinkDiagnosticsTest {
         SyncDiagnostics.withTestConfiguration(true, { 10L }, { error("CPU unused") }, records::add) {
             stablePairs.forEach { (kind, code) -> recordGoogleMessagesLinkEvent(kind, code, Long.MAX_VALUE) }
         }
-        assertEquals(279, records.size)
+        assertEquals(281, records.size)
         records.forEachIndexed { index, record ->
             assertEquals("event=27 session=1 timestamp_ms=10 trace=0 29=${index + 1}", record)
         }

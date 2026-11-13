@@ -286,6 +286,8 @@ internal object GoogleMessagesLinkDiagnosticReason {
         ("recovery_skipped_age" to "under_1h") to 277L,
         ("recovery_skipped_age" to "under_24h") to 278L,
         ("recovery_skipped_age" to "older") to 279L,
+        ("typing" to "outbound_not_owned") to 280L,
+        ("typing" to "outbound_refused") to 281L,
     )
 }
 

@@ -1426,7 +1426,6 @@ export function Composer({
   composerUserSized = false,
   maxAutoGrowHeight = 176,
   hideSmsCounter = false,
-  typingSlot,
   typingSendState = "idle",
   platform,
   attachmentLayout = "tiles",
@@ -1460,7 +1459,6 @@ export function Composer({
   /** CSS max-height: 176px remains the hard ceiling (8 lines); this can only lower auto-grow. */
   maxAutoGrowHeight?: number;
   hideSmsCounter?: boolean;
-  typingSlot?: ReactNode;
   typingSendState?: "idle" | "active" | "suppressed";
   platform?: "macos" | "windows" | "linux";
   attachmentLayout?: AttachmentLayout;
@@ -1668,7 +1666,7 @@ export function Composer({
         </button>
         {gatewaySlot}
         {(inlineStatusSlot || mergedStatusItems.length > 0 || statusTrailingSlot) && <div id="composer-inline-status">{inlineStatusSlot}{mergedStatusItems.length > 0 && <InlineStatus items={mergedStatusItems} idPrefix="composer-status" labels={statusLabels} />}{statusTrailingSlot}</div>}
-        <div id="composer-typing-slot" className="composer-toolbar-spacer">{typingSlot}</div>
+        <div id="composer-toolbar-spacer" className="composer-toolbar-spacer" aria-hidden="true" />
         {!hideSmsCounter && counter && (
           <span id="sms-counter" aria-live="polite" aria-label="SMS character count">
             {counter}

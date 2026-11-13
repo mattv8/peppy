@@ -291,6 +291,9 @@ notification previews and floating heads.
   `InlineStatus` truncates the first, counts the rest as `+N`, and shows full
   text, details and actions in an anchored popover. There is no status row above
   the toolbar. See the mobile style guide's composer status section.
+- The remote contact's typing state is a trailing synthetic row in `#message-list-content` (`#typing-indicator`, an `aria-hidden` incoming bubble with three animated dots), after real messages and queued sends. It is never in the composer and never part of the message timeline or sender runs. One-to-one rows show no avatar, so the real message lands in the same place. Groups show the typer's avatar and tone for one typer, a neutral bubble for several, and the typing label beneath.
+- The row renders only when the list ends at the live tail: not in detached history, empty threads, read-only groups, loading, or other tabs. The existing near-bottom stick reveals it above the composer overlay and never moves a reader of older history.
+- Typing announcements stay in the sr-only `#typing-announcer` outside the log. The composer toolbar keeps only its spacer and the `data-typing-send` attribute for the user's own typing.
 
 ## Floating recipient rail
 

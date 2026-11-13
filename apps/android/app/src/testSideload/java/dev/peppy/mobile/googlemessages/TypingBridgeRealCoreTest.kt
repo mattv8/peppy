@@ -42,20 +42,36 @@ class TypingBridgeRealCoreTest : GatewayTestBase() {
         val desktop = SharedVault.desktop
         val conversationId = UUID.randomUUID().toString()
         val googleConversationId = "google-${UUID.randomUUID()}"
-        enableGatewayRouting(gateway, conversationId)
+        enableGatewayRouting(gateway, conversationId, System.currentTimeMillis() + DESKTOP_WALL_SKEW_MS)
         syncGatewayStateToDesktop(gateway, desktop)
-        val host = RelayHost(desktop, false, deviceId)
+        val host = RelayHost(desktop, false, deviceId) { clock(DESKTOP_WALL_SKEW_MS) }
         val effects = mutableListOf<LiveTypingEffectIntent>()
         val bridge = bridge(gateway, host, conversationId, googleConversationId, effects)
-        enable(desktop, NativeLiveExecutor.NONE)
+        enable(desktop, NativeLiveExecutor.NONE, DESKTOP_WALL_SKEW_MS)
         bridge.start(TypingCredentials("https://vault.example", "bearer", deviceId, 1))
         host.enable()
 
-        assertTrue(relay(desktop, host, conversationId))
-        assertTrue(relay(desktop, host, conversationId, 3_001UL))
-
+        assertTrue(relay(desktop, host, conversationId, DESKTOP_WALL_SKEW_MS))
         assertTrue(host.sentFrames > 0)
         assertTrue(effects.isEmpty())
+
+        assertTrue(
+            relay(
+                desktop,
+                host,
+                conversationId,
+                DESKTOP_WALL_SKEW_MS + REFRESH_INTERVAL_MS.toLong(),
+                REFRESH_INTERVAL_MS,
+            ),
+        )
+        val afterForwarding = SystemClock.elapsedRealtime().toULong()
+
+        val effect = effects.single()
+        assertEquals(googleConversationId, effect.conversationId)
+        assertEquals(NativeTypingState.STARTED, effect.state)
+        assertTrue(effect.deadlineMono > afterForwarding)
+        assertTrue(effect.deadlineMono - afterForwarding <= TYPING_TTL_MS)
+        assertTrue(effect.isCurrent.isCurrent())
     }
 
     @Test fun `discarded real-core replies cannot admit gateway typing`() {
@@ -63,18 +79,27 @@ class TypingBridgeRealCoreTest : GatewayTestBase() {
         val gateway = enrollAndUnlock()
         val desktop = SharedVault.desktop
         val conversationId = UUID.randomUUID().toString()
-        enableGatewayRouting(gateway, conversationId)
+        enableGatewayRouting(gateway, conversationId, System.currentTimeMillis() + DESKTOP_WALL_SKEW_MS)
         syncGatewayStateToDesktop(gateway, desktop)
-        val host = RelayHost(desktop, true, deviceId)
+        val host = RelayHost(desktop, true, deviceId) { clock(DESKTOP_WALL_SKEW_MS) }
         val effects = mutableListOf<LiveTypingEffectIntent>()
         val bridge = bridge(gateway, host, conversationId, "google-${UUID.randomUUID()}", effects)
-        enable(desktop, NativeLiveExecutor.NONE)
+        enable(desktop, NativeLiveExecutor.NONE, DESKTOP_WALL_SKEW_MS)
         bridge.start(TypingCredentials("https://vault.example", "bearer", deviceId, 1))
         host.enable()
 
-        assertTrue(relay(desktop, host, conversationId))
-        assertTrue(relay(desktop, host, conversationId, 3_001UL))
+        assertTrue(relay(desktop, host, conversationId, DESKTOP_WALL_SKEW_MS))
+        assertTrue(
+            relay(
+                desktop,
+                host,
+                conversationId,
+                DESKTOP_WALL_SKEW_MS + REFRESH_INTERVAL_MS.toLong(),
+                REFRESH_INTERVAL_MS,
+            ),
+        )
 
+        assertTrue(host.sentFrames > 0)
         assertTrue(effects.isEmpty())
     }
 
@@ -97,30 +122,35 @@ class TypingBridgeRealCoreTest : GatewayTestBase() {
         return bridge
     }
 
-    private fun enable(client: NativeClient, executor: NativeLiveExecutor) {
+    private fun enable(client: NativeClient, executor: NativeLiveExecutor, clockOffset: Long = 0L) {
         val localDeviceId = if (executor == NativeLiveExecutor.NONE) SharedVault.desktopDeviceId else deviceId
         client.enableLiveTyping(
             NativeLiveEnableContext(listOf(deviceId, SharedVault.desktopDeviceId), localDeviceId, executor),
-            clock(),
+            clock(clockOffset),
         )
         client.setTypingSharing(true)
     }
 
-    private fun relay(client: NativeClient, host: RelayHost, conversationId: String, offset: ULong = 0UL): Boolean {
+    private fun relay(
+        client: NativeClient,
+        host: RelayHost,
+        conversationId: String,
+        wallOffset: Long = 0L,
+        monoOffset: ULong = 0UL,
+    ): Boolean {
         val frame = client.sealTypingSignalV2(
             conversationId,
             deviceId,
             NativeTypingOrigin.VAULT_DEVICE,
             null,
             NativeTypingState.STARTED,
-            clock(offset),
+            clock(wallOffset, monoOffset),
         ) ?: return false
         host.toGateway(frame.frameJson)
         return true
     }
 
-    private fun enableGatewayRouting(gateway: NativeClient, conversationId: String) {
-        val now = System.currentTimeMillis()
+    private fun enableGatewayRouting(gateway: NativeClient, conversationId: String, now: Long) {
         gateway.captureIncoming(NativeIncomingSms(conversationId, PEER, "", "typing-$conversationId", true))
         gateway.recordRcsLinkLifecycle(NativeRcsLinkState.LINKED, true, true, true, now, now)
         assertEquals(
@@ -205,15 +235,16 @@ class TypingBridgeRealCoreTest : GatewayTestBase() {
         context.getSharedPreferences("google-messages-link", 0).edit().clear().commit()
     }
 
-    private fun clock(offset: ULong = 0UL) = NativeLiveClock(
-        System.currentTimeMillis() + offset.toLong(),
-        SystemClock.elapsedRealtime().toULong() + offset,
+    private fun clock(wallOffset: Long = 0L, monoOffset: ULong = 0UL) = NativeLiveClock(
+        System.currentTimeMillis() + wallOffset,
+        SystemClock.elapsedRealtime().toULong() + monoOffset,
     )
 
     private class RelayHost(
         private val desktop: NativeClient,
         private val discard: Boolean,
         private val gatewayDeviceId: String,
+        private val desktopClock: () -> NativeLiveClock,
     ) : TypingTransport {
         lateinit var listener: LiveTypingListener
         lateinit var toGateway: (String) -> Unit
@@ -226,7 +257,7 @@ class TypingBridgeRealCoreTest : GatewayTestBase() {
             if (publication != PUBLICATION) return false
             sentFrames++
             if (discard) return true
-            desktop.openTypingSignalV2(frameJson, NativeLiveClock(System.currentTimeMillis(), SystemClock.elapsedRealtime().toULong()))
+            desktop.openTypingSignalV2(frameJson, desktopClock())
                 .replyFrameJson?.let {
                     toGateway(it)
                 }
@@ -245,6 +276,9 @@ class TypingBridgeRealCoreTest : GatewayTestBase() {
         const val PEER = "+12025550123"
         const val OWN_NUMBER = "+12025550101"
         const val PUBLICATION = 1L
+        const val DESKTOP_WALL_SKEW_MS = -1_250L
+        const val REFRESH_INTERVAL_MS = 3_001UL
+        const val TYPING_TTL_MS = 15_000UL
     }
 
     private class RealTypingCore(
