@@ -127,27 +127,86 @@ describe("McpDeviceSettings", () => {
       expect(screen.queryByText("Enable failed")).not.toBeInTheDocument();
     });
 
-    it("disables Enable after a conflict refresh shows the existing device", async () => {
+    it("silently recovers a conflict when refresh shows the existing device", async () => {
       vi.mocked(bridge.mcp_status).mockResolvedValueOnce(ready).mockResolvedValueOnce(onlineStatus);
       vi.mocked(bridge.mcp_enable).mockRejectedValueOnce({ code: "mcp_device_conflict", message: "already configured" });
       renderSettings();
       fireEvent.click(await screen.findByText("Enable"));
       fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt this vault/i }));
       fireEvent.click(document.getElementById("mcp-custody-consent-enable")!);
-      const dialog = screen.getByRole("dialog");
-      expect(await within(dialog).findByRole("alert")).toHaveTextContent("Peppy MCP is already set up. Close this to see its current status.");
-      expect(within(dialog).getByRole("button", { name: /enable Peppy MCP/i })).toBeDisabled();
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(document.activeElement).toBe(document.getElementById("mcp-device-mcp-device"));
     });
 
-    it("keeps custody consent open for a native setup-in-progress error and silently refreshes status", async () => {
+    it("reconciles a conflict even while a Details refresh is unresolved", async () => {
+      const detailsRefresh = deferred<McpDeviceStatus>();
+      vi.mocked(bridge.mcp_status)
+        .mockResolvedValueOnce(device("revoked"))
+        .mockReturnValueOnce(detailsRefresh.promise)
+        .mockResolvedValueOnce(onlineStatus);
+      vi.mocked(bridge.mcp_enable).mockRejectedValueOnce({ code: "mcp_device_conflict" });
+      renderSettings();
+      await openDetailsDialog();
+      fireEvent.click(screen.getByRole("button", { name: "Re-enable Peppy MCP" }));
+      fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt this vault/i }));
+      fireEvent.click(document.getElementById("mcp-custody-consent-enable")!);
+      await waitFor(() => expect(document.getElementById("mcp-custody-consent")).toBeNull());
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(document.querySelector('[data-device-badge="presence"]')).toHaveTextContent("Online");
+    });
+
+    it("closes custody consent and polls for a native setup-in-progress error without a device", async () => {
       vi.mocked(bridge.mcp_enable).mockRejectedValue({ code: "server-rejected", message: "The server rejected the request (HTTP 409, mcp_enable_in_progress)." });
       renderSettings();
       fireEvent.click(await screen.findByText("Enable"));
       fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt this vault/i }));
       fireEvent.click(document.getElementById("mcp-custody-consent-enable")!);
-      expect(await within(screen.getByRole("dialog")).findByRole("alert")).toHaveTextContent("Peppy MCP setup is already running. Wait a few minutes, then try again.");
-      expect(within(screen.getByRole("dialog")).getByRole("button", { name: /enable Peppy MCP/i })).toBeEnabled();
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(document.getElementById("mcp-row-notice")).toHaveAttribute("data-mcp-enable-outcome", "unconfirmed");
+      expect(screen.queryByRole("button", { name: /enable Peppy MCP/i })).toBeNull();
       expect(bridge.mcp_status).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps conflict fallback actionable when refresh fails", async () => {
+      vi.mocked(bridge.mcp_enable).mockRejectedValue({ code: "mcp_device_conflict" });
+      vi.mocked(bridge.mcp_status).mockResolvedValueOnce(ready).mockRejectedValueOnce(new Error("status unavailable"));
+      renderSettings();
+      fireEvent.click(await screen.findByText("Enable"));
+      fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt this vault/i }));
+      fireEvent.click(document.getElementById("mcp-custody-consent-enable")!);
+      expect(await within(screen.getByRole("dialog")).findByRole("alert")).toHaveTextContent("Peppy MCP may already be set up. Close this to see its current status.");
+      expect(within(screen.getByRole("dialog")).getByRole("button", { name: /enable Peppy MCP/i })).toBeEnabled();
+    });
+
+    it("keeps other enable failures actionable after refresh", async () => {
+      vi.mocked(bridge.mcp_enable).mockRejectedValue({ code: "mcp_operation_invalid" });
+      renderSettings();
+      fireEvent.click(await screen.findByText("Enable"));
+      fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt this vault/i }));
+      fireEvent.click(document.getElementById("mcp-custody-consent-enable")!);
+      expect(await within(screen.getByRole("dialog")).findByRole("alert")).toHaveTextContent("This setup attempt expired or was replaced. Try enabling again.");
+      expect(within(screen.getByRole("dialog")).getByRole("button", { name: /enable Peppy MCP/i })).toBeEnabled();
+    });
+
+    it("keeps worker rejection failures actionable after refresh", async () => {
+      vi.mocked(bridge.mcp_enable).mockRejectedValue({ code: "mcp_worker_rejected" });
+      renderSettings();
+      fireEvent.click(await screen.findByText("Enable"));
+      fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt this vault/i }));
+      fireEvent.click(document.getElementById("mcp-custody-consent-enable")!);
+      expect(await within(screen.getByRole("dialog")).findByRole("alert")).toHaveTextContent("Peppy MCP setup didn't finish. Try again.");
+    });
+
+    it("shows the pending status and hint immediately", async () => {
+      const enable = deferred<McpDeviceStatus>();
+      vi.mocked(bridge.mcp_enable).mockReturnValue(enable.promise);
+      renderSettings();
+      fireEvent.click(await screen.findByText("Enable"));
+      fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt this vault/i }));
+      fireEvent.click(document.getElementById("mcp-custody-consent-enable")!);
+      expect(document.getElementById("mcp-custody-consent-progress")).toHaveTextContent("Setting up Peppy MCP… This can take a minute or two.");
+      expect(document.getElementById("mcp-custody-consent-progress-hint")).toBeInTheDocument();
     });
 
     it("ignores an enable completion after the vault context changes", async () => {
@@ -797,6 +856,69 @@ describe("McpDeviceSettings", () => {
       await settle();
       expect(vi.mocked(bridge.mcp_status).mock.calls.length).toBe(afterEnable + MAX_POLLS);
       expect(rowNotice()).toHaveTextContent("Still offline. Open Details to check again.");
+    });
+
+    it("keeps polling after an unconfirmed enable finds an offline device", async () => {
+      const onMutation = vi.fn();
+      vi.mocked(bridge.mcp_enable).mockRejectedValue({ code: "mcp-enable-unconfirmed" });
+      vi.mocked(bridge.mcp_status).mockResolvedValueOnce(ready).mockResolvedValueOnce(ready).mockResolvedValueOnce(offlineStatus).mockResolvedValueOnce(onlineStatus);
+      renderSettings({ onMutation });
+      await settle();
+      await enableFromRow();
+      expect(rowNotice()).toHaveAttribute("data-mcp-enable-outcome", "unconfirmed");
+      await advance(5_000);
+      await settle();
+      expect(rowNotice()).toHaveAttribute("data-mcp-enable-outcome", "ready");
+      expect(rowNotice()).toHaveTextContent(OFFLINE_HINT);
+      await advance(5_000);
+      await settle();
+      expect(rowNotice()).toHaveTextContent("Peppy MCP is set up.");
+      expect(screen.getByRole("button", { name: /Peppy MCP details/i })).toBeInTheDocument();
+      expect(onMutation).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns Enable after an unconfirmed enable exhausts its polling budget", async () => {
+      vi.mocked(bridge.mcp_enable).mockRejectedValue({ code: "offline" });
+      vi.mocked(bridge.mcp_status).mockResolvedValueOnce(ready).mockImplementation(fresh(ready));
+      renderSettings();
+      await settle();
+      await enableFromRow();
+      for (let tick = 0; tick < MAX_POLLS; tick += 1) await advance(5_000);
+      await settle();
+      expect(rowNotice()).toHaveAttribute("data-mcp-enable-outcome", "exhausted");
+      expect(rowNotice()).toHaveTextContent("Peppy MCP still isn't ready. Select Enable to try again.");
+      expect(screen.getByRole("button", { name: /enable Peppy MCP/i })).toBeInTheDocument();
+    });
+
+    it("pauses unconfirmed polling while the server is offline and resumes when it returns", async () => {
+      vi.mocked(bridge.mcp_enable).mockRejectedValue({ code: "offline" });
+      vi.mocked(bridge.mcp_status).mockResolvedValueOnce(ready).mockImplementation(fresh(ready));
+      const { rerender } = renderSettings();
+      await settle();
+      await enableFromRow();
+      rerender(<McpDeviceSettings roster={owner} serverOffline accountReadOnly={false} sessionKey="vault-a" unlocked />);
+      expect(rowNotice()).toBeNull();
+      const pausedCalls = vi.mocked(bridge.mcp_status).mock.calls.length;
+      await advance(5_000);
+      expect(vi.mocked(bridge.mcp_status).mock.calls.length).toBe(pausedCalls);
+      rerender(<McpDeviceSettings roster={owner} serverOffline={false} accountReadOnly={false} sessionKey="vault-a" unlocked />);
+      await advance(5_000);
+      await settle();
+      expect(vi.mocked(bridge.mcp_status).mock.calls.length).toBe(pausedCalls + 1);
+      expect(rowNotice()).toHaveAttribute("data-mcp-enable-outcome", "unconfirmed");
+    });
+
+    it("hides an exhausted notice when Enable is unavailable", async () => {
+      vi.mocked(bridge.mcp_enable).mockRejectedValue({ code: "offline" });
+      vi.mocked(bridge.mcp_status).mockResolvedValueOnce(ready).mockImplementation(fresh(ready));
+      const { rerender } = renderSettings();
+      await settle();
+      await enableFromRow();
+      for (let tick = 0; tick < MAX_POLLS; tick += 1) await advance(5_000);
+      await settle();
+      expect(rowNotice()).toHaveAttribute("data-mcp-enable-outcome", "exhausted");
+      rerender(<McpDeviceSettings roster={owner} serverOffline accountReadOnly={false} sessionKey="vault-a" unlocked />);
+      expect(rowNotice()).toBeNull();
     });
 
     it("stops settling polls when the session changes mid-poll and drops the notice", async () => {

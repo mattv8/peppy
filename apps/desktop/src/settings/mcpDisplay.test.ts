@@ -3,22 +3,26 @@ import { mcpErrorMessage, mcpServerErrorCode } from "./mcpDisplay";
 
 describe("mcpErrorMessage", () => {
   it.each([
-    ["mcp_enable_in_progress", "Peppy MCP setup is already running. Wait a few minutes, then try again."],
-    ["mcp_device_conflict", "Peppy MCP is already set up. Close this to see its current status."],
+    ["mcp_enable_in_progress", "Peppy MCP setup is already running. Its status will update here."],
+    ["mcp-enable-unconfirmed", "Peppy MCP setup is still finishing. Its status will update here."],
+    ["mcp_device_conflict", "Peppy MCP may already be set up. Close this to see its current status."],
     ["mcp_operation_not_found", "This setup attempt expired or was replaced. Try enabling again."],
     ["mcp_device_not_enrolled", "Peppy MCP setup didn't finish. Try again."],
+    ["mcp_worker_rejected", "Peppy MCP setup didn't finish. Try again."],
+    ["mcp_worker_rejected", "Peppy MCP setup didn't finish. Try again."],
     ["mcp_unavailable", "Peppy MCP isn't reachable right now. Try again in a moment."],
     ["owner_required", "Only an owner can enable Peppy MCP."],
     ["hosted-session-required", "Your Peppy Hosted sign-in has expired. Sign in again, then select Enable."],
     ["session-changed", "Your session changed. Close this and try again."],
     ["offline", "Couldn't reach the server. Check the connection and try again."],
+    ["timeout", "Couldn't reach the server. Check the connection and try again."],
   ])("uses actionable copy for %s", (code, expected) => {
     expect(mcpErrorMessage({ code, message: "ignored" }, "fallback")).toBe(expected);
   });
 
   it("recognizes a server code embedded in a native-shaped message", () => {
     expect(mcpErrorMessage({ code: "server-rejected", message: "The server rejected the request (HTTP 409, mcp_enable_in_progress)." }, "fallback"))
-      .toBe("Peppy MCP setup is already running. Wait a few minutes, then try again.");
+      .toBe("Peppy MCP setup is already running. Its status will update here.");
   });
 
   it("recognizes direct browser and embedded native grant-not-found codes exactly", () => {

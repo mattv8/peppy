@@ -22,18 +22,21 @@ export const hasUsableEndpoint = (device: NonNullable<McpDeviceStatus["device"]>
 export const isStartingState = (state: McpDeviceState | undefined) => state === "offline";
 
 const MCP_ERROR_MESSAGES: Record<string, string> = {
-  mcp_enable_in_progress: "Peppy MCP setup is already running. Wait a few minutes, then try again.",
-  mcp_device_conflict: "Peppy MCP is already set up. Close this to see its current status.",
+  mcp_enable_in_progress: "Peppy MCP setup is already running. Its status will update here.",
+  "mcp-enable-unconfirmed": "Peppy MCP setup is still finishing. Its status will update here.",
+  mcp_device_conflict: "Peppy MCP may already be set up. Close this to see its current status.",
   mcp_operation_not_found: "This setup attempt expired or was replaced. Try enabling again.",
   mcp_operation_invalid: "This setup attempt expired or was replaced. Try enabling again.",
   mcp_device_not_enrolled: "Peppy MCP setup didn't finish. Try again.",
   mcp_unavailable: "Peppy MCP isn't reachable right now. Try again in a moment.",
   mcp_worker_unavailable: "Peppy MCP isn't reachable right now. Try again in a moment.",
   mcp_worker_invalid: "Peppy MCP isn't reachable right now. Try again in a moment.",
+  mcp_worker_rejected: "Peppy MCP setup didn't finish. Try again.",
   owner_required: "Only an owner can enable Peppy MCP.",
   "hosted-session-required": "Your Peppy Hosted sign-in has expired. Sign in again, then select Enable.",
   "session-changed": "Your session changed. Close this and try again.",
   offline: "Couldn't reach the server. Check the connection and try again.",
+  timeout: "Couldn't reach the server. Check the connection and try again.",
 };
 
 const MCP_GRANT_NOT_FOUND = "mcp_grant_not_found";
