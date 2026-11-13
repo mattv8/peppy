@@ -6,10 +6,10 @@ use axum::{
 };
 use futures_util::StreamExt;
 use peppy_hosted_api::mcp::{
-    McpDeviceState, McpDeviceStatus, McpDeviceView, McpEnrollmentPreparation, McpGrantView,
-    McpWorkerActivateRequest, McpWorkerActivateResponse, McpWorkerCompleteRequest,
-    McpWorkerPrepareRequest, McpWorkerPrepareResponse, McpWorkerStatusRequest,
-    McpWorkerStatusResponse,
+    MCP_WORKER_COMPLETE_TIMEOUT_MS, McpDeviceState, McpDeviceStatus, McpDeviceView,
+    McpEnrollmentPreparation, McpGrantView, McpWorkerActivateRequest, McpWorkerActivateResponse,
+    McpWorkerCompleteRequest, McpWorkerPrepareRequest, McpWorkerPrepareResponse,
+    McpWorkerStatusRequest, McpWorkerStatusResponse,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -1011,7 +1011,8 @@ fn worker_request_limit(path: &str) -> Option<usize> {
 
 fn worker_request_timeout(path: &str) -> Option<Duration> {
     match path {
-        "/internal/mcp/call" | "/internal/mcp/complete" => Some(Duration::from_secs(30)),
+        "/internal/mcp/call" => Some(Duration::from_secs(30)),
+        "/internal/mcp/complete" => Some(Duration::from_millis(MCP_WORKER_COMPLETE_TIMEOUT_MS)),
         "/internal/mcp/webhooks" => Some(Duration::from_secs(20)),
         "/internal/mcp/prepare"
         | "/internal/mcp/activate"
@@ -1202,6 +1203,10 @@ mod worker_wire_tests {
         assert_eq!(
             worker_request_timeout("/internal/mcp/status"),
             Some(Duration::from_secs(5))
+        );
+        assert!(
+            worker_request_timeout("/internal/mcp/complete").unwrap()
+                < Duration::from_millis(peppy_hosted_api::mcp::MCP_COMPLETE_REQUEST_TIMEOUT_MS)
         );
         assert_eq!(worker_request_limit("/internal/mcp/not-a-route"), None);
     }
