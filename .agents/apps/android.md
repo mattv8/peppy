@@ -1,6 +1,6 @@
 # Android client reference
 
-This reference covers Android implementation, build, and verification work. For repository-wide workflow, see [CONTRIBUTING.md](../../CONTRIBUTING.md). User installation, permissions, and capability limits are in the root [Clients](../../README.md#clients) guide.
+This reference covers Android implementation, build, and verification work. For repository-wide workflow, see [CONTRIBUTING.md](../../CONTRIBUTING.md). User installation, permissions, and capability limits are in the [Android guide](https://peppy.pro/docs/android).
 
 ## Hosted sign-in configuration
 
