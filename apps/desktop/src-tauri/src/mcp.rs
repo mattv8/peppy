@@ -1210,20 +1210,59 @@ mod tests {
         )
     }
 
+    const TEST_SERVER_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
+    const TEST_SERVER_IO_TIMEOUT: Duration = Duration::from_secs(2);
+
+    async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+
+        tokio::time::timeout(TEST_SERVER_IO_TIMEOUT, async {
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0; 1024];
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(
+                    read > 0,
+                    "connection closed before the request body arrived"
+                );
+                request.extend_from_slice(&chunk[..read]);
+
+                let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                let content_length = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    return String::from_utf8(request).unwrap();
+                }
+            }
+        })
+        .await
+        .expect("timed out reading the HTTP request")
+    }
+
     async fn serve_mcp_responses(
         responses: Vec<String>,
     ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             let mut requests = Vec::new();
             for response in responses {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = vec![0; 4096];
-                let read = socket.read(&mut request).await.unwrap();
-                requests.push(String::from_utf8(request[..read].to_vec()).unwrap());
+                let (mut socket, _) =
+                    tokio::time::timeout(TEST_SERVER_ACCEPT_TIMEOUT, listener.accept())
+                        .await
+                        .expect("timed out waiting for an HTTP request")
+                        .unwrap();
+                requests.push(read_http_request(&mut socket).await);
                 socket.write_all(response.as_bytes()).await.unwrap();
             }
             requests
@@ -1231,30 +1270,52 @@ mod tests {
         (origin, server)
     }
 
-    async fn serve_delayed_mcp_responses(
-        responses: Vec<(Duration, String)>,
+    enum GatedMcpResponse {
+        AfterAllRequests(String),
+        Never,
+    }
+
+    async fn serve_gated_mcp_responses(
+        responses: Vec<GatedMcpResponse>,
     ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
+            let all_requests_read = std::sync::Arc::new(tokio::sync::Barrier::new(responses.len()));
             let mut requests = tokio::task::JoinSet::new();
-            for (delay, response) in responses {
-                let (mut socket, _) = listener.accept().await.unwrap();
+            for (index, response) in responses.into_iter().enumerate() {
+                let (mut socket, _) =
+                    tokio::time::timeout(TEST_SERVER_ACCEPT_TIMEOUT, listener.accept())
+                        .await
+                        .expect("timed out waiting for an HTTP request")
+                        .unwrap();
+                let all_requests_read = all_requests_read.clone();
                 requests.spawn(async move {
-                    let mut request = vec![0; 4096];
-                    let read = socket.read(&mut request).await.unwrap();
-                    tokio::time::sleep(delay).await;
-                    let _ = socket.write_all(response.as_bytes()).await;
-                    String::from_utf8(request[..read].to_vec()).unwrap()
+                    let request = read_http_request(&mut socket).await;
+                    tokio::time::timeout(TEST_SERVER_IO_TIMEOUT, all_requests_read.wait())
+                        .await
+                        .expect("timed out waiting for all request bodies");
+
+                    match response {
+                        GatedMcpResponse::AfterAllRequests(response) => {
+                            let _ = socket.write_all(response.as_bytes()).await;
+                        }
+                        GatedMcpResponse::Never => {
+                            tokio::time::sleep(TEST_SERVER_IO_TIMEOUT).await;
+                        }
+                    }
+                    (index, request)
                 });
             }
+
             let mut received = Vec::new();
             while let Some(request) = requests.join_next().await {
                 received.push(request.unwrap());
             }
-            received
+            received.sort_by_key(|(index, _)| *index);
+            received.into_iter().map(|(_, request)| request).collect()
         });
         (origin, server)
     }
@@ -1302,16 +1363,14 @@ mod tests {
 
     #[tokio::test]
     async fn complete_timeout_replays_the_identical_request() {
-        let (origin, server) = serve_delayed_mcp_responses(vec![
-            (
-                Duration::from_millis(50),
-                http_response("200 OK", mcp_device_status()),
-            ),
-            (Duration::ZERO, http_response("200 OK", mcp_device_status())),
+        let response = http_response("200 OK", mcp_device_status());
+        let (origin, server) = serve_gated_mcp_responses(vec![
+            GatedMcpResponse::AfterAllRequests(response.clone()),
+            GatedMcpResponse::AfterAllRequests(response),
         ])
         .await;
 
-        assert!(complete_with_timeout(&origin, Duration::from_millis(10))
+        assert!(complete_with_timeout(&origin, Duration::from_secs(1))
             .await
             .is_ok());
         let requests = server.await.unwrap();
@@ -1360,19 +1419,10 @@ mod tests {
 
     #[tokio::test]
     async fn complete_two_timeouts_are_unconfirmed() {
-        let (origin, server) = serve_delayed_mcp_responses(vec![
-            (
-                Duration::from_millis(50),
-                http_response("200 OK", mcp_device_status()),
-            ),
-            (
-                Duration::from_millis(50),
-                http_response("200 OK", mcp_device_status()),
-            ),
-        ])
-        .await;
+        let (origin, server) =
+            serve_gated_mcp_responses(vec![GatedMcpResponse::Never, GatedMcpResponse::Never]).await;
 
-        let error = complete_with_timeout(&origin, Duration::from_millis(10))
+        let error = complete_with_timeout(&origin, Duration::from_secs(1))
             .await
             .unwrap_err();
         assert_eq!(error.code, "mcp-enable-unconfirmed");
