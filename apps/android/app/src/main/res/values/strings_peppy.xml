@@ -722,6 +722,13 @@
     <string name="peppy_hosted_subscribe_terms">Terms</string>
     <string name="peppy_hosted_subscribe_privacy">Privacy</string>
     <string name="peppy_privacy_policy">Privacy Policy</string>
+    <string name="peppy_guides">Guides</string>
+    <string name="peppy_mcp_guide">MCP guide</string>
+    <string name="peppy_webhooks_guide">Webhooks guide</string>
+    <string name="peppy_android_guide">Android guide</string>
+    <string name="peppy_google_messages_guide">Google Messages guide</string>
+    <string name="peppy_guides_open_failed">Guides could not be opened.</string>
+    <string name="peppy_guide_open_failed">Couldn\'t open the guide.</string>
     <string name="peppy_privacy_policy_scope">Peppy apps and hosted service. Self-hosted server operators set their own privacy practices.</string>
     <string name="peppy_account_delete_section">Delete Peppy account</string>
     <string name="peppy_account_delete_row">Delete Peppy account</string>

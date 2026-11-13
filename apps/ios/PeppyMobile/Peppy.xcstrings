@@ -7211,6 +7211,76 @@
         }
       }
     },
+    "peppy.guides": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Guides"
+          }
+        }
+      }
+    },
+    "peppy.mcp_guide": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MCP guide"
+          }
+        }
+      }
+    },
+    "peppy.webhooks_guide": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Webhooks guide"
+          }
+        }
+      }
+    },
+    "peppy.android_guide": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android guide"
+          }
+        }
+      }
+    },
+    "peppy.google_messages_guide": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Messages guide"
+          }
+        }
+      }
+    },
+    "peppy.guides_open_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Guides could not be opened."
+          }
+        }
+      }
+    },
+    "peppy.guide_open_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't open the guide."
+          }
+        }
+      }
+    },
     "peppy.privacy_policy_scope": {
       "localizations": {
         "en": {
