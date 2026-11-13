@@ -945,13 +945,14 @@ describe("desktop UI controls", () => {
     expect(document.getElementById("shared-composer")).toHaveAttribute("data-typing-send", "active");
   });
 
-  it("keeps typing content in the toolbar typing slot", () => {
-    render(<Composer draft="" attachments={[]} sendSupported onDraftChange={() => {}} onSend={() => {}} typingSlot={<span id="typing-indicator" />} />);
+  it("keeps an empty toolbar spacer while preserving typing sender state", () => {
+    render(<Composer draft="" attachments={[]} sendSupported onDraftChange={() => {}} onSend={() => {}} />);
 
-    const slot = document.getElementById("composer-typing-slot");
+    const slot = document.getElementById("composer-toolbar-spacer");
     expect(slot).toBeInTheDocument();
     expect(slot).toHaveClass("composer-toolbar-spacer");
-    expect(slot).toContainElement(document.getElementById("typing-indicator"));
+    expect(slot).toBeEmptyDOMElement();
+    expect(slot).toHaveAttribute("aria-hidden", "true");
   });
 
   it("allows attachment-only sends and explains why sending is unavailable", () => {

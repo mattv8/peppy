@@ -3543,6 +3543,87 @@ describe("draft durability", () => {
     await waitFor(() => expect(document.querySelector("[data-pending-send-id]")).toBeNull());
   });
 
+  it.each([
+    ["main window", () => undefined],
+    ["composer window", () => openComposerWindow("aurora")],
+    ["head-panel window", () => openComposerWindow("aurora", true)],
+  ])("scrolls the queued local bubble into view in the %s", async (_windowName, openWindow) => {
+    const restoreGeometry = mockMessageListGeometry({ overlay: 0, viewport: 100, scrollHeight: 1_000 });
+    const response = delayAcceptedSend();
+    if (_windowName === "head-panel window") {
+      host.drafts.set("aurora", {
+        id: "draft-aurora",
+        conversationId: "aurora",
+        text: "",
+        recipientIds: [],
+        attachmentIds: [],
+        gatewayId: SMS_ONLY.id,
+        simId: SMS_ONLY.simId,
+        revision: "1",
+      });
+    }
+    openWindow();
+    try {
+      render(<App />);
+      await screen.findByText("Hello from Aurora");
+      const list = screen.getByRole("log", { name: "Messages" });
+      list.scrollTop = 930;
+      fireEvent.scroll(list);
+      if (_windowName !== "head-panel window") await chooseGateway(SMS_ONLY);
+      type("scroll queued message");
+
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+      await waitFor(() => expect(document.querySelector("[data-pending-send-id]")).toBeInTheDocument());
+      expect(list.scrollTop).toBe(list.scrollHeight);
+
+      response.resolve();
+      await waitFor(() => expect(document.querySelector("[data-pending-send-id]")).toBeNull());
+    } finally {
+      restoreGeometry();
+    }
+  });
+
+  it("does not scroll or show a queued local bubble in detached history", async () => {
+    const restoreGeometry = mockMessageListGeometry({ overlay: 0, viewport: 100, scrollHeight: 1_000 });
+    const response = delayAcceptedSend();
+    const conversation = host.conversations[0];
+    const target = conversation.messages[0];
+    vi.spyOn(bridge, "search_local").mockResolvedValue({
+      query: "target",
+      items: [{ kind: "message", conversationId: conversation.id, messageId: target.id, title: "Aurora", snippet: target.body, timestamp: target.timestamp }],
+      indexState: "ready",
+      hasMore: { conversation: false, message: false, contact: false },
+    });
+    vi.spyOn(bridge, "load_message_window").mockResolvedValue({ conversationId: conversation.id, messages: [target], hasOlder: true, hasNewer: true });
+    try {
+      render(<App />);
+      await screen.findByText(target.body);
+      fireEvent.change(screen.getByRole("combobox", { name: "Search Peppy" }), { target: { value: "target" } });
+      const hit = await waitFor(() => {
+        const result = document.querySelector<HTMLElement>("[data-search-hit]");
+        expect(result).not.toBeNull();
+        return result!;
+      });
+      fireEvent.click(hit);
+      await screen.findByRole("button", { name: "Load newer messages" });
+      const list = screen.getByRole("log", { name: "Messages" });
+      list.scrollTop = 400;
+      fireEvent.scroll(list);
+      await chooseGateway(SMS_ONLY);
+      type("detached queued message");
+
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(bridge.send_draft).toHaveBeenCalled());
+
+      expect(list.scrollTop).toBe(400);
+      expect(document.querySelector("[data-pending-send-id]")).toBeNull();
+      response.resolve();
+    } finally {
+      restoreGeometry();
+    }
+  });
+
   it("removes a pending bubble when the send is rejected, after the draft is restored", async () => {
     const rejection = deferred<Awaited<ReturnType<typeof bridge.send_draft>>>();
     vi.mocked(bridge.send_draft).mockReturnValueOnce(rejection.promise);
@@ -6610,6 +6691,18 @@ describe("desktop presentation controls", () => {
         Object.defineProperty(HTMLElement.prototype, "clientHeight", clientHeight);
       else delete (HTMLElement.prototype as { clientHeight?: number }).clientHeight;
     }
+  });
+
+  it("observes the message list after a composer loading shell clears", async () => {
+    TestResizeObserver.reset();
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    openComposerWindow("aurora");
+    render(<App />);
+
+    const list = await screen.findByRole("log", { name: "Messages" });
+    const content = document.getElementById("message-list-content")!;
+
+    await waitFor(() => expect(TestResizeObserver.observers.some((observer) => observer.targets.has(list) && observer.targets.has(content))).toBe(true));
   });
 
   it("keeps a reader anchored to the unobscured bottom when the composer grows", async () => {

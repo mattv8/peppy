@@ -777,17 +777,15 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   white-space: nowrap;
 }
 #conversation-rcs-e2ee-badge { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; border-color: var(--peppy-border-strong); }
-#typing-indicator { display: inline-flex; align-items: center; gap: 6px; color: var(--peppy-text-secondary); font-size: 12px; white-space: nowrap; }
-#typing-indicator[hidden] { display: none; }
 .composer-toolbar-spacer { display: flex; min-width: 0; overflow: hidden; }
-#typing-indicator-label { overflow: hidden; text-overflow: ellipsis; }
-#typing-indicator-dots { display: inline-flex; gap: 3px; }
-#typing-indicator-dots i { width: 4px; height: 4px; border-radius: var(--peppy-radius-pill); background: currentColor; animation: typing-dot 1200ms ease-in-out infinite; }
-#typing-indicator-dots i:nth-child(2) { animation-delay: 160ms; }
-#typing-indicator-dots i:nth-child(3) { animation-delay: 320ms; }
+.typing-dots { display: flex; align-items: center; gap: 4px; height: calc(15px * 1.5); }
+.typing-dots i { width: 6px; height: 6px; border-radius: var(--peppy-radius-pill); background: currentColor; animation: typing-dot 1200ms ease-in-out infinite; }
+.typing-dots i:nth-child(2) { animation-delay: 160ms; }
+.typing-dots i:nth-child(3) { animation-delay: 320ms; }
 @keyframes typing-dot { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { #typing-indicator-dots i { animation: none; opacity: .7; } }
-@media (forced-colors: active) { #typing-indicator-dots i { background: CanvasText; } }
+#typing-indicator-label { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (prefers-reduced-motion: reduce) { .typing-dots i { animation: none; opacity: .7; } }
+@media (forced-colors: active) { .typing-dots i { background: CanvasText; } }
 .header-copy-details small {
   color: var(--peppy-text-secondary);
   font-size: 11px;

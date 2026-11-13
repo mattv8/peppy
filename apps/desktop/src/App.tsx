@@ -158,7 +158,7 @@ import { RcsMediaActionsProvider } from "./rcs/RcsMediaActions";
 import { RcsAttachmentSlot } from "./rcs/RcsAttachmentSlot";
 import { RcsMediaFileRow } from "./rcs/RcsMediaPlaceholder";
 import { useRcsRoute } from "./rcs/useRcsRoute";
-import { TypingAnnouncer, TypingIndicator } from "./typing/TypingIndicator";
+import { TypingAnnouncer, TypingRow, type TypingRowData } from "./typing/TypingIndicator";
 import { useTypingDisplay } from "./typing/useTypingDisplay";
 import { useTypingSender } from "./typing/useTypingSender";
 import { peppyCopy } from "./generated/peppyCopy";
@@ -938,6 +938,7 @@ function MessageList({
   onCreateGroupAgain,
   pendingSends,
   attachmentViews,
+  typingRow,
 }: {
   conversation?: ConversationView;
   /** Copies a refused group message's body back into the composer. Nothing is sent. */
@@ -992,6 +993,7 @@ function MessageList({
   toneOverrides?: Record<string, number>;
   pendingSends: PendingSend[];
   attachmentViews: Record<string, AttachmentView>;
+  typingRow?: TypingRowData;
 }) {
   const reactions = useMemo(() => showReactions && conversation ? linkReactions(conversation.messages) : NO_REACTIONS, [showReactions, conversation?.messages]);
   const [focusedNoticeId, setFocusedNoticeId] = useState<string>();
@@ -1377,6 +1379,7 @@ function MessageList({
             </div>
           );
         })}
+        {typingRow && <TypingRow {...typingRow} showSenderAvatars={showSenderAvatars} conversationToneSeed={conversationToneSeed} toneOverrides={toneOverrides} />}
       </div>
     </div>
     </ReactionHintLayout>
@@ -3568,6 +3571,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, [active?.id, appLock?.locked, snapshot?.encryption.state]);
   const conversationLoaded =
     Boolean(active) && snapshot?.activeConversationId === slotKey;
+  const visiblePendingSendRows = visiblePendingSends(pendingSends, active, Boolean(detachedHistory && detachedHistory.conversationId === active?.id && detachedHistory.hasNewer));
+  const trailingRowsKey = visiblePendingSendRows.map(({ id }) => id).join(",");
   const conversationTabsShown = Boolean(composerConversation) || conversationLoaded;
   const seenReactions = useMemo(() => createSeenReactionLedger({ mode: snapshot?.mode ?? "", origin: snapshot?.connection.origin }), [snapshot?.mode, snapshot?.connection.origin]);
   const reactionScopeKey = JSON.stringify([renderedSearchSessionKey, slotKey]);
@@ -3809,9 +3814,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     nearBottom.current = true;
   }, [slotKey, conversationLoaded]);
   useLayoutEffect(() => {
-    if (nearBottom.current && !searchReadGate.current && !detachedHistoryRef.current) stickToBottom();
-  }, [messageIds]);
-  useLayoutEffect(() => {
     messageRows.current.forEach((candidate, id) => {
       if (id === searchTargetId || candidate.dataset.searchTarget !== "true") return;
       candidate.removeAttribute("data-search-target");
@@ -3844,7 +3846,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     adjustMessageScrollForGeometry();
   }, [overlayHeight]);
   useLayoutEffect(() => {
-    const list = messageListRef.current;
+    const list = messageListNode;
     const content = document.getElementById("message-list-content");
     if (!list || !content || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver((entries) => {
@@ -3857,7 +3859,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     observer.observe(list);
     observer.observe(content);
     return () => observer.disconnect();
-  }, [activeView, slotKey, conversationLoaded, headPanel]);
+  }, [activeView, slotKey, conversationLoaded, headPanel, messageListNode]);
   useEffect(() => {
     seenMessageIds.current = new Set<string>();
     pendingSeenMessageIds.current = new Set<string>();
@@ -4892,6 +4894,33 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, []);
 
   const resolution = useMemo<ContactResolutionMap>(() => ({ ...chosenContacts, ...(snapshot?.contactResolution ?? {}) }), [snapshot?.contactResolution, chosenContacts]);
+  const typingLabel = groupTypingLabel(typing.participants, (address) => displayAddressName(address, resolution));
+  const conversationToneSeed = active ? conversationAvatar({ id: active.id, name: active.name, participants: active.participants, recipientless: active.recipientlessDraft }).seed : "";
+  const typingRow = useMemo<TypingRowData | undefined>(() => {
+    const detached = detachedHistory?.conversationId === active?.id;
+    const hasVisualMessages = Boolean(active?.messages.some(message => message.sendCancellation?.state !== "confirmed") || visiblePendingSendRows.length);
+    if (!active || !conversationLoaded || !typing.visible || !hasVisualMessages || detached || groupLeft) return undefined;
+    if (isGroup) return {
+      scope: "group",
+      label: typingLabel,
+      typers: typing.participants.map((address) => ({
+        address,
+        name: resolution[address]?.displayName,
+        photoDataUrl: resolution[address]?.photoDataUrl,
+        toneSeed: incomingToneSeed(conversationToneSeed, address),
+      })),
+    };
+    const address = latestIncomingSender ?? "";
+    return {
+      scope: "direct",
+      label: peppyCopy.typing_indicator_direct,
+      typers: [{ address, name: resolution[address]?.displayName, photoDataUrl: resolution[address]?.photoDataUrl, toneSeed: incomingToneSeed(conversationToneSeed, address) }],
+    };
+  }, [active, conversationLoaded, conversationToneSeed, detachedHistory, groupLeft, isGroup, latestIncomingSender, resolution, typing, typingLabel, visiblePendingSendRows]);
+  const typingRowsKey = typingRow ? `${typingRow.scope}:${typingRow.typers.map(({ address }) => address).join(",")}` : "";
+  useLayoutEffect(() => {
+    if (nearBottom.current && !searchReadGate.current && !detachedHistoryRef.current) stickToBottom();
+  }, [messageIds, trailingRowsKey, typingRowsKey]);
   const conversationRows = useMemo<Conversation[]>(() => {
     const combined = [
       ...store.localDrafts().map((local) => {
@@ -5153,7 +5182,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         : undefined);
   const groupBarState = groupNoticeState(active?.group);
   const groupRcsLinked = Boolean(content.gatewayId && snapshot?.rcsStatus?.gateways.some((gateway) => gateway.gatewayId === content.gatewayId && gateway.state === "linked" && gateway.current && gateway.healthy));
-  const typingLabel = groupTypingLabel(typing.participants, (address) => displayAddressName(address, resolution));
   /** Copies definitely unsent RCS content into the draft. Nothing is sent. */
   const restoreUnsentRcs = async (message: MessageView) => {
     if (!slotKey || !active) return;
@@ -5426,7 +5454,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         attachments={attachments}
         sendSupported={Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending && !resolvingDraftConflict}
         hideSmsCounter={rcsRoute.current || rcsBlock.kind !== "none"}
-        typingSlot={<><TypingIndicator visible={typing.visible} scope={isGroup ? "group" : "direct"} label={isGroup ? typingLabel : peppyCopy.typing_indicator_direct} /><TypingAnnouncer text={typing.announcement ? isGroup ? typingLabel : peppyCopy.typing_announce_direct : ""} /></>}
         typingSendState={typingSender.state}
         unavailableReason={resolvingDraftConflict ? "resolving draft conflict…" : sending ? "sending…" : draftSubscriptionError ? "draft updates unavailable; retry setup" : composerReadOnly ? "draft is loading" : composerUnavailableReason}
         readOnly={composerReadOnly || resolvingDraftConflict || groupLeft}
@@ -5584,11 +5611,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const messages = (
     <MediaActionsProvider publicCopies={publicCopies} onSave={saveGalleryAttachment} onPublish={publishGalleryAttachment} onRetry={(id) => bridge.retry_attachment(id)} requestDownload={(id) => bridge.request_attachment_download(id)} requestMediaSync={bridge.media_sync_request ? attachmentIds => bridge.media_sync_request!(attachmentIds) : undefined} loadOriginal={requestOriginal} releaseMedia={releaseMedia} canCopyImage={browserHost && clipboardImageSupported()} copyNativeImage={copyNativeImage} hydrateMediaPreview={hydrateMediaPreview}>
       <RcsMediaActionsProvider retryBlock={rcsRetryBlock} retryDownload={(messageId, attachmentIndex) => bridge.retryRcsMediaDownload(messageId, attachmentIndex)} openStorageSettings={openStorageSettings}>
+      <TypingAnnouncer text={!groupLeft && typing.announcement ? isGroup ? typingLabel : peppyCopy.typing_announce_direct : ""} />
       <div id="tabpanel-messages" role={conversationTabsShown ? "tabpanel" : undefined} aria-labelledby={conversationTabsShown ? "tab-messages" : undefined} hidden={conversationTab !== "messages"}>
       <MessageList
       key={reactionScopeKey}
       conversation={active}
-      pendingSends={visiblePendingSends(pendingSends, active, Boolean(detachedHistory && detachedHistory.conversationId === active?.id && detachedHistory.hasNewer))}
+       pendingSends={visiblePendingSendRows}
+       typingRow={typingRow}
       attachmentViews={attachmentViews}
       loading={Boolean(active) && !conversationLoaded}
       registerRow={registerRow}
