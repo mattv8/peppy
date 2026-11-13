@@ -967,6 +967,10 @@ async fn worker_request_with_error_mapping(
             let body = bounded_response_body(response, 4 * 1024).await?;
             return Err(webhook_worker_error(status, &body));
         }
+        // A worker rejection is definitive; clients may retry only an unavailable worker.
+        if response.status().is_client_error() {
+            return Err(ApiError(StatusCode::BAD_GATEWAY, "mcp_worker_rejected"));
+        }
         return Err(ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "mcp_worker_unavailable",
@@ -1075,7 +1079,7 @@ mod worker_wire_tests {
     use super::*;
 
     #[tokio::test]
-    async fn worker_rejects_invalid_responses_and_maps_status_failures_to_unavailable() {
+    async fn worker_rejects_invalid_responses_and_separates_rejections_from_unavailability() {
         let temp = tempfile::tempdir().unwrap();
         let token_file = temp.path().join("worker-token");
         std::fs::write(&token_file, "test-worker-control-token").unwrap();
@@ -1090,6 +1094,7 @@ mod worker_wire_tests {
                     "empty204" => StatusCode::NO_CONTENT,
                     "empty200" => StatusCode::OK,
                     "error" => StatusCode::BAD_REQUEST,
+                    "unavailable" => StatusCode::INTERNAL_SERVER_ERROR,
                     "webhookError" => StatusCode::CONFLICT,
                     _ => StatusCode::OK,
                 };
@@ -1131,14 +1136,16 @@ mod worker_wire_tests {
             ("/internal/mcp/revoke", "empty200", StatusCode::BAD_GATEWAY),
             ("/internal/mcp/status", "malformed", StatusCode::BAD_GATEWAY),
             ("/internal/mcp/revoke", "malformed", StatusCode::BAD_GATEWAY),
+            ("/internal/mcp/status", "error", StatusCode::BAD_GATEWAY),
+            ("/internal/mcp/complete", "error", StatusCode::BAD_GATEWAY),
             (
-                "/internal/mcp/status",
-                "error",
+                "/internal/mcp/complete",
+                "unavailable",
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
             (
                 "/internal/mcp/revoke",
-                "error",
+                "unavailable",
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
         ] {
@@ -1148,6 +1155,14 @@ mod worker_wire_tests {
                     .unwrap_err();
             assert_eq!(error.0, expected, "{path} {response}");
         }
+        let rejected = worker_request_with(
+            &worker,
+            "/internal/mcp/complete",
+            &serde_json::json!({"response":"error"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(rejected.1, "mcp_worker_rejected");
         server.abort();
     }
 
