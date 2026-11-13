@@ -48,6 +48,7 @@ def synthetic_values():
     role_suffix = uuid.uuid4().hex[:24]
     values = {
         "PEPPY_ENV": "development",
+        "PEPPY_SERVER_IMAGE": "peppy-server:local",
         "POSTGRES_DB": "peppy_demo",
         "POSTGRES_USER": "peppy_demo",
         "POSTGRES_PASSWORD": f"synthetic-{token}",

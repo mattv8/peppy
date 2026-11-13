@@ -1,0 +1,9 @@
+services:
+  mcp-state-init:
+    build:
+      context: .
+      dockerfile: infra/docker/mcp.Dockerfile
+  mcp:
+    build:
+      context: .
+      dockerfile: infra/docker/mcp.Dockerfile

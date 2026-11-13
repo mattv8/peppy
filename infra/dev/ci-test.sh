@@ -12,6 +12,70 @@ die() { echo "ci-test: $*" >&2; exit 1; }
 suite() { printf '\n== %s ==\n' "$1"; }
 require_command() { command -v "$1" >/dev/null || die "$1 is required for full local CI coverage"; }
 
+single_file_compose_guard() {
+    local env_file config_file status
+    env_file=$(mktemp "$SCRATCH/compose-guard.env.XXXXXX")
+    config_file=$(mktemp "$SCRATCH/compose-guard.json.XXXXXX")
+    cat > "$env_file" <<'ENV'
+PEPPY_SERVER_IMAGE=peppy-server:guard
+POSTGRES_DB=peppy_guard
+POSTGRES_USER=peppy_guard
+POSTGRES_PASSWORD=peppy-guard-password
+PEPPY_RUNTIME_DB_USER=peppy_guard_runtime
+PEPPY_RUNTIME_DB_PASSWORD=peppy-guard-runtime-password
+PEPPY_MAINTENANCE_DB_USER=peppy_guard_maintenance
+PEPPY_MAINTENANCE_DB_PASSWORD=peppy-guard-maintenance-password
+S3_ACCESS_KEY=peppy-guard-access
+S3_SECRET_KEY=peppy-guard-secret
+PUBLIC_API_URL=https://guard.invalid
+PUBLIC_ATTACHMENT_URL=https://guard.invalid
+ENV
+    if ! docker compose -p peppy-sfc-fix-1 --env-file "$env_file" -f docker-compose.yml config --format json > "$config_file"; then
+        rm -f "$env_file" "$config_file"
+        return 1
+    fi
+    set +e
+    python3 - "$ROOT" "$config_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+config = json.loads(Path(sys.argv[2]).read_text())
+def repository_file(source):
+    if not isinstance(source, str):
+        return False
+    try:
+        Path(source).resolve().relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+for name, service in config["services"].items():
+    if "build" in service:
+        raise SystemExit(f"base Compose service has build configuration: {name}")
+    for volume in service.get("volumes", []):
+        if volume.get("type") != "bind":
+            continue
+        source = volume.get("source")
+        if repository_file(source):
+            raise SystemExit(f"base Compose service has repository bind mount: {name}: {source}")
+    for kind in ("configs", "secrets"):
+        for entry in service.get(kind, []):
+            source_name = entry.get("source")
+            definition = config.get(kind, {}).get(source_name, {})
+            source = definition.get("file")
+            if repository_file(source):
+                raise SystemExit(
+                    f"base Compose service has repository {kind[:-1]} file: {name}: {source}"
+                )
+PY
+    status=$?
+    set -e
+    rm -f "$env_file" "$config_file"
+    return "$status"
+}
+
 preflight() {
     [[ $(uname) == Darwin ]] || die "full local CI coverage requires macOS and Xcode"
     xcode-select -p >/dev/null 2>&1 || die "full Xcode is required"
@@ -85,6 +149,7 @@ main() {
     python3 infra/audit/test-check-advisory-exceptions.py
 
     suite "Development tooling"
+    single_file_compose_guard
     node packages/mobile-design/scripts/generate.mjs --check
     node --test packages/mobile-design/test/*.test.mjs
     python3 tests/dev/run_parallel.py

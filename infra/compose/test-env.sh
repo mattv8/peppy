@@ -20,6 +20,14 @@ export PUBLIC_ATTACHMENT_URL='http://127.0.0.1:8080'
 PEPPY_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export PEPPY_REPO_ROOT
 
+PEPPY_TEST_SEAWEED_ENTRYPOINT=$(mktemp)
+export PEPPY_TEST_SEAWEED_ENTRYPOINT
+if ! python3 "$PEPPY_REPO_ROOT/infra/compose/extract-config.py" "$PEPPY_REPO_ROOT/docker-compose.yml" seaweed-entrypoint > "$PEPPY_TEST_SEAWEED_ENTRYPOINT"; then
+  rm -f "$PEPPY_TEST_SEAWEED_ENTRYPOINT"
+  unset PEPPY_TEST_SEAWEED_ENTRYPOINT
+  return 1
+fi
+
 : "${PEPPY_TEST_COMPOSE_PROJECT:=peppy-test-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}}"
 export PEPPY_TEST_COMPOSE_PROJECT
 
@@ -57,7 +65,7 @@ services:
       retries: 30
 configs:
   seaweed-entrypoint:
-    file: ${PEPPY_REPO_ROOT}/infra/docker/seaweedfs-entrypoint.sh
+    file: ${PEPPY_TEST_SEAWEED_ENTRYPOINT}
   s3-config:
     content: |
       {"identities":[{"name":"peppy-test","credentials":[{"accessKey":"peppy-test-access","secretKey":"peppy-test-secret"}],"actions":["Read","Write","List","Tagging","Admin"]}]}
@@ -90,4 +98,5 @@ peppy_test_bucket_probe() {
 
 peppy_test_infra_down() {
   peppy_test_compose down --volumes --remove-orphans
+  rm -f "$PEPPY_TEST_SEAWEED_ENTRYPOINT"
 }

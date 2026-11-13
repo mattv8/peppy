@@ -1,9 +1,0 @@
-# Prebuilt companion image for the optional same-server MCP worker. Pass this
-# after compose.mcp.yml so its immutable image replaces the local build.
-services:
-  mcp-state-init:
-    image: ${PEPPY_MCP_IMAGE:?set an immutable public MCP worker image digest}
-    build: !reset null
-  mcp:
-    image: ${PEPPY_MCP_IMAGE:?set an immutable public MCP worker image digest}
-    build: !reset null

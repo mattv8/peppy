@@ -32,11 +32,6 @@ use uuid::Uuid;
 const PG_IMAGE: &str =
     "postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f";
 const SEAWEED_IMAGE: &str = "chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d";
-const SEAWEED_ENTRYPOINT: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../infra/docker/seaweedfs-entrypoint.sh"
-);
-
 async fn bounded<T>(phase: &'static str, future: impl Future<Output = T>) -> T {
     common::network(phase, future).await
 }
@@ -71,6 +66,23 @@ impl ComposeFixture {
         let env_path = path.join(".env");
         fs::write(&env_path, env).unwrap();
         fs::set_permissions(&env_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let seaweed_entrypoint = path.join("seaweed-entrypoint");
+        let extraction = checked(
+            Command::new("python3")
+                .args([
+                    concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../infra/compose/extract-config.py"
+                    ),
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/../../docker-compose.yml"),
+                    "seaweed-entrypoint",
+                ])
+                .output()
+                .unwrap(),
+            "extract-seaweed-entrypoint",
+        );
+        fs::write(&seaweed_entrypoint, extraction.stdout).unwrap();
+        let seaweed_entrypoint_yaml = serde_json::to_string(&seaweed_entrypoint).unwrap();
         let compose = format!(
             r#"name: {project}
 services:
@@ -124,7 +136,7 @@ configs:
     content: |
       {{"identities":[{{"name":"recovery","credentials":[{{"accessKey":"${{S3_ACCESS_KEY}}","secretKey":"${{S3_SECRET_KEY}}"}}],"actions":["Read","Write","List","Tagging","Admin"]}}]}}
   seaweed-entrypoint:
-    file: {SEAWEED_ENTRYPOINT}
+    file: {seaweed_entrypoint_yaml}
 "#
         );
         fs::write(path.join("docker-compose.yml"), compose).unwrap();
