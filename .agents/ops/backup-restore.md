@@ -20,10 +20,10 @@ just backup /secure/backups
 
 Backups use the same effective Compose files as `docker compose`: a local
 `compose.override.yml` is included, and callers may select overlays with
-`COMPOSE_FILE`. For example, use the prebuilt community image with:
+`COMPOSE_FILE`. For a Community deployment, use the base file alone:
 
 ```sh
-COMPOSE_FILE=docker-compose.yml:infra/compose/compose.community.yml just backup /secure/backups
+COMPOSE_FILE=docker-compose.yml just backup /secure/backups
 ```
 
 Backup directories are private (`0700`) and every archive artifact is private
@@ -43,7 +43,7 @@ Use the identical `COMPOSE_FILE` setting that produced the backup when
 restoring an overlay deployment:
 
 ```sh
-COMPOSE_FILE=docker-compose.yml:infra/compose/compose.community.yml just restore /secure/backups/peppy-peppy-... restore-drill
+COMPOSE_FILE=docker-compose.yml just restore /secure/backups/peppy-peppy-... restore-drill
 ```
 
 The restore verifies the manifest and checksums, verifies image/layout compatibility, and refuses existing target volumes. It starts PostgreSQL only to load the dump. It leaves migrations, the API, and carrier processing stopped, and it performs no automatic post-restore execution. Do not use `docker compose down -v` as a recovery shortcut.
@@ -80,15 +80,15 @@ Set `PEPPY_SERVER_IMAGE` to the release's immutable `@sha256:…` reference and
 configure the normal root Compose environment. With Docker Compose v2.24+:
 
 ```sh
-docker compose -f docker-compose.yml -f infra/compose/compose.community.yml pull
-docker compose -f docker-compose.yml -f infra/compose/compose.community.yml up -d --no-build
+docker compose -f docker-compose.yml pull
+docker compose -f docker-compose.yml up -d --no-build
 ```
 
-This overlay reuses the shared PostgreSQL, authenticated SeaweedFS, migration,
-and server configuration; it replaces only the local image builds. It requires
-no hosted account or Stripe configuration. Hosted-only code is built and
-distributed separately from the private platform repository. Verify the
-release digest/signature with the operator-published signing key before use.
+The root file includes PostgreSQL, authenticated SeaweedFS, migration, and
+server configuration. It requires no hosted account or Stripe configuration.
+Hosted-only code is built and distributed separately from the private platform
+repository. Verify the release digest/signature with the operator-published
+signing key before use.
 
 The default API listener is loopback-only. When a reverse proxy runs on another
 host, set `API_BIND_IP` to the server's private interface and restrict access to
@@ -100,7 +100,7 @@ still uses HTTPS through Proxy, not the internal HTTP port.
 
 The public server image includes the browser client at `/usr/share/peppy/web`.
 Community Compose enables it at `https://PUBLIC_HOST/` by default; its API shares
-that origin. Start the Caddy overlay with the root file first:
+that origin. Start the root file with the Caddy overlay:
 
 ```sh
 docker compose -f docker-compose.yml -f infra/compose/compose.caddy.yml up -d

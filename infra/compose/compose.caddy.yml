@@ -1,5 +1,4 @@
 # Compose v2.24+ overlay: reverse proxy and HTTPS termination.
-# Pass root docker-compose.yml first with -f to resolve relative paths from the repository root.
 services:
   caddy:
     image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
@@ -10,12 +9,15 @@ services:
       PUBLIC_HOST: ${PUBLIC_HOST:?set the externally reachable HTTPS hostname}
       WEB_CLIENT_HOST: ${WEB_CLIENT_HOST:-}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-64MB}
+    configs:
+      - source: caddyfile-template
+        target: /etc/caddy/Caddyfile.template
+      - source: caddy-entrypoint
+        target: /usr/local/bin/peppy-caddy
     volumes:
       - caddy-data:/data
       - caddy-config:/config
-      - ./infra/proxy/Caddyfile:/etc/caddy/Caddyfile.template:ro
-      - ./infra/proxy/caddy-entrypoint.sh:/usr/local/bin/peppy-caddy:ro
-    entrypoint: ["/usr/local/bin/peppy-caddy"]
+    entrypoint: ["/bin/sh", "/usr/local/bin/peppy-caddy"]
     ports:
       - "80:80"
       - "443:443"
@@ -31,3 +33,55 @@ networks:
 volumes:
   caddy-data:
   caddy-config:
+
+configs:
+  caddyfile-template:
+    # Literal dollars are escaped because Compose interpolates config content.
+    content: |
+      __PEPPY_HOSTS__ {
+        header Strict-Transport-Security "max-age=15552000"
+
+        request_body {
+          max_size {$$MAX_UPLOAD_BYTES:64MB}
+        }
+
+        reverse_proxy api:8080 {
+          header_up Host {http.request.host}
+          header_up X-Forwarded-Proto https
+          transport http {
+            dial_timeout 5s
+            response_header_timeout 30s
+          }
+          stream_timeout 24h
+        }
+      }
+  caddy-entrypoint:
+    content: |
+      #!/bin/sh
+      set -eu
+
+      fail() {
+          printf 'peppy-caddy: %s\n' "$$*" >&2
+          exit 1
+      }
+
+      validate_host() {
+          case "$$1" in
+              ''|*[!A-Za-z0-9.-]*|.*|*..*|*.) fail "invalid hostname: $$1" ;;
+          esac
+      }
+
+      : "$${PUBLIC_HOST:?set PUBLIC_HOST}"
+      validate_host "$$PUBLIC_HOST"
+
+      if [ -n "$${WEB_CLIENT_HOST:-}" ]; then
+          printf 'peppy-caddy: WEB_CLIENT_HOST is retired; serve the UI at https://%s/ and remove the legacy hostname and DNS record.\n' "$$PUBLIC_HOST" >&2
+      fi
+
+      config=$$(mktemp)
+      trap 'rm -f "$$config"' EXIT
+      sed "s|__PEPPY_HOSTS__|$$PUBLIC_HOST|" /etc/caddy/Caddyfile.template >"$$config"
+      if [ "$${1:-}" = validate ]; then
+          exec caddy validate --config "$$config" --adapter caddyfile
+      fi
+      exec caddy run --config "$$config" --adapter caddyfile

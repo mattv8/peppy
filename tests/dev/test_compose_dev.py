@@ -9,6 +9,8 @@ from unittest import mock
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from infra.dev import dev_tls
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -18,6 +20,8 @@ RUNTIME_ROLE = "peppy_runtime_fixture"
 RUNTIME_PASSWORD = "synthetic-runtime-password"
 MAINTENANCE_ROLE = "peppy_maintenance_fixture"
 MAINTENANCE_PASSWORD = "synthetic-maintenance-password"
+PASSWORD_PREFLIGHT_TARGET = "/usr/local/bin/validate-db-passwords" + ".sh"
+BOOTSTRAP_ROLES_TARGET = "/usr/local/bin/peppy-bootstrap-roles" + ".sh"
 
 
 class ComposeDevelopmentTests(unittest.TestCase):
@@ -26,6 +30,7 @@ class ComposeDevelopmentTests(unittest.TestCase):
     @staticmethod
     def synthetic_env(**overrides):
         values = {
+            "PEPPY_SERVER_IMAGE": "peppy-server:local",
             "POSTGRES_USER": "peppy",
             "POSTGRES_PASSWORD": "synthetic-password",
             "POSTGRES_DB": "peppy",
@@ -182,6 +187,7 @@ class ComposeDevelopmentTests(unittest.TestCase):
             key: value for key, value in os.environ.items()
             if key not in generated_names and not key.startswith("COMPOSE_")
         }
+        environment["PEPPY_SERVER_IMAGE"] = "peppy-server:local"
         with tempfile.TemporaryDirectory() as directory:
             dotenv = Path(directory) / ".env"
             setup = subprocess.run(
@@ -228,7 +234,10 @@ class ComposeDevelopmentTests(unittest.TestCase):
 
     @unittest.skipUnless(compose, "Docker Compose is unavailable")
     def test_dev_overlay_can_disable_root_web_serving(self):
-        result = self.render("docker-compose.yml", "infra/compose/compose.dev.yml", WEB_UI_ENABLED="false")
+        result = self.render(
+            "docker-compose.yml", "infra/compose/compose.dev.yml",
+            WEB_UI_ENABLED="false"
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["services"]["dev"]["environment"]["PEPPY_WEB_CLIENT_ROOT"], "false")
 
@@ -240,7 +249,10 @@ class ComposeDevelopmentTests(unittest.TestCase):
             api = json.loads(base.stdout)["services"]["api"]
             self.assertEqual(api["environment"]["PEPPY_SETUP_TOKEN"], value)
 
-            dev = self.render("docker-compose.yml", "infra/compose/compose.dev.yml", PEPPY_SETUP_TOKEN=value)
+            dev = self.render(
+                "docker-compose.yml", "infra/compose/compose.dev.yml",
+                PEPPY_SETUP_TOKEN=value
+            )
             self.assertEqual(dev.returncode, 0, dev.stderr)
             dev_service = json.loads(dev.stdout)["services"]["dev"]
             self.assertEqual(dev_service["environment"]["PEPPY_SETUP_TOKEN"], value)
@@ -316,10 +328,10 @@ class ComposeDevelopmentTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(compose, "Docker Compose is unavailable")
-    def test_community_overlay_rendered_with_server_image(self):
+    def test_base_production_layout_is_self_contained_and_uses_server_image(self):
         server_image = f"example.invalid/peppy@sha256:{'a' * 64}"
         result = self.render(
-            "docker-compose.yml", "infra/compose/compose.community.yml",
+            "docker-compose.yml",
             PEPPY_SERVER_IMAGE=server_image
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -334,6 +346,55 @@ class ComposeDevelopmentTests(unittest.TestCase):
         self.assertEqual(migrate["restart"], "no")
         for name in ("postgres", "seaweedfs", "api"):
             self.assertEqual(config["services"][name].get("restart"), "unless-stopped", name)
+        self.assertEqual(api["ports"], [{"mode": "ingress", "host_ip": "127.0.0.1", "target": 8080, "published": "7000", "protocol": "tcp"}])
+        self.assertFalse(any(volume["type"] == "bind" for service in config["services"].values() for volume in service.get("volumes", [])))
+        postgres_configs = {entry["source"]: entry["target"] for entry in config["services"]["postgres"]["configs"]}
+        self.assertEqual(postgres_configs["database-password-preflight"], PASSWORD_PREFLIGHT_TARGET)
+        self.assertEqual(postgres_configs["bootstrap-roles"], BOOTSTRAP_ROLES_TARGET)
+        self.assertEqual(postgres_configs["bootstrap-roles-init"], "/docker-entrypoint-initdb.d/10-peppy-roles.sh")
+        self.assertEqual(config["configs"]["bootstrap-roles-init"]["content"], f"sh {BOOTSTRAP_ROLES_TARGET}\n")
+
+    @unittest.skipUnless(compose, "Docker Compose is unavailable")
+    def test_source_build_overlay_adds_server_builds(self):
+        result = self.render("docker-compose.yml", "infra/compose/compose.build.yml", PEPPY_SERVER_IMAGE="peppy-server:local")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in ("api", "migrate"):
+            build = json.loads(result.stdout)["services"][name]["build"]
+            self.assertEqual(build["context"], str(ROOT))
+            self.assertEqual(build["dockerfile"], "infra/docker/server.Dockerfile")
+
+    def test_dev_wrapper_uses_dev_overlay_and_defaults_only_its_required_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dotenv = Path(directory) / ".env"
+            dotenv.write_text("DEBUG=false\n")
+            for provided, expected in ((None, "peppy-server:local"), ("", "peppy-server:local"), ("example.invalid/server@sha256:abc", "example.invalid/server@sha256:abc")):
+                with self.subTest(provided=provided):
+                    calls = []
+
+                    def capture(_program, arguments, environment):
+                        calls.append((arguments, environment))
+                        raise RuntimeError("captured")
+
+                    environment = {} if provided is None else {"PEPPY_SERVER_IMAGE": provided}
+                    with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(dev_tls.os, "execvpe", capture):
+                        with self.assertRaisesRegex(RuntimeError, "captured"):
+                            dev_tls.compose_arguments(dotenv, ["config"], False)
+
+                    arguments, values = calls[0]
+                    files = [arguments[index + 1] for index, value in enumerate(arguments) if value == "-f"]
+                    self.assertEqual(files, [str(ROOT / "docker-compose.yml"), str(ROOT / "infra/compose/compose.dev.yml")])
+                    self.assertNotIn(str(ROOT / "infra/compose/compose.build.yml"), files)
+                    self.assertEqual(values["PEPPY_SERVER_IMAGE"], expected)
+
+    def test_just_source_build_commands_default_only_their_server_image(self):
+        justfile = (ROOT / "justfile").read_text()
+        self.assertIn(
+            'compose := "PEPPY_SERVER_IMAGE=${PEPPY_SERVER_IMAGE:-peppy-server:local} docker compose --env-file .env -f docker-compose.yml -f infra/compose/compose.build.yml"',
+            justfile,
+        )
+        self.assertNotIn("export PEPPY_SERVER_IMAGE", justfile)
+        self.assertIn("backup destination:\n    ./infra/compose/backup.sh {{ quote(destination) }}", justfile)
+        self.assertIn("restore archive project:\n    ./infra/compose/restore.sh {{ quote(archive) }} {{ quote(project) }}", justfile)
 
     @unittest.skipUnless(compose, "Docker Compose is unavailable")
     def test_caddy_overlay_mount_and_public_host(self):
@@ -345,27 +406,18 @@ class ComposeDevelopmentTests(unittest.TestCase):
         config = json.loads(result.stdout)
         self.assertEqual(config["name"], "peppy")
         caddy = config["services"]["caddy"]
-        caddyfile_mount = next(
-            (v for v in caddy["volumes"] if v["target"] == "/etc/caddy/Caddyfile.template"),
-            None
-        )
-        self.assertIsNotNone(caddyfile_mount, "Caddyfile mount not found")
-        self.assertEqual(caddyfile_mount["type"], "bind")
-        self.assertEqual(caddyfile_mount["source"], str(ROOT / "infra/proxy/Caddyfile"))
-        self.assertTrue(caddyfile_mount["read_only"])
-        entrypoint_mount = next(
-            (v for v in caddy["volumes"] if v["target"] == "/usr/local/bin/peppy-caddy"),
-            None
-        )
-        self.assertIsNotNone(entrypoint_mount, "Caddy entrypoint mount not found")
-        self.assertEqual(entrypoint_mount["source"], str(ROOT / "infra/proxy/caddy-entrypoint.sh"))
-        self.assertTrue(entrypoint_mount["read_only"])
-        self.assertEqual(caddy["entrypoint"], ["/usr/local/bin/peppy-caddy"])
+        configs = {entry["source"]: entry["target"] for entry in caddy["configs"]}
+        self.assertEqual(configs["caddyfile-template"], "/etc/caddy/Caddyfile.template")
+        self.assertEqual(configs["caddy-entrypoint"], "/usr/local/bin/peppy-caddy")
+        self.assertEqual(caddy["entrypoint"], ["/bin/sh", "/usr/local/bin/peppy-caddy"])
         self.assertEqual(caddy["environment"]["WEB_CLIENT_HOST"], "")
 
     @unittest.skipUnless(compose, "Docker Compose is unavailable")
     def test_mcp_overlay_isolates_worker_from_storage_network(self):
-        result = self.render("docker-compose.yml", "infra/compose/compose.mcp.yml")
+        missing = self.render("docker-compose.yml", "infra/compose/compose.mcp.yml")
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("set an immutable MCP worker image digest in .env", missing.stderr)
+        result = self.render("docker-compose.yml", "infra/compose/compose.mcp.yml", PEPPY_MCP_IMAGE="peppy-mcp:local")
         self.assertEqual(result.returncode, 0, result.stderr)
         config = json.loads(result.stdout)
         self.assertEqual(set(config["services"]["mcp"]["networks"]), {"mcp-api", "mcp-egress"})
@@ -374,10 +426,18 @@ class ComposeDevelopmentTests(unittest.TestCase):
         self.assertIn("mcp-api", config["services"]["api"]["networks"])
         self.assertEqual(config["services"]["mcp-state-init"]["network_mode"], "none")
         self.assertNotIn("networks", config["services"]["mcp-state-init"])
+        self.assertNotIn("build", config["services"]["mcp"])
+
+        built = self.render(
+            "docker-compose.yml", "infra/compose/compose.mcp.yml", "infra/compose/compose.mcp-build.yml",
+            PEPPY_MCP_IMAGE="peppy-mcp:local"
+        )
+        self.assertEqual(built.returncode, 0, built.stderr)
+        self.assertEqual(json.loads(built.stdout)["services"]["mcp"]["build"]["dockerfile"], "infra/docker/mcp.Dockerfile")
 
     def test_shell_entrypoints_receive_their_script_as_one_argument(self):
         # Compose splits a string command into argv words, so `sh -c` would run only the first word.
-        result = self.render("docker-compose.yml", "infra/compose/compose.mcp.yml")
+        result = self.render("docker-compose.yml", "infra/compose/compose.mcp.yml", PEPPY_MCP_IMAGE="peppy-mcp:local")
         self.assertEqual(result.returncode, 0, result.stderr)
         for name, service in json.loads(result.stdout)["services"].items():
             entrypoint = service.get("entrypoint") or []
@@ -413,9 +473,12 @@ class ComposeDevelopmentTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
 
             calls = log.read_text().splitlines()
-            rm = "compose --env-file .env -f docker-compose.yml rm --stop --force api migrate"
+            rm = "compose --env-file .env -f docker-compose.yml -f infra/compose/compose.build.yml rm --stop --force api migrate"
             resolved_root = root.resolve()
-            dev_prefix = f"compose --env-file {resolved_root / '.env'} -f {resolved_root / 'docker-compose.yml'} -f {resolved_root / 'infra/compose/compose.dev.yml'}"
+            dev_prefix = (
+                f"compose --env-file {resolved_root / '.env'} -f {resolved_root / 'docker-compose.yml'} "
+                f"-f {resolved_root / 'infra/compose/compose.dev.yml'}"
+            )
             teardown_prefix = f"{dev_prefix} -f {resolved_root / 'infra/compose/compose.dev-tls.yml'}"
             dev_rm = f"{teardown_prefix} rm --stop --force web dev caddy"
             build = f"{dev_prefix} build web dev"
