@@ -9,6 +9,8 @@ use thiserror::Error;
 
 pub const EPHEMERAL_PROTOCOL_VERSION: u16 = 1;
 pub const MAX_EPHEMERAL_TTL_MS: u64 = 15_000;
+/// Maximum permitted future clock skew for ephemeral frames.
+pub const EPHEMERAL_FUTURE_TOLERANCE_MS: u64 = 30_000;
 pub const POSTGRES_NOTIFY_PAYLOAD_BYTES: usize = 8_000;
 pub const MAX_EPHEMERAL_CIPHERTEXT_BYTES: usize = 5_700;
 pub const EPHEMERAL_V2_PROTOCOL_VERSION: u16 = 2;

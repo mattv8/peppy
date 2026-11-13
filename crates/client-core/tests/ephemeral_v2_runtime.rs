@@ -7,7 +7,9 @@ use base64::{
 };
 use common::*;
 use peppy_crypto::{EncryptedEnvelope, KeyPurpose, decrypt, derive_purpose_key, derive_root_key};
-use peppy_protocol::{EphemeralSignalV2, TypingOriginV2, TypingStateV2};
+use peppy_protocol::{
+    EPHEMERAL_FUTURE_TOLERANCE_MS, EphemeralSignalV2, TypingOriginV2, TypingStateV2,
+};
 use std::collections::BTreeMap;
 
 fn publish_eligible(client: &Client, gateway: DeviceId, conversation_id: ConversationId) {
@@ -78,6 +80,50 @@ fn seal(
             LiveClock { wall_ms, mono_ms },
         )
         .unwrap()
+}
+
+fn enable_pair(
+    desktop: &Client,
+    desktop_id: DeviceId,
+    gateway: &Client,
+    gateway_id: DeviceId,
+    desktop_clock: LiveClock,
+    gateway_clock: LiveClock,
+) {
+    let roster = vec![desktop_id, gateway_id];
+    desktop
+        .enable_live_typing(
+            LiveEnableContext {
+                trusted_roster: roster.clone(),
+                local_gateway_device_id: gateway_id,
+                local_executor: LiveExecutor::None,
+            },
+            desktop_clock,
+        )
+        .unwrap();
+    gateway
+        .enable_live_typing(
+            LiveEnableContext {
+                trusted_roster: roster,
+                local_gateway_device_id: gateway_id,
+                local_executor: LiveExecutor::CurrentGateway,
+            },
+            gateway_clock,
+        )
+        .unwrap();
+}
+
+fn publish_pair_eligibility(
+    desktop: &Client,
+    gateway: &Client,
+    gateway_id: DeviceId,
+    conversation: ConversationId,
+    observed_at_ms: i64,
+) {
+    publish_eligible_at(gateway, gateway_id, conversation, 1, observed_at_ms);
+    let mut server = Server::default();
+    server.upload(gateway);
+    server.sync(desktop);
 }
 
 fn expected_v2_aad(signal: &EphemeralSignalV2, vault_id: VaultId) -> Vec<u8> {
@@ -350,6 +396,297 @@ fn authenticated_two_client_typing_reaches_a_tagged_gateway_intent() {
         Some(LiveAction::GatewayTypingIntent { .. })
     ));
     assert!(outcome.reply.is_some());
+}
+
+#[test]
+fn skewed_two_core_handshakes_preserve_typing_actions() {
+    for skew_ms in [1_250, -1_250] {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::new();
+        let gateway_config = config(&directory, "v2-skew-gateway", &vault);
+        let desktop_config = config(&directory, "v2-skew-desktop", &vault);
+        let gateway = unlocked(&gateway_config, &vault);
+        let desktop = unlocked(&desktop_config, &vault);
+        let conversation = ConversationId::new();
+        let base_wall_ms = 50_000;
+        let gateway_wall_ms = base_wall_ms + skew_ms;
+        publish_pair_eligibility(
+            &desktop,
+            &gateway,
+            gateway_config.device_id,
+            conversation,
+            base_wall_ms.min(gateway_wall_ms),
+        );
+        enable_pair(
+            &desktop,
+            desktop_config.device_id,
+            &gateway,
+            gateway_config.device_id,
+            LiveClock {
+                wall_ms: base_wall_ms,
+                mono_ms: 1_000,
+            },
+            LiveClock {
+                wall_ms: gateway_wall_ms,
+                mono_ms: 1_000,
+            },
+        );
+        let initial = seal(
+            &desktop,
+            conversation,
+            gateway_config.device_id,
+            TypingStateV2::Started,
+            base_wall_ms + 1,
+            1_001,
+        )
+        .unwrap();
+        let challenge = gateway
+            .open_typing_signal_v2(
+                &initial.signal,
+                LiveClock {
+                    wall_ms: gateway_wall_ms + 1,
+                    mono_ms: 1_001,
+                },
+            )
+            .unwrap();
+        assert_eq!(challenge.action, None);
+        assert!(challenge.reply.is_some(), "skew {skew_ms}");
+        let challenge = challenge.reply.unwrap();
+        let acknowledgement = desktop
+            .open_typing_signal_v2(
+                &challenge,
+                LiveClock {
+                    wall_ms: base_wall_ms + 2,
+                    mono_ms: 1_002,
+                },
+            )
+            .unwrap()
+            .reply
+            .unwrap();
+        assert!(
+            gateway
+                .open_typing_signal_v2(
+                    &acknowledgement,
+                    LiveClock {
+                        wall_ms: gateway_wall_ms + 3,
+                        mono_ms: 1_003,
+                    },
+                )
+                .unwrap()
+                .session_update
+                .is_some()
+        );
+
+        let action = seal(
+            &desktop,
+            conversation,
+            gateway_config.device_id,
+            TypingStateV2::Started,
+            base_wall_ms + 4_001,
+            5_001,
+        )
+        .unwrap();
+        assert!(matches!(
+            gateway
+                .open_typing_signal_v2(
+                    &action.signal,
+                    LiveClock {
+                        wall_ms: gateway_wall_ms + 4_001,
+                        mono_ms: 5_001,
+                    },
+                )
+                .unwrap()
+                .action,
+            Some(LiveAction::GatewayTypingIntent { conversation_id, state: TypingStateV2::Started, .. }) if conversation_id == conversation
+        ));
+
+        let initial = gateway
+            .seal_typing_signal_v2(
+                conversation,
+                gateway_config.device_id,
+                TypingOriginV2::GoogleContact,
+                None,
+                TypingStateV2::Started,
+                LiveClock {
+                    wall_ms: gateway_wall_ms + 8_001,
+                    mono_ms: 9_001,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let challenge = desktop
+            .open_typing_signal_v2(
+                &initial.signal,
+                LiveClock {
+                    wall_ms: base_wall_ms + 8_001,
+                    mono_ms: 9_001,
+                },
+            )
+            .unwrap()
+            .reply
+            .unwrap();
+        let acknowledgement = gateway
+            .open_typing_signal_v2(
+                &challenge,
+                LiveClock {
+                    wall_ms: gateway_wall_ms + 8_002,
+                    mono_ms: 9_002,
+                },
+            )
+            .unwrap()
+            .reply
+            .unwrap();
+        assert!(
+            desktop
+                .open_typing_signal_v2(
+                    &acknowledgement,
+                    LiveClock {
+                        wall_ms: base_wall_ms + 8_003,
+                        mono_ms: 9_003,
+                    },
+                )
+                .unwrap()
+                .session_update
+                .is_some()
+        );
+        let displayed = gateway
+            .seal_typing_signal_v2(
+                conversation,
+                gateway_config.device_id,
+                TypingOriginV2::GoogleContact,
+                None,
+                TypingStateV2::Started,
+                LiveClock {
+                    wall_ms: gateway_wall_ms + 12_001,
+                    mono_ms: 13_001,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            desktop
+                .open_typing_signal_v2(
+                    &displayed.signal,
+                    LiveClock {
+                        wall_ms: base_wall_ms + 12_001,
+                        mono_ms: 13_001,
+                    },
+                )
+                .unwrap()
+                .action,
+            Some(LiveAction::Display { .. })
+        ));
+    }
+}
+
+#[test]
+fn skewed_sender_at_future_tolerance_is_accepted() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&directory, "v2-skew-tolerance-gateway", &vault);
+    let desktop_config = config(&directory, "v2-skew-tolerance-desktop", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let desktop = unlocked(&desktop_config, &vault);
+    let conversation = ConversationId::new();
+    let base_wall_ms = 50_000;
+    let gateway_wall_ms = base_wall_ms - EPHEMERAL_FUTURE_TOLERANCE_MS as i64;
+    publish_pair_eligibility(
+        &desktop,
+        &gateway,
+        gateway_config.device_id,
+        conversation,
+        gateway_wall_ms,
+    );
+    enable_pair(
+        &desktop,
+        desktop_config.device_id,
+        &gateway,
+        gateway_config.device_id,
+        LiveClock {
+            wall_ms: base_wall_ms,
+            mono_ms: 1_000,
+        },
+        LiveClock {
+            wall_ms: gateway_wall_ms,
+            mono_ms: 1_000,
+        },
+    );
+
+    let typing = seal(
+        &desktop,
+        conversation,
+        gateway_config.device_id,
+        TypingStateV2::Started,
+        base_wall_ms + 1,
+        1_001,
+    )
+    .unwrap();
+    let outcome = gateway
+        .open_typing_signal_v2(
+            &typing.signal,
+            LiveClock {
+                wall_ms: gateway_wall_ms + 1,
+                mono_ms: 1_001,
+            },
+        )
+        .unwrap();
+    assert_eq!(outcome.action, None);
+    assert!(outcome.reply.is_some());
+}
+
+#[test]
+fn skewed_sender_beyond_tolerance_is_dropped_without_reply_or_action() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&directory, "v2-skew-drop-gateway", &vault);
+    let desktop_config = config(&directory, "v2-skew-drop-desktop", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let desktop = unlocked(&desktop_config, &vault);
+    let conversation = ConversationId::new();
+    let base_wall_ms = 50_000;
+    let gateway_wall_ms = base_wall_ms - EPHEMERAL_FUTURE_TOLERANCE_MS as i64 - 1;
+    publish_pair_eligibility(
+        &desktop,
+        &gateway,
+        gateway_config.device_id,
+        conversation,
+        gateway_wall_ms,
+    );
+    enable_pair(
+        &desktop,
+        desktop_config.device_id,
+        &gateway,
+        gateway_config.device_id,
+        LiveClock {
+            wall_ms: base_wall_ms,
+            mono_ms: 1_000,
+        },
+        LiveClock {
+            wall_ms: gateway_wall_ms,
+            mono_ms: 1_000,
+        },
+    );
+
+    let typing = seal(
+        &desktop,
+        conversation,
+        gateway_config.device_id,
+        TypingStateV2::Started,
+        base_wall_ms + 1,
+        1_001,
+    )
+    .unwrap();
+    let outcome = gateway
+        .open_typing_signal_v2(
+            &typing.signal,
+            LiveClock {
+                wall_ms: gateway_wall_ms + 1,
+                mono_ms: 1_001,
+            },
+        )
+        .unwrap();
+    assert_eq!(outcome.reply, None);
+    assert_eq!(outcome.action, None);
 }
 
 #[test]
