@@ -189,7 +189,7 @@ struct DeviceView: View {
                         .buttonStyle(.bordered)
                         .accessibilityIdentifier("phone-enrollment-button")
 
-                    Link(destination: URL(string: "https://github.com/mattv8/peppy#readme")!) {
+                    Link(destination: URL(string: "https://peppy.pro/docs/self-host")!) {
                         Text("peppy.self_hosted_docs_link", tableName: "Peppy")
                             .frame(minHeight: 44)
                     }
@@ -300,6 +300,10 @@ struct DeviceView: View {
                 Link(destination: URL(string: "https://peppy.pro/privacy")!) { Text("peppy.privacy_policy", tableName: "Peppy") }
                     .accessibilityIdentifier("sync-privacy-policy")
                 Text("peppy.privacy_policy_scope", tableName: "Peppy").font(.footnote)
+                Link(destination: URL(string: "https://peppy.pro/docs")!) {
+                    Text("peppy.guides", tableName: "Peppy")
+                }
+                .accessibilityIdentifier("sync-guides")
             }.formStyle(.grouped).navigationTitle(Text("peppy.toggle_ios_sync_tab", tableName: "Peppy"))
         }.accessibilityIdentifier("sync-tab-screen")
     }
@@ -405,6 +409,10 @@ struct DeviceView: View {
                     Text("peppy.privacy_policy", tableName: "Peppy")
                 }
                 .accessibilityIdentifier("account-privacy-policy")
+                Link(destination: URL(string: "https://peppy.pro/docs")!) {
+                    Text("peppy.guides", tableName: "Peppy")
+                }
+                .accessibilityIdentifier("account-guides")
                 if let identity = model.status.identity, identity.origin == "https://peppy.pro" {
                     Section {
                         Link(destination: URL(string: "https://peppy.pro/account")!) {
@@ -632,6 +640,10 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings-privacy-policy")
                     Text("peppy.privacy_policy_scope", tableName: "Peppy")
                         .font(.footnote)
+                    Link(destination: URL(string: "https://peppy.pro/docs")!) {
+                        Text("peppy.guides", tableName: "Peppy")
+                    }
+                    .accessibilityIdentifier("settings-guides")
                 }
                 if model.status.role == "owner" {
                     Section("Danger zone") {
