@@ -17,7 +17,8 @@
     "./shared-worker": "./src/shared-worker.ts",
     "./presentation": "./src/presentation.ts",
     "./publication": "./src/publication.ts",
-    "./live": "./src/live.ts"
+    "./live": "./src/live.ts",
+    "./enrollment-deadlines": "./src/enrollment-deadlines.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

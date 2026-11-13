@@ -1,13 +1,14 @@
 import { ATTACHMENT_RETENTION_PROTOCOL_HEADER_NAME, ATTACHMENT_RETENTION_PROTOCOL_HEADER_VALUE } from "@peppy/generated/attachment-retention";
+import { MCP_COMPLETE_REQUEST_TIMEOUT_MS } from "@peppy/generated/mcp";
 import { CheckpointError, RuntimeCoreError } from "./checkpoint.js";
 import { BrowserCoreError, CoreRejectedError } from "./core.js";
+import { ENROLLMENT_REQUEST_TIMEOUT_MS } from "./enrollment-deadlines.js";
 import type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceState, McpDeviceStatus, McpGrantView, McpScope, WebhookCreated, WebhookInput, WebhookList, WebhookSecret, WebhookTestResult, WebhookView } from "@peppy/generated/mcp";
 
 const MAX_JSON_BYTES = 64 * 1024;
 // Webhook list responses can exceed the general limit; the server bounds them at 2 MiB.
 const MAX_WEBHOOK_LIST_BYTES = 2 * 1024 * 1024;
-// Must exceed the server's 15 s long-poll (?wait=15) plus margin for the bounded body read.
-const ENROLLMENT_REQUEST_TIMEOUT_MS = 25_000;
+export const MCP_ENABLE_UNCONFIRMED_MESSAGE = "Peppy MCP setup is still finishing. Its status will update here.";
 const DEVICE_NAME = "Peppy Browser";
 const MAX_MCP_CLIENT_ID_LENGTH = 256;
 const MAX_MCP_ORIGIN_LENGTH = 2048;
@@ -159,7 +160,7 @@ export class BrowserEnrollment {
     const confirmation = record(activation.confirm);
     const admission = await this.request(`/v1/enrollment/computers/${encodeURIComponent(invitationId)}/confirm`, "POST", confirmation, true);
     this.assertMcpAttempt(generation);
-    const result = mcpDeviceStatus(await this.request("/v1/mcp/device/complete", "POST", { operation_id: operationId, admission }, true));
+    const result = mcpDeviceStatus(await this.completeMcpEnrollment(generation, operationId, admission));
     this.assertMcpAttempt(generation);
     if (result.vaultId !== vaultId) throw new Error("mcp-response");
     return result;
@@ -883,7 +884,23 @@ export class BrowserEnrollment {
     }
   }
 
-  private async request<T = Record<string, unknown>>(path: string, method: "GET" | "POST" | "PUT" | "DELETE", body?: unknown, authenticated = false, extraHeaders: Record<string, string> = {}, maxResponseBytes = MAX_JSON_BYTES): Promise<T> {
+  private async completeMcpEnrollment(generation: number, operationId: string, admission: unknown): Promise<Record<string, unknown>> {
+    const body = { operation_id: operationId, admission };
+    try {
+      return await this.request("/v1/mcp/device/complete", "POST", body, true, {}, MAX_JSON_BYTES, { timeoutMs: MCP_COMPLETE_REQUEST_TIMEOUT_MS });
+    } catch (error) {
+      if (!isAmbiguousMcpCompleteError(error)) throw error;
+      this.assertMcpAttempt(generation);
+      try {
+        return await this.request("/v1/mcp/device/complete", "POST", body, true, {}, MAX_JSON_BYTES, { timeoutMs: MCP_COMPLETE_REQUEST_TIMEOUT_MS });
+      } catch (replayError) {
+        if (isAmbiguousMcpCompleteError(replayError)) throw mcpEnableUnconfirmedError();
+        throw replayError;
+      }
+    }
+  }
+
+  private async request<T = Record<string, unknown>>(path: string, method: "GET" | "POST" | "PUT" | "DELETE", body?: unknown, authenticated = false, extraHeaders: Record<string, string> = {}, maxResponseBytes = MAX_JSON_BYTES, options: { timeoutMs?: number } = {}): Promise<T> {
     if (this.signal?.aborted) throw new Error("enrollment-cancelled");
     const token = authenticated ? this.session.tokenForTransport() : undefined;
     const csrfHeader = this.viewValue.mode === "hosted" ? "X-Peppy-CSRF" : "X-Peppy-CSRF-Token";
@@ -895,7 +912,7 @@ export class BrowserEnrollment {
         reject(error);
       };
     });
-    const timeout = setTimeout(() => abort(new Error("enrollment-timeout")), ENROLLMENT_REQUEST_TIMEOUT_MS);
+    const timeout = setTimeout(() => abort(new Error("enrollment-timeout")), options.timeoutMs ?? ENROLLMENT_REQUEST_TIMEOUT_MS);
     const cancel = () => abort(new Error("enrollment-cancelled"));
     this.signal?.addEventListener("abort", cancel, { once: true });
     try {
@@ -1153,6 +1170,16 @@ class HttpStatusError extends Error {
     } catch {}
     return new HttpStatusError(response.status);
   }
+}
+
+function isAmbiguousMcpCompleteError(error: unknown): boolean {
+  return (error instanceof Error && error.message === "enrollment-timeout")
+    || error instanceof TypeError
+    || (error instanceof HttpStatusError && (error.status === 504 || (error.status === 503 && error.code === "mcp_worker_unavailable")));
+}
+
+function mcpEnableUnconfirmedError(): Error & { code: "mcp-enable-unconfirmed" } {
+  return Object.assign(new Error(MCP_ENABLE_UNCONFIRMED_MESSAGE), { code: "mcp-enable-unconfirmed" as const });
 }
 
 function hostedStage(account: Record<string, unknown>, origin: string): EnrollmentView {

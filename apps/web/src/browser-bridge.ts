@@ -9,6 +9,7 @@ import type {
   AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult, ConversationFolder, NotificationPersistence, NotificationPersistenceSettings, PastedImage,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { DEFAULT_NOTIFICATION_PERSISTENCE, notificationPersistence } from "@peppy/desktop-ui/bridge-contracts";
+import { MCP_ENABLE_TIMEOUT_MS } from "@peppy/browser-runtime/enrollment-deadlines";
 import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
 import { validateAccountUrl } from "./account-navigation";
 import { beginHostedAuthorization, fetchHostedWebConfig } from "./newhosted-app-auth";
@@ -440,7 +441,8 @@ export class BrowserBridge implements DesktopBridge {
     if (this.stopped) return Promise.reject(new BrowserBridgeError("stopped", "Peppy locked or stopped. Reconnect to continue."));
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      const timer = window.setTimeout(() => { this.pending.delete(id); reject(new BrowserBridgeError("timeout", "The browser worker did not respond. Reload Peppy and try again.")); }, this.timeoutMs);
+      const timeoutMs = command === "mcp_enable" ? MCP_ENABLE_TIMEOUT_MS : this.timeoutMs;
+      const timer = window.setTimeout(() => { this.pending.delete(id); reject(new BrowserBridgeError("timeout", "The browser worker did not respond. Reload Peppy and try again.")); }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       try { this.port.postMessage({ id, command, args }, transfer); }
       catch { window.clearTimeout(timer); this.pending.delete(id); reject(new BrowserBridgeError("disconnected", "The browser worker is unavailable.")); }

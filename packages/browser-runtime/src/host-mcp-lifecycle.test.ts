@@ -29,6 +29,7 @@ const WEBHOOK_SERVER_CODES = [
   "mcp_unavailable",
   "mcp_device_required",
   "mcp_worker_unavailable",
+  "mcp_worker_rejected",
   "mcp_worker_invalid",
   "owner_required",
 ];

@@ -1258,11 +1258,22 @@ describe("BrowserBridge", () => {
 
   it("rejects requests when a worker response times out", async () => {
     vi.useFakeTimers();
-    const bridge = new BrowserBridge(new TestPort() as unknown as MessagePort, 1);
+    const bridge = new BrowserBridge(new TestPort() as unknown as MessagePort);
     const request = bridge.load_state();
     const rejection = expect(request).rejects.toMatchObject({ code: "timeout" });
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(30_000);
     await rejection;
+    vi.useRealTimers();
+  });
+
+  it("allows MCP enablement to exceed the default bridge timeout", async () => {
+    vi.useFakeTimers();
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const request = bridge.mcp_enable();
+    await vi.advanceTimersByTimeAsync(30_000);
+    port.reply({ id: 1, ok: true, value: { available: true } });
+    await expect(request).resolves.toMatchObject({ available: true });
     vi.useRealTimers();
   });
 
