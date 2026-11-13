@@ -13,6 +13,14 @@ use crate::{
     enrollment::AdmissionComplete,
 };
 
+/// How long the server waits for the worker to install an enrolled MCP client.
+pub const MCP_WORKER_COMPLETE_TIMEOUT_MS: u64 = 30_000;
+
+/// How long a client waits for `POST /v1/mcp/device/complete`. It covers the worker install plus
+/// the server's own locking and database work, so a slow install is never reported as a failure
+/// the server then commits. It must stay below the hosted gateway's 60 s server timeout.
+pub const MCP_COMPLETE_REQUEST_TIMEOUT_MS: u64 = MCP_WORKER_COMPLETE_TIMEOUT_MS + 15_000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum McpDeviceState {

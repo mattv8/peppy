@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { BrowserEnrollment, type EnrollmentIdentity, type EnrollmentSession } from "./enrollment.js";
+import { MCP_COMPLETE_REQUEST_TIMEOUT_MS } from "@peppy/generated/mcp";
+import { BrowserEnrollment, MCP_ENABLE_UNCONFIRMED_MESSAGE, type EnrollmentIdentity, type EnrollmentSession } from "./enrollment.js";
 import { CheckpointError } from "./checkpoint.js";
 import { BrowserCore, CoreRejectedError, type EmscriptenCoreModule } from "./core.js";
 
@@ -110,7 +111,119 @@ function lifecycleFetcher(statuses: Array<Record<string, unknown>> = []) {
   });
 }
 
+function mcpEnrollment(complete: (init: RequestInit | undefined) => Response | Promise<Response>): { enrollment: BrowserEnrollment; fetcher: ReturnType<typeof vi.fn<typeof fetch>> } {
+  const core = {
+    invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_mcp_owner_begin") return {};
+      if (command === "_worker_identity_metadata") return { vaultId: mcpVaultId };
+      if (command === "_worker_mcp_owner_create") return { request: JSON.stringify({ claimant: "private" }) };
+      if (command === "_worker_mcp_owner_created") return {};
+      if (command === "_worker_mcp_owner_approve") return { request: JSON.stringify({ approval: "private" }) };
+      throw new Error(`unexpected ${command}`);
+    }),
+  };
+  const session = new TestSession();
+  session.phase = "ready";
+  session.identity = { role: "owner" };
+  const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+    const path = pathOf(input);
+    if (path === "/v1/instance/session") return json({ csrf_token: "csrf" });
+    if (path === "/v1/mcp/device") return json({ vaultId: mcpVaultId, available: true, serverOrigin: origin, hosted: false, device: null });
+    if (path === "/v1/mcp/device/prepare") return json({ operation_id: invitationId, pairing: { invitation_id: invitationId } });
+    if (path === "/v1/enrollment/computers") return json({ server_nonce: "nonce", expires_in_seconds: 60 });
+    if (path.endsWith("/approve")) return json({ state: "approved" });
+    if (path === "/v1/mcp/device/activate") return json({ confirm: { claimant_proof: "private" } });
+    if (path.endsWith("/confirm")) return json({ vault_id: mcpVaultId, device_id: deviceId, role: "device" });
+    if (path === "/v1/mcp/device/complete") return complete(init);
+    throw new Error(`unexpected ${path}`);
+  });
+  return { enrollment: new BrowserEnrollment(core, session, origin, fetcher), fetcher };
+}
+
 describe("BrowserEnrollment", () => {
+  it("replays an ambiguous complete timeout with the identical admission", async () => {
+    let attempts = 0;
+    vi.useFakeTimers();
+    const { enrollment, fetcher } = mcpEnrollment(init => {
+      attempts += 1;
+      if (attempts === 2) return json({ vaultId: mcpVaultId, available: true, serverOrigin: origin, hosted: false, device: null });
+      return new Promise((_resolve, reject) => {
+        (init?.signal as AbortSignal).addEventListener("abort", () => reject(new TypeError("aborted")), { once: true });
+      });
+    });
+
+    const enabling = enrollment.mcpEnable();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(MCP_COMPLETE_REQUEST_TIMEOUT_MS);
+    await expect(enabling).resolves.toMatchObject({ vaultId: mcpVaultId });
+    const bodies = fetcher.mock.calls.filter(([input]) => pathOf(input) === "/v1/mcp/device/complete").map(([, init]) => init?.body);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).toBe(bodies[0]);
+    vi.useRealTimers();
+  });
+
+  it("replays an unavailable MCP worker once", async () => {
+    let attempts = 0;
+    const { enrollment } = mcpEnrollment(() => attempts++ === 0
+      ? json({ code: "mcp_worker_unavailable" }, { status: 503 })
+      : json({ vaultId: mcpVaultId, available: true, serverOrigin: origin, hosted: false, device: null }));
+
+    await expect(enrollment.mcpEnable()).resolves.toMatchObject({ vaultId: mcpVaultId });
+    expect(attempts).toBe(2);
+  });
+
+  it("replays a gateway timeout once", async () => {
+    let attempts = 0;
+    const { enrollment } = mcpEnrollment(() => attempts++ === 0
+      ? json({}, { status: 504 })
+      : json({ vaultId: mcpVaultId, available: true, serverOrigin: origin, hosted: false, device: null }));
+
+    await expect(enrollment.mcpEnable()).resolves.toMatchObject({ vaultId: mcpVaultId });
+    expect(attempts).toBe(2);
+  });
+
+  it("reports unconfirmed after two ambiguous complete outcomes", async () => {
+    const { enrollment } = mcpEnrollment(() => Promise.reject(new TypeError("network")));
+
+    await expect(enrollment.mcpEnable()).rejects.toMatchObject({
+      code: "mcp-enable-unconfirmed",
+      message: MCP_ENABLE_UNCONFIRMED_MESSAGE,
+    });
+  });
+
+  it("does not replay a definitive complete failure", async () => {
+    const { enrollment, fetcher } = mcpEnrollment(() => json({ code: "mcp_operation_invalid" }, { status: 409 }));
+
+    await expect(enrollment.mcpEnable()).rejects.toMatchObject({ status: 409, code: "mcp_operation_invalid" });
+    expect(fetcher.mock.calls.filter(([input]) => pathOf(input) === "/v1/mcp/device/complete")).toHaveLength(1);
+  });
+
+  it("does not replay a rejected MCP worker", async () => {
+    const { enrollment, fetcher } = mcpEnrollment(() => json({ code: "mcp_worker_rejected" }, { status: 502 }));
+
+    await expect(enrollment.mcpEnable()).rejects.toMatchObject({ status: 502, code: "mcp_worker_rejected" });
+    expect(fetcher.mock.calls.filter(([input]) => pathOf(input) === "/v1/mcp/device/complete")).toHaveLength(1);
+  });
+
+  it("gives complete the MCP worker deadline", async () => {
+    vi.useFakeTimers();
+    let completeAttempts = 0;
+    const { enrollment } = mcpEnrollment(init => new Promise((_resolve, reject) => {
+      completeAttempts += 1;
+      (init?.signal as AbortSignal).addEventListener("abort", () => reject(new TypeError("aborted")), { once: true });
+    }));
+    const enabling = enrollment.mcpEnable();
+    const rejection = expect(enabling).rejects.toMatchObject({ code: "mcp-enable-unconfirmed" });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(completeAttempts).toBe(1);
+    await vi.advanceTimersByTimeAsync(MCP_COMPLETE_REQUEST_TIMEOUT_MS - 25_000);
+    expect(completeAttempts).toBe(2);
+    await vi.advanceTimersByTimeAsync(MCP_COMPLETE_REQUEST_TIMEOUT_MS);
+    await rejection;
+    vi.useRealTimers();
+  });
+
   it("retries a failed create with a fresh owner flow and relays the canonical MCP activation wire", async () => {
     const mcpVaultId = "550e8400-e29b-41d4-a716-446655440000";
     const events: string[] = [];

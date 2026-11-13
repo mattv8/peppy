@@ -4,7 +4,7 @@ import { Modal } from "@peppy/desktop-ui";
 import type { McpDeviceStatus, McpGrantView } from "@peppy/desktop-ui/bridge-contracts";
 import { bridge, type DeviceRosterView } from "../bridge/bridge";
 import { McpDetailsModal } from "./McpDetailsModal";
-import { grantShortId, isRemovedDevice, isStartingState, mcpErrorMessage, mcpServerErrorCode, mcpStateLabel, mcpVaultId, unavailableReasonFor } from "./mcpDisplay";
+import { grantShortId, hasUsableEndpoint, isRemovedDevice, isStartingState, mcpErrorMessage, mcpServerErrorCode, mcpStateLabel, mcpVaultId, unavailableReasonFor } from "./mcpDisplay";
 import { publishMcpStatus } from "./mcpStatusStore";
 
 type McpDeviceSettingsProps = {
@@ -30,6 +30,14 @@ const CLEANUP_STILL_WAITING_MESSAGE = "Cleanup is still running. Select Refresh 
 const ROW_CLEANUP_STILL_WAITING_MESSAGE = "Cleanup is still running. Open Details to check again.";
 const CLEANUP_HINT = "Cleanup is running. Status updates automatically.";
 const OFFLINE_HINT = "Peppy MCP is offline. Checking for it to connect.";
+const UNCONFIRMED_ENABLE_CODES = new Set(["mcp-enable-unconfirmed", "offline", "timeout", "mcp_enable_in_progress"]);
+type EnableOutcome = "unconfirmed" | "ready" | "exhausted";
+type StatusRefreshMode = "manual" | "poll" | "reconcile";
+const ENABLE_OUTCOME_MESSAGES: Record<EnableOutcome, string> = {
+  unconfirmed: "Peppy MCP setup is still finishing. Its status will update here.",
+  ready: "Peppy MCP is set up.",
+  exhausted: "Peppy MCP still isn't ready. Select Enable to try again.",
+};
 
 /** Appends the bridge's sanitized failure message, never raw or untrusted text. */
 const staleStatusMessage = (reason: unknown) => {
@@ -67,6 +75,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
   const [revokeError, setRevokeError] = useState("");
   const [pollingExhausted, setPollingExhausted] = useState(false);
   const [enableSettling, setEnableSettling] = useState(false);
+  const [enableOutcome, setEnableOutcome] = useState<EnableOutcome | null>(null);
   /** Bumped when a new poll budget starts (enable or Details open) so the polling interval restarts with 24 fresh polls. */
   const [pollRun, setPollRun] = useState(0);
   const sequence = useRef(0);
@@ -78,9 +87,11 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
   const sessionGeneration = useRef(0);
   const statusRef = useRef<McpDeviceStatus | null>(null);
   const pollCount = useRef(0);
+  const enableOutcomeRef = useRef<EnableOutcome | null>(null);
   const revokeTargetRef = useRef<McpGrantView | null>(null);
   const revokeInFlight = useRef(false);
   const onDeviceIdRef = useRef(onDeviceId);
+  const onMutationRef = useRef(onMutation);
   const context = useRef(sessionKey);
   const mounted = useRef(true);
   const rowRef = useRef<HTMLLIElement>(null);
@@ -96,9 +107,10 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
   const polling = Boolean(device?.cleanupPending);
   /** Right after a successful enable, offline is transitional and polls even with details closed. */
   const settling = enableSettling && isStartingState(device?.state);
-  const pollActive = (detailsOpen && polling) || settling;
+  const pollActive = (detailsOpen && polling) || settling || (enableOutcome === "unconfirmed" && !serverOffline);
 
   useEffect(() => { onDeviceIdRef.current = onDeviceId; }, [onDeviceId]);
+  useEffect(() => { onMutationRef.current = onMutation; }, [onMutation]);
 
   const isCurrentDetails = useCallback((generation: number) => mounted.current && detailsGeneration.current === generation, []);
   const isCurrentSession = useCallback((generation: number) => mounted.current && sessionGeneration.current === generation, []);
@@ -124,26 +136,43 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
   }, [applyStatus]);
 
   /** Polls stay silent; only a manual refresh marks the button busy. The sequence drops results that a newer request superseded. */
-  const refreshStatus = useCallback(async (isCurrent: () => boolean, manual: boolean) => {
-    if (!manual && statusInFlight.current !== null) return;
+  const refreshStatus = useCallback(async (isCurrent: () => boolean, mode: StatusRefreshMode): Promise<McpDeviceStatus | null> => {
+    if (mode === "poll" && statusInFlight.current !== null) return null;
     const request = ++statusSequence.current;
     statusInFlight.current = request;
-    if (manual) setRefreshingStatus(true);
+    if (mode === "manual") setRefreshingStatus(true);
     try {
       const next = await bridge.mcp_status();
-      if (!isCurrent() || request !== statusSequence.current) return;
+      if (!isCurrent() || request !== statusSequence.current) return null;
       const previous = statusRef.current?.device;
       applyStatus(next);
+      if (enableOutcomeRef.current === "unconfirmed" && next.device && hasUsableEndpoint(next.device)) {
+        enableOutcomeRef.current = "ready";
+        setEnableOutcome("ready");
+        setEnableSettling(isStartingState(next.device.state));
+        pollCount.current = 0;
+        setPollingExhausted(false);
+        setPollRun(run => run + 1);
+        void onMutationRef.current?.();
+      }
       setStatusError("");
       if (previous && next.device && previous.state !== next.device.state) setStatusNotice(`Status is now ${mcpStateLabel(next.device.state)}.`);
       else if (previous?.cleanupPending && !next.device?.cleanupPending) setStatusNotice("Cleanup finished.");
+      return next;
     } catch (reason) {
       if (isCurrent() && request === statusSequence.current) setStatusError(staleStatusMessage(reason));
     } finally {
       if (statusInFlight.current === request) statusInFlight.current = null;
-      if (manual && isCurrent()) setRefreshingStatus(false);
-      if (pollCount.current >= MAX_STATUS_POLLS && isCurrent() && request === statusSequence.current) setPollingExhausted(true);
+      if (mode === "manual" && isCurrent()) setRefreshingStatus(false);
+      if (pollCount.current >= MAX_STATUS_POLLS && isCurrent() && request === statusSequence.current) {
+        setPollingExhausted(true);
+        if (enableOutcomeRef.current === "unconfirmed") {
+          enableOutcomeRef.current = "exhausted";
+          setEnableOutcome("exhausted");
+        }
+      }
     }
+    return null;
   }, [applyStatus]);
 
   const loadGrants = useCallback(async (generation: number) => {
@@ -169,7 +198,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
   }, [canManageGrants, isCurrentDetails]);
 
   const refreshDetails = useCallback((generation: number) => {
-    void refreshStatus(() => isCurrentDetails(generation), true);
+    void refreshStatus(() => isCurrentDetails(generation), "manual");
     if (!isRemovedDevice(statusRef.current?.device)) void loadGrants(generation);
   }, [isCurrentDetails, loadGrants, refreshStatus]);
 
@@ -207,6 +236,8 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
     setRevokingGrantId(null);
     setPollingExhausted(false);
     setEnableSettling(false);
+    enableOutcomeRef.current = null;
+    setEnableOutcome(null);
   }, [sessionKey, roster.currentDeviceId]);
 
   useEffect(() => {
@@ -218,7 +249,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
         return;
       }
       pollCount.current += 1;
-      void refreshStatus(() => isCurrentSession(session), false);
+      void refreshStatus(() => isCurrentSession(session), "poll");
       if (pollCount.current === MAX_STATUS_POLLS) {
         clearInterval(interval);
       }
@@ -227,7 +258,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
   }, [isCurrentSession, pollActive, pollRun, refreshStatus]);
 
   useEffect(() => {
-    if (pollActive && !pollActiveRef.current) {
+    if (pollActive && !pollActiveRef.current && enableOutcomeRef.current !== "unconfirmed") {
       pollCount.current = 0;
       setPollingExhausted(false);
       setPollRun(run => run + 1);
@@ -235,26 +266,46 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
     pollActiveRef.current = pollActive;
   }, [pollActive]);
 
+  const finishEnable = async (next: McpDeviceStatus) => {
+    setEnableSettling(isStartingState(next.device?.state));
+    pollCount.current = 0;
+    setPollingExhausted(false);
+    setPollRun(run => run + 1);
+    await onMutationRef.current?.();
+    setConsentOpen(false);
+    setConsented(false);
+    setEnableError("");
+  };
+
   const enable = async () => {
     if (!canEnable || !consented || pending || !owner || serverOffline || accountReadOnly) return;
     setPending(true);
+    enableOutcomeRef.current = null;
+    setEnableOutcome(null);
     const enableContext = sessionKey;
     const enableSession = sessionGeneration.current;
     try {
       const next = await bridge.mcp_enable();
       if (!mounted.current || context.current !== enableContext) return;
       applyStatus(next);
-      setEnableSettling(isStartingState(next.device?.state));
-      pollCount.current = 0;
-      setPollingExhausted(false);
-      setPollRun(run => run + 1);
-      await onMutation?.();
-      setConsentOpen(false);
-      setConsented(false);
-      setEnableError("");
+      await finishEnable(next);
     } catch (reason) {
-      if (isCurrentSession(enableSession)) setEnableError(mcpErrorMessage(reason, "MCP could not be enabled."));
-      if (mounted.current) void refreshStatus(() => isCurrentSession(enableSession), false);
+      const refreshed = await refreshStatus(() => isCurrentSession(enableSession), "reconcile");
+      if (!isCurrentSession(enableSession) || context.current !== enableContext) return;
+      if (refreshed?.device && hasUsableEndpoint(refreshed.device)) {
+        await finishEnable(refreshed);
+      } else if (UNCONFIRMED_ENABLE_CODES.has(mcpServerErrorCode(reason) ?? "")) {
+        enableOutcomeRef.current = "unconfirmed";
+        setEnableOutcome("unconfirmed");
+        pollCount.current = 0;
+        setPollingExhausted(false);
+        setPollRun(run => run + 1);
+        setConsentOpen(false);
+        setConsented(false);
+        setEnableError("");
+      } else {
+        setEnableError(mcpErrorMessage(reason, "MCP could not be enabled."));
+      }
     } finally {
       if (mounted.current) setPending(false);
     }
@@ -272,6 +323,8 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
     setGrantNotice("");
     setRevokeError("");
     setPollingExhausted(false);
+    enableOutcomeRef.current = null;
+    setEnableOutcome(null);
     refreshDetails(generation);
   };
 
@@ -391,6 +444,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
   const unavailableReason = unavailableReasonFor({ available: status.available, vaultId: statusVaultId, unlocked, owner, accountReadOnly, serverOffline, state: device?.state });
   const exhausted = pollingExhausted && pollActive;
   const statusHint = statusHintFor({ removed: isRemovedDevice(device), exhausted, cleanupPending: device?.cleanupPending === true, starting: settling, statusNotice });
+  const showEnableOutcome = enableOutcome !== "exhausted" || (!serverOffline && canEnable);
 
   return (
     <>
@@ -404,7 +458,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
           </span>
           {device?.lastSyncedAt && <small>Last sync: {device.lastSyncedAt}</small>}
           {unavailableReason && <small data-mcp-unavailable>{unavailableReason}</small>}
-          {!detailsOpen && pollActive && <small id="mcp-row-notice" data-mcp-row-notice role="status">{exhausted ? device?.cleanupPending ? ROW_CLEANUP_STILL_WAITING_MESSAGE : ROW_STILL_OFFLINE_MESSAGE : statusHint}</small>}
+          {!detailsOpen && (pollActive || enableOutcome) && !(serverOffline && enableOutcome === "unconfirmed") && showEnableOutcome && <small id="mcp-row-notice" data-mcp-row-notice data-mcp-enable-outcome={enableOutcome ?? undefined} role="status">{enableOutcome && !settling ? ENABLE_OUTCOME_MESSAGES[enableOutcome] : exhausted ? device?.cleanupPending ? ROW_CLEANUP_STILL_WAITING_MESSAGE : ROW_STILL_OFFLINE_MESSAGE : statusHint}</small>}
           {error && <p id="mcp-device-error" className="settings-error" role="alert">{error}</p>}
         </div>
         {device ? (
@@ -413,11 +467,11 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
             {matchedDevice && owner && !serverOffline && (
               <button id="mcp-device-remove" type="button" className="secondary-button" aria-label="Remove Peppy MCP" onClick={event => onRemove?.(matchedDevice, event.currentTarget)}>Remove</button>
             )}
-            {canEnable && (
+            {canEnable && enableOutcome !== "unconfirmed" && (
               <button id="mcp-custody-review" ref={custodyOpener} type="button" className="secondary-button" aria-label="Re-enable Peppy MCP" onClick={openConsent}>Re-enable</button>
             )}
           </span>
-        ) : canEnable && (
+        ) : canEnable && enableOutcome !== "unconfirmed" && (
           <button id="mcp-custody-review" ref={custodyOpener} type="button" className="secondary-button" aria-label="Enable Peppy MCP" onClick={openConsent}>Enable</button>
         )}
       </li>
@@ -435,8 +489,8 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
               <button id="mcp-custody-consent-enable" type="button" className="primary-button" aria-busy={pending || undefined} disabled={!consented || pending || !canEnable} onClick={() => void enable()}>Enable Peppy MCP</button>
             </>}
           >
-            {enableError && <p className="settings-error" role="alert">{enableError}</p>}
-            {pending && <p id="mcp-custody-consent-progress" role="status">Setting up Peppy MCP…</p>}
+            {enableError && <p id="mcp-custody-consent-error" className="settings-error" role="alert">{enableError}</p>}
+            {pending && <p id="mcp-custody-consent-progress" role="status">Setting up Peppy MCP… <small id="mcp-custody-consent-progress-hint">This can take a minute or two.</small></p>}
             <p>{custodyName} at {status.serverOrigin} will be able to decrypt vault {statusVaultId} to run its enrolled MCP client. It can send real messages without per-message prompts when you authorize a client.</p>
             <label className="settings-check">
               <input id="mcp-custody-consent-check" type="checkbox" checked={consented} disabled={pending} onChange={event => setConsented(event.target.checked)} />

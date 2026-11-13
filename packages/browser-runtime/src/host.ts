@@ -3,7 +3,7 @@ import { BrowserCore, CoreRejectedError, type CoreResult, type EmscriptenCoreMod
 import { type EmscriptenFilesystem } from "./filesystem.js";
 import { acquireWorkerOwner, type OwnerLockManager, type WorkerOwner } from "./owner.js";
 import { BrowserSession, BrowserSessionError, type BrowserSessionPhase } from "./session.js";
-import { BrowserEnrollment, type EnrollmentView, type InstanceManagement, type VaultInviteView, type VaultRequestView, type VaultSummary } from "./enrollment.js";
+import { BrowserEnrollment, MCP_ENABLE_UNCONFIRMED_MESSAGE, type EnrollmentView, type InstanceManagement, type VaultInviteView, type VaultRequestView, type VaultSummary } from "./enrollment.js";
 import { BrowserScheduler, type SchedulerSyncProgress } from "./scheduler.js";
 import { OriginTransport, TransportError } from "./transport.js";
 import { BannerPresenter, BrowserNotificationAdapter, CoreNotificationSettings, DEFAULT_NOTIFICATION_PREFERENCES, IndexedDbNotificationSettings, notificationPreferences, type BannerContext, type NotificationAdapter, type NotificationPreferences, type NotificationSettings } from "./presentation.js";
@@ -369,6 +369,9 @@ function isFamilyEnrollmentCommand(command: string): boolean {
 
 function mcpErrorFor(error: unknown): RpcError {
   if (isMcpCancellation(error)) return { code: "cancelled", message: "MCP status check was cancelled. Try again." };
+  if (typeof error === "object" && error !== null && (error as { code?: unknown }).code === "mcp-enable-unconfirmed") {
+    return { code: "mcp-enable-unconfirmed", message: error instanceof Error ? error.message : MCP_ENABLE_UNCONFIRMED_MESSAGE };
+  }
   if (error instanceof Error && error.message === "enrollment-timeout") return { code: "timeout", message: "MCP status check timed out. Try again." };
   if (error instanceof Error && error.message === "session-expired") return { code: "session-expired", message: "Your sign-in session expired. Sign in again." };
   const httpError = mcpHttpError(error);

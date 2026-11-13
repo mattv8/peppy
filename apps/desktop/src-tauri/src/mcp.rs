@@ -8,7 +8,7 @@ use peppy_hosted_api::mcp::{
     McpAuthorizationDecision, McpAuthorizationView, McpDeviceStatus, McpEnrollmentPreparation,
     McpGrantView, McpHostActivationRequest, McpHostCompletionRequest, McpScope,
     McpWorkerActivateResponse, WebhookCreated, WebhookInput, WebhookList, WebhookSecret,
-    WebhookTestResult, WebhookView,
+    WebhookTestResult, WebhookView, MCP_COMPLETE_REQUEST_TIMEOUT_MS,
 };
 use peppy_hosted_api::{
     computer_enrollment::{ComputerEnrollmentCreated, ComputerEnrollmentStatus},
@@ -17,7 +17,7 @@ use peppy_hosted_api::{
 };
 use peppy_hosted_client::newenrollment::{ClientKind, EnrollmentClient};
 use serde::{de::DeserializeOwned, Serialize};
-use std::str::FromStr;
+use std::{str::FromStr, time::Duration};
 use tauri::{State, WebviewWindow};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -140,6 +140,25 @@ struct McpAccountAuthorization {
     revision: Option<u64>,
 }
 
+struct McpAccountPostOptions<'a> {
+    account: Option<&'a str>,
+    timeout: Option<Duration>,
+}
+
+enum McpAccountPostError {
+    Bridge(BridgeError),
+    Network(NetError),
+}
+
+impl McpAccountPostError {
+    fn into_bridge(self) -> BridgeError {
+        match self {
+            Self::Bridge(error) => error,
+            Self::Network(error) => error.into(),
+        }
+    }
+}
+
 async fn begin_mcp_account_post<T, B>(
     state: &AppState,
     session: &std::sync::Arc<crate::session::Session>,
@@ -182,48 +201,135 @@ where
     T: DeserializeOwned,
     B: Serialize + ?Sized,
 {
-    current(state, session).await?;
-    current_account(hosted, account_revision)?;
+    mcp_account_post_with_timeout(
+        state,
+        session,
+        hosted,
+        account_revision,
+        path,
+        body,
+        McpAccountPostOptions {
+            account,
+            timeout: None,
+        },
+    )
+    .await
+    .map_err(McpAccountPostError::into_bridge)
+}
+
+async fn mcp_account_post_with_timeout<T, B>(
+    state: &AppState,
+    session: &std::sync::Arc<crate::session::Session>,
+    hosted: &crate::hosted::HostedState,
+    account_revision: Option<u64>,
+    path: &str,
+    body: &B,
+    options: McpAccountPostOptions<'_>,
+) -> Result<T, McpAccountPostError>
+where
+    T: DeserializeOwned,
+    B: Serialize + ?Sized,
+{
+    current(state, session)
+        .await
+        .map_err(McpAccountPostError::Bridge)?;
+    current_account(hosted, account_revision).map_err(McpAccountPostError::Bridge)?;
     let response = match session
         .api
-        .post_json_with_account(path, body, account)
+        .post_json_with_account_timeout(path, body, options.account, options.timeout)
         .await
     {
         Ok(response) => response,
         Err(error) => {
-            if account.is_none() {
-                return Err(error.into());
+            if options.account.is_none() {
+                return Err(McpAccountPostError::Network(error));
             }
             let Some((status, code)) = account_session_rejected(&error) else {
-                return Err(error.into());
+                return Err(McpAccountPostError::Network(error));
             };
             crate::hosted::force_renew_mcp_account_session(state, hosted, session.api.origin())
                 .await
-                .map_err(|_| hosted_session_required(path, status, code))?;
-            current(state, session).await?;
-            account
+                .map_err(|_| {
+                    McpAccountPostError::Bridge(hosted_session_required(path, status, code))
+                })?;
+            current(state, session)
+                .await
+                .map_err(McpAccountPostError::Bridge)?;
+            options
+                .account
                 .map(|bearer| hosted.capture_mcp_account_session(bearer))
                 .expect("account rejections require an account session")
-                .await?;
-            current_account(hosted, account_revision)?;
+                .await
+                .map_err(McpAccountPostError::Bridge)?;
+            current_account(hosted, account_revision).map_err(McpAccountPostError::Bridge)?;
             match session
                 .api
-                .post_json_with_account(path, body, account)
+                .post_json_with_account_timeout(path, body, options.account, options.timeout)
                 .await
             {
                 Ok(response) => response,
                 Err(error) => match account_session_rejected(&error) {
                     Some((status, code)) => {
-                        return Err(hosted_session_required(path, status, code))
+                        return Err(McpAccountPostError::Bridge(hosted_session_required(
+                            path, status, code,
+                        )))
                     }
-                    None => return Err(error.into()),
+                    None => return Err(McpAccountPostError::Network(error)),
                 },
             }
         }
     };
-    current(state, session).await?;
-    current_account(hosted, account_revision)?;
+    current(state, session)
+        .await
+        .map_err(McpAccountPostError::Bridge)?;
+    current_account(hosted, account_revision).map_err(McpAccountPostError::Bridge)?;
     Ok(response)
+}
+
+fn ambiguous_mcp_complete(error: &NetError) -> bool {
+    matches!(
+        error,
+        NetError::Offline | NetError::Status { status: 504, .. }
+    ) || error.is_status(503, "mcp_worker_unavailable")
+}
+
+async fn complete_mcp_enable(
+    state: &AppState,
+    session: &std::sync::Arc<crate::session::Session>,
+    hosted: &crate::hosted::HostedState,
+    account_revision: Option<u64>,
+    account: Option<&str>,
+    request: &McpHostCompletionRequest,
+    timeout: Duration,
+) -> BridgeResult<McpDeviceStatus> {
+    for attempt in 0..2 {
+        match mcp_account_post_with_timeout(
+            state,
+            session,
+            hosted,
+            account_revision,
+            "/v1/mcp/device/complete",
+            request,
+            McpAccountPostOptions {
+                account,
+                timeout: Some(timeout),
+            },
+        )
+        .await
+        {
+            Ok(response) => return Ok(response),
+            Err(McpAccountPostError::Network(error))
+                if ambiguous_mcp_complete(&error) && attempt == 0 => {}
+            Err(McpAccountPostError::Network(error)) if ambiguous_mcp_complete(&error) => {
+                return Err(BridgeError::new(
+                    "mcp-enable-unconfirmed",
+                    "Peppy MCP setup is still finishing. Its status will update here.",
+                ));
+            }
+            Err(error) => return Err(error.into_bridge()),
+        }
+    }
+    unreachable!("MCP completion retries exactly once")
 }
 
 #[tauri::command]
@@ -380,17 +486,17 @@ pub async fn mcp_enable(
         account.as_deref().map(String::as_str),
     )
     .await?;
-    let result = mcp_account_post(
+    let result = complete_mcp_enable(
         &state,
         &session,
         &hosted,
         account_generation,
-        "/v1/mcp/device/complete",
+        account.as_deref().map(String::as_str),
         &McpHostCompletionRequest {
             operation_id: prepared.operation_id,
             admission: admission.clone(),
         },
-        account.as_deref().map(String::as_str),
+        Duration::from_millis(MCP_COMPLETE_REQUEST_TIMEOUT_MS),
     )
     .await?;
     Ok(result)
@@ -1104,25 +1210,253 @@ mod tests {
         )
     }
 
+    const TEST_SERVER_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
+    const TEST_SERVER_IO_TIMEOUT: Duration = Duration::from_secs(2);
+
+    async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+
+        tokio::time::timeout(TEST_SERVER_IO_TIMEOUT, async {
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0; 1024];
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(
+                    read > 0,
+                    "connection closed before the request body arrived"
+                );
+                request.extend_from_slice(&chunk[..read]);
+
+                let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                let content_length = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    return String::from_utf8(request).unwrap();
+                }
+            }
+        })
+        .await
+        .expect("timed out reading the HTTP request")
+    }
+
     async fn serve_mcp_responses(
         responses: Vec<String>,
     ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             let mut requests = Vec::new();
             for response in responses {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = vec![0; 4096];
-                let read = socket.read(&mut request).await.unwrap();
-                requests.push(String::from_utf8(request[..read].to_vec()).unwrap());
+                let (mut socket, _) =
+                    tokio::time::timeout(TEST_SERVER_ACCEPT_TIMEOUT, listener.accept())
+                        .await
+                        .expect("timed out waiting for an HTTP request")
+                        .unwrap();
+                requests.push(read_http_request(&mut socket).await);
                 socket.write_all(response.as_bytes()).await.unwrap();
             }
             requests
         });
         (origin, server)
+    }
+
+    enum GatedMcpResponse {
+        AfterAllRequests(String),
+        Never,
+    }
+
+    async fn serve_gated_mcp_responses(
+        responses: Vec<GatedMcpResponse>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let all_requests_read = std::sync::Arc::new(tokio::sync::Barrier::new(responses.len()));
+            let mut requests = tokio::task::JoinSet::new();
+            for (index, response) in responses.into_iter().enumerate() {
+                let (mut socket, _) =
+                    tokio::time::timeout(TEST_SERVER_ACCEPT_TIMEOUT, listener.accept())
+                        .await
+                        .expect("timed out waiting for an HTTP request")
+                        .unwrap();
+                let all_requests_read = all_requests_read.clone();
+                requests.spawn(async move {
+                    let request = read_http_request(&mut socket).await;
+                    tokio::time::timeout(TEST_SERVER_IO_TIMEOUT, all_requests_read.wait())
+                        .await
+                        .expect("timed out waiting for all request bodies");
+
+                    match response {
+                        GatedMcpResponse::AfterAllRequests(response) => {
+                            let _ = socket.write_all(response.as_bytes()).await;
+                        }
+                        GatedMcpResponse::Never => {
+                            tokio::time::sleep(TEST_SERVER_IO_TIMEOUT).await;
+                        }
+                    }
+                    (index, request)
+                });
+            }
+
+            let mut received = Vec::new();
+            while let Some(request) = requests.join_next().await {
+                received.push(request.unwrap());
+            }
+            received.sort_by_key(|(index, _)| *index);
+            received.into_iter().map(|(_, request)| request).collect()
+        });
+        (origin, server)
+    }
+
+    fn complete_request() -> McpHostCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "operation_id": "550e8400-e29b-41d4-a716-446655440000",
+            "admission": {
+                "vault_id": "550e8400-e29b-41d4-a716-446655440001",
+                "device_id": "550e8400-e29b-41d4-a716-446655440002",
+                "role": "device",
+                "material": {
+                    "profile": {},
+                    "check_header": "header",
+                    "fingerprint": "fingerprint",
+                    "key_epoch": 1,
+                    "admission_public_key": "key"
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn mcp_device_status() -> &'static str {
+        r#"{"vaultId":"550e8400-e29b-41d4-a716-446655440001","available":true,"serverOrigin":"https://peppy.example","hosted":true,"device":null}"#
+    }
+
+    async fn complete_with_timeout(
+        origin: &str,
+        timeout: Duration,
+    ) -> BridgeResult<McpDeviceStatus> {
+        let (state, session, hosted, _) = mcp_account_fixture(origin).await;
+        let revision = hosted.capture_mcp_account_session("account").await?;
+        complete_mcp_enable(
+            &state,
+            &session,
+            &hosted,
+            Some(revision),
+            Some("account"),
+            &complete_request(),
+            timeout,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn complete_timeout_replays_the_identical_request() {
+        let response = http_response("200 OK", mcp_device_status());
+        let (origin, server) = serve_gated_mcp_responses(vec![
+            GatedMcpResponse::AfterAllRequests(response.clone()),
+            GatedMcpResponse::AfterAllRequests(response),
+        ])
+        .await;
+
+        assert!(complete_with_timeout(&origin, Duration::from_secs(1))
+            .await
+            .is_ok());
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].split_once("\r\n\r\n").unwrap().1,
+            requests[1].split_once("\r\n\r\n").unwrap().1,
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_worker_unavailable_replays_once() {
+        let (origin, server) = serve_mcp_responses(vec![
+            http_response(
+                "503 Service Unavailable",
+                r#"{"code":"mcp_worker_unavailable"}"#,
+            ),
+            http_response("200 OK", mcp_device_status()),
+        ])
+        .await;
+
+        assert!(complete_with_timeout(&origin, Duration::from_secs(1))
+            .await
+            .is_ok());
+        assert_eq!(server.await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn complete_gateway_timeout_replays_the_identical_request() {
+        let (origin, server) = serve_mcp_responses(vec![
+            http_response("504 Gateway Timeout", ""),
+            http_response("200 OK", mcp_device_status()),
+        ])
+        .await;
+
+        assert!(complete_with_timeout(&origin, Duration::from_secs(1))
+            .await
+            .is_ok());
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].split_once("\r\n\r\n").unwrap().1,
+            requests[1].split_once("\r\n\r\n").unwrap().1,
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_two_timeouts_are_unconfirmed() {
+        let (origin, server) =
+            serve_gated_mcp_responses(vec![GatedMcpResponse::Never, GatedMcpResponse::Never]).await;
+
+        let error = complete_with_timeout(&origin, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "mcp-enable-unconfirmed");
+        assert_eq!(server.await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn complete_operation_invalid_is_not_replayed() {
+        let (origin, server) = serve_mcp_responses(vec![http_response(
+            "409 Conflict",
+            r#"{"code":"mcp_operation_invalid"}"#,
+        )])
+        .await;
+
+        let error = complete_with_timeout(&origin, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "server-rejected");
+        assert_eq!(server.await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn complete_worker_rejected_is_not_replayed() {
+        let (origin, server) = serve_mcp_responses(vec![http_response(
+            "502 Bad Gateway",
+            r#"{"code":"mcp_worker_rejected"}"#,
+        )])
+        .await;
+
+        let error = complete_with_timeout(&origin, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "server-rejected");
+        assert_eq!(server.await.unwrap().len(), 1);
     }
 
     async fn rejected_mcp_post(

@@ -280,9 +280,24 @@ impl Api {
         body: &B,
         account_session: Option<&str>,
     ) -> Result<T, NetError> {
+        self.post_json_with_account_timeout(path, body, account_session, None)
+            .await
+    }
+
+    /// `timeout` replaces the client's default deadline for this request only.
+    pub async fn post_json_with_account_timeout<B: Serialize + ?Sized, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        account_session: Option<&str>,
+        timeout: Option<Duration>,
+    ) -> Result<T, NetError> {
         let mut request = self
             .retention_mutation(self.http.post(self.url(path)))
             .json(body);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
         if let Some(account_session) = account_session {
             request = request.header("Peppy-Account-Session", account_session);
         }
