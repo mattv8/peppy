@@ -1,6 +1,7 @@
 package dev.peppy.mobile.googlemessages
 
 import androidx.test.core.app.ApplicationProvider
+import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import dev.peppy.mobile.googlemessages.live.LiveScheduledTask
 import dev.peppy.mobile.googlemessages.live.LiveScheduler
 import dev.peppy.mobile.googlemessages.live.LiveTypingCredentials
@@ -168,6 +169,46 @@ class TypingBridgeTest {
         bridge.onFrame("frame")
 
         assertEquals("google-conversation", effects.single().conversationId)
+    }
+
+    @Test fun `admitted typing without a link-owned Google id records outbound_not_owned`() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(calls).also { it.ownedGoogleId = null }
+        val transport = FakeTransport(calls)
+        val effects = mutableListOf<LiveTypingEffectIntent>()
+        val bridge = bridge(core, transport, calls) { effects += it; "ok" }
+        bridge.start(credentials())
+        transport.enable(listOf("gateway"), "gateway")
+
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            core.nextOpen = outcome(update = session(), action = intent())
+            bridge.onFrame("frame")
+        }
+
+        assertTrue(effects.isEmpty())
+        assertEquals(listOf("event=27 session=1 timestamp_ms=10 trace=0 29=280"), records)
+    }
+
+    @Test fun `refused Google typing records outbound_refused and does not open the suppression window`() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(calls)
+        val transport = FakeTransport(calls)
+        val effects = mutableListOf<LiveTypingEffectIntent>()
+        val bridge = bridge(core, transport, calls) { effects += it; "typing_failed" }
+        bridge.start(credentials())
+        transport.enable(listOf("gateway"), "gateway")
+
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            core.nextOpen = outcome(update = session(), action = intent())
+            bridge.onFrame("first")
+            core.nextOpen = outcome(action = intent(sequence = 2UL))
+            bridge.onFrame("second")
+        }
+
+        assertEquals(2, effects.size)
+        assertEquals(List(2) { "event=27 session=1 timestamp_ms=10 trace=0 29=281" }, records)
     }
 
     @Test fun `membership retirement drops an effect queued behind the bridge executor`() {
@@ -375,11 +416,12 @@ class TypingBridgeTest {
         var sealedState: NativeTypingState? = null
         var sealedParticipant: String? = null
         var nextOpen = NativeLiveOutcome(1UL, null, null, null)
+        var ownedGoogleId: String? = "google-conversation"
         override fun enable(context: NativeLiveEnableContext, clock: NativeLiveClock): ULong { calls += "core.enable"; enableContext = context; return 1UL }
         override fun setSharing(enabled: Boolean) { calls += "core.share" }
         override fun disable() { calls += "core.disable" }
         override fun receiveContext(googleConversationId: String) = context
-        override fun ownedGoogleConversationId(conversationId: String) = "google-conversation"
+        override fun ownedGoogleConversationId(conversationId: String) = ownedGoogleId
         override fun seal(conversationId: String, gatewayDeviceId: String, participant: String?, state: NativeTypingState, clock: NativeLiveClock): NativeLiveOutbound? {
             sealedState = state
             sealedParticipant = participant

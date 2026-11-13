@@ -176,7 +176,7 @@ internal class TypingBridge(
 
     private fun applyOutbound(intent: LiveTypingEffectIntent) {
         val googleConversationId = runCatching { client()?.ownedGoogleConversationId(intent.conversationId) }.getOrNull()
-            ?: return droppedStale()
+            ?: return recordGoogleMessagesLinkEvent("typing", "outbound_not_owned", 0)
         val now = clock.nowMs()
         if (startedValidity[googleConversationId]?.let { it > now } == true) {
             recordGoogleMessagesLinkEvent("typing", "suppressed", 0)
@@ -185,6 +185,8 @@ internal class TypingBridge(
         if (googleEffect(intent.copy(conversationId = googleConversationId)) == "ok") {
             startedValidity[googleConversationId] = minOf(intent.deadlineMono, now + MAX_GOOGLE_TYPING_VALIDITY_MS)
             recordGoogleMessagesLinkEvent("typing", "outbound_effect", 0)
+        } else {
+            recordGoogleMessagesLinkEvent("typing", "outbound_refused", 0)
         }
     }
 
