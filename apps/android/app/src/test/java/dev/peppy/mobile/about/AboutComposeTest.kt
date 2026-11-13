@@ -45,15 +45,18 @@ class AboutComposeTest {
         renderAccount(account = account(), notices = null)
         compose.waitUntil { compose.onAllNodesWithTag("account-about-row").fetchSemanticsNodes().isNotEmpty() }
         val rows = compose.onAllNodes(
-            hasTestTag("account-privacy-policy-row").or(hasTestTag("account-about-row")),
+            hasTestTag("account-privacy-policy-row")
+                .or(hasTestTag("account-guides-row"))
+                .or(hasTestTag("account-about-row")),
         ).fetchSemanticsNodes().map { it.config[SemanticsProperties.TestTag] }
-        assertEquals(listOf("account-privacy-policy-row", "account-about-row"), rows)
+        assertEquals(listOf("account-privacy-policy-row", "account-guides-row", "account-about-row"), rows)
     }
 
     @Test fun offlineAccountAlsoShowsAboutLast() {
         renderAccount(account = null, notices = null)
         compose.waitUntil { compose.onAllNodesWithTag("account-about-row").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("account-privacy-policy-row").fetchSemanticsNode()
+        compose.onNodeWithTag("account-guides-row").fetchSemanticsNode()
         compose.onNodeWithTag("account-about-row").fetchSemanticsNode()
     }
 
@@ -142,6 +145,8 @@ class AboutComposeTest {
         compose.onNodeWithTag("about-title").assert(SemanticsMatcher.expectValue(SemanticsProperties.Heading, Unit))
         compose.onNodeWithTag("about-privacy-row").performScrollTo().performClick()
         compose.runOnIdle { assertEquals(PRIVACY_URL, opened) }
+        compose.onNodeWithTag("about-guides-row").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals("https://peppy.pro/docs", opened) }
         compose.onNodeWithTag("about-source-row").performScrollTo().performClick()
         compose.runOnIdle { assertEquals(SOURCE_URL, opened) }
     }

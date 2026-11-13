@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
@@ -57,6 +58,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.onClick as semanticsOnClick
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -210,6 +212,7 @@ private fun GoogleMessagesLinkPanelContent(
     var checkResult by remember { mutableStateOf<Int?>(null) }
     var sheet by rememberSaveable { mutableStateOf<String?>(null) }
     var localNotice by rememberSaveable(initialNotice) { mutableStateOf(initialNotice) }
+    var guideOpenFailed by remember { mutableStateOf(false) }
     var cutoverAlert by remember { mutableStateOf(false) }
     var cutoverDismissed by rememberSaveable { mutableStateOf(false) }
     var batteryUnavailable by remember { mutableStateOf(false) }
@@ -394,6 +397,8 @@ private fun GoogleMessagesLinkPanelContent(
     if (result is LinkOpenResult.Unavailable) return
 
     val colors = if (isSystemInDarkTheme()) PeppyTokens.Dark else PeppyTokens.Light
+    val externalLinkLabel = stringResource(R.string.peppy_about_opens_in_browser)
+    val guideOpenFailedText = stringResource(R.string.peppy_guide_open_failed)
     val unreadable = result is LinkOpenResult.Unreadable
     val signInBlocked = GoogleMessagesLink.signInBlocked(context)
     val stopNoticeShown = status?.let { it.stopCode.isNotEmpty() && dismissedSeq != it.seq } == true && !details
@@ -467,6 +472,21 @@ private fun GoogleMessagesLinkPanelContent(
         ScreenBody("google-messages-details-screen") {
             DetailsPageHeader(stringResource(R.string.peppy_google_messages_link_details_title), "google-messages-details", onBack)
             content()
+            TextButton(
+                onClick = {
+                    guideOpenFailed = false
+                    try {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(GOOGLE_MESSAGES_GUIDE_URL)))
+                    } catch (_: ActivityNotFoundException) {
+                        guideOpenFailed = true
+                    }
+                },
+                modifier = Modifier.heightIn(min = 48.dp).semantics { semanticsOnClick(externalLinkLabel, null) }.testTag("google-messages-details-guide"),
+            ) { Text(stringResource(R.string.peppy_google_messages_guide)) }
+            if (guideOpenFailed) Text(
+                guideOpenFailedText,
+                Modifier.semantics { liveRegion = LiveRegionMode.Polite }.testTag("google-messages-details-guide-error"),
+            )
         }
     } else {
         Surface(
@@ -581,6 +601,8 @@ private fun GoogleMessagesLinkPanelContent(
         "battery" -> ConsentSheet(stringResource(R.string.peppy_google_messages_link_battery_title), stringResource(R.string.peppy_google_messages_link_battery_sheet_body), "google-messages-link-battery-sheet", { sheet = null }, { sheet = null; openBatterySettings() }, stringResource(R.string.peppy_toggle_android_open_settings), showPrivacyPolicy = false)
     }
 }
+
+private const val GOOGLE_MESSAGES_GUIDE_URL = "https://peppy.pro/docs/google-messages"
 
 /** Reads the cutover alert. Isolated so a core-backed read can replace the prefs flag in one place. */
 private fun readCutoverAlert(context: Context): Boolean = GoogleMessagesLink.cutoverMayHaveMissedMessages(context)

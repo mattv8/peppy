@@ -7,6 +7,7 @@ import android.content.ContextWrapper
 import android.content.Intent
 import android.os.PowerManager
 import android.provider.Settings
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -40,7 +41,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.onClick as semanticsOnClick
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.unit.dp
@@ -116,6 +120,7 @@ internal fun SmsTab(
     var offConfirmation by remember { mutableStateOf(false) }
     var writeBusy by remember { mutableStateOf(false) }
     var resultHint by remember { mutableStateOf<String?>(null) }
+    var guideOpenFailed by remember { mutableStateOf(false) }
     var permissionDenied by remember { mutableStateOf(false) }
     var detailsOpen by remember { mutableStateOf(false) }
     var linkDetailsOpen by remember { mutableStateOf(false) }
@@ -127,6 +132,7 @@ internal fun SmsTab(
     val accountReadOnly by AccountAccessState.readOnly.collectAsState()
     val deniedHint = stringResource(R.string.peppy_toggle_android_sms_denied_hint)
     val guardFailedHint = stringResource(R.string.peppy_toggle_android_sms_guard_failed)
+    val externalLinkLabel = stringResource(R.string.peppy_about_opens_in_browser)
     val allGranted = SMS_PERMISSIONS.all { granted(context, it) }
     val readGranted = granted(context, Manifest.permission.READ_SMS)
     val reachability by ServerReachabilityState.state.collectAsState()
@@ -305,6 +311,21 @@ internal fun SmsTab(
             MmsSettings(context, refresh, databaseOpen, onChanged, detailsOnly = true)
             if (restrictedSetupAvailable(context)) AdvancedFeaturesSection(context, refresh, onChanged)
             resultHint?.let { Text(it, Modifier.testTag("sms-action-error")) }
+            TextButton(
+                onClick = {
+                    guideOpenFailed = false
+                    try {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(ANDROID_GUIDE_URL)))
+                    } catch (_: ActivityNotFoundException) {
+                        guideOpenFailed = true
+                    }
+                },
+                modifier = Modifier.heightIn(min = 48.dp).semantics { semanticsOnClick(externalLinkLabel, null) }.testTag("sms-details-guide"),
+            ) { Text(stringResource(R.string.peppy_android_guide)) }
+            if (guideOpenFailed) Text(
+                stringResource(R.string.peppy_guide_open_failed),
+                Modifier.semantics { liveRegion = LiveRegionMode.Polite }.testTag("sms-details-guide-error"),
+            )
         }
     } else if (linkDetailsOpen) {
         GoogleMessagesLink.Details(
@@ -417,6 +438,8 @@ internal fun SmsTab(
         dismissLabel = stringResource(R.string.peppy_toggle_android_keep_on),
     )
 }
+
+private const val ANDROID_GUIDE_URL = "https://peppy.pro/docs/android"
 
 @Composable
 private fun SyncSummary(health: SyncHealth?) {

@@ -66,6 +66,7 @@ import dev.peppy.mobile.about.AboutBuildInfo
 import dev.peppy.mobile.about.AboutRoute
 import dev.peppy.mobile.about.AboutScreen
 import dev.peppy.mobile.about.AssetThirdPartyNotices
+import dev.peppy.mobile.about.GUIDES_URL
 import dev.peppy.mobile.about.LicenseTextScreen
 import dev.peppy.mobile.about.LicensesScreen
 import dev.peppy.mobile.about.PRIVACY_URL
@@ -239,6 +240,7 @@ internal fun GatewayAccountSettings(
                     TextButton(onClick = { scope.launch { failure = null; refresh() } }, modifier = Modifier.testTag("account-retry-button")) { Text(stringResource(R.string.peppy_toggle_android_retry)) }
                     AccountNavigationRow("account-settings-row", stringResource(R.string.peppy_toggle_android_account_settings), onOpenSettings)
                     AccountNavigationRow("account-privacy-policy-row", stringResource(R.string.peppy_privacy_policy)) { openUri(context, PRIVACY_URL, failureSetter = { failure = it }) }
+                    AccountNavigationRow("account-guides-row", stringResource(R.string.peppy_guides), true) { openUri(context, GUIDES_URL, failureSetter = { failure = it }) }
                     AccountNavigationRow("account-about-row", stringResource(R.string.peppy_about_row_label)) { aboutRoute = AboutRoute.About }
                 }
             }
@@ -279,6 +281,9 @@ internal fun GatewayAccountSettings(
                     AccountNavigationRow("account-settings-row", stringResource(R.string.peppy_toggle_android_account_settings), onOpenSettings)
                     AccountNavigationRow("account-privacy-policy-row", stringResource(R.string.peppy_privacy_policy)) {
                         openUri(context, PRIVACY_URL, failureSetter = { failure = it })
+                    }
+                    AccountNavigationRow("account-guides-row", stringResource(R.string.peppy_guides), true) {
+                        openUri(context, GUIDES_URL, failureSetter = { failure = it })
                     }
                     AccountNavigationRow("account-about-row", stringResource(R.string.peppy_about_row_label)) { aboutRoute = AboutRoute.About }
                 }

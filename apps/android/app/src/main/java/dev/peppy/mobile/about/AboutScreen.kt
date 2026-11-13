@@ -52,6 +52,7 @@ internal fun AboutScreen(
         }
         Section("about-links-section", stringResource(R.string.peppy_about_section_links)) {
             AccountNavigationRow("about-privacy-row", stringResource(R.string.peppy_privacy_policy), true) { onOpenLink(PRIVACY_URL) }
+            AccountNavigationRow("about-guides-row", stringResource(R.string.peppy_guides), true) { onOpenLink(GUIDES_URL) }
             AccountNavigationRow("about-source-row", stringResource(R.string.peppy_about_source_code), true) { onOpenLink(SOURCE_URL) }
             if (licensesAvailable) AccountNavigationRow("about-licenses-row", stringResource(R.string.peppy_about_open_source_licenses), onOpenLicenses)
         }
@@ -60,4 +61,5 @@ internal fun AboutScreen(
 }
 
 internal const val PRIVACY_URL = "https://peppy.pro/privacy"
+internal const val GUIDES_URL = "https://peppy.pro/docs"
 internal const val SOURCE_URL = "https://github.com/mattv8/peppy"
