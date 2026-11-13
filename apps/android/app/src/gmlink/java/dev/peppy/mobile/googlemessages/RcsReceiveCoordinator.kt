@@ -1,6 +1,7 @@
 package dev.peppy.mobile.googlemessages
 
 import android.content.Context
+import dev.peppy.mobile.GatewayWork
 import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
 import dev.peppy.mobile.gateway.NativeGateway
 import org.json.JSONArray
@@ -31,6 +32,8 @@ internal class RcsReceiveCoordinator(
     /** One fresh complete snapshot ingest for group records; false when no complete snapshot was available. */
     private val reconcileGroups: () -> Boolean = GoogleMessagesLinkService::requestRcsGroupReconcile,
     private val nowMs: () -> Long = System::currentTimeMillis,
+    /** Requests a gateway pass after core invalidates a mapping for a protocol-switch event. Best effort. */
+    private val requestUpload: () -> Unit = { GatewayWork.enqueueAfterCapture(context.applicationContext) },
 ) : RcsReceiveSink {
     private val locks = ConcurrentHashMap<String, Any>()
     private val sweepLock = Any()
@@ -51,6 +54,7 @@ internal class RcsReceiveCoordinator(
         }
         // Unknown group senders get one snapshot re-read per record before the record is ingested unattributed.
         if (event is LiveEvent.Record && unknownGroupSender(event.record)) reconcileGroups()
+        var invalidated = false
         synchronized(lock(context.conversationId)) {
             if (!enabled()) return
             when (event) {
@@ -61,12 +65,17 @@ internal class RcsReceiveCoordinator(
                     // lane, and recovery then fetches this record from the unchanged watermark.
                     if (outcome.recordOutcome == UNPROVEN_REFUSAL) bootstrapRequest(googleId)
                 }
-                is LiveEvent.ProtocolSwitch -> runCatching { core.invalidate(context, googleId, null) }
-                    .getOrNull()
-                    ?.takeIf { it }
-                    ?.let { recordGoogleMessagesLinkEvent("recovery", "live_switch_invalidated", 0) }
+                is LiveEvent.ProtocolSwitch -> {
+                    invalidated = runCatching { core.invalidate(context, googleId, null) }.getOrNull() == true
+                    if (invalidated) recordGoogleMessagesLinkEvent("recovery", "live_switch_invalidated", 0)
+                }
             }
         }
+        if (invalidated) requestGatewayUpload()
+    }
+
+    private fun requestGatewayUpload() {
+        runCatching { requestUpload() }
     }
 
     private fun unknownGroupSender(record: String): Boolean =
@@ -122,12 +131,14 @@ internal class RcsReceiveCoordinator(
         cancelled: AtomicBoolean,
         current: () -> Boolean,
     ): RcsRecoveryResult {
-        val result = synchronized(lock(initial.conversationId)) { traverse(handle, initial, cancelled, current) }
+        val uploadNeeded = AtomicBoolean()
+        val result = synchronized(lock(initial.conversationId)) { traverse(handle, initial, cancelled, current, uploadNeeded) }
         when (result) {
             RcsRecoveryResult.ABORTED -> recordGoogleMessagesLinkEvent("link", "rcs_recovery_aborted", 0)
             RcsRecoveryResult.INCOMPLETE -> recordGoogleMessagesLinkEvent("link", "rcs_recovery_incomplete", 0)
             RcsRecoveryResult.COMPLETE -> Unit
         }
+        if (uploadNeeded.get()) requestGatewayUpload()
         return result
     }
 
@@ -141,6 +152,7 @@ internal class RcsReceiveCoordinator(
         initial: NativeRcsReceiveContext,
         cancelled: AtomicBoolean,
         current: () -> Boolean,
+        uploadNeeded: AtomicBoolean,
     ): RcsRecoveryResult {
         var context = initial
         val floorMs = initial.watermarkMs - SLACK_MS
@@ -170,6 +182,7 @@ internal class RcsReceiveCoordinator(
                 val invalidated = runCatching { core.invalidate(context, signal.googleConversationId, signal.sentAtMs) }
                     .getOrElse { return aborted("signal_failed") }
                 if (invalidated) {
+                    uploadNeeded.set(true)
                     recordGoogleMessagesLinkEvent("recovery_signal_age", signalAge(signal.sentAtMs), 0)
                     return aborted("signal_invalidated")
                 }

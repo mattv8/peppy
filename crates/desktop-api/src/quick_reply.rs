@@ -207,6 +207,11 @@ fn validate_rcs_route(
     let eligibility = client
         .rcs_eligibility_projection(conversation_id, gateway_device_id, now_ms)
         .map_err(ComposeError::Core)?;
+    let gateway_expires_at_ms = status
+        .status
+        .observed_at_ms
+        .checked_add(peppy_client_core::RCS_CAPABILITY_STALE_MS)
+        .and_then(|value| value.checked_add(1));
     let policy = rcs_send_block(RcsSendPolicyInput {
         known_rcs_chat: true,
         gateway_state: Some(status.status.state),
@@ -214,18 +219,9 @@ fn validate_rcs_route(
         gateway_available: status.status.availability,
         gateway_healthy: status.status.health,
         gateway_phone_responsive: status.status.phone_responsive,
-        gateway_expires_at_ms: status
-            .status
-            .observed_at_ms
-            .checked_add(peppy_client_core::RCS_CAPABILITY_STALE_MS)
-            .and_then(|value| value.checked_add(1)),
+        gateway_expires_at_ms,
         eligibility: eligibility.as_ref().map(|value| value.eligibility),
-        eligibility_expires_at_ms: eligibility.and_then(|value| {
-            value
-                .observed_at_ms
-                .checked_add(peppy_client_core::RCS_CAPABILITY_STALE_MS)
-                .and_then(|value| value.checked_add(1))
-        }),
+        eligibility_expires_at_ms: eligibility.and(gateway_expires_at_ms),
         now_ms,
     });
     match policy {
@@ -323,6 +319,65 @@ mod tests {
     }
 
     #[test]
+    fn rcs_route_accepts_old_eligibility_while_the_gateway_status_is_fresh() {
+        use peppy_client_core::{
+            ClientConfig, DatabaseKey, RcsEligibilityProjection, RcsLinkStatusEvent, VaultId,
+        };
+
+        const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
+        let gateway = DeviceId::new();
+        let conversation = ConversationId::new();
+        let directory =
+            std::env::temp_dir().join(format!("desktop-quick-reply-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.join("client.db"),
+                vault_id: VaultId::new(),
+                device_id: gateway,
+            },
+            DatabaseKey::new(&[7; 32]).unwrap(),
+        )
+        .unwrap();
+        let now_ms: i64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .try_into()
+            .unwrap();
+        client
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id: gateway,
+                    state: RcsCapabilityState::Linked,
+                    availability: true,
+                    health: true,
+                    phone_responsive: true,
+                    observed_at_ms: now_ms,
+                    capability_revision: 1,
+                    feature_bits: 0,
+                    linked_since_ms: Some(now_ms - DAY_MS),
+                },
+                &[RcsEligibilityProjection {
+                    conversation_id: conversation,
+                    eligibility: RcsEligibility::Eligible,
+                    feature_bits: 0,
+                    mapping_revision: 1,
+                    observed_at_ms: now_ms - DAY_MS,
+                    gateway_device_id: gateway,
+                }],
+                now_ms,
+            )
+            .unwrap();
+
+        let result = validate_rcs_route(&client, conversation, gateway);
+        drop(client);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn quick_reply_rejects_an_invalid_gateway_id() {
         assert!(parse_device("not-a-device").is_err());
     }
@@ -357,5 +412,31 @@ mod tests {
             };
             assert_eq!(actual, expected, "fixture: {}", fixture.expected);
         }
+    }
+
+    #[test]
+    fn rcs_send_policy_keeps_old_eligibility_current_until_gateway_deadline() {
+        let status_deadline = 1_001;
+        let input = RcsSendPolicyInput {
+            known_rcs_chat: true,
+            gateway_state: Some(RcsCapabilityState::Linked),
+            gateway_current: true,
+            gateway_available: true,
+            gateway_healthy: true,
+            gateway_phone_responsive: true,
+            gateway_expires_at_ms: Some(status_deadline),
+            eligibility: Some(RcsEligibility::Eligible),
+            eligibility_expires_at_ms: Some(status_deadline),
+            now_ms: 1_000,
+        };
+
+        assert_eq!(rcs_send_block(input), RcsSendBlock::Allow);
+        assert_eq!(
+            rcs_send_block(RcsSendPolicyInput {
+                now_ms: status_deadline,
+                ..input
+            }),
+            RcsSendBlock::Phone
+        );
     }
 }

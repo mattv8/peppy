@@ -112,7 +112,7 @@ pub fn snapshot_at(
                 },
                 observed_at_ms: projection.observed_at_ms.to_string(),
                 mapping_revision: projection.mapping_revision.to_string(),
-                expires_at_ms: expiry(projection.observed_at_ms).map(|value| value.to_string()),
+                expires_at_ms: expiry(status.status.observed_at_ms).map(|value| value.to_string()),
             });
         }
     }
@@ -291,6 +291,10 @@ mod tests {
             snapshot.eligibilities[0].eligibility,
             RcsEligibilityState::Eligible
         );
+        assert_eq!(
+            snapshot.eligibilities[0].expires_at_ms,
+            Some((observed_at_ms + RCS_CAPABILITY_STALE_MS + 1).to_string())
+        );
 
         for now_ms in [
             observed_at_ms + RCS_CAPABILITY_STALE_MS + 1,
@@ -314,6 +318,63 @@ mod tests {
             assert!(!snapshot.gateways[0].current);
             assert!(snapshot.eligibilities.is_empty());
         }
+    }
+
+    #[test]
+    fn snapshot_keeps_old_eligibility_until_the_gateway_status_expires() {
+        let fixture = fixture();
+        let conversation = ConversationId::new();
+        let eligibility_observed_at_ms = 1_000;
+        let status_observed_at_ms = eligibility_observed_at_ms + 24 * 60 * 60 * 1_000;
+        fixture
+            .client
+            .publish_rcs_capability(
+                &RcsLinkStatusEvent {
+                    gateway_device_id: fixture.gateway,
+                    state: RcsCapabilityState::Linked,
+                    availability: true,
+                    health: true,
+                    phone_responsive: true,
+                    observed_at_ms: status_observed_at_ms,
+                    capability_revision: 1,
+                    feature_bits: 1,
+                    linked_since_ms: Some(eligibility_observed_at_ms),
+                },
+                &[RcsEligibilityProjection {
+                    conversation_id: conversation,
+                    eligibility: RcsEligibility::Eligible,
+                    feature_bits: 1,
+                    mapping_revision: 1,
+                    observed_at_ms: eligibility_observed_at_ms,
+                    gateway_device_id: fixture.gateway,
+                }],
+                status_observed_at_ms,
+            )
+            .unwrap();
+
+        let snapshot = snapshot_at(
+            &fixture.client,
+            &[gateway_view(fixture.gateway)],
+            &HashSet::new(),
+            SnapshotAccess {
+                active_conversation: Some(conversation),
+                active_is_existing: true,
+                roster_validated: true,
+                unlocked: true,
+                now_ms: status_observed_at_ms,
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            snapshot.eligibilities[0].eligibility,
+            RcsEligibilityState::Eligible
+        );
+        assert_eq!(
+            snapshot.eligibilities[0].expires_at_ms,
+            Some((status_observed_at_ms + RCS_CAPABILITY_STALE_MS + 1).to_string())
+        );
     }
 
     #[test]

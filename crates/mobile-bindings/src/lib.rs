@@ -4508,7 +4508,7 @@ mod tests {
     }
 
     #[test]
-    fn rcs_read_methods_mark_stale_and_future_evidence_not_current() {
+    fn rcs_read_methods_mark_stale_gateway_status_and_future_evidence_not_current() {
         let (_path, client, gateway_device_id) = rcs_client();
         let gateway = parse_id::<peppy_client_core::DeviceId>(&gateway_device_id).unwrap();
         let conversation = peppy_client_core::ConversationId::new();
@@ -4521,7 +4521,28 @@ mod tests {
         let eligibility = rcs_eligibility(gateway, conversation, 1, 1_000);
         publish_rcs(&client, &linked, std::slice::from_ref(&eligibility), 1_000);
 
-        let stale_now = 1_000 + peppy_client_core::RCS_CAPABILITY_STALE_MS + 1;
+        let mut refreshed = rcs_status(
+            gateway,
+            peppy_client_core::RcsCapabilityState::Linked,
+            2,
+            1_000 + peppy_client_core::RCS_CAPABILITY_STALE_MS,
+        );
+        refreshed.linked_since_ms = Some(1_000);
+        publish_rcs(&client, &refreshed, &[], refreshed.observed_at_ms);
+        assert_eq!(
+            client
+                .rcs_eligibility_projection(
+                    conversation.to_string(),
+                    gateway_device_id.clone(),
+                    refreshed.observed_at_ms,
+                )
+                .unwrap()
+                .unwrap()
+                .eligibility,
+            NativeRcsEligibility::Eligible
+        );
+
+        let stale_now = refreshed.observed_at_ms + peppy_client_core::RCS_CAPABILITY_STALE_MS + 1;
         assert!(
             !client
                 .rcs_link_status(gateway_device_id.clone(), stale_now)
@@ -4545,10 +4566,10 @@ mod tests {
         let future = rcs_status(
             gateway,
             peppy_client_core::RcsCapabilityState::Linked,
-            2,
+            3,
             2_000,
         );
-        let future_eligibility = rcs_eligibility(gateway, conversation, 2, 2_000);
+        let future_eligibility = rcs_eligibility(gateway, conversation, 3, 2_000);
         publish_rcs(
             &client,
             &future,

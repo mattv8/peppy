@@ -1752,7 +1752,7 @@ impl Client {
     ) -> Result<Option<u64>, Error> {
         let mut store = self.lock()?;
         let (conn, ctx) = store.parts();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some(ownership) = load_ownership(&tx, conversation_id)? else {
             return Err(Error::NotFound);
         };
@@ -1812,6 +1812,25 @@ impl Client {
             [serde_json::to_string(&context).map_err(|_| Error::Database)?],
         )?;
         crate::rcs_mapping::invalidate_mapping(&tx, conversation_id, "google_event")?;
+        // Peers learn of the withdrawal now instead of at the next lifecycle record. An
+        // observation before linked-since would be ignored by them, and a failed publication
+        // must not undo the invalidation.
+        let now_ms = crate::notifications::now_ms();
+        if crate::rcs_capability::linked_since(&tx, ctx.device_id)?
+            .is_none_or(|linked_since_ms| now_ms >= linked_since_ms)
+        {
+            let savepoint = tx.savepoint()?;
+            if crate::publish_rcs_eligibility_for_conversation(
+                &savepoint,
+                &ctx,
+                conversation_id,
+                now_ms,
+            )
+            .is_ok()
+            {
+                savepoint.commit()?;
+            }
+        }
         tx.commit()?;
         Ok(Some(revision))
     }

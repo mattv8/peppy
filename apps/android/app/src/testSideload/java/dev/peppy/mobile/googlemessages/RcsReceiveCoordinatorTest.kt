@@ -568,12 +568,104 @@ class RcsReceiveCoordinatorTest {
         assertEquals(listOf(NativeRcsObservationProvenance.LIVE), core.provenances)
     }
 
+    @Test fun `live protocol switch that invalidates requests one gateway upload`() {
+        val uploads = AtomicInteger()
+        coordinator(FakeCore(listOf(conv("core-a", "google-a"))), requestUpload = { uploads.incrementAndGet() })
+            .receive(protocolSwitch("google-a"))
+        assertEquals(1, uploads.get())
+    }
+
+    @Test fun `live protocol switch that core does not invalidate requests no upload`() {
+        val uploads = AtomicInteger()
+        val core = FakeCore(listOf(conv("core-a", "google-a"))).apply { invalidateResult = false }
+        coordinator(core, requestUpload = { uploads.incrementAndGet() }).receive(protocolSwitch("google-a"))
+        assertEquals(0, uploads.get())
+    }
+
+    @Test fun `live protocol switch whose invalidation throws requests no upload and records nothing`() {
+        val uploads = AtomicInteger()
+        val records = mutableListOf<String>()
+        val core = FakeCore(listOf(conv("core-a", "google-a"))).apply { invalidateFailure = IllegalStateException("synthetic") }
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            coordinator(core, requestUpload = { uploads.incrementAndGet() }).receive(protocolSwitch("google-a"))
+        }
+        assertEquals(0, uploads.get())
+        assertTrue(records.isEmpty())
+    }
+
+    @Test fun `a throwing live upload request leaves the invalidation diagnostics unchanged`() {
+        val records = mutableListOf<String>()
+        val core = FakeCore(listOf(conv("core-a", "google-a")))
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            coordinator(core, requestUpload = { throw IllegalStateException("synthetic") }).receive(protocolSwitch("google-a"))
+        }
+        assertEquals(listOf("google-a" to null), core.invalidations)
+        assertEquals(listOf(265L), records.map { it.substringAfter("29=").toLong() })
+    }
+
+    @Test fun `history signal that invalidates requests one upload after its abort diagnostics`() {
+        val now = BASE + 24 * HOUR
+        val records = mutableListOf<String>()
+        val recordsAtUpload = mutableListOf<Int>()
+        val google = FakeGoogle(emptyMap()).apply { fetchHook = { _, _ -> signalPage("google-a", now - HOUR) } }
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            assertEquals(
+                RcsRecoveryResult.ABORTED,
+                coordinator(
+                    FakeCore(listOf(conv("core-a", "google-a"))),
+                    nowMs = { now },
+                    requestUpload = { recordsAtUpload += records.size },
+                ).resumeConversation(google, "google-a"),
+            )
+        }
+        assertEquals(listOf(3), recordsAtUpload)
+        assertEquals(listOf(271L, 256L, 44L), records.map { it.substringAfter("29=").toLong() })
+    }
+
+    @Test fun `history signal superseded by core requests no upload`() {
+        val uploads = AtomicInteger()
+        val google = FakeGoogle(emptyMap()).apply { fetchHook = { _, _ -> signalPage("google-a", BASE - HOUR) } }
+        val core = FakeCore(listOf(conv("core-a", "google-a", watermarkMs = BASE))).apply { invalidateResult = false }
+
+        assertEquals(RcsRecoveryResult.COMPLETE, coordinator(core, requestUpload = { uploads.incrementAndGet() }).resumeConversation(google, "google-a"))
+
+        assertEquals(0, uploads.get())
+    }
+
+    @Test fun `history signal whose invalidation throws requests no upload and keeps its signal_failed abort`() {
+        val uploads = AtomicInteger()
+        val google = FakeGoogle(emptyMap()).apply { fetchHook = { _, _ -> signalPage("google-a", BASE + HOUR) } }
+        val core = FakeCore(listOf(conv("core-a", "google-a", watermarkMs = BASE))).apply { invalidateFailure = IllegalStateException("synthetic") }
+
+        assertRecoveryAbort(260L) { coordinator(core, requestUpload = { uploads.incrementAndGet() }).resumeConversation(google, "google-a") }
+
+        assertEquals(0, uploads.get())
+    }
+
+    @Test fun `a throwing history upload request leaves the abort and its diagnostics unchanged`() {
+        val now = BASE + 24 * HOUR
+        val records = mutableListOf<String>()
+        val google = FakeGoogle(emptyMap()).apply { fetchHook = { _, _ -> signalPage("google-a", now - HOUR) } }
+        val result = SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            coordinator(
+                FakeCore(listOf(conv("core-a", "google-a"))),
+                nowMs = { now },
+                requestUpload = { throw IllegalStateException("synthetic") },
+            ).resumeConversation(google, "google-a")
+        }
+        assertEquals(RcsRecoveryResult.ABORTED, result)
+        assertEquals(listOf(271L, 256L, 44L), records.map { it.substringAfter("29=").toLong() })
+    }
+
+    private fun protocolSwitch(googleId: String) = JSONObject().put("code", "protocol_switch").put("google_conversation_id", googleId).toString()
+
     private fun coordinator(
         core: RcsReceiveCore,
         enabled: Boolean = true,
         bootstrapRequest: (String) -> Unit = {},
         reconcileGroups: () -> Boolean = { false },
         nowMs: () -> Long = System::currentTimeMillis,
+        requestUpload: () -> Unit = {},
     ) = RcsReceiveCoordinator(
         ApplicationProvider.getApplicationContext(),
         core,
@@ -581,6 +673,7 @@ class RcsReceiveCoordinatorTest {
         bootstrapRequest,
         reconcileGroups,
         nowMs,
+        requestUpload,
     )
 
     private fun assertRecoveryAbort(code: Long, recoveryAbort: Boolean = true, action: () -> RcsRecoveryResult): RcsRecoveryResult {
