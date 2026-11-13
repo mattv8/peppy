@@ -10,10 +10,18 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
+try:
+    from tests.dev.compose_config import extracted_config_file
+except ModuleNotFoundError:
+    from compose_config import extracted_config_file
+
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "infra/dev"))
 import migration_repair as repair
+
+PASSWORD_PREFLIGHT_TARGET = "/usr/local/bin/validate-db-passwords" + ".sh"
+BOOTSTRAP_ROLES_TARGET = "/usr/local/bin/peppy-bootstrap-roles" + ".sh"
 
 
 def checksum(text: bytes) -> bytes:
@@ -213,34 +221,38 @@ class MigrationRepairTests(unittest.TestCase):
             "PEPPY_MAINTENANCE_DB_PASSWORD": "synthetic-maintenance-password",
         }
         try:
-            command = [
-                "docker", "run", "--detach", "--name", container,
-                "-v", f"{volume}:/var/lib/postgresql",
-                "-v", f"{ROOT / 'infra/compose/bootstrap-roles.sh'}:/docker-entrypoint-initdb.d/10-peppy-roles.sh:ro",
-                "-v", f"{ROOT / 'infra/compose/validate-db-passwords.sh'}:/usr/local/bin/validate-db-passwords.sh:ro",
-            ]
-            for name, value in environment.items():
-                command.extend(("-e", f"{name}={value}"))
-            subprocess.run(command + [image], check=True, stdout=subprocess.DEVNULL)
-            deadline = time.monotonic() + 30
-            ready_since = None
-            while time.monotonic() < deadline:
-                ready = subprocess.run(["docker", "exec", container, "psql", "-X", "-U", environment["POSTGRES_USER"], "-d", environment["POSTGRES_DB"], "-c", "SELECT 1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if ready.returncode == 0:
-                    ready_since = ready_since or time.monotonic()
-                    if time.monotonic() - ready_since >= 1:
-                        break
+            with extracted_config_file(ROOT / "docker-compose.yml", "database-password-preflight", executable=True) as preflight, \
+                 extracted_config_file(ROOT / "docker-compose.yml", "bootstrap-roles", executable=True) as bootstrap, \
+                 extracted_config_file(ROOT / "docker-compose.yml", "bootstrap-roles-init") as init:
+                command = [
+                    "docker", "run", "--detach", "--name", container,
+                    "-v", f"{volume}:/var/lib/postgresql",
+                    "-v", f"{preflight}:{PASSWORD_PREFLIGHT_TARGET}:ro",
+                    "-v", f"{bootstrap}:{BOOTSTRAP_ROLES_TARGET}:ro",
+                    "-v", f"{init}:/docker-entrypoint-initdb.d/10-peppy-roles.sh:ro",
+                ]
+                for name, value in environment.items():
+                    command.extend(("-e", f"{name}={value}"))
+                subprocess.run(command + [image], check=True, stdout=subprocess.DEVNULL)
+                deadline = time.monotonic() + 30
+                ready_since = None
+                while time.monotonic() < deadline:
+                    ready = subprocess.run(["docker", "exec", container, "psql", "-X", "-U", environment["POSTGRES_USER"], "-d", environment["POSTGRES_DB"], "-c", "SELECT 1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if ready.returncode == 0:
+                        ready_since = ready_since or time.monotonic()
+                        if time.monotonic() - ready_since >= 1:
+                            break
+                    else:
+                        ready_since = None
+                    time.sleep(0.2)
                 else:
-                    ready_since = None
-                time.sleep(0.2)
-            else:
-                self.fail("PostgreSQL test container did not become ready")
-            psql = ["docker", "exec", "-i", container, "psql", "-X", "-v", "ON_ERROR_STOP=1", "-U", environment["POSTGRES_USER"], "-d", environment["POSTGRES_DB"], "-At"]
-            subprocess.run(psql, input="CREATE TABLE preserved_data (value text); INSERT INTO preserved_data VALUES ('kept');", text=True, check=True, stdout=subprocess.DEVNULL)
-            for _ in range(2):
-                subprocess.run(["docker", "exec", container, "/docker-entrypoint-initdb.d/10-peppy-roles.sh"], check=True, stdout=subprocess.DEVNULL)
-            result = subprocess.run(psql, input="SELECT value FROM preserved_data; SELECT rolname || ':' || rolbypassrls FROM pg_roles WHERE rolname IN ('peppy_runtime_test', 'peppy_maintenance_test') ORDER BY rolname;", text=True, capture_output=True, check=True)
-            self.assertEqual(result.stdout.splitlines(), ["kept", "peppy_maintenance_test:true", "peppy_runtime_test:false"])
+                    self.fail("PostgreSQL test container did not become ready")
+                psql = ["docker", "exec", "-i", container, "psql", "-X", "-v", "ON_ERROR_STOP=1", "-U", environment["POSTGRES_USER"], "-d", environment["POSTGRES_DB"], "-At"]
+                subprocess.run(psql, input="CREATE TABLE preserved_data (value text); INSERT INTO preserved_data VALUES ('kept');", text=True, check=True, stdout=subprocess.DEVNULL)
+                for _ in range(2):
+                    subprocess.run(["docker", "exec", container, "sh", "/docker-entrypoint-initdb.d/10-peppy-roles.sh"], check=True, stdout=subprocess.DEVNULL)
+                result = subprocess.run(psql, input="SELECT value FROM preserved_data; SELECT rolname || ':' || rolbypassrls FROM pg_roles WHERE rolname IN ('peppy_runtime_test', 'peppy_maintenance_test') ORDER BY rolname;", text=True, capture_output=True, check=True)
+                self.assertEqual(result.stdout.splitlines(), ["kept", "peppy_maintenance_test:true", "peppy_runtime_test:false"])
         finally:
             subprocess.run(["docker", "rm", "--force", container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["docker", "volume", "rm", volume], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -1,0 +1,9 @@
+services:
+  migrate:
+    build:
+      context: .
+      dockerfile: infra/docker/server.Dockerfile
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/server.Dockerfile

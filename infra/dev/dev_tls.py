@@ -309,6 +309,7 @@ def compose_arguments(dotenv: Path, arguments: list[str], teardown: bool) -> Non
     environment["DEV_GID"] = str(os.getgid())
     environment["PEPPY_SOURCE_TREE"] = str(source)
     environment["DEBUG"] = "true" if enabled else "false"
+    environment["PEPPY_SERVER_IMAGE"] = environment.get("PEPPY_SERVER_IMAGE") or "peppy-server:local"
     values = dotenv_values(dotenv)
     port = development_port(values)
     for name in ("PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL"):

@@ -1,10 +1,6 @@
-# Same-server MCP worker overlay. Pass root docker-compose.yml first so paths
-# remain relative to the repository root.
+# Same-server MCP worker overlay. Pass root docker-compose.yml first.
 x-mcp-image: &mcp-image
-  build:
-    context: .
-    dockerfile: infra/docker/mcp.Dockerfile
-  image: peppy-mcp:local
+  image: ${PEPPY_MCP_IMAGE:?set an immutable MCP worker image digest in .env}
 
 services:
   mcp-state-init:

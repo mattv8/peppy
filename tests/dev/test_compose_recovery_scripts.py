@@ -11,11 +11,17 @@ import unittest.mock
 from collections.abc import Callable
 from hashlib import sha256
 
+try:
+    from tests.dev.compose_config import extracted_config_file
+except ModuleNotFoundError:
+    from compose_config import extracted_config_file
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BACKUP = ROOT / "infra/compose/backup.sh"
 RESTORE = ROOT / "infra/compose/restore.sh"
-PASSWORD_PREFLIGHT = ROOT / "infra/compose/validate-db-passwords.sh"
+COMPOSE = ROOT / "docker-compose.yml"
+PASSWORD_PREFLIGHT_TARGET = "/usr/local/bin/validate-db-passwords" + ".sh"
 
 POSTGRES_ID = "sha256:" + "a" * 64
 SEAWEED_ID = "sha256:" + "b" * 64
@@ -221,6 +227,7 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
         "PEPPY_MAINTENANCE_DB_PASSWORD": "maintenance_password_3",
     }
     COMPOSE_FIXTURE_ENVIRONMENT = {
+        "PEPPY_SERVER_IMAGE": "peppy-server:local",
         "PEPPY_ENV": "development",
         "POSTGRES_DB": "peppy",
         "POSTGRES_USER": "peppy",
@@ -254,12 +261,13 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
     }
 
     def run_password_preflight(self, passwords: dict[str, str]):
-        return subprocess.run(
-            ["sh", str(PASSWORD_PREFLIGHT)],
-            env=os.environ | passwords,
-            text=True,
-            capture_output=True,
-        )
+        with extracted_config_file(COMPOSE, "database-password-preflight", executable=True) as script:
+            return subprocess.run(
+                ["sh", str(script)],
+                env=os.environ | passwords,
+                text=True,
+                capture_output=True,
+            )
 
     def effective_compose_config(self, *compose_files: pathlib.Path) -> dict:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8") as environment_file:
@@ -326,11 +334,11 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
 
         preflight = root_config["services"]["database-password-preflight"]
         self.assertEqual(preflight["image"], root_config["services"]["postgres"]["image"])
-        self.assertEqual(preflight["entrypoint"], ["/bin/sh", "/usr/local/bin/validate-db-passwords.sh"])
+        self.assertEqual(preflight["entrypoint"], ["/bin/sh", PASSWORD_PREFLIGHT_TARGET])
         self.assertEqual(preflight["environment"], self.PASSWORDS)
         self.assertEqual(
             preflight["configs"],
-            [{"source": "database-password-preflight", "target": "/usr/local/bin/validate-db-passwords.sh"}],
+            [{"source": "database-password-preflight", "target": PASSWORD_PREFLIGHT_TARGET}],
         )
         self.assertNotIn("volumes", preflight)
         self.assertEqual(preflight["tmpfs"], ["/var/lib/postgresql"])

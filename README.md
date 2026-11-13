@@ -94,6 +94,8 @@ The Community server runs with Docker Compose. You need:
 - Docker Engine with Docker Compose v2.24 or newer.
 - For access from other devices, a hostname that resolves to the server, with ports 80 and 443 open.
 
+The Compose file needs only a `.env` beside it.
+
 1. Create your environment file.
 
    ```sh
@@ -110,7 +112,7 @@ The Community server runs with Docker Compose. You need:
 2. Start the server.
 
    ```sh
-   docker compose -f docker-compose.yml -f infra/compose/compose.community.yml up -d
+   docker compose up -d
    ```
 
    It listens on `http://127.0.0.1:7000` and serves the browser client at that address.
@@ -118,7 +120,7 @@ The Community server runs with Docker Compose. You need:
 3. Add HTTPS so other devices can connect. Set `PUBLIC_HOST` to your hostname, set `PUBLIC_API_URL` and `PUBLIC_ATTACHMENT_URL` to its `https://` address, then add the Caddy overlay.
 
    ```sh
-   docker compose -f docker-compose.yml -f infra/compose/compose.community.yml -f infra/compose/compose.caddy.yml up -d
+   docker compose -f docker-compose.yml -f infra/compose/compose.caddy.yml up -d
    ```
 
    Caddy publishes ports 80 and 443. If you use another reverse proxy, set `TRUSTED_PROXY_CIDRS` to that proxy's addresses only.
@@ -175,7 +177,7 @@ Read the [backup and restore guide](.agents/ops/backup-restore.md) before you re
 
 ### Update
 
-Back up first. Verify the new release's signature, set `PEPPY_SERVER_IMAGE` to its digest, and keep the same Compose overlay files you started with. The [backup and restore guide](.agents/ops/backup-restore.md) and the [release update guide](.agents/ops/release-updates.md) have the details.
+Back up first. Verify the new release's signature and set `PEPPY_SERVER_IMAGE` to its digest. Existing self-hosters should note that `infra/compose/compose.community.yml` is gone; the root file now replaces it. The [backup and restore guide](.agents/ops/backup-restore.md) and the [release update guide](.agents/ops/release-updates.md) have the details.
 
 Peppy runs on a single node. It is not a high-availability deployment.
 

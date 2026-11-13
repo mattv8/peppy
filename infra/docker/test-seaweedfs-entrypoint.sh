@@ -4,7 +4,6 @@ set -euo pipefail
 readonly IMAGE='chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d'
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly ROOT
-readonly ENTRYPOINT="$ROOT/infra/docker/seaweedfs-entrypoint.sh"
 readonly CONTAINER_ENTRYPOINT='/usr/local/bin/peppy-seaweedfs-entrypoint.sh'
 
 # Pull up front so image download progress never reaches the output assertions.
@@ -13,6 +12,9 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull --quiet "$IMAGE" >/
 scratch_root="$ROOT/.opencode/sessions"
 mkdir -p "$scratch_root"
 fixture=$(mktemp -d "$scratch_root/seaweed-entrypoint.XXXXXX")
+ENTRYPOINT="$fixture/seaweed-entrypoint"
+readonly ENTRYPOINT
+python3 "$ROOT/infra/compose/extract-config.py" "$ROOT/docker-compose.yml" seaweed-entrypoint > "$ENTRYPOINT"
 
 cleanup_fixture() {
   docker run --rm \
