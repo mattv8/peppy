@@ -11,6 +11,7 @@ type McpDeviceSettingsProps = {
   roster: DeviceRosterView;
   serverOffline: boolean;
   accountReadOnly: boolean;
+  browserHost?: boolean;
   sessionKey: string;
   unlocked?: boolean;
   refreshToken?: number;
@@ -45,7 +46,7 @@ const statusHintFor = ({ removed, exhausted, cleanupPending, starting, statusNot
   return statusNotice;
 };
 
-export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sessionKey, unlocked = false, refreshToken = 0, onDeviceId, onRemove, onMutation }: McpDeviceSettingsProps) {
+export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, browserHost = false, sessionKey, unlocked = false, refreshToken = 0, onDeviceId, onRemove, onMutation }: McpDeviceSettingsProps) {
   const [status, setStatus] = useState<McpDeviceStatus | null>(null);
   const [grants, setGrants] = useState<McpGrantView[]>([]);
   const [error, setError] = useState("");
@@ -454,6 +455,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
             copyStatus={copyStatus}
             statusNotice={statusHint}
             statusError={statusError}
+            browserHost={browserHost}
             onCopy={() => void copyEndpoint()}
             onRefresh={() => refreshDetails(detailsGeneration.current)}
             onClose={closeDetails}
@@ -467,8 +469,8 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, sess
               notice: grantNotice,
               revokeError,
               revokeTargetId: revokeTarget?.id ?? null,
-               revoking: revokingGrantId !== null,
-               revokingGrantId,
+              revoking: revokingGrantId !== null,
+              revokingGrantId,
               onRetryLoad: () => void loadGrants(detailsGeneration.current),
               onStartRevoke: startRevoke,
               onCancelRevoke: cancelRevoke,

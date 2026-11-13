@@ -1,6 +1,6 @@
 # Browser client reference
 
-This reference covers browser-client implementation, deployment configuration, and checks. For repository-wide workflow, see [CONTRIBUTING.md](../../CONTRIBUTING.md). User requirements are in [Clients](../../README.md#clients).
+This reference covers browser-client implementation, deployment configuration, and checks. For repository-wide workflow, see [CONTRIBUTING.md](../../CONTRIBUTING.md). User requirements are in the [browser guide](https://peppy.pro/docs/browser).
 
 The React desktop UI bundles with the Rust client core, SharedWorker runtime, and browser host integration. Build it from the root:
 

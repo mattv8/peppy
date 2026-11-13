@@ -1,6 +1,6 @@
 # Desktop client reference
 
-This reference covers desktop implementation, builds, and verification. For repository-wide workflow, see [CONTRIBUTING.md](../../CONTRIBUTING.md). User setup and capabilities are in [Clients](../../README.md#clients).
+This reference covers desktop implementation, builds, and verification. For repository-wide workflow, see [CONTRIBUTING.md](../../CONTRIBUTING.md). User setup and capabilities are in the [desktop guide](https://peppy.pro/docs/desktop).
 
 The desktop client uses Tauri with native Rust and a web UI. Native development is supported on macOS and Windows from WSL. Linux native development is unsupported; Linux packaging is CI-only. Passwords and vault secrets must remain in native dialogs, not React fields or Tauri command arguments.
 

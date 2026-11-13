@@ -66,6 +66,8 @@ The dashed box is your carrier's network. Peppy's encryption does not reach it, 
 
 Android releases are numbered separately from desktop releases.
 
+[Full guide →](https://peppy.pro/docs/apps)
+
 ### Connect your phone
 
 1. Set up Peppy in the browser or desktop app.
@@ -77,9 +79,13 @@ On a self-hosted server, you can also join from any device by entering the serve
 
 On Android, texting needs SMS permission and mirroring needs notification access. Peppy does not ask to become your default messaging app.
 
+[Full guide →](https://peppy.pro/docs/connect-phone)
+
 ## Peppy Hosted
 
 Peppy Hosted is the managed service: the same apps, with the server run for you. Sign in at [peppy.pro](https://peppy.pro) to create an account, subscribe, and download the apps.
+
+[Full guide →](https://peppy.pro/docs/hosted)
 
 ## Self-host
 
@@ -123,6 +129,8 @@ To check a running server, request `/healthz` for the process and `/readyz` for 
 
 To build from source instead, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+[Full guide →](https://peppy.pro/docs/self-host)
+
 <a id="first-run-setup-and-device-connections"></a>
 
 ### First-run setup
@@ -140,6 +148,10 @@ Setup involves three separate secrets:
 | Vault key phrase | Protects your messages and admits new devices. Peppy generates it. |
 
 Save the Vault key phrase when Peppy shows it. The server never has it, so neither the server nor its logs can give it back.
+
+[Full guide →](https://peppy.pro/docs/self-host/first-setup)
+
+<a id="recover-from-an-unwanted-first-claim"></a>
 
 ### Recover from an unwanted first claim
 
@@ -159,11 +171,15 @@ This permanently destroys every vault and attachment on that server. Do not run 
 
 Read the [backup and restore guide](.agents/ops/backup-restore.md) before you remove anything.
 
+[Full guide →](https://peppy.pro/docs/self-host/recover-claim)
+
 ### Update
 
 Back up first. Verify the new release's signature, set `PEPPY_SERVER_IMAGE` to its digest, and keep the same Compose overlay files you started with. The [backup and restore guide](.agents/ops/backup-restore.md) and the [release update guide](.agents/ops/release-updates.md) have the details.
 
 Peppy runs on a single node. It is not a high-availability deployment.
+
+[Full guide →](https://peppy.pro/docs/self-host/updates)
 
 ## What Peppy protects, and what it does not
 
@@ -173,6 +189,8 @@ Peppy runs on a single node. It is not a high-availability deployment.
 - A public image link publishes a separate, unencrypted copy of that image. The link has its own expiry and can be revoked.
 - Turning on MCP lets the server hold keys for that vault. Webhooks send message text to the address you choose.
 - Peppy does not claim forward secrecy, and it has not had an external security audit.
+
+[Full guide →](https://peppy.pro/docs/security)
 
 ## Status
 

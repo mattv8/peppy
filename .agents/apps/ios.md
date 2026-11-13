@@ -1,6 +1,6 @@
 # iOS client reference
 
-This reference covers iOS implementation and verification. For repository-wide workflow, see [CONTRIBUTING.md](../../CONTRIBUTING.md). User setup and limits are in [Clients](../../README.md#clients).
+This reference covers iOS implementation and verification. For repository-wide workflow, see [CONTRIBUTING.md](../../CONTRIBUTING.md). User setup and limits are in the [apps guide](https://peppy.pro/docs/apps).
 
 Hosted Google sign-in uses native GoogleSignIn with a server-issued nonce. Configure the public Xcode settings `PEPPY_GOOGLE_IOS_CLIENT_ID`, `PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID`, and `PEPPY_GOOGLE_REVERSED_CLIENT_ID`. Register the iOS client for `dev.peppy.mobile`; use its reversed ID as the callback scheme. The backend must separately allow the native token audience. Missing values disable real sign-in rather than using a preview. Rebuild after changing an OAuth ID. Native Apple authentication remains unavailable pending code exchange and provider configuration.
 

@@ -1,5 +1,9 @@
 package dev.peppy.mobile.googlemessages
 
+import android.content.ActivityNotFoundException
+import android.content.ContextWrapper
+import android.content.Intent
+import android.os.Bundle
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
@@ -11,6 +15,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -66,6 +71,18 @@ import org.robolectric.annotation.Config
 
 /** Which composable surface a test renders: the card, the details page, or a card that opens details on Manage. */
 private enum class PanelSurface { Card, Details, Managed }
+
+private class GoogleMessagesGuideContext(base: android.content.Context) : ContextWrapper(base) {
+    var rejectActivityLaunch = true
+    var startedIntent: Intent? = null
+
+    override fun startActivity(intent: Intent) {
+        if (rejectActivityLaunch) throw ActivityNotFoundException()
+        startedIntent = intent
+    }
+
+    override fun startActivity(intent: Intent, options: Bundle?) = startActivity(intent)
+}
 
 @Composable
 private fun LinkPanelSurface(surface: PanelSurface, host: GoogleMessagesLinkPanelHost?) {
@@ -1081,6 +1098,33 @@ class GoogleMessagesLinkPanelTest {
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Assertive))
             .assertTextContains("😀", substring = true)
         check(compose.onAllNodesWithTag("google-messages-link-emoji", useUnmergedTree = false).fetchSemanticsNodes().isEmpty())
+    }
+
+    @Test
+    @Config(sdk = [35], qualifiers = "w412dp-h1600dp")
+    fun `details guide opens its exact URL and announces a retryable failure`() {
+        val host = FakePanelHost(FakeHandle("linked"), notificationsGranted = true)
+        GoogleMessagesLinkTestHooks.available = true
+        lateinit var context: GoogleMessagesGuideContext
+        compose.setContent {
+            val baseContext = LocalContext.current
+            context = remember(baseContext) { GoogleMessagesGuideContext(baseContext) }
+            CompositionLocalProvider(LocalContext provides context) {
+                PeppyTheme { GoogleMessagesLinkPanelDetails(host, onChanged = {}) }
+            }
+        }
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-details-guide").fetchSemanticsNodes().isNotEmpty() }
+
+        compose.onNodeWithTag("google-messages-details-guide").performClick()
+
+        compose.onNodeWithTag("google-messages-details-guide-error")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
+        context.rejectActivityLaunch = false
+        compose.onNodeWithTag("google-messages-details-guide").performClick()
+        compose.waitUntil { compose.onAllNodesWithTag("google-messages-details-guide-error").fetchSemanticsNodes().isEmpty() }
+        val intent = requireNotNull(context.startedIntent)
+        assertEquals(Intent.ACTION_VIEW, intent.action)
+        assertEquals("https://peppy.pro/docs/google-messages", intent.data.toString())
     }
 
     @Test fun `narrow large-text card keeps re-link and manage reachable`() {

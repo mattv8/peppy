@@ -543,6 +543,7 @@ it.each([
   const settings = persistenceSettings({ seconds: 5, supported: true, platform: "macos", macosStyle });
   render(<NotificationSettings {...props()} persistenceSettings={settings} />);
   expect(await screen.findByRole("status")).toHaveTextContent(status);
+  await act(async () => undefined);
   fireEvent.focus(window);
   await waitFor(() => expect(settings.load).toHaveBeenCalledTimes(2));
 });

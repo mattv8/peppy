@@ -1731,7 +1731,7 @@ function SettingsView({
           </button>
         )}
       </section>
-      <DevicesSettings key={`${sessionScopeId ?? "none"}:${encryption}`} serverOffline={serverOffline} accountReadOnly={accountReadOnly} sessionKey={sessionScopeId ?? "unavailable"} unlocked={encryption === "unlocked"} />
+      <DevicesSettings key={`${sessionScopeId ?? "none"}:${encryption}`} serverOffline={serverOffline} accountReadOnly={accountReadOnly} browserHost={browserHost} sessionKey={sessionScopeId ?? "unavailable"} unlocked={encryption === "unlocked"} />
       <NotificationSettings
         notifications={notifications}
         filters={filters}
@@ -1895,8 +1895,8 @@ function SettingsView({
         {browserHost ? <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} manageStorageUrl={accountUrl} /> : <HostedAccountSettings sessionScopeId={sessionScopeId} onAccountDeleted={onAccountDeleted} />}
       </section>}
       {typingShare !== undefined && <RcsFeaturesSettings typingShare={{ enabled: typingShare, onChange: onTypingShare, error: typingShareError }} />}
-      <AdvancedSettings sessionKey={sessionScopeId ?? "unavailable"} unlocked={encryption === "unlocked"} serverOffline={serverOffline} onOpenDevices={() => { selectSection("devices"); window.setTimeout(() => document.getElementById("mcp-custody-review")?.focus(), 0); }} />
-      <PrivacySettings browserHost={browserHost} />
+      <AdvancedSettings sessionKey={sessionScopeId ?? "unavailable"} unlocked={encryption === "unlocked"} serverOffline={serverOffline} browserHost={browserHost} onOpenDevices={() => { selectSection("devices"); window.setTimeout(() => document.getElementById("mcp-custody-review")?.focus(), 0); }} />
+      <PrivacySettings browserHost={browserHost} bridge={bridge} />
       </div>
       </div>
     </section>

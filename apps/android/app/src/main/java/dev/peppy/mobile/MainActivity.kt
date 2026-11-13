@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -52,6 +53,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.onClick as semanticsOnClick
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -635,7 +637,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
                             context.startActivity(
                                 android.content.Intent(
                                     android.content.Intent.ACTION_VIEW,
-                                    Uri.parse("https://github.com/mattv8/peppy#readme"),
+                                    Uri.parse("https://peppy.pro/docs/self-host"),
                                 ),
                             )
                         },
@@ -702,6 +704,8 @@ private fun CompanionScreen(activity: ComponentActivity) {
             }, canConnectComputer = ownerPhoneAvailable, onDetailChanged = { accountDetailsOpen = it }, onRouteChanged = { scope.launch { scrollState.scrollTo(0) } })
             if (settingsOpen && !subscriptionOpen) {
                 ScreenBody("settings-screen") {
+                    val externalLinkLabel = stringResource(R.string.peppy_about_opens_in_browser)
+                    val guidesOpenFailed = stringResource(R.string.peppy_guides_open_failed)
                     Section("about-section", "About") {
                         Text(stringResource(R.string.peppy_encrypted))
                         StatusRow("settings-server", "Server", status?.origin ?: "Not enrolled")
@@ -716,6 +720,18 @@ private fun CompanionScreen(activity: ComponentActivity) {
                             modifier = Modifier.testTag("settings-privacy-policy"),
                         ) { Text(stringResource(R.string.peppy_privacy_policy)) }
                         Text(stringResource(R.string.peppy_privacy_policy_scope), style = MaterialTheme.typography.bodySmall)
+                        TextButton(
+                            onClick = {
+                                try {
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://peppy.pro/docs")))
+                                } catch (_: ActivityNotFoundException) {
+                                    Toast.makeText(context, guidesOpenFailed, Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            modifier = Modifier.heightIn(min = 48.dp).semantics {
+                                semanticsOnClick(externalLinkLabel, null)
+                            }.testTag("settings-guides"),
+                        ) { Text(stringResource(R.string.peppy_guides)) }
                     }
                     DiagnosticsSettings()
                     if (status?.enrolled == true && status?.sharedKeysReady == true) {
