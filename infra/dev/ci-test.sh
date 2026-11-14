@@ -18,17 +18,11 @@ single_file_compose_guard() {
     config_file=$(mktemp "$SCRATCH/compose-guard.json.XXXXXX")
     cat > "$env_file" <<'ENV'
 PEPPY_SERVER_IMAGE=peppy-server:guard
-POSTGRES_DB=peppy_guard
-POSTGRES_USER=peppy_guard
 POSTGRES_PASSWORD=peppy-guard-password
-PEPPY_RUNTIME_DB_USER=peppy_guard_runtime
 PEPPY_RUNTIME_DB_PASSWORD=peppy-guard-runtime-password
-PEPPY_MAINTENANCE_DB_USER=peppy_guard_maintenance
 PEPPY_MAINTENANCE_DB_PASSWORD=peppy-guard-maintenance-password
-S3_ACCESS_KEY=peppy-guard-access
 S3_SECRET_KEY=peppy-guard-secret
-PUBLIC_API_URL=https://guard.invalid
-PUBLIC_ATTACHMENT_URL=https://guard.invalid
+PUBLIC_HOST=guard.invalid
 ENV
     if ! docker compose -p peppy-sfc-fix-1 --env-file "$env_file" -f docker-compose.yml config --format json > "$config_file"; then
         rm -f "$env_file" "$config_file"

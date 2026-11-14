@@ -263,7 +263,6 @@ impl TestServer {
                     release_identity: "test".into(),
                     s3: None,
                     public_api_url: None,
-                    public_attachment_url: None,
                     vault_attachment_quota_bytes: 512 * 1024 * 1024,
                     trusted_proxy_cidrs: Vec::new(),
                     replay_retention: options.replay_retention,

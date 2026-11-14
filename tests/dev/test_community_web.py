@@ -38,7 +38,6 @@ class CommunityWebComposeTests(unittest.TestCase):
             "S3_ACCESS_KEY": "test-access",
             "S3_SECRET_KEY": "test-secret",
             "PUBLIC_API_URL": "https://peppy.invalid",
-            "PUBLIC_ATTACHMENT_URL": "https://peppy.invalid",
             "PEPPY_SERVER_IMAGE": f"example.invalid/peppy@sha256:{'a' * 64}",
         }
         return os.environ | required | overrides
@@ -58,7 +57,7 @@ class CommunityWebComposeTests(unittest.TestCase):
 
     @unittest.skipUnless(docker, "Docker Compose is unavailable")
     def test_base_root_mode_defaults_to_enabled_without_legacy_server_host(self):
-        result = self.render("docker-compose.yml", WEB_CLIENT_HOST="app.peppy.invalid")
+        result = self.render("docker-compose.yml")
         self.assertEqual(result.returncode, 0, result.stderr)
         services = json.loads(result.stdout)["services"]
         self.assertEqual(services["api"]["environment"]["PEPPY_WEB_CLIENT_ROOT"], "true")
@@ -66,8 +65,8 @@ class CommunityWebComposeTests(unittest.TestCase):
         self.assertNotIn("PEPPY_WEB_CLIENT_ROOT", services["migrate"]["environment"])
 
     @unittest.skipUnless(docker, "Docker Compose is unavailable")
-    def test_production_root_mode_ignores_legacy_server_host(self):
-        result = self.render("docker-compose.yml", WEB_CLIENT_HOST="app.peppy.invalid")
+    def test_production_root_mode_has_no_legacy_server_host_setting(self):
+        result = self.render("docker-compose.yml")
         self.assertEqual(result.returncode, 0, result.stderr)
         services = json.loads(result.stdout)["services"]
         self.assertEqual(services["api"]["environment"]["PEPPY_WEB_CLIENT_ROOT"], "true")
@@ -83,16 +82,15 @@ class CommunityWebComposeTests(unittest.TestCase):
         self.assertNotIn("PEPPY_WEB_CLIENT_ROOT", services["migrate"]["environment"])
 
     @unittest.skipUnless(docker, "Docker Compose is unavailable")
-    def test_caddy_overlay_keeps_legacy_value_only_for_retirement_warning(self):
+    def test_caddy_overlay_has_no_legacy_host_setting(self):
         result = self.render(
             "docker-compose.yml",
             "infra/compose/compose.caddy.yml",
             PUBLIC_HOST="peppy.invalid",
-            WEB_CLIENT_HOST="app.peppy.invalid",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         caddy = json.loads(result.stdout)["services"]["caddy"]
-        self.assertEqual(caddy["environment"]["WEB_CLIENT_HOST"], "app.peppy.invalid")
+        self.assertNotIn("WEB_CLIENT_HOST", caddy["environment"])
 
 
 class CaddyEntrypointTests(unittest.TestCase):
@@ -132,16 +130,16 @@ class CaddyEntrypointTests(unittest.TestCase):
                 )
         return result
 
-    def test_legacy_host_warns_but_generated_site_uses_public_host_only(self):
+    def test_legacy_host_is_ignored_and_generated_site_uses_public_host_only(self):
         result = self.run_entrypoint({"WEB_CLIENT_HOST": "app.peppy.invalid"})
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("WEB_CLIENT_HOST is retired", result.stderr)
+        self.assertNotIn("WEB_CLIENT_HOST", result.stderr)
         self.assertIn("peppy.invalid {", result.stdout)
         self.assertNotIn("app.peppy.invalid", result.stdout)
 
-    def test_absent_legacy_host_does_not_warn(self):
+    def test_entrypoint_does_not_warn_without_legacy_host(self):
         result = self.run_entrypoint({})
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("WEB_CLIENT_HOST is retired", result.stderr)
+        self.assertNotIn("WEB_CLIENT_HOST", result.stderr)

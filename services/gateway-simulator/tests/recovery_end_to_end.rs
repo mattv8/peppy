@@ -333,7 +333,6 @@ async fn start_router(fixture: &ComposeFixture, migrate: bool) -> RouterRuntime 
         release_identity: "recovery-fixture".into(),
         s3: Some(s3),
         public_api_url: None,
-        public_attachment_url: None,
         vault_attachment_quota_bytes: 512 * 1024 * 1024,
         trusted_proxy_cidrs: vec![],
         replay_retention: Duration::from_secs(30 * 86_400),

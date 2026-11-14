@@ -47,7 +47,6 @@ class DemoTests(unittest.TestCase):
     def test_synthetic_environment_advertises_canonical_https_origin(self):
         values = demo.synthetic_values()
         self.assertEqual(values["PUBLIC_API_URL"], "https://127.0.0.1")
-        self.assertEqual(values["PUBLIC_ATTACHMENT_URL"], "https://127.0.0.1")
         self.assertEqual(values["BIND_ADDR"], "127.0.0.1:8080")
 
     def test_synthetic_environment_generates_distinct_database_roles_and_passwords(self):

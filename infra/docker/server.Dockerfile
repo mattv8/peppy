@@ -82,7 +82,9 @@ RUN apt-get update \
     && useradd --system --uid 10001 --create-home peppy
 COPY --from=build /out/peppy-server /usr/local/bin/peppy-server
 COPY --from=web-build /src/apps/web/dist /usr/share/peppy/web
-ENV PEPPY_WEB_CLIENT_DIR=/usr/share/peppy/web
+ENV PEPPY_WEB_CLIENT_DIR=/usr/share/peppy/web \
+    RUNNING_IN_CONTAINER=1 \
+    BIND_ADDR=0.0.0.0:8080
 USER peppy
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/peppy-server"]

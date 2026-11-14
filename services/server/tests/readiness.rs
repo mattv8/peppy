@@ -787,7 +787,6 @@ fn test_config(s3: S3Config) -> Config {
         release_identity: "readiness-test".into(),
         s3: Some(s3),
         public_api_url: None,
-        public_attachment_url: None,
         vault_attachment_quota_bytes: 512 * 1024 * 1024,
         trusted_proxy_cidrs: Vec::new(),
         replay_retention: Duration::from_secs(86_400),

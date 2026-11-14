@@ -41,13 +41,11 @@ class ComposeDevelopmentTests(unittest.TestCase):
             "S3_ACCESS_KEY": "synthetic-access",
             "S3_SECRET_KEY": "synthetic-secret",
             "PUBLIC_API_URL": "http://127.0.0.1:7000",
-            "PUBLIC_ATTACHMENT_URL": "http://127.0.0.1:7000",
         }
         inherited = {
             key: value for key, value in os.environ.items()
             if key not in {
-                'BIND_ADDR', 'API_HOST_PORT', 'PUBLIC_API_URL',
-                'PUBLIC_ATTACHMENT_URL', 'WEB_UI_ENABLED', 'DEBUG',
+                'BIND_ADDR', 'API_HOST_PORT', 'PUBLIC_API_URL', 'WEB_UI_ENABLED', 'DEBUG',
                 'PEPPY_REPLAY_RETENTION_DAYS', 'VAULT_ATTACHMENT_QUOTA_BYTES',
                 'TRUSTED_PROXY_CIDRS',
             }
@@ -58,7 +56,7 @@ class ComposeDevelopmentTests(unittest.TestCase):
     @staticmethod
     def fixture_env(**overrides):
         values = os.environ.copy()
-        for name in ("API_HOST_PORT", "PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL", "WEB_UI_ENABLED", "DEBUG"):
+        for name in ("API_HOST_PORT", "PUBLIC_API_URL", "WEB_UI_ENABLED", "DEBUG"):
             values.pop(name, None)
         return values | overrides
 
@@ -79,6 +77,30 @@ class ComposeDevelopmentTests(unittest.TestCase):
             command.extend(["--profile", profile])
         command.extend(["config", "--format", "json"])
         return subprocess.run(command, cwd=ROOT, text=True, capture_output=True, env=self.synthetic_env(**env))
+
+    def render_with_required_environment(self, **overrides):
+        required = {
+            "PUBLIC_HOST": "peppy.invalid",
+            "POSTGRES_PASSWORD": "synthetic-password",
+            "PEPPY_RUNTIME_DB_PASSWORD": RUNTIME_PASSWORD,
+            "PEPPY_MAINTENANCE_DB_PASSWORD": MAINTENANCE_PASSWORD,
+            "S3_SECRET_KEY": "synthetic-secret",
+        }
+        environment = os.environ.copy()
+        for name in {
+            "PEPPY_SERVER_IMAGE", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD",
+            "PEPPY_RUNTIME_DB_USER", "PEPPY_RUNTIME_DB_PASSWORD",
+            "PEPPY_MAINTENANCE_DB_USER", "PEPPY_MAINTENANCE_DB_PASSWORD",
+            "S3_ACCESS_KEY", "S3_SECRET_KEY", "PUBLIC_HOST", "PUBLIC_API_URL",
+        }:
+            environment.pop(name, None)
+        return subprocess.run(
+            ["docker", "compose", "--env-file", "/dev/null", "-f", str(ROOT / "docker-compose.yml"), "config", "--format", "json"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env=environment | required | overrides,
+        )
 
     def assert_source_mount(self, service, source=ROOT):
         source_mount = next(volume for volume in service["volumes"] if volume["target"] == "/source")
@@ -181,7 +203,6 @@ class ComposeDevelopmentTests(unittest.TestCase):
             "VAULT_ATTACHMENT_QUOTA_BYTES",
             "API_HOST_PORT",
             "PUBLIC_API_URL",
-            "PUBLIC_ATTACHMENT_URL",
         }
         environment = {
             key: value for key, value in os.environ.items()
@@ -286,6 +307,35 @@ class ComposeDevelopmentTests(unittest.TestCase):
         self.assertEqual(
             set(json.loads(result.stdout)["services"]),
             {"database-password-preflight", "postgres", "seaweedfs", "migrate", "api"},
+        )
+
+    @unittest.skipUnless(compose, "Docker Compose is unavailable")
+    def test_base_renders_with_only_required_values_and_defaults_shared_storage_credentials(self):
+        result = self.render_with_required_environment()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads(result.stdout)
+        environment = config["services"]["api"]["environment"]
+        self.assertEqual(
+            config["services"]["api"]["image"],
+            "hub.docker.visnovsky.us/library/peppy-server:latest",
+        )
+        self.assertEqual(environment["PUBLIC_API_URL"], "https://peppy.invalid")
+        self.assertEqual(environment["S3_ACCESS_KEY"], "peppy")
+        self.assertEqual(self.database_credentials(environment["DATABASE_URL"])[0], "peppy_runtime")
+        self.assertEqual(self.database_credentials(environment["MAINTENANCE_DATABASE_URL"])[0], "peppy_maintenance")
+        self.assertEqual(
+            config["services"]["postgres"]["environment"]["POSTGRES_USER"],
+            "peppy",
+        )
+        self.assertIn('"accessKey":"peppy"', config["configs"]["seaweed-s3-config"]["content"])
+
+    @unittest.skipUnless(compose, "Docker Compose is unavailable")
+    def test_explicit_public_api_url_overrides_required_host_derivation(self):
+        result = self.render_with_required_environment(PUBLIC_API_URL="https://api.peppy.invalid")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout)["services"]["api"]["environment"]["PUBLIC_API_URL"],
+            "https://api.peppy.invalid",
         )
 
     @staticmethod
@@ -410,16 +460,14 @@ class ComposeDevelopmentTests(unittest.TestCase):
         self.assertEqual(configs["caddyfile-template"], "/etc/caddy/Caddyfile.template")
         self.assertEqual(configs["caddy-entrypoint"], "/usr/local/bin/peppy-caddy")
         self.assertEqual(caddy["entrypoint"], ["/bin/sh", "/usr/local/bin/peppy-caddy"])
-        self.assertEqual(caddy["environment"]["WEB_CLIENT_HOST"], "")
+        self.assertNotIn("WEB_CLIENT_HOST", caddy["environment"])
 
     @unittest.skipUnless(compose, "Docker Compose is unavailable")
     def test_mcp_overlay_isolates_worker_from_storage_network(self):
-        missing = self.render("docker-compose.yml", "infra/compose/compose.mcp.yml")
-        self.assertNotEqual(missing.returncode, 0)
-        self.assertIn("set an immutable MCP worker image digest in .env", missing.stderr)
-        result = self.render("docker-compose.yml", "infra/compose/compose.mcp.yml", PEPPY_MCP_IMAGE="peppy-mcp:local")
+        result = self.render("docker-compose.yml", "infra/compose/compose.mcp.yml")
         self.assertEqual(result.returncode, 0, result.stderr)
         config = json.loads(result.stdout)
+        self.assertEqual(config["services"]["mcp"]["image"], "hub.docker.visnovsky.us/library/peppy-mcp:latest")
         self.assertEqual(set(config["services"]["mcp"]["networks"]), {"mcp-api", "mcp-egress"})
         self.assertNotIn("private", config["services"]["mcp"]["networks"])
         self.assertTrue(config["networks"]["mcp-api"]["internal"])
@@ -427,6 +475,10 @@ class ComposeDevelopmentTests(unittest.TestCase):
         self.assertEqual(config["services"]["mcp-state-init"]["network_mode"], "none")
         self.assertNotIn("networks", config["services"]["mcp-state-init"])
         self.assertNotIn("build", config["services"]["mcp"])
+
+        overridden = self.render("docker-compose.yml", "infra/compose/compose.mcp.yml", PEPPY_MCP_IMAGE="peppy-mcp:local")
+        self.assertEqual(overridden.returncode, 0, overridden.stderr)
+        self.assertEqual(json.loads(overridden.stdout)["services"]["mcp"]["image"], "peppy-mcp:local")
 
         built = self.render(
             "docker-compose.yml", "infra/compose/compose.mcp.yml", "infra/compose/compose.mcp-build.yml",
@@ -547,7 +599,7 @@ class ComposeDevelopmentTests(unittest.TestCase):
             helper_directory.mkdir(parents=True)
             shutil.copy(ROOT / "infra/dev/dev_port.py", helper_directory / "dev_port.py")
             (root / ".env").write_text(
-                "API_HOST_PORT=7100\nPUBLIC_API_URL=http://127.0.0.1:7100\nPUBLIC_ATTACHMENT_URL=http://127.0.0.1:7100\n"
+                "API_HOST_PORT=7100\nPUBLIC_API_URL=http://127.0.0.1:7100\n"
             )
             tools = root / "tools"
             tools.mkdir()

@@ -95,7 +95,7 @@ def development_port(values: dict[str, str]) -> int:
 
 
 def ensure_loopback_urls_match(port: int, values: dict[str, str]) -> None:
-    for name in ("PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL"):
+    for name in ("PUBLIC_API_URL",):
         value = configured_value(name, values)
         if not value:
             continue
@@ -203,7 +203,6 @@ def write_setup(dotenv: Path) -> None:
         "VAULT_ATTACHMENT_QUOTA_BYTES": "536870912",
         "API_HOST_PORT": str(port),
         "PUBLIC_API_URL": configured_value("PUBLIC_API_URL", configured) or public_url,
-        "PUBLIC_ATTACHMENT_URL": configured_value("PUBLIC_ATTACHMENT_URL", configured) or public_url,
     }
     descriptor = os.open(dotenv, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as output:

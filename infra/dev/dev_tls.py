@@ -312,7 +312,7 @@ def compose_arguments(dotenv: Path, arguments: list[str], teardown: bool) -> Non
     environment["PEPPY_SERVER_IMAGE"] = environment.get("PEPPY_SERVER_IMAGE") or "peppy-server:local"
     values = dotenv_values(dotenv)
     port = development_port(values)
-    for name in ("PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL"):
+    for name in ("PUBLIC_API_URL",):
         value = environment.get(name, values.get(name))
         if value:
             environment[name] = rewrite_loopback_url(value, port, enabled)
