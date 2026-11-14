@@ -184,6 +184,15 @@ fn request(path: &str, host: Option<&str>, method: &str) -> Request<Body> {
     builder.body(Body::empty()).unwrap()
 }
 
+fn brotli_request(path: &str, method: &str) -> Request<Body> {
+    let mut request = request(path, Some("app.example.test"), method);
+    request.headers_mut().insert(
+        header::ACCEPT_ENCODING,
+        HeaderValue::from_static("gzip, Br;q=1"),
+    );
+    request
+}
+
 #[tokio::test]
 async fn serves_app_assets_config_and_api_only_on_the_configured_host() {
     let (_assets, app) = app();
@@ -701,6 +710,194 @@ async fn preserves_head_mime_cache_and_isolates_explicit_port_hosts() {
 }
 
 #[tokio::test]
+async fn serves_brotli_assets_with_original_metadata_and_head_headers() {
+    let (assets, app) = app();
+    let compressed = b"compressed wasm";
+    fs::write(
+        assets.path().join("core/peppy_browser_core.wasm.br"),
+        compressed,
+    )
+    .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(brotli_request("/core/peppy_browser_core.wasm", "GET"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_ENCODING], "br");
+    assert_eq!(response.headers()[header::VARY], "Accept-Encoding");
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/wasm");
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        compressed
+    );
+
+    let response = app
+        .oneshot(brotli_request("/core/peppy_browser_core.wasm", "HEAD"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_ENCODING], "br");
+    assert_eq!(response.headers()[header::VARY], "Accept-Encoding");
+    assert!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn brotli_fallbacks_and_direct_siblings_preserve_asset_behavior() {
+    let (assets, app) = app();
+    let original = [0, 97, 115, 109];
+    fs::write(
+        assets.path().join("core/peppy_browser_core.wasm.br"),
+        b"compressed wasm",
+    )
+    .unwrap();
+
+    let mut disabled = request(
+        "/core/peppy_browser_core.wasm",
+        Some("app.example.test"),
+        "GET",
+    );
+    disabled
+        .headers_mut()
+        .insert(header::ACCEPT_ENCODING, HeaderValue::from_static("br;q=0"));
+    let response = app.clone().oneshot(disabled).await.unwrap();
+    assert_eq!(response.headers()[header::VARY], "Accept-Encoding");
+    assert!(response.headers().get(header::CONTENT_ENCODING).is_none());
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        original
+    );
+
+    let mut wildcard = request(
+        "/core/peppy_browser_core.wasm",
+        Some("app.example.test"),
+        "GET",
+    );
+    wildcard
+        .headers_mut()
+        .insert(header::ACCEPT_ENCODING, HeaderValue::from_static("*"));
+    let response = app.clone().oneshot(wildcard).await.unwrap();
+    assert_eq!(response.headers()[header::VARY], "Accept-Encoding");
+    assert!(response.headers().get(header::CONTENT_ENCODING).is_none());
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        original
+    );
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            "/core/peppy_browser_core.wasm",
+            Some("app.example.test"),
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.headers()[header::VARY], "Accept-Encoding");
+    assert!(response.headers().get(header::CONTENT_ENCODING).is_none());
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        original
+    );
+
+    let response = app
+        .clone()
+        .oneshot(brotli_request("/core/peppy-browser-core.js", "GET"))
+        .await
+        .unwrap();
+    assert_eq!(response.headers()[header::VARY], "Accept-Encoding");
+    assert!(response.headers().get(header::CONTENT_ENCODING).is_none());
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        b"export default {}"
+    );
+
+    for method in ["GET", "HEAD"] {
+        let response = app
+            .clone()
+            .oneshot(request(
+                "/core/peppy_browser_core.wasm.br",
+                Some("app.example.test"),
+                method,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rejects_brotli_siblings_outside_the_asset_directory() {
+    let (assets, app) = app();
+    let external = TempDir::new().unwrap();
+    let sibling = external.path().join("compressed.wasm.br");
+    fs::write(&sibling, b"compressed wasm").unwrap();
+    std::os::unix::fs::symlink(
+        &sibling,
+        assets.path().join("core/peppy_browser_core.wasm.br"),
+    )
+    .unwrap();
+
+    let response = app
+        .oneshot(brotli_request("/core/peppy_browser_core.wasm", "GET"))
+        .await
+        .unwrap();
+    assert_eq!(response.headers()[header::VARY], "Accept-Encoding");
+    assert!(response.headers().get(header::CONTENT_ENCODING).is_none());
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        [0, 97, 115, 109]
+    );
+}
+
+#[tokio::test]
 async fn caches_generated_assets_immutably_and_serves_ttf_fonts() {
     let (_assets, app) = app();
     let asset = app
@@ -727,12 +924,9 @@ async fn caches_generated_assets_immutably_and_serves_ttf_fonts() {
         b"console.log(1)"
     );
     let font = app
-        .oneshot(request(
-            "/assets/peppy.ttf",
-            Some("app.example.test"),
-            "HEAD",
-        ))
+        .oneshot(brotli_request("/assets/peppy.ttf", "HEAD"))
         .await
         .unwrap();
     assert_eq!(font.headers()[header::CONTENT_TYPE], "font/ttf");
+    assert!(font.headers().get(header::VARY).is_none());
 }

@@ -180,6 +180,7 @@ async fn dispatch(
             &state.config,
             "index.html",
             request.method() == Method::HEAD,
+            request.headers(),
         )
         .await;
         if app_host {
@@ -195,6 +196,7 @@ async fn dispatch(
         &state.config,
         path.strip_prefix('/').unwrap_or(path),
         request.method() == Method::HEAD,
+        request.headers(),
     )
     .await
 }
@@ -332,28 +334,44 @@ fn is_static_namespace(path: &str) -> bool {
         || path.starts_with("/web/")
 }
 
-async fn serve_asset(config: &WebClientConfig, path: &str, head_only: bool) -> Response<Body> {
+async fn serve_asset(
+    config: &WebClientConfig,
+    path: &str,
+    head_only: bool,
+    headers: &HeaderMap,
+) -> Response<Body> {
     let Some(path) = safe_asset_path(path) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if path.ends_with(".br") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let eligible_for_brotli = is_brotli_asset(path);
     let candidate = config.asset_dir.join(path);
     let Ok(metadata) = tokio::fs::metadata(&candidate).await else {
-        return StatusCode::NOT_FOUND.into_response();
+        return asset_not_found(eligible_for_brotli);
     };
     if !metadata.is_file() || metadata.len() > MAX_ASSET_BYTES {
-        return StatusCode::NOT_FOUND.into_response();
+        return asset_not_found(eligible_for_brotli);
     }
     let Ok(canonical) = tokio::fs::canonicalize(&candidate).await else {
-        return StatusCode::NOT_FOUND.into_response();
+        return asset_not_found(eligible_for_brotli);
     };
     if !canonical.starts_with(&config.asset_dir) {
-        return StatusCode::NOT_FOUND.into_response();
+        return asset_not_found(eligible_for_brotli);
     }
+    let brotli_sibling = if eligible_for_brotli && accepts_brotli(headers) {
+        brotli_sibling(config, &canonical).await
+    } else {
+        None
+    };
+    let compressed = brotli_sibling.is_some();
+    let file_path = brotli_sibling.unwrap_or(canonical);
     let body = if head_only {
         Body::empty()
     } else {
-        let Ok(file) = tokio::fs::File::open(canonical).await else {
-            return StatusCode::NOT_FOUND.into_response();
+        let Ok(file) = tokio::fs::File::open(file_path).await else {
+            return asset_not_found(eligible_for_brotli);
         };
         Body::from_stream(ReaderStream::new(file))
     };
@@ -366,7 +384,74 @@ async fn serve_asset(config: &WebClientConfig, path: &str, head_only: bool) -> R
         header::CACHE_CONTROL,
         HeaderValue::from_static(cache_control(path)),
     );
+    if eligible_for_brotli {
+        response
+            .headers_mut()
+            .insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    }
+    if compressed {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_ENCODING, HeaderValue::from_static("br"));
+    }
     add_security_headers(response.headers_mut());
+    response
+}
+
+async fn brotli_sibling(
+    config: &WebClientConfig,
+    canonical: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let mut sibling = canonical.to_path_buf();
+    sibling.as_mut_os_string().push(".br");
+    let metadata = tokio::fs::metadata(&sibling).await.ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_ASSET_BYTES {
+        return None;
+    }
+    let canonical_sibling = tokio::fs::canonicalize(sibling).await.ok()?;
+    canonical_sibling
+        .starts_with(&config.asset_dir)
+        .then_some(canonical_sibling)
+}
+
+fn is_brotli_asset(path: &str) -> bool {
+    matches!(path.rsplit('.').next(), Some("wasm" | "js" | "css"))
+}
+
+fn accepts_brotli(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::ACCEPT_ENCODING)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|encoding| {
+            let mut parts = encoding.split(';');
+            let Some(name) = parts.next() else {
+                return false;
+            };
+            if !name.trim().eq_ignore_ascii_case("br") {
+                return false;
+            }
+            parts.all(|parameter| {
+                let Some((name, value)) = parameter.trim().split_once('=') else {
+                    return true;
+                };
+                !name.trim().eq_ignore_ascii_case("q")
+                    || value
+                        .trim()
+                        .parse::<f32>()
+                        .is_ok_and(|q| q > 0.0 && q <= 1.0)
+            })
+        })
+}
+
+fn asset_not_found(vary: bool) -> Response<Body> {
+    let mut response = StatusCode::NOT_FOUND.into_response();
+    if vary {
+        response
+            .headers_mut()
+            .insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    }
     response
 }
 
