@@ -1,4 +1,10 @@
-use std::sync::Arc;
+use std::{
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use axum::{Json, extract::State, http::StatusCode};
 use futures_util::StreamExt;
@@ -11,14 +17,103 @@ use crate::{
     storage::{DisposableObject, Storage},
 };
 
+const STORAGE_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+const STORAGE_PROBE_MAX_AGE: Duration = Duration::from_secs(15);
+
 #[derive(Clone)]
 pub struct HealthState(Arc<Dependencies>);
 
 struct Dependencies {
     database: PgPool,
-    storage: Option<(Storage, std::time::Duration)>,
-    timeout: std::time::Duration,
+    storage: Option<Arc<StorageReadiness>>,
+    timeout: Duration,
     release_identity: String,
+}
+
+struct StorageReadiness {
+    storage: Storage,
+    timeout: Duration,
+    started_at: tokio::time::Instant,
+    max_age: Duration,
+    latest_probe_succeeded: AtomicBool,
+    last_success_millis: AtomicU64,
+}
+
+impl StorageReadiness {
+    fn new(storage: Storage, timeout: Duration) -> Self {
+        Self::with_timing(storage, timeout, STORAGE_PROBE_MAX_AGE)
+    }
+
+    fn with_timing(storage: Storage, timeout: Duration, max_age: Duration) -> Self {
+        Self {
+            storage,
+            timeout,
+            started_at: tokio::time::Instant::now(),
+            max_age,
+            latest_probe_succeeded: AtomicBool::new(true),
+            last_success_millis: AtomicU64::new(0),
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        self.is_ready_at(self.started_at.elapsed())
+    }
+
+    fn is_ready_at(&self, elapsed: Duration) -> bool {
+        self.latest_probe_succeeded.load(Ordering::Acquire)
+            && elapsed.saturating_sub(Duration::from_millis(
+                self.last_success_millis.load(Ordering::Relaxed),
+            )) <= self.max_age
+    }
+
+    fn record_probe(&self, succeeded: bool) -> bool {
+        if succeeded {
+            self.last_success_millis.store(
+                self.started_at.elapsed().as_millis() as u64,
+                Ordering::Relaxed,
+            );
+        }
+        self.latest_probe_succeeded
+            .swap(succeeded, Ordering::AcqRel)
+            != succeeded
+    }
+}
+
+fn spawn_storage_probe(storage: Weak<StorageReadiness>) {
+    spawn_storage_probe_at_interval(storage, STORAGE_PROBE_INTERVAL);
+}
+
+fn spawn_storage_probe_at_interval(storage: Weak<StorageReadiness>, interval_duration: Duration) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + interval_duration,
+            interval_duration,
+        );
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let Some(storage) = storage.upgrade() else {
+                return;
+            };
+            match tokio::time::timeout(storage.timeout, storage.storage.probe()).await {
+                Ok(Ok(())) => {
+                    if storage.record_probe(true) {
+                        tracing::info!("storage readiness probe recovered");
+                    }
+                }
+                Ok(Err(error)) => {
+                    if storage.record_probe(false) {
+                        tracing::warn!(%error, "storage readiness probe failed");
+                    }
+                }
+                Err(_) => {
+                    if storage.record_probe(false) {
+                        tracing::warn!("storage readiness probe timed out");
+                    }
+                }
+            }
+        }
+    });
 }
 
 impl HealthState {
@@ -40,15 +135,22 @@ impl HealthState {
         database: PgPool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let storage = match config.s3.as_ref() {
-            Some(s3) => Some((Storage::initialize(s3).await?, s3.readiness_timeout)),
+            Some(s3) => Some(Arc::new(StorageReadiness::new(
+                Storage::initialize(s3).await?,
+                s3.readiness_timeout,
+            ))),
             None => None,
         };
-        Ok(Self(Arc::new(Dependencies {
+        let dependencies = Arc::new(Dependencies {
             database,
             storage,
-            timeout: std::time::Duration::from_secs(2),
+            timeout: Duration::from_secs(2),
             release_identity: config.release_identity.clone(),
-        })))
+        });
+        if let Some(storage) = &dependencies.storage {
+            spawn_storage_probe(Arc::downgrade(storage));
+        }
+        Ok(Self(dependencies))
     }
 
     pub fn database(&self) -> PgPool {
@@ -56,7 +158,10 @@ impl HealthState {
     }
 
     pub(crate) fn storage(&self) -> Option<Storage> {
-        self.0.storage.as_ref().map(|(storage, _)| storage.clone())
+        self.0
+            .storage
+            .as_ref()
+            .map(|storage| storage.storage.clone())
     }
 }
 
@@ -149,8 +254,121 @@ async fn dependencies_ready(
             .fetch_one(&dependencies.database),
     )
     .await??;
-    if let Some((storage, timeout)) = &dependencies.storage {
-        tokio::time::timeout(*timeout, storage.probe()).await??;
+    storage_ready(dependencies.storage.as_ref())?;
+    Ok(())
+}
+
+fn storage_ready(
+    storage: Option<&Arc<StorageReadiness>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(storage) = storage
+        && !storage.is_ready()
+    {
+        return Err("storage readiness probe is stale or failed".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use url::Url;
+
+    use super::*;
+    use crate::config::S3Config;
+
+    fn storage(endpoint: &str) -> Storage {
+        Storage::new(&S3Config {
+            endpoint: Url::parse(endpoint).expect("endpoint"),
+            bucket: "bucket".into(),
+            access_key: "access".into(),
+            secret_key: "secret".into(),
+            signing_region: "us-west-000".into(),
+            precreated_bucket: true,
+            readiness_timeout: Duration::from_secs(1),
+        })
+    }
+
+    #[tokio::test]
+    async fn seeded_storage_readiness_answers_without_a_network_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local listener");
+        let endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("listener address")
+        );
+        let accepted_connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener_connections = Arc::clone(&accepted_connections);
+        let server = tokio::spawn(async move {
+            while listener.accept().await.is_ok() {
+                listener_connections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        let readiness = Arc::new(StorageReadiness::new(
+            storage(&endpoint),
+            Duration::from_secs(1),
+        ));
+
+        assert!(storage_ready(Some(&readiness)).is_ok());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            accepted_connections.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "readiness must not probe storage on the request path"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_storage_probe_makes_readiness_fail() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local listener");
+        let endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("listener address")
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept probe");
+            let mut request = [0_u8; 4096];
+            socket
+                .read_exact(&mut request[..1])
+                .await
+                .expect("read probe");
+            socket
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await
+                .expect("write probe response");
+        });
+        let readiness = Arc::new(StorageReadiness::new(
+            storage(&endpoint),
+            Duration::from_secs(1),
+        ));
+        spawn_storage_probe_at_interval(Arc::downgrade(&readiness), Duration::from_millis(1));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while readiness.is_ready() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("failed probe updates readiness");
+
+        assert!(!readiness.is_ready());
+        server.await.expect("probe server");
+    }
+
+    #[test]
+    fn stale_storage_success_fails_readiness_without_a_completed_probe() {
+        let readiness = StorageReadiness::with_timing(
+            storage("http://127.0.0.1:9"),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        );
+
+        assert!(!readiness.is_ready_at(Duration::from_secs(2)));
+    }
 }
