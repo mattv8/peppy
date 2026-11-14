@@ -76,9 +76,6 @@ fn standalone_rls_config_from(
     get: impl Fn(&str) -> Option<String>,
     migration: bool,
 ) -> Result<StandaloneRlsConfig, Box<dyn std::error::Error + Send + Sync>> {
-    if get("PEPPY_RLS_ENFORCED").as_deref() != Some("true") {
-        return Err("PEPPY_RLS_ENFORCED=true is required for the standalone server".into());
-    }
     let maintenance_database_url = get("MAINTENANCE_DATABASE_URL")
         .filter(|value| !value.is_empty())
         .ok_or("MAINTENANCE_DATABASE_URL is required for the standalone server")?;
@@ -139,11 +136,10 @@ mod tests {
     use super::{ensure_distinct_database_roles, standalone_rls_config_from};
 
     #[test]
-    fn standalone_requires_rls_and_separated_urls_independent_of_peppy_env() {
+    fn standalone_requires_separated_database_urls() {
         assert!(standalone_rls_config_from(|_| None, false).is_err());
         let serve = standalone_rls_config_from(
             |name| match name {
-                "PEPPY_RLS_ENFORCED" => Some("true".into()),
                 "MAINTENANCE_DATABASE_URL" => Some("postgres://maintenance/db".into()),
                 _ => None,
             },
@@ -153,13 +149,23 @@ mod tests {
         assert!(
             standalone_rls_config_from(
                 |name| match name {
-                    "PEPPY_RLS_ENFORCED" => Some("true".into()),
                     "MAINTENANCE_DATABASE_URL" => Some("postgres://maintenance/db".into()),
                     _ => None,
                 },
                 true,
             )
             .is_err()
+        );
+        assert!(
+            standalone_rls_config_from(
+                |name| match name {
+                    "MAINTENANCE_DATABASE_URL" => Some("postgres://maintenance/db".into()),
+                    "DATABASE_MIGRATION_URL" => Some("postgres://migration/db".into()),
+                    _ => None,
+                },
+                true,
+            )
+            .is_ok()
         );
     }
 

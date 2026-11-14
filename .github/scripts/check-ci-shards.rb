@@ -9,7 +9,7 @@ require 'yaml'
 
 ROOT = File.expand_path('..', __dir__)
 VALIDATION_JOBS = %w[changes source-audit workflow-security version release-tooling release-macos-tooling development-tools rust integration frontend desktop desktop-updater android google-messages-go swift-bindings container-image development-artifacts].freeze
-PUBLICATION_JOBS = %w[publish-prerelease publish-prerelease-android publish-staging-server publish-staging-relay publish-staging-mcp publish-production-server publish-production-relay publish-production-mcp notify-hosted-production stable-release].freeze
+PUBLICATION_JOBS = %w[publish-prerelease publish-prerelease-android publish-production-server publish-production-relay publish-production-mcp notify-hosted-production stable-release].freeze
 FULL_MATRIX = [{ 'os' => 'ubuntu-24.04', 'index' => 1, 'count' => 1 }, { 'os' => 'macos-15', 'index' => 1, 'count' => 1 }, { 'os' => 'windows-2025', 'index' => 1, 'count' => 4 }, { 'os' => 'windows-2025', 'index' => 2, 'count' => 4 }, { 'os' => 'windows-2025', 'index' => 3, 'count' => 4 }, { 'os' => 'windows-2025', 'index' => 4, 'count' => 4 }].freeze
 LINUX_MATRIX = [{ 'os' => 'ubuntu-24.04', 'index' => 1, 'count' => 1 }].freeze
 FULL_OS_MATRIX = %w[ubuntu-24.04 macos-15 windows-2025].freeze

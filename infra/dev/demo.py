@@ -60,7 +60,6 @@ def synthetic_values():
         "S3_SECRET_KEY": f"synthetic-{uuid.uuid4().hex}",
         "S3_BUCKET": "peppy-private",
         "PUBLIC_API_URL": "https://127.0.0.1",
-        "PUBLIC_ATTACHMENT_URL": "https://127.0.0.1",
         "BIND_ADDR": "127.0.0.1:8080",
         "PEPPY_ISOLATED_DEMO": "1",
         "PEPPY_SETUP_TOKEN": f"synthetic-{uuid.uuid4().hex}",

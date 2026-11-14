@@ -27,7 +27,6 @@ fn config(revision: &str) -> Config {
         release_identity: revision.into(),
         s3: None,
         public_api_url: None,
-        public_attachment_url: None,
         vault_attachment_quota_bytes: 512 * 1024 * 1024,
         trusted_proxy_cidrs: Vec::new(),
         replay_retention: Duration::from_secs(86_400),

@@ -14,7 +14,7 @@ HELPER = ROOT / "infra/dev/dev_port.py"
 class DevelopmentPortTests(unittest.TestCase):
     def run_helper(self, command, dotenv, **environment):
         env = os.environ.copy()
-        for name in ("API_HOST_PORT", "PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL", "WEB_UI_ENABLED"):
+        for name in ("API_HOST_PORT", "PUBLIC_API_URL", "WEB_UI_ENABLED"):
             env.pop(name, None)
         env.update(environment)
         return subprocess.run(
@@ -32,10 +32,10 @@ class DevelopmentPortTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "http://127.0.0.1:7100\n")
 
-    def test_external_public_urls_do_not_block_validation(self):
+    def test_stale_attachment_url_does_not_block_validation(self):
         with tempfile.TemporaryDirectory() as directory:
             dotenv = Path(directory) / ".env"
-            dotenv.write_text("API_HOST_PORT=7100\nPUBLIC_API_URL=https://api.example.test\nPUBLIC_ATTACHMENT_URL=https://files.example.test\n")
+            dotenv.write_text("API_HOST_PORT=7100\nPUBLIC_API_URL=https://api.example.test\nPUBLIC_ATTACHMENT_URL=http://127.0.0.1:7000/files?version=1\n")
             result = self.run_helper("validate", dotenv)
             self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -55,13 +55,11 @@ class DevelopmentPortTests(unittest.TestCase):
                 dotenv,
                 API_HOST_PORT="7100",
                 PUBLIC_API_URL="https://api.example.test",
-                PUBLIC_ATTACHMENT_URL="https://files.example.test",
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             values = dotenv.read_text()
             self.assertIn("API_HOST_PORT=7100\n", values)
             self.assertIn("PUBLIC_API_URL=https://api.example.test\n", values)
-            self.assertIn("PUBLIC_ATTACHMENT_URL=https://files.example.test\n", values)
             self.assertEqual(dotenv.stat().st_mode & 0o777, 0o600)
 
     def test_write_setup_generates_distinct_database_roles_and_passwords(self):
@@ -96,7 +94,6 @@ class DevelopmentPortTests(unittest.TestCase):
                 "PORT=7100 # local development port\n"
                 "API_HOST_PORT=${PORT:-7000}\n"
                 "PUBLIC_API_URL=\"https://${API_HOST:-api.example.test}:7443\" # browser origin\n"
-                "PUBLIC_ATTACHMENT_URL=${PUBLIC_API_URL:-https://files.example.test}\n"
             )
             compose_file = root / "compose.yml"
             compose_file.write_text(
@@ -106,10 +103,9 @@ class DevelopmentPortTests(unittest.TestCase):
                 "    environment:\n"
                 "      API_HOST_PORT: ${API_HOST_PORT}\n"
                 "      PUBLIC_API_URL: ${PUBLIC_API_URL}\n"
-                "      PUBLIC_ATTACHMENT_URL: ${PUBLIC_ATTACHMENT_URL}\n"
             )
             environment = os.environ.copy()
-            for name in ("API_HOST_PORT", "PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL", "WEB_UI_ENABLED", "API_HOST"):
+            for name in ("API_HOST_PORT", "PUBLIC_API_URL", "WEB_UI_ENABLED", "API_HOST"):
                 environment.pop(name, None)
             result = subprocess.run(
                 ["docker", "compose", "--env-file", str(dotenv), "-f", str(compose_file), "config", "--format", "json"],
@@ -122,7 +118,6 @@ class DevelopmentPortTests(unittest.TestCase):
             rendered = json.loads(result.stdout)["services"]["test"]["environment"]
             self.assertEqual(rendered["API_HOST_PORT"], "7100")
             self.assertEqual(rendered["PUBLIC_API_URL"], "https://api.example.test:7443")
-            self.assertEqual(rendered["PUBLIC_ATTACHMENT_URL"], "https://api.example.test:7443")
             self.assertEqual(self.run_helper("port", dotenv).stdout, "7100\n")
             self.assertEqual(self.run_helper("public-api-origin", dotenv).stdout, "https://api.example.test:7443\n")
 
@@ -150,10 +145,10 @@ class DevelopmentPortTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "false\n")
 
-    def test_loopback_urls_follow_debug_scheme_without_losing_attachment_path(self):
+    def test_loopback_public_api_url_follows_debug_scheme(self):
         with tempfile.TemporaryDirectory() as directory:
             dotenv = Path(directory) / ".env"
-            dotenv.write_text("DEBUG=true\nAPI_HOST_PORT=7100\nPUBLIC_API_URL=http://127.0.0.1:7100\nPUBLIC_ATTACHMENT_URL=http://127.0.0.1:7100/files?version=1\n")
+            dotenv.write_text("DEBUG=true\nAPI_HOST_PORT=7100\nPUBLIC_API_URL=http://127.0.0.1:7100\n")
             result = self.run_helper("public-api-origin", dotenv)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "https://127.0.0.1:7100\n")

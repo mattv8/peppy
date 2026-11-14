@@ -12,9 +12,9 @@ This writes `apps/web/dist/` with the UI and WASM core. It needs Emscripten 6.0.
 
 ## Deployment
 
-Serve artifacts from `PEPPY_WEB_CLIENT_DIR`. Community sets `PEPPY_WEB_CLIENT_ROOT=true` by default and serves the UI at `/` with `/v1/*` APIs on that origin, using `PUBLIC_API_URL` as canonical reference. Hosted account and billing use the separate origin configured by `PEPPY_WEB_ASSET_DIR` and `PEPPY_WEB_ORIGIN`; the messaging origin `PEPPY_WEB_CLIENT_HOST` is separate and uses same-origin HTTPS fetches.
+Serve artifacts from `PEPPY_WEB_CLIENT_DIR`. Community sets `PEPPY_WEB_CLIENT_ROOT=true` by default and serves the UI at `/` with `/v1/*` APIs on that origin, using `PUBLIC_API_URL` as canonical reference. Hosted account and billing use the separate origin configured by `PEPPY_WEB_ASSET_DIR` and `PEPPY_WEB_ORIGIN`; the messaging origin stays separate and uses same-origin HTTPS fetches.
 
-Community has no hosted account or billing site. Its Compose configuration maps `WEB_UI_ENABLED` to root mode; set `WEB_UI_ENABLED=false` to disable browser messaging. `WEB_CLIENT_HOST` is retired: move users to `https://PUBLIC_HOST/` and remove the separate hostname and DNS record. `WEB_CLIENT_ACCOUNT_URL` still configures external account navigation.
+Community has no hosted account or billing site. Its Compose configuration maps `WEB_UI_ENABLED` to root mode; set `WEB_UI_ENABLED=false` to disable browser messaging. The browser client uses `https://PUBLIC_HOST/`; delete the legacy separate-browser-host setting and remove its hostname and DNS record. `WEB_CLIENT_ACCOUNT_URL` still configures external account navigation.
 
 ## Origin and security
 

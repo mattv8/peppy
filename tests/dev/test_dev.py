@@ -16,7 +16,7 @@ class DevScriptTests(unittest.TestCase):
     @staticmethod
     def shortcut_env(**values):
         env = os.environ.copy()
-        for key in ("PEPPY_ACCEPT_ANDROID_LICENSES", "PEPPY_ANDROID_AVD", "PEPPY_ANDROID_SERIAL", "API_HOST_PORT", "PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL", "WEB_UI_ENABLED"):
+        for key in ("PEPPY_ACCEPT_ANDROID_LICENSES", "PEPPY_ANDROID_AVD", "PEPPY_ANDROID_SERIAL", "API_HOST_PORT", "PUBLIC_API_URL", "WEB_UI_ENABLED"):
             env.pop(key, None)
         env.update(values)
         return env
@@ -65,7 +65,6 @@ class DevScriptTests(unittest.TestCase):
             values = configuration.read_text()
             self.assertIn("POSTGRES_PASSWORD=synthetic-", values)
             self.assertIn("PUBLIC_API_URL=http://127.0.0.1:7000\n", values)
-            self.assertIn("PUBLIC_ATTACHMENT_URL=http://127.0.0.1:7000\n", values)
         self.assertNotIn("replace-with-", values)
 
     def test_dev_smoke_checks_web_only_when_enabled_and_rejects_malformed_ui_setting(self):

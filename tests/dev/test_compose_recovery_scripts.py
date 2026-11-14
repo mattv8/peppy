@@ -240,7 +240,6 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
         "PEPPY_REPLAY_RETENTION_DAYS": "30",
         "VAULT_ATTACHMENT_QUOTA_BYTES": "536870912",
         "PUBLIC_API_URL": "http://127.0.0.1:7000",
-        "PUBLIC_ATTACHMENT_URL": "http://127.0.0.1:7000",
         "WEB_CLIENT_ACCOUNT_URL": "",
         "WEB_UI_ENABLED": "true",
         "PEPPY_SETUP_TOKEN": "",

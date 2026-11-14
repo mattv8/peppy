@@ -693,42 +693,6 @@ jobs:
     secrets:
       PEPPY_RELEASE_GPG_KEY: ${{ secrets.PEPPY_RELEASE_GPG_KEY }}
       PEPPY_RELEASE_GPG_PASSPHRASE: ${{ secrets.PEPPY_RELEASE_GPG_PASSPHRASE }}
-  publish-staging-server:
-    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success'"
-    needs: gate
-    uses: ./.github/workflows/publish-community-image.yml
-    with:
-      image: hub.docker.visnovsky.us/library/peppy-server
-      context: .
-      dockerfile: infra/docker/server.Dockerfile
-      tag: staging
-      environment: staging
-      sha: ${{ github.sha }}
-    secrets: inherit
-  publish-staging-relay:
-    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success'"
-    needs: gate
-    uses: ./.github/workflows/publish-community-image.yml
-    with:
-      image: hub.docker.visnovsky.us/library/peppy-push-relay
-      context: .
-      dockerfile: infra/docker/push-relay.Dockerfile
-      tag: staging
-      environment: staging
-      sha: ${{ github.sha }}
-    secrets: inherit
-  publish-staging-mcp:
-    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success'"
-    needs: gate
-    uses: ./.github/workflows/publish-community-image.yml
-    with:
-      image: hub.docker.visnovsky.us/library/peppy-mcp
-      context: .
-      dockerfile: infra/docker/mcp.Dockerfile
-      tag: staging
-      environment: staging
-      sha: ${{ github.sha }}
-    secrets: inherit
   publish-production-server:
     if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success'"
     needs: gate

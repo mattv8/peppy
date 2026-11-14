@@ -2,6 +2,11 @@
 set -euo pipefail
 root=$(mktemp -d)
 trap 'rm -rf "$root"' EXIT
+workflow=.github/workflows/publish-community-image.yml
+if grep -Fq 'staging' "$workflow"; then
+  echo 'community image workflow must reject staging publication' >&2
+  exit 1
+fi
 mkdir "$root/bin"
 cat > "$root/bin/docker" <<'MOCK'
 #!/usr/bin/env bash
@@ -86,7 +91,7 @@ MOCK
 chmod +x "$root/bin/docker" "$root/bin/cosign"
 reset_case() { : > "$root/log"; : > "$root/output"; rm -f "$root/build_state" "$root/sign_count"; rm -rf "$root/registry"; mkdir "$root/registry"; }
 run_publisher() {
-  env -u HARBOR_USERNAME -u HARBOR_PASSWORD PATH="$root/bin:$PATH" LOG="$root/log" GITHUB_OUTPUT="$root/output" BUILD_STATE_FILE="$root/build_state" SIGN_STATE_FILE="$root/sign_count" REGISTRY_STATE_DIR="$root/registry" GITHUB_REPOSITORY=test/peppy IMAGE="${IMAGE:-hub.docker.visnovsky.us/library/peppy-server}" CONTEXT=. DOCKERFILE=infra/docker/server.Dockerfile TAG="${TAG:-staging}" SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa COSIGN_PRIVATE_KEY=x COSIGN_PASSWORD=x COSIGN_PUBLIC_KEY=x infra/release/publish-image.sh
+  env -u HARBOR_USERNAME -u HARBOR_PASSWORD PATH="$root/bin:$PATH" LOG="$root/log" GITHUB_OUTPUT="$root/output" BUILD_STATE_FILE="$root/build_state" SIGN_STATE_FILE="$root/sign_count" REGISTRY_STATE_DIR="$root/registry" GITHUB_REPOSITORY=test/peppy IMAGE="${IMAGE:-hub.docker.visnovsky.us/library/peppy-server}" CONTEXT=. DOCKERFILE=infra/docker/server.Dockerfile TAG="${TAG:-edge}" SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa COSIGN_PRIVATE_KEY=x COSIGN_PASSWORD=x COSIGN_PUBLIC_KEY=x infra/release/publish-image.sh
 }
 assert_no_mutation() {
   if grep -Eq 'docker buildx build|docker buildx imagetools create|cosign sign' "$root/log"; then echo 'unexpected registry mutation' >&2; cat "$root/log" >&2; exit 1; fi
@@ -95,7 +100,7 @@ reset_case
 INSPECT_MODE=exists run_publisher
 grep -Fq 'docker buildx imagetools inspect --format \{\{json\ .Manifest.Digest\}\}' "$root/log"
 grep -Fq 'cosign verify --key env://COSIGN_PUBLIC_KEY hub.docker.visnovsky.us/library/peppy-server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$root/log"
-grep -Fq 'docker buildx imagetools create --prefer-index=false --tag hub.docker.visnovsky.us/library/peppy-server:staging hub.docker.visnovsky.us/library/peppy-server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$root/log"
+grep -Fq 'docker buildx imagetools create --prefer-index=false --tag hub.docker.visnovsky.us/library/peppy-server:edge hub.docker.visnovsky.us/library/peppy-server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$root/log"
 if grep -Fq 'docker buildx build' "$root/log"; then echo 'unexpected docker buildx build in log' >&2; exit 1; fi
 grep -Fq 'digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$root/output"
 reset_case
@@ -116,7 +121,7 @@ INSPECT_MODE=missing run_publisher
 grep -Fq 'docker buildx build --push' "$root/log"
 grep -Fq 'cosign sign --timeout 2m --yes --key env://COSIGN_PRIVATE_KEY hub.docker.visnovsky.us/library/peppy-server@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$root/log"
 sign_line=$(grep -n 'cosign sign' "$root/log" | cut -d: -f1); promote_line=$(grep -n 'docker buildx imagetools create' "$root/log" | head -1 | cut -d: -f1); ((sign_line < promote_line))
-grep -Fq 'docker buildx imagetools inspect --format \{\{json\ .Manifest.Digest\}\} hub.docker.visnovsky.us/library/peppy-server:staging' "$root/log"
+grep -Fq 'docker buildx imagetools inspect --format \{\{json\ .Manifest.Digest\}\} hub.docker.visnovsky.us/library/peppy-server:edge' "$root/log"
 grep -Fq 'digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$root/output"
 reset_case
 if INSPECT_MODE=uncertain run_publisher >/dev/null 2>"$root/stderr"; then echo 'uncertain inspect failure should fail closed' >&2; exit 1; fi

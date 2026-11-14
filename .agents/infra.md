@@ -82,8 +82,6 @@ hosted still builds or starts.
   companion notifier uses its own same-named secret for public status writes.
   GitHub does not share repository secrets, so migration requires configuring
   the secret in each repository; do not infer equality from the shared name.
-- Staging pins remain with the scheduled community pin watch; they are out of
-  scope here.
 - Merging stays manual. For local runs, check the platform out so that
   `../peppy` points at this checkout (symlink it if the directory name differs).
   Once the public pull request has merged and the companion is repinned to its
@@ -102,9 +100,8 @@ hosted still builds or starts.
 ## Public image lanes and release
 
 - [`publish-community-image.yml`](../.github/workflows/publish-community-image.yml)
-  accepts only `edge` for a `production` branch push, `staging` for a `staging`
-  push, or a semver tag from protected stable dispatch. Publication also writes
-  immutable `sha-<commit>` tags.
+  accepts `edge` for a `production` branch push or a semver tag from protected
+  stable dispatch. Publication also writes immutable `sha-<commit>` tags.
 - A production push publishes `:edge` and its immutable SHA tag, not a stable
   version. Stable publication through the separate Release workflow requires a
   successful CI push run's `gate` job for the same commit. See
@@ -121,7 +118,7 @@ hosted still builds or starts.
 
 ### Release streams and assets
 
-- A passing `staging` push publishes `vX.Y.Z-staging.N`, calculated from Conventional Commits and commits since the stable tag. WiX retains a monotonic prerelease version-code sequence. Keep the newest 10 prereleases per stream. After the gate succeeds, publish `peppy-server:staging`, `peppy-push-relay:staging`, and immutable SHA tags.
+- A passing `staging` push publishes app prereleases as `vX.Y.Z-staging.N`, calculated from Conventional Commits and commits since the stable tag. WiX retains a monotonic prerelease version-code sequence. Keep the newest 10 prereleases per stream. It does not publish Community images.
 - A passing `production` push can create the next stable `v*` release after gate and both edge-image publishers succeed. Promote immutable images as `X.Y.Z`, `X.Y`, `latest`, and `X` from `1.0.0`; do not rebuild them. Conventional Commits select major, minor, or patch, with a patch fallback. Missing stable-signing inputs skip automatic release with a warning; partial inputs fail. Stable release requires CI success for the exact production commit.
 - The Release workflow runs from `production` with `bump` (`auto`, `patch`, `minor`, `major`), optional `version` (`X.Y.Z`), and `dry_run`. CI and stable-release concurrency retain one pending run, so a burst can cancel an intermediate run.
 - Android uses independent `android-v*` tags and versions, beginning at `v0.17.1`. A staging push publishes `android-vX.Y.Z-staging.N`; a stable release publishes `android-vX.Y.Z`. It publishes when Android-relevant paths changed since its previous tag or after 500 commits. Its scope is `infra/release/components/android.paths`. Android releases are never GitHub latest and do not update `latest.json`.
@@ -132,7 +129,7 @@ hosted still builds or starts.
 
 - Trusted desktop releases include Tauri updater signatures, GPG-signed checksums, and GPG-signed RPM packages. macOS uses strict `developer-id` by default or explicit `adhoc`; Windows uses strict `authenticode` by default or explicit `none`. Strict modes fail closed. Ad-hoc macOS builds are not notarized; Windows `none` has no publisher signature.
 - Android release assets require the protected-environment keystore, access inputs, and pinned SHA-256 certificate fingerprint. The iOS archive remains unsigned. Keep signing credentials only in protected CI environment secrets.
-- Harbor publication requires protected `staging` and `production` environments with `HARBOR_USERNAME`, `HARBOR_PASSWORD`, `COSIGN_PRIVATE_KEY`, and `COSIGN_PASSWORD`. Public images contain no billing capability.
+- Harbor publication requires a protected `production` environment with `HARBOR_USERNAME`, `HARBOR_PASSWORD`, `COSIGN_PRIVATE_KEY`, and `COSIGN_PASSWORD`. Public images contain no billing capability.
 - Use `just version --channel prerelease` to preview a version. After changing `infra/release/` or release workflows, run `just release-test`. It requires git-cliff 2.14.2 on `PATH` (install with `infra/release/install-git-cliff.sh <dir>`), JDK 17 in `JAVA_HOME`, and an Android SDK at `ANDROID_HOME` or `ANDROID_SDK_ROOT` with build-tools `35.0.0` and `platforms/android-35`.
 - See [release-update guidance](ops/release-updates.md) for provisioning, key rotation, rescue bootstrap, Linux package mapping, and Android keystore backup, key continuity, and OAuth certificate registration.
 

@@ -67,7 +67,6 @@ impl Fixture {
                 release_identity: "instance-events-test".into(),
                 s3: None,
                 public_api_url: Some(Url::parse("http://localhost:3000").unwrap()),
-                public_attachment_url: None,
                 vault_attachment_quota_bytes: 123_456,
                 trusted_proxy_cidrs: vec![],
                 replay_retention: Duration::from_secs(604_800),

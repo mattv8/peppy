@@ -59,7 +59,7 @@ class AndroidHelperTests(unittest.TestCase):
             "RUNNING_IN_CONTAINER", "PEPPY_ANDROID_CONTAINER", "ANDROID_SDK_ROOT",
             "ANDROID_HOME", "ANDROID_NDK_HOME", "JAVA_HOME", "CARGO_TARGET_DIR",
             "PEPPY_ACCEPT_ANDROID_LICENSES", "PEPPY_DEBUG_SERVER", "API_HOST_PORT", "PUBLIC_API_URL",
-            "PUBLIC_ATTACHMENT_URL", "WEB_UI_ENABLED",
+            "WEB_UI_ENABLED",
             "DEBUG", "PEPPY_DEV_CONFIG_ROOT", "PEPPY_DEV_TLS_DIR", "PEPPY_DEV_TLS_CERT", "PEPPY_SOURCE_TREE",
         ):
             values.pop(name, None)
@@ -600,9 +600,7 @@ class AndroidHelperTests(unittest.TestCase):
             shutil.copy(ROOT / "infra/dev/android.sh", script)
             shutil.copy(ROOT / "infra/dev/dev_tls.py", script.parent / "dev_tls.py")
             shutil.copy(ROOT / "infra/dev/dev_port.py", script.parent / "dev_port.py")
-            (repo / ".env").write_text(
-                "API_HOST_PORT=7100\nPUBLIC_API_URL=http://127.0.0.1:7100\nPUBLIC_ATTACHMENT_URL=http://127.0.0.1:7100\n"
-            )
+            (repo / ".env").write_text("API_HOST_PORT=7100\nPUBLIC_API_URL=http://127.0.0.1:7100\n")
             sdk = temp / "sdk"
             (sdk / "platform-tools").mkdir(parents=True)
             log = temp / "adb.log"
