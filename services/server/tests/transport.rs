@@ -1571,6 +1571,94 @@ async fn owner_capability_registration_limits_owner_to_its_own_gateway_work() {
 }
 
 #[tokio::test]
+async fn capability_updates_skip_identical_values_and_timestamp_changed_values() {
+    let server = TestServer::start().await;
+    let initial = json!({"simulator":false,"capabilities":{"carrier":true}});
+    let (status, _) = server
+        .post(&server.owner_token, "/v1/capabilities", &initial)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    sqlx::query("UPDATE device_capabilities SET updated_at=now()-interval '1 hour' WHERE vault_id=$1 AND device_id=$2")
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let unchanged_at: String = sqlx::query_scalar(
+        "SELECT updated_at::text FROM device_capabilities WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+
+    let (status, _) = server
+        .post(&server.owner_token, "/v1/capabilities", &initial)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let repeated_at: String = sqlx::query_scalar(
+        "SELECT updated_at::text FROM device_capabilities WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(repeated_at, unchanged_at);
+
+    let changed = json!({"simulator":true,"capabilities":{"carrier":false}});
+    let (status, _) = server
+        .post(&server.owner_token, "/v1/capabilities", &changed)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (simulator, capabilities, changed_at): (bool, Value, String) = sqlx::query_as("SELECT simulator, capabilities, updated_at::text FROM device_capabilities WHERE vault_id=$1 AND device_id=$2")
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+    assert!(simulator);
+    assert_eq!(capabilities, json!({"carrier":false}));
+    assert_ne!(changed_at, unchanged_at);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn repeated_compaction_capability_registration_keeps_the_fence_set() {
+    let server = TestServer::start().await;
+
+    let (status, _) = server
+        .post(&server.owner_token, "/v1/compaction/capability", &json!({}))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let fence_xmin: String =
+        sqlx::query_scalar("SELECT xmin::text FROM devices WHERE vault_id=$1 AND device_id=$2")
+            .bind(server.vault)
+            .bind(server.owner_device)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+    let (status, _) = server
+        .post(&server.owner_token, "/v1/compaction/capability", &json!({}))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (fenced, repeated_xmin): (bool, String) = sqlx::query_as(
+        "SELECT compaction_generation_fence, xmin::text FROM devices WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert!(fenced);
+    assert_eq!(repeated_xmin, fence_xmin);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn exact_retry_returns_cursor_and_changed_identity_or_sequence_conflicts() {
     let server = TestServer::start().await;
     let client = Client::new();
