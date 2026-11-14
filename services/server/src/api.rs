@@ -2682,7 +2682,7 @@ async fn update_capabilities(
     let mut tx = scope::begin(&s.db, p.vault)
         .await
         .map_err(|error| database_unavailable(&error, "capability_update_begin"))?;
-    sqlx::query("INSERT INTO device_capabilities(vault_id,device_id,simulator,capabilities) VALUES($1,$2,$3,$4) ON CONFLICT(vault_id,device_id) DO UPDATE SET simulator=EXCLUDED.simulator,capabilities=EXCLUDED.capabilities,updated_at=now()")
+    sqlx::query("INSERT INTO device_capabilities(vault_id,device_id,simulator,capabilities) VALUES($1,$2,$3,$4) ON CONFLICT(vault_id,device_id) DO UPDATE SET simulator=EXCLUDED.simulator,capabilities=EXCLUDED.capabilities,updated_at=now() WHERE device_capabilities.simulator IS DISTINCT FROM EXCLUDED.simulator OR device_capabilities.capabilities IS DISTINCT FROM EXCLUDED.capabilities")
         .bind(p.vault).bind(p.device).bind(x.simulator).bind(x.capabilities).execute(&mut *tx).await.map_err(|error| database_unavailable(&error, "api_query"))?;
     tx.commit()
         .await
@@ -2708,15 +2708,9 @@ async fn register_compaction_capability(
     h: HeaderMap,
 ) -> ApiResult<StatusCode> {
     let p = authenticated(&s, &h, Operation::Publish).await?;
-    let mut tx = scope::begin(&s.db, p.vault)
+    sync::declare_compaction_fence(&s.db, p.vault, p.device)
         .await
-        .map_err(|error| database_unavailable(&error, "compaction_capability_begin"))?;
-    sqlx::query("UPDATE devices SET compaction_generation_fence=TRUE WHERE vault_id=$1 AND device_id=$2 AND revoked_at IS NULL")
-        .bind(p.vault).bind(p.device).execute(&mut *tx).await
         .map_err(|error| database_unavailable(&error, "compaction_capability_register"))?;
-    tx.commit()
-        .await
-        .map_err(|error| database_unavailable(&error, "compaction_capability_commit"))?;
     Ok(StatusCode::NO_CONTENT)
 }
 pub(crate) async fn withdraw_legacy_retention_mutation(
