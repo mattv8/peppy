@@ -20,7 +20,7 @@ on:
         required: true
         type: string
       environment:
-        description: Trusted publication environment (staging or production)
+        description: Trusted production publication environment
         required: true
         type: string
       sha:
@@ -55,10 +55,9 @@ jobs:
     if: >-
       github.sha == inputs.sha &&
         ((github.event_name == 'push' &&
-          ((inputs.environment == 'production' && github.ref == 'refs/heads/production' && inputs.tag != 'staging') ||
-         (inputs.environment == 'staging' && github.ref == 'refs/heads/staging' && inputs.tag == 'staging'))) ||
-       (github.event_name == 'workflow_dispatch' && inputs.environment == 'production' && github.ref == 'refs/heads/production' &&
-        inputs.tag != 'edge' && inputs.tag != 'staging'))
+          (inputs.environment == 'production' && github.ref == 'refs/heads/production')) ||
+        (github.event_name == 'workflow_dispatch' && inputs.environment == 'production' && github.ref == 'refs/heads/production' &&
+         inputs.tag != 'edge'))
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: ${{ inputs.environment }}
@@ -81,11 +80,8 @@ jobs:
           [[ "$DOCKERFILE" != /* && "$DOCKERFILE" != .. && "$DOCKERFILE" != ../* ]]
           test -f "$DOCKERFILE"
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$TAG" =~ ^(edge|staging|[0-9]+\.[0-9]+\.[0-9]+)$ ]]
-          if [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then CHANNEL=stable
-          elif [[ "$TAG" == edge ]]; then CHANNEL=edge
-          else CHANNEL=staging
-          fi
+          [[ "$TAG" =~ ^(edge|[0-9]+\.[0-9]+\.[0-9]+)$ ]]
+          if [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then CHANNEL=stable; else CHANNEL=edge; fi
           if [[ "$CHANNEL" != edge ]]; then CHANNEL="$CHANNEL" REQUESTED_SHA="$SHA" bash .github/scripts/release-context-guard.sh; fi
       - name: Log in to Harbor
         env:
