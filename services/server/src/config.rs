@@ -17,7 +17,6 @@ pub struct Config {
     pub release_identity: String,
     pub s3: Option<S3Config>,
     pub public_api_url: Option<Url>,
-    pub public_attachment_url: Option<Url>,
     pub vault_attachment_quota_bytes: i64,
     pub trusted_proxy_cidrs: Vec<IpNet>,
     /// Transport replay retention. Immutable snapshot records are retained separately.
@@ -40,7 +39,6 @@ impl fmt::Debug for Config {
             .field("release_identity", &self.release_identity)
             .field("s3_configured", &self.s3.is_some())
             .field("public_api_url", &self.public_api_url)
-            .field("public_attachment_url", &self.public_attachment_url)
             .field(
                 "vault_attachment_quota_bytes",
                 &self.vault_attachment_quota_bytes,
@@ -122,7 +120,6 @@ impl Config {
         }
         let production = get("PEPPY_ENV").as_deref() == Some("production");
         let public_api_url = public_url(&get, "PUBLIC_API_URL", production)?;
-        let public_attachment_url = public_url(&get, "PUBLIC_ATTACHMENT_URL", production)?;
         let vault_attachment_quota_bytes = get("VAULT_ATTACHMENT_QUOTA_BYTES")
             .map(|value| {
                 value.parse::<i64>().map_err(|source| ConfigError::Invalid {
@@ -279,7 +276,6 @@ impl Config {
             release_identity,
             s3,
             public_api_url,
-            public_attachment_url,
             vault_attachment_quota_bytes,
             trusted_proxy_cidrs,
             replay_retention,

@@ -75,9 +75,6 @@ assert.call(handoff.fetch('needs').sort == %w[gate publish-production-mcp publis
 publish_job_names = %w[
   publish-prerelease
   publish-prerelease-android
-  publish-staging-server
-  publish-staging-relay
-  publish-staging-mcp
   publish-production-server
   publish-production-relay
   publish-production-mcp
@@ -171,8 +168,7 @@ production_context = {
   outputs: { 'version.android_changed' => true, 'version.android_budget_refresh' => false }
 }.freeze
 
-staging_publishers = %w[publish-prerelease publish-staging-server publish-staging-relay publish-staging-mcp]
-staging_publishers << 'publish-prerelease-android'
+staging_publishers = %w[publish-prerelease publish-prerelease-android]
 production_publishers = %w[publish-production-server publish-production-relay publish-production-mcp stable-release]
 staging_publishers.each do |job_name|
   condition = publish_conditions.fetch(job_name)

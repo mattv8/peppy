@@ -152,7 +152,6 @@ async fn run_owner_enrollment_smoke() {
             readiness_timeout: Duration::from_secs(5),
         }),
         public_api_url: Some(CANONICAL_ORIGIN.parse().unwrap()),
-        public_attachment_url: None,
         vault_attachment_quota_bytes: 512 * 1024 * 1024,
         trusted_proxy_cidrs: vec![],
         replay_retention: Duration::from_secs(60),

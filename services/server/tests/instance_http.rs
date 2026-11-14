@@ -191,7 +191,6 @@ fn config(_pool: PgPool) -> Config {
         release_identity: "instance-http-test".into(),
         s3: None,
         public_api_url: Some(Url::parse(ORIGIN).unwrap()),
-        public_attachment_url: None,
         vault_attachment_quota_bytes: 123_456,
         trusted_proxy_cidrs: Vec::new(),
         replay_retention: Duration::from_secs(7 * 86_400),

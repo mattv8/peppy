@@ -7,7 +7,6 @@ services:
         condition: service_healthy
     environment:
       PUBLIC_HOST: ${PUBLIC_HOST:?set the externally reachable HTTPS hostname}
-      WEB_CLIENT_HOST: ${WEB_CLIENT_HOST:-}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-64MB}
     configs:
       - source: caddyfile-template
@@ -73,10 +72,6 @@ configs:
 
       : "$${PUBLIC_HOST:?set PUBLIC_HOST}"
       validate_host "$$PUBLIC_HOST"
-
-      if [ -n "$${WEB_CLIENT_HOST:-}" ]; then
-          printf 'peppy-caddy: WEB_CLIENT_HOST is retired; serve the UI at https://%s/ and remove the legacy hostname and DNS record.\n' "$$PUBLIC_HOST" >&2
-      fi
 
       config=$$(mktemp)
       trap 'rm -f "$$config"' EXIT

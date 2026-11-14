@@ -13,7 +13,7 @@ import infra.dev.dev_tls as dev_tls
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "infra/dev/dev_tls.py"
-CONFIGURATION_VARIABLES = ("API_HOST_PORT", "PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL", "PEPPY_DEV_CONFIG_ROOT", "PEPPY_DEV_TLS_DIR", "PEPPY_SOURCE_TREE", "DEBUG")
+CONFIGURATION_VARIABLES = ("API_HOST_PORT", "PUBLIC_API_URL", "PEPPY_DEV_CONFIG_ROOT", "PEPPY_DEV_TLS_DIR", "PEPPY_SOURCE_TREE", "DEBUG")
 
 
 def run_dev_tls(script, *arguments, **environment):
@@ -318,7 +318,7 @@ subjectAltName = IP:127.0.0.1,IP:::1,IP:10.0.2.2
                     dev_tls.compose_arguments(dotenv, ["config"], False)
             self.assertEqual(captured[0]["PUBLIC_API_URL"], "https://api.example.test/base?version=1")
 
-    def test_compose_normalizes_loopback_attachment_url_without_dropping_path(self):
+    def test_compose_ignores_stale_attachment_url(self):
         with tempfile.TemporaryDirectory() as directory:
             dotenv = Path(directory) / ".env"
             dotenv.write_text("DEBUG=true\nAPI_HOST_PORT=7100\nPUBLIC_ATTACHMENT_URL=http://127.0.0.1:7000/files?version=1\n")
@@ -331,7 +331,7 @@ subjectAltName = IP:127.0.0.1,IP:::1,IP:10.0.2.2
             with mock.patch.object(dev_tls.os, "execvpe", capture):
                 with self.assertRaisesRegex(RuntimeError, "captured"):
                     dev_tls.compose_arguments(dotenv, ["config"], False)
-            self.assertEqual(captured[0]["PUBLIC_ATTACHMENT_URL"], "https://127.0.0.1:7100/files?version=1")
+            self.assertNotIn("PUBLIC_ATTACHMENT_URL", captured[0])
 
 
 class ConfigurationRootTests(unittest.TestCase):

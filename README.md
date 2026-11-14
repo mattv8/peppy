@@ -104,10 +104,16 @@ The Compose file needs only a `.env` beside it.
 
    In `.env`:
 
-   - Set `PEPPY_ENV=production`.
-   - Replace `POSTGRES_PASSWORD`, `PEPPY_RUNTIME_DB_PASSWORD`, `PEPPY_MAINTENANCE_DB_PASSWORD`, `S3_ACCESS_KEY`, and `S3_SECRET_KEY` with long random values. The three database passwords can contain only letters, digits, and `.` `_` `~` `-`.
-   - Set `PEPPY_SERVER_IMAGE` to the release's `hub.docker.visnovsky.us/library/peppy-server@sha256:...` digest. Verify it first, as the [Community image guide](.agents/ops/backup-restore.md#prebuilt-community-edition) describes.
+   - Set `PUBLIC_HOST` to your hostname.
+   - Set `POSTGRES_PASSWORD`, `PEPPY_RUNTIME_DB_PASSWORD`, `PEPPY_MAINTENANCE_DB_PASSWORD`, and `S3_SECRET_KEY` to long random values. The three database passwords can contain only letters, digits, and `.` `_` `~` `-`.
    - Set `PEPPY_SETUP_TOKEN` if you want setup to require a code. See [First-run setup](#first-run-setup).
+
+   These are the five required values. `PUBLIC_API_URL` defaults to
+   `https://PUBLIC_HOST`, and `PEPPY_ENV` defaults to `production`. The database
+   names and users, database-role names, and `S3_ACCESS_KEY` use their defaults;
+   change them only before the first start. Compose uses the current stable
+   `:latest` server image by default. You may pin `PEPPY_SERVER_IMAGE` or
+   `PEPPY_MCP_IMAGE` to a version tag or digest instead.
 
 2. Start the server.
 
@@ -117,7 +123,7 @@ The Compose file needs only a `.env` beside it.
 
    It listens on `http://127.0.0.1:7000` and serves the browser client at that address.
 
-3. Add HTTPS so other devices can connect. Set `PUBLIC_HOST` to your hostname, set `PUBLIC_API_URL` and `PUBLIC_ATTACHMENT_URL` to its `https://` address, then add the Caddy overlay.
+3. Add HTTPS so other devices can connect. Add the Caddy overlay.
 
    ```sh
    docker compose -f docker-compose.yml -f infra/compose/compose.caddy.yml up -d
@@ -177,7 +183,21 @@ Read the [backup and restore guide](.agents/ops/backup-restore.md) before you re
 
 ### Update
 
-Back up first. Verify the new release's signature and set `PEPPY_SERVER_IMAGE` to its digest. Existing self-hosters should note that `infra/compose/compose.community.yml` is gone; the root file now replaces it. The [backup and restore guide](.agents/ops/backup-restore.md) and the [release update guide](.agents/ops/release-updates.md) have the details.
+Back up first. If `.env` sets `PEPPY_SERVER_IMAGE` or `PEPPY_MCP_IMAGE`, change
+them to the release you want, or delete them to follow `:latest`; a pinned image
+does not change on `pull`. Then pull and recreate with the same Compose files you
+started with, for example with the HTTPS and MCP overlays:
+
+```sh
+docker compose -f docker-compose.yml -f infra/compose/compose.caddy.yml -f infra/compose/compose.mcp.yml pull
+docker compose -f docker-compose.yml -f infra/compose/compose.caddy.yml -f infra/compose/compose.mcp.yml up -d
+```
+
+Leaving out an overlay you use recreates `api` without it; dropping the MCP
+overlay disconnects the worker. The `:latest` tag moves with each stable
+release. Migrations cannot be rolled back, so keep the backup until you confirm
+the update. The [backup and restore guide](.agents/ops/backup-restore.md)
+and the [release update guide](.agents/ops/release-updates.md) have the details.
 
 Peppy runs on a single node. It is not a high-availability deployment.
 

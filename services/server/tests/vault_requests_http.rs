@@ -64,7 +64,6 @@ impl Fixture {
                 release_identity: "vault-requests-http-test".into(),
                 s3: None,
                 public_api_url: Some(Url::parse("http://localhost:3000").unwrap()),
-                public_attachment_url: None,
                 vault_attachment_quota_bytes: 123_456,
                 trusted_proxy_cidrs: vec![],
                 replay_retention: Duration::from_secs(7 * 86_400),

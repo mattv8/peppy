@@ -135,7 +135,6 @@ fn config() -> Config {
         release_identity: "admission-security-test".into(),
         s3: None,
         public_api_url: Some(Url::parse(ORIGIN).unwrap()),
-        public_attachment_url: None,
         vault_attachment_quota_bytes: 1,
         trusted_proxy_cidrs: Vec::new(),
         replay_retention: Duration::from_secs(60),

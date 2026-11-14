@@ -15,7 +15,6 @@ export S3_ACCESS_KEY='peppy-test-access'
 export S3_SECRET_KEY='peppy-test-secret'
 export S3_BUCKET='peppy-test'
 export PUBLIC_API_URL='http://127.0.0.1:8080'
-export PUBLIC_ATTACHMENT_URL='http://127.0.0.1:8080'
 
 PEPPY_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export PEPPY_REPO_ROOT
