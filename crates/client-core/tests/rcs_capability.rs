@@ -1611,13 +1611,23 @@ fn unchanged_eligibility_is_published_once_until_the_republish_floor_elapses() {
             .unwrap(),
         1
     );
-    let queued = client.pending_outbox_count().unwrap();
     let first = client
         .rcs_eligibility_projection(conversation, config.device_id, 1_000)
         .unwrap()
         .unwrap();
 
     let before_floor = 1_000 + RCS_ELIGIBILITY_REPUBLISH_FLOOR_MS - 1;
+    client
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Linked,
+            true,
+            true,
+            true,
+            before_floor,
+            before_floor,
+        )
+        .unwrap();
+    let queued = client.pending_outbox_count().unwrap();
     assert_eq!(
         client
             .publish_rcs_eligibility_from_lifecycle(&[conversation], before_floor)
@@ -1641,6 +1651,216 @@ fn unchanged_eligibility_is_published_once_until_the_republish_floor_elapses() {
         1
     );
     assert_eq!(client.pending_outbox_count().unwrap(), queued + 1);
+}
+
+#[test]
+fn unchanged_eligibility_is_not_republished_on_a_refresh_cadence() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-eligibility-refresh-cadence", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+    let started = 1_000;
+
+    client
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Linked,
+            true,
+            true,
+            true,
+            started,
+            started,
+        )
+        .unwrap();
+    assert_eq!(
+        client
+            .publish_rcs_eligibility_from_lifecycle(&[conversation], started)
+            .unwrap(),
+        1
+    );
+    let first = client
+        .rcs_eligibility_projection(conversation, config.device_id, started)
+        .unwrap()
+        .unwrap();
+    let mut outbox = client.pending_outbox_count().unwrap();
+
+    for now in [
+        started + 16 * 60_000,
+        started + 32 * 60_000,
+        started + 48 * 60_000,
+    ] {
+        client
+            .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, now, now)
+            .unwrap();
+        outbox += 1;
+        assert_eq!(client.pending_outbox_count().unwrap(), outbox);
+        assert_eq!(
+            client
+                .publish_rcs_eligibility_from_lifecycle(&[conversation], now)
+                .unwrap(),
+            0
+        );
+        assert_eq!(client.pending_outbox_count().unwrap(), outbox);
+        assert_eq!(
+            client
+                .rcs_eligibility_projection(conversation, config.device_id, now)
+                .unwrap()
+                .unwrap(),
+            first
+        );
+        assert_ne!(first.eligibility, RcsEligibility::Unknown);
+    }
+}
+
+#[test]
+fn a_peer_keeps_old_eligibility_current_across_status_heartbeats() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-eligibility-peer-heartbeats", &vault);
+    let peer = unlocked(&config, &vault);
+    let gateway = DeviceId::new();
+    let conversation = ConversationId::new();
+    let started = 1_000;
+    let initial = [
+        PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload {
+            status: status(gateway, 1, started),
+        }),
+        PrivatePayload::RcsLinkEligibility(RcsLinkEligibilityPayload {
+            eligibility: eligibility(gateway, conversation, 1, started),
+        }),
+    ];
+
+    for (sequence, payload) in initial.into_iter().enumerate() {
+        peer.ingest(
+            &sealed(&vault, gateway, sequence as u64 + 1, payload),
+            Cursor(sequence as u64 + 1),
+        )
+        .unwrap();
+    }
+    assert_eq!(settle(&peer).quarantined, 0);
+
+    for (revision, now) in (1..=12).zip((1..=12).map(|hour| started + hour * 10 * 60_000)) {
+        let mut heartbeat = status(gateway, revision + 1, now);
+        heartbeat.linked_since_ms = Some(started);
+        peer.ingest(
+            &sealed(
+                &vault,
+                gateway,
+                revision + 2,
+                PrivatePayload::RcsLinkStatus(RcsLinkStatusPayload { status: heartbeat }),
+            ),
+            Cursor(revision + 2),
+        )
+        .unwrap();
+        assert_eq!(settle(&peer).quarantined, 0);
+        assert_ne!(
+            peer.rcs_eligibility_projection(conversation, gateway, now)
+                .unwrap()
+                .unwrap()
+                .eligibility,
+            RcsEligibility::Unknown
+        );
+    }
+}
+
+#[test]
+fn changed_eligibility_is_published_immediately_despite_the_floor() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-eligibility-change", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = client
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "+12025550123".into(),
+            body: String::new(),
+            provider_message_id: Some("provider-eligibility-change".into()),
+            imported: true,
+        })
+        .unwrap()
+        .conversation_id;
+
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+        .unwrap();
+    assert_eq!(
+        client
+            .publish_rcs_eligibility_from_lifecycle(&[conversation], 1_000)
+            .unwrap(),
+        1
+    );
+    assert!(matches!(
+        client
+            .verify_rcs_mapping(&mapping_observation("+12025550123"), 1_001)
+            .unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    assert_eq!(
+        client
+            .publish_rcs_eligibility_from_lifecycle(&[conversation], 1_001)
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn eligibility_published_before_linked_since_is_republished_despite_the_floor() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-eligibility-relink", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+        .unwrap();
+    assert_eq!(
+        client
+            .publish_rcs_eligibility_from_lifecycle(&[conversation], 1_000)
+            .unwrap(),
+        1
+    );
+    client
+        .record_rcs_link_lifecycle(
+            RcsCapabilityState::Unlinked,
+            false,
+            false,
+            false,
+            1_001,
+            1_001,
+        )
+        .unwrap();
+    let before_relink = client.pending_outbox_count().unwrap();
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_002, 1_002)
+        .unwrap();
+
+    assert_eq!(client.pending_outbox_count().unwrap(), before_relink + 2);
+}
+
+#[test]
+fn future_dated_publication_is_republished() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "rcs-eligibility-clock-rollback", &vault);
+    let client = unlocked(&config, &vault);
+    let conversation = ConversationId::new();
+
+    client
+        .record_rcs_link_lifecycle(RcsCapabilityState::Linked, true, true, true, 1_000, 1_000)
+        .unwrap();
+    assert_eq!(
+        client
+            .publish_rcs_eligibility_from_lifecycle(&[conversation], 1_001)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        client
+            .publish_rcs_eligibility_from_lifecycle(&[conversation], 1_000)
+            .unwrap(),
+        1
+    );
 }
 
 #[test]
