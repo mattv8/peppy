@@ -1,10 +1,7 @@
 # Same-server MCP worker overlay. Pass root docker-compose.yml first.
-x-mcp-image: &mcp-image
-  image: ${PEPPY_MCP_IMAGE:-hub.docker.visnovsky.us/library/peppy-mcp:latest}
-
 services:
   mcp-state-init:
-    <<: *mcp-image
+    image: ${PEPPY_MCP_IMAGE:-hub.docker.visnovsky.us/library/peppy-mcp:latest}
     user: "0:0"
     entrypoint: ["/bin/sh", "-ec"]
     # A one-element list keeps the script intact; Compose splits a string command into argv words.
@@ -21,14 +18,10 @@ services:
     restart: "no"
 
   mcp:
-    <<: *mcp-image
+    image: ${PEPPY_MCP_IMAGE:-hub.docker.visnovsky.us/library/peppy-mcp:latest}
     environment:
-      PEPPY_MCP_BIND_ADDR: 0.0.0.0:8091
-      PEPPY_MCP_STATE_DIR: /var/lib/peppy-mcp
       PEPPY_MCP_API_URL: http://api:8080
       PUBLIC_API_URL: ${PUBLIC_API_URL:-https://${PUBLIC_HOST:-}}
-      PEPPY_MCP_WORKER_TOKEN_FILE: /run/peppy-mcp/control-token
-      PEPPY_MCP_KEY_FILE: /var/lib/peppy-mcp/storage-key
     depends_on:
       mcp-state-init:
         condition: service_completed_successfully

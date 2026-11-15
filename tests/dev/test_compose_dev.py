@@ -150,8 +150,8 @@ class ComposeDevelopmentTests(unittest.TestCase):
         self.assertTrue(web_mount["read_only"])
         self.assertEqual(dev["healthcheck"]["test"], ["CMD", "/home/developer/.local/lib/peppy/peppy-server", "healthcheck"])
         self.assertEqual(dev["healthcheck"]["start_period"], "30m0s")
-        self.assertEqual(dev["environment"]["PEPPY_REPLAY_RETENTION_DAYS"], "30")
-        self.assertEqual(dev["environment"]["VAULT_ATTACHMENT_QUOTA_BYTES"], "536870912")
+        self.assertIsNone(dev["environment"].get("PEPPY_REPLAY_RETENTION_DAYS"))
+        self.assertIsNone(dev["environment"].get("VAULT_ATTACHMENT_QUOTA_BYTES"))
         android = self.render("docker-compose.yml", "infra/compose/compose.dev.yml", profile="android")
         self.assertEqual(android.returncode, 0, android.stderr)
         android_service = json.loads(android.stdout)["services"]["android"]
@@ -356,12 +356,48 @@ class ComposeDevelopmentTests(unittest.TestCase):
         self.assertEqual(self.database_credentials(migrate["DATABASE_URL"]), runtime)
         self.assertEqual(self.database_credentials(migrate["DATABASE_MIGRATION_URL"]), owner)
         self.assertEqual(self.database_credentials(migrate["MAINTENANCE_DATABASE_URL"]), maintenance)
+        self.assertEqual(
+            set(migrate),
+            {"DATABASE_URL", "DATABASE_MIGRATION_URL", "MAINTENANCE_DATABASE_URL"},
+        )
+        self.assertNotIn("S3_SECRET_KEY", migrate)
+        self.assertNotIn("PUBLIC_API_URL", migrate)
 
         api = services["api"]["environment"]
         self.assertEqual(self.database_credentials(api["DATABASE_URL"]), runtime)
         self.assertEqual(self.database_credentials(api["MAINTENANCE_DATABASE_URL"]), maintenance)
         self.assertNotIn("DATABASE_MIGRATION_URL", api)
         self.assertNotIn("synthetic-password", json.dumps(api))
+        self.assertIsNone(api.get("PEPPY_REPLAY_RETENTION_DAYS"))
+        self.assertIsNone(api.get("VAULT_ATTACHMENT_QUOTA_BYTES"))
+        self.assertFalse({"RUNNING_IN_CONTAINER", "PEPPY_RLS_ENFORCED", "BIND_ADDR"} & set(api))
+
+        forwarded = self.render(
+            "docker-compose.yml",
+            PEPPY_REPLAY_RETENTION_DAYS="90",
+            VAULT_ATTACHMENT_QUOTA_BYTES="1234",
+        )
+        self.assertEqual(forwarded.returncode, 0, forwarded.stderr)
+        forwarded_api = json.loads(forwarded.stdout)["services"]["api"]["environment"]
+        self.assertEqual(forwarded_api["PEPPY_REPLAY_RETENTION_DAYS"], "90")
+        self.assertEqual(forwarded_api["VAULT_ATTACHMENT_QUOTA_BYTES"], "1234")
+
+    @unittest.skipUnless(compose, "Docker Compose is unavailable")
+    def test_dotenv_server_defaults_pass_through_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dotenv = Path(directory) / ".env"
+            dotenv.write_text("PEPPY_REPLAY_RETENTION_DAYS=\nVAULT_ATTACHMENT_QUOTA_BYTES=1234\n")
+            result = subprocess.run(
+                ["docker", "compose", "--env-file", str(dotenv), "-f", str(ROOT / "docker-compose.yml"), "config", "--format", "json"],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                env=self.synthetic_env(),
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        api = json.loads(result.stdout)["services"]["api"]["environment"]
+        self.assertEqual(api["PEPPY_REPLAY_RETENTION_DAYS"], "")
+        self.assertEqual(api["VAULT_ATTACHMENT_QUOTA_BYTES"], "1234")
 
     @unittest.skipUnless(compose, "Docker Compose is unavailable")
     def test_dev_overlay_separates_runtime_and_owner_database_urls(self):
@@ -475,6 +511,10 @@ class ComposeDevelopmentTests(unittest.TestCase):
         self.assertEqual(config["services"]["mcp-state-init"]["network_mode"], "none")
         self.assertNotIn("networks", config["services"]["mcp-state-init"])
         self.assertNotIn("build", config["services"]["mcp"])
+        self.assertEqual(
+            set(config["services"]["mcp"]["environment"]),
+            {"PEPPY_MCP_API_URL", "PUBLIC_API_URL"},
+        )
 
         overridden = self.render("docker-compose.yml", "infra/compose/compose.mcp.yml", PEPPY_MCP_IMAGE="peppy-mcp:local")
         self.assertEqual(overridden.returncode, 0, overridden.stderr)
