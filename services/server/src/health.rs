@@ -59,11 +59,12 @@ impl StorageReadiness {
         self.is_ready_at(self.started_at.elapsed())
     }
 
+    /// A failed probe alone does not fail readiness; only a last success older
+    /// than `max_age` does, so one slow probe cannot eject a healthy server.
     fn is_ready_at(&self, elapsed: Duration) -> bool {
-        self.latest_probe_succeeded.load(Ordering::Acquire)
-            && elapsed.saturating_sub(Duration::from_millis(
-                self.last_success_millis.load(Ordering::Relaxed),
-            )) <= self.max_age
+        elapsed.saturating_sub(Duration::from_millis(
+            self.last_success_millis.load(Ordering::Relaxed),
+        )) <= self.max_age
     }
 
     fn record_probe(&self, succeeded: bool) -> bool {
@@ -264,7 +265,7 @@ fn storage_ready(
     if let Some(storage) = storage
         && !storage.is_ready()
     {
-        return Err("storage readiness probe is stale or failed".into());
+        return Err("storage readiness probe has not succeeded recently".into());
     }
     Ok(())
 }
@@ -323,7 +324,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_storage_probe_makes_readiness_fail() {
+    async fn storage_probes_failing_past_the_max_age_make_readiness_fail() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind local listener");
@@ -331,34 +332,73 @@ mod tests {
             "http://{}",
             listener.local_addr().expect("listener address")
         );
+        let rejected_probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_rejected_probes = Arc::clone(&rejected_probes);
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept probe");
-            let mut request = [0_u8; 4096];
-            socket
-                .read_exact(&mut request[..1])
-                .await
-                .expect("read probe");
-            socket
-                .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-                .await
-                .expect("write probe response");
+            loop {
+                let (mut socket, _) = listener.accept().await.expect("accept probe");
+                let mut request = [0_u8; 1];
+                socket.read_exact(&mut request).await.expect("read probe");
+                socket
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    .await
+                    .expect("write probe response");
+                server_rejected_probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         });
-        let readiness = Arc::new(StorageReadiness::new(
+        let readiness = Arc::new(StorageReadiness::with_timing(
             storage(&endpoint),
             Duration::from_secs(1),
+            Duration::from_millis(50),
         ));
         spawn_storage_probe_at_interval(Arc::downgrade(&readiness), Duration::from_millis(1));
 
         tokio::time::timeout(Duration::from_secs(1), async {
+            while rejected_probes.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
             while readiness.is_ready() {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
-        .expect("failed probe updates readiness");
+        .expect("rejected probes must not refresh readiness");
 
         assert!(!readiness.is_ready());
-        server.await.expect("probe server");
+        server.abort();
+    }
+
+    #[test]
+    fn failed_storage_probe_keeps_readiness_while_the_last_success_is_fresh() {
+        let max_age = Duration::from_secs(15);
+        let readiness = StorageReadiness::with_timing(
+            storage("http://127.0.0.1:9"),
+            Duration::from_secs(1),
+            max_age,
+        );
+
+        readiness.record_probe(false);
+
+        assert!(readiness.is_ready_at(max_age));
+        assert!(!readiness.is_ready_at(max_age + Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn successful_storage_probe_after_a_failure_restores_readiness() {
+        let max_age = Duration::from_secs(1);
+        let since_start = Duration::from_millis(20);
+        let readiness = StorageReadiness::with_timing(
+            storage("http://127.0.0.1:9"),
+            Duration::from_secs(1),
+            max_age,
+        );
+        std::thread::sleep(since_start);
+        readiness.record_probe(false);
+        assert!(!readiness.is_ready_at(max_age + since_start));
+
+        readiness.record_probe(true);
+
+        assert!(readiness.is_ready_at(max_age + since_start));
     }
 
     #[test]
