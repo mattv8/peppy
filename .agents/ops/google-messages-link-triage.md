@@ -42,8 +42,22 @@ Observed with `content query` on the evidence device. Query IDs, dates, boxes, a
 - A proof is valid for 30 seconds and only against the current link context. The next native attempt in the same batch advances the context and stales it. `RcsNativeSendWork` therefore ends the batch after a carrier-only result (`carrierHandoffRequested`) and the gateway pass sends one carrier message. Expect one carrier message per pass.
 - A one-recipient message that is not plain text (attachment or subject) and has no live mapping is listed as a text candidate for the route decision only (`unattempted_route_probe_message`). It can never be sent as text: prepare and admission still use the strict text loader.
 - `verifySendMapping` is called by both the text and the media coordinator. Its loader must accept any unattempted command (`pending_command_message`). A text-only loader there strands every picture to a mapped chat behind a live mapping, where the carrier is blocked as well.
-- The send needs a complete conversation index. A full scan took about 45 seconds and 46 requests on the evidence device, and prepares are refused while it runs (124). The Go link reuses a complete index for up to ten minutes (`conversationIndexMaxAge`); group creation forces a rescan. Do not add callers that rescan on every readiness pass.
+- The send needs a complete conversation index, and prepares are refused while a scan runs (124). A full scan took about 45 seconds and 46 requests on the evidence device on 2026-11-11, and about 70 seconds and 24 requests on 2026-11-14. Do not add callers that rescan on every readiness pass. See [Conversation index revalidation](#conversation-index-revalidation).
+- A carrier-only proof is decided from the index alone. Only an RCS send fetches its target conversation again before committing (`BindNativeRcsTarget`, `CommitNativeRcs`). An index that is wrong about a chat being absent or unsupported therefore produces an SMS, not a refusal.
 - A subject-only MMS to a number that has an RCS chat has no send path. It is neither text nor media, and the live mapping blocks the carrier.
+
+## Conversation index revalidation
+
+libgm reopens its long-poll stream about every 16 minutes on the evidence device, and the safety patch retires the stream on every reopen, including a clean one. The link used to discard the index on each reopen and at ten minutes of age (`conversationIndexMaxAge`), then list every conversation again. It now keeps a copy of a complete index, the probe basis, and checks it against one page.
+
+- `EnsureConversationIndex` fetches the first inbox page (25 conversations) and adopts the basis when every returned conversation matches it in the fields the index serves to the core (`conversationCandidateRecordFor`). The fresh records replace the kept ones for the returned IDs. Adoption emits 282; a difference or a request error emits 283 and runs the full scan.
+- The basis is captured before the index is invalidated by a clean `StreamRetired`, by `ActiveSessionSet`, by settings that carry SIM cards, and by the ten-minute age limit. `ActiveSessionSet` and the settings follow every reopen as the answer to the link's own session request (`sessionEvidenceRequestLocked`), so they keep an existing basis. Dropping it there would stop every probe.
+- Everything else drops the basis: `ContinuityLost`, a reopen more than 15 seconds after the retire (`conversationProbeMaxGap`), any conversation event, `PhoneNotResponding`, a temporary listen error, `NoDataReceived`, `StreamGap`, old or SIM-less settings, a failed health check, a new run, revoke, and the start of any full scan.
+- `RefreshConversationIndex` always scans. Group creation uses it to see the new group.
+- A full scan runs at least every two hours (`conversationFullScanMaxAge`). An adopted index does not reset that clock.
+- A probe whose page matched but whose result could not be published, because the stream epoch moved during the request, returns the stale code and keeps the basis. The settings event that lands about two seconds after a reopen does this. The event's own `index/stale` starts the next readiness pass, which probes again.
+
+What the probe cannot see: a change to a conversation outside the first inbox page that happened during a reopen and that Google did not redeliver. Such a record can be stale for up to two hours. While it is, a message to a chat that only just became RCS-capable can go out as SMS, outbound typing can use the chat's previous SIM (`typing.go` reads the cached `DefaultOutgoingID`), and group reconcile and eligibility for that chat can be late. The owner accepted this on 2026-11-15. A fresh fetch before a carrier-only decision would remove the SMS case and is not built.
 
 ## Reading the link's diagnostics
 
@@ -57,6 +71,9 @@ Diagnostics are off unless enabled in **Settings → Diagnostics**. When on, eac
 | 84, 94, 97 before a 79 | Transient refusals (begin, facts, target binding). `BlockedSendRetry` retries with backoff. Persistent repeats are a bug. |
 | 93 with a code from 210–224 | The core refused to bind the Google chat to the Peppy conversation; the second code is the reason. For a send, 217 means the number index has no entry for the recipient, 218 that the entry is another conversation, and 224 that the command's recipient is not the chat's participant. 222 comes from the receive-side thread guard (the indexed thread also carries someone else). |
 | 124 | The conversation index is incomplete or being rescanned. |
+| 282 after 26, 48, 199, 33 | A stream reopen followed by a one-page probe that adopted the kept index. Expect one or two list requests (178) per reopen. |
+| 283, then many 168 and 171 and a final 169 to 173 | The probe found a difference or failed, and a full scan ran (every inbox page, then archive and spam). A probe on its own shows one 168 and one 171. On every reopen it means the first inbox page never matches the kept index. See the evidence boundary. |
+| 161 between a probe's list request and a later 282 | The probe matched but the stream epoch moved during the request. The next readiness pass probes again. |
 | 226 | A mirrored text row was skipped because the link already delivered it. |
 | 231 on every mirrored text | The link did not deliver, or its IDs do not match the row's ID. See the evidence boundary. |
 | 230 | A mirrored row is waiting one capture pass for the link. |
@@ -103,5 +120,7 @@ Not established:
 - Which libgm field equals the ID in a mirrored row: `messageID`, `anotherMessageID.messageID`, or `anotherMessageID.anotherID`. Go reports all three and the core matches any. If none matches, texts in a link-owned chat are still captured twice (231, never 226). Once a device shows which field matches, report only that one.
 - The route probe and the media verification fix on a device. Both are covered by tests only.
 - Group RCS on a device.
+- How often the one-page probe adopts on a device (282 against 283). It depends on Google Messages returning the same served fields for an unchanged conversation in two list calls. Tests cover the logic only.
+- Whether Google redelivers a conversation event sent during a reopen of a few seconds.
 - Row shapes on other devices, Android versions, carriers, or Google Messages versions.
 - Why pictures that had been waiting for hours left the queue after a reboot with no outgoing row in the provider. The log for that period was lost.

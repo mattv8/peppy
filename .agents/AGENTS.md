@@ -382,6 +382,26 @@ This reference records non-obvious Peppy domain constraints.
   [gateway scheduling](../apps/android/app/src/main/java/dev/peppy/mobile/GatewayWork.kt),
   [MMS capture](../apps/android/app/src/main/java/dev/peppy/mobile/MmsCaptureWork.kt),
   and [MMS previews](../apps/android/app/src/main/java/dev/peppy/mobile/mms/MmsMediaPreview.kt).
+- Idle loops removed from a linked gateway phone; do not reintroduce them.
+  The server replays every committed event to its producer's socket, so an
+  own-producer `event` frame does not schedule a pass
+  (`RemoteMessagingProtocol.isOwnEvent`). Own events still arrive through
+  HTTP replay, and a frame over 64 KiB still schedules a pass. One pass
+  receives up to four replay pages (`RECEIVE_PAGES`), which equals its apply
+  budget. An unchanged RCS eligibility is republished at most once per
+  `RCS_ELIGIBILITY_REPUBLISH_FLOOR_MS` (24 hours): peers keep an eligibility
+  current from the gateway status heartbeat and the linked-since fence, so
+  never add a reader that expires an eligibility by its own `observed_at_ms`.
+  The Go link revalidates its conversation index with one inbox page after a
+  stream reopen instead of listing every conversation; see
+  [index revalidation](ops/google-messages-link-triage.md#conversation-index-revalidation)
+  for its rules and its accepted routing risk. The loops were measured on
+  one Pixel 7 on 2026-11-14 (3,322 gateway enqueues, 3,030 single-envelope
+  uploads, and 623 conversation list requests in 6.5 idle hours). The effect
+  of the fixes on a device is not established. See
+  [socket service](../apps/android/app/src/main/java/dev/peppy/mobile/RemoteMessagingService.kt),
+  [eligibility constants](../crates/client-core/src/rcs_capability.rs), and
+  [conversation index](../apps/android/googlemessages/gmlink/conversations.go).
 - Encrypted media is published with an atomic no-replace rename first;
   SELinux denies `hard_link` for app data on current Android, so the link
   path is a fallback, not the primary. See
