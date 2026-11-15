@@ -50,6 +50,7 @@ class GatewaySyncTest : GatewayTestBase() {
     private var events = JSONArray()
     private var snapshot = JSONArray()
     private var eventsStatus = 200
+    private var eventResponder: ((String) -> LoopbackHttpServer.Response)? = null
     private var uploadResponse = LoopbackHttpServer.Response(200, """{"cursor":"9","duplicate":false}""")
     /** Responses consumed (one each) before normal snapshot-record pages are served. */
     private val brokenRecordPages = ArrayDeque<LoopbackHttpServer.Response>()
@@ -76,7 +77,7 @@ class GatewaySyncTest : GatewayTestBase() {
             request.method == "POST" && path == "/v1/capabilities" -> capabilitiesResponse
             request.method == "POST" && path == "/v1/compaction/capability" -> compactionCapabilityResponse
             request.method == "GET" && path == "/v1/events" ->
-                if (eventsStatus == 200) LoopbackHttpServer.Response(200, JSONObject().put("events", events).toString())
+                eventResponder?.invoke(request.target) ?: if (eventsStatus == 200) LoopbackHttpServer.Response(200, JSONObject().put("events", events).toString())
                 else LoopbackHttpServer.Response(eventsStatus, """{"code":"resync_required"}""")
             request.method == "POST" && path == "/v1/events" -> uploadResponder?.invoke() ?: uploadResponse
             request.method == "GET" && path == "/v1/snapshot" -> LoopbackHttpServer.Response(
@@ -111,6 +112,22 @@ class GatewaySyncTest : GatewayTestBase() {
     private val routes = SimRoutes.current(3)
 
     private fun record(cursor: Int, wire: String) = JSONObject().put("cursor", cursor.toString()).put("envelope", JSONObject(wire))
+
+    private fun replayRecords(count: Int): List<JSONObject> {
+        val wires = List((count + GatewaySync.EVENT_PAGE - 1) / GatewaySync.EVENT_PAGE) { page ->
+            desktopCommandEnvelope(SimRoutes.routeId(3), "receive backlog page $page").second
+        }
+        return List(count) { index -> record(index + 1, wires[index / GatewaySync.EVENT_PAGE]) }
+    }
+
+    private fun serveEventPages(records: List<JSONObject>) {
+        eventResponder = { target ->
+            val after = Regex("after=([0-9]+)").find(target)!!.groupValues[1].toInt()
+            val page = JSONArray()
+            records.filter { it.getString("cursor").toInt() > after }.take(50).forEach(page::put)
+            LoopbackHttpServer.Response(200, JSONObject().put("events", page).toString())
+        }
+    }
 
     private fun sync(
         client: NativeClientInterface,
@@ -514,6 +531,75 @@ class GatewaySyncTest : GatewayTestBase() {
         assertNotNull("transient failure is reported for retry", result.failure)
         assertEquals(1, uploads())
         assertTrue(client.pendingOutboxJsonBatch(10uL).isEmpty())
+    }
+
+    @Test
+    fun receiveDrains120EventsAcrossThreePagesInOnePass() {
+        val client = live()
+        serveEventPages(replayRecords(120))
+
+        val result = sync(client).run()
+
+        assertFalse(result.more)
+        assertTrue(result.commandsProgressed)
+        assertEquals("120", client.receiveCursor())
+        assertEquals(3, requests.count { it.first.startsWith("GET /v1/events") })
+    }
+
+    @Test
+    fun receiveLeavesMoreAfterFourFullPages() {
+        val client = live()
+        serveEventPages(replayRecords(200))
+
+        val result = sync(client).run()
+
+        assertTrue(result.more)
+        assertTrue(result.commandsProgressed)
+        assertEquals("200", client.receiveCursor())
+        assertEquals(4, requests.count { it.first.startsWith("GET /v1/events") })
+    }
+
+    @Test
+    fun receiveStopsAfterAShortFirstPage() {
+        val client = live()
+        serveEventPages(replayRecords(20))
+
+        val result = sync(client).run()
+
+        assertFalse(result.more)
+        assertEquals("20", client.receiveCursor())
+        assertEquals(1, requests.count { it.first.startsWith("GET /v1/events") })
+    }
+
+    @Test
+    fun receiveStartsResyncWhenTheSecondPageReturns409() {
+        val client = live()
+        val firstPage = replayRecords(50)
+        var eventRequests = 0
+        eventResponder = {
+            if (++eventRequests == 1) LoopbackHttpServer.Response(200, JSONObject().put("events", JSONArray(firstPage)).toString())
+            else LoopbackHttpServer.Response(409, """{"code":"resync_required"}""")
+        }
+
+        val result = sync(client).run()
+
+        assertNull(result.failure)
+        assertEquals(2, eventRequests)
+        assertEquals("50", client.receiveCursor())
+        assertTrue(requests.any { it.first == "GET /v1/snapshot" })
+    }
+
+    @Test
+    fun receiveStopsWhenAFullPageDoesNotAdvanceTheCursor() {
+        val client = live()
+        val page = JSONArray(replayRecords(50))
+        eventResponder = { LoopbackHttpServer.Response(200, JSONObject().put("events", page).toString()) }
+
+        val result = sync(client).run()
+
+        assertTrue(result.more)
+        assertEquals("50", client.receiveCursor())
+        assertEquals(2, requests.count { it.first.startsWith("GET /v1/events") })
     }
 
     @Test
