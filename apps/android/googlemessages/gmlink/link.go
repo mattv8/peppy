@@ -93,6 +93,8 @@ type Link struct {
 	indexRevision                uint64
 	conversationIndexComplete    bool
 	conversationIndexScannedAt   time.Time
+	conversationFullScanAt       time.Time
+	conversationProbeBasis       *conversationProbeBasis
 	conversationIndexGeneration  uint64
 	conversationIndexStreamEpoch uint64
 	pendingConversationEvents    uint64
@@ -596,49 +598,58 @@ func (link *Link) CheckHealth() int64 {
 // RefreshConversationIndex refreshes the bounded local conversation index.
 // It requires runtime-minted index verification for the current stream.
 func (link *Link) RefreshConversationIndex() string {
+	link.mu.Lock()
+	link.clearConversationProbeBasisLocked()
+	link.mu.Unlock()
+	return refreshConversationIndexJSON(link.withConversationIndexRefresh(func(runCtx context.Context, generation, streamEpoch uint64, load conversationPageLoader) string {
+		return link.refreshConversationIndexWith(runCtx, generation, streamEpoch, load)
+	}))
+}
+
+func (link *Link) withConversationIndexRefresh(refresh func(context.Context, uint64, uint64, conversationPageLoader) string) string {
 	if !link.hasM2Verification() {
 		link.emit("conversation_refresh", "verification_unavailable", 0)
-		return refreshConversationIndexJSON("m2_verification_required")
+		return "m2_verification_required"
 	}
 	link.rpcMu.Lock()
 	defer link.rpcMu.Unlock()
 	client, runCtx, generation, streamEpoch, ok := link.activeRuntime()
 	if !ok {
 		link.emit("conversation_refresh", "runtime_unavailable", 0)
-		return refreshConversationIndexJSON("link_unavailable")
+		return "link_unavailable"
 	}
 	if !link.hasM2Verification() {
 		link.emit("conversation_refresh", "verification_unavailable", 0)
-		return refreshConversationIndexJSON("m2_verification_required")
+		return "m2_verification_required"
 	}
 	if !link.awaitConversationEventsApplied(runCtx) {
 		link.emit("conversation_refresh", "pending_events", 0)
-		return refreshConversationIndexJSON("pending_conversation_events")
+		return "pending_conversation_events"
 	}
 	load := func(ctx context.Context, request *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
 		return link.loadConversationPageWithDiagnostics(ctx, generation, request, client.ListConversations)
 	}
-	return refreshConversationIndexJSON(link.refreshConversationIndexWith(runCtx, generation, streamEpoch, load))
+	return refresh(runCtx, generation, streamEpoch, load)
 }
 
-// EnsureConversationIndex reports ok when the published index is still usable and rescans otherwise.
-// Updates on the open stream are applied to the index in place, and a stream gap discards it, so a
-// rescan of a complete index only repeats work and refuses sends while it runs.
+// EnsureConversationIndex reports ok when the published index is still usable and revalidates it otherwise.
 func (link *Link) EnsureConversationIndex() string {
 	if link.hasM2Verification() && link.conversationIndexUsable() {
 		return refreshConversationIndexJSON("")
 	}
-	return link.RefreshConversationIndex()
+	return refreshConversationIndexJSON(link.withConversationIndexRefresh(link.ensureConversationIndexWith))
 }
 
 func (link *Link) conversationIndexUsable() bool {
 	link.mu.Lock()
 	defer link.mu.Unlock()
-	age := link.nowForTicketLocked().Sub(link.conversationIndexScannedAt)
+	now := link.nowForTicketLocked()
+	age := now.Sub(link.conversationIndexScannedAt)
 	return !link.closed && link.running && link.runGeneration == link.generation &&
 		link.conversationIndexComplete && link.conversationIndexGeneration == link.generation &&
 		link.conversationIndexStreamEpoch == link.streamEpoch && link.pendingConversationEvents == 0 &&
-		link.hasIndexVerificationLocked() && age >= 0 && age < conversationIndexMaxAge
+		link.hasIndexVerificationLocked() && age >= 0 && age < conversationIndexMaxAge &&
+		fullScanWithinCeiling(link.conversationFullScanAt, now)
 }
 
 // refreshConversationIndexWith publishes one complete index. The caller holds rpcMu.
@@ -657,9 +668,68 @@ func (link *Link) refreshConversationIndexWith(runCtx context.Context, generatio
 	}
 }
 
+// ensureConversationIndexWith revalidates a retained basis with one inbox page and falls back to a full scan.
+// A complete index that has aged out of reuse is retained as a basis first, before it is invalidated.
+func (link *Link) ensureConversationIndexWith(runCtx context.Context, generation, streamEpoch uint64, load conversationPageLoader) string {
+	link.mu.Lock()
+	link.retainAgedConversationProbeBasisLocked()
+	link.mu.Unlock()
+	indexRevision, started := link.beginConversationIndexRefreshFor(generation, streamEpoch)
+	if !started {
+		link.emit("conversation_refresh", "publication_stale", 0)
+		return "conversation_lookup_stale"
+	}
+	link.mu.Lock()
+	basis := link.conversationProbeBasis
+	usable := link.conversationProbeBasisUsableLocked()
+	link.mu.Unlock()
+	if usable {
+		ctx, cancel := context.WithTimeout(runCtx, conversationPageTimeout)
+		response, err := load(ctx, &gmproto.ListConversationsRequest{Count: conversationPageSize, Folder: gmproto.ListConversationsRequest_INBOX})
+		if err == nil && response != nil && link.conversationProbeMatches(basis, response) {
+			outcome := link.replaceProbedConversationIndexForContext(ctx, generation, streamEpoch, indexRevision, basis, link.probeConversations(basis, response))
+			cancel()
+			switch outcome {
+			case probeAdopted:
+				link.emit("conversation_refresh", "probe_adopted", 0)
+				return "ok"
+			case probeSuperseded:
+				link.emit("conversation_refresh", "publication_stale", 0)
+				return "conversation_lookup_stale"
+			}
+		} else {
+			cancel()
+		}
+		link.emit("conversation_refresh", "probe_missed", 0)
+	}
+	// The full scan drops any basis in the critical section that begins it.
+	return link.refreshConversationIndexWith(runCtx, generation, streamEpoch, load)
+}
+
+// retainAgedConversationProbeBasisLocked keeps a complete index that has aged out of reuse as a basis. It
+// captures nothing once the full-scan ceiling has passed, so an expired index cannot become a usable basis.
+func (link *Link) retainAgedConversationProbeBasisLocked() {
+	now := link.nowForTicketLocked()
+	if !link.conversationIndexCurrentLocked() || now.Sub(link.conversationIndexScannedAt) < conversationIndexMaxAge || !fullScanWithinCeiling(link.conversationFullScanAt, now) {
+		return
+	}
+	if basis := link.captureConversationProbeBasisLocked(false); basis != nil {
+		link.conversationProbeBasis = basis
+	}
+}
+
+func (link *Link) invalidateEvidencePreservingConversationProbeBasisLocked() {
+	basis := link.captureConversationProbeBasisLocked(false)
+	if basis == nil {
+		basis = link.conversationProbeBasis
+	}
+	link.invalidateEvidenceLocked()
+	link.conversationProbeBasis = basis
+}
+
 // scanConversationIndexOnce reports superseded when a finished scan could not be published.
 func (link *Link) scanConversationIndexOnce(runCtx context.Context, generation, streamEpoch uint64, load conversationPageLoader) (code string, superseded bool) {
-	indexRevision, started := link.beginConversationIndexRefreshFor(generation, streamEpoch)
+	indexRevision, started := link.beginConversationScanFor(generation, streamEpoch)
 	if !started {
 		link.emit("conversation_refresh", "publication_stale", 0)
 		return "conversation_lookup_stale", false
@@ -1027,6 +1097,7 @@ func (link *Link) stopRunLocked() {
 // can observe settings or readiness. It cannot recall bytes already admitted to
 // libgm's writer; callers must treat an admitted request as outcome-unknown.
 func (link *Link) invalidateEvidenceLocked() {
+	link.clearConversationProbeBasisLocked()
 	link.streamEpoch++
 	link.invalidateSettingsLocked()
 	link.invalidateConversationIndexLocked()
@@ -1197,6 +1268,9 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 		if link.streamOpen {
 			link.retirePhysicalSourceLocked()
 		}
+		if link.conversationProbeBasis != nil && link.conversationProbeBasis.retiredAt && !link.conversationProbeBasisUsableLocked() {
+			link.clearConversationProbeBasisLocked()
+		}
 		link.streamSource = value.Source
 		link.streamOpen = true
 		link.clearConversationIndexLocked()
@@ -1240,14 +1314,24 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 		return
 	}
 	switch event.(type) {
-	case *libgm.StreamRetired, *libgm.ContinuityLost:
+	case *libgm.StreamRetired:
+		basis := link.captureConversationProbeBasisLocked(true)
+		link.retirePhysicalSourceLocked()
+		if basis != nil {
+			link.conversationProbeBasis = basis
+		}
+	case *libgm.ContinuityLost:
 		link.retirePhysicalSourceLocked()
 	default:
 		if invalidatesAtIngress(event) {
-			link.invalidateEvidenceLocked()
+			if _, activeSessionSet := event.(*events.ActiveSessionSet); activeSessionSet {
+				link.invalidateEvidencePreservingConversationProbeBasisLocked()
+			} else {
+				link.invalidateEvidenceLocked()
+			}
 		}
 		if settings, ok := event.(*libgm.WrappedSettings); ok && settings != nil && !settings.IsOld && settings.Settings != nil && settings.Settings.GetSIMCards() != nil {
-			link.invalidateEvidenceLocked()
+			link.invalidateEvidencePreservingConversationProbeBasisLocked()
 			link.settingsVersion++
 			if link.staleIndexEpoch != link.streamEpoch {
 				link.staleIndexEpoch = link.streamEpoch
@@ -1282,6 +1366,7 @@ func (link *Link) queueEventFor(generation uint64, event any) {
 		// The update is applied to the index in place. Until then the pending count fences every
 		// reader, and the new revision retires tickets and scans bound to the earlier snapshot.
 		link.clearPreparedTicketLocked()
+		link.clearConversationProbeBasisLocked()
 		link.indexRevision++
 		link.pendingConversationEvents++
 		pendingConversationEvent = true

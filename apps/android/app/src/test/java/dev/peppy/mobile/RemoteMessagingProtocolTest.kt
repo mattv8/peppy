@@ -40,6 +40,22 @@ class RemoteMessagingProtocolTest {
         assertFalse(RemoteMessagingProtocol.shouldSync("x".repeat(RemoteMessagingProtocol.MAX_FRAME_BYTES + 1)))
     }
 
+    @Test fun ownEventDetectionOnlyMatchesSmallEventFramesFromThisDevice() {
+        val deviceId = "123e4567-e89b-12d3-a456-426614174000"
+        val ownEvent = """{"type":"event","envelope":{"producer_device_id":"$deviceId"}}"""
+
+        assertTrue("own producer", RemoteMessagingProtocol.isOwnEvent(ownEvent, deviceId))
+        assertTrue("upper-case device ID", RemoteMessagingProtocol.isOwnEvent(ownEvent, deviceId.uppercase()))
+        assertTrue("upper-case envelope ID", RemoteMessagingProtocol.isOwnEvent(ownEvent.replace(deviceId, deviceId.uppercase()), deviceId))
+        assertFalse("other producer", RemoteMessagingProtocol.isOwnEvent(ownEvent.replace(deviceId, "123e4567-e89b-12d3-a456-426614174001"), deviceId))
+        assertFalse("large event", RemoteMessagingProtocol.isOwnEvent("""{"type":"event","envelope":{"producer_device_id":"$deviceId"},"padding":"${"x".repeat(70_000)}"}""", deviceId))
+        assertFalse("malformed JSON", RemoteMessagingProtocol.isOwnEvent("{", deviceId))
+        assertFalse("missing envelope", RemoteMessagingProtocol.isOwnEvent("""{"type":"event"}""", deviceId))
+        assertFalse("ready frame", RemoteMessagingProtocol.isOwnEvent("""{"type":"ready","envelope":{"producer_device_id":"$deviceId"}}""", deviceId))
+        assertFalse("resync frame", RemoteMessagingProtocol.isOwnEvent("""{"type":"resync_required","envelope":{"producer_device_id":"$deviceId"}}""", deviceId))
+        assertFalse("blank device ID", RemoteMessagingProtocol.isOwnEvent(ownEvent, ""))
+    }
+
     @Test fun reconnectDelayIsBoundedAndJittered() {
         assertEquals(1_000L, RemoteMessagingBackoff.delayMs(0, 0.0))
         assertEquals(30_000L, RemoteMessagingBackoff.delayMs(99, 0.0))

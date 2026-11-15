@@ -55,6 +55,16 @@ internal object RemoteMessagingProtocol {
         // is useful, and the tagged envelope is emitted before its encrypted body.
         return if (LARGE_EVENT.containsMatchIn(frame.take(LARGE_FRAME_PREFIX_CHARS))) "event" else null
     }
+    fun isOwnEvent(frame: String, deviceId: String): Boolean {
+        if (deviceId.isBlank() || frame.toByteArray(Charsets.UTF_8).size > SMALL_FRAME_BYTES) return false
+        return try {
+            val event = JSONObject(frame)
+            event.optString("type") == "event" && event.optJSONObject("envelope")
+                ?.optString("producer_device_id")?.equals(deviceId, ignoreCase = true) == true
+        } catch (_: Exception) {
+            false
+        }
+    }
     fun shouldSync(frame: String): Boolean = frameType(frame) in setOf("ready", "event", "resync_required")
 }
 
@@ -171,7 +181,7 @@ class RemoteMessagingService : Service() {
                 } else recordFrame(SocketFrame.READY)
                 "event" -> {
                     recordFrame(SocketFrame.EVENT)
-                    GatewayWork.enqueueUrgent(applicationContext)
+                    if (!RemoteMessagingProtocol.isOwnEvent(text, session.deviceId)) GatewayWork.enqueueUrgent(applicationContext)
                 }
                 "resync_required" -> {
                     recordFrame(SocketFrame.RESYNC)

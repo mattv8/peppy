@@ -283,7 +283,7 @@ internal class GatewayAccountPausedException : IOException("account access pause
  * RECOVERY_REQUIRED state, sets the core restore guard, and never uploads or touches the carrier.
  * Nothing is uploaded and no command is executed until the bootstrap snapshot is fully drained.
  *
- * Budgets per pass: up to 4 snapshot pages (200 records) or one replay page (50 events), up to 4
+ * Budgets per pass: up to 4 snapshot pages (200 records) or 4 replay pages (200 events), up to 4
  * apply batches of 50, up to 50 uploads before and after dispatch, at most 10 carrier commands.
  */
 class GatewaySync(
@@ -508,27 +508,33 @@ class GatewaySync(
             stage(it, NativeSnapshotPurpose.RESYNC, detectOwnRecords = false)
             return true // a finished generation still has to drain
         }
-        val response = http.get("/v1/events?after=${client.receiveCursor()}&limit=$EVENT_PAGE")
-        if (response.code == 409) {
-            val progress = try {
-                beginSnapshot(NativeSnapshotPurpose.RESYNC)
-            } catch (_: MobileBindingsException.InvalidRequest) {
-                return true // A published generation is still draining; drain first, then retry.
+        repeat(RECEIVE_PAGES) { pageIndex ->
+            if (pageIndex > 0) ensureEffectsPermitted()
+            val cursor = client.receiveCursor()
+            val response = http.get("/v1/events?after=$cursor&limit=$EVENT_PAGE")
+            if (response.code == 409) {
+                val progress = try {
+                    beginSnapshot(NativeSnapshotPurpose.RESYNC)
+                } catch (_: MobileBindingsException.InvalidRequest) {
+                    return true // A published generation is still draining; drain first, then retry.
+                }
+                stage(progress, NativeSnapshotPurpose.RESYNC, detectOwnRecords = false)
+                return true
             }
-            stage(progress, NativeSnapshotPurpose.RESYNC, detectOwnRecords = false)
-            return true
-        }
-        val page = JSONObject(checkBody(response))
-        val events = page.getJSONArray("events")
-        for (index in 0 until events.length()) {
-            val event = events.getJSONObject(index)
-            if (client.ingestRaw(event.getJSONObject("envelope").toString().toByteArray(Charsets.UTF_8), event.getString("cursor")).state == NativeIngestState.JOURNALED) {
-                commandsProgressed = true
+            val page = JSONObject(checkBody(response))
+            val events = page.getJSONArray("events")
+            for (index in 0 until events.length()) {
+                val event = events.getJSONObject(index)
+                if (client.ingestRaw(event.getJSONObject("envelope").toString().toByteArray(Charsets.UTF_8), event.getString("cursor")).state == NativeIngestState.JOURNALED) {
+                    commandsProgressed = true
+                }
             }
+            page.optString("high_water_cursor").takeIf { it.isNotBlank() }?.let(client::observeServerHighWater)
+            if (diagnosticsEnabled) received += events.length().toLong()
+            if (events.length() < EVENT_PAGE) return false
+            if (client.receiveCursor() == cursor) return true
         }
-        page.optString("high_water_cursor").takeIf { it.isNotBlank() }?.let(client::observeServerHighWater)
-        if (diagnosticsEnabled) received += events.length().toLong()
-        return events.length() >= EVENT_PAGE
+        return true
     }
 
     private enum class Stage { STAGING, FINISHED, OWN_RECORDS }
@@ -772,6 +778,7 @@ class GatewaySync(
 
     companion object {
         const val EVENT_PAGE = 50
+        const val RECEIVE_PAGES = 4
         const val SNAPSHOT_PAGES = 4
         const val SNAPSHOT_PAGE = 200
         const val APPLY_BATCHES = 4

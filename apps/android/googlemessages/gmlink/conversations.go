@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"time"
 
@@ -26,6 +27,10 @@ const (
 	conversationEventDrainPoll    = 20 * time.Millisecond
 	// conversationIndexMaxAge bounds how long a published index is reused without a rescan.
 	conversationIndexMaxAge = 10 * time.Minute
+	// conversationProbeMaxGap bounds re-adoption after a clean stream reopen.
+	conversationProbeMaxGap = 15 * time.Second
+	// conversationFullScanMaxAge bounds re-adoption without a complete scan.
+	conversationFullScanMaxAge = 2 * time.Hour
 	// sessionEvidenceRequestInterval bounds how often one run asks the phone to resend its settings.
 	sessionEvidenceRequestInterval = 30 * time.Second
 	sessionEvidenceRequestTimeout  = 10 * time.Second
@@ -103,6 +108,14 @@ type conversationLastActivityResult struct {
 }
 
 type conversationPageLoader func(context.Context, *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error)
+
+type conversationProbeBasis struct {
+	records    map[string]*gmproto.Conversation
+	generation uint64
+	capturedAt time.Time
+	fullScanAt time.Time
+	retiredAt  bool
+}
 
 func conversationJSON(code string) string {
 	encoded, _ := json.Marshal(conversationResult{Code: code})
@@ -190,53 +203,7 @@ func (link *Link) conversationCandidateSnapshotLocked() string {
 	sort.Strings(ids)
 	records := make([]conversationCandidateRecord, 0, len(ids))
 	for _, id := range ids {
-		conversation := link.conversationRecords[id]
-		participants := make([]conversationCandidateParticipant, 0, len(conversation.GetParticipants()))
-		invisibleParticipantCount := 0
-		for _, participant := range conversation.GetParticipants() {
-			if participant == nil {
-				continue
-			}
-			identifier := participant.GetID()
-			participantID := identifier.GetParticipantID()
-			rawNumber := identifier.GetNumber()
-			canonicalAddress, canonicalAddressPresent := "", false
-			if participant.GetIsVisible() {
-				canonicalAddress, canonicalAddressPresent = canonicalGoogleNumber(rawNumber, participant.GetFormattedNumber())
-			}
-			if !participant.GetIsVisible() {
-				invisibleParticipantCount++
-			}
-			participants = append(participants, conversationCandidateParticipant{
-				ParticipantID:           participantID,
-				IdentifierType:          int32(identifier.GetType()),
-				RawNumber:               rawNumber,
-				FormattedNumber:         participant.GetFormattedNumber(),
-				ParticipantIDPresent:    participantID != "",
-				NumberPresent:           rawNumber != "",
-				Visible:                 participant.GetIsVisible(),
-				Self:                    participant.GetIsMe(),
-				CanonicalAddress:        canonicalAddress,
-				CanonicalAddressPresent: canonicalAddressPresent,
-				DisplayName:             participantDisplayName(participant),
-			})
-		}
-		visibleNonSelfCount := len(visibleOtherParticipants(conversation))
-		records = append(records, conversationCandidateRecord{
-			GoogleConversationID:      id,
-			ConversationType:          int32(conversation.GetType()),
-			ConversationStatus:        int32(conversation.GetStatus()),
-			Classification:            classifyConversation(conversation),
-			Group:                     visibleNonSelfCount > 1,
-			VisibleNonSelfCount:       visibleNonSelfCount,
-			LastMessageMS:             lastMessageMillis(conversation),
-			Participants:              participants,
-			Name:                      conversation.GetName(),
-			IsGroupChat:               conversation.GetIsGroupChat(),
-			ReadOnly:                  conversation.GetReadOnly(),
-			InvisibleParticipantCount: invisibleParticipantCount,
-			MemberDigest:              groupMemberDigest(conversation),
-		})
+		records = append(records, conversationCandidateRecordFor(id, link.conversationRecords[id]))
 	}
 	snapshot := conversationCandidateSnapshot{
 		Code:              "conversation_candidate_snapshot",
@@ -251,6 +218,55 @@ func (link *Link) conversationCandidateSnapshotLocked() string {
 	}
 	encoded, _ := json.Marshal(snapshot)
 	return string(encoded)
+}
+
+func conversationCandidateRecordFor(id string, conversation *gmproto.Conversation) conversationCandidateRecord {
+	participants := make([]conversationCandidateParticipant, 0, len(conversation.GetParticipants()))
+	invisibleParticipantCount := 0
+	for _, participant := range conversation.GetParticipants() {
+		if participant == nil {
+			continue
+		}
+		identifier := participant.GetID()
+		participantID := identifier.GetParticipantID()
+		rawNumber := identifier.GetNumber()
+		canonicalAddress, canonicalAddressPresent := "", false
+		if participant.GetIsVisible() {
+			canonicalAddress, canonicalAddressPresent = canonicalGoogleNumber(rawNumber, participant.GetFormattedNumber())
+		}
+		if !participant.GetIsVisible() {
+			invisibleParticipantCount++
+		}
+		participants = append(participants, conversationCandidateParticipant{
+			ParticipantID:           participantID,
+			IdentifierType:          int32(identifier.GetType()),
+			RawNumber:               rawNumber,
+			FormattedNumber:         participant.GetFormattedNumber(),
+			ParticipantIDPresent:    participantID != "",
+			NumberPresent:           rawNumber != "",
+			Visible:                 participant.GetIsVisible(),
+			Self:                    participant.GetIsMe(),
+			CanonicalAddress:        canonicalAddress,
+			CanonicalAddressPresent: canonicalAddressPresent,
+			DisplayName:             participantDisplayName(participant),
+		})
+	}
+	visibleNonSelfCount := len(visibleOtherParticipants(conversation))
+	return conversationCandidateRecord{
+		GoogleConversationID:      id,
+		ConversationType:          int32(conversation.GetType()),
+		ConversationStatus:        int32(conversation.GetStatus()),
+		Classification:            classifyConversation(conversation),
+		Group:                     visibleNonSelfCount > 1,
+		VisibleNonSelfCount:       visibleNonSelfCount,
+		LastMessageMS:             lastMessageMillis(conversation),
+		Participants:              participants,
+		Name:                      conversation.GetName(),
+		IsGroupChat:               conversation.GetIsGroupChat(),
+		ReadOnly:                  conversation.GetReadOnly(),
+		InvisibleParticipantCount: invisibleParticipantCount,
+		MemberDigest:              groupMemberDigest(conversation),
+	}
 }
 
 func (link *Link) getConversation(ctx context.Context, client *libgm.Client, id string) (*gmproto.Conversation, string) {
@@ -373,9 +389,23 @@ func cloneConversation(conversation *gmproto.Conversation) *gmproto.Conversation
 	return cloned
 }
 
+// beginConversationIndexRefreshFor starts a probe or scan without dropping a retained probe basis.
 func (link *Link) beginConversationIndexRefreshFor(generation, streamEpoch uint64) (uint64, bool) {
 	link.mu.Lock()
 	defer link.mu.Unlock()
+	return link.beginConversationIndexRefreshLocked(generation, streamEpoch)
+}
+
+// beginConversationScanFor starts a full scan. It drops any retained probe basis in the same critical
+// section, so no basis survives into a scan that can fail. A capture during the scan finds no complete index.
+func (link *Link) beginConversationScanFor(generation, streamEpoch uint64) (uint64, bool) {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	link.clearConversationProbeBasisLocked()
+	return link.beginConversationIndexRefreshLocked(generation, streamEpoch)
+}
+
+func (link *Link) beginConversationIndexRefreshLocked(generation, streamEpoch uint64) (uint64, bool) {
 	if link.closed || generation != link.generation || link.runGeneration != generation || streamEpoch != link.streamEpoch || !link.hasIndexVerificationLocked() {
 		return 0, false
 	}
@@ -458,9 +488,58 @@ func (link *Link) replaceConversationIndexFor(generation, streamEpoch, revision 
 	return link.replaceConversationIndexForContext(context.Background(), generation, streamEpoch, revision, conversations)
 }
 
+// replaceConversationIndexForContext publishes a full scan when its generation, stream epoch, and revision are still current.
+// The scan's bookkeeping shares that critical section: fullScanAt advances and any prior basis is dropped.
 func (link *Link) replaceConversationIndexForContext(ctx context.Context, generation, streamEpoch, revision uint64, conversations []*gmproto.Conversation) bool {
 	link.mu.Lock()
 	defer link.mu.Unlock()
+	if !link.publishConversationIndexLocked(ctx, generation, streamEpoch, revision, conversations) {
+		return false
+	}
+	link.conversationFullScanAt = link.nowForTicketLocked()
+	link.clearConversationProbeBasisLocked()
+	return true
+}
+
+// probeOutcome is the result of publishing one probe page.
+type probeOutcome int
+
+const (
+	probeAdopted probeOutcome = iota
+	probeSuperseded
+	// probeExpired means the full-scan ceiling passed while the page was in flight; it counts as a miss.
+	probeExpired
+)
+
+// replaceProbedConversationIndexForContext publishes a probe adoption. It applies the scan fencing and also
+// requires that basis is still the retained one and inside the full-scan ceiling. A probe never advances
+// fullScanAt. A successful adoption consumes the basis.
+func (link *Link) replaceProbedConversationIndexForContext(ctx context.Context, generation, streamEpoch, revision uint64, basis *conversationProbeBasis, conversations []*gmproto.Conversation) probeOutcome {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	if link.conversationProbeBasis != basis {
+		return probeSuperseded
+	}
+	if !fullScanWithinCeiling(basis.fullScanAt, link.nowForTicketLocked()) {
+		link.clearConversationProbeBasisLocked()
+		return probeExpired
+	}
+	if !link.publishConversationIndexLocked(ctx, generation, streamEpoch, revision, conversations) {
+		return probeSuperseded
+	}
+	link.clearConversationProbeBasisLocked()
+	return probeAdopted
+}
+
+// fullScanWithinCeiling reports whether a full scan at fullScanAt is still inside conversationFullScanMaxAge at now.
+// A zero or future fullScanAt is never within the ceiling.
+func fullScanWithinCeiling(fullScanAt, now time.Time) bool {
+	age := now.Sub(fullScanAt)
+	return !fullScanAt.IsZero() && age >= 0 && age < conversationFullScanMaxAge
+}
+
+// publishConversationIndexLocked rebuilds the index from conversations. The caller holds link.mu.
+func (link *Link) publishConversationIndexLocked(ctx context.Context, generation, streamEpoch, revision uint64, conversations []*gmproto.Conversation) bool {
 	if ctx.Err() != nil || link.closed || generation != link.generation || link.runGeneration != generation || streamEpoch != link.streamEpoch || revision != link.indexRevision || link.pendingConversationEvents != 0 || !link.hasIndexVerificationLocked() {
 		return false
 	}
@@ -475,6 +554,66 @@ func (link *Link) replaceConversationIndexForContext(ctx context.Context, genera
 	link.conversationIndexStreamEpoch = streamEpoch
 	link.conversationEvents = nil
 	return true
+}
+
+func (link *Link) captureConversationProbeBasisLocked(retiredAt bool) *conversationProbeBasis {
+	if !link.conversationIndexCurrentLocked() || len(link.conversationEvents) == 1 && link.conversationEvents[0].Code == "conversation_resync" {
+		return nil
+	}
+	records := make(map[string]*gmproto.Conversation, len(link.conversationRecords))
+	for id, conversation := range link.conversationRecords {
+		records[id] = cloneConversation(conversation)
+	}
+	return &conversationProbeBasis{records: records, generation: link.generation, capturedAt: link.nowForTicketLocked(), fullScanAt: link.conversationFullScanAt, retiredAt: retiredAt}
+}
+
+func (link *Link) conversationProbeBasisUsableLocked() bool {
+	basis := link.conversationProbeBasis
+	if basis == nil || basis.generation != link.generation {
+		return false
+	}
+	now := link.nowForTicketLocked()
+	if now.Sub(basis.capturedAt) < 0 || !fullScanWithinCeiling(basis.fullScanAt, now) {
+		return false
+	}
+	// A reopen that lands inside the gap keeps the basis; until the stream reopens, the gap is still open.
+	return !basis.retiredAt || link.streamOpen || now.Sub(basis.capturedAt) <= conversationProbeMaxGap
+}
+
+func (link *Link) clearConversationProbeBasisLocked() {
+	link.conversationProbeBasis = nil
+}
+
+func (link *Link) conversationProbeMatches(basis *conversationProbeBasis, response *gmproto.ListConversationsResponse) bool {
+	conversations := response.GetConversations()
+	if len(conversations) == 0 {
+		return len(basis.records) == 0
+	}
+	for _, conversation := range conversations {
+		id := conversation.GetConversationID()
+		if id == "" || basis.records[id] == nil || !reflect.DeepEqual(conversationCandidateRecordFor(id, conversation), conversationCandidateRecordFor(id, basis.records[id])) {
+			return false
+		}
+	}
+	return true
+}
+
+func (link *Link) probeConversations(basis *conversationProbeBasis, response *gmproto.ListConversationsResponse) []*gmproto.Conversation {
+	conversations := make([]*gmproto.Conversation, 0, len(basis.records))
+	for _, conversation := range basis.records {
+		if conversation != nil {
+			conversations = append(conversations, cloneConversation(conversation))
+		}
+	}
+	for _, conversation := range response.GetConversations() {
+		for index, existing := range conversations {
+			if existing.GetConversationID() == conversation.GetConversationID() {
+				conversations[index] = cloneConversation(conversation)
+				break
+			}
+		}
+	}
+	return conversations
 }
 
 func visibleOtherParticipants(conversation *gmproto.Conversation) []*gmproto.Participant {
@@ -581,6 +720,7 @@ func (link *Link) recordConversationEventLocked(id string) (resyncRequired bool)
 		}
 	}
 	if len(link.conversationEvents) >= conversationEventLimit {
+		link.clearConversationProbeBasisLocked()
 		link.invalidateConversationCompletenessLocked()
 		link.indexRevision++
 		link.conversationEvents = []conversationEvent{{Code: "conversation_resync"}}
@@ -603,6 +743,7 @@ func (link *Link) recordQueuedConversationEventFor(generation uint64, source lib
 		link.mu.Unlock()
 		return
 	}
+	link.clearConversationProbeBasisLocked()
 	if pending && link.pendingConversationEvents > 0 {
 		link.pendingConversationEvents--
 	}
