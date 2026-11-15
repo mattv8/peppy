@@ -34,6 +34,7 @@ var eventCodes = []eventCode{
 	{"conversation_refresh", "missing_id"}, {"conversation_refresh", "conflicting_duplicate"}, {"conversation_refresh", "cursor_invalid"},
 	{"conversation_refresh", "cursor_repeated"}, {"conversation_refresh", "page_limit"}, {"conversation_refresh", "item_limit"},
 	{"conversation_refresh", "publication_stale"}, {"conversation_refresh", "refreshed"}, {"conversation_refresh", "cancelled"},
+	{"conversation_refresh", "probe_adopted"}, {"conversation_refresh", "probe_missed"},
 }
 
 type eventCode struct{ kind, code string }
