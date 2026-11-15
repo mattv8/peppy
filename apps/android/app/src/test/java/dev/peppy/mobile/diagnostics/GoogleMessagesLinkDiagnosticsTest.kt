@@ -147,6 +147,7 @@ class GoogleMessagesLinkDiagnosticsTest {
         "recovery_skipped_age" to "under_15m", "recovery_skipped_age" to "under_1h",
         "recovery_skipped_age" to "under_24h", "recovery_skipped_age" to "older",
         "typing" to "outbound_not_owned", "typing" to "outbound_refused",
+        "conversation_refresh" to "probe_adopted", "conversation_refresh" to "probe_missed",
     )
 
     @Test fun everyPairRecordsOnlyItsStableNumericReason() {
@@ -154,7 +155,7 @@ class GoogleMessagesLinkDiagnosticsTest {
         SyncDiagnostics.withTestConfiguration(true, { 10L }, { error("CPU unused") }, records::add) {
             stablePairs.forEach { (kind, code) -> recordGoogleMessagesLinkEvent(kind, code, Long.MAX_VALUE) }
         }
-        assertEquals(281, records.size)
+        assertEquals(283, records.size)
         records.forEachIndexed { index, record ->
             assertEquals("event=27 session=1 timestamp_ms=10 trace=0 29=${index + 1}", record)
         }
@@ -195,6 +196,8 @@ class GoogleMessagesLinkDiagnosticsTest {
             assertEquals((266 + index).toLong(), GoogleMessagesLinkDiagnosticReason.codes["recovery_signal_age" to code])
             assertEquals((273 + index).toLong(), GoogleMessagesLinkDiagnosticReason.codes["recovery_skipped_age" to code])
         }
+        assertEquals(282L, GoogleMessagesLinkDiagnosticReason.codes["conversation_refresh" to "probe_adopted"])
+        assertEquals(283L, GoogleMessagesLinkDiagnosticReason.codes["conversation_refresh" to "probe_missed"])
     }
 
     @Test fun goEventVocabularyIsCoveredByTheClosedMapping() {
