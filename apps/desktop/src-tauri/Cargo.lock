@@ -4168,7 +4168,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
- "swift-rs",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
