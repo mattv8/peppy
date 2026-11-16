@@ -251,6 +251,128 @@ describe("browser host RPC", () => {
     await eventually(() => session.candidates.length === 0);
   });
 
+  it("drains held banners when scheduler progress catches up", async () => {
+    const session = new BannerLedgerSession();
+    session.candidates = [ledgerCandidate("candidate-1", Date.now())];
+    let progress = { phase: "receiving" as const, receivedThrough: "10", processedThrough: "10", targetHighWater: "10" };
+    let replayPageInFlight = true;
+    let changed: (() => void) | undefined;
+    const shown: unknown[] = [];
+    const syncProgress = vi.fn(() => progress);
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      notification: { available: true, permission: "granted", show: notification => { shown.push(notification); } },
+      network: {
+        start: async () => undefined,
+        stop: async () => undefined,
+        syncProgress,
+        replayPageInFlight: () => replayPageInFlight,
+        subscribeChanges: (listener: () => void) => { changed = listener; return () => undefined; },
+      } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "set_notification_context", args: { view: "settings" } });
+    await eventually(() => syncProgress.mock.calls.length > 0);
+    expect(shown).toEqual([]);
+    expect(session.calls).not.toContainEqual(expect.objectContaining({ command: "ack_banner_candidates" }));
+
+    replayPageInFlight = false;
+    changed?.();
+
+    await eventually(() => shown.length === 1);
+    expect(session.calls).toContainEqual(expect.objectContaining({ command: "ack_banner_candidates" }));
+  });
+
+  it.each([
+    ["unknown target", { phase: "current" as const, receivedThrough: "0", processedThrough: "0" }],
+    ["equal cursors", { phase: "receiving" as const, receivedThrough: "10", processedThrough: "10", targetHighWater: "10" }],
+    ["malformed cursors", { phase: "receiving" as const, receivedThrough: "not-a-cursor", processedThrough: "0", targetHighWater: "10" }],
+  ])("does not hold banners with %s", async (_description, progress) => {
+    const session = new BannerLedgerSession();
+    session.candidates = [ledgerCandidate("candidate-1", Date.now())];
+    const shown: unknown[] = [];
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      notification: { available: true, permission: "granted", show: notification => { shown.push(notification); } },
+      network: {
+        start: async () => undefined,
+        stop: async () => undefined,
+        syncProgress: () => progress,
+        replayPageInFlight: () => false,
+      } as unknown as import("./host.js").BrowserNetwork,
+    });
+
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "set_notification_context", args: { view: "settings" } });
+
+    await eventually(() => shown.length === 1);
+  });
+
+  it("releases held banners when a failed poll clears the replay-page hold", async () => {
+    const session = new BannerLedgerSession();
+    session.candidates = [ledgerCandidate("candidate-1", Date.now())];
+    let replayPageInFlight = true;
+    let changed: (() => void) | undefined;
+    const shown: unknown[] = [];
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      notification: { available: true, permission: "granted", show: notification => { shown.push(notification); } },
+      network: {
+        start: async () => undefined,
+        stop: async () => undefined,
+        syncProgress: () => ({ phase: "receiving", receivedThrough: "10", processedThrough: "10", targetHighWater: "10" }),
+        replayPageInFlight: () => replayPageInFlight,
+        subscribeChanges: (listener: () => void) => { changed = listener; return () => undefined; },
+      } as unknown as import("./host.js").BrowserNetwork,
+    });
+
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "set_notification_context", args: { view: "settings" } });
+    replayPageInFlight = false;
+    changed?.();
+
+    await eventually(() => shown.length === 1);
+  });
+
+  it("releases held banners when boot resets stale sync progress", async () => {
+    const session = new BannerLedgerSession();
+    session.candidates = [ledgerCandidate("candidate-1", Date.now())];
+    let progress: { phase: "receiving"; receivedThrough: string; processedThrough: string; targetHighWater: string } | undefined = {
+      phase: "receiving", receivedThrough: "0", processedThrough: "0", targetHighWater: "10",
+    };
+    let replayPageInFlight = true;
+    let changed: (() => void) | undefined;
+    const shown: unknown[] = [];
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      notification: { available: true, permission: "granted", show: notification => { shown.push(notification); } },
+      network: {
+        start: async () => undefined,
+        stop: async () => undefined,
+        syncProgress: () => progress,
+        replayPageInFlight: () => replayPageInFlight,
+        subscribeChanges: (listener: () => void) => { changed = listener; return () => undefined; },
+      } as unknown as import("./host.js").BrowserNetwork,
+    });
+
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "set_notification_context", args: { view: "settings" } });
+    progress = undefined;
+    replayPageInFlight = false;
+    changed?.();
+
+    await eventually(() => shown.length === 1);
+  });
+
   it("retries a failed durable display acknowledgement without reposting and retires its result authorization", async () => {
     const session = new BannerLedgerSession();
     session.candidates = [ledgerCandidate("candidate-1", Date.now())];
