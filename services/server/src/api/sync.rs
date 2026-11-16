@@ -50,6 +50,10 @@ pub struct TransportOptions {
     pub hello_timeout: Duration,
     /// Time allowed for one frame write before the socket is closed for backpressure.
     pub send_timeout: Duration,
+    /// Cadence for WebSocket control Pings while a peer is present.
+    pub heartbeat_interval: Duration,
+    /// Cadence for adaptive WebSocket control Pings while a device is alone.
+    pub idle_heartbeat_interval: Duration,
     /// Outbox drain cadence.
     pub outbox_drain_interval: Duration,
     /// Maximum outbox jobs claimed or deleted per drain pass.
@@ -73,6 +77,8 @@ impl Default for TransportOptions {
             durable_replay_interval: Duration::from_secs(5),
             hello_timeout: Duration::from_secs(10),
             send_timeout: Duration::from_secs(10),
+            heartbeat_interval: Duration::from_secs(20),
+            idle_heartbeat_interval: Duration::from_secs(50),
             outbox_drain_interval: Duration::from_secs(1),
             outbox_batch_size: 256,
             outbox_delivered_retention: Duration::from_secs(3_600),

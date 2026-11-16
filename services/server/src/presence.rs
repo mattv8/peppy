@@ -13,7 +13,7 @@ const MAX_SOCKETS_PER_DEVICE: i64 = 32;
 const UNAVAILABLE_WARN_INTERVAL: Duration = Duration::from_secs(30);
 static UNAVAILABLE_WARNINGS: OnceLock<Mutex<HashMap<&'static str, Instant>>> = OnceLock::new();
 
-fn warn_unavailable(operation: &'static str, error: &sqlx::Error) {
+pub(crate) fn warn_unavailable(operation: &'static str, error: &sqlx::Error) {
     let now = Instant::now();
     let warnings = UNAVAILABLE_WARNINGS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut warnings = warnings
@@ -79,17 +79,35 @@ pub async fn renew(
     vault_id: Uuid,
     device_id: Uuid,
     connection_id: Uuid,
+    lease_seconds: i64,
 ) -> Result<bool, sqlx::Error> {
     let was_responsive: Option<bool> = sqlx::query_scalar("SELECT responsive FROM device_sockets WHERE connection_id=$3 AND vault_id=$1 AND device_id=$2 FOR UPDATE")
         .bind(vault_id).bind(device_id).bind(connection_id).fetch_optional(&mut **tx).await?;
     let changed = sqlx::query("UPDATE device_sockets SET lease_until=now() + make_interval(secs => $4),responsive=TRUE WHERE connection_id=$3 AND vault_id=$1 AND device_id=$2 AND EXISTS(SELECT 1 FROM devices WHERE vault_id=$1 AND device_id=$2 AND revoked_at IS NULL)")
-        .bind(vault_id).bind(device_id).bind(connection_id).bind(LEASE_SECONDS).execute(&mut **tx).await?.rows_affected();
+        .bind(vault_id).bind(device_id).bind(connection_id).bind(lease_seconds).execute(&mut **tx).await?.rows_affected();
     if changed != 0 {
         touch(tx, vault_id, device_id).await?;
     }
     let other_responsive: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM device_sockets WHERE vault_id=$1 AND device_id=$2 AND connection_id <> $3 AND responsive AND lease_until > now())")
         .bind(vault_id).bind(device_id).bind(connection_id).fetch_one(&mut **tx).await?;
     Ok(changed != 0 && was_responsive == Some(false) && !other_responsive)
+}
+
+pub async fn peer_connected(
+    db: &sqlx::PgPool,
+    vault_id: Uuid,
+    device_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = crate::scope::begin(db, vault_id).await?;
+    let connected = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM device_sockets s JOIN devices d ON d.vault_id=s.vault_id AND d.device_id=s.device_id WHERE s.vault_id=$1 AND s.device_id <> $2 AND d.revoked_at IS NULL AND COALESCE(d.kind,'desktop') <> 'android' AND s.responsive AND s.lease_until > now())",
+    )
+    .bind(vault_id)
+    .bind(device_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(connected)
 }
 
 pub async fn close(
