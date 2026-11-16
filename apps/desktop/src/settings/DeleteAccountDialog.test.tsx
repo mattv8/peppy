@@ -68,3 +68,12 @@ it("restores focus to the opener after ordinary cancellation", async () => {
   await waitFor(() => expect(opener).toHaveFocus());
   expect(bridge.hosted_delete_account).not.toHaveBeenCalled();
 });
+
+it("keeps Google Play cancellation visible and opens its management page", async () => {
+  vi.mocked(bridge.billing_summary).mockResolvedValue({ provider: "google_play", manageableIn: "google_play", planActive: true, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+  const manage = vi.mocked(bridge.open_play_subscriptions);
+  render(<DeleteAccountDialog billing={{ provider: "google_play", manageableIn: "google_play", planActive: true, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false }} opener={createRef()} onDismiss={vi.fn()} onDeleted={vi.fn()} />);
+  expect(document.getElementById("account-delete-google-play-notice")).toHaveTextContent("Deleting your account doesn't cancel your Google Play subscription.");
+  fireEvent.click(screen.getByRole("button", { name: "Manage Google Play subscriptions" }));
+  await waitFor(() => expect(manage).toHaveBeenCalledOnce());
+});

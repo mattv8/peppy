@@ -1204,6 +1204,7 @@ describe("BrowserBridge", () => {
     await expect(bridge.store_purchase("product-id")).rejects.toMatchObject({ code: "unsupported" });
     await expect(bridge.store_restore()).rejects.toMatchObject({ code: "unsupported" });
     await expect(bridge.open_store_subscriptions()).rejects.toMatchObject({ code: "unsupported" });
+    await expect(bridge.open_play_subscriptions()).rejects.toMatchObject({ code: "unsupported" });
     await expect(bridge.purchase_options()).resolves.toEqual({ appStore: false, website: true });
   });
 

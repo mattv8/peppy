@@ -5887,6 +5887,18 @@ describe("host state display", () => {
     expect(document.getElementById("settings-privacy")).toHaveAttribute("data-settings-section", "privacy-links");
   });
 
+  it("shows the Google Play account billing intro", async () => {
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue({ ...(await fixtureBridge.hosted_account()), signedIn: true });
+    vi.spyOn(bridge, "billing_summary").mockResolvedValue({ provider: "google_play", manageableIn: "google_play", planActive: true, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+    vi.spyOn(bridge, "purchase_options").mockResolvedValue({ appStore: false, website: true });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    expect(await screen.findByText("Your Peppy subscription is managed through Google Play.")).toHaveAttribute("id", "account-billing-intro-google-play");
+    expect(screen.queryByText("Manage your Peppy subscription and account on Peppy’s website.")).not.toBeInTheDocument();
+  });
+
   it.each([false, true])("scrolls only the settings content when selecting Account (reduced motion: %s)", async (reducedMotion) => {
     vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
       matches: reducedMotion && query === "(prefers-reduced-motion: reduce)",
@@ -6092,10 +6104,11 @@ describe("host state display", () => {
   it.each([
     ["deleted", "stripe", "Account deleted"],
     ["deleted", "apple", "Account deleted"],
+    ["deleted", "google_play", "Account deleted"],
     ["pending", "none", "Deletion in progress"],
   ] as const)("shows the %s account-deletion result for %s", async (outcome, provider, title) => {
     vi.spyOn(bridge, "hosted_account").mockResolvedValue({ ...(await fixtureBridge.hosted_account()), signedIn: true });
-    vi.spyOn(bridge, "billing_summary").mockResolvedValue({ provider, manageableIn: provider === "apple" ? "app_store" : "website", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+    vi.spyOn(bridge, "billing_summary").mockResolvedValue({ provider, manageableIn: provider === "apple" ? "app_store" : provider === "google_play" ? "google_play" : "website", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
     vi.spyOn(bridge, "hosted_delete_account").mockResolvedValue(outcome);
     render(<App />);
     await screen.findByText("Hello from Aurora");
@@ -6107,6 +6120,7 @@ describe("host state display", () => {
     expect(await screen.findByRole("heading", { name: title })).toBeInTheDocument();
     expect(document.getElementById("account-deletion-result-dialog")).toBeInTheDocument();
     if (provider === "apple") expect(screen.getByRole("button", { name: "Manage App Store subscriptions" })).toBeInTheDocument();
+    if (provider === "google_play") expect(screen.getByRole("button", { name: "Manage Google Play subscriptions" })).toBeInTheDocument();
   });
 
   it("reports when the protected key remains unavailable after retrying", async () => {

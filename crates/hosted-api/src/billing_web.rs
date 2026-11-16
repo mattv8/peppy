@@ -132,6 +132,7 @@ pub enum BillingProvider {
     None,
     Stripe,
     Apple,
+    GooglePlay,
 }
 
 /// Where the account's current billing can be managed.
@@ -144,6 +145,7 @@ pub enum BillingManageableIn {
     None,
     Website,
     AppStore,
+    GooglePlay,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -251,6 +253,32 @@ mod tests {
         })).unwrap();
         assert_eq!(summary.provider, BillingProvider::None);
         assert_eq!(summary.manageable_in, BillingManageableIn::None);
+    }
+
+    #[test]
+    fn google_play_billing_uses_snake_case_wire_names() {
+        assert_eq!(
+            serde_json::to_value(BillingProvider::GooglePlay).unwrap(),
+            "google_play"
+        );
+        assert_eq!(
+            serde_json::to_value(BillingManageableIn::GooglePlay).unwrap(),
+            "google_play"
+        );
+    }
+
+    #[test]
+    fn google_play_billing_deserializes_and_rejects_unknown_values() {
+        assert_eq!(
+            serde_json::from_str::<BillingProvider>(r#""google_play""#).unwrap(),
+            BillingProvider::GooglePlay
+        );
+        assert_eq!(
+            serde_json::from_str::<BillingManageableIn>(r#""google_play""#).unwrap(),
+            BillingManageableIn::GooglePlay
+        );
+        assert!(serde_json::from_str::<BillingProvider>(r#""unknown""#).is_err());
+        assert!(serde_json::from_str::<BillingManageableIn>(r#""unknown""#).is_err());
     }
 
     #[test]

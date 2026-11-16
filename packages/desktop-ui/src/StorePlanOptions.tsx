@@ -103,7 +103,7 @@ export function StorePlanOptions({ purchaseOptions, products, state, copy, subsc
 
   return <section id="hosted-store-plan-options" data-purchase-mode={purchaseOptions.website ? "both" : "iap"}>
     <p id="hosted-subscribe-body">{copy.hosted_subscribe_body}</p>
-    {conflict ? <BillingElsewhereNotice variant={conflictVariant(billingProvider, purchaseOptions.website)} provider={billingProvider === "stripe" || billingProvider === "apple" ? billingProvider : undefined} copy={copy} onManageWebsite={onManageWebsite} /> : unavailable ? <div id="hosted-store-unavailable"><p role="alert">{copy.store_unavailable}</p>{onRetry && <button id="hosted-store-retry" className="secondary-button" type="button" onClick={onRetry}>{copy.try_again}</button>}</div> : <div id="hosted-store-plans" aria-busy={state === "loading" || undefined}>
+    {conflict ? <BillingElsewhereNotice variant={conflictVariant(billingProvider, purchaseOptions.website)} provider={billingProvider === "stripe" || billingProvider === "apple" || billingProvider === "google_play" ? billingProvider : undefined} copy={copy} onManageWebsite={onManageWebsite} /> : unavailable ? <div id="hosted-store-unavailable"><p role="alert">{copy.store_unavailable}</p>{onRetry && <button id="hosted-store-retry" className="secondary-button" type="button" onClick={onRetry}>{copy.try_again}</button>}</div> : <div id="hosted-store-plans" aria-busy={state === "loading" || undefined}>
       {state === "loading" ? <BusyIndicator id="hosted-store-loading" label={copy.production_pairing_checking} /> :
       <ul id="hosted-plan-options">
         {plans.map((product) => {

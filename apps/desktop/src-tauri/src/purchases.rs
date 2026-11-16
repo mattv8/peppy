@@ -22,6 +22,7 @@ use tauri::Manager;
 use tauri_plugin_opener::OpenerExt;
 
 const SUBSCRIPTIONS_URL: &str = "https://apps.apple.com/account/subscriptions";
+const PLAY_SUBSCRIPTIONS_URL: &str = "https://play.google.com/store/account/subscriptions";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -153,8 +154,13 @@ async fn catalog(state: &AppState, hosted: &HostedState) -> BridgeResult<Billing
     response_json(response).await
 }
 
+fn catalog_allows_apple_actions(catalog: &BillingCatalogResponse) -> bool {
+    catalog.summary.provider != BillingProvider::GooglePlay
+}
+
 fn catalog_allows_apple_purchase(catalog: &BillingCatalogResponse, product_id: &str) -> bool {
-    catalog.eligibility == BillingEligibility::Eligible
+    catalog_allows_apple_actions(catalog)
+        && catalog.eligibility == BillingEligibility::Eligible
         && catalog
             .products
             .iter()
@@ -453,6 +459,12 @@ pub(crate) async fn store_products(
             )
         }
     })?;
+    if !catalog_allows_apple_actions(&catalog) {
+        return Err(BridgeError::new(
+            "store-unavailable",
+            "App Store purchases are unavailable for this account.",
+        ));
+    }
     let storage_pack_bytes = catalog.storage_pack_bytes;
     let products: Vec<_> = catalog
         .products
@@ -563,6 +575,24 @@ pub(crate) async fn store_restore(
             .await
             .map_err(storekit_error)?,
     );
+    if !transactions.is_empty() {
+        let catalog = catalog(&state, &hosted).await.map_err(|error| {
+            if error.code == "hosted-session-required" {
+                error
+            } else {
+                BridgeError::new(
+                    "store-unavailable",
+                    "Purchases are unavailable right now. Try again.",
+                )
+            }
+        })?;
+        if !catalog_allows_apple_actions(&catalog) {
+            return Err(BridgeError::new(
+                "store-unavailable",
+                "App Store purchases are unavailable for this account.",
+            ));
+        }
+    }
     let state = &*state;
     let hosted = &*hosted;
     restore_after_sync(synced, transactions, |transaction| async move {
@@ -586,6 +616,17 @@ pub(crate) async fn open_store_subscriptions(
     app.opener()
         .open_url(SUBSCRIPTIONS_URL, None::<String>)
         .map_err(|_| BridgeError::new("open-url", "Could not open App Store subscriptions."))
+}
+
+#[tauri::command]
+pub(crate) async fn open_play_subscriptions(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> BridgeResult<()> {
+    crate::require_main(window.label())?;
+    app.opener()
+        .open_url(PLAY_SUBSCRIPTIONS_URL, None::<String>)
+        .map_err(|_| BridgeError::new("open-url", "Could not open Google Play subscriptions."))
 }
 
 #[tauri::command]
@@ -842,6 +883,47 @@ mod tests {
             &ineligible,
             "org.peppy.desktop.plan"
         ));
+        let google_play: BillingCatalogResponse = serde_json::from_value(serde_json::json!({
+            "products": [{
+                "id": "org.peppy.desktop.plan",
+                "kind": "plan",
+                "provider": "apple",
+                "interval": "month",
+                "storage_pack_count": null
+            }],
+            "eligibility": "eligible",
+            "summary": {
+                "provider": "google_play",
+                "manageable_in": "google_play"
+            }
+        }))
+        .unwrap();
+        assert!(!catalog_allows_apple_purchase(
+            &google_play,
+            "org.peppy.desktop.plan"
+        ));
+    }
+
+    fn google_play_catalog() -> BillingCatalogResponse {
+        serde_json::from_value(serde_json::json!({
+            "products": [],
+            "eligibility": "eligible",
+            "summary": {
+                "provider": "google_play",
+                "manageable_in": "google_play"
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn store_products_are_blocked_for_google_play_billing() {
+        assert!(!catalog_allows_apple_actions(&google_play_catalog()));
+    }
+
+    #[test]
+    fn store_restore_is_blocked_for_google_play_billing() {
+        assert!(!catalog_allows_apple_actions(&google_play_catalog()));
     }
 
     #[test]

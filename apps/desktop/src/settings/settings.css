@@ -491,7 +491,8 @@
   #attachment-storage.settings-card { border-top-color: CanvasText; }
   #hosted-account-delete { border-color: CanvasText; }
   #hosted-account-delete-status,
-  #account-delete-apple-notice {
+  #account-delete-apple-notice,
+  #account-delete-google-play-notice {
     border: 1px solid CanvasText;
   }
 }

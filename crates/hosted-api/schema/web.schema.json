@@ -92,7 +92,8 @@
       "enum": [
         "none",
         "website",
-        "app_store"
+        "app_store",
+        "google_play"
       ],
       "type": "string"
     },
@@ -133,7 +134,8 @@
       "enum": [
         "none",
         "stripe",
-        "apple"
+        "apple",
+        "google_play"
       ],
       "type": "string"
     },

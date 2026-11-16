@@ -1307,6 +1307,18 @@ describe("SetupLanding", () => {
     expect(document.getElementById("hosted-billing-card")).toBeInTheDocument();
   });
 
+  it("shows Google Play management instead of website billing on the billing route", async () => {
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_only" }));
+    vi.spyOn(bridge, "purchase_options").mockResolvedValue({ appStore: false, website: true });
+    vi.spyOn(bridge, "billing_summary").mockResolvedValue({ provider: "google_play", manageableIn: "google_play", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+    renderLanding();
+
+    const card = await screen.findByRole("heading", { name: peppyCopy.hosted_subscribe_headline });
+    expect(card.closest("#hosted-billing-card")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: peppyCopy.google_play_manage_cta })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: peppyCopy.production_billing_open })).not.toBeInTheDocument();
+  });
+
   describe("sanitized enrollment stages", () => {
     it("opens the invite request form from a claimed-server chooser", async () => {
       vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "signin" }));
@@ -2723,6 +2735,17 @@ describe("SetupLanding", () => {
       const card = await lapsedCard();
       expect(within(card).getByRole("button", { name: peppyCopy.production_billing_open })).toBeInTheDocument();
       expect(within(card).getByRole("button", { name: peppyCopy.production_billing_check })).toBeInTheDocument();
+    });
+
+    it("shows Google Play management instead of website billing for a lapsed subscription", async () => {
+      vi.spyOn(bridge, "hosted_account").mockResolvedValue(lapsed());
+      vi.spyOn(bridge, "purchase_options").mockResolvedValue({ appStore: false, website: true });
+      vi.spyOn(bridge, "billing_summary").mockResolvedValue({ provider: "google_play", manageableIn: "google_play", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+      renderLanding();
+
+      const card = await lapsedCard();
+      expect(within(card).getByRole("button", { name: peppyCopy.google_play_manage_cta })).toBeInTheDocument();
+      expect(within(card).queryByRole("button", { name: peppyCopy.production_billing_open })).not.toBeInTheDocument();
     });
 
     it("opens fixed legal destinations through the bridge and keeps billing controls after failure", async () => {

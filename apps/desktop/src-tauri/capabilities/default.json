@@ -132,6 +132,7 @@
     "allow-store-purchase",
     "allow-store-restore",
     "allow-open-store-subscriptions",
+    "allow-open-play-subscriptions",
     "allow-billing-summary",
     "allow-enrollment-discover",
     "allow-enrollment-start-over",

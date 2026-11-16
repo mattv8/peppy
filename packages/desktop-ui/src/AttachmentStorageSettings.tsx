@@ -55,6 +55,7 @@ export type AttachmentStorageCopy = BillingElsewhereCopy & {
   store_period_year: string;
   store_manage_cta: string;
   store_manage_failed: string;
+  attachment_storage_google_play_note: string;
   store_unavailable: string;
   try_again: string;
 };
@@ -68,6 +69,7 @@ export type StoragePurchaseProps = {
   state: StoragePurchaseState;
   onPurchase(productId: string): Promise<"purchased" | "pending" | "cancelled">;
   onManageAppStore(): Promise<void> | void;
+  onManageGooglePlay?(): Promise<void> | void;
   onRetry?(): void;
   onPurchased?(): void;
   onManageWebsite?(): Promise<void> | void;
@@ -183,6 +185,10 @@ function StorageAddOns({ purchase, copy, directManageAction }: { purchase: Stora
       setManageError(true);
     }
   };
+  if (billingSummary.provider === "google_play") return <div id="attachment-storage-google-play-notice" className="billing-elsewhere-notice">
+    <BillingElsewhereNotice variant="google_play" provider="google_play" copy={copy} onManageGooglePlay={purchase.onManageGooglePlay} headingLevel={4} />
+    <p id="attachment-storage-google-play-storage-note" role="status">{copy.attachment_storage_google_play_note}</p>
+  </div>;
   if (!purchaseOptions.appStore) return billingSummary.provider === "apple"
     ? <BillingElsewhereNotice variant="apple" provider="apple" copy={copy} onManageAppStore={purchase.onManageAppStore} headingLevel={4} />
     : directManageAction ?? null;

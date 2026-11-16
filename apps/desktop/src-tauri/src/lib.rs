@@ -6993,6 +6993,7 @@ pub fn run() {
             purchases::store_purchase,
             purchases::store_restore,
             purchases::open_store_subscriptions,
+            purchases::open_play_subscriptions,
             purchases::billing_summary,
             account_access,
             attachment_retention_status,

@@ -586,6 +586,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "store_purchase",
         "store_restore",
         "open_store_subscriptions",
+        "open_play_subscriptions",
         "billing_summary",
         "check_for_updates",
         "restart_for_update",
