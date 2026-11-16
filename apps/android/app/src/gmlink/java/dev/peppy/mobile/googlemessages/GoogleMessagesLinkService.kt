@@ -52,6 +52,7 @@ internal data class ServiceTestHooks(
     val workerFinished: () -> Unit = {},
     val receiveSweepExecutor: Executor = DEFAULT_RCS_RECEIVE_EXECUTOR,
     val receiveSweep: (LinkHandleLease, AtomicBoolean) -> Unit = LinkRuntime::resumeRcsReceive,
+    val invalidateSweepMemo: (LinkHandleLease) -> Unit = LinkRuntime::invalidateRcsSweepMemo,
     val beforeEligibilityEnumeration: () -> Unit = {},
     val currentTimeMillis: () -> Long = System::currentTimeMillis,
     val bootstrapExecutor: Executor = DEFAULT_RCS_BOOTSTRAP_EXECUTOR,
@@ -533,7 +534,8 @@ class GoogleMessagesLinkService : Service() {
         conversationIndexReady(lease, LinkHandle::refreshConversationIndex)
 
     private fun conversationIndexReady(lease: LinkHandleLease?, request: (LinkHandle) -> String): Boolean {
-        val handle = lease?.handle ?: return false
+        val activeLease = lease ?: return false
+        val handle = activeLease.handle
         val refresh = {
             runCatching { request(handle) }.getOrDefault("{\"code\":\"unavailable\"}").also { response ->
                 val reason = when {
@@ -542,6 +544,10 @@ class GoogleMessagesLinkService : Service() {
                     else -> "refresh_other"
                 }
                 recordGoogleMessagesLinkEvent("readiness", reason, 0L)
+                if (response.contains("\"code\":\"ok\"") && !response.contains("\"index\":\"reused\"") &&
+                    !response.contains("\"index\":\"adopted\"")) {
+                    testHooks.invalidateSweepMemo(activeLease)
+                }
             }
         }
         val first = refresh()

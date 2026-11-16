@@ -1,7 +1,10 @@
 package dev.peppy.mobile.googlemessages
 
 import androidx.test.core.app.ApplicationProvider
+import android.os.SystemClock
 import dev.peppy.mobile.diagnostics.SyncDiagnostics
+import dev.peppy.mobile.diagnostics.SyncTraceEvent
+import dev.peppy.mobile.diagnostics.SyncTraceField
 import dev.peppy.mobile.gateway.GatewayTestBase
 import java.util.Collections
 import java.util.UUID
@@ -10,6 +13,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -29,6 +33,7 @@ import uniffi.peppy_mobile_bindings.NativeRcsResumeHint
 
 private const val BASE = 1_700_000_000_000L
 private const val HOUR = 3_600_000L
+private const val MINUTE = 60_000L
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -129,6 +134,59 @@ class RcsReceiveCoordinatorTest {
         coordinator(core).resumeConversation(google, "google-a")
 
         assertEquals(setOf("new"), core.messages)
+        assertEquals(1, google.requests.size)
+    }
+
+    @Test fun `non-projectable page below the floor completes without fetching older history`() {
+        val google = FakeGoogle(emptyMap()).apply {
+            fetchHook = { _, _ ->
+                JSONObject().put("code", "ok").put("records", JSONArray()).put("signals", JSONArray())
+                    .put("newest_ms", BASE - HOUR).put("next_cursor", "older").put("has_more", true).toString()
+            }
+        }
+
+        assertEquals(
+            RcsRecoveryResult.COMPLETE,
+            coordinator(FakeCore(listOf(conv("core-a", "google-a")))).resumeConversation(google, "google-a"),
+        )
+        assertEquals(1, google.requests.size)
+    }
+
+    @Test fun `non-projectable page inside the floor continues to the next page`() {
+        val google = FakeGoogle(emptyMap()).apply {
+            fetchHook = { _, cursor ->
+                JSONObject().put("code", "ok").put("records", JSONArray()).put("signals", JSONArray())
+                    .put("newest_ms", if (cursor.isEmpty()) BASE else BASE - HOUR)
+                    .put("next_cursor", "older").put("has_more", cursor.isEmpty()).toString()
+            }
+        }
+
+        assertEquals(RcsRecoveryResult.COMPLETE, coordinator(FakeCore(listOf(conv("core-a", "google-a")))).resumeConversation(google, "google-a"))
+        assertEquals(2, google.requests.size)
+    }
+
+    @Test fun `non-projectable page without newest timestamp keeps traversing`() {
+        val google = FakeGoogle(emptyMap()).apply {
+            fetchHook = { _, cursor ->
+                JSONObject().put("code", "ok").put("records", JSONArray()).put("signals", JSONArray())
+                    .put("next_cursor", "older").put("has_more", cursor.isEmpty()).toString()
+            }
+        }
+
+        assertEquals(RcsRecoveryResult.COMPLETE, coordinator(FakeCore(listOf(conv("core-a", "google-a")))).resumeConversation(google, "google-a"))
+        assertEquals(2, google.requests.size)
+    }
+
+    @Test fun `projected records below the floor finish regardless of newest timestamp`() {
+        val google = FakeGoogle(emptyMap()).apply {
+            fetchHook = { _, _ ->
+                JSONObject().put("code", "ok").put("records", JSONArray().put(JSONObject()
+                    .put("google_message_id", "old").put("google_conversation_id", "google-a").put("sent_at_ms", BASE - HOUR)))
+                    .put("signals", JSONArray()).put("newest_ms", BASE + HOUR).put("next_cursor", "older").put("has_more", true).toString()
+            }
+        }
+
+        assertEquals(RcsRecoveryResult.COMPLETE, coordinator(FakeCore(listOf(conv("core-a", "google-a")))).resumeConversation(google, "google-a"))
         assertEquals(1, google.requests.size)
     }
 
@@ -433,6 +491,33 @@ class RcsReceiveCoordinatorTest {
         assertEquals(listOf("google-zero", "google-missing"), google.requests.map { it.first })
     }
 
+    @Test fun `second sweep skips a completed conversation with unchanged activity`() {
+        val google = FakeGoogle(mapOf("google-a" to listOf(Msg("new", BASE + 1)))).apply {
+            activityJson = JSONObject().put("code", "ok").put("complete", true)
+                .put("last_message_ms", JSONObject().put("google-a", BASE + 1)).toString()
+        }
+        val coordinator = coordinator(FakeCore(listOf(conv("core-a", "google-a"))))
+
+        coordinator.resume(google)
+        coordinator.resume(google)
+
+        assertEquals(1, google.requests.size)
+    }
+
+    @Test fun `memo invalidation makes an unchanged conversation sweep again`() {
+        val google = FakeGoogle(mapOf("google-a" to listOf(Msg("new", BASE + 1)))).apply {
+            activityJson = JSONObject().put("code", "ok").put("complete", true)
+                .put("last_message_ms", JSONObject().put("google-a", BASE + 1)).toString()
+        }
+        val coordinator = coordinator(FakeCore(listOf(conv("core-a", "google-a"))))
+
+        coordinator.resume(google)
+        coordinator.invalidateSweepMemo()
+        coordinator.resume(google)
+
+        assertEquals(2, google.requests.size)
+    }
+
     @Test fun `sweep recovers at most twenty five conversations and the next sweep continues and wraps`() {
         val convs = (0 until 30).map { conv("core-$it", "google-$it") }
         val google = FakeGoogle(emptyMap())
@@ -657,6 +742,332 @@ class RcsReceiveCoordinatorTest {
         assertEquals(listOf(271L, 256L, 44L), records.map { it.substringAfter("29=").toLong() })
     }
 
+    @Test fun `fallback chat with only non-projectable pages completes at the first page below the floor and is then skipped`() {
+        val google = FakeGoogle(emptyMap()).apply {
+            fetchHook = { _, cursor -> gapPage(hasMore = true, nextCursor = "older", newestMs = if (cursor.isEmpty()) BASE - 5 * MINUTE else BASE - HOUR) }
+            activityJson = activity("google-a" to BASE - 5 * MINUTE)
+        }
+        val core = FakeCore(listOf(conv("core-a", "google-a", incomplete = true)))
+        val coordinator = coordinator(core)
+
+        val (_, first) = recordedDiagnostics { coordinator.resume(google) }
+
+        assertEquals(2, google.requests.size)
+        assertEquals(listOf("core-a" to BASE), core.completions.toList())
+        assertEquals(BASE, core.conversation("core-a").watermarkMs)
+        assertEquals(1L, first.sweeps().single().field(SyncTraceField.PROCESSED))
+        assertEquals(2L, first.sweeps().single().field(SyncTraceField.PAGE_QUERIES))
+
+        coordinator.resume(google)
+        assertEquals(2, google.requests.size)
+    }
+
+    @Test fun `fallback chat whose pages never reach the floor hits the page cap and stays incomplete`() {
+        var fetches = 0
+        val google = FakeGoogle(emptyMap()).apply { fetchHook = { _, _ -> fetches += 1; gapPage(hasMore = true, nextCursor = "p$fetches") } }
+        val core = FakeCore(listOf(conv("core-a", "google-a", incomplete = true)))
+
+        val (result, records) = recordedDiagnostics { coordinator(core).resumeConversation(google, "google-a") }
+
+        assertEquals(RcsRecoveryResult.INCOMPLETE, result)
+        assertEquals(32, google.requests.size)
+        assertEquals(listOf(284L, 45L), records.linkReasons())
+        assertEquals(BASE, core.conversation("core-a").watermarkMs)
+    }
+
+    @Test fun `memo is not used after activity changes, an open hint, or an incomplete gap`() {
+        val google = FakeGoogle(mapOf("google-a" to listOf(Msg("new", BASE + 1)))).apply { activityJson = activity("google-a" to BASE + 1) }
+        val core = FakeCore(listOf(conv("core-a", "google-a")))
+        val coordinator = coordinator(core)
+        val conversation = core.conversation("core-a")
+
+        coordinator.resume(google)
+        assertEquals(1, google.requests.size)
+
+        google.activityJson = activity("google-a" to BASE + 2)
+        coordinator.resume(google)
+        assertEquals(2, google.requests.size)
+
+        conversation.hint = BASE + 1 to "o:1"
+        coordinator.resume(google)
+        assertEquals(3, google.requests.size)
+
+        conversation.incomplete = true
+        coordinator.resume(google)
+        assertEquals(4, google.requests.size)
+    }
+
+    @Test fun `zero activity is never memoized so a later positive activity sweeps once before skipping`() {
+        val google = FakeGoogle(mapOf("google-a" to listOf(Msg("new", BASE + 1)))).apply { activityJson = activity("google-a" to 0L) }
+        val coordinator = coordinator(FakeCore(listOf(conv("core-a", "google-a"))))
+
+        coordinator.resume(google)
+        coordinator.resume(google)
+        assertEquals(2, google.requests.size)
+
+        google.activityJson = activity("google-a" to BASE + 1)
+        coordinator.resume(google)
+        assertEquals(3, google.requests.size)
+        coordinator.resume(google)
+        assertEquals(3, google.requests.size)
+    }
+
+    @Test fun `unknown or unreadable activity is never memoized`() {
+        val google = FakeGoogle(mapOf("google-a" to listOf(Msg("new", BASE + 1)))).apply { activityJson = activity("google-other" to BASE + 1) }
+        val coordinator = coordinator(FakeCore(listOf(conv("core-a", "google-a"))))
+
+        coordinator.resume(google)
+        coordinator.resume(google)
+        assertEquals(2, google.requests.size)
+
+        google.activityJson = """{"code":"unavailable","complete":false,"last_message_ms":{"google-a":${BASE + 1}}}"""
+        coordinator.resume(google)
+        coordinator.resume(google)
+        assertEquals(4, google.requests.size)
+
+        google.activityJson = activity("google-a" to BASE + 1)
+        coordinator.resume(google)
+        assertEquals(5, google.requests.size)
+        coordinator.resume(google)
+        assertEquals(5, google.requests.size)
+    }
+
+    @Test fun `invalidation during a sweep's recovery stores nothing and the next sweep sweeps again`() {
+        var invalidated = false
+        val google = FakeGoogle(mapOf("google-a" to listOf(Msg("new", BASE + 1)))).apply { activityJson = activity("google-a" to BASE + 1) }
+        val coordinator = coordinator(FakeCore(listOf(conv("core-a", "google-a"))))
+        google.fetchHook = { _, _ ->
+            if (!invalidated) { invalidated = true; coordinator.invalidateSweepMemo() }
+            null
+        }
+
+        coordinator.resume(google)
+        assertEquals(1, google.requests.size)
+        coordinator.resume(google)
+        assertEquals(2, google.requests.size)
+        coordinator.resume(google)
+        assertEquals(2, google.requests.size)
+    }
+
+    @Test fun `memo entry is skipped under two hours and swept again at two hours`() {
+        val elapsed = AtomicLong()
+        val google = FakeGoogle(mapOf("google-a" to listOf(Msg("new", BASE + 1)))).apply { activityJson = activity("google-a" to BASE + 1) }
+        val coordinator = coordinator(FakeCore(listOf(conv("core-a", "google-a"))), elapsedMs = elapsed::get)
+
+        coordinator.resume(google)
+        elapsed.set(2 * HOUR - 1)
+        coordinator.resume(google)
+        assertEquals(1, google.requests.size)
+
+        elapsed.set(2 * HOUR)
+        coordinator.resume(google)
+        assertEquals(2, google.requests.size)
+    }
+
+    @Test fun `memoized chats do not consume the sweep cap and a changed chat is swept when reached`() {
+        val convs = (0 until 30).map { conv("core-$it", "google-$it") }
+        val google = FakeGoogle(emptyMap())
+        // google-29 sits at the lowest tier so the rotation ends on it; google-27 drops to that tier when it changes,
+        // so it is reached only after the 25 memoized chats ahead of it.
+        fun activityWithChanged(changed: Int) = activity(*(0 until 30).map { "google-$it" to (if (it == 29 || it == changed) BASE else BASE + 1) }.toTypedArray())
+        google.activityJson = activityWithChanged(changed = -1)
+        val coordinator = coordinator(FakeCore(convs))
+
+        coordinator.resume(google)
+        assertEquals((0 until 25).map { "google-$it" }, google.requests.map { it.first })
+
+        coordinator.resume(google)
+        assertEquals((25 until 30).map { "google-$it" }, google.requests.drop(25).map { it.first })
+
+        google.activityJson = activityWithChanged(changed = 27)
+        coordinator.resume(google)
+        assertEquals(31, google.requests.size)
+        assertEquals("google-27", google.requests.last().first)
+    }
+
+    @Test fun `a sweep that hits the page cap stores no memo`() {
+        var fetches = 0
+        val google = FakeGoogle(emptyMap()).apply {
+            fetchHook = { _, _ -> fetches += 1; gapPage(hasMore = true, nextCursor = "p$fetches") }
+            activityJson = activity("google-a" to BASE + 1)
+        }
+        val coordinator = coordinator(FakeCore(listOf(conv("core-a", "google-a"))))
+
+        coordinator.resume(google)
+        assertEquals(32, google.requests.size)
+        coordinator.resume(google)
+        assertEquals(64, google.requests.size)
+    }
+
+    @Test fun `an aborted sweep stores no memo`() {
+        val cancelled = AtomicBoolean()
+        val google = FakeGoogle(mapOf("google-a" to listOf(Msg("new", BASE + 1)))).apply {
+            activityJson = activity("google-a" to BASE + 1)
+            fetchHook = { _, _ -> cancelled.set(true); null }
+        }
+        val coordinator = coordinator(FakeCore(listOf(conv("core-a", "google-a"))))
+
+        coordinator.resume(google, cancelled)
+        assertEquals(1, google.requests.size)
+        coordinator.resume(google)
+        assertEquals(2, google.requests.size)
+        coordinator.resume(google)
+        assertEquals(2, google.requests.size)
+    }
+
+    @Test fun `targeted recovery ignores and clears the memo entry`() {
+        val google = FakeGoogle(mapOf("google-a" to listOf(Msg("new", BASE + 1)))).apply { activityJson = activity("google-a" to BASE + 1) }
+        val coordinator = coordinator(FakeCore(listOf(conv("core-a", "google-a"))))
+
+        coordinator.resume(google)
+        assertEquals(RcsRecoveryResult.COMPLETE, coordinator.resumeConversation(google, "google-a"))
+        assertEquals(2, google.requests.size)
+
+        coordinator.resume(google)
+        assertEquals(3, google.requests.size)
+        coordinator.resume(google)
+        assertEquals(3, google.requests.size)
+    }
+
+    @Test fun `a live record for a memoized chat is still ingested`() {
+        val google = FakeGoogle(mapOf("google-a" to listOf(Msg("new", BASE + 1)))).apply { activityJson = activity("google-a" to BASE + 1) }
+        val core = FakeCore(listOf(conv("core-a", "google-a")))
+        val coordinator = coordinator(core)
+        coordinator.resume(google)
+
+        coordinator.receive(liveRecord("google-a", sentAtMs = BASE + 2, messageId = "live"))
+
+        assertTrue(core.messages.contains("live"))
+        assertEquals(listOf(NativeRcsObservationProvenance.HISTORICAL, NativeRcsObservationProvenance.LIVE), core.provenances)
+    }
+
+    @Test fun `each incomplete recovery records its reason and a failed hint clear records none`() {
+        fun recover(google: FakeGoogle, core: FakeCore = FakeCore(listOf(conv("core-a", "google-a")))) =
+            recordedDiagnostics { coordinator(core).resumeConversation(google, "google-a") }
+        val throwing = FakeGoogle(emptyMap()).apply { fetchHook = { _, _ -> throw IllegalStateException("synthetic") } }
+        val gapFailed = FakeGoogle(emptyMap()).apply { fetchHook = { _, _ -> """{"code":"gap_failed"}""" } }
+        val missingCursor = FakeGoogle(emptyMap()).apply { fetchHook = { _, _ -> gapPage(hasMore = true) } }
+        val repeatedCursor = FakeGoogle(emptyMap()).apply { fetchHook = { _, _ -> gapPage(hasMore = true, nextCursor = "same") } }
+
+        recover(throwing).let { (result, records) ->
+            assertEquals(RcsRecoveryResult.INCOMPLETE, result)
+            assertEquals(listOf(285L, 45L), records.linkReasons())
+        }
+        recover(gapFailed).let { (_, records) -> assertEquals(listOf(285L, 45L), records.linkReasons()) }
+        recover(missingCursor).let { (_, records) -> assertEquals(listOf(286L, 45L), records.linkReasons()) }
+        recover(repeatedCursor).let { (_, records) -> assertEquals(listOf(286L, 45L), records.linkReasons()) }
+
+        val clearFailure = FakeCore(listOf(conv("core-a", "google-a"))).apply { clearRejection = "stale" }
+        val (result, records) = recover(gapFailed, clearFailure)
+        assertEquals(RcsRecoveryResult.ABORTED, result)
+        assertEquals(listOf(264L, 44L), records.linkReasons())
+    }
+
+    @Test fun `sweep record counts every outcome and the pages including a failed fetch`() {
+        val json = activity(
+            "google-idle" to BASE - 2 * HOUR, "google-memo" to BASE + 1, "google-done" to BASE + 2,
+            "google-fail" to BASE + 1, "google-abort" to BASE + 1,
+        )
+        val google = FakeGoogle(mapOf(
+            "google-memo" to listOf(Msg("memo", BASE + 1)),
+            "google-done" to listOf(Msg("done", BASE + 1)),
+            "google-abort" to listOf(Msg("bad", BASE + 1)),
+        )).apply {
+            activityJson = json
+            fetchHook = { googleId, _ -> if (googleId == "google-fail") """{"code":"gap_failed"}""" else null }
+        }
+        val core = FakeCore(listOf(conv("core-memo", "google-memo"))).apply { refusals["bad"] = "identity_conflict" }
+        val coordinator = coordinator(core)
+        coordinator.resume(google)
+        core.addConversation(conv("core-idle", "google-idle"))
+        core.addConversation(conv("core-done", "google-done"))
+        core.addConversation(conv("core-fail", "google-fail"))
+        core.addConversation(conv("core-abort", "google-abort"))
+
+        val (_, records) = recordedDiagnostics { coordinator.resume(google) }
+
+        val sweep = records.sweeps().single()
+        assertEquals(5L, sweep.field(SyncTraceField.ROWS))
+        assertEquals(2L, sweep.field(SyncTraceField.COUNT))
+        assertEquals(1L, sweep.field(SyncTraceField.PROCESSED))
+        assertEquals(1L, sweep.field(SyncTraceField.PENDING))
+        assertEquals(1L, sweep.field(SyncTraceField.UNAVAILABLE))
+        assertEquals(3L, sweep.field(SyncTraceField.PAGE_QUERIES))
+        assertTrue(sweep.field(SyncTraceField.DURATION_MS) >= 0L)
+        assertEquals(1, records.linkReasons().count { it == 47L })
+    }
+
+    @Test fun `a sweep that skips only memoized chats records no idle reason`() {
+        val google = FakeGoogle(mapOf("google-a" to listOf(Msg("new", BASE + 1)))).apply { activityJson = activity("google-a" to BASE + 1) }
+        val coordinator = coordinator(FakeCore(listOf(conv("core-a", "google-a"))))
+        coordinator.resume(google)
+
+        val (_, records) = recordedDiagnostics { coordinator.resume(google) }
+
+        assertEquals(1, google.requests.size)
+        val sweep = records.sweeps().single()
+        assertEquals(1L, sweep.field(SyncTraceField.ROWS))
+        assertEquals(1L, sweep.field(SyncTraceField.COUNT))
+        assertEquals(0L, sweep.field(SyncTraceField.PAGE_QUERIES))
+        assertTrue(records.linkReasons().none { it == 47L })
+    }
+
+    @Test fun `a sweep that skips only idle chats still records one sweep event with the idle reason`() {
+        val google = FakeGoogle(emptyMap()).apply { activityJson = activity("google-a" to BASE - 2 * HOUR) }
+
+        val (_, records) = recordedDiagnostics { coordinator(FakeCore(listOf(conv("core-a", "google-a")))).resume(google) }
+
+        val sweep = records.sweeps().single()
+        assertEquals(1L, sweep.field(SyncTraceField.ROWS))
+        assertEquals(1L, sweep.field(SyncTraceField.COUNT))
+        assertEquals(0L, sweep.field(SyncTraceField.PAGE_QUERIES))
+        assertEquals(listOf(47L), records.linkReasons())
+    }
+
+    private fun activity(vararg lastMessages: Pair<String, Long>) = JSONObject().put("code", "ok").put("complete", true)
+        .put("last_message_ms", JSONObject().apply { lastMessages.forEach { (googleId, ms) -> put(googleId, ms) } }).toString()
+
+    private fun gapPage(hasMore: Boolean, nextCursor: String? = null, newestMs: Long? = null) = JSONObject()
+        .put("code", "ok").put("records", JSONArray()).put("signals", JSONArray()).put("has_more", hasMore)
+        .apply { nextCursor?.let { put("next_cursor", it) }; newestMs?.let { put("newest_ms", it) } }
+        .toString()
+
+    private fun <T> recordedDiagnostics(action: () -> T): Pair<T, List<Map<String, Long>>> {
+        val records = mutableListOf<String>()
+        val result = SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) { action() }
+        return result to records.map(::fieldsOf)
+    }
+
+    /** Parses `key=value` tokens of a diagnostic line; every key and value is numeric. */
+    private fun fieldsOf(line: String): Map<String, Long> = line.split(' ').associate { it.substringBefore('=') to it.substringAfter('=').toLong() }
+
+    private fun List<Map<String, Long>>.sweeps() = filter { it["event"] == SyncTraceEvent.RCS_SWEEP.code }
+
+    private fun List<Map<String, Long>>.linkReasons() = filter { it["event"] == SyncTraceEvent.GM_LINK.code }
+        .map { it.getValue(SyncTraceField.REASON.code.toString()) }
+
+    private fun Map<String, Long>.field(field: SyncTraceField) = getValue(field.code.toString())
+
+    @Test fun `a recovery resumed from a hint does not memoize the unfetched head`() {
+        val google = FakeGoogle(mapOf("google-a" to listOf(Msg("head", BASE + 5), Msg("tail", BASE + 1)))).apply {
+            pageSize = 1
+            activityJson = activity("google-a" to BASE + 5)
+        }
+        val core = FakeCore(listOf(conv("core-a", "google-a", hint = BASE + 1 to "o:1")))
+        val coordinator = coordinator(core)
+
+        coordinator.resume(google)
+        assertEquals(listOf("o:1"), google.requests.map { it.second })
+        assertFalse(core.messages.contains("head"))
+
+        coordinator.resume(google)
+        assertEquals(listOf("o:1", "", "o:1"), google.requests.map { it.second })
+        assertTrue(core.messages.contains("head"))
+
+        coordinator.resume(google)
+        assertEquals(3, google.requests.size)
+    }
+
     private fun protocolSwitch(googleId: String) = JSONObject().put("code", "protocol_switch").put("google_conversation_id", googleId).toString()
 
     private fun coordinator(
@@ -665,6 +1076,7 @@ class RcsReceiveCoordinatorTest {
         bootstrapRequest: (String) -> Unit = {},
         reconcileGroups: () -> Boolean = { false },
         nowMs: () -> Long = System::currentTimeMillis,
+        elapsedMs: () -> Long = SystemClock::elapsedRealtime,
         requestUpload: () -> Unit = {},
     ) = RcsReceiveCoordinator(
         ApplicationProvider.getApplicationContext(),
@@ -673,6 +1085,7 @@ class RcsReceiveCoordinatorTest {
         bootstrapRequest,
         reconcileGroups,
         nowMs,
+        elapsedMs,
         requestUpload,
     )
 

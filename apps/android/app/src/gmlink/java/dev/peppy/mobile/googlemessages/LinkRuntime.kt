@@ -178,6 +178,14 @@ object LinkRuntime {
         coordinator.resume(lease.handle, cancelled) { ownsLease(lease) }
     }
 
+    internal fun invalidateRcsSweepMemo(lease: LinkHandleLease) {
+        val coordinator = synchronized(this) {
+            if (!ownsLease(lease)) return
+            receiveCoordinator
+        } ?: return
+        coordinator.invalidateSweepMemo()
+    }
+
     internal fun resumeRcsReceiveConversation(lease: LinkHandleLease, googleConversationId: String, cancelled: AtomicBoolean): RcsRecoveryResult {
         val coordinator = synchronized(this) {
             if (!ownsLease(lease)) return RcsRecoveryResult.ABORTED

@@ -606,6 +606,44 @@ class GoogleMessagesLinkServiceTest {
         handle.allowRunReturn.countDown()
     }
 
+    @Test fun `full index scan invalidates the sweep memo before requesting a sweep`() {
+        val events = mutableListOf<String>()
+        val handle = object : MutableStatusRunHandle() {
+            override fun ensureConversationIndex(): String = """{"code":"ok","index":"scanned"}"""
+        }
+        val executor = QueueExecutor()
+        GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            bootstrapExecutor = executor,
+            bootstrapFactory = { _, _, _ -> emptyBootstrap() },
+            receiveSweepExecutor = Executor(Runnable::run),
+            invalidateSweepMemo = { events += "invalidate" },
+            receiveSweep = { _, _ -> events += "sweep" },
+        )
+        installEngine(handle)
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+        executor.runAll()
+
+        assertEquals(listOf("invalidate", "sweep"), events)
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `scanned, unlabelled or other index results invalidate the sweep memo before the sweep`() {
+        listOf("""{"code":"ok","index":"scanned"}""", """{"code":"ok"}""", """{"code":"ok","index":"other"}""").forEach { response ->
+            assertEquals(listOf("invalidate", "sweep"), readinessEvents(response))
+        }
+    }
+
+    @Test fun `reused, adopted and non-ok index results do not invalidate the sweep memo`() {
+        assertEquals(listOf("sweep"), readinessEvents("""{"code":"ok","index":"reused"}"""))
+        assertEquals(listOf("sweep"), readinessEvents("""{"code":"ok","index":"adopted"}"""))
+        assertEquals(emptyList<String>(), readinessEvents("""{"code":"failed","index":"scanned"}"""))
+    }
+
     @Test fun `readiness retries after an incomplete index and recovers owned conversations after refresh`() {
         val events = mutableListOf<String>()
         val handle = RefreshTrackingHandle(listOf("stale", "ok"), events)
@@ -1015,6 +1053,33 @@ class GoogleMessagesLinkServiceTest {
         private val tasks = ArrayDeque<Runnable>()
         override fun execute(command: Runnable) { tasks += command }
         fun runAll() { while (tasks.isNotEmpty()) tasks.removeFirst().run() }
+    }
+
+    /** Runs one readiness pass whose index ensure returns [response]; yields the hook calls in order. */
+    private fun readinessEvents(response: String): List<String> {
+        val events = mutableListOf<String>()
+        val handle = object : MutableStatusRunHandle() {
+            override fun ensureConversationIndex(): String = response
+        }
+        val executor = QueueExecutor()
+        GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
+        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+            bootstrapExecutor = executor,
+            bootstrapFactory = { _, _, _ -> emptyBootstrap() },
+            receiveSweepExecutor = Executor(Runnable::run),
+            invalidateSweepMemo = { events += "invalidate" },
+            receiveSweep = { _, _ -> events += "sweep" },
+        )
+        installEngine(handle)
+        val controller = startService()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+        executor.runAll()
+
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+        return events
     }
 
     private fun startService() = Robolectric.buildService(GoogleMessagesLinkService::class.java)

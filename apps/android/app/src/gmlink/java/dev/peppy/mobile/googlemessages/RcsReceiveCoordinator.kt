@@ -1,8 +1,10 @@
 package dev.peppy.mobile.googlemessages
 
 import android.content.Context
+import android.os.SystemClock
 import dev.peppy.mobile.GatewayWork
 import dev.peppy.mobile.GatewayEnqueueCause
+import dev.peppy.mobile.diagnostics.BackgroundDiagnostics
 import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
 import dev.peppy.mobile.gateway.NativeGateway
 import org.json.JSONArray
@@ -12,6 +14,7 @@ import uniffi.peppy_mobile_bindings.NativeRcsObservationProvenance
 import uniffi.peppy_mobile_bindings.NativeRcsReceiveContext
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Result of one per-conversation recovery run. */
 internal enum class RcsRecoveryResult {
@@ -33,12 +36,15 @@ internal class RcsReceiveCoordinator(
     /** One fresh complete snapshot ingest for group records; false when no complete snapshot was available. */
     private val reconcileGroups: () -> Boolean = GoogleMessagesLinkService::requestRcsGroupReconcile,
     private val nowMs: () -> Long = System::currentTimeMillis,
+    private val elapsedMs: () -> Long = SystemClock::elapsedRealtime,
     /** Requests a gateway pass after core invalidates a mapping for a protocol-switch event. Best effort. */
     private val requestUpload: () -> Unit = { GatewayWork.enqueueAfterCapture(context.applicationContext, GatewayEnqueueCause.RCS_RECEIVE) },
 ) : RcsReceiveSink {
     private val locks = ConcurrentHashMap<String, Any>()
     private val sweepLock = Any()
     private var sweepContinuation: String? = null
+    private val swept = mutableMapOf<String, Swept>()
+    private var memoGeneration = 0L
 
     override fun receive(recordJson: String) {
         if (!enabled()) return
@@ -91,27 +97,55 @@ internal class RcsReceiveCoordinator(
         cancelled: AtomicBoolean = AtomicBoolean(),
         current: () -> Boolean = { true },
     ) {
+        val startedAt = elapsedMs()
         if (!enabled() || !current()) return
         val contexts = runCatching { core.contexts() }.getOrDefault(emptyList())
         if (contexts.isEmpty()) return
         val activity = lastActivity(handle, contexts)
+        val generation = synchronized(sweepLock) { memoGeneration }
         val ordered = orderForSweep(contexts, activity)
         val start = sweepStart(ordered)
         var recovered = 0
+        var considered = 0
+        var skipped = 0
         var skippedIdle = 0
+        var complete = 0
+        var incomplete = 0
+        var aborted = 0
+        var pages = 0
         var last: String? = null
         for (context in ordered.drop(start) + ordered.take(start)) {
             if (recovered == SWEEP_CAP || !active(cancelled, current)) break
-            if (isIdle(context, activity[context.googleConversationId])) {
-                skippedIdle += 1
+            considered += 1
+            val activityMs = activity[context.googleConversationId]
+            if (isIdle(context, activityMs) || unchanged(context, activityMs)) {
+                skipped += 1
+                if (isIdle(context, activityMs)) skippedIdle += 1
                 continue
             }
-            recover(handle, context, cancelled, current)
+            val hinted = context.resumeHint != null
+            val recovery = recover(handle, context, cancelled, current)
+            pages += recovery.pages
+            when (recovery.result) {
+                RcsRecoveryResult.COMPLETE -> {
+                    complete += 1
+                    // A walk resumed from a hint covers only the older tail, so it cannot vouch for the newest activity.
+                    if (!hinted) storeSweep(context.googleConversationId, activityMs, generation)
+                }
+                RcsRecoveryResult.INCOMPLETE -> incomplete += 1
+                RcsRecoveryResult.ABORTED -> aborted += 1
+            }
             recovered += 1
             last = context.googleConversationId
         }
         synchronized(sweepLock) { sweepContinuation = last }
         if (skippedIdle > 0) recordGoogleMessagesLinkEvent("link", "rcs_sweep_skipped_idle", 0)
+        BackgroundDiagnostics.rcsSweep(considered, skipped, complete, incomplete, aborted, pages, elapsedMs() - startedAt)
+    }
+
+    fun invalidateSweepMemo() = synchronized(sweepLock) {
+        swept.clear()
+        memoGeneration += 1
     }
 
     /** Targeted recovery for one owned conversation, used after a claim and for owned targets. */
@@ -121,26 +155,30 @@ internal class RcsReceiveCoordinator(
         cancelled: AtomicBoolean = AtomicBoolean(),
         current: () -> Boolean = { true },
     ): RcsRecoveryResult {
+        synchronized(sweepLock) { swept.remove(googleConversationId) }
         val context = runCatching { core.context(googleConversationId) }.getOrNull()
             ?: return aborted("context_missing")
-        return recover(handle, context, cancelled, current)
+        return recover(handle, context, cancelled, current).result
     }
+
+    private data class Recovery(val result: RcsRecoveryResult, val pages: Int)
 
     private fun recover(
         handle: LinkHandle,
         initial: NativeRcsReceiveContext,
         cancelled: AtomicBoolean,
         current: () -> Boolean,
-    ): RcsRecoveryResult {
+    ): Recovery {
         val uploadNeeded = AtomicBoolean()
-        val result = synchronized(lock(initial.conversationId)) { traverse(handle, initial, cancelled, current, uploadNeeded) }
+        val pages = AtomicInteger()
+        val result = synchronized(lock(initial.conversationId)) { traverse(handle, initial, cancelled, current, uploadNeeded, pages) }
         when (result) {
             RcsRecoveryResult.ABORTED -> recordGoogleMessagesLinkEvent("link", "rcs_recovery_aborted", 0)
             RcsRecoveryResult.INCOMPLETE -> recordGoogleMessagesLinkEvent("link", "rcs_recovery_incomplete", 0)
             RcsRecoveryResult.COMPLETE -> Unit
         }
         if (uploadNeeded.get()) requestGatewayUpload()
-        return result
+        return Recovery(result, pages.get())
     }
 
     /**
@@ -154,6 +192,7 @@ internal class RcsReceiveCoordinator(
         cancelled: AtomicBoolean,
         current: () -> Boolean,
         uploadNeeded: AtomicBoolean,
+        pages: AtomicInteger,
     ): RcsRecoveryResult {
         var context = initial
         val floorMs = initial.watermarkMs - SLACK_MS
@@ -167,7 +206,8 @@ internal class RcsReceiveCoordinator(
             if (!active(cancelled, current)) return aborted("cancelled")
             val requested = cursor.orEmpty()
             usedCursors += requested
-            val page = fetchPage(handle, context.googleConversationId, requested) ?: return failedPage(context)
+            pages.incrementAndGet()
+            val page = fetchPage(handle, context.googleConversationId, requested) ?: return incomplete(context, "page_failed")
             val pageTarget = targetMs ?: page.records.maxOfOrNull { it.sentAtMs }
             targetMs = pageTarget
             for (record in page.records) {
@@ -190,11 +230,12 @@ internal class RcsReceiveCoordinator(
                 recordGoogleMessagesLinkEvent("recovery_skipped_age", signalAge(signal.sentAtMs), 0)
                 recordGoogleMessagesLinkEvent("recovery", "stale_signal_skipped", 0)
             }
-            if (!page.hasMore || (page.records.isNotEmpty() && page.records.all { it.sentAtMs < floorMs })) {
+            if (!page.hasMore || (page.records.isNotEmpty() && page.records.all { it.sentAtMs < floorMs }) ||
+                page.newestMs in 1 until floorMs) {
                 return finish(context, pageTarget)
             }
             val next = page.nextCursor
-            if (next == null || next in usedCursors) return failedPage(context)
+            if (next == null || next in usedCursors) return incomplete(context, "cursor_invalid")
             if (pageTarget != null) {
                 if (!write { core.recordProgress(context, pageTarget, next) }) return aborted("progress_failed")
                 context = runCatching { core.context(context.googleConversationId) }.getOrNull()
@@ -202,6 +243,7 @@ internal class RcsReceiveCoordinator(
             }
             cursor = next
         }
+        recordGoogleMessagesLinkEvent("recovery_incomplete", "page_cap", 0)
         return RcsRecoveryResult.INCOMPLETE
     }
 
@@ -214,6 +256,9 @@ internal class RcsReceiveCoordinator(
     /** A fetch, cursor or sanity failure: keep the watermark, drop the hint, and leave the gap open. */
     private fun failedPage(context: NativeRcsReceiveContext): RcsRecoveryResult =
         if (write { core.clearHint(context) }) RcsRecoveryResult.INCOMPLETE else aborted("clear_hint_failed")
+
+    private fun incomplete(context: NativeRcsReceiveContext, reason: String): RcsRecoveryResult =
+        failedPage(context).also { if (it == RcsRecoveryResult.INCOMPLETE) recordGoogleMessagesLinkEvent("recovery_incomplete", reason, 0) }
 
     private fun aborted(code: String): RcsRecoveryResult {
         recordGoogleMessagesLinkEvent("recovery_abort", code, 0)
@@ -280,6 +325,20 @@ internal class RcsReceiveCoordinator(
         lastMessageMs != null && lastMessageMs > 0 && lastMessageMs < context.watermarkMs - SLACK_MS &&
             context.resumeHint == null && !context.incomplete
 
+    private fun unchanged(context: NativeRcsReceiveContext, activityMs: Long?): Boolean = synchronized(sweepLock) {
+        val entry = swept[context.googleConversationId] ?: return@synchronized false
+        activityMs != null && activityMs > 0 && entry.activityMs == activityMs &&
+            elapsedMs() - entry.atElapsedMs < SWEEP_MEMO_MAX_AGE_MS &&
+            context.resumeHint == null && !context.incomplete
+    }
+
+    private fun storeSweep(googleConversationId: String, activityMs: Long?, generation: Long) {
+        if (activityMs == null || activityMs <= 0) return
+        synchronized(sweepLock) {
+            if (memoGeneration == generation) swept[googleConversationId] = Swept(activityMs, elapsedMs())
+        }
+    }
+
     private fun lock(conversationId: String) = locks.getOrPut(conversationId) { Any() }
 
     private fun parseLiveEvent(json: String): LiveEvent? = runCatching {
@@ -311,6 +370,7 @@ internal class RcsReceiveCoordinator(
             },
             nextCursor = value.optString("next_cursor").takeIf(String::isNotEmpty),
             hasMore = value.optBoolean("has_more"),
+            newestMs = value.optLong("newest_ms"),
         )
     }.getOrNull()
 
@@ -320,7 +380,10 @@ internal class RcsReceiveCoordinator(
         val signals: List<PageSignal>,
         val nextCursor: String?,
         val hasMore: Boolean,
+        val newestMs: Long,
     )
+
+    private data class Swept(val activityMs: Long, val atElapsedMs: Long)
 
     private class PageRecord(val json: String, val sentAtMs: Long)
     private class PageSignal(val googleConversationId: String, val sentAtMs: Long?)
@@ -334,6 +397,8 @@ internal class RcsReceiveCoordinator(
     private companion object {
         const val SLACK_MS = 15 * 60 * 1000L
         const val TWO_MINUTES_MS = 2 * 60 * 1000L
+        const val HOUR_MS = 60 * 60 * 1000L
+        const val SWEEP_MEMO_MAX_AGE_MS = 2 * HOUR_MS
         const val MAX_PAGES = 32
         const val SWEEP_CAP = 25
         const val MAX_ACTIVITY_IDS = 500
