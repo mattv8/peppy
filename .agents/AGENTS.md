@@ -8,7 +8,7 @@ This reference records non-obvious Peppy domain constraints.
 - [Android app guidance](apps/android.md), [desktop app guidance](apps/desktop.md), [iOS app guidance](apps/ios.md), and [web app guidance](apps/web.md): application-specific implementation constraints.
 - [Browser bindings](crates/browser-bindings.md), [mobile bindings](crates/mobile-bindings.md), and [tester cryptography](crates/tester-crypto.md): Rust binding and cryptography boundaries.
 - [Browser runtime](packages/browser-runtime.md) and [push relay](services/push-relay.md): package and service runtime behavior.
-- [Backup and restore](ops/backup-restore.md), [release updates](ops/release-updates.md), [Linux repository](ops/linux-repository.md), [release keys](ops/release-keys.md), and [packaging assets](ops/packaging-assets.md): operational and release procedures.
+- [Backup and restore](ops/backup-restore.md), [release updates](ops/release-updates.md), [Linux repository](ops/linux-repository.md), [release keys](ops/release-keys.md), [packaging assets](ops/packaging-assets.md), and [Google Play distribution](ops/play-store.md): operational and release procedures.
 - [SMS/MMS send-failure triage](ops/sms-mms-send-triage.md) and [Google Messages link field notes](ops/google-messages-link-triage.md): on-phone triage for carrier sends and for RCS through the link.
 - [Infrastructure and release boundaries](infra.md), [data, trust, and recovery boundaries](data-boundaries.md), [hosted platform security](platform-security.md), [desktop frontend](frontend-style-guide.md), and [native mobile](mobile-style-guide.md): shared implementation guidance.
 
@@ -131,7 +131,10 @@ This reference records non-obvious Peppy domain constraints.
   same account. See the native account clients for
   [Android](../apps/android/app/src/main/java/dev/peppy/mobile/account/HostedAccountClient.kt)
   and [iOS](../apps/ios/PeppyNative/HostedAccountClient.swift).
-- Hosted billing uses Stripe through Peppy's website. Subscription lapse means
+- Hosted billing uses Stripe on Peppy's website, the Apple App Store in Apple
+  builds, and Google Play Billing in the Play build. One paid provider is active
+  per account, and store subscriptions are managed and canceled in that store.
+  Subscription lapse means
   indefinite read-only retention, not scheduled account deletion. Read-only
   policy still permits reads, sync, export, revocation, and attachment deletion;
   explicit account deletion owns billing and vault cleanup. See
