@@ -248,6 +248,16 @@ describe("AttachmentStorageSettingsHost", () => {
     expect(screen.getByRole("button", { name: "Manage storage on the website" })).toBeInTheDocument();
   });
 
+  it("hides website management for Google Play billing", async () => {
+    vi.mocked(bridge.attachment_retention_status!).mockResolvedValue(status());
+    vi.mocked(bridge.billing_summary).mockResolvedValueOnce({ provider: "google_play", manageableIn: "google_play", planActive: true, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+    vi.mocked(bridge.purchase_options).mockResolvedValueOnce({ appStore: false, website: true });
+    render(<AttachmentStorageSettingsHost onManageStorage={vi.fn()} />);
+
+    expect(await screen.findByText("Extra storage isn't available with a Google Play subscription.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Manage storage on the website" })).not.toBeInTheDocument();
+  });
+
   it("clears a loaded device-a status before device-b becomes unavailable", async () => {
     const deviceA = deferred<import("../bridge/bridge").AttachmentRetentionStatusResult>();
     const deviceB = deferred<import("../bridge/bridge").AttachmentRetentionStatusResult>();

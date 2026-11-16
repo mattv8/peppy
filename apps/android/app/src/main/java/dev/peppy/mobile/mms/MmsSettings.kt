@@ -2,8 +2,6 @@ package dev.peppy.mobile.mms
 
 import android.Manifest
 import android.content.Context
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -260,6 +258,7 @@ internal fun MmsSettings(
     databaseOpen: Boolean,
     onChanged: () -> Unit,
     detailsOnly: Boolean = false,
+    onOpenGoogleMessagesLink: () -> Unit = {},
 ) {
     val preferences = remember { MmsPreferences(context) }
     var enabled by remember(refresh) { mutableStateOf(preferences.enabled) }
@@ -408,12 +407,14 @@ internal fun MmsSettings(
             }
             RestrictedMessageAccessControls(
                 context = context,
+                refresh = refresh,
                 access = restrictedAccess,
                 showAccessStatus = !hasAdvancedFeaturesSetup,
                 showRescan = presentation.showRescan && enabled && receiveGranted && !health.databaseUnavailable,
                 enabled = canRequestProviderRescan(enabled, receiveGranted, databaseOpen, restrictedAccess),
                 pending = rescanPending,
                 feedback = rescanFeedback,
+                onOpenGoogleMessagesLink = onOpenGoogleMessagesLink,
                 startRescan = {
                     rescanPending = true
                     scope.launch {
@@ -514,19 +515,19 @@ internal fun MmsSettings(
 }
 
 @Composable
-private fun RestrictedMessageAccessControls(
+internal fun RestrictedMessageAccessControls(
     context: Context,
+    refresh: Int,
     access: RestrictedMessageAccess,
     showAccessStatus: Boolean,
     showRescan: Boolean,
     enabled: Boolean,
     pending: Boolean,
     feedback: String?,
+    onOpenGoogleMessagesLink: () -> Unit,
     startRescan: () -> Unit,
 ) {
-    val command = remember(context.packageName) { restrictedMessageAppOpCommand(context.packageName) }
-    var commandCopied by remember { mutableStateOf(false) }
-    if (showAccessStatus) {
+    if (showAccessStatus && access != RestrictedMessageAccess.NOT_ALLOWED) {
         RestrictedMessageAccessStatus(access)
     }
     if (access == RestrictedMessageAccess.ALLOWED && showRescan) {
@@ -536,21 +537,8 @@ private fun RestrictedMessageAccessControls(
             modifier = Modifier.testTag("mms-restricted-message-rescan"),
         ) { Text(stringResource(R.string.peppy_mms_restricted_rescan)) }
     } else if (showAccessStatus && access == RestrictedMessageAccess.NOT_ALLOWED) {
-        Text(command, Modifier.testTag("mms-restricted-message-command"), style = MaterialTheme.typography.bodySmall)
-        OutlinedButton(
-            onClick = {
-                val clipboard = context.getSystemService(ClipboardManager::class.java)
-                commandCopied = try {
-                    clipboard?.setPrimaryClip(ClipData.newPlainText("Restricted message access command", command))
-                    clipboard != null
-                } catch (_: Exception) {
-                    false
-                }
-            },
-            modifier = Modifier.testTag("mms-restricted-message-copy-command"),
-        ) { Text(stringResource(R.string.peppy_mms_restricted_copy_command)) }
+        RestrictedNotAllowedAccessControls(context, refresh, onOpenGoogleMessagesLink)
     }
-    if (showAccessStatus && commandCopied) Text(stringResource(R.string.peppy_mms_restricted_command_copied), Modifier.testTag("mms-restricted-message-command-copied"), style = MaterialTheme.typography.bodySmall)
     feedback?.let {
         Text(
             it,
@@ -561,16 +549,16 @@ private fun RestrictedMessageAccessControls(
 }
 
 @Composable
-internal fun RestrictedMessageAccessStatus(access: RestrictedMessageAccess) {
+internal fun RestrictedMessageAccessStatus(access: RestrictedMessageAccess, statusResId: Int? = null) {
     val title = stringResource(R.string.peppy_mms_restricted_title)
-    val status = when (access) {
+    val status = if (statusResId != null) stringResource(statusResId) else when (access) {
         RestrictedMessageAccess.ALLOWED -> stringResource(R.string.peppy_mms_restricted_status_allowed)
         RestrictedMessageAccess.NOT_ALLOWED -> stringResource(R.string.peppy_mms_restricted_status_not_allowed)
         RestrictedMessageAccess.UNSUPPORTED -> stringResource(R.string.peppy_mms_restricted_status_unsupported)
         RestrictedMessageAccess.UNKNOWN -> stringResource(R.string.peppy_mms_restricted_status_unknown)
     }
     val help = buildString {
-        append(stringResource(R.string.peppy_mms_restricted_help))
+        append(stringResource(restrictedMessageAccessHelpResId()))
         if (access == RestrictedMessageAccess.UNSUPPORTED) {
             append("\n\n")
             append(stringResource(R.string.peppy_mms_restricted_unsupported_help))

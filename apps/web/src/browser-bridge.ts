@@ -841,6 +841,7 @@ export class BrowserBridge implements DesktopBridge {
   public store_purchase(_productId: string): Promise<"purchased" | "pending" | "cancelled"> { return unsupported("App Store purchases"); }
   public store_restore(): Promise<void> { return unsupported("Restore purchases"); }
   public open_store_subscriptions(): Promise<void> { return unsupported("App Store subscriptions"); }
+  public open_play_subscriptions(): Promise<void> { return unsupported("Google Play subscriptions"); }
 
   private async enrollmentSecretAction(command: string, id: string, title: string, description: string, confirm: string, fields: EnrollmentSecretField[], input: Record<string, unknown> = {}): Promise<EnrollmentView> {
     const secret = await secretDialog({ id, title, description, confirm, fields });

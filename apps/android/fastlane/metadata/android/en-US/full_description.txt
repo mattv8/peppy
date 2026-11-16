@@ -1,9 +1,27 @@
-Peppy helps you use your Android phone's SMS messages across your connected Peppy devices. Read and reply to SMS from the devices you choose while your Android phone remains your carrier connection.
+Read and reply to your Android phone's text messages from your other devices with Peppy.
 
-Peppy is a companion to your default messaging app. It does not ask to become your default SMS app. Experimental MMS support can import messages and media that your phone's default messaging app has already handled. Peppy does not provide general RCS support.
+Peppy keeps your phone's SMS and MMS conversations available on the devices you choose. You can read a conversation and reply from a computer or another phone. Replies are sent by your Android phone through its own SIM and carrier, so you keep using your existing phone number and plan.
 
-Choose which optional features to enable. Contacts access and notification-related access are requested only when you choose the related feature, and you can continue using Peppy without granting them.
+HOW SYNC WORKS
+- Pair your devices with Peppy. Your Android phone stays the carrier connection for the texts it sends and receives.
+- Messages synced between your devices are encrypted on your devices before they reach Peppy's relay. The Peppy server stores and forwards ciphertext for that synced data.
+- Carrier SMS and MMS travel over your carrier's network as they always do. Peppy does not add encryption to that carrier leg.
+- Experimental MMS support can import messages and media that your phone's default messaging app has already handled.
 
-Use Peppy Hosted with a subscription, or connect Peppy to a server you run yourself. A hosted subscription supports the hosted service; self-hosted servers remain an option for people who want to operate their own service.
+GOOGLE MESSAGES (RCS), OPTIONAL
+- You can link Google Messages on your phone to use RCS chats that already exist in Google Messages.
+- A message to a contact with no existing RCS chat is sent as SMS.
+- Group chats use RCS only when they match an existing Google Messages group. Otherwise they are sent as group MMS.
+- Peppy does not provide general RCS support outside this link. Without the link, Peppy uses SMS and MMS only.
+- The Google Play version includes the Google Messages link. It runs on your Android phone, not on Peppy's server.
 
-Privacy Policy: https://peppy.pro/privacy
+PEPPY HOSTED OR SELF-HOSTED
+- Peppy Hosted is a subscription you buy in this app. It is billed through Google Play. You can manage or cancel it in Google Play.
+- If your Peppy Hosted subscription lapses, your account becomes read-only. Your data is kept. You can still read and export it, and you can delete your account.
+- Prefer to run your own service? Connect Peppy to a server you operate yourself instead of Peppy Hosted.
+
+PERMISSIONS AND PRIVACY
+- Peppy does not ask to become your default SMS app. Your default messaging app keeps handling texts as before.
+- Contacts access and notification-related access are optional. Peppy requests them only when you turn on a feature that needs them, and you can use Peppy without granting them.
+
+Privacy policy: https://peppy.pro/privacy

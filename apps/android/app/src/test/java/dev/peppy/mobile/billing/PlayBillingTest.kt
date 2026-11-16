@@ -33,11 +33,24 @@ class PlayBillingTest {
         assertFalse(isValidatedPlayProductId("x".repeat(129)))
     }
 
+    @Test fun androidBillingGatewayBuildsWithRequiredPendingPurchasesConfiguration() {
+        AndroidPlayBillingGateway(activity).close()
+    }
+
     @Test fun managementUriIsLocallyConstructedOnlyForPlayProvider() {
         val context = billingContext(provider = NativeBillingProvider.PLAY)
         assertEquals("https://play.google.com/store/account/subscriptions?sku=peppy.monthly&package=dev.peppy.mobile", playManageUri(context).toString())
         assertNull(playManageUri(context.copy(currentProvider = NativeBillingProvider.STRIPE)))
-        assertNull(playManageUri(context.copy(productId = "not valid")))
+        assertEquals("https://play.google.com/store/account/subscriptions", playManageUri(context.copy(productId = "not valid")).toString())
+    }
+
+    @Test fun billingResponseCodesUseSpecificUserFacingStates() {
+        assertEquals(PlaySubscriptionState.Reconnecting, billingStateFor(BillingClient.BillingResponseCode.SERVICE_DISCONNECTED))
+        assertEquals(PlaySubscriptionState.Error(PlayBillingError.UNAVAILABLE), billingStateFor(BillingClient.BillingResponseCode.BILLING_UNAVAILABLE))
+        assertEquals(PlaySubscriptionState.Error(PlayBillingError.NETWORK), billingStateFor(BillingClient.BillingResponseCode.NETWORK_ERROR))
+        assertEquals(PlaySubscriptionState.Error(PlayBillingError.NOT_SUPPORTED), billingStateFor(BillingClient.BillingResponseCode.FEATURE_NOT_SUPPORTED))
+        assertEquals(PlaySubscriptionState.Error(PlayBillingError.GENERIC), billingStateFor(BillingClient.BillingResponseCode.DEVELOPER_ERROR))
+        assertEquals(PlaySubscriptionState.Error(PlayBillingError.GENERIC), billingStateFor(BillingClient.BillingResponseCode.ITEM_UNAVAILABLE))
     }
 
     @Test fun initialLoadReachesReadyAndStartsAutomaticRestore() {
@@ -169,12 +182,73 @@ class PlayBillingTest {
         val fixture = fixture()
         fixture.coordinator.load("account")
         fixture.gateway.completeConnect(ready = false)
-        assertTrue(fixture.coordinator.state.value is PlaySubscriptionState.BillingUnavailable)
+        assertEquals(PlaySubscriptionState.Reconnecting, fixture.coordinator.state.value)
 
-        fixture.coordinator.retry()
         fixture.gateway.completeConnect()
         fixture.gateway.completeOffers(listOf(monthlyOffer()))
         assertTrue(fixture.coordinator.state.value is PlaySubscriptionState.Ready)
+    }
+
+    @Test fun idleDisconnectKeepsReadyAndProviderPlayStates() {
+        val ready = readyFixture()
+        ready.gateway.disconnect()
+        assertTrue(ready.coordinator.state.value is PlaySubscriptionState.Ready)
+
+        val provider = fixture(context = billingContext(provider = NativeBillingProvider.PLAY))
+        provider.coordinator.load("account")
+        provider.gateway.disconnect()
+        assertTrue(provider.coordinator.state.value is PlaySubscriptionState.ProviderPlay)
+    }
+
+    @Test fun serviceDisconnectRecoversByRequeryingProductsAndPurchases() {
+        val fixture = readyFixture()
+        fixture.gateway.launchResult = BillingClient.BillingResponseCode.SERVICE_DISCONNECTED
+        fixture.coordinator.purchase(activity)
+
+        assertEquals(PlaySubscriptionState.Reconnecting, fixture.coordinator.state.value)
+        fixture.gateway.completeConnect()
+        fixture.gateway.completeOffers(listOf(monthlyOffer()))
+        fixture.gateway.completePurchases(emptyList())
+
+        assertTrue(fixture.coordinator.state.value is PlaySubscriptionState.Ready)
+        assertTrue(fixture.gateway.purchaseQueries >= 2)
+    }
+
+    @Test fun serviceDisconnectedPurchaseCallbackRecoversAfterSuccessfulLaunch() {
+        val fixture = readyFixture()
+        fixture.coordinator.purchase(activity)
+        fixture.gateway.emit(BillingClient.BillingResponseCode.SERVICE_DISCONNECTED, emptyList())
+
+        fixture.gateway.completeConnect()
+        fixture.gateway.completeOffers(listOf(monthlyOffer()))
+        fixture.gateway.completePurchases(emptyList())
+
+        assertTrue(fixture.coordinator.state.value is PlaySubscriptionState.Ready)
+    }
+
+    @Test fun unavailableReconnectExhaustionShowsRetryableUnavailableError() {
+        val fixture = readyFixture()
+        fixture.gateway.launchResult = BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE
+        fixture.coordinator.purchase(activity)
+
+        repeat(3) { fixture.gateway.completeConnect(ready = false) }
+
+        assertEquals(PlaySubscriptionState.Error(PlayBillingError.UNAVAILABLE), fixture.coordinator.state.value)
+    }
+
+    @Test fun delayedRecoveryOfferDoesNotOverwriteLinkedProviderState() = runBlocking {
+        val fixture = readyFixture()
+        val deferredLink = CompletableDeferred<NativePlayLinkOutcome>()
+        fixture.host.deferredLink = deferredLink
+        fixture.gateway.completePurchases(listOf(purchase("linked-during-recovery")))
+        fixture.coordinator.purchase(activity)
+        fixture.gateway.emit(BillingClient.BillingResponseCode.SERVICE_DISCONNECTED, emptyList())
+        fixture.gateway.completeConnect()
+
+        deferredLink.complete(NativePlayLinkOutcome.LINKED)
+        fixture.gateway.completeOffers(listOf(monthlyOffer()))
+
+        assertTrue(fixture.coordinator.state.value is PlaySubscriptionState.ProviderPlay)
     }
 
     @Test fun transientLinkFailureCanBeRetriedWithTheSameToken() {
@@ -248,6 +322,28 @@ class PlayBillingTest {
         fixture.host.snapshot = snapshot(fence = "two", vaultId = "account-vault")
         fixture.coordinator.load("account", "device-vault")
         assertTrue(fixture.coordinator.state.value is PlaySubscriptionState.VaultMismatch)
+    }
+
+    @Test fun cachedAccessAssociationRequiresTheAuthenticatedEnrolledVault() {
+        val nullVault = fixture(snapshot = snapshot(vaultId = null))
+        nullVault.coordinator.load("account", "device-vault")
+        assertNull(nullVault.coordinator.accountAccessAssociation.value)
+
+        val mismatchedVault = fixture(snapshot = snapshot(vaultId = "account-b"))
+        mismatchedVault.coordinator.load("account", "device-a")
+        mismatchedVault.coordinator.continueWithSignedInAccount()
+        assertNull(mismatchedVault.coordinator.accountAccessAssociation.value)
+
+        val matchingVault = fixture(snapshot = snapshot(vaultId = "device-vault"))
+        matchingVault.coordinator.load("account", "device-vault")
+        assertTrue(
+            requireNotNull(matchingVault.coordinator.accountAccessAssociation.value)
+                .matches("https://peppy.pro\ndevice-vault\ndevice\n1"),
+        )
+        assertFalse(
+            requireNotNull(matchingVault.coordinator.accountAccessAssociation.value)
+                .matches("https://peppy.pro\nother-vault\ndevice\n1"),
+        )
     }
 
     @Test fun duplicateCallbacksLinkOncePerSessionButNewSessionMayRelink() {
@@ -363,7 +459,7 @@ class PlayBillingTest {
         val gateway = FakeGateway()
         var refreshes = 0
         val scope = CoroutineScope(Job() + Dispatchers.Unconfined)
-        val coordinator = PlayBillingCoordinator(host, gateway, scope) { refreshes++ }
+        val coordinator = PlayBillingCoordinator(host, gateway, scope, { refreshes++ }) { }
         return Fixture(host, gateway, coordinator, scope) { refreshes }
     }
 
@@ -395,6 +491,7 @@ class PlayBillingTest {
 
     private class FakeGateway : PlayBillingGateway {
         private var events: (Int, List<BillingPurchase>) -> Unit = { _, _ -> }
+        private var disconnected: () -> Unit = {}
         private val connections = ArrayDeque<(Boolean) -> Unit>()
         private val offerResults = ArrayDeque<(Boolean, List<BillingOffer>) -> Unit>()
         private val purchaseResults = ArrayDeque<(Boolean, List<BillingPurchase>) -> Unit>()
@@ -404,6 +501,7 @@ class PlayBillingTest {
         var closeCalls = 0
         var launchResult = BillingClient.BillingResponseCode.OK
         override fun setEvents(listener: (Int, List<BillingPurchase>) -> Unit) { events = listener }
+        override fun setDisconnectedListener(listener: () -> Unit) { disconnected = listener }
         override fun connect(onReady: (Boolean) -> Unit) { connectCalls++; connections += onReady }
         override fun queryOffers(productId: String, onResult: (Boolean, List<BillingOffer>) -> Unit) { offerResults += onResult }
         override fun launch(activity: Activity, offer: BillingOffer, accountBinding: String): Int { launchCalls++; return launchResult }
@@ -413,6 +511,7 @@ class PlayBillingTest {
         fun completeOffers(offers: List<BillingOffer>, ok: Boolean = true) = offerResults.removeFirst().invoke(ok, offers)
         fun completePurchases(purchases: List<BillingPurchase>, ok: Boolean = true) = purchaseResults.removeFirst().invoke(ok, purchases)
         fun emit(code: Int, purchases: List<BillingPurchase>) = events(code, purchases)
+        fun disconnect() = disconnected()
     }
 
     private companion object {

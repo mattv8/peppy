@@ -7,6 +7,7 @@ import com.android.billingclient.api.BillingClientStateListener
 import com.android.billingclient.api.BillingFlowParams
 import com.android.billingclient.api.Purchase
 import com.android.billingclient.api.PurchasesUpdatedListener
+import com.android.billingclient.api.PendingPurchasesParams
 import com.android.billingclient.api.QueryProductDetailsParams
 import com.android.billingclient.api.QueryPurchasesParams
 import dev.peppy.mobile.account.HostedAccountClient
@@ -32,6 +33,7 @@ internal interface PlayBillingHost {
 }
 internal interface PlayBillingGateway {
     fun setEvents(listener: (Int, List<BillingPurchase>) -> Unit)
+    fun setDisconnectedListener(listener: () -> Unit) = Unit
     fun connect(onReady: (Boolean) -> Unit)
     fun queryOffers(productId: String, onResult: (Boolean, List<BillingOffer>) -> Unit)
     fun launch(activity: Activity, offer: BillingOffer, accountBinding: String): Int
@@ -47,14 +49,19 @@ internal class HostedPlayBillingHost(private val hosted: HostedAccountClient) : 
 }
 internal class AndroidPlayBillingGateway(context: Context) : PlayBillingGateway {
     private var events: (Int, List<BillingPurchase>) -> Unit = { _, _ -> }
+    private var disconnected: () -> Unit = {}
     private val details = mutableMapOf<String, com.android.billingclient.api.ProductDetails>()
     private val client = BillingClient.newBuilder(context.applicationContext).setListener(PurchasesUpdatedListener { result, purchases ->
         events(result.responseCode, purchases.orEmpty().map { it.toPort() })
-    }).enablePendingPurchases(com.android.billingclient.api.PendingPurchasesParams.newBuilder().enableOneTimeProducts().build()).build()
+    })
+        .enablePendingPurchases(PendingPurchasesParams.newBuilder().enableOneTimeProducts().build())
+        .enableAutoServiceReconnection()
+        .build()
     override fun setEvents(listener: (Int, List<BillingPurchase>) -> Unit) { events = listener }
+    override fun setDisconnectedListener(listener: () -> Unit) { disconnected = listener }
     override fun connect(onReady: (Boolean) -> Unit) { if (client.isReady) onReady(true) else client.startConnection(object : BillingClientStateListener {
         override fun onBillingSetupFinished(result: com.android.billingclient.api.BillingResult) = onReady(result.responseCode == BillingClient.BillingResponseCode.OK)
-        override fun onBillingServiceDisconnected() = Unit
+        override fun onBillingServiceDisconnected() = disconnected()
     }) }
     override fun queryOffers(productId: String, onResult: (Boolean, List<BillingOffer>) -> Unit) = client.queryProductDetailsAsync(
         QueryProductDetailsParams.newBuilder().setProductList(listOf(QueryProductDetailsParams.Product.newBuilder().setProductId(productId).setProductType(BillingClient.ProductType.SUBS).build())).build(),

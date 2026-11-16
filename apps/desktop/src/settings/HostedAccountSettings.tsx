@@ -126,8 +126,8 @@ export function AttachmentStorageSettingsHost({ sessionScopeId, onManageStorage,
     setManageStorageError(false);
     void load();
   }, [load, sessionScopeId]);
-  const showWebsiteManage = purchaseOptions?.website === true && billingSummary.provider !== "apple";
-  const purchase = purchaseOptions ? { purchaseOptions, billingSummary, products, currentPacks: billingSummary.storagePacks, state: purchaseState, onPurchase: bridge.store_purchase, onPurchased: () => void load(), onManageAppStore: bridge.open_store_subscriptions, onManageWebsite: purchaseOptions.website ? onManageStorage : undefined, onRetry: () => void load() } : undefined;
+  const showWebsiteManage = purchaseOptions?.website === true && billingSummary.provider !== "apple" && billingSummary.provider !== "google_play";
+  const purchase = purchaseOptions ? { purchaseOptions, billingSummary, products, currentPacks: billingSummary.storagePacks, state: purchaseState, onPurchase: bridge.store_purchase, onPurchased: () => void load(), onManageAppStore: bridge.open_store_subscriptions, onManageGooglePlay: bridge.open_play_subscriptions, onManageWebsite: purchaseOptions.website ? onManageStorage : undefined, onRetry: () => void load() } : undefined;
   const manage = async () => { try { setManageStorageError(false); await onManageStorage?.(); } catch { setManageStorageError(true); } };
   return <AttachmentStorageSettings key={sessionScopeId ?? "legacy-session"} result={storage} loading={loading} stale={stale} copy={peppyCopy} onRefresh={() => void load()} onManageStorage={showWebsiteManage ? manage : undefined} manageStorageUrl={showWebsiteManage ? manageStorageUrl : undefined} manageStorageError={manageStorageError} purchase={purchase} />;
 }

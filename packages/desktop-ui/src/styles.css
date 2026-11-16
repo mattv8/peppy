@@ -1352,6 +1352,7 @@ select:focus-visible {
 .badge { display: inline-flex; align-items: center; padding: 2px 6px; border-radius: var(--peppy-radius-pill); background: var(--peppy-surface-active); color: var(--peppy-text-primary); font-size: 11px; font-weight: 700; }
 [data-tone="warning"] { border-color: var(--peppy-warning-border); background: var(--peppy-warning-surface); color: var(--peppy-warning-text); }
 #billing-elsewhere-notice, #attachment-storage-addons, #hosted-store-plan-options { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-md); background: var(--peppy-surface-panel); }
+#attachment-storage-google-play-notice { display: grid; gap: 8px; }
 #billing-elsewhere-notice h3, #billing-elsewhere-notice h4, #attachment-storage-addons h4, #hosted-store-plan-options p { margin: 0; }
 #attachment-storage-addon-options, #hosted-plan-options, #hosted-paywall-links { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
 #attachment-storage-addon-options > li, #hosted-plan-options > li { display: grid; gap: 4px; padding: 8px; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-sm); background: var(--peppy-surface-widget); }

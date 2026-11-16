@@ -8,7 +8,7 @@ import { StorePlanOptions, type StorePlanOptionsCopy } from "./StorePlanOptions"
 afterEach(cleanup);
 
 const copy = {
-  hosted_subscribe_cta: "Subscribe", hosted_subscribe_body: "Choose a plan.", hosted_purchase_pending: "Pending", hosted_purchase_verifying: "Verifying", production_pairing_checking: "Checking purchases…", attachment_storage_allowance: "50 GB included", try_again: "Try again", privacy_policy: "Privacy Policy", store_period_month: "per month", store_period_year: "per year", store_renewal_notice: "Renews automatically.", store_terms_cta: "Terms of Use", store_restore_cta: "Restore purchases", store_restore_working: "Restoring purchases…", store_restore_done: "Restore finished.", store_restore_failed: "Purchases couldn't be restored.", store_purchase_waiting: "Complete the purchase.", store_purchase_pending_body: "Waiting for approval.", store_purchase_failed: "The purchase couldn't be completed.", store_purchase_rejected: "This purchase couldn't be applied.", store_unavailable: "Purchases are unavailable right now.", billing_elsewhere_title: "Subscription billed elsewhere", billing_elsewhere_website_body: "This subscription is billed on the Peppy website.", billing_elsewhere_website_cta: "Manage on the website", billing_elsewhere_other_body: "This subscription was started outside the App Store.", billing_elsewhere_apple_body: "This subscription is billed through the App Store.", attachment_storage_billing_handoff: "Manage it there.", attachment_storage_billing_open_failed: "Couldn't open billing.", store_manage_cta: "Manage App Store subscriptions", store_manage_failed: "Couldn't open subscriptions.",
+  hosted_subscribe_cta: "Subscribe", hosted_subscribe_body: "Choose a plan.", hosted_purchase_pending: "Pending", hosted_purchase_verifying: "Verifying", production_pairing_checking: "Checking purchases…", attachment_storage_allowance: "50 GB included", try_again: "Try again", privacy_policy: "Privacy Policy", store_period_month: "per month", store_period_year: "per year", store_renewal_notice: "Renews automatically.", store_terms_cta: "Terms of Use", store_restore_cta: "Restore purchases", store_restore_working: "Restoring purchases…", store_restore_done: "Restore finished.", store_restore_failed: "Purchases couldn't be restored.", store_purchase_waiting: "Complete the purchase.", store_purchase_pending_body: "Waiting for approval.", store_purchase_failed: "The purchase couldn't be completed.", store_purchase_rejected: "This purchase couldn't be applied.", store_unavailable: "Purchases are unavailable right now.", billing_elsewhere_title: "Subscription billed elsewhere", billing_elsewhere_website_body: "This subscription is billed on the Peppy website.", billing_elsewhere_website_cta: "Manage on the website", billing_elsewhere_other_body: "This subscription was started outside the App Store.", billing_elsewhere_apple_body: "This subscription is billed through the App Store.", billing_elsewhere_google_play_body: "This subscription is billed through Google Play.", attachment_storage_billing_handoff: "Manage it there.", attachment_storage_billing_open_failed: "Couldn't open billing.", store_manage_cta: "Manage App Store subscriptions", store_manage_failed: "Couldn't open subscriptions.", google_play_manage_cta: "Manage Google Play subscriptions", google_play_manage_failed: "Couldn't open subscriptions.",
 } satisfies StorePlanOptionsCopy & BillingElsewhereCopy;
 
 const products = [
@@ -65,6 +65,7 @@ describe("StorePlanOptions", () => {
   it.each([
     [{ website: true }, "stripe", copy.billing_elsewhere_website_body, "stripe"],
     [{ website: true }, "apple", copy.billing_elsewhere_apple_body, "apple"],
+    [{ website: true }, "google_play", copy.billing_elsewhere_google_play_body, "google_play"],
     [{ website: true }, undefined, copy.billing_elsewhere_other_body, null],
     [{ website: true }, "none", copy.billing_elsewhere_other_body, null],
   ] as const)("uses the billing provider %s for the conflict notice", async (options, billingProvider, body, dataProvider) => {
@@ -96,8 +97,9 @@ describe("BillingElsewhereNotice", () => {
     ["website", "stripe", copy.billing_elsewhere_website_body],
     ["other", "stripe", copy.billing_elsewhere_other_body],
     ["apple", "apple", copy.billing_elsewhere_apple_body],
+    ["google_play", "google_play", copy.billing_elsewhere_google_play_body],
   ] as const)("renders the %s variant", (variant, provider, body) => {
-    render(<BillingElsewhereNotice variant={variant} provider={provider} copy={copy} onManageWebsite={vi.fn()} onManageAppStore={vi.fn()} />);
+    render(<BillingElsewhereNotice variant={variant} provider={provider} copy={copy} onManageWebsite={vi.fn()} onManageAppStore={vi.fn()} onManageGooglePlay={vi.fn()} />);
     expect(screen.getByText(body)).toBeInTheDocument();
     if (variant === "other") expect(screen.queryByRole("button")).toBeNull();
     else expect(screen.getByRole("button")).toBeInTheDocument();

@@ -28,6 +28,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -524,7 +525,9 @@ internal fun HostedEnrollmentScreen(
             }
         }
         if (phase !in setOf(HostedPhase.SigningIn, HostedPhase.Checking, HostedPhase.Provisioning)) {
-            HostedEnrollmentDeletionEntry()
+            val playDeletionContext by playBilling?.deletionContext?.collectAsState()
+                ?: remember { mutableStateOf(null) }
+            HostedEnrollmentDeletionEntry(playDeletionContext = playDeletionContext)
         }
     }
 }
@@ -562,9 +565,16 @@ internal fun HostedPlayEnrollmentCheck(onCheckAgain: () -> Unit) {
 @Composable
 internal fun HostedEnrollmentDeletionEntry(
     openDeletion: (android.content.Context) -> Boolean = ::openHostedAccountDeletion,
+    playDeletionContext: dev.peppy.mobile.billing.PlayDeletionContext? = null,
 ) {
     var deletionOpenError by remember { mutableStateOf(false) }
-    HostedAccountDeletionEntry(tag = "hosted-delete-account-button", onOpenFailed = { deletionOpenError = true }, openDeletion = openDeletion)
+    HostedAccountDeletionEntry(
+        tag = "hosted-delete-account-button",
+        onOpenFailed = { deletionOpenError = true },
+        playManaged = playDeletionContext?.managed == true,
+        playProductId = playDeletionContext?.productId,
+        openDeletion = openDeletion,
+    )
     if (deletionOpenError) Text(
         stringResource(R.string.peppy_toggle_android_link_unavailable),
         Modifier.testTag("hosted-delete-account-error"),

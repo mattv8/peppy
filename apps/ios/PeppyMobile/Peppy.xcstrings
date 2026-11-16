@@ -7361,6 +7361,36 @@
         }
       }
     },
+    "peppy.account_delete_subscription_play": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deleting your account doesn't cancel your Google Play subscription. Cancel it in Google Play so you aren't charged again."
+          }
+        }
+      }
+    },
+    "peppy.account_delete_cancel_in_play": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel in Google Play"
+          }
+        }
+      }
+    },
+    "peppy.account_deleted_play_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your Google Play subscription stays active until you cancel it in Google Play."
+          }
+        }
+      }
+    },
     "peppy.account_delete_vault_distinct": {
       "localizations": {
         "en": {
@@ -7436,7 +7466,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Manage in Google Play, opens Google Play"
+            "value": "Manage your Google Play subscription"
           }
         }
       }
@@ -7477,6 +7507,46 @@
           "stringUnit": {
             "state": "translated",
             "value": "Google Play purchases aren't available on this device right now. Make sure Google Play is installed and up to date, then try again."
+          }
+        }
+      }
+    },
+    "peppy.play_reconnecting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reconnecting to Google Play…"
+          }
+        }
+      }
+    },
+    "peppy.play_error_network": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't reach Google Play. Check your connection and try again."
+          }
+        }
+      }
+    },
+    "peppy.play_error_not_supported": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This version of Google Play can't start subscriptions on this phone. Update Google Play and try again."
+          }
+        }
+      }
+    },
+    "peppy.play_error_generic": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Something went wrong with Google Play. Try again in a little while."
           }
         }
       }
@@ -7697,6 +7767,106 @@
           "stringUnit": {
             "state": "translated",
             "value": "Your subscription is active."
+          }
+        }
+      }
+    },
+    "peppy.play_grace_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Play couldn't charge your payment method. Fix it in Google Play by %1$@ to keep sending texts. Your messages are safe either way."
+          }
+        }
+      }
+    },
+    "peppy.play_grace_body_nodate": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Play couldn't charge your payment method. Fix it in Google Play soon to keep sending texts. Your messages are safe either way."
+          }
+        }
+      }
+    },
+    "peppy.play_ending_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You cancelled in Google Play. After that, Peppy becomes read-only. Your data is kept."
+          }
+        }
+      }
+    },
+    "peppy.play_ending_scheduled_nodate_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your subscription ends soon"
+          }
+        }
+      }
+    },
+    "peppy.play_hold_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sending paused: payment problem"
+          }
+        }
+      }
+    },
+    "peppy.play_hold_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Play has put your subscription on hold or paused it. Fix your payment method or resume it in Google Play to send again. You can still read, sync and export your messages, and your data is kept."
+          }
+        }
+      }
+    },
+    "peppy.play_subscription_ended_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Subscription ended"
+          }
+        }
+      }
+    },
+    "peppy.play_subscription_ended_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your subscription has ended. Your data is kept."
+          }
+        }
+      }
+    },
+    "peppy.play_fix_payment_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fix payment in Google Play"
+          }
+        }
+      }
+    },
+    "peppy.play_resubscribe_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Resubscribe in Google Play"
           }
         }
       }

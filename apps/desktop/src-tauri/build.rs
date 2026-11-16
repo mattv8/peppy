@@ -126,6 +126,7 @@ const COMMANDS: &[&str] = &[
     "store_purchase",
     "store_restore",
     "open_store_subscriptions",
+    "open_play_subscriptions",
     "billing_summary",
     "enrollment_discover",
     "enrollment_start_over",

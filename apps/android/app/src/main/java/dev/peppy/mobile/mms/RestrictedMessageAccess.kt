@@ -38,9 +38,6 @@ internal fun checkAppOp(appOps: AppOpsManager, operation: String, uid: Int, pack
     else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) appOps.unsafeCheckOpNoThrow(operation, uid, packageName)
     else throw UnsupportedOperationException("AppOps check unavailable")
 
-internal fun restrictedMessageAppOpCommand(packageName: String): String =
-    "adb shell appops set $packageName $READ_RESTRICTED_MESSAGES_OP allow"
-
 internal enum class ProviderRescanRequestOutcome { QUEUED, ALREADY_QUEUED, UNAVAILABLE, FAILED }
 
 internal fun canRequestProviderRescan(

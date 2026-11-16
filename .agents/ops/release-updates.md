@@ -54,9 +54,11 @@ Configure the following protected inputs before enabling an update release:
   publisher independently verifies final staged APK and AAB assets against it
   before checksums or GitHub Release creation.
 
-Trusted direct APK builds always create the libgm AAR and link it, which requires
-Go `1.27.3`, JDK 17, NDK `27.2.12479018`, and the AAR build inputs. Play/AAB
-builds never include libgm.
+Trusted builds always create the libgm AAR and link it, which requires Go
+`1.27.3`, JDK 17, NDK `27.2.12479018`, and the AAR build inputs. Trusted CI builds
+both the direct APK and the Play AAB with `-PpeppyGoogleMessagesLink=true`;
+`verifySideloadGoogleMessagesLink` and `verifyReleaseGoogleMessagesLink` fail
+the build when libgm is absent. See [Android Google Messages link](../apps/android.md#google-messages-link-github-release-apk).
 
 The trusted build fails closed when its channel, updater key, required selected
 platform credentials, or explicit mode value is invalid. It never downgrades a
@@ -113,12 +115,13 @@ skip behavior.
 Register the corresponding certificate with Google OAuth where that Android
 identity is required. GitHub Release assets are named
 `peppy-<version>-android.apk` and `peppy-<version>-android.aab`. The APK is the
-signed direct-sideload artifact; the AAB is an upload input for store tooling,
-not directly installable. Google Play enrollment is not required to sideload the
+signed direct-sideload artifact; the AAB is not directly installable. The Play
+publishing workflow, `.github/workflows/play-publish.yml`, uploads the AAB to the
+Google Play internal track. Google Play enrollment is not required to sideload the
 APK.
 
 Trusted direct APK release notes must say that the APK includes the Google
-Messages link, that the AAB and Play distribution never include it, that including
+Messages link, that the Play AAB includes it too, that including
 the link does not by itself enable Google Messages sending or receiving, and that
 the in-app **Open-source licenses** page contains the Google Messages notices and
 corresponding-source offer.
@@ -137,8 +140,9 @@ Use protected-environment variables (not repository defaults) for the two mode
 values. Both are validated before trusted build work; unavailable GitHub
 environment variables are mapped to the strict defaults, while an explicitly
 empty or unknown script policy value fails. These GitHub
-Release artifacts are not App Store, Mac App Store, Microsoft Store, Android
-store, or iOS store submissions.
+Release artifacts are not App Store, Mac App Store, Microsoft Store, or iOS store
+submissions. The Play AAB reaches Google Play only through
+`.github/workflows/play-publish.yml`; see [Play store reference](play-store.md).
 
 ## Public verification keys
 

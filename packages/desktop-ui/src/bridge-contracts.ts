@@ -169,8 +169,8 @@ export type ContactResolutionMap = Record<string, ResolvedContact>;
 export type BridgeErrorCode = "database-key-unavailable" | "cancelled" | (string & {});
 export type BridgeError = { code: BridgeErrorCode; message: string; conversationId?: string; draftId?: string; currentRevision?: string };
 export type HostedSignInProvider = "google" | "apple";
-export type BillingProvider = "none" | "stripe" | "apple";
-export type BillingManageableIn = "none" | "website" | "app_store";
+export type BillingProvider = "none" | "stripe" | "apple" | "google_play";
+export type BillingManageableIn = "none" | "website" | "app_store" | "google_play";
 export type HostedBillingSummary = { provider: BillingProvider; manageableIn: BillingManageableIn };
 /** Account-wide billing state. `storageRenewsWithoutPlan` is true only when Apple storage still renews after the plan lapsed. */
 export type BillingSummaryView = HostedBillingSummary & { planActive: boolean; storagePacks: number; storageRenewsWithoutPlan: boolean; deletionPending: boolean };
@@ -367,6 +367,7 @@ export interface DesktopBridge {
   store_purchase(productId: string): Promise<"purchased" | "pending" | "cancelled">;
   store_restore(): Promise<void>;
   open_store_subscriptions(): Promise<void>;
+  open_play_subscriptions(): Promise<void>;
   /** Optional while older fixture hosts do not implement device retention status. Fetch only on settings open or explicit refresh. */
   attachment_retention_status?(): Promise<AttachmentRetentionStatusResult>;
   /** Optional host read of one attachment's core-owned remote/local availability. */

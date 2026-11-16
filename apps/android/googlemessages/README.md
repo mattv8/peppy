@@ -1,8 +1,8 @@
 # Google Messages link
 
 This Go module builds the Android bridge for the Google Messages link. Trusted
-direct APKs always include it; Play/AAB builds never include it. Local sideload
-builds opt in with `-PpeppyGoogleMessagesLink=true`.
+release builds always include it: both the direct APK and the Play AAB. Local
+sideload builds opt in with `-PpeppyGoogleMessagesLink=true`.
 
 ## Pins
 

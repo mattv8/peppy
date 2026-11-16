@@ -342,6 +342,8 @@ private fun CompanionScreen(activity: ComponentActivity) {
             }
         }
     }
+    val playDeletionContext by subscriptionCoordinator?.deletionContext?.collectAsState()
+        ?: remember { mutableStateOf(dev.peppy.mobile.billing.PlayDeletionContext(false, null)) }
     var subscriptionRouteState by remember { mutableStateOf(SubscriptionRouteState()) }
     var subscriptionSignInBusy by remember { mutableStateOf(false) }
     LaunchedEffect(subscriptionOpen) {
@@ -701,7 +703,8 @@ private fun CompanionScreen(activity: ComponentActivity) {
                 scope.launch { ownerPhoneHost = withContext(Dispatchers.IO) { createOwnerPhoneApprovalHost(context) }; addPhoneOpen = ownerPhoneHost != null }
             }, canAddPhone = ownerPhoneAvailable, onConnectComputer = {
                 scope.launch { ownerComputerHost = withContext(Dispatchers.IO) { createOwnerComputerApprovalHost(context) }; connectComputerOpen = ownerComputerHost != null }
-            }, canConnectComputer = ownerPhoneAvailable, onDetailChanged = { accountDetailsOpen = it }, onRouteChanged = { scope.launch { scrollState.scrollTo(0) } })
+            }, canConnectComputer = ownerPhoneAvailable, onDetailChanged = { accountDetailsOpen = it }, onRouteChanged = { scope.launch { scrollState.scrollTo(0) } },
+                playDeletionContext = playDeletionContext)
             if (settingsOpen && !subscriptionOpen) {
                 ScreenBody("settings-screen") {
                     val externalLinkLabel = stringResource(R.string.peppy_about_opens_in_browser)
@@ -735,8 +738,17 @@ private fun CompanionScreen(activity: ComponentActivity) {
                     }
                     DiagnosticsSettings()
                     if (status?.enrolled == true && status?.sharedKeysReady == true) {
-                        GatewayAccountSettings(onChanged = { refresh++ }, settingsMode = true, onOpenSubscription = { subscriptionOpen = true })
-                    } else LockedHostedSettings(status?.origin, isPlayDistribution()) { subscriptionOpen = true }
+                        GatewayAccountSettings(
+                            onChanged = { refresh++ },
+                            settingsMode = true,
+                            onOpenSubscription = { subscriptionOpen = true },
+                            playDeletionContext = playDeletionContext,
+                        )
+                    } else LockedHostedSettings(
+                        status?.origin,
+                        isPlayDistribution(),
+                        playDeletionContext,
+                    ) { subscriptionOpen = true }
                 }
             }
             }
@@ -757,7 +769,12 @@ internal fun SubscriptionRoute(
 }
 
 @Composable
-internal fun LockedHostedSettings(origin: String?, isPlay: Boolean, onOpenSubscription: () -> Unit) {
+internal fun LockedHostedSettings(
+    origin: String?,
+    isPlay: Boolean,
+    playDeletionContext: dev.peppy.mobile.billing.PlayDeletionContext = dev.peppy.mobile.billing.PlayDeletionContext(false, null),
+    onOpenSubscription: () -> Unit,
+) {
     if (origin != "https://peppy.pro") return
     var deletionOpenError by remember { mutableStateOf(false) }
     if (isPlay) {
@@ -770,6 +787,8 @@ internal fun LockedHostedSettings(origin: String?, isPlay: Boolean, onOpenSubscr
             tag = "account-delete-row",
             onOpenFailed = { deletionOpenError = true },
             onViewSubscription = onOpenSubscription,
+            playManaged = playDeletionContext.managed,
+            playProductId = playDeletionContext.productId,
         )
     }
     if (deletionOpenError) Text(

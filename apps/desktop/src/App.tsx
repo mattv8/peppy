@@ -13,7 +13,7 @@ import {
   type WheelEvent,
 } from "react";
 import { flushSync } from "react-dom";
-import { MAX_DRAFT_ATTACHMENTS, type ConversationFolder, type GatewayAvailability, type LocalSearchHit, type LocalSearchRequest, type NotificationQuickReplySettings, type OneTimeCodeTarget } from "@peppy/desktop-ui/bridge-contracts";
+import { MAX_DRAFT_ATTACHMENTS, type BillingManageableIn, type BillingProvider, type ConversationFolder, type GatewayAvailability, type LocalSearchHit, type LocalSearchRequest, type NotificationQuickReplySettings, type OneTimeCodeTarget } from "@peppy/desktop-ui/bridge-contracts";
 import {
   AppTitlebar,
   attachmentStorageRemovalText,
@@ -1525,14 +1525,14 @@ function SettingsView({
   onTypingShare(enabled: boolean): void;
   requestedSection?: string;
   onRequestedSectionConsumed?(): void;
-  onAccountDeleted(result: { outcome: "deleted" | "pending"; provider: "none" | "stripe" | "apple" }): void;
+  onAccountDeleted(result: { outcome: "deleted" | "pending"; provider: BillingProvider }): void;
 }) {
   const platform = detectPlatform();
   const [startupStatus, setStartupStatus] = useState<{ state: "on" | "off" | "approval_needed" | "unavailable"; background: boolean }>();
   const [savingStartup, setSavingStartup] = useState(false);
   const [startupError, setStartupError] = useState("");
   const [openLoginItemsError, setOpenLoginItemsError] = useState(false);
-  const [billingSummary, setBillingSummary] = useState<{ provider: "none" | "stripe" | "apple"; manageableIn: "none" | "website" | "app_store" }>();
+  const [billingSummary, setBillingSummary] = useState<{ provider: BillingProvider; manageableIn: BillingManageableIn }>();
   const [purchaseOptions, setPurchaseOptions] = useState<{ appStore: boolean; website: boolean }>();
   const [pendingAction, setPendingAction] = useState<SettingsAction | null>(null);
   const [actionError, setActionError] = useState<{ action: SettingsAction; message: string } | null>(null);
@@ -1898,8 +1898,9 @@ function SettingsView({
       {!browserHost && <AppLockSettings status={appLock} onChange={onAppLock} />}
       {hasAccount && <section id="settings-account-billing" className="settings-card" data-settings-section="account-billing">
         <h2>Account &amp; billing</h2>
-        {(browserHost || (purchaseOptions?.website && billingSummary && billingSummary.provider !== "apple")) && <p>{peppyCopy.account_billing_intro_website}</p>}
+        {(browserHost || (purchaseOptions?.website && billingSummary && billingSummary.provider !== "apple" && billingSummary.provider !== "google_play")) && <p>{peppyCopy.account_billing_intro_website}</p>}
         {!browserHost && purchaseOptions?.appStore && billingSummary && (billingSummary.provider === "none" || billingSummary.provider === "apple") && <p>{peppyCopy.account_billing_intro_app_store}</p>}
+        {billingSummary?.provider === "google_play" && billingSummary.manageableIn === "google_play" && <p id="account-billing-intro-google-play">{peppyCopy.account_billing_intro_google_play}</p>}
         {browserHost && accountUrl && <a id="settings-account-portal-link" className="secondary-button" href={accountUrl} target="_blank" rel="noopener noreferrer">{peppyCopy.account_portal_cta}<span className="visually-hidden"> (opens in a new tab)</span></a>}
         {browserHost ? <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} manageStorageUrl={accountUrl} /> : <HostedAccountSettings sessionScopeId={sessionScopeId} onAccountDeleted={onAccountDeleted} />}
       </section>}
@@ -1990,13 +1991,21 @@ function ReenrolScreen({ onRetry, onStart, enrollment }: { onRetry(): Promise<vo
   </section>;
 }
 
-function AccountDeletionResultDialog({ result, onDone }: { result: { outcome: "deleted" | "pending"; provider: "none" | "stripe" | "apple" }; onDone(): void }) {
+function AccountDeletionResultDialog({ result, onDone }: { result: { outcome: "deleted" | "pending"; provider: BillingProvider }; onDone(): void }) {
   const deleted = result.outcome === "deleted";
   const [managementFailed, setManagementFailed] = useState(false);
   const openSubscriptionManagement = async () => {
     setManagementFailed(false);
     try {
       await bridge.open_store_subscriptions();
+    } catch {
+      setManagementFailed(true);
+    }
+  };
+  const openGooglePlayManagement = async () => {
+    setManagementFailed(false);
+    try {
+      await bridge.open_play_subscriptions();
     } catch {
       setManagementFailed(true);
     }
@@ -2009,6 +2018,7 @@ function AccountDeletionResultDialog({ result, onDone }: { result: { outcome: "d
   >
     <p id="account-deletion-result-body">{deleted ? peppyCopy.account_deleted_body : peppyCopy.account_delete_pending_body}</p>
     {deleted && result.provider === "apple" && <><p id="account-deletion-result-apple-notice">{peppyCopy.account_deleted_apple_body}</p><button id="account-deletion-result-manage" className="secondary-button" type="button" onClick={() => void openSubscriptionManagement()}>{peppyCopy.store_manage_cta}</button>{managementFailed && <p id="account-deletion-result-management-error" role="alert">{peppyCopy.store_manage_failed}</p>}</>}
+    {deleted && result.provider === "google_play" && <><p id="account-deletion-result-google-play-notice">{peppyCopy.account_deleted_google_play_body}</p><button id="account-deletion-result-google-play-manage" className="secondary-button" type="button" onClick={() => void openGooglePlayManagement()}>{peppyCopy.google_play_manage_cta}</button>{managementFailed && <p id="account-deletion-result-management-error" role="alert">{peppyCopy.google_play_manage_failed}</p>}</>}
   </Modal>;
 }
 
@@ -2377,7 +2387,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [reenrolEnrollment, setReenrolEnrollment] = useState(false);
   const reenrolEnrollmentRef = useRef(false);
   reenrolEnrollmentRef.current = reenrolEnrollment;
-  const [deletionResult, setDeletionResult] = useState<{ outcome: "deleted" | "pending"; provider: "none" | "stripe" | "apple" }>();
+  const [deletionResult, setDeletionResult] = useState<{ outcome: "deleted" | "pending"; provider: BillingProvider }>();
   const [refreshing, setRefreshing] = useState(false);
   const [sending, setSending] = useState(false);
   const [closingHead, setClosingHead] = useState(false);

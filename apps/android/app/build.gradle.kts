@@ -367,6 +367,9 @@ android {
     sourceSets {
         getByName("main").jniLibs.srcDir("src/main/jniLibs")
         getByName("debug").res.srcDir(developmentTlsResources.get().asFile)
+        listOf("debug", "sideload").forEach { sourceSet ->
+            getByName(sourceSet).kotlin.directories += "src/restrictedAccessCommand/java"
+        }
         getByName("sideload").manifest.srcFile("src/sideload/AndroidManifest.xml")
         getByName("sideload").kotlin.directories += "src/gmlink/java"
         getByName("sideload").res.srcDir("src/gmlink/res")
