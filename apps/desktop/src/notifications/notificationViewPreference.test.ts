@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  NOTIFICATIONS_PREFERENCE_KEY,
+  NOTIFICATIONS_PREFERENCE_ITEM,
   persistNotificationArrangement,
   readNotificationArrangement,
   useNotificationArrangement,
@@ -20,15 +20,15 @@ describe("notification view preference", () => {
 
   it("defaults to time arrangement for missing, invalid, or unknown storage", () => {
     expect(readNotificationArrangement()).toBe("time");
-    localStorage.setItem(NOTIFICATIONS_PREFERENCE_KEY, "not json");
+    localStorage.setItem(NOTIFICATIONS_PREFERENCE_ITEM, "not json");
     expect(readNotificationArrangement()).toBe("time");
-    localStorage.setItem(NOTIFICATIONS_PREFERENCE_KEY, '{"arrangement":"sideways"}');
+    localStorage.setItem(NOTIFICATIONS_PREFERENCE_ITEM, '{"arrangement":"sideways"}');
     expect(readNotificationArrangement()).toBe("time");
   });
 
   it("reads and writes the arrangement under the versioned key", () => {
     persistNotificationArrangement("app");
-    expect(localStorage.getItem(NOTIFICATIONS_PREFERENCE_KEY)).toBe('{"arrangement":"app"}');
+    expect(localStorage.getItem(NOTIFICATIONS_PREFERENCE_ITEM)).toBe('{"arrangement":"app"}');
     expect(readNotificationArrangement()).toBe("app");
   });
 
@@ -38,7 +38,7 @@ describe("notification view preference", () => {
     expect(result.current[0]).toBe("app");
     expect(readNotificationArrangement()).toBe("app");
     persistNotificationArrangement("time");
-    act(() => window.dispatchEvent(new StorageEvent("storage", { key: NOTIFICATIONS_PREFERENCE_KEY })));
+    act(() => window.dispatchEvent(new StorageEvent("storage", { key: NOTIFICATIONS_PREFERENCE_ITEM })));
     expect(result.current[0]).toBe("time");
   });
 
