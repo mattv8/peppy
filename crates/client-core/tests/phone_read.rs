@@ -1,7 +1,17 @@
 //! Durable phone-read permits are issued only for live, locally acquired SMS rows.
 
 use crate::common::*;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap()
+}
 
 fn input(id: &str, thread: &str, date: i64, imported: bool) -> SmsAcquisitionInput {
     SmsAcquisitionInput {
@@ -20,6 +30,7 @@ fn input(id: &str, thread: &str, date: i64, imported: bool) -> SmsAcquisitionInp
         sent_at_ms: Some(date),
         date_sent_ms: Some(date),
         creator: None,
+        provider_read: None,
         source_row_fingerprint: format!("fingerprint-{id}"),
     }
 }
@@ -71,6 +82,258 @@ fn disabled_reads_do_not_backfill_when_enabled_later() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn capture_read_sms_replays_seen_before_the_message_without_a_phone_effect_or_banner() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let desktop = unlocked(&config(&dir, "desktop", &vault), &vault);
+    enable(&phone);
+    let mut row = input("already-read", "thread", now_ms(), false);
+    row.provider_read = Some(true);
+    let acquisition = phone.begin_sms_acquisition(row).unwrap();
+    let captured = phone
+        .complete_sms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+
+    assert!(
+        phone
+            .phone_read_candidates(PhoneReadTransport::Sms, "generation-1", 0, 100)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        phone
+            .pending_phone_read_effects(100, 100)
+            .unwrap()
+            .is_empty()
+    );
+
+    let envelopes = phone.pending_outbox().unwrap();
+    assert_eq!(envelopes.len(), 2);
+    assert!(
+        envelopes[0].producer_sequence < envelopes[1].producer_sequence,
+        "the ReadState must be sequenced before its message envelope"
+    );
+    desktop.ingest(&envelopes[0], Cursor(1)).unwrap();
+    desktop.apply_pending(100).unwrap();
+    assert!(
+        desktop
+            .messages(captured.conversation_id)
+            .map(|messages| messages.is_empty())
+            .unwrap_or(true),
+        "the first envelope must be the ReadState, not the message"
+    );
+    desktop.ingest(&envelopes[1], Cursor(2)).unwrap();
+    desktop.apply_pending(100).unwrap();
+
+    let message = desktop
+        .messages(captured.conversation_id)
+        .unwrap()
+        .into_iter()
+        .find(|message| message.payload.record.message_id == captured.message_id)
+        .unwrap();
+    assert!(message.seen);
+    assert!(desktop.pending_banner_candidates(10).unwrap().is_empty());
+}
+
+#[test]
+fn capture_read_sms_false_leaves_the_message_unread_with_a_banner_candidate() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let desktop = unlocked(&config(&dir, "desktop", &vault), &vault);
+    enable(&phone);
+    let mut row = input("false", "thread", now_ms(), false);
+    row.provider_read = Some(false);
+    let acquisition = phone.begin_sms_acquisition(row).unwrap();
+    let captured = phone
+        .complete_sms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+
+    let envelopes = phone.pending_outbox().unwrap();
+    assert_eq!(envelopes.len(), 1);
+    desktop.ingest(&envelopes[0], Cursor(1)).unwrap();
+    desktop.apply_pending(100).unwrap();
+    assert!(!only_message(&desktop, captured.conversation_id).seen);
+    assert_eq!(desktop.pending_banner_candidates(10).unwrap().len(), 1);
+}
+
+#[test]
+fn capture_read_sms_unknown_leaves_the_message_unread_with_a_banner_candidate() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let desktop = unlocked(&config(&dir, "desktop", &vault), &vault);
+    enable(&phone);
+    let acquisition = phone
+        .begin_sms_acquisition(input("unknown", "thread", now_ms(), false))
+        .unwrap();
+    let captured = phone
+        .complete_sms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+
+    let envelope = phone.pending_outbox().unwrap().remove(0);
+    desktop.ingest(&envelope, Cursor(1)).unwrap();
+    desktop.apply_pending(100).unwrap();
+    assert!(!only_message(&desktop, captured.conversation_id).seen);
+    assert_eq!(desktop.pending_banner_candidates(10).unwrap().len(), 1);
+}
+
+#[test]
+fn capture_read_sms_disabled_does_not_publish_or_mark_seen() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let mut row = input("disabled", "thread", now_ms(), false);
+    row.provider_read = Some(true);
+    let acquisition = phone.begin_sms_acquisition(row).unwrap();
+    let captured = phone
+        .complete_sms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+
+    assert_eq!(phone.pending_outbox().unwrap().len(), 1);
+    assert!(!only_message(&phone, captured.conversation_id).seen);
+}
+
+#[test]
+fn capture_read_sms_ignores_imported_and_outgoing_rows() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone = unlocked(&config(&dir, "gateway", &vault), &vault);
+    enable(&phone);
+    let mut imported = input("imported-read", "thread", now_ms(), true);
+    imported.provider_read = Some(true);
+    let imported = phone.begin_sms_acquisition(imported).unwrap();
+    phone
+        .complete_sms_acquisition(&imported.acquisition_id)
+        .unwrap();
+    let mut outgoing = input("outgoing-read", "thread", now_ms(), false);
+    outgoing.direction = Direction::Outgoing;
+    outgoing.sender_address = None;
+    outgoing.recipients = vec![ADDRESS.into()];
+    outgoing.provider_read = Some(true);
+    let outgoing = phone.begin_sms_acquisition(outgoing).unwrap();
+    phone
+        .complete_sms_acquisition(&outgoing.acquisition_id)
+        .unwrap();
+
+    assert_eq!(phone.pending_outbox().unwrap().len(), 2);
+}
+
+#[test]
+fn capture_read_sms_rebegin_refresh_publishes_once_and_blocks_later_phone_scan() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone = unlocked(&config(&dir, "gateway", &vault), &vault);
+    enable(&phone);
+    let row = input("refresh-read", "thread", now_ms(), false);
+    let acquisition = phone.begin_sms_acquisition(row.clone()).unwrap();
+    let mut refreshed = row;
+    refreshed.provider_read = Some(true);
+    assert_eq!(
+        phone
+            .begin_sms_acquisition(refreshed)
+            .unwrap()
+            .acquisition_id,
+        acquisition.acquisition_id
+    );
+    let captured = phone
+        .complete_sms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+    assert_eq!(phone.pending_outbox().unwrap().len(), 2);
+    assert!(
+        phone
+            .complete_sms_acquisition(&acquisition.acquisition_id)
+            .unwrap()
+            .duplicate
+    );
+    assert_eq!(phone.pending_outbox().unwrap().len(), 2);
+    let candidates = phone
+        .phone_read_candidates(PhoneReadTransport::Sms, "generation-1", 0, 100)
+        .unwrap();
+    assert_eq!(phone.apply_phone_reads(&candidates).unwrap(), 0);
+    assert_eq!(phone.pending_outbox().unwrap().len(), 2);
+    assert!(only_message(&phone, captured.conversation_id).seen);
+}
+
+#[test]
+fn broadcast_first_sms_provider_read_reconciles_with_one_later_read_state() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let desktop = unlocked(&config(&dir, "desktop", &vault), &vault);
+    enable(&phone);
+    let sent_at = now_ms();
+    let mut broadcast = incoming("broadcast read", "broadcast-read");
+    broadcast.provider_message_id = Some("broadcast-read".into());
+    let captured = phone
+        .capture_incoming_broadcast(broadcast, Some(sent_at), Some(sent_at))
+        .unwrap();
+    let mut row = input("provider-read", "thread", sent_at, false);
+    row.body = "broadcast read".into();
+    row.source.broadcast_id = Some("broadcast-read".into());
+    row.provider_read = Some(true);
+    let acquisition = phone.begin_sms_acquisition(row.clone()).unwrap();
+    assert_eq!(acquisition.state, SmsAcquisitionState::Complete);
+    assert_eq!(
+        phone.begin_sms_acquisition(row).unwrap().state,
+        SmsAcquisitionState::Complete
+    );
+
+    let envelopes = phone.pending_outbox().unwrap();
+    assert_eq!(envelopes.len(), 2);
+    assert!(envelopes[0].producer_sequence < envelopes[1].producer_sequence);
+    for (index, envelope) in envelopes.iter().enumerate() {
+        desktop.ingest(envelope, Cursor(index as u64 + 1)).unwrap();
+        desktop.apply_pending(100).unwrap();
+    }
+    assert!(only_message(&phone, captured.conversation_id).seen);
+    assert!(only_message(&desktop, captured.conversation_id).seen);
+    assert_eq!(desktop.pending_banner_candidates(10).unwrap().len(), 0);
+    let candidates = phone
+        .phone_read_candidates(PhoneReadTransport::Sms, "generation-1", 0, 100)
+        .unwrap();
+    assert_eq!(phone.apply_phone_reads(&candidates).unwrap(), 0);
+    assert_eq!(phone.pending_outbox().unwrap().len(), 2);
+}
+
+#[test]
+fn capture_read_sms_fails_closed_during_restore_and_without_unlocked_keys() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+
+    let restored = unlocked(&config(&dir, "restored-gateway", &vault), &vault);
+    enable(&restored);
+    restored.mark_restored_gateway().unwrap();
+    let mut restored_row = input("restored-read", "thread", now_ms(), false);
+    restored_row.provider_read = Some(true);
+    let acquisition = restored.begin_sms_acquisition(restored_row).unwrap();
+    let captured = restored
+        .complete_sms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+    assert_eq!(restored.pending_outbox().unwrap().len(), 1);
+    assert!(!only_message(&restored, captured.conversation_id).seen);
+
+    let locked_config = config(&dir, "locked-gateway", &vault);
+    let unlocked_client = unlocked(&locked_config, &vault);
+    enable(&unlocked_client);
+    drop(unlocked_client);
+    let locked = open(&locked_config);
+    let mut locked_row = input("locked-read", "thread", now_ms(), false);
+    locked_row.provider_read = Some(true);
+    let acquisition = locked.begin_sms_acquisition(locked_row).unwrap();
+    let captured = locked
+        .complete_sms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+    assert!(locked.pending_outbox().unwrap().is_empty());
+    assert!(!only_message(&locked, captured.conversation_id).seen);
+    drop(locked);
+    let reopened = unlocked(&locked_config, &vault);
+    assert_eq!(reopened.pending_outbox().unwrap().len(), 1);
+    assert!(!only_message(&reopened, captured.conversation_id).seen);
 }
 
 #[test]

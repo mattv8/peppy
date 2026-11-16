@@ -567,6 +567,7 @@ fn capture_mirrored_text(fixture: &Fixture, google_message_id: &str) {
             body: "synthetic body".into(),
             imported: false,
             observed_at_ms: 1_735_689_600_123,
+            provider_read: None,
             transaction_id: Some(mirrored_transaction_id(google_message_id)),
         })?;
         core.complete_mms_acquisition(&acquisition.acquisition_id)

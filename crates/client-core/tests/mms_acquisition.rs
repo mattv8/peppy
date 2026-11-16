@@ -1,7 +1,23 @@
 //! Durable, local-only provider acquisition before an immutable MMS event is published.
 use crate::common::*;
 use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap()
+}
+
+fn enable_phone_read(client: &Client) {
+    let mut settings = client.gateway_settings().unwrap();
+    settings.phone_read_enabled = true;
+    client.set_gateway_settings(settings).unwrap();
+}
 
 fn input(id: &str, direction: Direction) -> MmsAcquisitionInput {
     MmsAcquisitionInput {
@@ -26,6 +42,7 @@ fn input(id: &str, direction: Direction) -> MmsAcquisitionInput {
         body: "hello".into(),
         imported: false,
         observed_at_ms: 1,
+        provider_read: None,
         transaction_id: None,
     }
 }
@@ -666,6 +683,142 @@ fn legacy_incoming_mms_capture_validates_recipients_and_subject() {
         client.capture_incoming_mms(make(vec![], Some("x".repeat(65_537)))),
         Err(Error::InvalidRequest("subject"))
     );
+}
+
+#[test]
+fn capture_read_mms_replays_seen_before_the_message_while_false_stays_unread() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let desktop = unlocked(&config(&dir, "desktop", &vault), &vault);
+    enable_phone_read(&phone);
+    let mut read = input("read", Direction::Incoming);
+    read.observed_at_ms = now_ms();
+    read.provider_read = Some(true);
+    let acquisition = phone.begin_mms_acquisition(read).unwrap();
+    let captured = phone
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+
+    let envelopes = phone.pending_outbox().unwrap();
+    assert_eq!(envelopes.len(), 2);
+    assert!(envelopes[0].producer_sequence < envelopes[1].producer_sequence);
+    for (index, envelope) in envelopes.iter().enumerate() {
+        desktop.ingest(envelope, Cursor(index as u64 + 1)).unwrap();
+        desktop.apply_pending(100).unwrap();
+        phone.ack_outbox(envelope.envelope_id).unwrap();
+        if index == 0 {
+            assert!(
+                desktop
+                    .messages(captured.conversation_id)
+                    .map(|messages| messages.is_empty())
+                    .unwrap_or(true),
+                "the first envelope must be the ReadState, not the message"
+            );
+        }
+    }
+    assert!(only_message(&desktop, captured.conversation_id).seen);
+    assert!(desktop.pending_banner_candidates(10).unwrap().is_empty());
+    assert!(
+        phone
+            .pending_phone_read_effects(100, 100)
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut unread = input("false", Direction::Incoming);
+    unread.observed_at_ms = now_ms();
+    unread.provider_read = Some(false);
+    let acquisition = phone.begin_mms_acquisition(unread).unwrap();
+    let captured = phone
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+    let message = phone.pending_outbox().unwrap().pop().unwrap();
+    desktop.ingest(&message, Cursor(3)).unwrap();
+    desktop.apply_pending(100).unwrap();
+    let received = desktop
+        .messages(captured.conversation_id)
+        .unwrap()
+        .into_iter()
+        .find(|message| message.payload.record.message_id == captured.message_id)
+        .unwrap();
+    assert!(!received.seen);
+    assert_eq!(desktop.pending_banner_candidates(10).unwrap().len(), 1);
+}
+
+#[test]
+fn reconciled_mms_provider_read_publishes_one_read_state_after_the_existing_message() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let desktop = unlocked(&config(&dir, "desktop", &vault), &vault);
+    enable_phone_read(&phone);
+    let mut first = input("same", Direction::Incoming);
+    first.observed_at_ms = now_ms();
+    let acquisition = phone.begin_mms_acquisition(first.clone()).unwrap();
+    let captured = phone
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+    let mut refreshed = first;
+    refreshed.provider_read = Some(true);
+    let reconciled = phone.begin_mms_acquisition(refreshed.clone()).unwrap();
+    assert_eq!(reconciled.state, MmsAcquisitionState::Complete);
+    assert_eq!(
+        phone.begin_mms_acquisition(refreshed).unwrap().state,
+        MmsAcquisitionState::Complete
+    );
+
+    let envelopes = phone.pending_outbox().unwrap();
+    assert_eq!(envelopes.len(), 2);
+    assert!(envelopes[0].producer_sequence < envelopes[1].producer_sequence);
+    for (index, envelope) in envelopes.iter().enumerate() {
+        desktop.ingest(envelope, Cursor(index as u64 + 1)).unwrap();
+        desktop.apply_pending(100).unwrap();
+    }
+    assert!(only_message(&phone, captured.conversation_id).seen);
+    assert!(only_message(&desktop, captured.conversation_id).seen);
+}
+
+#[test]
+fn media_held_mms_returns_its_read_state_before_uploading_the_message() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let desktop = unlocked(&config(&dir, "desktop", &vault), &vault);
+    enable_phone_read(&phone);
+    let mut row = input("held-read", Direction::Incoming);
+    row.observed_at_ms = now_ms();
+    row.provider_read = Some(true);
+    let acquisition = phone.begin_mms_acquisition(row).unwrap();
+    let part = attachment(&phone, &dir, "held-read.png");
+    phone
+        .set_mms_acquisition_part(&acquisition.acquisition_id, "part", part)
+        .unwrap();
+    let captured = phone
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+
+    let read_state = phone.pending_outbox_batch(10).unwrap();
+    assert_eq!(
+        read_state.len(),
+        1,
+        "media-held message must not block ReadState"
+    );
+    desktop.ingest(&read_state[0], Cursor(1)).unwrap();
+    desktop.apply_pending(100).unwrap();
+    phone
+        .mark_attachment_uploaded(part, &uuid::Uuid::new_v4().to_string())
+        .unwrap();
+    let message = phone.pending_outbox_batch(10).unwrap();
+    assert_eq!(message.len(), 2);
+    let message = message
+        .into_iter()
+        .find(|envelope| envelope.envelope_id != read_state[0].envelope_id)
+        .unwrap();
+    desktop.ingest(&message, Cursor(2)).unwrap();
+    desktop.apply_pending(100).unwrap();
+    assert!(only_message(&desktop, captured.conversation_id).seen);
+    assert!(desktop.pending_banner_candidates(10).unwrap().is_empty());
 }
 
 #[test]

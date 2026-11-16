@@ -114,19 +114,12 @@ impl Client {
             return Ok(0);
         }
         let mut store = self.lock()?;
-        let active_epoch_available = store
-            .active_epoch
-            .is_some_and(|epoch| store.keys.contains_key(&epoch));
         let (conn, ctx) = store.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if !active_epoch_available || restore_guarded(&tx)? {
-            tx.commit()?;
-            return Ok(0);
-        }
         let mut applied = 0_u32;
         for candidate in candidates {
             if phone_read_candidate_current(&tx, candidate)?
-                && phone_read_ingest_enabled(&tx, candidate.transport)?
+                && capture_read_ingest_eligible(&tx, &ctx, candidate.transport)?
             {
                 record_seen(&tx, candidate.message_id)?;
                 enqueue_without_sealing(
@@ -307,7 +300,7 @@ fn phone_read_enabled(conn: &rusqlite::Transaction<'_>) -> Result<bool, Error> {
         .map_err(Into::into)
 }
 
-fn phone_read_ingest_enabled(
+pub(crate) fn phone_read_ingest_enabled(
     conn: &Connection,
     transport: PhoneReadTransport,
 ) -> Result<bool, Error> {
@@ -320,6 +313,66 @@ fn phone_read_ingest_enabled(
         |row| row.get(0),
     )
     .map_err(Into::into)
+}
+
+pub(crate) fn capture_read_ingest_eligible(
+    conn: &Connection,
+    ctx: &crate::Ctx<'_>,
+    transport: PhoneReadTransport,
+) -> Result<bool, Error> {
+    Ok(ctx
+        .active_epoch
+        .is_some_and(|epoch| ctx.keys.contains_key(&epoch))
+        && !restore_guarded(conn)?
+        && phone_read_ingest_enabled(conn, transport)?)
+}
+
+pub(crate) struct CapturedRead {
+    pub transport: PhoneReadTransport,
+    pub provider_read: Option<bool>,
+    pub incoming: bool,
+    pub imported: bool,
+    pub message_id: MessageId,
+    pub message_exists: bool,
+}
+
+/// Records provider `read=1` capture evidence without making a Peppy-to-phone effect.
+///
+/// When `message_exists` is true the message envelope has already been published, so this
+/// `ReadState` necessarily receives a higher outbox sequence than that envelope.
+pub(crate) fn observe_captured_read(
+    conn: &Connection,
+    ctx: &crate::Ctx<'_>,
+    read: CapturedRead,
+) -> Result<bool, Error> {
+    if read.provider_read != Some(true)
+        || !read.incoming
+        || read.imported
+        || !capture_read_ingest_eligible(conn, ctx, read.transport)?
+    {
+        return Ok(false);
+    }
+    if read.message_exists
+        && conn.query_row(
+            "SELECT seen FROM messages WHERE id=?",
+            [read.message_id.to_string()],
+            |row| row.get::<_, bool>(0),
+        )?
+    {
+        return Ok(false);
+    }
+    record_seen(conn, read.message_id)?;
+    enqueue_without_sealing(
+        conn,
+        ctx,
+        EnvelopePurpose::Event,
+        None,
+        None,
+        &PrivatePayload::ReadState {
+            message_id: read.message_id,
+        },
+    )?;
+    Ok(true)
 }
 
 fn phone_read_candidate_current(

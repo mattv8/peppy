@@ -44,6 +44,7 @@ fn row(
         sent_at_ms: date,
         date_sent_ms: date_sent,
         creator: None,
+        provider_read: None,
         source_row_fingerprint: format!("fp:{id}:{date:?}"),
     }
 }
@@ -660,7 +661,7 @@ fn ia_reused_ids_trigger_a_prompt_sweep_without_a_restart_storm() {
         replaced.as_ref().map(|plan| plan.upper_bound.as_str()),
         Some("205")
     );
-    assert_eq!(replaced.and_then(|plan| plan.cursor), Some("5".into()));
+    assert_eq!(replaced.and_then(|plan| plan.cursor), None);
     // The sweep's own re-observation acquires the new row; after it completes no storm follows.
     let mut reobserved = row(
         "205",
@@ -672,7 +673,7 @@ fn ia_reused_ids_trigger_a_prompt_sweep_without_a_restart_storm() {
     reobserved.source_row_fingerprint = "fp:205:replacement".into();
     capture(&client, reobserved);
     client
-        .complete_sms_reconciliation(GENERATION, scope, "205", Some("5"), true)
+        .complete_sms_reconciliation(GENERATION, scope, "205", Some("6"), true)
         .unwrap();
 
     // Updating the checkpoint row in place also starts only a local sweep.
@@ -680,7 +681,7 @@ fn ia_reused_ids_trigger_a_prompt_sweep_without_a_restart_storm() {
         .plan_sms_reconciliation(GENERATION, scope, "205", Some("fp:205:date-changed"))
         .unwrap()
         .unwrap();
-    assert_eq!(changed_date.cursor.as_deref(), Some("5"));
+    assert_eq!(changed_date.cursor, None);
     let mut reobserved = row(
         "205",
         Direction::Outgoing,
@@ -707,7 +708,8 @@ fn ia_reused_ids_trigger_a_prompt_sweep_without_a_restart_storm() {
         .plan_sms_reconciliation(GENERATION, scope, "204", None)
         .unwrap()
         .unwrap();
-    assert_eq!(regressed.cursor.as_deref(), Some("4"));
+    assert_eq!(regressed.cursor, None);
+    assert_eq!(regressed.floor.as_deref(), Some("4"));
     assert_eq!(regressed.upper_bound, "204");
     let live = client.plan_sms_scans(GENERATION, scope, "204").unwrap();
     assert_eq!(
@@ -719,7 +721,7 @@ fn ia_reused_ids_trigger_a_prompt_sweep_without_a_restart_storm() {
         Some("204")
     );
     client
-        .complete_sms_reconciliation(GENERATION, scope, "204", Some("4"), true)
+        .complete_sms_reconciliation(GENERATION, scope, "204", Some("5"), true)
         .unwrap();
 
     // A larger regression retains the full sweep from the beginning.

@@ -19,6 +19,7 @@ const RECOVERY_BYTE_RESERVE: u64 = 64 * 1024 * 1024;
 /// Completed full-provider reconciliation sweeps restart at most this often.
 pub const SMS_RECONCILIATION_INTERVAL_MS: i64 = 6 * 60 * 60 * 1000;
 const LOCAL_REUSE_WINDOW: u64 = 200;
+const LIVE_GAP_THRESHOLD_IDS: u64 = 500;
 
 /// Host reason codes for provider rows that are not (yet) messages: drafts and failed sends stay
 /// rechecked, but neither fill the pending queue nor report as reconciliation work.
@@ -54,6 +55,9 @@ pub struct SmsAcquisitionInput {
     /// Provider `date_sent`: SMSC time for incoming rows; Android writes 0 for outgoing rows.
     pub date_sent_ms: Option<i64>,
     pub creator: Option<String>,
+    /// Mutable provider `read` evidence. It is intentionally excluded from source identity.
+    #[serde(default)]
+    pub provider_read: Option<bool>,
     /// Length-delimited hash of immutable provider-row evidence. Provider IDs can be reused.
     pub source_row_fingerprint: String,
 }
@@ -113,8 +117,20 @@ pub struct SmsScanPlan {
     pub history_complete: bool,
     pub paused: bool,
     pub pending_recheck_cursor: Option<String>,
+    /// An independently fenced descending window left behind after a large live-id jump.
+    pub live_gap: Option<SmsLiveGapPlan>,
     /// Maximum provider rows this plan may import. Live work always retains its normal bound.
     pub budget: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SmsLiveGapPlan {
+    pub source_generation: String,
+    pub subscription_id: String,
+    pub upper_bound: String,
+    pub floor: String,
+    pub cursor: Option<String>,
+    pub token: String,
 }
 
 /// Volatile host facts used only to size older text-history pages. They are never persisted.
@@ -133,6 +149,8 @@ pub struct SmsReconciliationPlan {
     pub subscription_id: String,
     pub cursor: Option<String>,
     pub upper_bound: String,
+    /// Frozen at sweep start so a moving history baseline cannot change the scanned region.
+    pub floor: Option<String>,
     /// Rows at or below the frozen history baseline are imported history, not live messages.
     pub history_upper_bound: Option<String>,
 }
@@ -162,6 +180,27 @@ const LIMITS: Limits = Limits {
     recovery_bytes: crate::MAX_SNAPSHOT_BYTES - RECOVERY_BYTE_RESERVE,
 };
 
+pub(crate) fn initialize(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS sms_live_gaps(
+            source_generation TEXT NOT NULL,
+            subscription_id TEXT NOT NULL,
+            upper_bound TEXT NOT NULL,
+            floor TEXT NOT NULL,
+            cursor TEXT,
+            token TEXT NOT NULL,
+            PRIMARY KEY(source_generation, subscription_id)
+         );",
+    )?;
+    crate::add_column_if_missing(
+        conn,
+        "sms_reconciliation_scans",
+        "descending INTEGER NOT NULL DEFAULT 0",
+    )?;
+    crate::add_column_if_missing(conn, "sms_reconciliation_scans", "floor TEXT")?;
+    Ok(())
+}
+
 impl Client {
     /// Persists a provider row before the host advances its scan checkpoint. Content the core
     /// cannot represent is durably recorded `unavailable` (reason `provider_row_invalid`) so the
@@ -182,15 +221,32 @@ impl Client {
         let input = normalized(input);
         let representable = validate_content(&input).is_ok();
         let mut guard = self.lock()?;
-        // The store mutex serializes writers, so this completed row cannot change before return.
-        if let Some(existing) = by_source(&guard.conn, &input)?
-            && existing.state == SmsAcquisitionState::Complete
-        {
-            return Ok(existing);
-        }
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(existing) = by_source(&tx, &input)? {
+            if existing.state == SmsAcquisitionState::Complete {
+                let message: String = tx.query_row(
+                    "SELECT message_id FROM sms_acquisitions WHERE acquisition_id=?",
+                    params![existing.acquisition_id],
+                    |row| row.get(0),
+                )?;
+                if crate::phone_read::observe_captured_read(
+                    &tx,
+                    &ctx,
+                    crate::phone_read::CapturedRead {
+                        transport: crate::phone_read::PhoneReadTransport::Sms,
+                        provider_read: input.provider_read,
+                        incoming: input.direction == Direction::Incoming,
+                        imported: existing.input.imported,
+                        message_id: crate::parse(&message)?,
+                        message_exists: true,
+                    },
+                )? {
+                    crate::seal_pending(&tx, &ctx, crate::MAX_SEAL_BATCH)?;
+                }
+                tx.commit()?;
+                return Ok(existing);
+            }
             if representable && existing.reason.as_deref() == Some(SMS_REASON_INVALID) {
                 // A once-unrepresentable row (for example an over-long draft, since edited) has
                 // no conversation or sequence yet: discard the placeholder and acquire it afresh.
@@ -228,6 +284,20 @@ impl Client {
                 existing.source_sequence,
             )?;
             persist_alias_for_id(&tx, &input, &existing.message_id.to_string())?;
+            if crate::phone_read::observe_captured_read(
+                &tx,
+                &ctx,
+                crate::phone_read::CapturedRead {
+                    transport: crate::phone_read::PhoneReadTransport::Sms,
+                    provider_read: input.provider_read,
+                    incoming: input.direction == Direction::Incoming,
+                    imported: input.imported,
+                    message_id: existing.message_id,
+                    message_exists: true,
+                },
+            )? {
+                crate::seal_pending(&tx, &ctx, crate::MAX_SEAL_BATCH)?;
+            }
             tx.commit()?;
             return Ok(acquisition);
         }
@@ -296,6 +366,20 @@ impl Client {
                 publish_reconciliation_alias(&tx, &ctx, &existing.message_id, &input)?;
                 tx.execute("UPDATE sms_acquisitions SET conversation_id=?,source_sequence=?,state='complete',reason=NULL,message_id=? WHERE acquisition_id=?", params![existing.conversation_id.to_string(), crate::to_i64(existing.source_sequence.0)?, existing.message_id.to_string(), id])?;
                 persist_alias_for_id(&tx, &input, &existing.message_id.to_string())?;
+                if crate::phone_read::observe_captured_read(
+                    &tx,
+                    &ctx,
+                    crate::phone_read::CapturedRead {
+                        transport: crate::phone_read::PhoneReadTransport::Sms,
+                        provider_read: input.provider_read,
+                        incoming: input.direction == Direction::Incoming,
+                        imported: input.imported,
+                        message_id: existing.message_id,
+                        message_exists: true,
+                    },
+                )? {
+                    crate::seal_pending(&tx, &ctx, crate::MAX_SEAL_BATCH)?;
+                }
                 tx.commit()?;
                 return Ok(Captured {
                     message_id: existing.message_id,
@@ -321,9 +405,24 @@ impl Client {
         if let Some(message) = existing {
             tx.execute("UPDATE sms_acquisitions SET state='complete',reason=NULL,message_id=? WHERE acquisition_id=?", params![message,id])?;
             persist_alias_for_id(&tx, &input, &message)?;
+            let message_id = crate::parse(&message)?;
+            if crate::phone_read::observe_captured_read(
+                &tx,
+                &ctx,
+                crate::phone_read::CapturedRead {
+                    transport: crate::phone_read::PhoneReadTransport::Sms,
+                    provider_read: input.provider_read,
+                    incoming: input.direction == Direction::Incoming,
+                    imported: input.imported,
+                    message_id,
+                    message_exists: true,
+                },
+            )? {
+                crate::seal_pending(&tx, &ctx, crate::MAX_SEAL_BATCH)?;
+            }
             tx.commit()?;
             return Ok(Captured {
-                message_id: crate::parse(&message)?,
+                message_id,
                 conversation_id,
                 duplicate: true,
             });
@@ -363,6 +462,20 @@ impl Client {
                 crate::message_origin::message_identity(&tx, &message_id)?;
             tx.execute("UPDATE sms_acquisitions SET state='complete',reason=NULL,message_id=?,conversation_id=?,source_sequence=? WHERE acquisition_id=?", params![message_id.to_string(), conversation_id.to_string(), crate::to_i64(source_sequence.0)?, id])?;
             persist_alias_for_id(&tx, &input, &message_id.to_string())?;
+            if crate::phone_read::observe_captured_read(
+                &tx,
+                &ctx,
+                crate::phone_read::CapturedRead {
+                    transport: crate::phone_read::PhoneReadTransport::Sms,
+                    provider_read: input.provider_read,
+                    incoming: input.direction == Direction::Incoming,
+                    imported: input.imported,
+                    message_id,
+                    message_exists: true,
+                },
+            )? {
+                crate::seal_pending(&tx, &ctx, crate::MAX_SEAL_BATCH)?;
+            }
             tx.commit()?;
             return Ok(Captured {
                 message_id,
@@ -370,6 +483,18 @@ impl Client {
                 duplicate: true,
             });
         }
+        crate::phone_read::observe_captured_read(
+            &tx,
+            &ctx,
+            crate::phone_read::CapturedRead {
+                transport: crate::phone_read::PhoneReadTransport::Sms,
+                provider_read: input.provider_read,
+                incoming: input.direction == Direction::Incoming,
+                imported: input.imported,
+                message_id,
+                message_exists: false,
+            },
+        )?;
         match crate::insert_message(&tx, &payload)? {
             Inserted::New => {}
             Inserted::Same => return Err(Error::Database),
@@ -564,6 +689,7 @@ impl Client {
         };
         let outbox_backpressured =
             history_incomplete && crate::history_import::outbox_backpressures_history(&tx)?;
+        let live_gap = open_live_gap(&tx, generation, scope, observed_high_water)?;
         let mut statement = tx.prepare("SELECT imported,provider_message_id,history_upper_bound,history_complete,paused_reason,pending_recheck_cursor,descending,history_floor,descending_cursor,history_seed_remaining FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? ORDER BY imported")?;
         let plans = statement
             .query_map(params![generation, scope], |r| {
@@ -586,6 +712,7 @@ impl Client {
                     paused: r.get::<_, Option<String>>(4)?.is_some()
                         || (r.get::<_, bool>(0)? && (!gate_open || outbox_backpressured)),
                     pending_recheck_cursor: r.get(5)?,
+                    live_gap: (!r.get::<_, bool>(0)?).then(|| live_gap.clone()).flatten(),
                     budget: if r.get::<_, bool>(0)? {
                         let seed_remaining: i64 = r.get(9)?;
                         if r.get::<_, bool>(6)? && seed_remaining > 0 {
@@ -604,6 +731,65 @@ impl Client {
         drop(statement);
         tx.commit()?;
         Ok(plans)
+    }
+    /// Commits one durable page of the independently fenced descending live-gap scan.
+    pub fn commit_sms_live_gap_page(
+        &self,
+        generation: &str,
+        scope: &str,
+        token: &str,
+        expected_cursor: Option<&str>,
+        last_durable_id: Option<&str>,
+        exhausted: bool,
+    ) -> Result<bool, Error> {
+        validate_scope(generation, scope)?;
+        if token.is_empty() || token.len() > 256 {
+            return Err(Error::InvalidRequest("SMS live gap token"));
+        }
+        for id in [expected_cursor, last_durable_id].into_iter().flatten() {
+            if crate::history_import::canonical_provider_id(id).is_none() {
+                return Err(Error::InvalidRequest("SMS live gap cursor"));
+            }
+        }
+        if !exhausted && last_durable_id.is_none() {
+            return Err(Error::InvalidRequest("SMS live gap page"));
+        }
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(gap) = live_gap(&tx, generation, scope)? else {
+            tx.commit()?;
+            return Ok(false);
+        };
+        if gap.token != token || gap.cursor.as_deref() != expected_cursor {
+            tx.commit()?;
+            return Ok(false);
+        }
+        if let Some(last) = last_durable_id
+            && !crate::history_import::advances_descending_cursor(
+                gap.cursor.as_deref(),
+                Some(&gap.floor),
+                &gap.upper_bound,
+                last,
+            )?
+        {
+            tx.commit()?;
+            return Ok(false);
+        }
+        if exhausted {
+            tx.execute(
+                "DELETE FROM sms_live_gaps WHERE source_generation=? AND subscription_id=? AND token=?",
+                params![generation, scope, token],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE sms_live_gaps SET cursor=? WHERE source_generation=? AND subscription_id=? AND token=? AND cursor IS ?",
+                params![last_durable_id, generation, scope, token, expected_cursor],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
     pub fn set_sms_pending_recheck_cursor(
         &self,
@@ -653,14 +839,30 @@ impl Client {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         normalize_stored_history_state(&tx, generation, scope)?;
         tx.execute(
-            "INSERT INTO sms_reconciliation_scans(source_generation,subscription_id,scan_cursor,upper_bound,completed_at_ms) VALUES(?,?,NULL,'',?) ON CONFLICT(source_generation,subscription_id) DO NOTHING",
+            "INSERT INTO sms_reconciliation_scans(source_generation,subscription_id,scan_cursor,upper_bound,completed_at_ms,descending) VALUES(?,?,NULL,'',?,1) ON CONFLICT(source_generation,subscription_id) DO NOTHING",
             params![generation, scope, now_ms],
         )?;
-        let (cursor, upper_bound, completed): (Option<String>, String, Option<i64>) = tx.query_row(
-            "SELECT scan_cursor,upper_bound,completed_at_ms FROM sms_reconciliation_scans WHERE source_generation=? AND subscription_id=?",
+        let (cursor, upper_bound, completed, descending): (Option<String>, String, Option<i64>, bool) = tx.query_row(
+            "SELECT scan_cursor,upper_bound,completed_at_ms,descending FROM sms_reconciliation_scans WHERE source_generation=? AND subscription_id=?",
             params![generation, scope],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
+        if !upper_bound.is_empty() && !descending {
+            // Legacy scans advanced upward. Re-observe their frozen region from the top instead.
+            let floor: Option<String> = tx
+                .query_row(
+                    "SELECT history_upper_bound FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? AND imported=1 AND history_complete=0",
+                    params![generation, scope],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            tx.execute(
+                "UPDATE sms_reconciliation_scans SET scan_cursor=NULL,floor=?,descending=1 WHERE source_generation=? AND subscription_id=?",
+                params![floor, generation, scope],
+            )?;
+        }
+        let gap_floor = live_gap(&tx, generation, scope)?.map(|gap| gap.floor);
         let reused = provider_ids_reused(
             &tx,
             generation,
@@ -672,8 +874,12 @@ impl Client {
         let full_sweep_due = completed.is_none_or(|at| {
             !clock_rebased && now_ms.saturating_sub(at) >= SMS_RECONCILIATION_INTERVAL_MS
         });
-        let (mut cursor, upper_bound) = if !upper_bound.is_empty() {
-            (cursor, upper_bound)
+        let (cursor, upper_bound, floor) = if !upper_bound.is_empty() {
+            (
+                if descending { cursor } else { None },
+                upper_bound,
+                reconciliation_floor(&tx, generation, scope)?,
+            )
         } else if reused.is_none() && !full_sweep_due && !clock_rebased {
             tx.commit()?;
             return Ok(None);
@@ -686,15 +892,13 @@ impl Client {
             } else {
                 match reused {
                     Some(ProviderIdReuse::AnchorMismatch { live }) => {
+                        advance_live_checkpoint(&tx, generation, scope, observed_high_water, true)?;
                         Some(live.saturating_sub(LOCAL_REUSE_WINDOW))
                     }
                     Some(ProviderIdReuse::HighWaterRegression { live, high_water })
                         if live - high_water <= LOCAL_REUSE_WINDOW =>
                     {
-                        tx.execute(
-                            "UPDATE sms_scan_checkpoints SET provider_message_id=? WHERE source_generation=? AND subscription_id=? AND imported=0",
-                            params![observed_high_water, generation, scope],
-                        )?;
+                        advance_live_checkpoint(&tx, generation, scope, observed_high_water, true)?;
                         Some(high_water.saturating_sub(LOCAL_REUSE_WINDOW))
                     }
                     _ => None,
@@ -702,25 +906,32 @@ impl Client {
             };
             if let Some(cursor) = local_cursor {
                 let cursor = (cursor != 0).then(|| cursor.to_string());
+                let floor = floor_covering_gap(cursor.clone(), gap_floor.clone())?;
                 tx.execute(
-                    "UPDATE sms_reconciliation_scans SET scan_cursor=?,upper_bound=? WHERE source_generation=? AND subscription_id=?",
-                    params![cursor, observed_high_water, generation, scope],
+                    "UPDATE sms_reconciliation_scans SET scan_cursor=NULL,upper_bound=?,floor=?,descending=1 WHERE source_generation=? AND subscription_id=?",
+                    params![observed_high_water, floor, generation, scope],
                 )?;
-                (cursor, observed_high_water.to_owned())
+                (None, observed_high_water.to_owned(), floor)
             } else {
+                let floor: Option<String> = tx
+                    .query_row(
+                        "SELECT history_upper_bound FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? AND imported=1 AND history_complete=0",
+                        params![generation, scope],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+                let floor = floor_covering_gap(floor, gap_floor)?;
                 tx.execute(
-                    "UPDATE sms_reconciliation_scans SET scan_cursor=NULL,upper_bound=?,completed_at_ms=NULL WHERE source_generation=? AND subscription_id=?",
-                    params![observed_high_water, generation, scope],
+                    "UPDATE sms_reconciliation_scans SET scan_cursor=NULL,upper_bound=?,floor=?,descending=1,completed_at_ms=NULL WHERE source_generation=? AND subscription_id=?",
+                    params![observed_high_water, floor, generation, scope],
                 )?;
                 // After a high-water regression the sweep covers every row up to the observed mark;
                 // the live scan resumes above it so later rows with reused lower IDs are not skipped.
                 if let Some(ProviderIdReuse::HighWaterRegression { .. }) = reused {
-                    tx.execute(
-                        "UPDATE sms_scan_checkpoints SET provider_message_id=? WHERE source_generation=? AND subscription_id=? AND imported=0",
-                        params![observed_high_water, generation, scope],
-                    )?;
+                    advance_live_checkpoint(&tx, generation, scope, observed_high_water, true)?;
                 }
-                (None, observed_high_water.to_owned())
+                (None, observed_high_water.to_owned(), floor)
             }
         };
         let history: Option<(String, bool)> = tx
@@ -731,27 +942,13 @@ impl Client {
             )
             .optional()?;
         let history_upper_bound = history.as_ref().map(|(bound, _)| bound.clone());
-        if history.is_some_and(|(_, complete)| !complete) {
-            let bound = history_upper_bound.as_deref().ok_or(Error::Database)?;
-            let bound_id = crate::history_import::stored_provider_id(bound)?;
-            let cursor_id = cursor
-                .as_deref()
-                .map(crate::history_import::stored_provider_id)
-                .transpose()?;
-            if cursor_id.is_none_or(|value| value < bound_id) {
-                cursor = Some(bound.into());
-                tx.execute(
-                    "UPDATE sms_reconciliation_scans SET scan_cursor=? WHERE source_generation=? AND subscription_id=? AND upper_bound=?",
-                    params![bound, generation, scope, upper_bound],
-                )?;
-            }
-        }
         tx.commit()?;
         Ok(Some(SmsReconciliationPlan {
             source_generation: generation.into(),
             subscription_id: scope.into(),
             cursor,
             upper_bound,
+            floor,
             history_upper_bound,
         }))
     }
@@ -773,43 +970,44 @@ impl Client {
         {
             return Err(Error::InvalidRequest("SMS reconciliation cursor"));
         }
-        let guard = self.lock()?;
-        normalize_stored_history_state(&guard.conn, generation, scope)?;
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        normalize_stored_history_state(&tx, generation, scope)?;
         if exhausted {
-            guard.conn.execute(
+            tx.execute(
                 "UPDATE sms_reconciliation_scans SET scan_cursor=NULL,upper_bound='',completed_at_ms=COALESCE(completed_at_ms,?) WHERE source_generation=? AND subscription_id=? AND upper_bound=?",
                 params![crate::notifications::now_ms(), generation, scope, upper_bound],
             )?;
         } else {
-            let history_bound: Option<String> = guard
-                .conn
-                .query_row(
-                    "SELECT history_upper_bound FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? AND imported=1 AND history_complete=0",
-                    params![generation, scope],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .flatten();
-            let cursor = match (cursor, history_bound) {
-                (Some(cursor), Some(bound)) => {
-                    let cursor_id = crate::history_import::canonical_provider_id(cursor)
-                        .ok_or(Error::InvalidRequest("SMS reconciliation cursor"))?;
-                    let bound_id = crate::history_import::stored_provider_id(&bound)?;
-                    if cursor_id < bound_id {
-                        bound
-                    } else {
-                        cursor.into()
-                    }
-                }
-                (None, Some(bound)) => bound,
-                (Some(cursor), None) => cursor.into(),
-                (None, None) => String::new(),
+            let floor: Option<String> = tx.query_row(
+                "SELECT floor FROM sms_reconciliation_scans WHERE source_generation=? AND subscription_id=? AND upper_bound=?",
+                params![generation, scope, upper_bound],
+                |row| row.get(0),
+            ).optional()?.flatten();
+            let Some(cursor) = cursor else {
+                return Err(Error::InvalidRequest("SMS reconciliation cursor"));
             };
-            guard.conn.execute(
+            let stored: Option<String> = tx.query_row(
+                "SELECT scan_cursor FROM sms_reconciliation_scans WHERE source_generation=? AND subscription_id=? AND upper_bound=?",
+                params![generation, scope, upper_bound],
+                |row| row.get(0),
+            ).optional()?.flatten();
+            if !crate::history_import::advances_descending_cursor(
+                stored.as_deref(),
+                floor.as_deref(),
+                upper_bound,
+                cursor,
+            )? {
+                return Err(Error::InvalidRequest("SMS reconciliation cursor"));
+            }
+            tx.execute(
                 "UPDATE sms_reconciliation_scans SET scan_cursor=? WHERE source_generation=? AND subscription_id=? AND upper_bound=?",
-                params![(!cursor.is_empty()).then_some(cursor), generation, scope, upper_bound],
+                params![cursor, generation, scope, upper_bound],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
     pub fn ack_sms_scan_exhausted(
@@ -932,22 +1130,144 @@ fn normalize_stored_history_state(
         )?;
     }
 
-    let reconciliation: Option<(Option<String>, String)> = conn
+    let reconciliation: Option<(Option<String>, String, Option<String>)> = conn
         .query_row(
-            "SELECT scan_cursor,upper_bound FROM sms_reconciliation_scans WHERE source_generation=? AND subscription_id=?",
+            "SELECT scan_cursor,upper_bound,floor FROM sms_reconciliation_scans WHERE source_generation=? AND subscription_id=?",
             params![generation, scope],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    if let Some((cursor, upper)) = reconciliation {
+    if let Some((cursor, upper, floor)) = reconciliation {
         let upper = if upper.is_empty() {
             upper
         } else {
             crate::history_import::normalized_provider_id(&upper).ok_or(Error::Database)?
         };
         conn.execute(
-            "UPDATE sms_reconciliation_scans SET scan_cursor=?,upper_bound=? WHERE source_generation=? AND subscription_id=?",
-            params![normalize_optional(cursor)?, upper, generation, scope],
+            "UPDATE sms_reconciliation_scans SET scan_cursor=?,upper_bound=?,floor=? WHERE source_generation=? AND subscription_id=?",
+            params![normalize_optional(cursor)?, upper, normalize_optional(floor)?, generation, scope],
+        )?;
+    }
+    if let Some(gap) = live_gap(conn, generation, scope)? {
+        conn.execute(
+            "UPDATE sms_live_gaps SET upper_bound=?,floor=?,cursor=? WHERE source_generation=? AND subscription_id=?",
+            params![
+                crate::history_import::normalized_provider_id(&gap.upper_bound).ok_or(Error::Database)?,
+                crate::history_import::normalized_provider_id(&gap.floor).ok_or(Error::Database)?,
+                normalize_optional(gap.cursor)?,
+                generation,
+                scope,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn reconciliation_floor(
+    conn: &Connection,
+    generation: &str,
+    scope: &str,
+) -> Result<Option<String>, Error> {
+    conn.query_row(
+        "SELECT floor FROM sms_reconciliation_scans WHERE source_generation=? AND subscription_id=?",
+        params![generation, scope],
+        |row| row.get(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(Into::into)
+}
+
+/// Extends a restricted sweep to cover an open gap. `None` is an unrestricted sweep floor,
+/// while a missing gap is also `None`; an unrestricted sweep must never be narrowed by a gap.
+fn floor_covering_gap(
+    sweep_floor: Option<String>,
+    gap_floor: Option<String>,
+) -> Result<Option<String>, Error> {
+    match (sweep_floor, gap_floor) {
+        (Some(sweep), Some(gap)) => Ok((crate::history_import::stored_provider_id(&sweep)?
+            <= crate::history_import::stored_provider_id(&gap)?)
+        .then_some(sweep)
+        .or(Some(gap))),
+        (sweep_floor, None) => Ok(sweep_floor),
+        (None, Some(_)) => Ok(None),
+    }
+}
+
+fn live_gap(
+    conn: &Connection,
+    generation: &str,
+    scope: &str,
+) -> Result<Option<SmsLiveGapPlan>, Error> {
+    conn.query_row(
+        "SELECT upper_bound,floor,cursor,token FROM sms_live_gaps WHERE source_generation=? AND subscription_id=?",
+        params![generation, scope],
+        |row| {
+            Ok(SmsLiveGapPlan {
+                source_generation: generation.into(),
+                subscription_id: scope.into(),
+                upper_bound: row.get(0)?,
+                floor: row.get(1)?,
+                cursor: row.get(2)?,
+                token: row.get(3)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn open_live_gap(
+    conn: &Connection,
+    generation: &str,
+    scope: &str,
+    observed_high_water: &str,
+) -> Result<Option<SmsLiveGapPlan>, Error> {
+    if let Some(gap) = live_gap(conn, generation, scope)? {
+        return Ok(Some(gap));
+    }
+    let live: String = conn.query_row(
+        "SELECT provider_message_id FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? AND imported=0",
+        params![generation, scope],
+        |row| row.get(0),
+    )?;
+    let live_id = crate::history_import::stored_provider_id(&live)?;
+    let high_water = crate::history_import::canonical_provider_id(observed_high_water)
+        .ok_or(Error::InvalidRequest("SMS high-water mark"))?;
+    if high_water.saturating_sub(live_id) <= LIVE_GAP_THRESHOLD_IDS {
+        return Ok(None);
+    }
+    let gap = SmsLiveGapPlan {
+        source_generation: generation.into(),
+        subscription_id: scope.into(),
+        upper_bound: observed_high_water.into(),
+        floor: live,
+        cursor: None,
+        token: uuid::Uuid::new_v4().to_string(),
+    };
+    conn.execute(
+        "INSERT INTO sms_live_gaps(source_generation,subscription_id,upper_bound,floor,cursor,token) VALUES(?,?,?,?,NULL,?)",
+        params![generation, scope, gap.upper_bound, gap.floor, gap.token],
+    )?;
+    advance_live_checkpoint(conn, generation, scope, observed_high_water, false)?;
+    Ok(Some(gap))
+}
+
+fn advance_live_checkpoint(
+    conn: &Connection,
+    generation: &str,
+    scope: &str,
+    checkpoint: &str,
+    close_gap: bool,
+) -> Result<(), Error> {
+    conn.execute(
+        "UPDATE sms_scan_checkpoints SET provider_message_id=? WHERE source_generation=? AND subscription_id=? AND imported=0",
+        params![checkpoint, generation, scope],
+    )?;
+    if close_gap {
+        conn.execute(
+            "DELETE FROM sms_live_gaps WHERE source_generation=? AND subscription_id=?",
+            params![generation, scope],
         )?;
     }
     Ok(())
@@ -1435,6 +1755,7 @@ mod tests {
             sent_at_ms: Some(1_600_000_000_000 + i64::from(id)),
             date_sent_ms: None,
             creator: None,
+            provider_read: None,
             source_row_fingerprint: format!("fp-{id}"),
         }
     }
@@ -1882,6 +2203,434 @@ mod tests {
             .unwrap()
             .expect("bounded repair");
         assert_eq!(plan.upper_bound, "205");
-        assert!(plan.cursor.is_some());
+        assert_eq!(plan.cursor, None);
+        assert_eq!(plan.floor.as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn live_gap_advances_the_live_checkpoint_and_fences_descending_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+        client.plan_sms_scans("install", "provider", "1").unwrap();
+        let plans = client.plan_sms_scans("install", "provider", "600").unwrap();
+        let gap = plans
+            .iter()
+            .find(|plan| !plan.imported)
+            .and_then(|plan| plan.live_gap.clone())
+            .expect("large live jump opens a gap");
+        assert_eq!(gap.floor, "1");
+        assert_eq!(gap.upper_bound, "600");
+        assert_eq!(
+            client
+                .sms_scan_status("install", "provider", false)
+                .unwrap()
+                .checkpoint
+                .as_deref(),
+            Some("600")
+        );
+        assert!(
+            client
+                .commit_sms_live_gap_page(
+                    "install",
+                    "provider",
+                    &gap.token,
+                    None,
+                    Some("550"),
+                    false
+                )
+                .unwrap()
+        );
+        assert!(
+            !client
+                .commit_sms_live_gap_page(
+                    "install",
+                    "provider",
+                    &gap.token,
+                    None,
+                    Some("550"),
+                    false
+                )
+                .unwrap()
+        );
+        assert!(
+            client
+                .commit_sms_live_gap_page(
+                    "install",
+                    "provider",
+                    &gap.token,
+                    Some("550"),
+                    Some("500"),
+                    true
+                )
+                .unwrap()
+        );
+        assert!(
+            client
+                .plan_sms_scans("install", "provider", "600")
+                .unwrap()
+                .iter()
+                .all(|plan| plan.live_gap.is_none())
+        );
+    }
+
+    #[test]
+    fn reuse_detection_closes_an_open_live_gap_and_reconciliation_covers_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+        client.plan_sms_scans("install", "provider", "1").unwrap();
+        let gap = client
+            .plan_sms_scans("install", "provider", "600")
+            .unwrap()
+            .into_iter()
+            .find(|plan| !plan.imported)
+            .and_then(|plan| plan.live_gap)
+            .unwrap();
+        assert!(
+            client
+                .commit_sms_live_gap_page(
+                    "install",
+                    "provider",
+                    &gap.token,
+                    None,
+                    Some("599"),
+                    false,
+                )
+                .unwrap()
+        );
+        let mut anchor = history_row(600);
+        anchor.imported = false;
+        anchor.source.subscription_id = "provider".into();
+        client.begin_sms_acquisition(anchor).unwrap();
+
+        let plan = client
+            .plan_sms_reconciliation_at("install", "provider", "600", Some("reused"), 1)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(plan.upper_bound, "600");
+        assert_eq!(plan.floor.as_deref(), Some("1"));
+        assert_eq!(
+            client
+                .sms_scan_status("install", "provider", false)
+                .unwrap()
+                .checkpoint
+                .as_deref(),
+            Some("600")
+        );
+        assert!(
+            client
+                .plan_sms_scans("install", "provider", "600")
+                .unwrap()
+                .into_iter()
+                .all(|plan| plan.live_gap.is_none())
+        );
+        assert!(
+            !client
+                .commit_sms_live_gap_page(
+                    "install",
+                    "provider",
+                    &gap.token,
+                    None,
+                    Some("599"),
+                    false,
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn small_regression_after_partial_gap_keeps_the_gap_floor_for_live_reconciliation() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+        client.plan_sms_scans("install", "provider", "1").unwrap();
+        let gap = client
+            .plan_sms_scans("install", "provider", "1000")
+            .unwrap()
+            .into_iter()
+            .find(|plan| !plan.imported)
+            .and_then(|plan| plan.live_gap)
+            .unwrap();
+        client
+            .commit_sms_live_gap_page("install", "provider", &gap.token, None, Some("950"), false)
+            .unwrap();
+
+        let replacement = client
+            .plan_sms_reconciliation_at("install", "provider", "999", None, 1)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(replacement.floor.as_deref(), Some("1"));
+        assert_eq!(replacement.upper_bound, "999");
+        assert_eq!(replacement.history_upper_bound.as_deref(), Some("1"));
+        assert!(
+            client
+                .plan_sms_scans("install", "provider", "999")
+                .unwrap()
+                .into_iter()
+                .all(|plan| plan.live_gap.is_none())
+        );
+    }
+
+    #[test]
+    fn unrestricted_reconciliation_stays_unrestricted_when_closing_a_gap_after_large_regression() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+        client.plan_sms_scans("install", "provider", "100").unwrap();
+        client
+            .ack_sms_scan_exhausted("install", "provider", true, "100")
+            .unwrap();
+        client
+            .plan_sms_scans("install", "provider", "1000")
+            .unwrap();
+        assert_eq!(
+            client
+                .plan_sms_reconciliation_at("install", "provider", "1000", None, 0)
+                .unwrap(),
+            None
+        );
+
+        let plan = client
+            .plan_sms_reconciliation_at("install", "provider", "50", None, 1)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(plan.upper_bound, "50");
+        assert_eq!(plan.floor, None);
+        assert!(
+            client
+                .plan_sms_scans("install", "provider", "50")
+                .unwrap()
+                .into_iter()
+                .all(|scan| scan.live_gap.is_none())
+        );
+    }
+
+    #[test]
+    fn periodic_unrestricted_reconciliation_is_not_narrowed_by_an_open_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+        client.plan_sms_scans("install", "provider", "100").unwrap();
+        client
+            .ack_sms_scan_exhausted("install", "provider", true, "100")
+            .unwrap();
+        client
+            .plan_sms_scans("install", "provider", "1000")
+            .unwrap();
+        assert_eq!(
+            client
+                .plan_sms_reconciliation_at("install", "provider", "1000", None, 0)
+                .unwrap(),
+            None
+        );
+
+        let plan = client
+            .plan_sms_reconciliation_at(
+                "install",
+                "provider",
+                "1000",
+                None,
+                SMS_RECONCILIATION_INTERVAL_MS,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.floor, None);
+    }
+
+    #[test]
+    fn local_reconciliation_floor_at_zero_stays_unrestricted_with_an_open_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+        client.plan_sms_scans("install", "provider", "1").unwrap();
+        client
+            .ack_sms_scan_exhausted("install", "provider", true, "1")
+            .unwrap();
+        client.plan_sms_scans("install", "provider", "600").unwrap();
+        assert_eq!(
+            client
+                .plan_sms_reconciliation_at("install", "provider", "600", None, 1_000)
+                .unwrap(),
+            None
+        );
+
+        let plan = client
+            .plan_sms_reconciliation_at("install", "provider", "200", None, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.floor, None);
+    }
+
+    #[test]
+    fn gap_remains_available_while_history_is_gated_or_backpressured() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+        client.plan_sms_scans("install", "provider", "1").unwrap();
+
+        let gated = client.plan_sms_scans("install", "provider", "600").unwrap();
+        assert!(gated.iter().find(|plan| plan.imported).unwrap().paused);
+        assert!(
+            gated
+                .iter()
+                .find(|plan| !plan.imported)
+                .unwrap()
+                .live_gap
+                .is_some()
+        );
+
+        client.open_history_import_gate("contacts_settled").unwrap();
+        for id in 1..=500 {
+            let acquisition = client.begin_sms_acquisition(history_row(id)).unwrap();
+            client
+                .complete_sms_acquisition(&acquisition.acquisition_id)
+                .unwrap();
+        }
+        let backpressured = client.plan_sms_scans("install", "provider", "600").unwrap();
+        assert!(
+            backpressured
+                .iter()
+                .find(|plan| plan.imported)
+                .unwrap()
+                .paused
+        );
+        assert!(
+            backpressured
+                .iter()
+                .find(|plan| !plan.imported)
+                .unwrap()
+                .live_gap
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn live_gap_threshold_and_open_bounds_are_stable() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+        client.plan_sms_scans("install", "provider", "100").unwrap();
+        assert!(
+            client
+                .plan_sms_scans("install", "provider", "600")
+                .unwrap()
+                .into_iter()
+                .all(|plan| plan.live_gap.is_none())
+        );
+
+        let gap = client
+            .plan_sms_scans("install", "provider", "601")
+            .unwrap()
+            .into_iter()
+            .find(|plan| !plan.imported)
+            .unwrap()
+            .live_gap
+            .unwrap();
+        let repeated = client
+            .plan_sms_scans("install", "provider", "900")
+            .unwrap()
+            .into_iter()
+            .find(|plan| !plan.imported)
+            .unwrap()
+            .live_gap
+            .unwrap();
+        assert_eq!(
+            (repeated.floor, repeated.upper_bound, repeated.cursor),
+            ("100".into(), "601".into(), None)
+        );
+        assert_eq!(repeated.token, gap.token);
+    }
+
+    #[test]
+    fn legacy_ascending_reconciliation_restarts_descending_with_the_current_history_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+        for (scope, history_complete, expected_floor) in
+            [("incomplete", false, Some("100")), ("complete", true, None)]
+        {
+            client.plan_sms_scans("install", scope, "100").unwrap();
+            if history_complete {
+                client
+                    .ack_sms_scan_exhausted("install", scope, true, "100")
+                    .unwrap();
+            }
+            client.lock().unwrap().conn.execute(
+                "INSERT INTO sms_reconciliation_scans(source_generation,subscription_id,scan_cursor,upper_bound,completed_at_ms,descending) VALUES(?,?,?, ?,NULL,0)",
+                params!["install", scope, "125", "200"],
+            ).unwrap();
+
+            let plan = client
+                .plan_sms_reconciliation_at("install", scope, "200", None, 1)
+                .unwrap()
+                .unwrap();
+            assert_eq!(plan.cursor, None);
+            assert_eq!(plan.upper_bound, "200");
+            assert_eq!(plan.floor.as_deref(), expected_floor);
+        }
+    }
+
+    #[test]
+    fn descending_reconciliation_rejects_out_of_region_progress_and_resumes_below_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+        client.lock().unwrap().conn.execute(
+            "INSERT INTO sms_reconciliation_scans(source_generation,subscription_id,scan_cursor,upper_bound,floor,completed_at_ms,descending) VALUES(?,?,NULL,?,?,NULL,1)",
+            params!["install", "provider", "200", "100"],
+        ).unwrap();
+
+        let first = client
+            .plan_sms_reconciliation_at("install", "provider", "200", None, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.cursor, None);
+        client
+            .complete_sms_reconciliation("install", "provider", "200", Some("150"), false)
+            .unwrap();
+        assert_eq!(
+            client.complete_sms_reconciliation("install", "provider", "200", Some("151"), false),
+            Err(Error::InvalidRequest("SMS reconciliation cursor"))
+        );
+        assert_eq!(
+            client.complete_sms_reconciliation("install", "provider", "200", Some("201"), false),
+            Err(Error::InvalidRequest("SMS reconciliation cursor"))
+        );
+        assert_eq!(
+            client.complete_sms_reconciliation("install", "provider", "200", Some("100"), false),
+            Err(Error::InvalidRequest("SMS reconciliation cursor"))
+        );
+        let resumed = client
+            .plan_sms_reconciliation_at("install", "provider", "200", None, 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.cursor.as_deref(), Some("150"));
+        client
+            .complete_sms_reconciliation("install", "provider", "200", Some("101"), true)
+            .unwrap();
+        let completed: Option<i64> = client.lock().unwrap().conn.query_row(
+            "SELECT completed_at_ms FROM sms_reconciliation_scans WHERE source_generation='install' AND subscription_id='provider'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(completed.is_some());
+    }
+
+    #[test]
+    fn legacy_input_without_provider_read_decodes_as_unknown() {
+        let input: SmsAcquisitionInput = serde_json::from_value(serde_json::json!({
+            "source": {
+                "source_generation": "generation",
+                "subscription_id": "subscription",
+                "provider_message_id": "message",
+                "provider_thread_id": null
+            },
+            "direction": "incoming",
+            "sender_address": "+15555550100",
+            "recipients": [],
+            "body": "body",
+            "imported": false,
+            "sent_at_ms": 1,
+            "date_sent_ms": 1,
+            "creator": null,
+            "source_row_fingerprint": "fingerprint"
+        }))
+        .unwrap();
+
+        assert_eq!(input.provider_read, None);
     }
 }

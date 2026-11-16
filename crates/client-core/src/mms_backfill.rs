@@ -17,6 +17,7 @@ const MMS_AWAITING_PROVIDER_BACKOFF_MS: i64 = 15 * 60 * 1000;
 const MMS_AWAITING_PROVIDER_IMMEDIATE_OBSERVATIONS: i64 = 2;
 /// Provider-change hints may immediately retry at most this many ordinary failures.
 const MMS_PROVIDER_CHANGE_RESET_MAX_FAILURES: i64 = 2;
+const LIVE_GAP_THRESHOLD_IDS: u64 = 500;
 // Pending candidates are the newest rows by local order; the fair sort then runs over at most this
 // many rows, so completed history never enters the recheck sort.
 // One bounded live provider page can add a message, preview, binding and demand records for each
@@ -36,6 +37,7 @@ const RECOVERY_BYTE_RESERVE: u64 = 64 * 1024 * 1024;
 #[serde(rename_all = "snake_case")]
 pub enum MmsBackfillPhase {
     Live,
+    LiveGap,
     ProviderRescan,
     History,
     Recheck,
@@ -119,6 +121,7 @@ pub struct MmsBackfillScanPlan {
     /// Last acknowledged provider ID, if a page is resumable.
     pub cursor: Option<String>,
     pub provider_rescan_token: Option<String>,
+    pub live_gap_token: Option<String>,
     pub descending: bool,
     pub history_floor: Option<String>,
     /// Frozen maximum ID for history/recheck classification; absent only before initialization.
@@ -202,6 +205,17 @@ pub(crate) fn initialize(conn: &Connection) -> Result<(), Error> {
            source_generation TEXT NOT NULL,
            subscription_id TEXT NOT NULL,
            upper_bound TEXT NOT NULL,
+           cursor TEXT,
+           token TEXT NOT NULL,
+           PRIMARY KEY(source_generation, subscription_id)
+         );",
+    )?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mms_live_gaps(
+           source_generation TEXT NOT NULL,
+           subscription_id TEXT NOT NULL,
+           upper_bound TEXT NOT NULL,
+           floor TEXT NOT NULL,
            cursor TEXT,
            token TEXT NOT NULL,
            PRIMARY KEY(source_generation, subscription_id)
@@ -364,6 +378,7 @@ impl Client {
         };
         let outbox_backpressured =
             !complete && crate::history_import::outbox_backpressures_history(&tx)?;
+        let live_gap = open_live_gap(&tx, generation, scope, observed_max_id)?;
         let live = checkpoint(&tx, generation, scope, false)?;
         let history = checkpoint(&tx, generation, scope, true)?;
         let provider_rescan = provider_rescan(&tx, generation, scope)?;
@@ -386,6 +401,7 @@ impl Client {
             subscription_id: scope.into(),
             cursor: live,
             provider_rescan_token: None,
+            live_gap_token: None,
             descending: false,
             history_floor: None,
             history_upper_bound: Some(baseline.clone()),
@@ -399,6 +415,29 @@ impl Client {
             ),
             budget: MAX_MMS_BACKFILL_RECHECK,
         }];
+        if let Some(gap) = live_gap {
+            plans.push(MmsBackfillScanPlan {
+                phase: MmsBackfillPhase::LiveGap,
+                source_generation: generation.into(),
+                subscription_id: scope.into(),
+                cursor: gap.cursor,
+                provider_rescan_token: None,
+                live_gap_token: Some(gap.token),
+                descending: true,
+                history_floor: Some(gap.floor),
+                history_upper_bound: Some(gap.upper_bound),
+                history_complete: complete,
+                pause,
+                paused: matches!(
+                    pause,
+                    Some(
+                        MmsBackfillPause::AbsoluteRecoveryCapacity
+                            | MmsBackfillPause::LocalCapacity
+                    )
+                ),
+                budget: MAX_MMS_BACKFILL_RECHECK,
+            });
+        }
         if let Some((upper_bound, cursor, token)) = provider_rescan {
             plans.push(MmsBackfillScanPlan {
                 phase: MmsBackfillPhase::ProviderRescan,
@@ -406,6 +445,7 @@ impl Client {
                 subscription_id: scope.into(),
                 cursor,
                 provider_rescan_token: Some(token),
+                live_gap_token: None,
                 descending: true,
                 history_floor: None,
                 history_upper_bound: Some(upper_bound),
@@ -424,6 +464,7 @@ impl Client {
                 subscription_id: scope.into(),
                 cursor: if descending { history_cursor } else { history },
                 provider_rescan_token: None,
+                live_gap_token: None,
                 descending,
                 history_floor: floor,
                 history_upper_bound: Some(baseline),
@@ -438,6 +479,7 @@ impl Client {
                 subscription_id: scope.into(),
                 cursor: recheck_cursor,
                 provider_rescan_token: None,
+                live_gap_token: None,
                 descending: false,
                 history_floor: None,
                 history_upper_bound: None,
@@ -541,6 +583,64 @@ impl Client {
         Ok(true)
     }
 
+    /// Atomically commits one fenced descending live-gap page after its live acquisitions are durable.
+    pub fn commit_mms_live_gap_page(
+        &self,
+        generation: &str,
+        scope: &str,
+        token: &str,
+        expected_cursor: Option<&str>,
+        last_durable_id: Option<&str>,
+        exhausted: bool,
+    ) -> Result<bool, Error> {
+        validate_scope(generation, scope)?;
+        if token.is_empty() || token.len() > 256 {
+            return Err(Error::InvalidRequest("MMS live gap token"));
+        }
+        for id in [expected_cursor, last_durable_id].into_iter().flatten() {
+            validate_id(id, "MMS live gap cursor")?;
+        }
+        if !exhausted && last_durable_id.is_none() {
+            return Err(Error::InvalidRequest("MMS live gap page"));
+        }
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(gap) = live_gap(&tx, generation, scope)? else {
+            tx.commit()?;
+            return Ok(false);
+        };
+        if gap.token != token || gap.cursor.as_deref() != expected_cursor {
+            tx.commit()?;
+            return Ok(false);
+        }
+        if let Some(last) = last_durable_id
+            && !crate::history_import::advances_descending_cursor(
+                gap.cursor.as_deref(),
+                Some(&gap.floor),
+                &gap.upper_bound,
+                last,
+            )?
+        {
+            tx.commit()?;
+            return Ok(false);
+        }
+        if exhausted {
+            tx.execute(
+                "DELETE FROM mms_live_gaps WHERE source_generation=? AND subscription_id=? AND token=?",
+                params![generation, scope, token],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE mms_live_gaps SET cursor=? WHERE source_generation=? AND subscription_id=? AND token=? AND cursor IS ?",
+                params![last_durable_id, generation, scope, token, expected_cursor],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Acknowledges a provider page after its acquisitions are durable. Recheck uses its own fair
     /// cursor and cannot be advanced through this method.
     pub fn advance_mms_backfill_page(
@@ -554,6 +654,9 @@ impl Client {
         validate_id(provider_id, "MMS checkpoint")?;
         let imported = match phase {
             MmsBackfillPhase::Live => false,
+            MmsBackfillPhase::LiveGap => {
+                return Err(Error::InvalidRequest("MMS live gap checkpoint"));
+            }
             MmsBackfillPhase::History => true,
             MmsBackfillPhase::ProviderRescan => {
                 return Err(Error::InvalidRequest("MMS provider rescan checkpoint"));
@@ -622,7 +725,10 @@ impl Client {
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if phase == MmsBackfillPhase::ProviderRescan {
+        if matches!(
+            phase,
+            MmsBackfillPhase::ProviderRescan | MmsBackfillPhase::LiveGap
+        ) {
             tx.commit()?;
             return Err(Error::InvalidRequest("MMS provider rescan checkpoint"));
         }
@@ -1109,12 +1215,83 @@ fn rewind_live_checkpoint_on_regression(
     let observed = crate::history_import::canonical_provider_id(observed_max_id)
         .ok_or(Error::InvalidRequest("MMS observed maximum"))?;
     if observed < crate::history_import::stored_provider_id(&live)? {
+        let checkpoint = live_gap(conn, generation, scope)?
+            .map(|gap| {
+                let floor = crate::history_import::stored_provider_id(&gap.floor)?;
+                Ok::<_, Error>(if observed < floor { observed } else { floor })
+            })
+            .transpose()?
+            .unwrap_or(observed);
         conn.execute(
             "UPDATE mms_scan_checkpoints SET provider_message_id=? WHERE source_generation=? AND subscription_id=? AND imported=0",
-            params![observed_max_id, generation, scope],
+            params![checkpoint.to_string(), generation, scope],
+        )?;
+        conn.execute(
+            "DELETE FROM mms_live_gaps WHERE source_generation=? AND subscription_id=?",
+            params![generation, scope],
         )?;
     }
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct MmsLiveGap {
+    upper_bound: String,
+    floor: String,
+    cursor: Option<String>,
+    token: String,
+}
+
+fn live_gap(conn: &Connection, generation: &str, scope: &str) -> Result<Option<MmsLiveGap>, Error> {
+    conn.query_row(
+        "SELECT upper_bound,floor,cursor,token FROM mms_live_gaps WHERE source_generation=? AND subscription_id=?",
+        params![generation, scope],
+        |row| {
+            Ok(MmsLiveGap {
+                upper_bound: row.get(0)?,
+                floor: row.get(1)?,
+                cursor: row.get(2)?,
+                token: row.get(3)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn open_live_gap(
+    conn: &Connection,
+    generation: &str,
+    scope: &str,
+    observed_max_id: &str,
+) -> Result<Option<MmsLiveGap>, Error> {
+    if let Some(gap) = live_gap(conn, generation, scope)? {
+        return Ok(Some(gap));
+    }
+    let Some(live) = checkpoint(conn, generation, scope, false)? else {
+        return Ok(None);
+    };
+    let live_id = crate::history_import::stored_provider_id(&live)?;
+    let observed = crate::history_import::canonical_provider_id(observed_max_id)
+        .ok_or(Error::InvalidRequest("MMS observed maximum"))?;
+    if observed.saturating_sub(live_id) <= LIVE_GAP_THRESHOLD_IDS {
+        return Ok(None);
+    }
+    let gap = MmsLiveGap {
+        upper_bound: observed_max_id.into(),
+        floor: live,
+        cursor: None,
+        token: uuid::Uuid::new_v4().to_string(),
+    };
+    conn.execute(
+        "INSERT INTO mms_live_gaps(source_generation,subscription_id,upper_bound,floor,cursor,token) VALUES(?,?,?,?,NULL,?)",
+        params![generation, scope, gap.upper_bound, gap.floor, gap.token],
+    )?;
+    conn.execute(
+        "UPDATE mms_scan_checkpoints SET provider_message_id=? WHERE source_generation=? AND subscription_id=? AND imported=0",
+        params![observed_max_id, generation, scope],
+    )?;
+    Ok(Some(gap))
 }
 
 fn ensure_checkpoint(
@@ -2037,6 +2214,32 @@ mod tests {
             RecoveryCapacity::Absolute
         );
     }
+
+    #[test]
+    fn live_gap_commit_rejects_its_exclusive_floor_and_accepts_the_next_id() {
+        let (_dir, client) = outcome_client();
+        client
+            .plan_mms_backfill_scans("generation", "scope", "10")
+            .unwrap();
+        let gap = client
+            .plan_mms_backfill_scans("generation", "scope", "600")
+            .unwrap()
+            .into_iter()
+            .find(|plan| plan.phase == MmsBackfillPhase::LiveGap)
+            .unwrap();
+        let token = gap.live_gap_token.unwrap();
+
+        assert!(
+            !client
+                .commit_mms_live_gap_page("generation", "scope", &token, None, Some("10"), false)
+                .unwrap()
+        );
+        assert!(
+            client
+                .commit_mms_live_gap_page("generation", "scope", &token, None, Some("11"), false)
+                .unwrap()
+        );
+    }
     use rusqlite::StatementStatus;
 
     #[test]
@@ -2266,6 +2469,7 @@ mod tests {
                 body: "complete".into(),
                 imported: false,
                 observed_at_ms: 1,
+                provider_read: None,
                 transaction_id: None,
             })
             .unwrap();

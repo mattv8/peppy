@@ -26,6 +26,7 @@ pub(crate) fn provider_sms(
             sent_at_ms: Some(1_000),
             date_sent_ms: Some(1_000),
             creator: None,
+            provider_read: None,
             source_row_fingerprint: id.into(),
         })
         .unwrap();
@@ -238,6 +239,7 @@ fn a_reused_thread_id_from_an_old_provider_generation_is_ignored() {
             sent_at_ms: Some(2_000),
             date_sent_ms: Some(2_000),
             creator: None,
+            provider_read: None,
             source_row_fingerprint: "gen-2".into(),
         })
         .unwrap();
@@ -283,6 +285,7 @@ fn a_provider_reset_forgets_observed_threads() {
             sent_at_ms: Some(2_000),
             date_sent_ms: Some(2_000),
             creator: None,
+            provider_read: None,
             source_row_fingerprint: "rs-2".into(),
         })
         .unwrap();
@@ -328,6 +331,7 @@ fn a_first_mms_generation_is_not_a_provider_reset() {
             body: "first mms".into(),
             imported: false,
             observed_at_ms: 3_000,
+            provider_read: None,
             transaction_id: None,
         })
         .unwrap();

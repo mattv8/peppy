@@ -19,6 +19,7 @@ fn input(id: &str) -> MmsAcquisitionInput {
         body: "pictures".into(),
         imported: false,
         observed_at_ms: 1,
+        provider_read: None,
         transaction_id: None,
     }
 }

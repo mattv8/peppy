@@ -25,6 +25,7 @@ fn provider_input(
         sent_at_ms,
         date_sent_ms: sent_at_ms,
         creator: None,
+        provider_read: None,
         source_row_fingerprint: format!("{id}:{body}:{sent_at_ms:?}:{broadcast_id:?}"),
     }
 }
@@ -44,6 +45,7 @@ fn mms_input(id: &str) -> MmsAcquisitionInput {
         body: "mms".into(),
         imported: true,
         observed_at_ms: 1,
+        provider_read: None,
         transaction_id: None,
     }
 }
@@ -559,21 +561,23 @@ fn incomplete_history_fences_reconciliation_above_its_frozen_bound() {
         )
         .unwrap()
         .unwrap();
-    assert_eq!(active.cursor.as_deref(), Some("100"));
+    assert_eq!(active.cursor, None);
+    assert_eq!(active.floor.as_deref(), Some("100"));
     client
-        .complete_sms_reconciliation("install-1", "provider", "200", Some("20"), false)
+        .complete_sms_reconciliation("install-1", "provider", "200", Some("150"), false)
         .unwrap();
-    assert_eq!(
-        client
-            .plan_sms_reconciliation_at("install-1", "provider", "200", None, start + 2)
-            .unwrap()
-            .unwrap()
-            .cursor
-            .as_deref(),
-        Some("100")
-    );
     client
-        .complete_sms_reconciliation("install-1", "provider", "200", Some("100"), true)
+        .ack_sms_scan_exhausted("install-1", "provider", true, "100")
+        .unwrap();
+    let in_flight = client
+        .plan_sms_reconciliation_at("install-1", "provider", "200", None, start + 2)
+        .unwrap()
+        .unwrap();
+    assert_eq!(in_flight.cursor.as_deref(), Some("150"));
+    assert_eq!(in_flight.floor.as_deref(), Some("100"));
+    assert_eq!(in_flight.history_upper_bound.as_deref(), Some("100"));
+    client
+        .complete_sms_reconciliation("install-1", "provider", "200", Some("101"), true)
         .unwrap();
 
     let restarted = client
@@ -587,23 +591,8 @@ fn incomplete_history_fences_reconciliation_above_its_frozen_bound() {
         .unwrap()
         .unwrap();
     assert_eq!(restarted.upper_bound, "50");
-    assert_eq!(restarted.cursor.as_deref(), Some("100"));
-    client
-        .ack_sms_scan_exhausted("install-1", "provider", true, "100")
-        .unwrap();
-    client
-        .complete_sms_reconciliation("install-1", "provider", "50", Some("20"), false)
-        .unwrap();
-    assert_eq!(
-        client
-            .plan_sms_reconciliation_at("install-1", "provider", "50", None, start + 3)
-            .unwrap()
-            .unwrap()
-            .cursor
-            .as_deref(),
-        Some("20"),
-        "history completion releases the reconciliation fence"
-    );
+    assert_eq!(restarted.cursor, None);
+    assert_eq!(restarted.floor, None);
 }
 
 #[test]

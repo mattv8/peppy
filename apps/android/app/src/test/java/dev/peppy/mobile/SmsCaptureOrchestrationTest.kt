@@ -352,6 +352,28 @@ class SmsCaptureOrchestrationTest {
         assertEquals(listOf("begin:7", "complete:7"), calls)
     }
 
+    @Test fun reconciliationRequestsDescendingRowsAndExhaustsOnAShortPage() {
+        val calls = mutableListOf<String>()
+        val requests = mutableListOf<String>()
+        val provider = object : FakeProvider(listOf(record(12), record(11), record(10))) {
+            override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int): SmsProviderPage {
+                requests += "$cursor/$upperBound/$floor/$limit"
+                return super.descendingPage(cursor, upperBound, floor, limit)
+            }
+        }
+
+        val result = SmsCapture.reconcile(
+            SmsReconciliationPlan("shared-generation", SmsCapture.PROVIDER_SCOPE, null, 12, 9),
+            FakeCore(calls),
+            provider,
+        )
+
+        assertEquals(listOf("null/12/null/50"), requests)
+        assertEquals(listOf("begin:12", "complete:12", "begin:11", "complete:11", "begin:10", "complete:10"), calls)
+        assertEquals(10L, result.cursor)
+        assertTrue(result.exhausted)
+    }
+
     @Test fun coreUnavailableAcquisitionIsTerminalWithoutCompletionLoop() {
         val calls = mutableListOf<String>()
         val core = object : SmsCaptureCore by FakeCore(calls) {
@@ -460,7 +482,7 @@ class SmsCaptureOrchestrationTest {
             FakeProvider(listOf(record(1), record(2))),
         )
 
-        assertEquals(2L, result.cursor)
+        assertEquals(1L, result.cursor)
         assertTrue(result.exhausted)
     }
 
@@ -479,7 +501,7 @@ class SmsCaptureOrchestrationTest {
     }
 
     private fun record(id: Long) = SmsProviderRecord(id, 1, 1, "+15551234", "body", 1000, 1001, 1, true, true, null, null)
-    private fun acquisition(id: String, providerId: Long) = SmsAcquisition(id, SmsAcquisitionInput("shared-generation", SimRoutes.routeId(1), providerId.toString(), "1", true, "+15551234", emptyList(), "body", false, 1000, 1001, null), SmsAcquisitionState.PENDING, null)
+    private fun acquisition(id: String, providerId: Long) = SmsAcquisition(id, SmsAcquisitionInput("shared-generation", SimRoutes.routeId(1), providerId.toString(), "1", true, "+15551234", emptyList(), "body", false, 1000, 1001, null, null), SmsAcquisitionState.PENDING, null)
 
     private open class FakeProvider(private val rows: List<SmsProviderRecord>) : SmsCaptureProvider {
         override open fun page(afterId: Long, limit: Int) = SmsProviderPage(rows.filter { it.id > afterId }.take(limit), rows.lastOrNull()?.id ?: afterId)

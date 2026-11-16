@@ -11,7 +11,7 @@ import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
 
 data class MmsProviderPart(val providerPartId: Long, val sequence: Int?, val mediaType: String?, val name: String?, val charset: Int?, val text: String?, val contentUri: Uri)
-data class MmsProviderRecord(val id: Long, val threadId: Long?, val subscriptionId: Int?, val messageBox: Int?, val dateMs: Long?, val transactionId: String?, val subject: String?, val sender: List<String>, val toRecipients: List<String>, val ccRecipients: List<String>, val bccRecipients: List<String>, val messageType: Int?, val expiry: Long?, val parts: List<MmsProviderPart>, val ready: Boolean, val error: String?, val restricted: Boolean = false, val textOnly: Boolean = false)
+data class MmsProviderRecord(val id: Long, val threadId: Long?, val subscriptionId: Int?, val messageBox: Int?, val dateMs: Long?, val transactionId: String?, val subject: String?, val sender: List<String>, val toRecipients: List<String>, val ccRecipients: List<String>, val bccRecipients: List<String>, val messageType: Int?, val expiry: Long?, val parts: List<MmsProviderPart>, val ready: Boolean, val error: String?, val restricted: Boolean = false, val textOnly: Boolean = false, val read: Boolean? = null)
 data class MmsProviderPage(val records: List<MmsProviderRecord>, val scannedThroughId: Long)
 class MmsProviderException(message: String) : IllegalStateException(message)
 
@@ -22,24 +22,36 @@ class MmsProviderException(message: String) : IllegalStateException(message)
  */
 class MmsOptionalColumns {
     private val lock = Any()
-    @Volatile private var supported: Boolean? = null
+    @Volatile private var flagsSupported: Boolean? = null
+    @Volatile private var readSupported: Boolean? = null
 
     fun messageProjection(resolver: ContentResolver): Array<String> =
-        if (supports(resolver)) MmsProviderReader.MESSAGE_BASE + MmsProviderReader.OPTIONAL_MESSAGE else MmsProviderReader.MESSAGE_BASE
+        MmsProviderReader.MESSAGE_BASE +
+            (if (supportsFlags(resolver)) MmsProviderReader.OPTIONAL_MESSAGE else emptyArray()) +
+            (if (supportsRead(resolver)) MmsProviderReader.READ_COLUMN else emptyArray())
 
-    private fun supports(resolver: ContentResolver): Boolean {
-        supported?.let { return it }
+    private fun supportsFlags(resolver: ContentResolver): Boolean {
+        flagsSupported?.let { return it }
         synchronized(lock) {
-            supported?.let { return it }
-            val result = probe(resolver) ?: return false
-            supported = result
+            flagsSupported?.let { return it }
+            val result = probe(resolver, MmsProviderReader.OPTIONAL_MESSAGE) ?: return false
+            flagsSupported = result
+            return result
+        }
+    }
+    private fun supportsRead(resolver: ContentResolver): Boolean {
+        readSupported?.let { return it }
+        synchronized(lock) {
+            readSupported?.let { return it }
+            val result = probe(resolver, MmsProviderReader.READ_COLUMN) ?: return false
+            readSupported = result
             return result
         }
     }
 
     /** Null when the provider returned no cursor, which says nothing about column support. */
-    private fun probe(resolver: ContentResolver): Boolean? = try {
-        resolver.query(MmsProviderReader.MMS, arrayOf("_id") + MmsProviderReader.OPTIONAL_MESSAGE, "1=0", null, null)?.use { true }
+    private fun probe(resolver: ContentResolver, columns: Array<String>): Boolean? = try {
+        resolver.query(MmsProviderReader.MMS, arrayOf("_id") + columns, "1=0", null, null)?.use { true }
     } catch (e: IllegalArgumentException) {
         false
     } catch (e: SQLiteException) {
@@ -91,7 +103,7 @@ class MmsProviderReader(context: Context, private val optionalColumns: MmsOption
             if (parts.error != null) error = parts.error
             if (error == null && parts.value.isEmpty()) error = "provider_content_pending"
             val sub = c.long("sub_id")?.toInt()?.takeIf { it >= 0 }
-            return MmsProviderRecord(id, c.long("thread_id"), sub, c.long("msg_box")?.toInt(), c.long("date")?.times(SECONDS_TO_MILLIS), bounded(c.string("tr_id")), bounded(c.string("sub")), addresses.from, addresses.to, addresses.cc, addresses.bcc, type, expiryMs, parts.value, error == null, error, c.long("restricted") == 1L, c.long("text_only") == 1L)
+            return MmsProviderRecord(id, c.long("thread_id"), sub, c.long("msg_box")?.toInt(), c.long("date")?.times(SECONDS_TO_MILLIS), bounded(c.string("tr_id")), bounded(c.string("sub")), addresses.from, addresses.to, addresses.cc, addresses.bcc, type, expiryMs, parts.value, error == null, error, c.long("restricted") == 1L, c.long("text_only") == 1L, c.long("read")?.let { it != 0L })
         }; return null
     }
     fun readPartText(part: MmsProviderPart, byteLimit: Int = MAX_TEXT): String? {
@@ -140,5 +152,5 @@ class MmsProviderReader(context: Context, private val optionalColumns: MmsOption
     private fun valid(id: Long) { require(id > 0) }; private fun partUri(id: Long)=Uri.withAppendedPath(PART,"$id")
     private fun android.database.Cursor.string(n:String)=getColumnIndex(n).takeIf{it>=0}?.let{getString(it)}; private fun android.database.Cursor.long(n:String)=getColumnIndex(n).takeIf{it>=0&&!isNull(it)}?.let{getLong(it)}
     private data class AddressResult(val from:List<String>,val to:List<String>,val cc:List<String>,val bcc:List<String>,val error:String?); private data class PartResult(val value:List<MmsProviderPart>,val error:String?)
-    companion object { private const val SECONDS_TO_MILLIS = 1_000L; internal val MMS=Uri.parse("content://mms"); private val PART=Uri.parse("content://mms/part"); internal val MESSAGE_BASE=arrayOf("_id","thread_id","sub_id","msg_box","date","tr_id","sub","m_type","exp"); internal val OPTIONAL_MESSAGE=arrayOf("restricted","text_only"); private val processColumns = MmsOptionalColumns(); private val PART_COLUMNS=arrayOf("_id","seq","ct","name","fn","chset","text"); const val MAX_PAGE=50; const val MAX_PARTS=10; const val MAX_TEXT=256*1024; const val MAX_PART=32L*1024*1024; const val MAX_STRING=4096; const val MAX_ADDRESSES=100; const val MAX_ADDRESS_ROWS=MAX_ADDRESSES * 2 }
+    companion object { private const val SECONDS_TO_MILLIS = 1_000L; internal val MMS=Uri.parse("content://mms"); private val PART=Uri.parse("content://mms/part"); internal val MESSAGE_BASE=arrayOf("_id","thread_id","sub_id","msg_box","date","tr_id","sub","m_type","exp"); internal val OPTIONAL_MESSAGE=arrayOf("restricted","text_only"); internal val READ_COLUMN=arrayOf("read"); private val processColumns = MmsOptionalColumns(); private val PART_COLUMNS=arrayOf("_id","seq","ct","name","fn","chset","text"); const val MAX_PAGE=50; const val MAX_PARTS=10; const val MAX_TEXT=256*1024; const val MAX_PART=32L*1024*1024; const val MAX_STRING=4096; const val MAX_ADDRESSES=100; const val MAX_ADDRESS_ROWS=MAX_ADDRESSES * 2 }
 }

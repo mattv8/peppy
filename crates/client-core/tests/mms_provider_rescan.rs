@@ -10,6 +10,12 @@ fn provider_rescan_plan(plans: &[MmsBackfillScanPlan]) -> Option<&MmsBackfillSca
         .find(|plan| plan.phase == MmsBackfillPhase::ProviderRescan)
 }
 
+fn live_gap_plan(plans: &[MmsBackfillScanPlan]) -> Option<&MmsBackfillScanPlan> {
+    plans
+        .iter()
+        .find(|plan| plan.phase == MmsBackfillPhase::LiveGap)
+}
+
 fn client() -> (TempDir, Vault, ClientConfig, Client) {
     let directory = TempDir::new().unwrap();
     let vault = Vault::new();
@@ -33,6 +39,7 @@ fn imported_input(id: &str) -> MmsAcquisitionInput {
         body: "history".into(),
         imported: true,
         observed_at_ms: 0,
+        provider_read: None,
         transaction_id: None,
     }
 }
@@ -107,6 +114,168 @@ fn provider_rescan_is_explicit_and_has_an_independent_frozen_descending_cursor()
             .unwrap()
             .cursor,
         Some("100".into())
+    );
+}
+
+#[test]
+fn live_gap_opens_above_the_threshold_and_advances_live_atomically() {
+    let (_directory, _vault, _config, client) = client();
+    client
+        .plan_mms_backfill_scans(GENERATION, SCOPE, "100")
+        .unwrap();
+    assert!(
+        live_gap_plan(
+            &client
+                .plan_mms_backfill_scans(GENERATION, SCOPE, "600")
+                .unwrap()
+        )
+        .is_none()
+    );
+
+    let plans = client
+        .plan_mms_backfill_scans(GENERATION, SCOPE, "601")
+        .unwrap();
+    let gap = live_gap_plan(&plans).unwrap();
+    assert_eq!(gap.history_upper_bound.as_deref(), Some("601"));
+    assert_eq!(gap.history_floor.as_deref(), Some("100"));
+    assert!(gap.descending);
+    assert_eq!(gap.cursor, None);
+    assert_eq!(
+        gap.live_gap_token.as_deref().map(str::is_empty),
+        Some(false)
+    );
+    assert_eq!(
+        plans
+            .iter()
+            .find(|plan| plan.phase == MmsBackfillPhase::Live)
+            .unwrap()
+            .cursor
+            .as_deref(),
+        Some("601")
+    );
+    let repeated_plans = client
+        .plan_mms_backfill_scans(GENERATION, SCOPE, "700")
+        .unwrap();
+    let repeated = live_gap_plan(&repeated_plans).unwrap();
+    assert_eq!(repeated.history_upper_bound.as_deref(), Some("601"));
+    assert_eq!(repeated.live_gap_token, gap.live_gap_token);
+}
+
+#[test]
+fn live_gap_commit_is_fenced_and_exhaustion_deletes_only_the_gap() {
+    let (_directory, _vault, _config, client) = client();
+    client
+        .plan_mms_backfill_scans(GENERATION, SCOPE, "100")
+        .unwrap();
+    let gap = live_gap_plan(
+        &client
+            .plan_mms_backfill_scans(GENERATION, SCOPE, "700")
+            .unwrap(),
+    )
+    .unwrap()
+    .clone();
+    let token = gap.live_gap_token.unwrap();
+    assert!(
+        !client
+            .commit_mms_live_gap_page(GENERATION, SCOPE, "wrong", None, Some("600"), false)
+            .unwrap()
+    );
+    assert!(
+        !client
+            .commit_mms_live_gap_page(GENERATION, SCOPE, &token, Some("1"), Some("600"), false)
+            .unwrap()
+    );
+    assert!(
+        !client
+            .commit_mms_live_gap_page(GENERATION, SCOPE, &token, None, Some("701"), false)
+            .unwrap()
+    );
+    assert!(
+        client
+            .commit_mms_live_gap_page(GENERATION, SCOPE, &token, None, Some("600"), false)
+            .unwrap()
+    );
+    assert!(
+        client
+            .commit_mms_live_gap_page(GENERATION, SCOPE, &token, Some("600"), Some("101"), true)
+            .unwrap()
+    );
+    assert!(
+        live_gap_plan(
+            &client
+                .plan_mms_backfill_scans(GENERATION, SCOPE, "700")
+                .unwrap()
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn regression_replaces_a_partial_gap_from_its_original_floor() {
+    let (_directory, _vault, _config, client) = client();
+    client
+        .plan_mms_backfill_scans(GENERATION, SCOPE, "100")
+        .unwrap();
+    let gap = live_gap_plan(
+        &client
+            .plan_mms_backfill_scans(GENERATION, SCOPE, "700")
+            .unwrap(),
+    )
+    .unwrap()
+    .clone();
+    client
+        .commit_mms_live_gap_page(
+            GENERATION,
+            SCOPE,
+            gap.live_gap_token.as_deref().unwrap(),
+            None,
+            Some("600"),
+            false,
+        )
+        .unwrap();
+
+    let plans = client
+        .plan_mms_backfill_scans(GENERATION, SCOPE, "650")
+        .unwrap();
+    let replacement = live_gap_plan(&plans).unwrap();
+    assert_eq!(replacement.history_floor.as_deref(), Some("100"));
+    assert_eq!(replacement.history_upper_bound.as_deref(), Some("650"));
+    assert_ne!(replacement.live_gap_token, gap.live_gap_token);
+    assert_eq!(
+        plans
+            .iter()
+            .find(|plan| plan.phase == MmsBackfillPhase::Live)
+            .unwrap()
+            .cursor
+            .as_deref(),
+        Some("650")
+    );
+}
+
+#[test]
+fn provider_rescan_coexists_with_a_live_gap() {
+    let (_directory, _vault, _config, client) = client();
+    client
+        .plan_mms_backfill_scans(GENERATION, SCOPE, "100")
+        .unwrap();
+    assert!(
+        client
+            .request_mms_provider_rescan(GENERATION, SCOPE, "90")
+            .unwrap()
+    );
+    let phases: Vec<_> = client
+        .plan_mms_backfill_scans(GENERATION, SCOPE, "700")
+        .unwrap()
+        .into_iter()
+        .map(|plan| plan.phase)
+        .collect();
+    assert_eq!(
+        phases[..3],
+        [
+            MmsBackfillPhase::Live,
+            MmsBackfillPhase::LiveGap,
+            MmsBackfillPhase::ProviderRescan,
+        ]
     );
 }
 

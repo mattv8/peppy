@@ -533,13 +533,14 @@ internal object MmsCapture {
                         }
                         val importsHistory = backfillPlan.phase == MmsBackfillPhase.HISTORY ||
                             backfillPlan.phase == MmsBackfillPhase.PROVIDER_RESCAN
+                        val liveGap = backfillPlan.phase == MmsBackfillPhase.LIVE_GAP
                         val result = try {
                             scan(
                                 core, provider, tempDirectory, plan.generation,
                                 imported = importsHistory,
                                 cursor = backfillPlan.cursor?.toLongOrNull(),
-                                upperBound = if (importsHistory) backfillPlan.historyUpperBound?.toLongOrNull() else null,
-                                descending = importsHistory && backfillPlan.descending,
+                                upperBound = if (importsHistory || liveGap) backfillPlan.historyUpperBound?.toLongOrNull() else null,
+                                descending = (importsHistory || liveGap) && backfillPlan.descending,
                                 floor = backfillPlan.historyFloor?.toLongOrNull(),
                                 budget = backfillPlan.budget.coerceIn(1, PAGE),
                                 budgetExpired = ::budgetExpired,
@@ -961,7 +962,7 @@ internal object MmsCapture {
         return NativeMmsAcquisitionInput(
             NativeMmsSource(generation, routeId, record.id.toString(), record.threadId?.toString()),
             incoming, sender, recipients, record.subject, body, imported,
-            record.dateMs ?: UNKNOWN_PROVIDER_DATE_MS, record.transactionId,
+            record.dateMs ?: UNKNOWN_PROVIDER_DATE_MS, record.read, record.transactionId,
         )
     }
 
@@ -1142,6 +1143,7 @@ private class NativeCore(internal val client: NativeClientInterface) : MmsCaptur
                 it.descending,
                 it.historyFloor,
                 it.providerRescanToken,
+                it.liveGapToken,
             )
         }
 
@@ -1159,6 +1161,15 @@ private class NativeCore(internal val client: NativeClientInterface) : MmsCaptur
         lastDurableId: String?,
         exhausted: Boolean,
     ) = client.commitMmsProviderRescanPage(generation, scope, token, expectedCursor, lastDurableId, exhausted)
+
+    override fun commitLiveGapPage(
+        generation: String,
+        scope: String,
+        token: String,
+        expectedCursor: String?,
+        lastDurableId: String?,
+        exhausted: Boolean,
+    ) = client.commitMmsLiveGapPage(generation, scope, token, expectedCursor, lastDurableId, exhausted)
 
     override fun dueRechecks(generation: String, scope: String, nowMs: Long, conditions: MmsBackfillRecheckConditions): MmsBackfillRecheck {
         return nativeRecheck(client.mmsBackfillDueRechecks(

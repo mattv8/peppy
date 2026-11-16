@@ -623,6 +623,7 @@ fn completed_mms(
             body: "existing MMS".into(),
             imported: false,
             observed_at_ms: 1,
+            provider_read: None,
             transaction_id: None,
         })
         .unwrap();
@@ -708,6 +709,7 @@ fn snapshot_and_history_emit_v3_thumbnail_metadata_without_promoting_the_origina
             body: "timeline v3".into(),
             imported: false,
             observed_at_ms: 1,
+            provider_read: None,
             transaction_id: None,
         })
         .unwrap();
@@ -1292,6 +1294,7 @@ fn attachment_scope_excludes_thumbnail_only_references() {
             body: "thumbnail scope".into(),
             imported: false,
             observed_at_ms: 1,
+            provider_read: None,
             transaction_id: None,
         })
         .unwrap();

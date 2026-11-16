@@ -28,6 +28,9 @@ pub struct MmsAcquisitionInput {
     pub body: String,
     pub imported: bool,
     pub observed_at_ms: i64,
+    /// Mutable provider `read` evidence. It is intentionally excluded from source identity.
+    #[serde(default)]
+    pub provider_read: Option<bool>,
     /// Provider PDU transaction identity. Peppy sends use `peppy-<canonical command UUID>`.
     #[serde(default)]
     pub transaction_id: Option<String>,
@@ -199,6 +202,21 @@ impl Client {
             acquisition.state == MmsAcquisitionState::Complete
                 && same_provider_identity(&acquisition.input, &input)
         }) {
+            let (message_id, _) = acquisition_identity(&tx, &completed.acquisition_id)?;
+            if crate::phone_read::observe_captured_read(
+                &tx,
+                &ctx,
+                crate::phone_read::CapturedRead {
+                    transport: crate::phone_read::PhoneReadTransport::Mms,
+                    provider_read: input.provider_read,
+                    incoming: input.direction == Direction::Incoming,
+                    imported: completed.input.imported,
+                    message_id,
+                    message_exists: true,
+                },
+            )? {
+                crate::seal_pending(&tx, &ctx, crate::MAX_SEAL_BATCH)?;
+            }
             tx.commit()?;
             return Ok(MmsBeginOutcome::Acquired(completed.clone()));
         }
@@ -333,6 +351,20 @@ impl Client {
                 )?;
             }
             prune_terminal_acquisitions(&tx)?;
+            if crate::phone_read::observe_captured_read(
+                &tx,
+                &ctx,
+                crate::phone_read::CapturedRead {
+                    transport: crate::phone_read::PhoneReadTransport::Mms,
+                    provider_read: stored_input.provider_read,
+                    incoming: stored_input.direction == Direction::Incoming,
+                    imported: stored_input.imported,
+                    message_id,
+                    message_exists: true,
+                },
+            )? {
+                crate::seal_pending(&tx, &ctx, crate::MAX_SEAL_BATCH)?;
+            }
             tx.commit()?;
             drop(guard);
             retired_detached.extend(detached);
@@ -786,6 +818,20 @@ impl Client {
                     "UPDATE mms_acquisitions SET state='complete',reason=NULL,message_id=?,conversation_id=?,source_sequence=? WHERE acquisition_id=?",
                     params![message_id.to_string(), conversation_id.to_string(), super::to_i64(source_sequence.0)?, id],
                 )?;
+                if crate::phone_read::observe_captured_read(
+                    &tx,
+                    &ctx,
+                    crate::phone_read::CapturedRead {
+                        transport: crate::phone_read::PhoneReadTransport::Mms,
+                        provider_read: input.provider_read,
+                        incoming: input.direction == Direction::Incoming,
+                        imported: input.imported,
+                        message_id,
+                        message_exists: true,
+                    },
+                )? {
+                    crate::seal_pending(&tx, &ctx, crate::MAX_SEAL_BATCH)?;
+                }
                 tx.commit()?;
                 drop(guard);
                 discard_detached(self, detached)?;
@@ -845,6 +891,20 @@ impl Client {
                 "UPDATE mms_acquisitions SET state='complete',reason=NULL,message_id=?,conversation_id=?,source_sequence=? WHERE acquisition_id=?",
                 params![existing.to_string(), conversation_id.to_string(), super::to_i64(source_sequence.0)?, id],
             )?;
+            if crate::phone_read::observe_captured_read(
+                &tx,
+                &ctx,
+                crate::phone_read::CapturedRead {
+                    transport: crate::phone_read::PhoneReadTransport::Mms,
+                    provider_read: input.provider_read,
+                    incoming: input.direction == Direction::Incoming,
+                    imported: input.imported,
+                    message_id: existing,
+                    message_exists: true,
+                },
+            )? {
+                crate::seal_pending(&tx, &ctx, crate::MAX_SEAL_BATCH)?;
+            }
             tx.commit()?;
             drop(guard);
             discard_detached(self, detached)?;
@@ -854,6 +914,18 @@ impl Client {
                 duplicate: true,
             });
         }
+        let publish_read_state = crate::phone_read::observe_captured_read(
+            &tx,
+            &ctx,
+            crate::phone_read::CapturedRead {
+                transport: crate::phone_read::PhoneReadTransport::Mms,
+                provider_read: input.provider_read,
+                incoming: input.direction == Direction::Incoming,
+                imported: input.imported,
+                message_id,
+                message_exists: false,
+            },
+        )?;
         match super::insert_message(&tx, &payload)? {
             Inserted::New => {}
             Inserted::Conflict => return Err(Error::Conflict),
@@ -875,7 +947,9 @@ impl Client {
             })
             .collect::<Vec<_>>();
         super::store_local_message_media_meta(&tx, message_id, &media_meta, id)?;
-        super::queue_message_banner(&tx, &payload)?;
+        if !publish_read_state {
+            super::queue_message_banner(&tx, &payload)?;
+        }
         let (envelope_id, _) = super::enqueue(
             &tx,
             &ctx,
@@ -1860,6 +1934,7 @@ mod tests {
             body: "body".into(),
             imported: false,
             observed_at_ms: 1,
+            provider_read: None,
             transaction_id: None,
         };
         (
@@ -1963,5 +2038,27 @@ mod tests {
         row.3 = "unknown".into();
 
         assert_eq!(decode_acquisition_row(&conn, row), Err(Error::Database));
+    }
+
+    #[test]
+    fn legacy_input_without_provider_read_decodes_as_unknown() {
+        let input: MmsAcquisitionInput = serde_json::from_value(serde_json::json!({
+            "source": {
+                "source_generation": "generation",
+                "subscription_id": "subscription",
+                "provider_message_id": "message",
+                "provider_thread_id": null
+            },
+            "direction": "incoming",
+            "sender_address": "+15555550100",
+            "recipients": [],
+            "subject": null,
+            "body": "body",
+            "imported": false,
+            "observed_at_ms": 1
+        }))
+        .unwrap();
+
+        assert_eq!(input.provider_read, None);
     }
 }

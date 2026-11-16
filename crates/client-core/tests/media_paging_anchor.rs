@@ -31,6 +31,7 @@ fn capture_media(
                     body: String::new(),
                     imported: false,
                     observed_at_ms: 1_700_000_000_000,
+                    provider_read: None,
                     transaction_id: None,
                 })
                 .unwrap();

@@ -3055,6 +3055,7 @@ mod tests {
                 body: "storage policy projection".into(),
                 imported: false,
                 observed_at_ms: 1,
+                provider_read: None,
                 transaction_id: None,
             })
             .unwrap();

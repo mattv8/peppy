@@ -34,6 +34,7 @@ class SmsNativeCaptureTest : GatewayTestBase() {
             sentAtMs = 1_000,
             dateSentMs = 1_001,
             creator = "messaging",
+            providerRead = true,
             sourceRowFingerprint = "fingerprint-42",
         )
         val core = NativeSmsCaptureCore(enrollAndUnlock())
@@ -43,6 +44,7 @@ class SmsNativeCaptureTest : GatewayTestBase() {
         assertEquals("fingerprint-42", acquisition.input.sourceRowFingerprint)
         assertEquals(1_001L, acquisition.input.dateSentMs)
         assertEquals("messaging", acquisition.input.creator)
+        assertEquals(true, acquisition.input.providerRead)
         core.complete(acquisition.id)
     }
 
@@ -84,7 +86,7 @@ class SmsNativeCaptureTest : GatewayTestBase() {
 
     private fun input(record: SmsProviderRecord) = SmsAcquisitionInput(
         "shared-generation", SimRoutes.routeId(1), record.id.toString(), record.threadId.toString(), true,
-        record.address, emptyList(), record.body.orEmpty(), false, record.dateMs, record.dateSentMs, record.creator,
+        record.address, emptyList(), record.body.orEmpty(), false, record.dateMs, record.dateSentMs, record.creator, record.read,
         SmsCapture.sourceRowFingerprint(record),
     )
 }

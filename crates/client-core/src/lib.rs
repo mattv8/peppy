@@ -9840,6 +9840,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
         Some(_) => return Err(Error::UnsupportedSchema),
     }
     mms_backfill::initialize(conn)?;
+    sms_acquisition::initialize(conn)?;
     attachment_retention::initialize(conn)?;
     mcp_commands::initialize(conn)?;
     rcs_mirror::initialize(conn)?;
@@ -17729,6 +17730,7 @@ mod tests {
             body: "blocked".into(),
             imported: false,
             observed_at_ms: 1,
+            provider_read: None,
             transaction_id: None,
         };
         let acquisition = client.begin_mms_acquisition(input).unwrap();
@@ -19768,6 +19770,7 @@ mod tests {
                 body: "old message".into(),
                 imported: false,
                 observed_at_ms: 1,
+                provider_read: None,
                 transaction_id: None,
             })
             .unwrap();
@@ -19881,6 +19884,7 @@ mod tests {
                 body: "hydrate".into(),
                 imported: false,
                 observed_at_ms: 1,
+                provider_read: None,
                 transaction_id: None,
             })
             .unwrap();
@@ -19981,6 +19985,7 @@ mod tests {
                 body: "recover epoch two".into(),
                 imported: false,
                 observed_at_ms: 1,
+                provider_read: None,
                 transaction_id: None,
             })
             .unwrap();

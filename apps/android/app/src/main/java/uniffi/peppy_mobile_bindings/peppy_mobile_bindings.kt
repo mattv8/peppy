@@ -887,7 +887,11 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_commit_mms_live_gap_page(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_commit_mms_provider_rescan_page(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_commit_sms_live_gap_page(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compaction_backfill_step_json(
     ): Int
@@ -1489,7 +1493,11 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext(`ptr`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_commit_mms_live_gap_page(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,`expectedCursor`: RustBuffer.ByValue,`lastDurableId`: RustBuffer.ByValue,`exhausted`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_commit_mms_provider_rescan_page(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,`expectedCursor`: RustBuffer.ByValue,`lastDurableId`: RustBuffer.ByValue,`exhausted`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_commit_sms_live_gap_page(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`providerScope`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,`expectedCursor`: RustBuffer.ByValue,`lastDurableId`: RustBuffer.ByValue,`exhausted`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_compaction_backfill_step_json(`ptr`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -2620,7 +2628,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext() and 0xFFFF) != 13469) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_commit_mms_live_gap_page() and 0xFFFF) != 1568) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_commit_mms_provider_rescan_page() and 0xFFFF) != 8014) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_commit_sms_live_gap_page() and 0xFFFF) != 41744) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compaction_backfill_step_json() and 0xFFFF) != 57580) {
@@ -3933,7 +3947,11 @@ public interface NativeClientInterface {
      */
     fun `cleanupUploadedGatewayMmsCiphertext`(`limit`: kotlin.UInt): NativeGatewayMmsCleanup
     
+    fun `commitMmsLiveGapPage`(`generation`: kotlin.String, `scope`: kotlin.String, `token`: kotlin.String, `expectedCursor`: kotlin.String?, `lastDurableId`: kotlin.String?, `exhausted`: kotlin.Boolean): kotlin.Boolean
+    
     fun `commitMmsProviderRescanPage`(`generation`: kotlin.String, `scope`: kotlin.String, `token`: kotlin.String, `expectedCursor`: kotlin.String?, `lastDurableId`: kotlin.String?, `exhausted`: kotlin.Boolean): kotlin.Boolean
+    
+    fun `commitSmsLiveGapPage`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `token`: kotlin.String, `expectedCursor`: kotlin.String?, `lastDurableId`: kotlin.String?, `exhausted`: kotlin.Boolean): kotlin.Boolean
     
     /**
      * One bounded compaction frontier backfill step (readiness JSON plus `processed`).
@@ -5112,6 +5130,26 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `commitMmsLiveGapPage`(`generation`: kotlin.String, `scope`: kotlin.String, `token`: kotlin.String, `expectedCursor`: kotlin.String?, `lastDurableId`: kotlin.String?, `exhausted`: kotlin.Boolean): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_commit_mms_live_gap_page(
+        it,
+        
+        FfiConverterString.lower(`generation`),
+        FfiConverterString.lower(`scope`),
+        FfiConverterString.lower(`token`),
+        FfiConverterOptionalString.lower(`expectedCursor`),
+        FfiConverterOptionalString.lower(`lastDurableId`),
+        FfiConverterBoolean.lower(`exhausted`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `commitMmsProviderRescanPage`(`generation`: kotlin.String, `scope`: kotlin.String, `token`: kotlin.String, `expectedCursor`: kotlin.String?, `lastDurableId`: kotlin.String?, `exhausted`: kotlin.Boolean): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     callWithHandle {
@@ -5121,6 +5159,26 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         
         FfiConverterString.lower(`generation`),
         FfiConverterString.lower(`scope`),
+        FfiConverterString.lower(`token`),
+        FfiConverterOptionalString.lower(`expectedCursor`),
+        FfiConverterOptionalString.lower(`lastDurableId`),
+        FfiConverterBoolean.lower(`exhausted`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `commitSmsLiveGapPage`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `token`: kotlin.String, `expectedCursor`: kotlin.String?, `lastDurableId`: kotlin.String?, `exhausted`: kotlin.Boolean): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_commit_sms_live_gap_page(
+        it,
+        
+        FfiConverterString.lower(`sourceGeneration`),
+        FfiConverterString.lower(`providerScope`),
         FfiConverterString.lower(`token`),
         FfiConverterOptionalString.lower(`expectedCursor`),
         FfiConverterOptionalString.lower(`lastDurableId`),
@@ -13447,6 +13505,8 @@ data class NativeMmsAcquisitionInput (
     , 
     var `observedAtMs`: kotlin.Long
     , 
+    var `providerRead`: kotlin.Boolean?
+    , 
     var `transactionId`: kotlin.String?
     
 ){
@@ -13472,6 +13532,7 @@ public object FfiConverterTypeNativeMmsAcquisitionInput: FfiConverterRustBuffer<
             FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterLong.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
         )
     }
@@ -13485,6 +13546,7 @@ public object FfiConverterTypeNativeMmsAcquisitionInput: FfiConverterRustBuffer<
             FfiConverterString.allocationSize(value.`body`) +
             FfiConverterBoolean.allocationSize(value.`imported`) +
             FfiConverterLong.allocationSize(value.`observedAtMs`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`providerRead`) +
             FfiConverterOptionalString.allocationSize(value.`transactionId`)
     )
 
@@ -13497,6 +13559,7 @@ public object FfiConverterTypeNativeMmsAcquisitionInput: FfiConverterRustBuffer<
             FfiConverterString.write(value.`body`, buf)
             FfiConverterBoolean.write(value.`imported`, buf)
             FfiConverterLong.write(value.`observedAtMs`, buf)
+            FfiConverterOptionalBoolean.write(value.`providerRead`, buf)
             FfiConverterOptionalString.write(value.`transactionId`, buf)
     }
 }
@@ -13726,6 +13789,8 @@ data class NativeMmsBackfillScanPlan (
     , 
     var `providerRescanToken`: kotlin.String?
     , 
+    var `liveGapToken`: kotlin.String?
+    , 
     var `descending`: kotlin.Boolean
     , 
     var `historyFloor`: kotlin.String?
@@ -13760,6 +13825,7 @@ public object FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer<
             FfiConverterString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
@@ -13776,6 +13842,7 @@ public object FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer<
             FfiConverterString.allocationSize(value.`subscriptionId`) +
             FfiConverterOptionalString.allocationSize(value.`cursor`) +
             FfiConverterOptionalString.allocationSize(value.`providerRescanToken`) +
+            FfiConverterOptionalString.allocationSize(value.`liveGapToken`) +
             FfiConverterBoolean.allocationSize(value.`descending`) +
             FfiConverterOptionalString.allocationSize(value.`historyFloor`) +
             FfiConverterOptionalString.allocationSize(value.`historyUpperBound`) +
@@ -13791,6 +13858,7 @@ public object FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer<
             FfiConverterString.write(value.`subscriptionId`, buf)
             FfiConverterOptionalString.write(value.`cursor`, buf)
             FfiConverterOptionalString.write(value.`providerRescanToken`, buf)
+            FfiConverterOptionalString.write(value.`liveGapToken`, buf)
             FfiConverterBoolean.write(value.`descending`, buf)
             FfiConverterOptionalString.write(value.`historyFloor`, buf)
             FfiConverterOptionalString.write(value.`historyUpperBound`, buf)
@@ -16043,6 +16111,64 @@ public object FfiConverterTypeNativeSmsHistoryStatus: FfiConverterRustBuffer<Nat
 
 
 
+data class NativeSmsLiveGapPlan (
+    var `sourceGeneration`: kotlin.String
+    , 
+    var `subscriptionId`: kotlin.String
+    , 
+    var `upperBound`: kotlin.String
+    , 
+    var `floor`: kotlin.String
+    , 
+    var `cursor`: kotlin.String?
+    , 
+    var `token`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeSmsLiveGapPlan: FfiConverterRustBuffer<NativeSmsLiveGapPlan> {
+    override fun read(buf: ByteBuffer): NativeSmsLiveGapPlan {
+        return NativeSmsLiveGapPlan(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeSmsLiveGapPlan) = (
+            FfiConverterString.allocationSize(value.`sourceGeneration`) +
+            FfiConverterString.allocationSize(value.`subscriptionId`) +
+            FfiConverterString.allocationSize(value.`upperBound`) +
+            FfiConverterString.allocationSize(value.`floor`) +
+            FfiConverterOptionalString.allocationSize(value.`cursor`) +
+            FfiConverterString.allocationSize(value.`token`)
+    )
+
+    override fun write(value: NativeSmsLiveGapPlan, buf: ByteBuffer) {
+            FfiConverterString.write(value.`sourceGeneration`, buf)
+            FfiConverterString.write(value.`subscriptionId`, buf)
+            FfiConverterString.write(value.`upperBound`, buf)
+            FfiConverterString.write(value.`floor`, buf)
+            FfiConverterOptionalString.write(value.`cursor`, buf)
+            FfiConverterString.write(value.`token`, buf)
+    }
+}
+
+
+
 data class NativeSmsProviderAcquisitionInput (
     var `source`: NativeSmsSource
     , 
@@ -16061,6 +16187,8 @@ data class NativeSmsProviderAcquisitionInput (
     var `dateSentMs`: kotlin.Long?
     , 
     var `creator`: kotlin.String?
+    , 
+    var `providerRead`: kotlin.Boolean?
     , 
     var `sourceRowFingerprint`: kotlin.String
     
@@ -16088,6 +16216,7 @@ public object FfiConverterTypeNativeSmsProviderAcquisitionInput: FfiConverterRus
             FfiConverterOptionalLong.read(buf),
             FfiConverterOptionalLong.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
             FfiConverterString.read(buf),
         )
     }
@@ -16102,6 +16231,7 @@ public object FfiConverterTypeNativeSmsProviderAcquisitionInput: FfiConverterRus
             FfiConverterOptionalLong.allocationSize(value.`sentAtMs`) +
             FfiConverterOptionalLong.allocationSize(value.`dateSentMs`) +
             FfiConverterOptionalString.allocationSize(value.`creator`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`providerRead`) +
             FfiConverterString.allocationSize(value.`sourceRowFingerprint`)
     )
 
@@ -16115,6 +16245,7 @@ public object FfiConverterTypeNativeSmsProviderAcquisitionInput: FfiConverterRus
             FfiConverterOptionalLong.write(value.`sentAtMs`, buf)
             FfiConverterOptionalLong.write(value.`dateSentMs`, buf)
             FfiConverterOptionalString.write(value.`creator`, buf)
+            FfiConverterOptionalBoolean.write(value.`providerRead`, buf)
             FfiConverterString.write(value.`sourceRowFingerprint`, buf)
     }
 }
@@ -16129,6 +16260,8 @@ data class NativeSmsReconciliationPlan (
     var `cursor`: kotlin.String?
     , 
     var `upperBound`: kotlin.String
+    , 
+    var `floor`: kotlin.String?
     , 
     var `historyUpperBound`: kotlin.String?
     
@@ -16152,6 +16285,7 @@ public object FfiConverterTypeNativeSmsReconciliationPlan: FfiConverterRustBuffe
             FfiConverterOptionalString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -16160,6 +16294,7 @@ public object FfiConverterTypeNativeSmsReconciliationPlan: FfiConverterRustBuffe
             FfiConverterString.allocationSize(value.`subscriptionId`) +
             FfiConverterOptionalString.allocationSize(value.`cursor`) +
             FfiConverterString.allocationSize(value.`upperBound`) +
+            FfiConverterOptionalString.allocationSize(value.`floor`) +
             FfiConverterOptionalString.allocationSize(value.`historyUpperBound`)
     )
 
@@ -16168,6 +16303,7 @@ public object FfiConverterTypeNativeSmsReconciliationPlan: FfiConverterRustBuffe
             FfiConverterString.write(value.`subscriptionId`, buf)
             FfiConverterOptionalString.write(value.`cursor`, buf)
             FfiConverterString.write(value.`upperBound`, buf)
+            FfiConverterOptionalString.write(value.`floor`, buf)
             FfiConverterOptionalString.write(value.`historyUpperBound`, buf)
     }
 }
@@ -16194,6 +16330,8 @@ data class NativeSmsScanPlan (
     var `paused`: kotlin.Boolean
     , 
     var `pendingRecheckCursor`: kotlin.String?
+    , 
+    var `liveGap`: NativeSmsLiveGapPlan?
     , 
     var `budget`: kotlin.ULong
     
@@ -16222,6 +16360,7 @@ public object FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer<NativeSm
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeNativeSmsLiveGapPlan.read(buf),
             FfiConverterULong.read(buf),
         )
     }
@@ -16237,6 +16376,7 @@ public object FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer<NativeSm
             FfiConverterBoolean.allocationSize(value.`historyComplete`) +
             FfiConverterBoolean.allocationSize(value.`paused`) +
             FfiConverterOptionalString.allocationSize(value.`pendingRecheckCursor`) +
+            FfiConverterOptionalTypeNativeSmsLiveGapPlan.allocationSize(value.`liveGap`) +
             FfiConverterULong.allocationSize(value.`budget`)
     )
 
@@ -16251,6 +16391,7 @@ public object FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer<NativeSm
             FfiConverterBoolean.write(value.`historyComplete`, buf)
             FfiConverterBoolean.write(value.`paused`, buf)
             FfiConverterOptionalString.write(value.`pendingRecheckCursor`, buf)
+            FfiConverterOptionalTypeNativeSmsLiveGapPlan.write(value.`liveGap`, buf)
             FfiConverterULong.write(value.`budget`, buf)
     }
 }
@@ -18602,6 +18743,7 @@ public object FfiConverterTypeNativeMmsBackfillPause: FfiConverterRustBuffer<Nat
 enum class NativeMmsBackfillPhase {
     
     LIVE,
+    LIVE_GAP,
     PROVIDER_RESCAN,
     HISTORY,
     RECHECK;
@@ -20698,6 +20840,38 @@ public object FfiConverterOptionalTypeNativeRcsUnlinkCutoverGenerations: FfiConv
         } else {
             buf.put(1)
             FfiConverterTypeNativeRcsUnlinkCutoverGenerations.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeNativeSmsLiveGapPlan: FfiConverterRustBuffer<NativeSmsLiveGapPlan?> {
+    override fun read(buf: ByteBuffer): NativeSmsLiveGapPlan? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNativeSmsLiveGapPlan.read(buf)
+    }
+
+    override fun allocationSize(value: NativeSmsLiveGapPlan?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNativeSmsLiveGapPlan.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NativeSmsLiveGapPlan?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNativeSmsLiveGapPlan.write(value, buf)
         }
     }
 }

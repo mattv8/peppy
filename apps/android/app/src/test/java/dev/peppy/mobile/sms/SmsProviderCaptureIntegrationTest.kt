@@ -38,6 +38,7 @@ import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.NativePermitState
 import uniffi.peppy_mobile_bindings.NativeSmsAcquisition
 import uniffi.peppy_mobile_bindings.NativeSmsAcquisitionState
+import uniffi.peppy_mobile_bindings.NativeSmsLiveGapPlan
 import uniffi.peppy_mobile_bindings.NativeSmsProviderAcquisitionInput
 import uniffi.peppy_mobile_bindings.NativeSmsReconciliationPlan
 import uniffi.peppy_mobile_bindings.NativeSmsScanPlan
@@ -97,11 +98,12 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
         upperBound: Long,
         state: NativeSmsAcquisitionState = NativeSmsAcquisitionState.COMPLETE,
         completions: MutableList<String?>,
+        cursor: String? = null,
     ): NativeClientInterface = Proxy.newProxyInstance(javaClass.classLoader, arrayOf(NativeClientInterface::class.java)) { _, method, arguments ->
         val args = arguments?.toList().orEmpty()
         when (method.name) {
             "planSmsScansWithHistoryConditions" -> emptyList<NativeSmsScanPlan>()
-            "planSmsReconciliation" -> NativeSmsReconciliationPlan("reconcile", SmsCapture.PROVIDER_SCOPE, "0", upperBound.toString(), null)
+            "planSmsReconciliation" -> NativeSmsReconciliationPlan("reconcile", SmsCapture.PROVIDER_SCOPE, cursor, upperBound.toString(), null, null)
             "smsAcquisitionsAfter" -> emptyList<NativeSmsAcquisition>()
             "beginSmsProviderAcquisition" -> {
                 val input = args.single() as NativeSmsProviderAcquisitionInput
@@ -123,10 +125,11 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
         shouldYield: () -> Boolean = { false },
         nanoTime: () -> Long = System::nanoTime,
         coreFactory: (NativeClientInterface) -> SmsCaptureCore = ::NativeSmsCaptureCore,
+        cursor: String? = null,
     ): Pair<SmsCaptureSummary, List<String?>> {
         val completions = mutableListOf<String?>()
         val summary = SmsNativeCapture.capture(
-            reconciliationClient(upperBound, state, completions),
+            reconciliationClient(upperBound, state, completions, cursor),
             AndroidSmsCaptureProvider(context),
             "reconcile",
             shouldYield = shouldYield,
@@ -142,7 +145,7 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
         val (summary, completions) = reconciliationCapture(125)
 
         assertFalse(summary.more)
-        assertEquals(listOf("50", "100", "125"), completions)
+        assertEquals(listOf("76", "26", "1"), completions)
     }
 
     @Test fun reconciliationYieldsAfterCompletingTheCurrentPage() {
@@ -152,7 +155,7 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
         val (summary, completions) = reconciliationCapture(100, shouldYield = { yields = true; yields })
 
         assertTrue(summary.more)
-        assertEquals(listOf("50"), completions)
+        assertEquals(listOf("51"), completions)
     }
 
     @Test fun reconciliationStopsAtTheSharedDeadline() {
@@ -163,7 +166,7 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
         val (summary, completions) = reconciliationCapture(100, nanoTime = nanoTime)
 
         assertTrue(summary.more)
-        assertEquals(listOf("50"), completions)
+        assertEquals(listOf("51"), completions)
     }
 
     @Test fun reconciliationStopsAfterACapturedPage() {
@@ -173,7 +176,7 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
 
         assertEquals(50, summary.captured)
         assertTrue(summary.more)
-        assertEquals(listOf("50"), completions)
+        assertEquals(listOf("51"), completions)
     }
 
     @Test fun reconciliationDoesNotContinueAfterExhaustion() {
@@ -182,7 +185,7 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
         val (summary, completions) = reconciliationCapture(49)
 
         assertFalse(summary.more)
-        assertEquals(listOf("49"), completions)
+        assertEquals(listOf("1"), completions)
     }
 
     @Test fun reconciliationCapacityBackpressureDoesNotRequestAContinuation() {
@@ -198,7 +201,23 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
         val (summary, completions) = reconciliationCapture(100, coreFactory = { blockedCore })
 
         assertFalse(summary.more)
-        assertEquals(listOf(null), completions)
+        assertTrue(completions.isEmpty())
+    }
+
+    @Test fun reconciliationWithPersistedCursorDoesNotCommitWhenCapacityBlocksThePage() {
+        (1L..100L).forEach { id -> provider.rows += row(id, 1, "+14155552671", "row $id", id, id, MESSAGES_APP) }
+        val blockedCore = object : SmsCaptureCore {
+            override fun acquisitions(afterId: String?, limit: Int) = emptyList<SmsAcquisition>()
+            override fun begin(input: SmsAcquisitionInput): SmsAcquisition = throw SmsCaptureCapacityException()
+            override fun complete(id: String): SmsCompletion = error("unreachable")
+            override fun setState(id: String, state: SmsAcquisitionState, reason: String?) = error("unreachable")
+            override fun setCheckpoint(sourceGeneration: String, subscription: String, imported: Boolean, providerId: String) = error("unreachable")
+        }
+
+        val (summary, completions) = reconciliationCapture(100, coreFactory = { blockedCore }, cursor = "100")
+
+        assertFalse(summary.coreError)
+        assertTrue(completions.isEmpty())
     }
 
     @Test fun reconciliationDurablePausedAcquisitionStillAdvances() {
@@ -207,7 +226,81 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
         val (summary, completions) = reconciliationCapture(100, NativeSmsAcquisitionState.PAUSED)
 
         assertTrue(summary.more)
-        assertEquals(listOf("50"), completions)
+        assertEquals(listOf("51"), completions)
+    }
+
+    /**
+     * Live plan at checkpoint 40 with an open gap (floor 0, upper 40) and a history plan frozen at 45.
+     * Provider rows 1..45: 41..45 are live-ascending, 1..40 are the gap region.
+     */
+    private fun liveGapClient(log: MutableList<String>, commitAccepted: Boolean, commits: MutableList<List<Any?>>): NativeClientInterface {
+        val live = NativeSmsScanPlan(
+            "provider", SmsCapture.PROVIDER_SCOPE, false, "40", false, null, null, false, false, null,
+            NativeSmsLiveGapPlan("provider", SmsCapture.PROVIDER_SCOPE, "40", "0", null, "gap-token"), 100u,
+        )
+        val history = NativeSmsScanPlan(
+            "provider", SmsCapture.PROVIDER_SCOPE, true, "45", false, null, "45", false, false, null, null, 100u,
+        )
+        return Proxy.newProxyInstance(javaClass.classLoader, arrayOf(NativeClientInterface::class.java)) { _, method, arguments ->
+            val args = arguments?.toList().orEmpty()
+            when {
+                method.name == "planSmsScansWithHistoryConditions" -> listOf(live, history)
+                method.name.startsWith("smsAcquisitionsAfter") -> emptyList<NativeSmsAcquisition>()
+                method.name == "beginSmsProviderAcquisition" -> {
+                    val input = args.single() as NativeSmsProviderAcquisitionInput
+                    log += "begin:${input.source.providerMessageId}:${input.imported}"
+                    NativeSmsAcquisition(input.source.providerMessageId, "conversation", input, NativeSmsAcquisitionState.PENDING, null)
+                }
+                method.name == "completeSmsAcquisition" -> NativeCaptured("message", "conversation", false)
+                method.name == "commitSmsLiveGapPage" -> {
+                    log += "commit"
+                    commits += args
+                    commitAccepted
+                }
+                method.name == "ackSmsScanExhausted" -> {
+                    log += "ack:${args[3]}"
+                    null
+                }
+                method.name == "beginMessageHistoryCapture" -> """{"token":"claim","budget":100}"""
+                method.name == "finishMessageHistoryCapture" -> "{}"
+                method.name == "drainMessageHistoryCaptureResults" -> """{"published":0,"pending":0}"""
+                method.name == "planSmsReconciliation" -> null
+                method.name in setOf("setSmsScanCheckpoint", "setSmsPendingRecheckCursor", "setSmsProviderError") -> null
+                else -> error("unexpected ${method.name}")
+            }
+        } as NativeClientInterface
+    }
+
+    private fun seedLiveGapRows() {
+        (1L..45L).forEach { id -> provider.rows += row(id, 1, "+14155552671", "row $id", 1_600_000_000_000L + id, 1_600_000_000_000L + id, MESSAGES_APP) }
+    }
+
+    @Test fun liveGapReadsAfterLiveDescendingThenHistoryAndCommitsTheFencedPage() {
+        seedLiveGapRows()
+        val log = mutableListOf<String>()
+        val commits = mutableListOf<List<Any?>>()
+
+        val summary = SmsNativeCapture.capture(liveGapClient(log, commitAccepted = true, commits = commits), AndroidSmsCaptureProvider(context), "provider")
+
+        assertEquals(45, summary.captured)
+        assertFalse(summary.more)
+        assertEquals(
+            (41L..45L).map { "begin:$it:false" } + (40L downTo 1L).map { "begin:$it:false" } + listOf("commit", "ack:45"),
+            log,
+        )
+        assertEquals(listOf<List<Any?>>(listOf("provider", SmsCapture.PROVIDER_SCOPE, "gap-token", null, "1", true)), commits)
+    }
+
+    @Test fun rejectedLiveGapFenceStopsWithoutRetryingOrRunningHistory() {
+        seedLiveGapRows()
+        val log = mutableListOf<String>()
+        val commits = mutableListOf<List<Any?>>()
+
+        val summary = SmsNativeCapture.capture(liveGapClient(log, commitAccepted = false, commits = commits), AndroidSmsCaptureProvider(context), "provider")
+
+        assertTrue(summary.more)
+        assertEquals(1, commits.size)
+        assertEquals((41L..45L).map { "begin:$it:false" } + (40L downTo 1L).map { "begin:$it:false" } + "commit", log)
     }
 
     @Test fun admittedHistoryCapturesNinetyNineRowsAndReportsTheProbeObservation() {
@@ -223,7 +316,7 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
                 method.name == "planSmsScansWithHistoryConditions" -> listOf(
                     NativeSmsScanPlan(
                         "provider", SmsCapture.PROVIDER_SCOPE, true, null, true, null, "100",
-                        false, false, null, 100u,
+                        false, false, null, null, 100u,
                     ),
                 )
                 method.name.startsWith("smsAcquisitionsAfter") -> emptyList<NativeSmsAcquisition>()
@@ -345,14 +438,14 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
         val live = pass(client)
 
         assertEquals(0, gated.captured)
-        assertEquals(1, live.captured)
-        assertEquals(listOf("live"), messages(client).map { it.body })
+        assertEquals(2, live.captured)
+        assertEquals(listOf("history", "live"), messages(client).map { it.body })
 
         assertTrue(client.openHistoryImportGate("contacts_settled"))
         val replayGated = pass(client)
         assertFalse(client.initialReplayCaughtUp())
         assertEquals(0, replayGated.captured)
-        assertEquals(listOf("live"), messages(client).map { it.body })
+        assertEquals(listOf("history", "live"), messages(client).map { it.body })
         client.observeServerHighWater(client.receiveCursor())
         val released = drain(client)
 
