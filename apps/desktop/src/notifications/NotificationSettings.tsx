@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import { ExternalLink } from "@peppy/desktop-ui";
 import { DEFAULT_NOTIFICATION_PERSISTENCE, notificationPersistence, type NotificationPersistence, type NotificationPersistenceSettings, type NotificationQuickReplySettings } from "@peppy/desktop-ui/bridge-contracts";
 import type { AppFilter, MirroredNotification, NotificationCheck, NotificationPreferences } from "../bridge/bridge";
-import { notificationAppName, notificationTuple, notificationSourceName } from "./Notifications";
+import { notificationTuple } from "./Notifications";
+import { NotificationSettingsApps } from "./NotificationSettingsApps";
 import { NotificationSettingsGroup, NotificationSettingsHelp } from "./NotificationSettingsParts";
 
 const LINUX_PERSISTENCE_PRESETS = [
@@ -166,14 +168,13 @@ export function NotificationSettings({ notifications, filters, sources, preferen
     ...notifications.map(n => ({ sourceDeviceId: n.target.sourceDeviceId, packageName: n.packageName, appName: n.appName, muted: false })),
     ...filters,
   ].map(filter => [notificationTuple(filter.sourceDeviceId, filter.packageName), filter])).values()];
-  const sourceIds = apps.map(app => app.sourceDeviceId);
   const hasDesktopBanners = preferences.messageBanners || preferences.mirroredBanners;
   const hasLocalSettings = Boolean(
     (hasDesktopBanners && (soundSettings || (quickReplySettings && quickReply?.supported !== false) || persistenceSupported)) ||
     quickReplyError ||
     persistenceLoadError,
   );
-  const hasQuickReplyPreviewHint = Boolean(hasDesktopBanners && quickReplySettings && quickReply?.supported && quickReply.enabled);
+  const quickReplyAvailable = Boolean(quickReplySettings && quickReply?.supported && quickReply.enabled);
   const muteWithHeads = preferences.muteWithHeads ?? true;
   const previewMode = preferences.preview === "full" ? "full" : preferences.showSource ? "source" : "hidden";
   const lockedNoteId = locked ? "notification-banner-locked-note" : undefined;
@@ -255,10 +256,9 @@ export function NotificationSettings({ notifications, filters, sources, preferen
   }, [hasDesktopBanners]);
   return (
     <section id="notification-settings" className="settings-card" data-settings-section="notifications" aria-busy={busy}>
-      <h2>Notification mirroring</h2>
+      <h2>Notifications</h2>
       <p>Mirrored app notifications use encrypted device sync. Carrier SMS/MMS has separate security boundaries.</p>
-      <NotificationSettingsGroup id="notification-banner-group" title="Desktop banners">
-        <p id="notification-banner-sync-note" className="settings-note">Banner choices apply to every computer and browser in this vault. System notification permission is set on each device.</p>
+      <NotificationSettingsGroup id="notification-banner-group" title="Banners" badge="All devices" help={<NotificationSettingsHelp id="notification-banner-help" title="Banner choices"><p id="notification-banner-sync-note">Banner choices apply to every computer and browser in this vault. System notification permission is set on each device.</p></NotificationSettingsHelp>}>
         {locked && <p id="notification-banner-locked-note" className="settings-note">Unlock Peppy to change banner settings.</p>}
         <div className="settings-control-row">
           <span className="notification-setting-label"><label htmlFor="notification-message-banners">SMS/MMS banners</label></span>
@@ -287,24 +287,20 @@ export function NotificationSettings({ notifications, filters, sources, preferen
             <span aria-hidden />
           </span>
         </div>
-        {hasDesktopBanners && <div id="notification-preview-row" className="settings-control-row">
-          <span className="notification-setting-label"><label htmlFor="notification-preview">Banner preview</label><NotificationSettingsHelp id="notification-preview-help" title="Banner preview"><p>Choose whether banners show the full message, only who it is from, or a generic notice.</p></NotificationSettingsHelp></span>
-          <select id="notification-preview" value={previewMode} disabled={busy || locked} aria-describedby={[lockedNoteId, hasQuickReplyPreviewHint ? "notification-quick-reply-preview-hint" : undefined].filter(Boolean).join(" ") || undefined}
-            onChange={event => {
-              const selection = event.target.value;
-              savePreferences({ ...preferences, preview: selection === "full" ? "full" : "hidden", showSource: selection === "source" });
-            }}>
-            <option value="full">Full content</option>
-            <option value="source">Sender or app only</option>
-            <option value="hidden">Hidden — generic banner only</option>
-          </select>
-        </div>}
-        {hasQuickReplyPreviewHint && <p id="notification-quick-reply-preview-hint" className="settings-note">
-          {previewMode === "full" ? "Show the sender and message, with quick reply." : previewMode === "source" ? "Show who it is from. Choose Show message to reveal a message and reply." : "Show a generic banner. Choose Show message to reveal a message and reply."} Quick reply applies to message banners, not mirrored app notifications.
-        </p>}
+        {hasDesktopBanners && <fieldset id="notification-preview" className="settings-option-cards" disabled={busy || locked} aria-labelledby="notification-preview-legend" aria-describedby={lockedNoteId}>
+          <legend><span id="notification-preview-legend">Banner preview</span> <NotificationSettingsHelp id="notification-preview-help" title="Banner preview"><p>Choose whether banners show the full message, only who it is from, or a generic notice. Quick reply applies to message banners, not mirrored app notifications.</p></NotificationSettingsHelp></legend>
+          <div className="settings-option-card-list">
+            {[["full", "Full content", quickReplyAvailable ? "Sender and message, with quick reply." : "Sender and message."], ["source", "Sender or app only", quickReplyAvailable ? "Who it's from. Choose Show message to read it." : "Who it's from."], ["hidden", "Hidden", "A generic notice with no details."]].map(([value, label, description]) => (
+              <label key={value} className="settings-option-card">
+                <input type="radio" name="notification-preview" value={value} checked={previewMode === value} aria-labelledby={`notification-preview-${value}-label`} aria-describedby={`notification-preview-${value}-description`}
+                  onChange={() => savePreferences({ ...preferences, preview: value === "full" ? "full" : "hidden", showSource: value === "source" })} />
+                <span id={`notification-preview-${value}-label`}>{label}</span><span id={`notification-preview-${value}-description`}>{description}</span>
+              </label>
+            ))}
+          </div>
+        </fieldset>}
       </NotificationSettingsGroup>
-      {hasLocalSettings && <NotificationSettingsGroup id="notification-local-group" title="On this computer">
-        <p className="settings-note">These settings apply only to this computer.</p>
+      {(hasLocalSettings || hasDesktopBanners) && <NotificationSettingsGroup id="notification-local-group" title="On this computer" badge="This computer">
         {hasDesktopBanners && soundSettings && <div id="notification-sounds-row" className="settings-control-row">
           <span className="notification-setting-label"><label htmlFor="notification-sounds">Notification sounds</label><NotificationSettingsHelp id="notification-sounds-help" title="Notification sounds"><p>Play the system notification sound on this computer. System volume and Focus or Do Not Disturb still apply.</p></NotificationSettingsHelp></span>
           <span className="settings-switch">
@@ -321,7 +317,7 @@ export function NotificationSettings({ notifications, filters, sources, preferen
         </div>}
         {hasDesktopBanners && quickReplySettings && quickReply?.supported !== false && <>
           <div id="notification-quick-reply-row" className="settings-control-row" aria-busy={quickReplyPending || (quickReply === undefined && !quickReplyError) || undefined}>
-            <span className="notification-setting-label"><label htmlFor="notification-quick-reply-toggle">Quick reply in notifications</label><NotificationSettingsHelp id="notification-quick-reply-help" title="Quick reply in notifications"><p>Reply to messages from notifications on this computer. This applies only to message banners, not mirrored app notifications.</p></NotificationSettingsHelp></span>
+            <span className="notification-setting-label"><span><span className="notification-setting-label-title"><label htmlFor="notification-quick-reply-toggle">Quick reply in notifications</label><NotificationSettingsHelp id="notification-quick-reply-help" title="Quick reply in notifications"><p>Reply to messages from notifications on this computer. This applies only to message banners, not mirrored app notifications.</p></NotificationSettingsHelp></span><small id="notification-quick-reply-hint">Message banners only. Not available while Peppy is locked.</small></span></span>
             <span className="settings-switch">
               <input id="notification-quick-reply-toggle" type="checkbox" role="switch" checked={quickReply?.enabled ?? false} aria-checked={quickReply?.enabled ?? false}
                 disabled={busy || locked || quickReplyPending || quickReply === undefined} aria-describedby={quickReplyDescribedBy}
@@ -337,7 +333,6 @@ export function NotificationSettings({ notifications, filters, sources, preferen
               <span aria-hidden />
             </span>
           </div>
-          <p id="notification-quick-reply-hint" className="settings-note">Message banners only. Not available while Peppy is locked.</p>
           {quickReplyPending && <p role="status">Saving quick reply setting…</p>}
           {quickReply === undefined && !quickReplyError && <p role="status">Loading quick reply setting…</p>}
           {quickReplyError && <p id="notification-quick-reply-error" className="settings-error" role="alert">{quickReplyError}</p>}
@@ -346,11 +341,10 @@ export function NotificationSettings({ notifications, filters, sources, preferen
         {!hasDesktopBanners && quickReplyError && <p id="notification-quick-reply-error" className="settings-error" role="alert">{quickReplyError}</p>}
         {hasDesktopBanners && persistenceSettings && persistenceSupported && persistence && persistencePlatform === "macos" && <>
           <div id="notification-persistence-row" className="settings-control-row" data-persistence-platform="macos" data-persistence-mode={macosStyle ?? "unknown"} role="group" aria-labelledby="notification-persistence-label">
-            <span className="notification-setting-label"><span id="notification-persistence-label">Banner style</span></span>
-            <button id="notification-persistence-open-settings" className="secondary-button" type="button" aria-describedby="notification-persistence-status" disabled={busy} onClick={() => void openSettings()}>Open System Settings</button>
+            <span className="notification-setting-label"><span><span className="notification-setting-label-title"><span id="notification-persistence-label">Banner style</span><NotificationSettingsHelp id="notification-persistence-help" title="Banner style"><span>macOS decides how long banners stay. Change it under Notifications in System Settings.</span></NotificationSettingsHelp></span><small id="notification-persistence-status" role="status">{macosPersistenceStatus(macosStyle)}</small></span></span>
+            <button id="notification-persistence-open-settings" className="secondary-button" type="button" aria-describedby="notification-persistence-status" disabled={busy} onClick={() => void openSettings()}>Open System Settings <ExternalLink size={14} aria-hidden="true" /></button>
           </div>
-          <p id="notification-persistence-status" className="settings-note" role="status">{macosPersistenceStatus(macosStyle)}</p>
-          <p id="notification-persistence-hint" className="settings-note">macOS decides how long banners stay. Change it under Notifications in System Settings.</p>
+          <span id="notification-persistence-hint" className="sr-only">macOS decides how long banners stay. Change it under Notifications in System Settings.</span>
         </>}
         {hasDesktopBanners && persistenceSettings && persistenceSupported && persistence && persistencePlatform === "browser" && <>
           <div id="notification-persistence-row" className="settings-control-row" data-persistence-platform="browser" data-persistence-mode={persistenceMode}>
@@ -360,61 +354,45 @@ export function NotificationSettings({ notifications, filters, sources, preferen
           </div>
           <p id="notification-persistence-hint" className="settings-note">Off: your browser decides how long banners stay. Some browsers ignore this.</p>
         </>}
-        {hasDesktopBanners && persistenceSettings && persistenceSupported && persistence && (persistencePlatform === "linux" || persistencePlatform === "windows") && <>
+        {hasDesktopBanners && persistenceSettings && persistenceSupported && persistence && persistencePlatform === "windows" && <>
+          <div id="notification-persistence-row" className="settings-control-row" data-persistence-platform={persistencePlatform} data-persistence-mode={persistenceMode}>
+            <fieldset className="settings-option-cards" disabled={locked} aria-labelledby="notification-persistence-label" aria-describedby={persistenceDescribedBy}>
+              <legend id="notification-persistence-label">Banner duration</legend>
+              <div className="settings-option-card-list">
+                {[["5", "Short", "About 5 seconds"], ["25", "Long", "About 25 seconds"], ["indefinite", "Until dismissed", "Stays until you dismiss it."]].map(([value, label, description]) => <label key={value} className="settings-option-card">
+                  <input type="radio" name="notification-persistence" value={value} checked={windowsSelection === value} aria-labelledby={`notification-persistence-${value}-label`} aria-describedby={`notification-persistence-${value}-description`} onChange={() => selectPersistence(value)} />
+                  <span id={`notification-persistence-${value}-label`}>{label}</span><span id={`notification-persistence-${value}-description`}>{description}</span>
+                </label>)}
+              </div>
+            </fieldset>
+          </div>
+          <p id="notification-persistence-hint" className="settings-note">Windows may still hide a banner set to stay until dismissed.</p>
+        </>}
+        {hasDesktopBanners && persistenceSettings && persistenceSupported && persistence && persistencePlatform === "linux" && <>
           <div id="notification-persistence-row" className="settings-control-row" data-persistence-platform={persistencePlatform} data-persistence-mode={persistenceMode}>
             <span className="notification-setting-label"><label htmlFor="notification-persistence">Banner duration</label></span>
-            <select id="notification-persistence" value={persistencePlatform === "windows" ? windowsSelection : persistenceSelection} disabled={locked} aria-describedby={persistenceDescribedBy} onChange={event => selectPersistence(event.target.value)}>
-              {persistencePlatform === "windows" ? <>
-                <option value="5">Short (about 5 seconds)</option>
-                <option value="25">Long (about 25 seconds)</option>
-              </> : <>
-                {[...LINUX_PERSISTENCE_PRESETS, ...(persistence.seconds !== null && !LINUX_PERSISTENCE_PRESETS.some(preset => preset.value === persistence.seconds) ? [{ value: persistence.seconds, label: `${formatPersistence(persistence.seconds)} (current)` }] : [])].sort((left, right) => left.value - right.value).map(preset => <option key={preset.value} value={preset.value}>{preset.label}</option>)}
-              </>}
+            <select id="notification-persistence" value={persistenceSelection} disabled={locked} aria-describedby={persistenceDescribedBy} onChange={event => selectPersistence(event.target.value)}>
+              {[...LINUX_PERSISTENCE_PRESETS, ...(persistence.seconds !== null && !LINUX_PERSISTENCE_PRESETS.some(preset => preset.value === persistence.seconds) ? [{ value: persistence.seconds, label: `${formatPersistence(persistence.seconds)} (current)` }] : [])].sort((left, right) => left.value - right.value).map(preset => <option key={preset.value} value={preset.value}>{preset.label}</option>)}
               <option value="indefinite">Until dismissed</option>
             </select>
           </div>
-          <p id="notification-persistence-hint" className="settings-note">{persistencePlatform === "windows" ? "Windows may still hide a banner set to stay until dismissed." : "Your desktop may ignore this and use its own timing."}</p>
+          <p id="notification-persistence-hint" className="settings-note">Your desktop may ignore this and use its own timing.</p>
         </>}
         {hasDesktopBanners && persistenceError && <p id="notification-persistence-error" role="alert" aria-label="Notification settings action failed">{persistenceError}</p>}
-      </NotificationSettingsGroup>}
-      {hasDesktopBanners && <NotificationSettingsGroup id="notification-test-group" title="Test notifications">
-        <div id="notification-test-actions">
-        <button id="notification-check" className="secondary-button" disabled={busy} onClick={() => void checkPermission()}>
-          Send test notification
-        </button>
-        {check?.canOpenSettings && <button id="notification-open-settings" className="secondary-button" disabled={busy} onClick={() => void openSettings()}>
-          Open notification settings
-        </button>}
-        </div>
-        {(checking || check) && <p id="notification-permission-status" role="status">{checking ? "Sending test notification… If your system asks for permission, choose Allow." : permissionMessage(check!)}</p>}
+        {/* Test notifications are useful whenever banners are enabled, even without local settings adapters. */}
+        {hasDesktopBanners && <section id="notification-test-group">
+          <div id="notification-test-row" className="settings-control-row">
+            <span className="notification-setting-label"><span><span>Test notification</span><small>Check that banners show up on this computer</small></span></span>
+            <button id="notification-check" className="secondary-button" disabled={busy} onClick={() => void checkPermission()}>Send test</button>
+          </div>
+          {check?.canOpenSettings && <button id="notification-open-settings" className="secondary-button" disabled={busy} onClick={() => void openSettings()}>Open notification settings</button>}
+          {(checking || check) && <p id="notification-permission-status" role="status">{checking ? "Sending test notification… If your system asks for permission, choose Allow." : permissionMessage(check!)}</p>}
+        </section>}
       </NotificationSettingsGroup>}
       {error && <p id="notification-settings-action-error" role="alert" aria-label="Notification settings action failed">{error}</p>}
-      <NotificationSettingsGroup id="notification-apps-group" title="Mirrored apps">
+      <NotificationSettingsGroup id="notification-apps-group" title="Mirrored apps" badge={apps.length ? `${apps.length} apps${apps.filter(app => app.muted).length ? `, ${apps.filter(app => app.muted).length} muted` : ""}` : undefined} help={<NotificationSettingsHelp id="notification-apps-help" title="Mirrored apps"><p>Apps are mirrored by default. Changes apply on the phone&apos;s next sync.</p><p>Notification history shares the vault&apos;s 100,000-record recovery limit. Mute noisy apps to limit storage growth.</p></NotificationSettingsHelp>}>
       {apps.length ? (
-        <details id="notification-app-rules-disclosure" className="settings-disclosure">
-          <summary>Per-app mirroring</summary>
-          <p>Apps are mirrored by default. Changes apply on the phone&apos;s next sync.</p>
-          <p className="settings-note">Notification history shares the vault&apos;s 100,000-record recovery limit. Mute noisy apps to limit storage growth.</p>
-          <ul id="notification-app-filter-list" aria-label="App mirroring filters">
-            {apps.map(filter => {
-              const id = notificationTuple(filter.sourceDeviceId, filter.packageName);
-              const phone = notificationSourceName(filter.sourceDeviceId, sources, sourceIds);
-              const appName = notificationAppName(filter.appName, filter.packageName);
-              return (
-                <li key={id} data-device-id={filter.sourceDeviceId} data-package={filter.packageName} className="notif-app-filter-row">
-                  <span className="notif-app-letter-avatar" aria-hidden>{appName.slice(0, 1).toUpperCase()}</span>
-                  <span className="notif-app-filter-label"><b>{appName}</b><small>{phone}</small></span>
-                  <span className="settings-switch">
-                    <input id={`filter-${id}`} type="checkbox" role="switch" disabled={busy}
-                      aria-label={`Mirror ${appName} from ${phone}`} checked={!filter.muted} aria-checked={!filter.muted}
-                      onChange={event => void save(() => onMute({ ...filter, muted: !event.target.checked }))} />
-                    <span aria-hidden />
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
-        </details>
+        <NotificationSettingsApps apps={apps} notifications={notifications} sources={sources} busy={busy} onMute={filter => void save(() => onMute(filter))} />
       ) : <p id="notification-apps-empty-state">No apps observed yet. Enable mirroring in the Android companion to begin.</p>}
       </NotificationSettingsGroup>
     </section>

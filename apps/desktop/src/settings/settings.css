@@ -127,9 +127,22 @@
 }
 
 #notification-settings .notification-settings-group > h3 {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
   margin: 0;
   color: var(--peppy-text-strong);
   font-size: 13px;
+}
+
+#notification-settings .notification-settings-badge {
+  padding: 1px 6px;
+  border: 1px solid var(--peppy-border-strong);
+  border-radius: 999px;
+  color: var(--peppy-text-secondary);
+  font-size: 11px;
+  font-weight: 400;
 }
 
 #notification-settings .notification-settings-group > .settings-control-row,
@@ -165,25 +178,135 @@
 
 #notification-settings #notification-mute-with-heads-row {
   padding-left: 12px;
+  border-left: 1px solid var(--peppy-border);
 }
 
-#notification-settings #notification-test-actions {
-  display: flex;
-  flex-wrap: wrap;
+#notification-settings .notification-setting-label > span {
+  display: grid;
+  gap: 2px;
+}
+
+#notification-settings .notification-setting-label-title {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 4px;
+}
+
+#notification-settings .notification-setting-label small,
+#notification-settings #notification-test-row small {
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+#notification-settings #notification-test-row .notification-setting-label > span > span {
+  color: var(--peppy-text-primary);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+#notification-settings #notification-test-group {
+  display: grid;
   gap: 8px;
-  min-width: 0;
 }
 
-#notification-settings #notification-test-actions > button {
+#notification-settings #notification-test-row > button,
+#notification-settings #notification-open-settings,
+#notification-settings #notification-persistence-open-settings {
   flex: 0 1 auto;
   width: auto;
-  max-width: 100%;
-  height: auto;
   min-height: 28px;
-  justify-self: start;
   padding: 4px 10px;
-  line-height: 1.4;
-  white-space: normal;
+}
+
+#notification-settings #notification-muted-app-list,
+#notification-settings #notification-muted-app-list > ul,
+#notification-settings #notification-app-filter-list,
+#notification-settings .notification-app-phone-group > ul {
+  display: grid;
+  gap: 4px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+#notification-settings #notification-muted-app-list,
+#notification-settings #notification-app-rules-disclosure {
+  display: grid;
+  gap: 8px;
+}
+
+#notification-settings #notification-muted-app-list > h4,
+#notification-settings .notification-app-phone-group > h4 {
+  margin: 0;
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+#notification-settings .notification-app-phone-group {
+  display: grid;
+  gap: 4px;
+}
+
+#notification-settings .notif-app-icon,
+#notification-settings .notif-app-letter-avatar {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border-radius: var(--peppy-radius-sm, 4px);
+}
+
+#notification-settings .notif-app-letter-avatar {
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--peppy-border-strong);
+  background: var(--peppy-surface-widget);
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+}
+
+#notification-settings .notif-app-icon {
+  object-fit: cover;
+}
+
+#notification-settings .notif-app-filter-row {
+  display: flex;
+  width: 100%;
+  min-height: 28px;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+}
+
+#notification-settings .notif-app-filter-label {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 2px;
+}
+
+#notification-settings .notif-app-filter-label > b {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+#notification-settings .notif-app-filter-label > small {
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+#notification-settings .notif-app-filter-row > .settings-switch {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+#notification-settings #notification-app-filter-input {
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .notification-settings-help-body {
@@ -193,13 +316,17 @@
   color: var(--peppy-text-primary);
   background: var(--peppy-surface-panel);
   overflow-wrap: anywhere;
+  font-weight: 400;
 }
+
+.notification-settings-help-body :is(p, span) { font-weight: 400; }
 
 @media (pointer: coarse) {
   #notification-settings .notification-settings-group > .settings-control-row,
   #notification-settings .notification-setting-help .info-button,
   #notification-settings .peppy-modal-actions > button,
-  #notification-settings #notification-test-actions > button,
+  #notification-settings #notification-test-row > button,
+  #notification-settings #notification-open-settings,
   #notification-settings #notification-persistence-open-settings,
   #notification-settings select {
     min-height: 44px;

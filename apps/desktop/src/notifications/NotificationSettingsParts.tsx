@@ -4,6 +4,8 @@ import { Info, Modal } from "@peppy/desktop-ui";
 type GroupProps = {
   id: string;
   title: string;
+  badge?: string;
+  help?: ReactNode;
   children: ReactNode;
 };
 
@@ -13,9 +15,9 @@ type HelpProps = {
   children: ReactNode;
 };
 
-export function NotificationSettingsGroup({ id, title, children }: GroupProps): ReactElement {
+export function NotificationSettingsGroup({ id, title, badge, help, children }: GroupProps): ReactElement {
   return <section id={id} className="notification-settings-group" aria-labelledby={`${id}-title`}>
-    <h3 id={`${id}-title`}>{title}</h3>
+    <h3><span id={`${id}-title`}>{title}</span>{badge && <span className="notification-settings-badge">{badge}</span>}{help}</h3>
     {children}
   </section>;
 }
