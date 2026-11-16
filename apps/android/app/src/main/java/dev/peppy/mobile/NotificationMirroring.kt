@@ -127,6 +127,10 @@ internal object NotificationExtraction {
     fun removedInstanceStillActive(removed: StatusBarNotification, active: Array<StatusBarNotification>) =
         active.any { it.key == removed.key && it.postTime == removed.postTime }
 
+    /** Newest post time first; equal post times order by key so reconnect capture is deterministic. */
+    fun <T> newestFirst(items: Iterable<T>, postTime: (T) -> Long, key: (T) -> String): List<T> =
+        items.sortedWith(compareByDescending<T> { postTime(it) }.thenBy { key(it) })
+
     data class Captured(
         val key: String,
         val instance: String,
@@ -387,7 +391,8 @@ class NotificationMirrorService : NotificationListenerService() {
                 if (absent.isNotEmpty()) GatewayWork.enqueueUrgent(applicationContext)
                 if (SyncDiagnostics.enabled) BackgroundDiagnostics.notification(active.size, reconciled = absent.size, dismissed = 0)
             } catch (_: MobileBindingsException) { return@post }
-            active.forEach { capturePosted(it, rankings) }
+            NotificationExtraction.newestFirst(active.asList(), { it.postTime }, { it.key })
+                .forEach { capturePosted(it, rankings) }
         }
     }
 
