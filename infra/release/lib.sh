@@ -110,6 +110,7 @@ linux-x86_64-appimage|peppy-$version-linux-x86_64.AppImage
 linux-x86_64-deb|peppy-$version-linux-x86_64.deb
 linux-x86_64-rpm|peppy-$version-linux-x86_64.rpm
 darwin-aarch64-app|peppy-$version-darwin-aarch64.app.tar.gz
+darwin-x86_64-app|peppy-$version-darwin-x86_64.app.tar.gz
 windows-x86_64-nsis|peppy-$version-windows-x86_64-setup.exe
 windows-x86_64-msi|peppy-$version-windows-x86_64.msi
 EOF

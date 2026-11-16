@@ -13,7 +13,7 @@ command -v jq >/dev/null || { echo 'jq is required to validate latest.json' >&2;
 jq -e --arg version "$version" --arg channel "$channel" '
   .version == $version and .channel == $channel and
   (.platforms | type == "object") and
-  ((.platforms | keys | sort) == ["darwin-aarch64-app", "linux-x86_64-appimage", "linux-x86_64-deb", "linux-x86_64-rpm", "windows-x86_64-msi", "windows-x86_64-nsis"])
+   ((.platforms | keys | sort) == ["darwin-aarch64-app", "darwin-x86_64-app", "linux-x86_64-appimage", "linux-x86_64-deb", "linux-x86_64-rpm", "windows-x86_64-msi", "windows-x86_64-nsis"])
 ' "$asset_dir/latest.json" >/dev/null || { echo 'latest.json has an invalid version, channel, or target set' >&2; exit 1; }
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck source=infra/release/lib.sh

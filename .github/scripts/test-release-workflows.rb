@@ -422,7 +422,13 @@ assert.call(desktop_precheck.fetch('if') == "inputs.trusted_update_build || inpu
 assert.call(desktop_guard.fetch('if') == "inputs.trusted_update_build || inputs.macos_distribution == 'app-store'", 'App Store builds must verify checked-out HEAD before repository code receives secrets')
 assert.call(desktop_steps.index(desktop_precheck) < desktop_steps.index(desktop_checkout) && desktop_steps.index(desktop_checkout) < desktop_steps.index(desktop_guard), 'trusted desktop context checks must bracket checkout')
 desktop_matrix = artifacts.fetch('desktop-development-artifacts').dig('strategy', 'matrix')
-assert.call(desktop_matrix.include?('fromJSON') && desktop_matrix.include?('"bundles":"app"') && desktop_matrix.include?('"path":"apps/desktop/src-tauri/target/release/bundle/macos/*.pkg"'), 'App Store builds must run only one macOS app/package matrix entry')
+assert.call(
+  desktop_matrix.include?('fromJSON') &&
+  desktop_matrix.include?('"target":"aarch64-apple-darwin"') &&
+  desktop_matrix.include?('"target":"x86_64-apple-darwin"') &&
+  desktop_matrix.include?('"path":"apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.pkg'),
+  'macOS artifact matrix must retain one universal App Store entry and both direct architectures'
+)
 mode_validation = desktop_steps.find { |step| step['run'] == 'bash .github/scripts/release-signing-readiness.sh --validate-modes' }
 assert.call(!mode_validation.nil?, 'trusted builds must validate both signing modes before platform work')
 mode_env = mode_validation.fetch('env')

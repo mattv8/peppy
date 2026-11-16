@@ -8,12 +8,20 @@ fake_bin="$root/bin"
 log="$root/pnpm.log"
 mkdir -p "$fake_bin"
 mkdir -p "$root/macos/Peppy.app/Contents"
+mkdir -p "$root/macos/Peppy.app/Contents/MacOS"
+mkdir -p "$root/xcode/Developer"
 mkdir -p "$root/dmg"
 touch "$root/dmg/Peppy.dmg"
+printf 'Peppy executable\n' > "$root/macos/Peppy.app/Contents/MacOS/Peppy"
 cat > "$root/macos/Peppy.app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>org.peppy.desktop</string><key>CFBundleName</key><string>Peppy</string></dict></plist>
+<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>org.peppy.desktop</string><key>CFBundleName</key><string>Peppy</string><key>CFBundleExecutable</key><string>Peppy</string></dict></plist>
+PLIST
+cat > "$root/xcode/version.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>26.0</string><key>ProductBuildVersion</key><string>26A1</string></dict></plist>
 PLIST
 
 cat > "$fake_bin/pnpm" <<'PNPM'
@@ -71,6 +79,12 @@ chmod +x "$fake_bin/spctl"
 cat > "$fake_bin/xcrun" <<'XCRUN'
 #!/usr/bin/env bash
 printf 'xcrun|%s\n' "$*" >> "$PNPM_LOG"
+if [ "$1" = --sdk ] && [ "$2" = macosx ] && [ "$3" = --show-sdk-version ]; then
+  printf '26.0\n'
+fi
+if [ "$1" = --sdk ] && [ "$2" = macosx ] && [ "$3" = --show-sdk-build-version ]; then
+  printf '26A1\n'
+fi
 if [ "$1" = notarytool ] && [ "$2" = submit ]; then
   if [ "${NOTARY_MALFORMED-false}" = true ]; then
     printf '{bad json\n'
@@ -87,6 +101,12 @@ if [ "$1" = stapler ] && [ "$2" = validate ] && [[ "$3" == *.dmg ]]; then
 fi
 XCRUN
 chmod +x "$fake_bin/xcrun"
+
+cat > "$fake_bin/xcode-select" <<'XCODESELECT'
+#!/usr/bin/env bash
+printf '%s/xcode/Developer\n' "$(dirname "$PNPM_LOG")"
+XCODESELECT
+chmod +x "$fake_bin/xcode-select"
 
 cat > "$fake_bin/security" <<'SECURITY'
 #!/usr/bin/env bash
@@ -154,6 +174,36 @@ touch "${!#}"
 PRODUCTBUILD
 chmod +x "$fake_bin/productbuild"
 
+cat > "$fake_bin/pkgutil" <<'PKGUTIL'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'pkgutil|%s\n' "$*" >> "$PNPM_LOG"
+if [ "$1" = --expand-full ]; then
+  [ ! -e "$3" ] || exit 78
+  mkdir -p "$3/Payload/Applications"
+  cp -R "$(dirname "$PNPM_LOG")/macos/Peppy.app" "$3/Payload/Applications/"
+fi
+PKGUTIL
+chmod +x "$fake_bin/pkgutil"
+
+cat > "$fake_bin/xattr" <<'XATTR'
+#!/usr/bin/env bash
+exit 0
+XATTR
+chmod +x "$fake_bin/xattr"
+
+cat > "$fake_bin/lipo" <<'LIPO'
+#!/usr/bin/env bash
+printf 'x86_64 arm64\n'
+LIPO
+chmod +x "$fake_bin/lipo"
+
+cat > "$fake_bin/strings" <<'STRINGS'
+#!/usr/bin/env bash
+cat "$1"
+STRINGS
+chmod +x "$fake_bin/strings"
+
 cat > "$fake_bin/python3" <<'PYTHON'
 #!/usr/bin/env bash
 if [ "$1" = -m ] && [ "$2" = venv ]; then
@@ -198,6 +248,18 @@ printf '%s\n' "$path"
 MKTEMP
 chmod +x "$fake_bin/mktemp"
 
+sourceable="$root/build-desktop-bundles-functions.sh"
+sed '/^if \[ "\$macos_distribution" = app-store \]; then/,$d' "$script_dir/build-desktop-bundles.sh" > "$sourceable"
+# shellcheck source=/dev/null
+source "$sourceable"
+test "$(xcode_dtxcode 16.2)" = 1620
+test "$(xcode_dtxcode 26.0.1)" = 2601
+test "$(xcode_dtxcode 26.1)" = 2610
+if xcode_dtxcode 26.1.2.3 >/dev/null 2>&1; then
+  printf 'expected invalid Xcode version to fail\n' >&2
+  exit 1
+fi
+
 run_bundles() {
   local macos_mode="${8-developer-id}"
   local windows_mode="${9-authenticode}"
@@ -230,6 +292,18 @@ run_macos_developer_id() {
     PEPPY_BUNDLE_OUTPUT_DIR="$root/macos" PEPPY_DMG_OUTPUT_DIR="$root/dmg" "$script_dir/build-desktop-bundles.sh"
 }
 
+run_macos_target() {
+  : > "$log"
+  PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app,dmg VERSION=1.2.3 TRUSTED_UPDATE_BUILD=false \
+    PEPPY_TAURI_TARGET=x86_64-apple-darwin PEPPY_DMG_OUTPUT_DIR="$root/dmg" "$script_dir/build-desktop-bundles.sh"
+}
+
+run_macos_target_without_version() {
+  : > "$log"
+  PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app,dmg VERSION='' TRUSTED_UPDATE_BUILD=false \
+    PEPPY_TAURI_TARGET=x86_64-apple-darwin PEPPY_DMG_OUTPUT_DIR="$root/dmg" "$script_dir/build-desktop-bundles.sh"
+}
+
 assert_developer_id_failure() {
   local expected_diagnostic="$1"
   shift
@@ -248,6 +322,11 @@ grep -Fq '|build|--bundles|appimage,deb,rpm|--config|{"version":"1.2.3"}|--|--lo
 grep -Fq 'Linux|false' "$log"
 config=$(grep '^ARGV' "$log" | sed -n 's/.*|--config|\(.*\)|--|--locked/\1/p')
 node -e 'const config = JSON.parse(process.argv[1]); if (config.productName || config.identifier || config.plugins?.updater?.pubkey) process.exit(1)' "$config"
+
+run_macos_target
+grep -Fq '|build|--bundles|app,dmg|--target|x86_64-apple-darwin|--config|{"version":"1.2.3"}|--|--locked' "$log"
+run_macos_target_without_version
+grep -Fq '|build|--bundles|app,dmg|--target|x86_64-apple-darwin|--|--locked' "$log"
 
 run_bundles Linux 'appimage,deb,rpm' 1.2.3-dev.4 false
 test "$(grep -c '^ARGV' "$log")" = 2
@@ -440,8 +519,10 @@ PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app VERSION=1.2.3
   APPLE_MAS_SIGNING_IDENTITY='Apple Distribution: Peppy (team)' APPLE_MAS_INSTALLER_IDENTITY='3rd Party Mac Developer Installer: Peppy (team)' \
   PEPPY_BUNDLE_OUTPUT_DIR="$root/macos" PEPPY_PKG_OUTPUT_DIR="$root/pkg" \
   "$script_dir/build-desktop-bundles.sh"
-app_store_config=$(grep '^ARGV' "$log" | sed -n 's/.*|--config|\(.*\)|--|--locked/\1/p')
-node -e 'const config = JSON.parse(process.argv[1]); if (config.productName !== "Peppy" || config.identifier !== "org.peppy.desktop" || config.bundle?.createUpdaterArtifacts !== false || config.bundle?.macOS?.minimumSystemVersion !== "13.0" || config.bundle?.macOS?.entitlements !== "../../../packaging/macos/app-store/entitlements.plist" || JSON.stringify(config.plugins?.updater?.endpoints) !== "[]") process.exit(1)' "$app_store_config"
+app_store_config=$(grep '^ARGV' "$log" | sed -n 's/.*|--config|\(.*\)|--|--locked|--no-default-features$/\1/p')
+node -e 'const config = JSON.parse(process.argv[1]); if (config.productName !== "Peppy" || config.identifier !== "org.peppy.desktop" || config.bundle?.createUpdaterArtifacts !== false || config.bundle?.macOS?.minimumSystemVersion !== "13.0" || config.bundle?.macOS?.entitlements !== "../../../packaging/macos/app-store/entitlements.plist" || config.bundle?.macOS?.infoPlist !== "../../../packaging/macos/app-store/Info.plist" || config.bundle?.macOS?.files?.["Resources/PrivacyInfo.xcprivacy"] !== "../../../packaging/macos/app-store/PrivacyInfo.xcprivacy" || JSON.stringify(config.plugins?.updater?.endpoints) !== "[]") process.exit(1)' "$app_store_config"
+grep -Fq '|build|--bundles|app|--target|universal-apple-darwin|' "$log"
+grep -Fq '|--|--locked|--no-default-features' "$log"
 grep -Fq 'productbuild|--component' "$log"
 grep -Fq 'security|cms -D' "$log"
 grep -Fq 'security|create-keychain' "$log"
@@ -451,7 +532,13 @@ grep -Fq 'security|delete-keychain' "$log"
 grep -Fq 'codesign|--force --sign Apple Distribution: Peppy (team) --keychain' "$log"
 grep -Fqx 'entitlements|team.org.peppy.desktop|team' "$log"
 grep -Fq 'productbuild|--component' "$log"
+grep -Fq 'pkgutil|--check-signature' "$log"
+grep -Fq 'pkgutil|--expand-full' "$log"
 test -f "$root/pkg/Peppy.pkg"
+test -f "$root/pkg/Peppy.Info.plist"
+/usr/bin/plutil -extract ITSAppUsesNonExemptEncryption raw -o - "$root/pkg/Peppy.Info.plist" | grep -Fqx true
+/usr/bin/plutil -extract LSMinimumSystemVersion raw -o - "$root/pkg/Peppy.Info.plist" | grep -Fqx 13.0
+/usr/bin/plutil -extract CFBundleSupportedPlatforms.0 raw -o - "$root/pkg/Peppy.Info.plist" | grep -Fqx MacOSX
 if grep -Fq 'repair|' "$log" || grep -Fq '^xcrun|' "$log" || grep -Fq 'notarytool' "$log"; then
   printf 'App Store packaging must not repair DMGs or notarize artifacts\n' >&2
   exit 1
@@ -510,11 +597,16 @@ app_store_env=(
 )
 assert_app_store_failure() {
   local expected_diagnostic="$1"
+  local version=1.2.3
   shift
+  if [[ "${1:-}" == VERSION=* ]]; then
+    version=${1#VERSION=}
+    shift
+  fi
   local output="$root/app-store-failure.log"
   : > "$log"
   if env GITHUB_ACTIONS=true MACOS_BUILD_NUMBER=42 "${app_store_env[@]}" "$@" \
-    PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app VERSION=1.2.3 TRUSTED_UPDATE_BUILD=false \
+    PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app VERSION="$version" TRUSTED_UPDATE_BUILD=false \
     PEPPY_MACOS_DISTRIBUTION=app-store PEPPY_BUNDLE_OUTPUT_DIR="$root/macos" PEPPY_PKG_OUTPUT_DIR="$root/pkg" \
     "$script_dir/build-desktop-bundles.sh" >"$output" 2>&1; then
     printf 'expected App Store validation to fail: %s\n' "$expected_diagnostic" >&2
@@ -528,6 +620,7 @@ assert_app_store_failure 'app-store distribution must run in GitHub Actions' GIT
 assert_app_store_failure 'MACOS_BUILD_NUMBER is required for app-store builds' MACOS_BUILD_NUMBER=
 assert_app_store_failure 'MACOS_BUILD_NUMBER must be a positive integer' MACOS_BUILD_NUMBER=0
 assert_app_store_failure 'MACOS_BUILD_NUMBER must be a positive integer' MACOS_BUILD_NUMBER=1.2
+assert_app_store_failure 'App Store version must match X.Y.Z' VERSION=1.2.3-staging.1
 assert_app_store_failure 'App Store bundle is missing the app sandbox entitlement' CODESIGN_APPLICATION_IDENTIFIER=team.org.peppy.desktop CODESIGN_TEAM_IDENTIFIER=team CODESIGN_SANDBOX_VALUE=false
 
 app_store_cleanup_dir="$root/app-store-cleanup"

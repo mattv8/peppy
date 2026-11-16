@@ -347,7 +347,7 @@ jobs:
     environment: "${{ inputs.macos_distribution == 'app-store' && 'mac-app-store' || inputs.trusted_update_build && format('updates-{0}', inputs.update_channel) || 'development-artifacts' }}"
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(inputs.macos_distribution == 'app-store' && '{"include":[{"os":"macos-26","name":"macos","bundles":"app","posix_bundles":"macos","path":"apps/desktop/src-tauri/target/release/bundle/macos/*.pkg"}]}' || '{"include":[{"os":"ubuntu-24.04","name":"linux","bundles":"appimage,deb,rpm","posix_bundles":"appimage deb rpm","path":"dist/desktop-linux-bundles.tar.gz"},{"os":"macos-26","name":"macos","bundles":"app,dmg","posix_bundles":"macos","path":"apps/desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz\napps/desktop/src-tauri/target/release/bundle/dmg/*.dmg\ndist/desktop-macos-app.tar.gz"},{"os":"windows-2025","name":"windows","bundles":"nsis,msi","path":"apps/desktop/src-tauri/target/release/bundle/nsis/**\napps/desktop/src-tauri/target/release/bundle/msi/**"}]}') }}
+      matrix: ${{ fromJSON(inputs.macos_distribution == 'app-store' && '{"include":[{"os":"macos-26","name":"macos","bundles":"app","posix_bundles":"macos","path":"apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.pkg\napps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.Info.plist"}]}' || '{"include":[{"os":"ubuntu-24.04","name":"linux","bundles":"appimage,deb,rpm","posix_bundles":"appimage deb rpm","path":"dist/desktop-linux-bundles.tar.gz"},{"os":"macos-26","name":"macos-arm64","bundles":"app,dmg","target":"aarch64-apple-darwin","posix_bundles":"macos","path":"apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz\napps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg\ndist/desktop-macos-arm64.app.tar.gz"},{"os":"macos-26","name":"macos-x64","bundles":"app,dmg","target":"x86_64-apple-darwin","posix_bundles":"macos","path":"apps/desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz\napps/desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg\ndist/desktop-macos-x64.app.tar.gz"},{"os":"windows-2025","name":"windows","bundles":"nsis,msi","path":"apps/desktop/src-tauri/target/release/bundle/nsis/**\napps/desktop/src-tauri/target/release/bundle/msi/**"}]}') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -387,6 +387,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: 1.98.1
+      - if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - name: Remove preinstalled package-manager shims
         if: runner.os == 'Windows'
         run: npm uninstall --global yarn pnpm
@@ -435,6 +437,7 @@ jobs:
         shell: bash
         env:
           BUNDLES: ${{ matrix.bundles }}
+          PEPPY_TAURI_TARGET: ${{ matrix.target || '' }}
           VERSION: ${{ inputs.version }}
           WIX_VERSION: ${{ inputs.wix_version }}
           MACOS_BUILD_NUMBER: ${{ inputs.macos_build_number }}
@@ -480,14 +483,14 @@ jobs:
           mkdir -p dist
           tar -C apps/desktop/src-tauri/target/release/bundle \
              -czf "dist/desktop-${{ matrix.name }}-bundles.tar.gz" ${{ matrix.posix_bundles }}
-      - if: runner.os == 'macOS'
+      - if: runner.os == 'macOS' && inputs.macos_distribution != 'app-store'
         name: Preserve development macOS app archive
         shell: bash
         run: |
           mkdir -p dist
-          archive="$PWD/dist/desktop-macos-app.tar.gz"
+          archive="$PWD/dist/desktop-${{ matrix.name }}.app.tar.gz"
           (
-            cd apps/desktop/src-tauri/target/release/bundle/macos
+            cd apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos
             tar -czf "$archive" -- *.app
           )
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

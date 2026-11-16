@@ -76,12 +76,13 @@ fn verify_asset(public_key: &PublicKey, asset_dir: &PathBuf, asset: String, vers
     }
 }
 
-fn release_targets(version: &str) -> [(String, String); 6] {
+fn release_targets(version: &str) -> [(String, String); 7] {
     [
         ("linux-x86_64-appimage".into(), format!("peppy-{version}-linux-x86_64.AppImage")),
         ("linux-x86_64-deb".into(), format!("peppy-{version}-linux-x86_64.deb")),
         ("linux-x86_64-rpm".into(), format!("peppy-{version}-linux-x86_64.rpm")),
         ("darwin-aarch64-app".into(), format!("peppy-{version}-darwin-aarch64.app.tar.gz")),
+        ("darwin-x86_64-app".into(), format!("peppy-{version}-darwin-x86_64.app.tar.gz")),
         ("windows-x86_64-nsis".into(), format!("peppy-{version}-windows-x86_64-setup.exe")),
         ("windows-x86_64-msi".into(), format!("peppy-{version}-windows-x86_64.msi")),
     ]
