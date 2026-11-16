@@ -1,12 +1,35 @@
 import type { ChangeEvent, CSSProperties, KeyboardEvent } from "react";
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import { MessageSquarePlus, X } from "lucide-react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ArrowRight, MessageSquarePlus, X } from "lucide-react";
 import type { HistorySearchSnapshot, HistorySearchState, LocalSearchHit, LocalSearchPage, LocalSearchRequest, SearchKind } from "./bridge-contracts";
 import { formatDateTime } from "./datetime";
 import { formatPhoneNumber, normalizePhoneNumber } from "./phone";
 
 export type OmniContactNumber = { address: string; display: string; label?: string };
 export type OmniConversationStartOutcome = boolean | "deferred";
+export type OmniTextSegment = { text: string; match: boolean };
+export type OmniSearchScope = {
+  label: string;
+  placeholder: string;
+  query: string;
+  onQueryChange(query: string): void;
+  onExit(): void;
+};
+export type OmniNotificationHit = {
+  key: string;
+  appName: string;
+  sourceName?: string;
+  iconPngBase64?: string;
+  title: OmniTextSegment[];
+  snippet: OmniTextSegment[];
+  timeLabel?: string;
+  timeTitle?: string;
+};
+export type OmniNotificationResults = {
+  search(query: string): { hits: OmniNotificationHit[]; total: number };
+  onActivate(key: string): void;
+  onShowAll(query: string): void;
+};
 type ContactHit = Extract<LocalSearchHit, { kind: "contact" }>;
 
 export type OmniSearchProps = {
@@ -22,6 +45,8 @@ export type OmniSearchProps = {
   onSearchFurtherBack?: () => Promise<void>;
   onCancelHistorySearch?: () => Promise<void>;
   onOpenChange?: (open: boolean) => void;
+  scope?: OmniSearchScope;
+  notificationResults?: OmniNotificationResults;
 };
 
 type CategoryKind = Exclude<SearchKind, "all">;
@@ -37,7 +62,9 @@ type SelectableItem =
   | { kind: "hit"; hit: LocalSearchHit }
   | { kind: "contact-action"; hit: ContactHit }
   | { kind: "candidate"; address: string }
-  | { kind: "action"; action: SearchAction };
+  | { kind: "action"; action: SearchAction }
+  | { kind: "notification"; hit: OmniNotificationHit }
+  | { kind: "notifications-all" };
 
 const SEARCH_DEBOUNCE_MS = 100;
 const INDEXING_REFRESH_INTERVAL_MS = 1_000;
@@ -106,6 +133,8 @@ function selectableKey(item: SelectableItem): string {
   if (item.kind === "hit") return hitKey(item.hit);
   if (item.kind === "contact-action") return `start-${hitKey(item.hit)}`;
   if (item.kind === "candidate") return `candidate-${item.address}`;
+  if (item.kind === "notification") return `notification-${encodeURIComponent(item.hit.key)}`;
+  if (item.kind === "notifications-all") return "notifications-all";
   return item.action.kind === "more" ? `more-${item.action.category}` : item.action.kind;
 }
 
@@ -113,7 +142,7 @@ function addressId(address: string): string {
   return encodeURIComponent(address);
 }
 
-function selectableItems(page: LocalSearchPage | null, category: CategoryKind | null, error: boolean, candidate: string | null, supportsContactActions: boolean, hasRetryStart: boolean, hasRetryContact: boolean, historyIntent: HistoryIntent | null): SelectableItem[] {
+function selectableItems(page: LocalSearchPage | null, category: CategoryKind | null, error: boolean, candidate: string | null, supportsContactActions: boolean, hasRetryStart: boolean, hasRetryContact: boolean, historyIntent: HistoryIntent | null, notifications: { hits: OmniNotificationHit[]; total: number } | null): SelectableItem[] {
   const items: SelectableItem[] = [];
   if (!category && candidate) items.push({ kind: "candidate", address: candidate });
   if (page) {
@@ -134,6 +163,10 @@ function selectableItems(page: LocalSearchPage | null, category: CategoryKind | 
       });
     }
   }
+  if (!category && notifications?.hits.length) {
+    notifications.hits.slice(0, 3).forEach((hit) => items.push({ kind: "notification", hit }));
+    items.push({ kind: "notifications-all" });
+  }
   if (historyIntent) items.push({ kind: "action", action: { kind: "history", intent: historyIntent } });
   if (error) items.push({ kind: "action", action: { kind: "retry" } });
   if (hasRetryStart) items.push({ kind: "action", action: { kind: "retry-start" } });
@@ -141,7 +174,7 @@ function selectableItems(page: LocalSearchPage | null, category: CategoryKind | 
   return items;
 }
 
-export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false, keyboardShortcut = true, refreshKey, resolveContactNumbers, onStartConversation, historySearch, onSearchFurtherBack, onCancelHistorySearch, onOpenChange }: OmniSearchProps) {
+export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false, keyboardShortcut = true, refreshKey, resolveContactNumbers, onStartConversation, historySearch, onSearchFurtherBack, onCancelHistorySearch, onOpenChange, scope, notificationResults }: OmniSearchProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
@@ -170,9 +203,12 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
   const recipientSequenceRef = useRef(0);
   const recipientPendingRef = useRef(false);
   const chooserRef = useRef<OmniContactNumber[] | null>(null);
+  const wasScopedRef = useRef(Boolean(scope));
+  const lastScopedQueryRef = useRef(scope?.query ?? "");
   onSearchRef.current = onSearch;
   onActivateRef.current = onActivate;
   onOpenChangeRef.current = onOpenChange;
+  if (scope) lastScopedQueryRef.current = scope.query;
   const componentId = useId();
   const listId = `omni-search-results-${componentId}`;
   const [query, setQuery] = useState("");
@@ -195,7 +231,17 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
   const [chooserContact, setChooserContact] = useState<ContactHit | null>(null);
   const [historyActionPending, setHistoryActionPending] = useState(false);
   const [startFailed, setStartFailed] = useState(false);
-  const trimmedQuery = query.trim();
+  const [failedNotificationIcons, setFailedNotificationIcons] = useState<ReadonlySet<string>>(() => new Set());
+  const searchQuery = scope ? scope.query : query;
+  const trimmedQuery = searchQuery.trim();
+  const notificationSearch = useMemo(
+    () => !scope && notificationResults && category === null && trimmedQuery && !disabled && !composing && !chooser
+      ? notificationResults.search(trimmedQuery)
+      : null,
+    [category, chooser, composing, disabled, notificationResults, scope, trimmedQuery],
+  );
+  const notificationSearchRef = useRef(notificationSearch);
+  notificationSearchRef.current = notificationSearch;
   const candidate = onStartConversation ? normalizePhoneNumber(trimmedQuery) : null;
   const supportsContactActions = Boolean(resolveContactNumbers && onStartConversation);
   const historyEnabled = Boolean(historySearch && onSearchFurtherBack);
@@ -259,8 +305,26 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
     clearBackgroundRefresh();
   }, []);
   useEffect(() => {
-    reset(); setQuery(""); setCategory(null); setOpen(false); openerRef.current = null;
+    reset(); setCategory(null); openerRef.current = null;
+    if (!scope) { setQuery(""); setOpen(false); }
   }, [disabled, sessionKey]);
+
+  useEffect(() => {
+    const wasScoped = wasScopedRef.current;
+    wasScopedRef.current = Boolean(scope);
+    if (scope) {
+      reset();
+      setCategory(null);
+      setOpen(false);
+      return;
+    }
+    if (wasScoped && document.activeElement === inputRef.current) {
+      setQuery(lastScopedQueryRef.current);
+      setQueryRevision((value) => value + 1);
+      setOpen(true);
+    }
+    else if (wasScoped) setQuery("");
+  }, [Boolean(scope)]);
 
   useEffect(() => {
     setStartFailed(false);
@@ -273,7 +337,7 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
   }, [open]);
 
   useEffect(() => {
-    if (!open || disabled || composing || !trimmedQuery) { reset(); return; }
+    if (scope || !open || disabled || composing || !trimmedQuery) { reset(); return; }
     const sequence = ++requestSequenceRef.current;
     const backgroundRefresh = backgroundRefreshRef.current;
     backgroundRefreshRef.current = false;
@@ -306,9 +370,9 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
           clearBackgroundRefresh();
         }
         if (chooserRef.current) return;
-        const selectedItemKey = selectedItemKeyRef.current;
+        const selectedItemKey = page ? selectedItemKeyRef.current : undefined;
         const selectedIndex = selectedItemKey
-          ? selectableItems(merged, category, false, candidate, supportsContactActions, Boolean(retryAddress), Boolean(retryContact), historyIntentRef.current).findIndex((item) => selectableKey(item) === selectedItemKey)
+          ? selectableItems(merged, category, false, candidate, supportsContactActions, Boolean(retryAddress), Boolean(retryContact), historyIntentRef.current, notificationSearchRef.current).findIndex((item) => selectableKey(item) === selectedItemKey)
           : -1;
         setActiveIndex(selectedIndex < 0 ? 0 : selectedIndex);
       };
@@ -338,7 +402,7 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
       clearTimeout(timer);
       userRequestScheduledRef.current = false;
     };
-  }, [candidate, category, composing, disabled, open, queryRevision, refreshEpoch, retry, retryAddress, retryContact, sessionKey, supportsContactActions, trimmedQuery]);
+  }, [candidate, category, composing, disabled, open, queryRevision, refreshEpoch, retry, retryAddress, retryContact, scope, sessionKey, supportsContactActions, trimmedQuery]);
 
   useEffect(() => {
     const refreshChanged = refreshKeyRef.current !== refreshKey;
@@ -346,7 +410,7 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
     const indexVersionChanged = historyEnabled && historyIndexVersionRef.current !== historySearch?.indexVersion;
     historyIndexVersionRef.current = historySearch?.indexVersion;
     if (!refreshChanged && !indexVersionChanged) return;
-    if (!open || disabled || composing || !trimmedQuery) return;
+    if (scope || !open || disabled || composing || !trimmedQuery) return;
     if (indexVersionChanged) {
       if (requestPendingRef.current) {
         pendingHistoryIndexRefreshRef.current = true;
@@ -369,7 +433,7 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
     if (page?.indexState !== "indexing") return;
     if (category) requestedPrefixRef.current = Math.max(requestedPrefixRef.current, page.items.length);
     scheduleBackgroundRefresh();
-  }, [composing, disabled, historyEnabled, historySearch?.indexVersion, open, page, refreshKey, trimmedQuery]);
+  }, [composing, disabled, historyEnabled, historySearch?.indexVersion, open, page, refreshKey, scope, trimmedQuery]);
 
   useEffect(() => {
     if (!keyboardShortcut || disabled) return;
@@ -380,11 +444,11 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
       event.preventDefault();
       const activeElement = document.activeElement;
       if (activeElement instanceof HTMLElement && activeElement !== inputRef.current) openerRef.current = activeElement;
-      inputRef.current?.focus(); inputRef.current?.select(); setOpen(true);
+      inputRef.current?.focus(); inputRef.current?.select(); if (!scope) setOpen(true);
     };
     document.addEventListener("keydown", shortcut);
     return () => document.removeEventListener("keydown", shortcut);
-  }, [disabled, keyboardShortcut]);
+  }, [disabled, keyboardShortcut, scope]);
 
   useEffect(() => {
     if (!open) return;
@@ -420,7 +484,7 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
 
   const items = chooser
     ? [...chooser.map((number) => ({ kind: "candidate" as const, address: number.address })), { kind: "action" as const, action: { kind: "return-chooser" as const } }, ...(retryAddress ? [{ kind: "action" as const, action: { kind: "retry-start" as const } }] : [])]
-    : selectableItems(page, category, error, candidate, supportsContactActions, Boolean(retryAddress), Boolean(retryContact), history?.intent ?? null);
+    : selectableItems(page, category, error, candidate, supportsContactActions, Boolean(retryAddress), Boolean(retryContact), history?.intent ?? null, notificationSearch);
   selectedItemKeyRef.current = items[activeIndex] ? selectableKey(items[activeIndex]) : undefined;
 
   useLayoutEffect(() => {
@@ -435,7 +499,7 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
   };
   const returnToSearchResults = () => {
     const originKey = chooserContact && hitKey(chooserContact);
-    const searchItems = selectableItems(page, category, error, candidate, supportsContactActions, Boolean(retryAddress), Boolean(retryContact), history?.intent ?? null);
+    const searchItems = selectableItems(page, category, error, candidate, supportsContactActions, Boolean(retryAddress), Boolean(retryContact), history?.intent ?? null, notificationSearch);
     setChooser(null);
     setChooserContact(null);
     setActiveIndex(originKey ? Math.max(0, searchItems.findIndex((item) => item.kind === "contact-action" && hitKey(item.hit) === originKey)) : 0);
@@ -561,6 +625,16 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
     });
   };
   const activate = (item: SelectableItem) => {
+    if (item.kind === "notification") {
+      close();
+      notificationResults?.onActivate(item.hit.key);
+      return;
+    }
+    if (item.kind === "notifications-all") {
+      close();
+      notificationResults?.onShowAll(trimmedQuery);
+      return;
+    }
     if (item.kind === "action") { activateAction(item.action); return; }
     if (item.kind === "candidate") { startConversation(item.address); return; }
     if (item.kind === "contact-action") { startContactConversation(item.hit); return; }
@@ -569,6 +643,14 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
   };
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 || compositionRef.current) return;
+    if (scope) {
+      if (event.key === "Escape") {
+        if (scope.query) scope.onQueryChange("");
+        else openerRef.current?.focus();
+      }
+      else if (event.key === "Backspace" && !scope.query && event.currentTarget.selectionStart === 0) scope.onExit();
+      return;
+    }
     if (!open && (event.key === "Enter" || event.key === "ArrowDown")) { event.preventDefault(); setOpen(true); }
     else if (event.key === "ArrowDown" || event.key === "ArrowUp") { if (!items.length) return; event.preventDefault(); setActiveIndex((value) => Math.max(0, Math.min(items.length - 1, value + (event.key === "ArrowDown" ? 1 : -1)))); }
     else if (open && event.key === "Home") { event.preventDefault(); setActiveIndex(0); }
@@ -588,13 +670,31 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
     }
     else if (event.key === "Tab") close();
   };
-  const clearQuery = () => { compositionRef.current = false; setComposing(false); reset(); setQuery(""); setCategory(null); setOpen(true); inputRef.current?.focus(); };
-  const change = (event: ChangeEvent<HTMLInputElement>) => { reset(); setCategory(null); setQuery(Array.from(event.target.value).slice(0, 128).join("")); setQueryRevision((value) => value + 1); setOpen(true); };
+  const clearQuery = () => {
+    compositionRef.current = false;
+    setComposing(false);
+    if (scope) {
+      scope.onQueryChange("");
+      inputRef.current?.focus();
+      return;
+    }
+    reset(); setQuery(""); setCategory(null); setOpen(true); inputRef.current?.focus();
+  };
+  const change = (event: ChangeEvent<HTMLInputElement>) => {
+    const nextQuery = Array.from(event.target.value).slice(0, 128).join("");
+    if (scope) {
+      scope.onQueryChange(nextQuery);
+      return;
+    }
+    reset(); setCategory(null); setQuery(nextQuery); setQueryRevision((value) => value + 1); setOpen(true);
+  };
   const actionId = (action: SearchAction) => action.kind === "more" ? `more-${action.category}` : action.kind === "retry" ? "retry-search" : action.kind === "return" ? "back-all" : action.kind;
   const selectedId = items[activeIndex]?.kind === "hit" ? `${componentId}-${hitKey(items[activeIndex].hit)}`
     : items[activeIndex]?.kind === "contact-action" ? `${componentId}-start-${hitKey(items[activeIndex].hit)}`
       : items[activeIndex]?.kind === "candidate" ? `${componentId}-candidate-${addressId(items[activeIndex].address)}`
-        : items[activeIndex]?.kind === "action" ? `${componentId}-${actionId(items[activeIndex].action)}` : undefined;
+        : items[activeIndex]?.kind === "notification" ? `${componentId}-notification-${encodeURIComponent(items[activeIndex].hit.key)}`
+          : items[activeIndex]?.kind === "notifications-all" ? `${componentId}-notifications-all`
+            : items[activeIndex]?.kind === "action" ? `${componentId}-${actionId(items[activeIndex].action)}` : undefined;
 
   return <section
     ref={rootRef}
@@ -605,27 +705,38 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
       if (document.activeElement !== inputRef.current) openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     }}
     onBlur={(event) => {
-      if (!(event.relatedTarget instanceof Node && rootRef.current?.contains(event.relatedTarget))) close();
+      if (!scope && !(event.relatedTarget instanceof Node && rootRef.current?.contains(event.relatedTarget))) close();
     }}
   >
+    {scope && <button
+      type="button"
+      className="omni-search-scope"
+      data-omni-scope
+      aria-label={`Search everything, not just ${scope.label}`}
+      onMouseDown={(event) => event.preventDefault()}
+      onClick={() => {
+        scope.onExit();
+        inputRef.current?.focus();
+      }}
+    >{scope.label}<X size={12} strokeWidth={1.75} aria-hidden /></button>}
     <input
       ref={inputRef}
-      role="combobox"
+      role={scope ? "searchbox" : "combobox"}
       aria-label="Search Peppy"
-      aria-autocomplete="list"
-      aria-expanded={open}
-      aria-controls={listId}
-      aria-activedescendant={selectedId}
+      aria-autocomplete={scope ? undefined : "list"}
+      aria-expanded={scope ? undefined : open}
+      aria-controls={scope ? undefined : listId}
+      aria-activedescendant={scope ? undefined : selectedId}
       autoComplete="off"
       autoCorrect="off"
       spellCheck={false}
       disabled={disabled}
-      value={query}
-      placeholder="Search messages, conversations, contacts"
+      value={searchQuery}
+      placeholder={scope?.placeholder ?? (notificationResults ? "Search messages, conversations, contacts, notifications" : "Search messages, conversations, contacts")}
       onChange={change}
       onFocus={(event) => {
         if (event.relatedTarget instanceof HTMLElement && !rootRef.current?.contains(event.relatedTarget)) openerRef.current = event.relatedTarget;
-        setOpen(true);
+        if (!scope) setOpen(true);
       }}
       onCompositionStart={() => {
         compositionRef.current = true;
@@ -637,28 +748,28 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
       }}
       onKeyDown={onKeyDown}
     />
-    {query.length > 0 && <button
+    {(scope || query.length > 0) && <button
       id="omni-search-clear"
       type="button"
       aria-label="Clear search"
       title="Clear search"
-      disabled={disabled}
+      disabled={disabled || searchQuery.length === 0}
       onMouseDown={(event) => event.preventDefault()}
       onClick={clearQuery}
     ><X size={12} strokeWidth={1.75} aria-hidden /></button>}
-    {open && <div
+    {open && !scope && <div
       className="omni-search-results"
       data-omni-search-results
       style={popoverStyle}
       onMouseDown={(event) => event.preventDefault()}
     >
-      {!trimmedQuery && <p className="omni-search-hint">Search locally synced conversations, messages, and contacts.</p>}
+      {!trimmedQuery && <p className="omni-search-hint">{notificationResults ? "Search locally synced conversations, messages, contacts, and notifications." : "Search locally synced conversations, messages, and contacts."}</p>}
       {loading && <p>Searching…</p>}
       {recipientPending && <p role="status">Starting conversation…</p>}
       {recipientError && <p role="alert">{recipientError}</p>}
       {!historyEnabled && page?.indexState === "indexing" && <p>Search index is updating; results may be incomplete.</p>}
       {error && <p>Search could not be completed. Choose Retry search.</p>}
-      {!historyEnabled && !loading && !error && (!candidate || category) && trimmedQuery && page && !page.items.length && <p>No matches.</p>}
+      {!historyEnabled && !loading && !error && (!candidate || category) && trimmedQuery && page && !page.items.length && (notificationSearch?.hits.length ?? 0) === 0 && <p>No matches.</p>}
       <div
         id={listId}
         role="listbox"
@@ -736,6 +847,40 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
               >Show all {categoryLabel(kind).toLowerCase()}</div>}
             </div>;
           })}
+          {notificationSearch && notificationSearch.hits.length > 0 && !category && <div
+            role="group"
+            aria-label="Notifications"
+            data-search-group="notifications"
+          >
+            <div role="presentation" className="omni-search-group-label">Notifications</div>
+            {notificationSearch.hits.slice(0, 3).map((hit) => <div
+              key={hit.key}
+              id={`${componentId}-notification-${encodeURIComponent(hit.key)}`}
+              role="option"
+              aria-selected={selectedId === `${componentId}-notification-${encodeURIComponent(hit.key)}`}
+              className="omni-search-notification"
+              data-omni-notification-hit
+              onClick={() => activate({ kind: "notification", hit })}
+            >
+              {hit.iconPngBase64 && !failedNotificationIcons.has(hit.key)
+                ? <img src={`data:image/png;base64,${hit.iconPngBase64}`} alt="" onError={() => setFailedNotificationIcons((keys) => new Set(keys).add(hit.key))} />
+                : <span className="omni-search-notification-avatar" aria-hidden>{Array.from(hit.appName)[0]?.toUpperCase()}</span>}
+              <span className="omni-search-notification-copy">
+                <span className="omni-search-notification-meta"><span>{hit.appName}</span>{hit.sourceName && <span className="omni-search-notification-source">{hit.sourceName}</span>}</span>
+                <b>{hit.title.map((segment, index) => segment.match ? <mark key={index}>{segment.text}</mark> : segment.text)}</b>
+                <span>{hit.snippet.map((segment, index) => segment.match ? <mark key={index}>{segment.text}</mark> : segment.text)}</span>
+              </span>
+              {hit.timeLabel && <time title={hit.timeTitle}>{hit.timeLabel}</time>}
+            </div>)}
+            <div
+              id={`${componentId}-notifications-all`}
+              role="option"
+              aria-selected={selectedId === `${componentId}-notifications-all`}
+              className="omni-search-notifications-all"
+              data-omni-notifications-all
+              onClick={() => activate({ kind: "notifications-all" })}
+            >Show all {notificationSearch.total} in Notifications<ArrowRight size={14} aria-hidden /></div>
+          </div>}
           {items.filter((item) => item.kind === "action" && item.action.kind === "return").map((item) => item.kind === "action" && <div
             key={actionId(item.action)}
             id={`${componentId}-${actionId(item.action)}`}
