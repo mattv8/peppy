@@ -66,7 +66,7 @@ func TestFetchRcsGapWalksBackwardPagesWithGoogleCursors(t *testing.T) {
 
 func TestRcsPageSkipsUnsupportedRecordsAndCountsThem(t *testing.T) {
 	conversation := &gmproto.Conversation{ConversationID: "conversation-1", Type: gmproto.ConversationType_RCS}
-	media := rcsTextMessageAt("m-media", 2_500_000)
+	media := rcsTextMessageAt("m-media", 3_500_000)
 	media.MessageInfo = []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MediaContent{MediaContent: &gmproto.MediaContent{}}}}
 	unknownStatus := rcsTextMessageAt("m-unknown-status", 2_400_000)
 	unknownStatus.MessageStatus = &gmproto.MessageStatus{Status: gmproto.MessageStatusType(999)}
@@ -81,6 +81,9 @@ func TestRcsPageSkipsUnsupportedRecordsAndCountsThem(t *testing.T) {
 
 	if page.Code != "ok" || page.Skipped != 3 || !page.HasMore {
 		t.Fatalf("page = %#v", page)
+	}
+	if page.NewestMS != 3500 {
+		t.Fatalf("newest_ms = %d, want 3500", page.NewestMS)
 	}
 	if len(page.Records) != 2 || page.Records[0].GoogleMessageID != "m-first" || page.Records[1].GoogleMessageID != "m-last" {
 		t.Fatalf("records = %#v", page.Records)
@@ -107,5 +110,8 @@ func TestRcsPageWithOnlySkippedRecordsStillAdvances(t *testing.T) {
 	}, conversation)
 	if page.Code != "ok" || page.Skipped != 1 || len(page.Records) != 0 || !page.HasMore || page.NextCursor == "" {
 		t.Fatalf("page = %#v", page)
+	}
+	if page.NewestMS != 2500 {
+		t.Fatalf("newest_ms = %d, want 2500", page.NewestMS)
 	}
 }

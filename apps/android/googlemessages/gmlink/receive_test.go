@@ -341,12 +341,18 @@ func TestFetchRcsGapKeepsProtocolSwitchSignalsAndText(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tombstone := textMessage(tc.status)
+			skipped := textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE)
+			skipped.Message.Timestamp = 1735689600999999
+			skipped.Message.MessageInfo = []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MediaContent{MediaContent: &gmproto.MediaContent{}}}}
 			got := projectRcsPage(&gmproto.ListMessagesResponse{
-				Messages: []*gmproto.Message{textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE).Message, tombstone.Message},
+				Messages: []*gmproto.Message{textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE).Message, tombstone.Message, skipped.Message},
 				Cursor:   &gmproto.Cursor{LastItemID: "page-id", LastItemTimestamp: 1234},
 			}, conversation)
-			if got.Code != "ok" || !got.HasMore || got.NextCursor == "" || len(got.Records) != 1 {
+			if got.Code != "ok" || got.Skipped != 1 || !got.HasMore || got.NextCursor == "" || len(got.Records) != 1 {
 				t.Fatalf("page = %#v", got)
+			}
+			if got.NewestMS != 1735689600999 {
+				t.Fatalf("newest_ms = %d, want 1735689600999", got.NewestMS)
 			}
 			if len(got.Signals) != 1 || got.Signals[0] != (rcsPageSignal{Code: "protocol_switch", GoogleConversationID: "conversation-1", SentAtMS: 1735689600123}) {
 				t.Fatalf("signals = %#v", got.Signals)
@@ -690,10 +696,14 @@ func TestFetchRcsGapReturnsEmptyPage(t *testing.T) {
 		return &gmproto.ListMessagesResponse{}, nil
 	})
 
-	got := decodeGapResult(t, link.FetchRcsGap("conversation-1", ""))
+	encoded := link.FetchRcsGap("conversation-1", "")
+	got := decodeGapResult(t, encoded)
 
-	if got.Code != "ok" || got.HasMore || len(got.Records) != 0 || len(got.Signals) != 0 || calls != 1 {
+	if got.Code != "ok" || got.HasMore || got.NewestMS != 0 || len(got.Records) != 0 || len(got.Signals) != 0 || calls != 1 {
 		t.Fatalf("result = %#v, calls = %d", got, calls)
+	}
+	if !strings.Contains(encoded, `"newest_ms":0`) {
+		t.Fatal("empty page omitted newest_ms")
 	}
 }
 
@@ -738,7 +748,7 @@ func TestFetchRcsGapHonorsCancellation(t *testing.T) {
 
 	got := decodeGapResult(t, link.FetchRcsGap("conversation-1", ""))
 
-	if got.Code != "gap_cancelled" || got.HasMore || got.NextCursor != "" || len(got.Records) != 0 {
+	if got.Code != "gap_cancelled" || got.HasMore || got.NewestMS != 0 || got.NextCursor != "" || len(got.Records) != 0 {
 		t.Fatalf("result = %#v", got)
 	}
 }
@@ -927,14 +937,14 @@ func TestRcsPageProjectionFailuresUseEmptyArrayEnvelope(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got := projectRcsPage(test.page, conversation)
-			if got.Code != test.code || got.Records == nil || got.Signals == nil || len(got.Records) != 0 || len(got.Signals) != 0 {
+			if got.Code != test.code || got.NewestMS != 0 || got.Records == nil || got.Signals == nil || len(got.Records) != 0 || len(got.Signals) != 0 {
 				t.Fatalf("projection = %#v", got)
 			}
 			encoded, err := json.Marshal(got)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(string(encoded), `"records":[]`) || !strings.Contains(string(encoded), `"signals":[]`) {
+			if !strings.Contains(string(encoded), `"records":[]`) || !strings.Contains(string(encoded), `"signals":[]`) || !strings.Contains(string(encoded), `"newest_ms":0`) {
 				t.Fatalf("envelope = %s", encoded)
 			}
 		})

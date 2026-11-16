@@ -83,7 +83,7 @@ func TestRefreshConversationIndexRescansAfterIncrementalUpdate(t *testing.T) {
 	close(fixture.listRelease)
 	select {
 	case refreshResult := <-result:
-		if refreshResult != `{"code":"ok"}` {
+		if refreshResult != `{"code":"ok","index":"scanned"}` {
 			t.Fatalf("RefreshConversationIndex result = %s", refreshResult)
 		}
 	case <-time.After(5 * time.Second):

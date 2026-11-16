@@ -1,6 +1,7 @@
 package gmlink
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -12,7 +13,7 @@ func TestEnsureConversationIndexKeepsACurrentCompleteIndex(t *testing.T) {
 	link.mu.Unlock()
 
 	// The link has no runtime client, so any rescan would report an unavailable link.
-	if result := link.EnsureConversationIndex(); result != `{"code":"ok"}` {
+	if result := link.EnsureConversationIndex(); result != `{"code":"ok","index":"reused"}` {
 		t.Fatalf("EnsureConversationIndex = %s", result)
 	}
 
@@ -40,8 +41,16 @@ func TestEnsureConversationIndexRescansWhenTheIndexIsNotUsable(t *testing.T) {
 			change(link, &now)
 			link.mu.Unlock()
 
-			if result := link.EnsureConversationIndex(); result == `{"code":"ok"}` {
+			result := link.EnsureConversationIndex()
+			var decoded map[string]any
+			if err := json.Unmarshal([]byte(result), &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if decoded["code"] == "ok" {
 				t.Fatal("an unusable index was reported ready without a rescan")
+			}
+			if _, ok := decoded["index"]; ok {
+				t.Fatalf("non-ok result has index: %s", result)
 			}
 		})
 	}

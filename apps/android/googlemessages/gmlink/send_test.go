@@ -51,7 +51,7 @@ func preparedRcsFixtureWithPhone(t *testing.T) (*Link, *phoneFixture, func(), st
 	done := startSafetyRun(t, link)
 	awaitStreamOpen(t, link)
 	link.queueEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{SIMParticipant: &gmproto.SIMParticipant{ID: "synthetic-outgoing"}, SIMData: &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}}, RCSChats: &gmproto.RCSChats{Enabled: true}}}}})
-	if result := link.RefreshConversationIndex(); result != `{"code":"ok"}` {
+	if result := link.RefreshConversationIndex(); result != `{"code":"ok","index":"scanned"}` {
 		t.Fatal(result)
 	}
 	setTestOwnerVerification(link)
@@ -482,7 +482,7 @@ func TestPrepareRcsBindsOneTicketToTheCurrentStage2Target(t *testing.T) {
 	done := startSafetyRun(t, link)
 	awaitStreamOpen(t, link)
 	link.queueEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{SIMParticipant: &gmproto.SIMParticipant{ID: "synthetic-outgoing"}, SIMData: &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}}, RCSChats: &gmproto.RCSChats{Enabled: true}}}}})
-	if result := link.RefreshConversationIndex(); result != `{"code":"ok"}` {
+	if result := link.RefreshConversationIndex(); result != `{"code":"ok","index":"scanned"}` {
 		t.Fatal(result)
 	}
 	setTestOwnerVerification(link)
@@ -532,7 +532,7 @@ func TestLegacySendRcsDoesNotSubmitWithoutPrepareCommit(t *testing.T) {
 	awaitStreamOpen(t, link)
 	setTestOwnerVerification(link)
 	link.queueEvent(&libgm.WrappedSettings{Settings: &gmproto.Settings{SIMCards: []*gmproto.SIMCard{{SIMParticipant: &gmproto.SIMParticipant{ID: "synthetic-outgoing"}, SIMData: &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{SIMNumber: 1}}, RCSChats: &gmproto.RCSChats{Enabled: true}}}}})
-	if result := link.RefreshConversationIndex(); result != `{"code":"ok"}` {
+	if result := link.RefreshConversationIndex(); result != `{"code":"ok","index":"scanned"}` {
 		t.Fatal(result)
 	}
 	result := link.SendRcs(`{"command_id":"synthetic-command","tmp_id":"00000000-0000-4000-8000-000000000000","google_conversation_id":"synthetic-conversation","mapping_revision":1,"proof_digest":"synthetic-proof","content":"synthetic-content"}`)

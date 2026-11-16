@@ -56,6 +56,7 @@ type conversationEvent struct {
 
 type conversationResult struct {
 	Code                 string `json:"code"`
+	Index                string `json:"index,omitempty"`
 	GoogleConversationID string `json:"google_conversation_id,omitempty"`
 }
 
@@ -119,6 +120,11 @@ type conversationProbeBasis struct {
 
 func conversationJSON(code string) string {
 	encoded, _ := json.Marshal(conversationResult{Code: code})
+	return string(encoded)
+}
+
+func conversationIndexJSON(code, index string) string {
+	encoded, _ := json.Marshal(conversationResult{Code: code, Index: index})
 	return string(encoded)
 }
 

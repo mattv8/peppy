@@ -88,7 +88,7 @@ func TestNativeRcsLiveCoreRoundTrip(t *testing.T) {
 	link.pairingEvidenceID = uuid.NewString()
 	link.settings.SIMCards[0].SIMData.InternationalPhoneNumber = "+12025550101"
 	link.mu.Unlock()
-	if result := link.RefreshConversationIndex(); result != `{"code":"ok"}` {
+	if result := link.RefreshConversationIndex(); result != `{"code":"ok","index":"scanned"}` {
 		t.Fatal(result)
 	}
 	now := time.Now().UnixMilli()
@@ -183,7 +183,7 @@ func TestNativeRcsLiveMediaCoreRoundTrip(t *testing.T) {
 	link.pairingEvidenceID = uuid.NewString()
 	link.settings.SIMCards[0].SIMData.InternationalPhoneNumber = "+12025550101"
 	link.mu.Unlock()
-	if result := link.RefreshConversationIndex(); result != `{"code":"ok"}` {
+	if result := link.RefreshConversationIndex(); result != `{"code":"ok","index":"scanned"}` {
 		t.Fatal(result)
 	}
 	now := time.Now().UnixMilli()

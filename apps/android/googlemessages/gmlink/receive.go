@@ -53,6 +53,7 @@ type rcsPageProjection struct {
 	Signals    []rcsPageSignal    `json:"signals"`
 	NextCursor string             `json:"next_cursor,omitempty"`
 	HasMore    bool               `json:"has_more"`
+	NewestMS   int64              `json:"newest_ms"`
 	// Skipped counts history records withheld because they are not supported one-to-one text.
 	Skipped int `json:"skipped"`
 }
@@ -190,13 +191,17 @@ func projectRcsPage(page *gmproto.ListMessagesResponse, conversation *gmproto.Co
 		NextCursor: cursor,
 		HasMore:    true,
 	}
-	for _, message := range messages {
+	for index, message := range messages {
+		messageMS := time.UnixMicro(message.GetTimestamp()).UnixMilli()
+		if index == 0 || messageMS > result.NewestMS {
+			result.NewestMS = messageMS
+		}
 		projection := projectRcsMessage(&libgm.WrappedMessage{Message: message}, conversation)
 		switch projection.Code {
 		case "ok":
 			result.Records = append(result.Records, *projection.Record)
 		case "protocol_switch":
-			result.Signals = append(result.Signals, rcsPageSignal{Code: projection.Code, GoogleConversationID: projection.GoogleConversationID, SentAtMS: time.UnixMicro(message.GetTimestamp()).UnixMilli()})
+			result.Signals = append(result.Signals, rcsPageSignal{Code: projection.Code, GoogleConversationID: projection.GoogleConversationID, SentAtMS: messageMS})
 		case "informational_tombstone":
 			// Known informational tombstones carry no history text and are not counted.
 		default:
