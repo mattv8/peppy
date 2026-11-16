@@ -57,6 +57,7 @@ import dev.peppy.mobile.RelayWakeStatus
 import dev.peppy.mobile.RemoteMessagingPreferences
 import dev.peppy.mobile.RemoteMessagingRuntime
 import dev.peppy.mobile.RemoteMessagingService
+import dev.peppy.mobile.GatewayEnqueueCause
 import dev.peppy.mobile.RemoteMessagingStatus
 import dev.peppy.mobile.Section
 import dev.peppy.mobile.StatusRow
@@ -344,7 +345,7 @@ internal fun GatewayAccountSettings(
                             onCheckedChange = { enabled ->
                                 remoteMessagingEnabled = enabled
                                 RemoteMessagingPreferences.setEnabled(context, enabled)
-                                if (enabled) RemoteMessagingService.resumeOrEnqueue(context) else RemoteMessagingService.stop(context)
+                                if (enabled) RemoteMessagingService.resumeOrEnqueue(context, GatewayEnqueueCause.SETTINGS) else RemoteMessagingService.stop(context)
                             },
                             modifier = Modifier.testTag("remote-messaging-toggle"),
                         )

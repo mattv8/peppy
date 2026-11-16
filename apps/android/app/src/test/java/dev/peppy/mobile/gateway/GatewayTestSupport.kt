@@ -86,7 +86,7 @@ abstract class GatewayTestBase {
         context = ApplicationProvider.getApplicationContext()
         NativeGateway.closeForTest()
         NativeGateway.secretBox = keys.box
-        GatewayScheduler.schedule = { scheduled += "sync" }
+        GatewayScheduler.schedule = { _, _ -> scheduled += "sync" }
         vaultId = SharedVault.vaultId
         deviceId = SharedVault.gatewayDeviceId
         material = SharedVault.material

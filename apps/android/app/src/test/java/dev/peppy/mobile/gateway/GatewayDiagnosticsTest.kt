@@ -7,6 +7,7 @@ import androidx.work.WorkManager
 import androidx.work.testing.SynchronousExecutor
 import androidx.work.testing.WorkManagerTestInitHelper
 import dev.peppy.mobile.GatewayWork
+import dev.peppy.mobile.GatewayEnqueueCause
 import dev.peppy.mobile.LoopbackHttpServer
 import dev.peppy.mobile.RemoteMessagingStatus
 import dev.peppy.mobile.contacts.ContactPassReport
@@ -44,6 +45,23 @@ class GatewayDiagnosticsTest {
             BackgroundDiagnostics.mmsCleanup(3, 2, 1)
         }
         assertEquals(1, traces.size)
+    }
+
+    @Test fun rcsSweepRecordsOnlyBoundedNumericCounts() {
+        val events = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+            BackgroundDiagnostics.rcsSweep(considered = 9, skipped = 4, complete = 3, incomplete = 1, aborted = 1, pages = 12, durationMs = 77)
+        }
+
+        val fields = traceFields(events.single())
+        assertEquals(SyncTraceEvent.RCS_SWEEP.code, fields.getValue("event"))
+        assertEquals(9L, fields.getValue(SyncTraceField.ROWS.code.toString()))
+        assertEquals(4L, fields.getValue(SyncTraceField.COUNT.code.toString()))
+        assertEquals(3L, fields.getValue(SyncTraceField.PROCESSED.code.toString()))
+        assertEquals(1L, fields.getValue(SyncTraceField.PENDING.code.toString()))
+        assertEquals(1L, fields.getValue(SyncTraceField.UNAVAILABLE.code.toString()))
+        assertEquals(12L, fields.getValue(SyncTraceField.PAGE_QUERIES.code.toString()))
+        assertEquals(77L, fields.getValue(SyncTraceField.DURATION_MS.code.toString()))
     }
     @Test fun diagnosticsRequestCarriesParentOnlyWhenEnabled() {
         SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, {}) {
@@ -231,8 +249,8 @@ class GatewayDiagnosticsTest {
         )
         val events = mutableListOf<String>()
         SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
-            GatewayWork.enqueue(context, diagnosticParent = 41L)
-            GatewayWork.enqueue(context, diagnosticParent = 99L)
+            GatewayWork.enqueue(context, GatewayEnqueueCause.SETTINGS, diagnosticParent = 41L)
+            GatewayWork.enqueue(context, GatewayEnqueueCause.SETTINGS, diagnosticParent = 99L)
         }
         val requests = WorkManager.getInstance(context).getWorkInfosForUniqueWork(GatewayWork.NAME).get()
         assertEquals(1, requests.size)

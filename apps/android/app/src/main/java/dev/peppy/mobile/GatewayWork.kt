@@ -71,6 +71,34 @@ import uniffi.peppy_mobile_bindings.NativeRawSnapshotRecord
 import uniffi.peppy_mobile_bindings.NativeSnapshotProgress
 import uniffi.peppy_mobile_bindings.NativeSnapshotPurpose
 
+enum class GatewayEnqueueCause(val code: Long) {
+    SOCKET_READY(1),
+    SOCKET_EVENT(2),
+    SOCKET_RESYNC(3),
+    RELAY_WAKE(4),
+    NOTIFICATION_LISTENER(5),
+    NOTIFICATION_RECONCILE(6),
+    SMS_RECEIVER(7),
+    SMS_CAPTURE(8),
+    MMS_CAPTURE(9),
+    HISTORY_CONTROL(10),
+    WORKER_CONTINUATION(11),
+    REACHABILITY(12),
+    UNLOCK(13),
+    SETTINGS(14),
+    ENROLLMENT(15),
+    RCS_LINK(16),
+    RCS_RECEIVE(17),
+    RCS_MEDIA(18),
+    RCS_SEND(19),
+    RCS_REFUSAL(20),
+    CONTACT_SYNC(21),
+    MMS_CALLBACK(22),
+    BOOT(23),
+    FOREGROUND(24),
+    NOTIFICATION_REMOVED(25),
+}
+
 object GatewayWork {
     const val NAME = "peppy-gateway-sync"
     const val PERIODIC_NAME = "peppy-gateway-periodic"
@@ -83,27 +111,27 @@ object GatewayWork {
     private val coalescer = GatewaySyncCoalescer()
 
     /** Unique, network-constrained work; hints set a durable dirty bit while a pass is running. */
-    fun enqueue(context: Context, diagnosticParent: Long = 0L) {
-        request(context, urgent = false, diagnosticParent = diagnosticParent, captureHint = true)
+    fun enqueue(context: Context, cause: GatewayEnqueueCause, diagnosticParent: Long = 0L) {
+        request(context, cause, urgent = false, diagnosticParent = diagnosticParent, captureHint = true)
     }
 
     /** Wake hints are latency-sensitive, but quota exhaustion must still retain bounded sync work. */
-    fun enqueueUrgent(context: Context) {
-        request(context, urgent = true, diagnosticParent = 0L, captureHint = true)
+    fun enqueueUrgent(context: Context, cause: GatewayEnqueueCause) {
+        request(context, cause, urgent = true, diagnosticParent = 0L, captureHint = true)
     }
 
     /** Schedules an upload after capture without requesting another capture pass. */
-    internal fun enqueueAfterCapture(context: Context, diagnosticParent: Long = 0L) {
-        request(context, urgent = false, diagnosticParent = diagnosticParent, captureHint = false)
+    internal fun enqueueAfterCapture(context: Context, cause: GatewayEnqueueCause, diagnosticParent: Long = 0L) {
+        request(context, cause, urgent = false, diagnosticParent = diagnosticParent, captureHint = false)
     }
 
-    private fun request(context: Context, urgent: Boolean, diagnosticParent: Long, captureHint: Boolean) {
+    private fun request(context: Context, cause: GatewayEnqueueCause, urgent: Boolean, diagnosticParent: Long, captureHint: Boolean) {
         val diagnosticsEnabled = SyncDiagnostics.enabled
         val enqueuedMs = if (diagnosticsEnabled) SyncDiagnostics.nowMs() else 0L
         val requestTrace = if (diagnosticsEnabled) SyncDiagnostics.currentTraceId() else 0L
         val appendToActivePass = coalescer.request()
         if (diagnosticsEnabled) {
-            SyncDiagnostics.record(SyncTraceEvent.GATEWAY_ENQUEUE, SyncTraceField.PARENT_ID to diagnosticParent, SyncTraceField.TRACE_ID to requestTrace, SyncTraceField.ENQUEUED_MS to enqueuedMs, SyncTraceField.SOURCE to if (appendToActivePass) 1 else 0)
+            SyncDiagnostics.record(SyncTraceEvent.GATEWAY_ENQUEUE, SyncTraceField.PARENT_ID to diagnosticParent, SyncTraceField.TRACE_ID to requestTrace, SyncTraceField.ENQUEUED_MS to enqueuedMs, SyncTraceField.SOURCE to if (appendToActivePass) 1 else 0, SyncTraceField.REASON to cause.code)
         }
         context.getSharedPreferences(COALESCE, 0).edit().putBoolean(DIRTY, true).apply {
             if (captureHint) putBoolean(CAPTURE_HINT_PENDING, true)
@@ -942,12 +970,12 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
             enqueueSms = { SmsCaptureWork.enqueue(applicationContext) },
             enqueueMms = { MmsCaptureWork.enqueue(applicationContext) },
         )
-        if (historyControlPublished) GatewayWork.enqueueAfterCapture(applicationContext)
+        if (historyControlPublished) GatewayWork.enqueueAfterCapture(applicationContext, GatewayEnqueueCause.HISTORY_CONTROL)
         result.failure?.let { failure -> binding?.let { ServerReachabilityState.recordFailure(it, failure) } }
         return when {
             result.failure != null -> if (runAttemptCount < MAX_ATTEMPTS) Result.retry() else Result.failure()
             else -> {
-                if (result.more) GatewayWork.enqueue(applicationContext)
+                if (result.more) GatewayWork.enqueue(applicationContext, GatewayEnqueueCause.WORKER_CONTINUATION)
                 Result.success()
             }
         }

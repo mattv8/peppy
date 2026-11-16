@@ -56,6 +56,7 @@ import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import dev.peppy.mobile.BuildConfig
 import dev.peppy.mobile.GatewayWork
+import dev.peppy.mobile.GatewayEnqueueCause
 import dev.peppy.mobile.R
 import dev.peppy.mobile.account.AndroidHostedSecureStore
 import dev.peppy.mobile.account.HostedAccountClient
@@ -481,7 +482,7 @@ internal fun HostedEnrollmentScreen(
                             client.bindPendingSecretAndAcknowledge(view.vaultId, view.deviceId)
                             clearSecrets()
                             if (!isCurrent(stamp)) return@startWork
-                            GatewayWork.enqueue(appContext)
+                            GatewayWork.enqueue(appContext, GatewayEnqueueCause.ENROLLMENT)
                             onEnrolled()
                         } catch (failure: HostedFailure) {
                             if (!isCurrent(stamp)) return@startWork

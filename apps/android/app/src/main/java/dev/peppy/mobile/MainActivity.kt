@@ -423,7 +423,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
     LaunchedEffect(refresh, permissionRefresh) {
         val current = withContext(Dispatchers.IO) { NativeGateway.status(context) }
         if (current.sharedKeysReady) GatewayWork.ensurePeriodic(context)
-        if (current.sharedKeysReady) RemoteMessagingService.resumeOrEnqueue(context)
+        if (current.sharedKeysReady) RemoteMessagingService.resumeOrEnqueue(context, GatewayEnqueueCause.FOREGROUND)
         MmsCaptureWork.onPermissionOrForeground(context)
         status = current
         ownerPhoneAvailable = current.sharedKeysReady &&
@@ -672,7 +672,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
                     unlockBusy = true
                     scope.launch {
                         val result = withContext(Dispatchers.IO) { NativeGateway.unlock(context, attempt) }
-                        if (result == UnlockResult.UNLOCKED) { NotificationMirrorService.reconcile(); GatewayWork.enqueue(context) }
+                        if (result == UnlockResult.UNLOCKED) { NotificationMirrorService.reconcile(); GatewayWork.enqueue(context, GatewayEnqueueCause.UNLOCK) }
                         unlockResult = result
                         unlockBusy = false
                         refresh++

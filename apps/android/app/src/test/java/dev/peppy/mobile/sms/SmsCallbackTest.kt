@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.telephony.SmsManager
 import dev.peppy.mobile.GatewayScheduler
+import dev.peppy.mobile.GatewayEnqueueCause
 import dev.peppy.mobile.ReceiverWork
 import dev.peppy.mobile.SmsStatusReceiver
 import dev.peppy.mobile.gateway.GatewayTestBase
@@ -255,7 +256,8 @@ class SmsCallbackTest : GatewayTestBase() {
         val recoveryScheduled = CountDownLatch(2)
         ReceiverWork.evidenceExecutor = Executor { it.run() }
         ReceiverWork.callbackApplyExecutor = Executor { throw RejectedExecutionException() }
-        GatewayScheduler.schedule = {
+        GatewayScheduler.schedule = { _, cause ->
+            assertEquals(GatewayEnqueueCause.SMS_RECEIVER, cause)
             recoveryScheduled.countDown()
         }
         try {

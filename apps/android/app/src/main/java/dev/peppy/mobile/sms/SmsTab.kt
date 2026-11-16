@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import dev.peppy.mobile.GatewayWork
+import dev.peppy.mobile.GatewayEnqueueCause
 import dev.peppy.mobile.R
 import dev.peppy.mobile.SMS_PERMISSIONS
 import dev.peppy.mobile.Section
@@ -165,7 +166,7 @@ internal fun SmsTab(
             },
             onActivated = {
                 SmsCaptureLifecycle.onPermissionOrForeground(context)
-                GatewayWork.enqueue(context)
+                GatewayWork.enqueue(context, GatewayEnqueueCause.SETTINGS)
             },
         )
     }

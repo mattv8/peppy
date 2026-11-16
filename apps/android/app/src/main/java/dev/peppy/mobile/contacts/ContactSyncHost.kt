@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.os.BatteryManager
 import androidx.core.content.ContextCompat
 import dev.peppy.mobile.GatewayScheduler
+import dev.peppy.mobile.GatewayEnqueueCause
 import dev.peppy.mobile.MmsCaptureWork
 import dev.peppy.mobile.SmsCaptureWork
 import dev.peppy.mobile.gateway.GatewaySession
@@ -56,7 +57,7 @@ internal object ContactSyncHost {
         val resumed = readGranted && prefs.enabled && !prefs.readAccessGranted
         prefs.readAccessGranted = readGranted
         ensureObserver(app)
-        if (resumed) GatewayScheduler.schedule(app)
+        if (resumed) GatewayScheduler.schedule(app, GatewayEnqueueCause.CONTACT_SYNC)
         return resumed
     }
 
@@ -157,7 +158,7 @@ internal object ContactSyncHost {
         synchronized(lock) {
             val current = observer
             if (wanted && current == null) {
-                observer = ContactChangeObserver(app.contentResolver, { GatewayScheduler.schedule(app) }).also { it.start() }
+                observer = ContactChangeObserver(app.contentResolver, { GatewayScheduler.schedule(app, GatewayEnqueueCause.CONTACT_SYNC) }).also { it.start() }
             } else if (!wanted && current != null) {
                 current.stop()
                 observer = null
@@ -195,7 +196,7 @@ internal object ContactSyncHost {
     fun withCoordinator(context: Context, action: (ContactSyncCoordinator) -> Unit): Boolean {
         val session = NativeGateway.session(context) ?: return false
         action(coordinator(context, session.client, session.deviceId))
-        GatewayScheduler.schedule(context)
+        GatewayScheduler.schedule(context, GatewayEnqueueCause.CONTACT_SYNC)
         return true
     }
 
@@ -213,6 +214,6 @@ internal object ContactSyncHost {
             coordinator(context, session.client, session.deviceId).retire()
             prefs.retirePending = false
         }
-        GatewayScheduler.schedule(context)
+        GatewayScheduler.schedule(context, GatewayEnqueueCause.CONTACT_SYNC)
     }
 }

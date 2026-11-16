@@ -2,6 +2,7 @@ package dev.peppy.mobile.googlemessages
 
 import android.content.Context
 import dev.peppy.mobile.GatewayWork
+import dev.peppy.mobile.GatewayEnqueueCause
 import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
 import dev.peppy.mobile.gateway.NativeGateway
 import org.json.JSONArray
@@ -33,7 +34,7 @@ internal class RcsReceiveCoordinator(
     private val reconcileGroups: () -> Boolean = GoogleMessagesLinkService::requestRcsGroupReconcile,
     private val nowMs: () -> Long = System::currentTimeMillis,
     /** Requests a gateway pass after core invalidates a mapping for a protocol-switch event. Best effort. */
-    private val requestUpload: () -> Unit = { GatewayWork.enqueueAfterCapture(context.applicationContext) },
+    private val requestUpload: () -> Unit = { GatewayWork.enqueueAfterCapture(context.applicationContext, GatewayEnqueueCause.RCS_RECEIVE) },
 ) : RcsReceiveSink {
     private val locks = ConcurrentHashMap<String, Any>()
     private val sweepLock = Any()

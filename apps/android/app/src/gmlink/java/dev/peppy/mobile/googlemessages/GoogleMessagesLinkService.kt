@@ -23,6 +23,7 @@ import dev.peppy.mobile.MainActivity
 import dev.peppy.mobile.RcsSendWake
 import dev.peppy.mobile.R
 import dev.peppy.mobile.GatewayWork
+import dev.peppy.mobile.GatewayEnqueueCause
 import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
 import dev.peppy.mobile.gateway.NativeGateway
@@ -265,19 +266,19 @@ class GoogleMessagesLinkService : Service() {
             clock,
             rcsCanonicalizerRevision().toInt(),
             RcsNativeAndroidRouteChangeRevoker(applicationContext),
-            onRefusalRecorded = { GatewayWork.enqueueAfterCapture(applicationContext) },
+            onRefusalRecorded = { GatewayWork.enqueueAfterCapture(applicationContext, GatewayEnqueueCause.RCS_REFUSAL) },
         ).execute(command).also { outcome ->
             when (carrierProofWakes.record(command.commandId, outcome)) {
                 CarrierProofWakeAction.WAKE -> {
                     carrierHandoffRequested.set(true)
-                    GatewayWork.enqueueUrgent(applicationContext)
+                    GatewayWork.enqueueUrgent(applicationContext, GatewayEnqueueCause.RCS_SEND)
                 }
                 CarrierProofWakeAction.PROOF_WINDOW_MISSED ->
                     recordGoogleMessagesLinkEvent("direct_send", "proof_window_missed", 0L)
                 CarrierProofWakeAction.NONE -> Unit
             }
             if (outcome == RcsNativeSendOutcome.SUBMITTED || outcome == RcsNativeSendOutcome.OUTCOME_UNKNOWN) {
-                GatewayWork.enqueueAfterCapture(applicationContext)
+                GatewayWork.enqueueAfterCapture(applicationContext, GatewayEnqueueCause.RCS_SEND)
             }
             // A carrier handoff has not sent anything yet and ends the batch, so later commands
             // still wait: keep one retry armed, as for a refusal.
@@ -309,7 +310,7 @@ class GoogleMessagesLinkService : Service() {
         RcsMediaSendCoordinator(mediaFiles, mediaQueue, core, RcsMediaSendGoAdapter(lease), { mediaCommand, index, onRefusalRecorded ->
             runNativeRcsSend(mediaCommand, index, onRefusalRecorded)
         }, now) {
-            GatewayWork.enqueueAfterCapture(applicationContext)
+            GatewayWork.enqueueAfterCapture(applicationContext, GatewayEnqueueCause.RCS_MEDIA)
             // Continue only after the coordinator has durably settled this index.
             mediaRcsSendWork.start()
         }.submit(attachment)

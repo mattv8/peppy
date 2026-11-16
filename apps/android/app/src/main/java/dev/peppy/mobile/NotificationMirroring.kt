@@ -233,7 +233,7 @@ class NotificationMirrorService : NotificationListenerService() {
         try {
             NotificationRemovalExecutor.remove(session.client, key, instance, active.associate { it.key to "${it.key}:${it.postTime}" })
         } catch (_: MobileBindingsException) { return }
-        GatewayWork.enqueueUrgent(applicationContext)
+        GatewayWork.enqueueUrgent(applicationContext, GatewayEnqueueCause.NOTIFICATION_REMOVED)
     }
 
     private fun capturePending(key: String, instance: String) {
@@ -248,7 +248,7 @@ class NotificationMirrorService : NotificationListenerService() {
                 capture.key, capture.instance, capture.packageName, capture.appName, capture.title, capture.text,
                 capture.category, capture.postedAt, capture.dismissible, capture.appIconPngBase64,
             ))
-            if (outcome == NativeNotificationCaptureOutcome.CAPTURED) GatewayWork.enqueueUrgent(applicationContext)
+            if (outcome == NativeNotificationCaptureOutcome.CAPTURED) GatewayWork.enqueueUrgent(applicationContext, GatewayEnqueueCause.NOTIFICATION_LISTENER)
         } catch (_: MobileBindingsException) {
             // Core rejects duplicates/locked/filtered input without a host-side plaintext retry queue.
         }
@@ -363,7 +363,7 @@ class NotificationMirrorService : NotificationListenerService() {
             return NotificationTestCapture.capture(
                 client = NativeGateway.session(context)?.client,
                 permitted = permitted,
-                enqueue = { GatewayWork.enqueueUrgent(context) },
+                enqueue = { GatewayWork.enqueueUrgent(context, GatewayEnqueueCause.SETTINGS) },
             )
         }
     }
@@ -388,7 +388,7 @@ class NotificationMirrorService : NotificationListenerService() {
                         NotificationReconciliation.shouldRemoveAbsentSnapshot(it.target.notificationKey)
                 }
                 absent.forEach { session.client.removeNotification(it.target.notificationKey, "reconcile") }
-                if (absent.isNotEmpty()) GatewayWork.enqueueUrgent(applicationContext)
+                if (absent.isNotEmpty()) GatewayWork.enqueueUrgent(applicationContext, GatewayEnqueueCause.NOTIFICATION_RECONCILE)
                 if (SyncDiagnostics.enabled) BackgroundDiagnostics.notification(active.size, reconciled = absent.size, dismissed = 0)
             } catch (_: MobileBindingsException) { return@post }
             NotificationExtraction.newestFirst(active.asList(), { it.postTime }, { it.key })

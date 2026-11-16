@@ -290,6 +290,9 @@ internal object GoogleMessagesLinkDiagnosticReason {
         ("typing" to "outbound_refused") to 281L,
         ("conversation_refresh" to "probe_adopted") to 282L,
         ("conversation_refresh" to "probe_missed") to 283L,
+        ("recovery_incomplete" to "page_cap") to 284L,
+        ("recovery_incomplete" to "page_failed") to 285L,
+        ("recovery_incomplete" to "cursor_invalid") to 286L,
     )
 }
 

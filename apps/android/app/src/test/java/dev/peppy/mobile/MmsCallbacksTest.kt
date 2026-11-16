@@ -254,7 +254,8 @@ class MmsCallbacksTest : GatewayTestBase() {
         val recoveryScheduled = CountDownLatch(2)
         ReceiverWork.evidenceExecutor = Executor { it.run() }
         ReceiverWork.callbackApplyExecutor = Executor { throw RejectedExecutionException() }
-        GatewayScheduler.schedule = {
+        GatewayScheduler.schedule = { _, cause ->
+            assertEquals(GatewayEnqueueCause.MMS_CALLBACK, cause)
             recoveryScheduled.countDown()
         }
         try {

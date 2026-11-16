@@ -16,6 +16,20 @@ internal object BackgroundDiagnostics {
             SyncTraceField.PENDING to pending,
         )
     }
+
+    fun rcsSweep(considered: Int, skipped: Int, complete: Int, incomplete: Int, aborted: Int, pages: Int, durationMs: Long) {
+        SyncDiagnostics.record(
+            SyncTraceEvent.RCS_SWEEP,
+            SyncTraceField.ROWS to considered.toLong(),
+            SyncTraceField.COUNT to skipped.toLong(),
+            SyncTraceField.PROCESSED to complete.toLong(),
+            SyncTraceField.PENDING to incomplete.toLong(),
+            SyncTraceField.UNAVAILABLE to aborted.toLong(),
+            SyncTraceField.PAGE_QUERIES to pages.toLong(),
+            SyncTraceField.DURATION_MS to durationMs,
+        )
+    }
+
     internal data class GatewayReadiness(val ready: Boolean, val backfillPending: Boolean)
 
     /** Parses the readiness JSON already returned by the native compaction-state call. */

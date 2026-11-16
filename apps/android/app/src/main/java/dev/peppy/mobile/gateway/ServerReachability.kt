@@ -17,6 +17,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import dev.peppy.mobile.GatewayWork
+import dev.peppy.mobile.GatewayEnqueueCause
 import java.io.IOException
 import kotlin.math.min
 import kotlinx.coroutines.CancellationException
@@ -175,7 +176,7 @@ private suspend fun probeServer(context: Context, binding: GatewayReachabilityBi
     if (withContext(Dispatchers.IO) { NativeGateway.reachabilityBinding(context) }?.sameBinding(binding) != true) return
     try {
         val response = withContext(Dispatchers.IO) { GatewayHttp(binding.origin, binding.bearerToken).get("/v1/events?after=0&limit=1") }
-        if (ServerReachabilityState.recordResponse(binding, response)) GatewayWork.enqueue(context)
+        if (ServerReachabilityState.recordResponse(binding, response)) GatewayWork.enqueue(context, GatewayEnqueueCause.REACHABILITY)
     } catch (error: Exception) {
         ServerReachabilityState.recordFailure(binding, error)
     }

@@ -32,6 +32,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import dev.peppy.mobile.GatewayScheduler
+import dev.peppy.mobile.GatewayEnqueueCause
 import dev.peppy.mobile.R
 import dev.peppy.mobile.enrollment.ConsentEffect
 import dev.peppy.mobile.enrollment.ConsentGatedToggle
@@ -83,7 +84,7 @@ internal fun ContactSyncSettings(context: Context, refresh: Int, onChanged: () -
                 if (persisted && ContactSyncHost.access(context).read) {
                     withContext(Dispatchers.IO) {
                         ContactSyncHost.ensureObserver(context)
-                        GatewayScheduler.schedule(context)
+                        GatewayScheduler.schedule(context, GatewayEnqueueCause.SETTINGS)
                     }
                 } else actionError = context.getString(R.string.peppy_toggle_android_contacts_enable_error)
             } catch (_: Exception) {

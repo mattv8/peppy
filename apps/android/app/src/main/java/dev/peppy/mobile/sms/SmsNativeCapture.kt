@@ -7,6 +7,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.BatteryManager
 import dev.peppy.mobile.GatewayWork
+import dev.peppy.mobile.GatewayEnqueueCause
 import dev.peppy.mobile.SmsAcquisition
 import dev.peppy.mobile.SmsAcquisitionInput
 import dev.peppy.mobile.SmsAcquisitionState
@@ -57,14 +58,14 @@ internal object SmsNativeCapture : SmsCaptureRunner {
             AndroidSmsCaptureProvider(context),
             MmsPreferences(context).sourceGeneration,
             historyImportConditions(context),
-            onControlPublished = { GatewayWork.enqueueAfterCapture(context.applicationContext) },
+            onControlPublished = { GatewayWork.enqueueAfterCapture(context.applicationContext, GatewayEnqueueCause.HISTORY_CONTROL) },
             shouldYield = shouldYield,
         )
         if (shouldScheduleGatewayUpload(summary)) {
             if (SyncDiagnostics.enabled) {
-                GatewayWork.enqueueAfterCapture(context.applicationContext, diagnosticParent = SyncDiagnostics.currentTraceId())
+                GatewayWork.enqueueAfterCapture(context.applicationContext, GatewayEnqueueCause.SMS_CAPTURE, diagnosticParent = SyncDiagnostics.currentTraceId())
             } else {
-                GatewayWork.enqueueAfterCapture(context.applicationContext)
+                GatewayWork.enqueueAfterCapture(context.applicationContext, GatewayEnqueueCause.SMS_CAPTURE)
             }
         }
         return summary

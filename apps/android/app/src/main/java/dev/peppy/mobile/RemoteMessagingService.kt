@@ -177,15 +177,15 @@ class RemoteMessagingService : Service() {
                     connected = true
                     reconnects = 0
                     updateStatus(RemoteMessagingStatus.CONNECTED)
-                    GatewayWork.enqueueUrgent(applicationContext)
+                    GatewayWork.enqueueUrgent(applicationContext, GatewayEnqueueCause.SOCKET_READY)
                 } else recordFrame(SocketFrame.READY)
                 "event" -> {
                     recordFrame(SocketFrame.EVENT)
-                    if (!RemoteMessagingProtocol.isOwnEvent(text, session.deviceId)) GatewayWork.enqueueUrgent(applicationContext)
+                    if (!RemoteMessagingProtocol.isOwnEvent(text, session.deviceId)) GatewayWork.enqueueUrgent(applicationContext, GatewayEnqueueCause.SOCKET_EVENT)
                 }
                 "resync_required" -> {
                     recordFrame(SocketFrame.RESYNC)
-                    GatewayWork.enqueueUrgent(applicationContext)
+                    GatewayWork.enqueueUrgent(applicationContext, GatewayEnqueueCause.SOCKET_RESYNC)
                 }
                 // A valid large replay is intentionally ignored as a hint: HTTP replay owns durable ingestion.
                 else -> recordFrame(SocketFrame.OTHER)
@@ -317,9 +317,9 @@ class RemoteMessagingService : Service() {
          * Safe wake seam for callers on the main thread. It never opens native session state here:
          * the service checks the session on its serialized dispatcher and stops itself if locked or ineligible.
          */
-        fun resumeOrEnqueue(context: Context) {
+        fun resumeOrEnqueue(context: Context, cause: GatewayEnqueueCause) {
             // A wake may be delivered while TCP looks open but can no longer carry data.
-            GatewayWork.enqueueUrgent(context)
+            GatewayWork.enqueueUrgent(context, cause)
             if (!RemoteMessagingPreferences.enabled(context)) return
             try {
                 ContextCompat.startForegroundService(context, Intent(context, RemoteMessagingService::class.java))
@@ -338,6 +338,6 @@ class RemoteMessagingService : Service() {
 /** Remote-messaging is a boot-allowlisted Android 15+ FGS type; failure still falls back to sync. */
 class RemoteMessagingBootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        RemoteMessagingService.resumeOrEnqueue(context)
+        RemoteMessagingService.resumeOrEnqueue(context, GatewayEnqueueCause.BOOT)
     }
 }
