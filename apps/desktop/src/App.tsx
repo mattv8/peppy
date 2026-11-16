@@ -102,6 +102,7 @@ import {
 } from "./bridge/bridge";
 import { useMaximizeButtonRegion } from "./shell/useMaximizeButtonRegion";
 import { dismissibleNotifications, notificationAppName, notificationMuteKey, notificationSourceName, NotificationsView, notificationTuple, visibleNotifications } from "./notifications/Notifications";
+import { useNotificationSearch } from "./notifications/useNotificationSearch";
 import { NotificationMuteNotice, type NotificationMuteNotice as NotificationMuteNoticeState } from "./notifications/NotificationMuteNotice";
 import { createNotificationActivationDrain, nativeNotificationActivation, type ActivationContext } from "./notifications/notificationActivation";
 import type { NotificationActivation, NotificationActivationTarget } from "@peppy/generated/notification-activation";
@@ -2273,6 +2274,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const contactsOpen = !revoked && activeView === "contacts";
   const [notificationSettingsRequested, setNotificationSettingsRequested] = useState<"notifications" | "notification-apps">();
   const [notificationAppFilter, setNotificationAppFilter] = useState<string | null>(null);
+  const notificationSearchRequestId = useRef(0);
   const dismissingNotificationsRef = useRef(false);
   const [actionNotice, setActionNotice] = useState<ActionNotice>();
   const [refreshNotice, setRefreshNotice] = useState("");
@@ -3505,7 +3507,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, [activeView]);
   const notificationFocusResult = (requestId: string, found: boolean) => {
     const pending = notificationFocusContext.current;
-    if (pending?.requestId !== requestId || pending.reported) return;
+    if (pending?.requestId !== requestId) {
+      if (!found && requestId.startsWith("omni-")) setNotificationActionNotice("This notification is no longer available.");
+      return;
+    }
+    if (pending.reported) return;
     pending.reported = true;
     void (async () => {
       if (!await pending.context.validate()) return;
@@ -5048,8 +5054,44 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     };
   }, [resolution]);
   const notificationDisplayTitle = useCallback((title: string) => resolution[title]?.displayName ?? title, [resolution]);
-  const [notificationQuery, setNotificationQuery] = useState("");
-  const resetNotificationSearch = () => setNotificationQuery("");
+  const openNotificationSearch = async (target: NotificationActivationTarget | undefined, query = "") => {
+    const navigation = await flushBeforeNavigation("Search result not opened");
+    if (!navigation || !navigation.isCurrent()) return;
+    flushSync(() => {
+      setContactTarget(undefined);
+      setNotificationAppFilter(null);
+      resetNotificationSearch();
+      setNotificationQuery(query);
+      setActiveViewNow("notifications");
+      if (target) setNotificationFocus({ requestId: `omni-${++notificationSearchRequestId.current}`, target });
+    });
+  };
+  const navigateNotificationSearch = (target: NotificationActivationTarget | undefined, query?: string) => {
+    notificationNavigationEpoch.current += 1;
+    const open = () => { void openNotificationSearch(target, query); };
+    if (contactNavigation.current) contactNavigation.current(open);
+    else open();
+  };
+  const {
+    notificationQuery,
+    setNotificationQuery,
+    notificationResults,
+    resetSearch: resetNotificationSearch,
+    scope: notificationSearchScope,
+  } = useNotificationSearch({
+    active: notificationsOpen,
+    locked: notificationsLocked || Boolean(appLock?.locked),
+    notifications: snapshot?.notifications ?? [],
+    filters: snapshot?.appFilters ?? [],
+    sources: snapshot?.gateways ?? [],
+    displayTitle: notificationDisplayTitle,
+    onOpenHit: target => navigateNotificationSearch(target),
+    onShowAll: query => navigateNotificationSearch(undefined, query),
+    onUnavailable: () => {
+      setNotificationActionNotice("This notification is no longer available.");
+      navigateNotificationSearch(undefined);
+    },
+  });
 
   const accountIdentityKey = snapshot ? `${snapshot.connection.origin ?? ""}|${snapshot.sessionScopeId ?? ""}` : null;
   const accountNotice = useAccountNotice(accountIdentityKey);
@@ -5881,7 +5923,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         onClose={browserHost ? undefined : () => void closeAfterSave(() => bridge.window("close"))}
         platform={platform}
         nativeWindowControls={!browserHost && platform === "macos"}
-        search={<OmniSearch onSearch={searchLocal} onActivate={activateSearchHit} resolveContactNumbers={resolveOmniContactNumbers} onStartConversation={startOmniConversation} sessionKey={searchSessionKey} disabled={searchDisabled} refreshKey={mediaStateHint} historySearch={historyControls.historySearch} onSearchFurtherBack={historyControls.onSearchFurtherBack} onCancelHistorySearch={historyControls.onCancelHistorySearch} onOpenChange={setHistorySearchVisible} />}
+        search={<OmniSearch onSearch={searchLocal} onActivate={activateSearchHit} resolveContactNumbers={resolveOmniContactNumbers} onStartConversation={startOmniConversation} sessionKey={searchSessionKey} disabled={searchDisabled} refreshKey={mediaStateHint} historySearch={historyControls.historySearch} onSearchFurtherBack={historyControls.onSearchFurtherBack} onCancelHistorySearch={historyControls.onCancelHistorySearch} onOpenChange={setHistorySearchVisible} scope={notificationSearchScope} notificationResults={notificationSearchScope ? undefined : notificationResults} />}
         onToggleSidebar={toggleConversationList}
         sidebarExpanded={narrowConversationListMode ? showingMobileConversationList : activeView === "conversations" && !listCollapsed}
         sidebarControls="thread-list"
