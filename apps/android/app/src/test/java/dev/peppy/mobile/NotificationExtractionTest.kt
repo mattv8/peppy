@@ -86,6 +86,16 @@ class NotificationExtractionTest {
         assertTrue(!NotificationExtraction.removedInstanceStillActive(old, arrayOf(repost)))
     }
 
+    @Test fun reconnectOrdersActiveNotificationsNewestFirstWithKeyTieBreak() {
+        data class Item(val key: String, val postTime: Long)
+        val ordered = NotificationExtraction.newestFirst(
+            listOf(Item("b", 1L), Item("c", 3L), Item("a", 3L), Item("d", 2L)),
+            { it.postTime },
+            { it.key },
+        )
+        assertEquals(listOf("a", "c", "d", "b"), ordered.map { it.key })
+    }
+
     @Test fun applicationMetadataUsesTheInstalledApplicationLabel() {
         assertEquals(
             context.applicationInfo.loadLabel(context.packageManager).toString(),
