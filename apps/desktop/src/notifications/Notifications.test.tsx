@@ -27,6 +27,13 @@ const props = (notifications: MirroredNotification[]) => ({
   onSeen: vi.fn().mockResolvedValue(undefined),
   onCopyOneTimeCode: vi.fn().mockResolvedValue(undefined),
   onSettings: vi.fn(),
+  onManageApps: vi.fn(),
+  onDismissMany: vi.fn().mockResolvedValue(undefined),
+  query: "",
+  onClearQuery: vi.fn(),
+  appFilter: null,
+  onAppFilter: vi.fn(),
+  displayTitle: (title: string) => title,
 });
 
 afterEach(() => {
@@ -34,6 +41,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  localStorage.removeItem("peppy.notifications.v1");
   Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
 });
 
@@ -108,7 +116,7 @@ describe("NotificationsView", () => {
     expect(onFocusResult).not.toHaveBeenCalled();
 
     rerender(<NotificationsView {...view} focusRequest={focusRequest} onFocusResult={onFocusResult} />);
-    const row = screen.getByRole("article", { name: /Chat on Pixel/ });
+    const row = screen.getByRole("article", { name: /Title phone-a/ });
     expect(row).toHaveFocus();
     expect(row).toHaveAttribute("data-activation-highlight", "true");
     expect(onFocusResult).toHaveBeenCalledExactlyOnceWith("unlock", true);
@@ -170,7 +178,7 @@ describe("NotificationsView", () => {
     const { rerender } = render(<NotificationsView {...view} focusRequest={focusRequest} onFocusResult={onFocusResult} />);
     const row = screen.getByRole("article");
     act(() => vi.advanceTimersByTime(1000));
-    const mute = screen.getByRole("button", { name: "Mute Chat on Pixel" });
+    const mute = screen.getByRole("button", { name: "Mute Chat" });
     mute.focus();
     const nextResult = vi.fn();
     rerender(<NotificationsView {...view} focusRequest={focusRequest} onFocusResult={nextResult} />);
@@ -188,16 +196,16 @@ describe("NotificationsView", () => {
   it("keeps same-package apps isolated by phone and hides only the muted source", () => {
     const view = props([notification("phone-a"), notification("phone-b")]);
     const { rerender } = render(<NotificationsView {...view} />);
-    expect(screen.getByRole("article", { name: /Chat on Pixel/ })).toBeInTheDocument();
-    expect(screen.getByRole("article", { name: /Chat on Tablet/ })).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: /Title phone-a/ })).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: /Title phone-b/ })).toBeInTheDocument();
     rerender(<NotificationsView {...view} filters={[{ sourceDeviceId: "phone-a", packageName: "chat", appName: "Chat", muted: true }]} />);
-    expect(screen.queryByRole("article", { name: /Chat on Pixel/ })).not.toBeInTheDocument();
-    expect(screen.getByRole("article", { name: /Chat on Tablet/ })).toBeInTheDocument();
+    expect(screen.queryByRole("article", { name: /Title phone-a/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("article", { name: /Title phone-b/ })).toBeInTheDocument();
   });
 
   it("keeps pending and non-dismissible notifications visible while disabling dismissal", () => {
     render(<NotificationsView {...props([notification("phone-a", "chat", { dismissalPending: true }), notification("phone-b", "mail", { dismissible: false })])} />);
-    expect(screen.getByText(/Dismissal pending/)).toBeVisible();
+    expect(screen.getByText("Waiting for phone")).toBeVisible();
     expect(screen.getByRole("button", { name: /Dismiss Title phone-a from Chat on Pixel/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /Dismiss Title phone-b from Chat on Tablet/ })).toBeDisabled();
   });
@@ -241,6 +249,227 @@ describe("NotificationsView", () => {
     expect(screen.getAllByRole("article").map(row => row.dataset.notificationKey)).toEqual(["key-phone-b", "chat", "chat"]);
     fireEvent.click(screen.getByRole("button", { name: "Mute Chat on Pixel" }));
     expect(view.onMute).toHaveBeenCalledWith({ sourceDeviceId: "phone-a", packageName: "chat", appName: "Chat", muted: false });
+  });
+
+  it("expands an app stack during render so a focused fourth notification is found", () => {
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+    const items = ["one", "two", "three", "four"].map((notificationKey, index) =>
+      notification("phone-a", "chat", {
+        target: { sourceDeviceId: "phone-a", notificationKey, lifetime: "one" },
+        postedAt: Date.now() - index,
+      }),
+    );
+    const view = props(items);
+    const { rerender } = render(<NotificationsView {...view} />);
+    fireEvent.click(screen.getByRole("button", { name: "App" }));
+    const onFocusResult = vi.fn();
+    rerender(<NotificationsView {...view} focusRequest={{ requestId: "fourth", target: items[3].target }} onFocusResult={onFocusResult} />);
+
+    expect(screen.getAllByRole("article", { name: /Title phone-a/ })[3]).toHaveFocus();
+    expect(onFocusResult).toHaveBeenCalledWith("fourth", true);
+  });
+
+  it("moves focus to the next row when a dismissed row disappears", () => {
+    const first = notification("phone-a", "chat", { target: { sourceDeviceId: "phone-a", notificationKey: "first", lifetime: "one" } });
+    const second = notification("phone-a", "mail", { target: { sourceDeviceId: "phone-a", notificationKey: "second", lifetime: "one" } });
+    const view = props([first, second]);
+    const { rerender } = render(<NotificationsView {...view} />);
+    const dismiss = screen.getAllByRole("button", { name: /Dismiss Title phone-a from Chat/ })[0];
+    dismiss.focus();
+    fireEvent.click(dismiss);
+    rerender(<NotificationsView {...view} notifications={[second]} />);
+
+    expect(screen.getByRole("article")).toHaveFocus();
+  });
+
+  it("moves focus to the empty-state heading after the final dismissed row disappears", () => {
+    const item = notification("phone-a");
+    const view = props([item]);
+    const { rerender } = render(<NotificationsView {...view} />);
+    const dismiss = screen.getByRole("button", { name: /^Dismiss / });
+    dismiss.focus();
+    fireEvent.click(dismiss);
+    rerender(<NotificationsView {...view} notifications={[]} />);
+
+    expect(screen.getByRole("heading", { name: "No notifications yet" })).toHaveFocus();
+  });
+
+  it("does not mark an intersecting row seen after a query hides it", () => {
+    let callback!: IntersectionObserverCallback;
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(next: IntersectionObserverCallback) { callback = next; }
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+      takeRecords() { return []; }
+      root = null;
+      rootMargin = "0px";
+      thresholds = [];
+    });
+    const view = props([notification("phone-a")]);
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const { rerender } = render(<NotificationsView {...view} />);
+    callback([{ target: screen.getByRole("article"), isIntersecting: true } as unknown as IntersectionObserverEntry], {} as IntersectionObserver);
+
+    rerender(<NotificationsView {...view} query="missing" />);
+    vi.mocked(document.hasFocus).mockReturnValue(true);
+    fireEvent.focus(window);
+
+    expect(view.onSeen).not.toHaveBeenCalled();
+  });
+
+  it("observes rows revealed by expanding an app stack", async () => {
+    const callbacks: IntersectionObserverCallback[] = [];
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(next: IntersectionObserverCallback) { callbacks.push(next); }
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+      takeRecords() { return []; }
+      root = null;
+      rootMargin = "0px";
+      thresholds = [];
+    });
+    const items = ["one", "two", "three"].map((notificationKey, index) => notification("phone-a", "chat", {
+      target: { sourceDeviceId: "phone-a", notificationKey, lifetime: "one" },
+      postedAt: Date.now() - index,
+    }));
+    const view = props(items);
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    render(<NotificationsView {...view} />);
+    fireEvent.click(screen.getByRole("button", { name: "App" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show 1 more" }));
+    const fourthRow = screen.getAllByRole("article")[2];
+    callbacks.at(-1)!([{ target: fourthRow, isIntersecting: true } as unknown as IntersectionObserverEntry], {} as IntersectionObserver);
+
+    await waitFor(() => expect(view.onSeen).toHaveBeenCalledWith([items[2].target]));
+  });
+
+  it("shows phone context for matching app stacks across multiple phones", () => {
+    const view = props([
+      notification("phone-a", "chat", { target: { sourceDeviceId: "phone-a", notificationKey: "one", lifetime: "one" } }),
+      notification("phone-a", "chat", { target: { sourceDeviceId: "phone-a", notificationKey: "two", lifetime: "one" } }),
+      notification("phone-b", "chat", { target: { sourceDeviceId: "phone-b", notificationKey: "three", lifetime: "one" } }),
+      notification("phone-b", "chat", { target: { sourceDeviceId: "phone-b", notificationKey: "four", lifetime: "one" } }),
+    ]);
+    render(<NotificationsView {...view} />);
+    fireEvent.click(screen.getByRole("button", { name: "App" }));
+
+    expect(screen.getAllByRole("button", { name: "Mute Chat on Pixel" })).not.toHaveLength(0);
+    expect(screen.getAllByRole("button", { name: "Mute Chat on Tablet" })).not.toHaveLength(0);
+  });
+
+  it("does not restore focus after a row action when focus moved outside the view", () => {
+    const item = notification("phone-a");
+    const view = props([item]);
+    const { rerender } = render(<><input aria-label="Outside" /><NotificationsView {...view} /></>);
+    const dismiss = screen.getByRole("button", { name: /^Dismiss / });
+    dismiss.focus();
+    fireEvent.click(dismiss);
+    const outside = screen.getByRole("textbox", { name: "Outside" });
+    outside.focus();
+    rerender(<><input aria-label="Outside" /><NotificationsView {...view} notifications={[]} /></>);
+
+    expect(outside).toHaveFocus();
+  });
+
+  it("cancels deferred row focus when focus moves to the toolbar", () => {
+    const item = notification("phone-a");
+    const view = props([item]);
+    const { rerender } = render(<NotificationsView {...view} />);
+    const dismiss = screen.getByRole("button", { name: /^Dismiss / });
+    dismiss.focus();
+    fireEvent.click(dismiss);
+    const toolbarButton = screen.getByRole("button", { name: "Time" });
+    toolbarButton.focus();
+    rerender(<NotificationsView {...view} notifications={[]} />);
+
+    expect(toolbarButton).toHaveFocus();
+  });
+
+  it("keeps All available when a selected app has no query matches", () => {
+    const view = props([
+      notification("phone-a", "chat", { appName: "Chat", title: "Chat title" }),
+      notification("phone-a", "mail", { appName: "Mail", title: "Mail title" }),
+    ]);
+    const { rerender } = render(<NotificationsView {...view} appFilter="chat" />);
+    rerender(<NotificationsView {...view} appFilter="chat" query="Mail" />);
+
+    expect(screen.getByRole("group", { name: "Filter by app" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "All" })).toBeInTheDocument();
+  });
+
+  it("re-observes replacement rows when arrangement changes without changing rendered keys", () => {
+    const observed: Element[] = [];
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(_callback: IntersectionObserverCallback) {}
+      observe(target: Element) { observed.push(target); }
+      disconnect() {}
+      unobserve() {}
+      takeRecords() { return []; }
+      root = null;
+      rootMargin = "0px";
+      thresholds = [];
+    });
+    const view = props([notification("phone-a")]);
+    render(<NotificationsView {...view} />);
+    const timeRow = screen.getByRole("article");
+    fireEvent.click(screen.getByRole("button", { name: "App" }));
+    const appRow = screen.getByRole("article");
+
+    expect(appRow).not.toBe(timeRow);
+    expect(observed).toContain(appRow);
+  });
+
+  it("does not recreate the observer when only onSeen changes", () => {
+    const disconnect = vi.fn();
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(_callback: IntersectionObserverCallback) {}
+      observe() {}
+      disconnect() { disconnect(); }
+      unobserve() {}
+      takeRecords() { return []; }
+      root = null;
+      rootMargin = "0px";
+      thresholds = [];
+    });
+    const view = props([notification("phone-a")]);
+    const { rerender } = render(<NotificationsView {...view} />);
+    rerender(<NotificationsView {...view} onSeen={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(disconnect).not.toHaveBeenCalled();
+  });
+
+  it("orders time-arranged rows newest first within a section", () => {
+    const older = notification("phone-a", "chat", {
+      title: "Older",
+      target: { sourceDeviceId: "phone-a", notificationKey: "older", lifetime: "one" },
+      postedAt: Date.now() - 1_000,
+    });
+    const newer = notification("phone-a", "mail", {
+      title: "Newer",
+      target: { sourceDeviceId: "phone-a", notificationKey: "newer", lifetime: "one" },
+      postedAt: Date.now(),
+    });
+    render(<NotificationsView {...props([older, newer])} />);
+
+    expect(screen.getAllByRole("article").map(row => row.textContent)).toEqual([
+      expect.stringContaining("Newer"),
+      expect.stringContaining("Older"),
+    ]);
+  });
+
+  it("keeps focus on the row when a dismissal becomes pending", () => {
+    const item = notification("phone-a");
+    const view = props([item]);
+    const { rerender } = render(<NotificationsView {...view} />);
+    const dismiss = screen.getByRole("button", { name: /^Dismiss / });
+    dismiss.focus();
+    fireEvent.click(dismiss);
+    dismiss.blur();
+    rerender(<NotificationsView {...view} notifications={[{ ...item, dismissalPending: true }]} />);
+
+    expect(screen.getByRole("article")).toHaveFocus();
   });
 
   it("excludes locked, muted, pending, and nondismissible notifications from bulk eligibility", () => {
@@ -321,6 +550,7 @@ describe("NotificationsView", () => {
 
       rerender(<NotificationsView {...change(view)} />);
       expect(screen.queryByRole("article", { name: /Chat on Pixel/ })).not.toBeInTheDocument();
+      intersect(callbacks.at(-1)!, [rowFor("phone-b")]);
       vi.mocked(document.hasFocus).mockReturnValue(true);
       fireEvent.focus(window);
 
@@ -372,7 +602,7 @@ describe("NotificationsView one-time codes", () => {
   it("keeps Mute and Dismiss as separate controls next to the copy button", () => {
     render(<NotificationsView {...props([notification("phone-a", "chat", { oneTimeCode: "839201" })])} />);
 
-    expect(screen.getByRole("button", { name: "Mute Chat on Pixel" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Mute Chat" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Dismiss / })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copy code 839201 from Chat" })).toBeInTheDocument();
   });

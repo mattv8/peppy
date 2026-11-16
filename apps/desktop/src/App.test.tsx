@@ -5807,7 +5807,7 @@ describe("host state display", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Notifications/ }));
     expect(screen.getByRole("region", { name: "Notifications" })).toBeInTheDocument();
     expect(document.getElementById("thread-list")).not.toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Notification settings" }));
     expect(document.getElementById("notification-settings")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
     expect(document.getElementById("thread-list")).toBeVisible();
@@ -5950,7 +5950,7 @@ describe("host state display", () => {
     });
 
     try {
-      fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+      fireEvent.click(screen.getByRole("button", { name: "Notification settings" }));
       await waitFor(() => expect(scrollContent).toHaveBeenCalledTimes(1));
       expect(scrollContent).toHaveBeenLastCalledWith({ top: 690, behavior: reducedMotion ? "instant" : "smooth" });
       expect(scrollContent.mock.contexts[0]).toBe(document.getElementById("settings-content"));
@@ -5959,7 +5959,7 @@ describe("host state display", () => {
       expect(screen.getByRole("link", { name: "Notifications" })).toHaveAttribute("aria-current", "location");
 
       fireEvent.click(screen.getByRole("button", { name: /^Notifications/ }));
-      fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+      fireEvent.click(screen.getByRole("button", { name: "Notification settings" }));
       await waitFor(() => expect(scrollContent).toHaveBeenCalledTimes(2));
 
       fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
@@ -7271,7 +7271,7 @@ describe("display-only contact names", () => {
     host.contactResolution = { "+12025550100": { contactId: "c1", bookId: "b1", displayName: "Ada Lovelace" } };
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: /Notifications/ }));
-    expect(await screen.findByLabelText("Chat on Phone 1: Ada Lovelace: Lunch?")).toBeInTheDocument();
+    expect(await screen.findByText("Ada Lovelace")).toBeInTheDocument();
     expect(host.notifications[0].title).toBe("+12025550100");
   });
 });
