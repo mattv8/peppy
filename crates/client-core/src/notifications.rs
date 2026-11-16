@@ -56,6 +56,14 @@ pub(super) fn now_ms() -> i64 {
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
 }
+pub(super) const BANNER_MAX_AGE_MS: i64 = 15 * 60 * 1000;
+
+pub(super) fn banner_is_fresh(timestamp_ms: Option<i64>, now_ms: i64) -> bool {
+    timestamp_ms.is_none_or(|timestamp_ms| {
+        timestamp_ms <= 0 || now_ms.saturating_sub(timestamp_ms) <= BANNER_MAX_AGE_MS
+    })
+}
+
 pub(super) fn valid_target(target: &NotificationTarget) -> bool {
     uuid::Uuid::parse_str(&target.source_device_id).is_ok()
         && valid(&target.notification_key)
@@ -674,7 +682,7 @@ fn upsert_notification(
         "INSERT OR IGNORE INTO app_filters(source_device_id,package_name,app_name,muted) VALUES(?,?,?,0)",
         params![n.target.source_device_id, n.package_name, n.app_name],
     )?;
-    if !historical && first_post {
+    if !historical && first_post && banner_is_fresh(Some(n.posted_at), now_ms()) {
         let id = json(&n.target)?;
         c.execute("INSERT OR IGNORE INTO banner_candidates(id,kind,conversation_id,source_device_id,notification_key,lifetime,title,body,created_at) VALUES(?, 'notification',NULL,?,?,?,?,?,?)",params![id,n.target.source_device_id,n.target.notification_key,n.target.lifetime,if n.title.is_empty() { &n.app_name } else { &n.title },n.text,now_ms()])?;
     }
@@ -857,6 +865,16 @@ mod tests {
     use peppy_crypto::{create_vault_check_header, derive_root_key};
     use serde_json::json;
 
+    #[test]
+    fn banner_freshness_allows_unknown_future_and_the_cutoff_boundary() {
+        let now = now_ms();
+        assert!(banner_is_fresh(None, now));
+        assert!(banner_is_fresh(Some(0), now));
+        assert!(banner_is_fresh(Some(now + 1), now));
+        assert!(banner_is_fresh(Some(now - BANNER_MAX_AGE_MS), now));
+        assert!(!banner_is_fresh(Some(now - BANNER_MAX_AGE_MS - 1), now));
+    }
+
     fn unlocked_client() -> (Client, tempfile::TempDir) {
         let directory = tempfile::TempDir::new().unwrap();
         let vault_id = VaultId::new();
@@ -942,7 +960,7 @@ mod tests {
             title: "Subject".into(),
             text: "Body".into(),
             category: None,
-            posted_at: 1,
+            posted_at: now_ms(),
             dismissible: true,
         };
         upsert_notification(&client.lock().unwrap().conn, &notification, 1, false).unwrap();

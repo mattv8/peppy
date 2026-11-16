@@ -11669,7 +11669,11 @@ fn index_address(
 
 fn queue_message_banner(conn: &Connection, message: &MessagePayload) -> Result<(), Error> {
     notifications::prune_banners(conn)?;
-    if message.direction != Direction::Incoming || message.imported || conn.query_row("SELECT EXISTS(SELECT 1 FROM conversation_folders WHERE conversation_id=? AND folder='spam')", [message.record.conversation_id.to_string()], |row| row.get::<_, bool>(0))? {
+    if message.direction != Direction::Incoming
+        || message.imported
+        || !notifications::banner_is_fresh(message.sent_at_ms, notifications::now_ms())
+        || conn.query_row("SELECT EXISTS(SELECT 1 FROM conversation_folders WHERE conversation_id=? AND folder='spam')", [message.record.conversation_id.to_string()], |row| row.get::<_, bool>(0))?
+    {
         return Ok(());
     }
     conn.execute(
