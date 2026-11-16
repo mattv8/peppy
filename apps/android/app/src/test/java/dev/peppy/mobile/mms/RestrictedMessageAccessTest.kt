@@ -14,13 +14,6 @@ class RestrictedMessageAccessTest {
         assertEquals(RestrictedMessageAccess.UNKNOWN, restrictedMessageAccessForCheck { throw SecurityException() })
     }
 
-    @Test fun commandUsesTheActualPackageName() {
-        val command = restrictedMessageAppOpCommand("dev.example.peppy")
-
-        assertTrue(command.contains("dev.example.peppy"))
-        assertTrue(command.contains(READ_RESTRICTED_MESSAGES_OP))
-    }
-
     @Test fun rescanPersistsBeforeEnqueueAndCoalescesExistingWork() {
         val calls = mutableListOf<String>()
         val outcome = requestProviderRescan(

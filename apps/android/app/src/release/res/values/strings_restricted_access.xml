@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="peppy_mms_restricted_play_link_body">Link Google Messages to read RCS chats Peppy can\'t otherwise see. It covers RCS chats that already have a thread in Google Messages on this phone. It doesn\'t bring in RCS history from before you linked, or messages missed while the link was off for a long time.</string>
+    <string name="peppy_mms_restricted_play_linked_body">Google Messages is linked. Peppy reads RCS chats through the link. It covers chats with a thread in Google Messages, not history from before you linked.</string>
+    <string name="peppy_mms_restricted_play_unavailable">Peppy can\'t read these messages on this phone right now. Messages sent as SMS or MMS still sync.</string>
+    <string name="peppy_mms_restricted_play_status_linked">Via Google Messages link</string>
+    <string name="peppy_mms_restricted_play_help">This can copy only messages the phone provider exposes. Peppy cannot grant this access. It does not change how replies are sent. Phone and app versions can expose only some RCS content.</string>
+</resources>

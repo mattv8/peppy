@@ -32,7 +32,7 @@ class RestrictedMessageAccessHelpTest {
     @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(compose)
 
     @Test fun `help is modal and unsupported access includes unsupported guidance`() {
-        val genericHelp = string(R.string.peppy_mms_restricted_help)
+        val genericHelp = string(restrictedMessageAccessHelpResId())
         val unsupportedHelp = string(R.string.peppy_mms_restricted_unsupported_help)
         setContent(RestrictedMessageAccess.UNSUPPORTED)
 
@@ -56,7 +56,7 @@ class RestrictedMessageAccessHelpTest {
     @Test fun `unknown access keeps only generic help in modal`() = assertGenericHelpOnly(RestrictedMessageAccess.UNKNOWN)
 
     private fun assertGenericHelpOnly(access: RestrictedMessageAccess) {
-        val genericHelp = string(R.string.peppy_mms_restricted_help)
+        val genericHelp = string(restrictedMessageAccessHelpResId())
         val unsupportedHelp = string(R.string.peppy_mms_restricted_unsupported_help)
         setContent(access)
         compose.onNodeWithTag("mms-restricted-message-access").assertIsDisplayed()
@@ -76,7 +76,7 @@ class RestrictedMessageAccessHelpTest {
         assertTrue(status.left >= container.left && status.right <= container.right)
         assertTrue(help.left >= container.left && help.right <= container.right)
         compose.onNodeWithTag("info-mms-restricted-message-access").performClick()
-        compose.onNodeWithText(string(R.string.peppy_mms_restricted_help)).assertIsDisplayed()
+        compose.onNodeWithText(string(restrictedMessageAccessHelpResId())).assertIsDisplayed()
     }
 
     private fun setContent(access: RestrictedMessageAccess, width: androidx.compose.ui.unit.Dp = 400.dp, fontScale: Float = 1f) {
