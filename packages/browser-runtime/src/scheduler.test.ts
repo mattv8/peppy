@@ -664,6 +664,104 @@ describe("BrowserScheduler", () => {
     expect(mutations.findIndex(([command]) => command === "apply_pending")).toBeGreaterThan(mutations.findIndex(([command]) => command === "ingest_batch"));
   });
 
+  it("continues replaying past the page cap until it receives a short page", async () => {
+    let receiveCursor = "0";
+    let replayRequests = 0;
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: receiveCursor };
+        if (command === "sync_work_status") return { pendingApply: false };
+        return [];
+      },
+      mutate: async (command: string, args: Record<string, unknown>) => {
+        if (command === "ingest_batch") {
+          const events = args.events as Array<{ cursor: string }>;
+          receiveCursor = events.at(-1)!.cursor;
+        }
+        return { applied: 0, quarantined: 0, drained: 0 };
+      },
+    };
+    await new BrowserScheduler(session, {
+      json: async path => {
+        if (!path.startsWith("/v1/events")) return {};
+        replayRequests += 1;
+        const eventCount = replayRequests <= 20 ? 100 : 1;
+        const start = Number(receiveCursor);
+        return {
+          events: Array.from({ length: eventCount }, (_, index) => ({ cursor: String(start + index + 1), envelope: {} })),
+          next_after: eventCount === 100 ? String(start + eventCount) : null,
+        };
+      },
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    }).poll();
+
+    expect(replayRequests).toBe(21);
+    expect(receiveCursor).toBe("2001");
+  });
+
+  it("stops replaying at the page cap when the receive cursor does not advance", async () => {
+    let replayRequests = 0;
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: "0" };
+        if (command === "sync_work_status") return { pendingApply: false };
+        return [];
+      },
+      mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
+    };
+    await new BrowserScheduler(session, {
+      json: async path => {
+        if (!path.startsWith("/v1/events")) return {};
+        replayRequests += 1;
+        return {
+          events: Array.from({ length: 100 }, (_, index) => ({ cursor: String(index + 1), envelope: {} })),
+          next_after: "100",
+        };
+      },
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    }).poll();
+
+    expect(replayRequests).toBe(20);
+  });
+
+  it("honors cancellation before starting another capped replay", async () => {
+    let replayRequests = 0;
+    let scheduler: BrowserScheduler;
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: String(replayRequests * 100) };
+        if (command === "sync_work_status") return { pendingApply: false };
+        return [];
+      },
+      mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
+    };
+    scheduler = new BrowserScheduler(session, {
+      json: async path => {
+        if (!path.startsWith("/v1/events")) return {};
+        replayRequests += 1;
+        if (replayRequests === 20) scheduler.stop();
+        const start = (replayRequests - 1) * 100;
+        return {
+          events: Array.from({ length: 100 }, (_, index) => ({ cursor: String(start + index + 1), envelope: {} })),
+          next_after: String(start + 100),
+        };
+      },
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    });
+
+    await expect(scheduler.poll()).rejects.toMatchObject({ kind: "cancelled" });
+    expect(replayRequests).toBe(20);
+  });
+
   it("publishes exact replay cursors only after durable ingest and apply checkpoints", async () => {
     const mutations: string[] = [];
     const progress = [] as Array<{ phase: string; receivedThrough: string; processedThrough: string; targetHighWater?: string }>;

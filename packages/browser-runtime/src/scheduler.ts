@@ -18,6 +18,7 @@ const REPLAY_DISPATCH_BYTES = PAGE_BYTES - 64 * 1024;
 const EMPTY_INGEST_DISPATCH_BYTES = utf8ByteLength(JSON.stringify({ command: "ingest_batch", args: { events: [] } }));
 
 type ReplayEvent = { cursor: string; envelope: unknown };
+type ReplayOutcome = "caughtUp" | "morePages";
 
 export interface SchedulerSession {
   query(command: string, args: Record<string, unknown>): Promise<unknown>;
@@ -153,7 +154,9 @@ export class BrowserScheduler {
       }
       await this.sendOutbox(signal);
       if (negotiationResolved) {
-        await this.replay(signal);
+        while (await this.replay(signal) === "morePages") {
+          throwIfAborted(signal);
+        }
         if (await this.hasPendingProjectionWork()) await this.apply(signal);
         await this.options.retention?.reconcile(signal);
       }
@@ -282,7 +285,9 @@ export class BrowserScheduler {
     }
   }
 
-  private async replay(signal: AbortSignal): Promise<void> {
+  private async replay(signal: AbortSignal): Promise<ReplayOutcome> {
+    const replayStartCursor = requiredString(object(await this.session.query("receive_cursor", {})).cursor);
+    let finalPageWasFull = false;
     for (let pageNumber = 0; pageNumber < MAX_REPLAY_PAGES; pageNumber += 1) {
       throwIfAborted(signal);
       const cursor = requiredString(object(await this.session.query("receive_cursor", {})).cursor);
@@ -296,6 +301,7 @@ export class BrowserScheduler {
       } catch (error) {
         if (isResync(error)) {
           await this.snapshot(signal);
+          finalPageWasFull = false;
           continue;
         }
         throw error;
@@ -305,7 +311,7 @@ export class BrowserScheduler {
       if (events.length === 0) {
         await this.publishProgress("applying");
         await this.observeHistorySearch(attempts, context, page);
-        return;
+        return "caughtUp";
       }
       for (const batch of replayBatches(events)) {
         throwIfAborted(signal);
@@ -316,8 +322,11 @@ export class BrowserScheduler {
       // Duplicate or quarantine-only pages may apply nothing; settle the page's final phase from durable frontiers.
       await this.publishProgress("applying");
       await this.observeHistorySearch(attempts, context, page);
-      if (events.length < PAGE_LIMIT || page.next_after === null) return;
+      finalPageWasFull = events.length === PAGE_LIMIT && page.next_after !== null;
+      if (!finalPageWasFull) return "caughtUp";
     }
+    const replayEndCursor = requiredString(object(await this.session.query("receive_cursor", {})).cursor);
+    return finalPageWasFull && decimal(replayEndCursor) > decimal(replayStartCursor) ? "morePages" : "caughtUp";
   }
 
   private async observeHistorySearch(attempts: readonly string[], context: unknown, page: Record<string, unknown>): Promise<void> {
