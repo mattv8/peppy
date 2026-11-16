@@ -17,6 +17,9 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import dev.peppy.mobile.BuildConfig
 import dev.peppy.mobile.R
+import dev.peppy.mobile.billing.playManageUri
+import uniffi.peppy_mobile_bindings.NativeBillingProvider
+import uniffi.peppy_mobile_bindings.NativePlayBillingContext
 import dev.peppy.mobile.ui.ConsentSheet
 
 internal const val HOSTED_ACCOUNT_DELETION_URL = "https://peppy.pro/account/delete"
@@ -33,6 +36,15 @@ internal fun openHostedAccountDeletion(context: Context): Boolean = openExternal
 
 internal fun openPlaySubscriptionList(context: Context): Boolean = openExternalUrl(context, PLAY_SUBSCRIPTIONS_URL)
 
+internal fun openPlaySubscription(context: Context, productId: String?): Boolean =
+    openExternalUrl(
+        context,
+        playManageUri(
+            NativePlayBillingContext("", false, productId, emptyList(), null, NativeBillingProvider.PLAY),
+            context.packageName,
+        ).toString(),
+    )
+
 /** The external account-deletion flow is deliberately separate from local vault deletion. */
 @Composable
 internal fun HostedAccountDeletionEntry(
@@ -41,6 +53,8 @@ internal fun HostedAccountDeletionEntry(
     onOpenFailed: () -> Unit,
     onViewSubscription: (() -> Unit)? = null,
     isPlay: Boolean = BuildConfig.PEPPY_DISTRIBUTION == "play",
+    playManaged: Boolean = false,
+    playProductId: String? = null,
     openDeletion: (Context) -> Boolean = ::openHostedAccountDeletion,
     openPlaySubscriptions: (Context) -> Boolean = ::openPlaySubscriptionList,
 ) {
@@ -54,12 +68,21 @@ internal fun HostedAccountDeletionEntry(
     }
     val viewSubscription: () -> Unit = {
         open = false
-        if (onViewSubscription != null) onViewSubscription() else if (!openPlaySubscriptions(context)) onOpenFailed()
+        if (playManaged) {
+            val opened = playProductId?.let { openPlaySubscription(context, it) } ?: openPlaySubscriptions(context)
+            if (!opened) onOpenFailed()
+        } else if (onViewSubscription != null) {
+            onViewSubscription()
+        } else if (!openPlaySubscriptions(context)) {
+            onOpenFailed()
+        }
     }
     if (open) ConsentSheet(
         title = stringResource(R.string.peppy_account_delete_title),
         body = stringResource(R.string.peppy_account_delete_body),
-        nextStep = if (isPlay) {
+        nextStep = if (playManaged) {
+            stringResource(R.string.peppy_account_delete_subscription_play)
+        } else if (isPlay) {
             stringResource(R.string.peppy_account_delete_subscription)
         } else {
             null
@@ -71,11 +94,14 @@ internal fun HostedAccountDeletionEntry(
             if (!openDeletion(context)) onOpenFailed()
         },
         confirmLabel = stringResource(R.string.peppy_account_delete_continue),
-        secondaryActionLabel = if (isPlay) {
+        secondaryActionLabel = if (playManaged) {
+            stringResource(R.string.peppy_account_delete_cancel_in_play)
+        } else if (isPlay) {
             stringResource(R.string.peppy_account_delete_view_subscription)
         } else {
             null
         },
-        onSecondaryAction = if (isPlay) viewSubscription else null,
+        onSecondaryAction = if (playManaged || isPlay) viewSubscription else null,
+        secondaryActionTag = if (playManaged) "account-delete-play-cancel" else null,
     )
 }

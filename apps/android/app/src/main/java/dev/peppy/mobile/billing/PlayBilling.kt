@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import uniffi.peppy_mobile_bindings.NativeBillingProvider
 import uniffi.peppy_mobile_bindings.NativePlayBillingContext
@@ -26,9 +27,14 @@ internal fun isPlayDistribution() = BuildConfig.PEPPY_DISTRIBUTION == "play"
 internal fun isValidatedPlayProductId(productId: String?) =
     productId != null && productId.length <= 128 && Regex("[A-Za-z0-9._-]{1,128}").matches(productId)
 
-internal fun playManageUri(context: NativePlayBillingContext): Uri? = context.productId
+internal fun playManageUri(
+    context: NativePlayBillingContext,
+    packageName: String = BuildConfig.APPLICATION_ID,
+): Uri? = if (context.currentProvider != NativeBillingProvider.PLAY) {
+    null
+} else {
+    context.productId
     ?.takeIf(::isValidatedPlayProductId)
-    ?.takeIf { context.currentProvider == NativeBillingProvider.PLAY }
     ?.let {
         Uri.Builder()
             .scheme("https")
@@ -37,9 +43,10 @@ internal fun playManageUri(context: NativePlayBillingContext): Uri? = context.pr
             .appendPath("account")
             .appendPath("subscriptions")
             .appendQueryParameter("sku", it)
-            .appendQueryParameter("package", "dev.peppy.mobile")
+            .appendQueryParameter("package", packageName)
             .build()
-    }
+    } ?: Uri.parse("https://play.google.com/store/account/subscriptions")
+}
 
 internal data class PlaySubscriptionPlan(
     val basePlanId: String,
@@ -48,12 +55,13 @@ internal data class PlaySubscriptionPlan(
     val annual: Boolean,
 )
 
-internal enum class PlayBillingError { UNAVAILABLE, NETWORK }
+internal enum class PlayBillingError { UNAVAILABLE, NETWORK, NOT_SUPPORTED, GENERIC }
 
 internal sealed interface PlaySubscriptionState {
     data object Loading : PlaySubscriptionState
     data object SignInRequired : PlaySubscriptionState
     data object BillingUnavailable : PlaySubscriptionState
+    data object Reconnecting : PlaySubscriptionState
     data object NotOffered : PlaySubscriptionState
     data object OtherProvider : PlaySubscriptionState
     data object UnknownProvider : PlaySubscriptionState
@@ -75,11 +83,21 @@ internal sealed interface PlaySubscriptionState {
 
 internal enum class PlayBillingNotice { RESTORE_NONE }
 
+internal data class PlayDeletionContext(val managed: Boolean, val productId: String?)
+
+internal data class VerifiedAccountAccessAssociation(val origin: String, val vaultId: String) {
+    fun matches(bindingKey: String): Boolean {
+        val fields = bindingKey.split('\n')
+        return fields.getOrNull(0) == origin && fields.getOrNull(1) == vaultId
+    }
+}
+
 internal class PlayBillingCoordinator internal constructor(
     private val host: PlayBillingHost,
     private val gateway: PlayBillingGateway,
     private val scope: CoroutineScope,
     private val refreshAccount: suspend () -> Unit,
+    private val waitForRecovery: suspend (Long) -> Unit = { delay(it) },
 ) {
     constructor(
         context: Context,
@@ -111,6 +129,12 @@ internal class PlayBillingCoordinator internal constructor(
 
     private val mutableLinked = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
     val linked: SharedFlow<Unit> = mutableLinked.asSharedFlow()
+    private val mutableDeletionContext = MutableStateFlow(PlayDeletionContext(false, null))
+    /** Retains only a server-verified Play provider across transient recovery UI states. */
+    val deletionContext: StateFlow<PlayDeletionContext> = mutableDeletionContext.asStateFlow()
+    private val mutableAccountAccessAssociation = MutableStateFlow<VerifiedAccountAccessAssociation?>(null)
+    /** The authenticated billing snapshot's exact hosted origin and enrolled vault, if verified. */
+    val accountAccessAssociation: StateFlow<VerifiedAccountAccessAssociation?> = mutableAccountAccessAssociation.asStateFlow()
 
     private var generation = 0L
     private var identity: Identity? = null
@@ -123,17 +147,36 @@ internal class PlayBillingCoordinator internal constructor(
     private var launchIdentity: Identity? = null
     private var billingReadyGeneration: Long? = null
     private var restoreRequest = 0L
+    private var operationRevision = 0L
+    private var recoveryRevision: Long? = null
     private val processingTokens = mutableSetOf<TokenKey>()
     private val linkedTokens = mutableSetOf<TokenKey>()
     private var released = false
 
+    private companion object {
+        const val RECOVERY_ATTEMPTS = 3
+        const val RECOVERY_BACKOFF_MS = 250L
+    }
+
     init {
         gateway.setEvents(::onPurchasesUpdated)
+        gateway.setDisconnectedListener {
+            val current = identity ?: return@setDisconnectedListener
+            if (!released && mutableState.value !in setOf(
+                    baseState,
+                    PlaySubscriptionState.Pending,
+                    PlaySubscriptionState.Purchasing,
+                )
+            ) {
+                recoverConnection(current)
+            }
+        }
     }
 
     fun load(accountId: String?, enrolledVaultId: String? = null) {
         requestedAccountId = accountId
         val loadGeneration = ++generation
+        beginNewOperation()
         clearLoadedIdentity(enrolledVaultId)
         mutableNotice.value = null
         if (accountId == null) {
@@ -151,6 +194,9 @@ internal class PlayBillingCoordinator internal constructor(
 
                 val loadedIdentity = Identity(loadGeneration, captured, loadedContext)
                 identity = loadedIdentity
+                mutableAccountAccessAssociation.value = captured.vaultId
+                    ?.takeIf { it == enrolledVaultId }
+                    ?.let { VerifiedAccountAccessAssociation(HostedAccountClient.ORIGIN, it) }
                 routeLoadedIdentity(loadedIdentity)
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -183,13 +229,15 @@ internal class PlayBillingCoordinator internal constructor(
         val current = identity ?: return
         val offer = selectedOffer ?: return
         if (baseState !is PlaySubscriptionState.Ready) return
+        beginNewOperation()
         scope.launch {
             if (!isIdentityCurrent(current) || current.context.currentProvider != NativeBillingProvider.NONE) return@launch
             val binding = current.context.accountBinding?.takeIf(String::isNotBlank) ?: return@launch
             restoreRequest++
             mutableState.value = PlaySubscriptionState.Purchasing
             launchIdentity = current
-            when (gateway.launch(activity, offer, binding)) {
+            val responseCode = gateway.launch(activity, offer, binding)
+            when (responseCode) {
                 BillingClient.BillingResponseCode.OK -> Unit
                 BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED -> {
                     launchIdentity = null
@@ -197,7 +245,15 @@ internal class PlayBillingCoordinator internal constructor(
                 }
                 else -> {
                     launchIdentity = null
-                    mutableState.value = PlaySubscriptionState.Error(PlayBillingError.UNAVAILABLE)
+                    if (responseCode in setOf(
+                            BillingClient.BillingResponseCode.SERVICE_DISCONNECTED,
+                            BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE,
+                        )
+                    ) {
+                        recoverConnection(current)
+                    } else {
+                        mutableState.value = billingStateFor(responseCode)
+                    }
                 }
             }
         }
@@ -251,21 +307,12 @@ internal class PlayBillingCoordinator internal constructor(
                         setBaseState(PlaySubscriptionState.BillingUnavailable)
                         return@runCallback
                     }
-                    val allowedOffers = returnedOffers
-                        .filter { it.productId == productId && it.basePlanId in current.context.basePlanIds }
-                        .distinctBy { it.basePlanId to it.offerToken }
+                    val allowedOffers = allowedOffers(current, productId, returnedOffers)
                     if (allowedOffers.isEmpty()) {
                         setBaseState(PlaySubscriptionState.NotOffered)
                         return@runCallback
                     }
-                    offers = allowedOffers
-                    selectedOffer = allowedOffers.firstOrNull { !it.annual } ?: allowedOffers.first()
-                    setBaseState(
-                        PlaySubscriptionState.Ready(
-                            current.context,
-                            allowedOffers.map(BillingOffer::toPlan),
-                        ),
-                    )
+                    setReady(current, allowedOffers)
                     queryPurchases(current, automatic = true)
                 }
             }
@@ -274,6 +321,7 @@ internal class PlayBillingCoordinator internal constructor(
 
     private fun restore(current: Identity, automatic: Boolean) {
         if (!isRestoreAllowed(current)) return
+        beginNewOperation()
         scope.launch {
             if (!isIdentityCurrent(current)) return@launch
             if (!automatic) {
@@ -292,7 +340,7 @@ internal class PlayBillingCoordinator internal constructor(
         gateway.connect { ready ->
             runCallback(current) {
                 if (!ready) {
-                    setBaseState(PlaySubscriptionState.BillingUnavailable)
+                    recoverConnection(current)
                     return@runCallback
                 }
                 billingReadyGeneration = current.generation
@@ -313,6 +361,70 @@ internal class PlayBillingCoordinator internal constructor(
                 }
                 handlePurchases(current, purchases, automatic)
             }
+        }
+    }
+
+    private fun recoverConnection(current: Identity) {
+        if (!isIdentityCurrentLocally(current)) return
+        if (recoveryRevision != null) return
+        val revision = ++operationRevision
+        recoveryRevision = revision
+        recoverConnection(current, revision, attempt = 1)
+    }
+
+    private fun recoverConnection(current: Identity, revision: Long, attempt: Int) {
+        if (!isRecoveryCurrent(current, revision)) return
+        mutableState.value = PlaySubscriptionState.Reconnecting
+        scope.launch {
+            if (attempt > 1) waitForRecovery(RECOVERY_BACKOFF_MS * (1L shl (attempt - 2)))
+            if (!isRecoveryCurrent(current, revision)) return@launch
+            gateway.connect { ready ->
+                runCallback(current) {
+                    if (!isRecoveryCurrent(current, revision)) return@runCallback
+                    if (!ready) {
+                        retryRecovery(current, revision, attempt)
+                        return@runCallback
+                    }
+                    billingReadyGeneration = current.generation
+                    val productId = current.context.productId
+                    if (productId == null) {
+                        retryRecovery(current, revision, attempt)
+                        return@runCallback
+                    }
+                    gateway.queryOffers(productId) { offersAvailable, returnedOffers ->
+                        runCallback(current) {
+                            if (!isRecoveryCurrent(current, revision)) return@runCallback
+                            if (!offersAvailable) {
+                                retryRecovery(current, revision, attempt)
+                                return@runCallback
+                            }
+                            if (current.context.currentProvider == NativeBillingProvider.NONE) {
+                                val allowedOffers = allowedOffers(current, productId, returnedOffers)
+                                if (allowedOffers.isEmpty()) {
+                                    retryRecovery(current, revision, attempt)
+                                    return@runCallback
+                                }
+                                setReady(current, allowedOffers)
+                            } else {
+                                setBaseState(PlaySubscriptionState.ProviderPlay(current.context))
+                                mutableDeletionContext.value = PlayDeletionContext(true, current.context.productId)
+                            }
+                            recoveryRevision = null
+                            queryPurchases(current, automatic = true)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun retryRecovery(current: Identity, revision: Long, attempt: Int) {
+        if (!isRecoveryCurrent(current, revision)) return
+        if (attempt >= RECOVERY_ATTEMPTS) {
+            recoveryRevision = null
+            mutableState.value = PlaySubscriptionState.Error(PlayBillingError.UNAVAILABLE)
+        } else {
+            recoverConnection(current, revision, attempt + 1)
         }
     }
 
@@ -350,11 +462,13 @@ internal class PlayBillingCoordinator internal constructor(
                 if (!isIdentityCurrent(current)) return@launch
                 when (outcome) {
                     NativePlayLinkOutcome.LINKED -> {
+                        beginNewOperation()
                         linkedTokens += key
                         baseState = null
                         val verifiedContext = current.context.copy(currentProvider = NativeBillingProvider.PLAY)
                         identity = current.copy(context = verifiedContext)
                         setBaseState(PlaySubscriptionState.ProviderPlay(verifiedContext))
+                        mutableDeletionContext.value = PlayDeletionContext(true, verifiedContext.productId)
                         mutableLinked.emit(Unit)
                         if (isIdentityCurrent(current)) refreshAccount()
                     }
@@ -398,7 +512,9 @@ internal class PlayBillingCoordinator internal constructor(
                 }
                 BillingClient.BillingResponseCode.USER_CANCELED -> restoreBaseState()
                 BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED -> restore(launched, automatic = false)
-                else -> mutableState.value = PlaySubscriptionState.Error(PlayBillingError.UNAVAILABLE)
+                BillingClient.BillingResponseCode.SERVICE_DISCONNECTED,
+                BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE -> recoverConnection(launched)
+                else -> mutableState.value = billingStateFor(code)
             }
         }
     }
@@ -434,6 +550,9 @@ internal class PlayBillingCoordinator internal constructor(
     private fun setBaseState(value: PlaySubscriptionState) {
         baseState = value
         mutableState.value = value
+        if (value is PlaySubscriptionState.ProviderPlay) {
+            mutableDeletionContext.value = PlayDeletionContext(true, value.context.productId)
+        }
     }
 
     private fun restoreBaseState() {
@@ -449,7 +568,28 @@ internal class PlayBillingCoordinator internal constructor(
         launchIdentity = null
         billingReadyGeneration = null
         restoreRequest++
+        mutableDeletionContext.value = PlayDeletionContext(false, null)
+        mutableAccountAccessAssociation.value = null
     }
+
+    private fun allowedOffers(current: Identity, productId: String, returnedOffers: List<BillingOffer>) =
+        returnedOffers
+            .filter { it.productId == productId && it.basePlanId in current.context.basePlanIds }
+            .distinctBy { it.basePlanId to it.offerToken }
+
+    private fun setReady(current: Identity, allowedOffers: List<BillingOffer>) {
+        offers = allowedOffers
+        selectedOffer = allowedOffers.firstOrNull { !it.annual } ?: allowedOffers.first()
+        setBaseState(PlaySubscriptionState.Ready(current.context, allowedOffers.map(BillingOffer::toPlan)))
+    }
+
+    private fun beginNewOperation() {
+        operationRevision++
+        recoveryRevision = null
+    }
+
+    private fun isRecoveryCurrent(current: Identity, revision: Long) =
+        recoveryRevision == revision && operationRevision == revision && isIdentityCurrentLocally(current)
 
     private fun mismatchKey(snapshot: BillingSessionSnapshot, deviceVaultId: String) = MismatchKey(
         snapshot.accountId,
@@ -481,3 +621,12 @@ private fun BillingPurchase.matches(context: NativePlayBillingContext): Boolean 
     products.singleOrNull() == context.productId &&
         !obfuscatedAccountId.isNullOrBlank() &&
         obfuscatedAccountId == context.accountBinding
+
+internal fun billingStateFor(responseCode: Int): PlaySubscriptionState = when (responseCode) {
+    BillingClient.BillingResponseCode.SERVICE_DISCONNECTED -> PlaySubscriptionState.Reconnecting
+    BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE,
+    BillingClient.BillingResponseCode.BILLING_UNAVAILABLE -> PlaySubscriptionState.Error(PlayBillingError.UNAVAILABLE)
+    BillingClient.BillingResponseCode.NETWORK_ERROR -> PlaySubscriptionState.Error(PlayBillingError.NETWORK)
+    BillingClient.BillingResponseCode.FEATURE_NOT_SUPPORTED -> PlaySubscriptionState.Error(PlayBillingError.NOT_SUPPORTED)
+    else -> PlaySubscriptionState.Error(PlayBillingError.GENERIC)
+}

@@ -3,6 +3,7 @@ package dev.peppy.mobile.billing
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -27,11 +28,20 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.peppy.mobile.R
+import dev.peppy.mobile.account.AccountAccessState
+import dev.peppy.mobile.account.CachedAccountNotice
+import java.text.DateFormat
+import java.util.Date
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import uniffi.peppy_mobile_bindings.NativeAccountNoticeKind
 
 /** Shared Play-only subscription surface. Direct builds must not compose this component. */
 @Composable
@@ -47,7 +57,10 @@ internal fun PlaySubscriptionPanel(
     val context = LocalContext.current
     val state by coordinator.state.collectAsState()
     val notice by coordinator.notice.collectAsState()
+    val accountAccessAssociation by coordinator.accountAccessAssociation.collectAsState()
+    val access by AccountAccessState.access.collectAsState()
     var selected by remember { mutableStateOf<PlaySubscriptionPlan?>(null) }
+    LaunchedEffect(Unit) { withContext(Dispatchers.IO) { AccountAccessState.ensureLoaded(context) } }
     PlaySubscriptionLoadEffect(accountId, enrolledVaultId, loadRevision, coordinator::load)
     PlaySubscriptionFeedbackLayout(signInError, modifier) {
         if (notice == PlayBillingNotice.RESTORE_NONE) Text(
@@ -63,6 +76,7 @@ internal fun PlaySubscriptionPanel(
                 }
             }
             PlaySubscriptionState.BillingUnavailable -> RecoverableStatus(R.string.peppy_play_billing_unavailable_body, coordinator::retry)
+            PlaySubscriptionState.Reconnecting -> Status(R.string.peppy_play_reconnecting, "play-subscription-reconnecting")
             PlaySubscriptionState.NotOffered -> RecoverableStatus(R.string.peppy_play_not_offered_body, coordinator::retry)
             PlaySubscriptionState.OtherProvider -> Status(R.string.peppy_play_other_provider_body)
             PlaySubscriptionState.UnknownProvider -> RecoverableStatus(R.string.peppy_play_unknown_provider_body, coordinator::retry)
@@ -76,7 +90,14 @@ internal fun PlaySubscriptionPanel(
                     Text(stringResource(R.string.peppy_play_switch_account))
                 }
             }
-            is PlaySubscriptionState.ProviderPlay -> ProviderPlay(current.context, context, coordinator::restore)
+            is PlaySubscriptionState.ProviderPlay -> ProviderPlay(
+                current.context,
+                access?.takeIf { cached ->
+                    accountAccessAssociation?.matches(cached.bindingKey) == true
+                }?.notice,
+                context,
+                coordinator::restore,
+            )
             is PlaySubscriptionState.Ready -> {
                 val chosen = selected?.takeIf { it in current.plans }
                     ?: current.plans.firstOrNull { !it.annual } ?: current.plans.first()
@@ -131,13 +152,14 @@ internal fun PlaySubscriptionPanel(
             is PlaySubscriptionState.Error -> {
                 Text(
                     stringResource(
-                        if (current.reason == PlayBillingError.UNAVAILABLE) {
-                            R.string.peppy_play_billing_unavailable_body
-                        } else {
-                            R.string.peppy_production_network_failed
+                        when (current.reason) {
+                            PlayBillingError.UNAVAILABLE -> R.string.peppy_play_billing_unavailable_body
+                            PlayBillingError.NETWORK -> R.string.peppy_play_error_network
+                            PlayBillingError.NOT_SUPPORTED -> R.string.peppy_play_error_not_supported
+                            PlayBillingError.GENERIC -> R.string.peppy_play_error_generic
                         },
                     ),
-                    Modifier.testTag("play-subscription-error"),
+                    Modifier.testTag("play-subscription-error").semantics { liveRegion = LiveRegionMode.Polite },
                 )
                 OutlinedButton(onClick = coordinator::retry, modifier = Modifier.testTag("play-billing-retry")) { Text(stringResource(R.string.peppy_try_again)) }
             }
@@ -170,9 +192,9 @@ internal fun PlaySubscriptionLoadEffect(
     LaunchedEffect(accountId, enrolledVaultId, loadRevision) { onLoad(accountId, enrolledVaultId) }
 }
 
-@Composable private fun Status(copy: Int) = Text(
+@Composable private fun Status(copy: Int, tag: String = "play-subscription-status") = Text(
     stringResource(copy),
-    Modifier.testTag("play-subscription-status").semantics { liveRegion = LiveRegionMode.Polite },
+    Modifier.testTag(tag).semantics { liveRegion = LiveRegionMode.Polite },
 )
 
 @Composable private fun RecoverableStatus(copy: Int, onRetry: () -> Unit) {
@@ -198,20 +220,97 @@ internal fun PlaySubscriptionLoadEffect(
 
 @Composable private fun ProviderPlay(
     context: uniffi.peppy_mobile_bindings.NativePlayBillingContext,
+    notice: CachedAccountNotice?,
     androidContext: android.content.Context,
     onRestore: () -> Unit,
 ) {
     var manageFailure by remember { mutableStateOf(false) }
     Text(stringResource(R.string.peppy_play_provider_label), Modifier.testTag("play-subscription-provider"))
     Text(stringResource(R.string.peppy_play_provider_google_play))
-    playManageUri(context)?.let { uri ->
-        TextButton(onClick = {
-            try { androidContext.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
-            catch (_: ActivityNotFoundException) { manageFailure = true }
-        }, modifier = Modifier.testTag("play-manage-button")) { Text(stringResource(R.string.peppy_play_manage_cta)) }
+    val openManage = {
+        try {
+            androidContext.startActivity(
+                Intent(Intent.ACTION_VIEW, playManageUri(context, androidContext.packageName)
+                    ?: Uri.parse("https://play.google.com/store/account/subscriptions")),
+            )
+        }
+        catch (_: ActivityNotFoundException) { manageFailure = true }
+    }
+    val showsAccessAction = notice?.kind in setOf(
+        NativeAccountNoticeKind.PAYMENT_FAILED_GRACE,
+        NativeAccountNoticeKind.ENDING_SCHEDULED,
+        NativeAccountNoticeKind.READ_ONLY_PAST_DUE,
+    )
+    val manageDescription = stringResource(R.string.peppy_play_manage_cta_description)
+    PlayAccessNotice(notice, manageDescription, openManage)
+    if (!showsAccessAction) {
+        TextButton(
+            onClick = openManage,
+            modifier = Modifier.testTag("play-manage-button")
+                .semantics { contentDescription = manageDescription },
+        ) { Text(stringResource(R.string.peppy_play_manage_cta)) }
     }
     if (manageFailure) Text(stringResource(R.string.peppy_toggle_android_link_unavailable), Modifier.testTag("play-manage-error"))
     OutlinedButton(onClick = onRestore, modifier = Modifier.testTag("play-restore-button")) {
         Text(stringResource(R.string.peppy_play_restore_cta))
     }
 }
+
+@Composable
+private fun PlayAccessNotice(notice: CachedAccountNotice?, manageDescription: String, onManage: () -> Unit) {
+    val body = when (notice?.kind) {
+        NativeAccountNoticeKind.PAYMENT_FAILED_GRACE -> R.string.peppy_play_grace_body
+        NativeAccountNoticeKind.ENDING_SCHEDULED -> R.string.peppy_play_ending_body
+        NativeAccountNoticeKind.READ_ONLY_PAST_DUE -> R.string.peppy_play_hold_body
+        NativeAccountNoticeKind.READ_ONLY_CANCELED -> R.string.peppy_play_subscription_ended_body
+        else -> return
+    }
+    val title = when (notice.kind) {
+        NativeAccountNoticeKind.PAYMENT_FAILED_GRACE -> R.string.peppy_account_payment_failed_grace_title
+        NativeAccountNoticeKind.READ_ONLY_PAST_DUE -> R.string.peppy_play_hold_title
+        NativeAccountNoticeKind.ENDING_SCHEDULED -> R.string.peppy_account_ending_scheduled_title
+        else -> R.string.peppy_play_subscription_ended_title
+    }
+    Column(
+        Modifier.testTag("play-access-notice").semantics { liveRegion = LiveRegionMode.Polite },
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (notice.kind == NativeAccountNoticeKind.ENDING_SCHEDULED) {
+            Text(
+                stringResource(if (notice.deadline == null) R.string.peppy_play_ending_scheduled_nodate_title else title, formatNoticeDate(notice.deadline)),
+                Modifier.semantics { heading() },
+            )
+        } else {
+            Text(stringResource(title), Modifier.semantics { heading() })
+        }
+        if (notice.kind == NativeAccountNoticeKind.PAYMENT_FAILED_GRACE && notice.deadline != null) {
+            Text(stringResource(body, formatNoticeDate(notice.deadline)))
+        } else {
+            Text(stringResource(if (notice.kind == NativeAccountNoticeKind.PAYMENT_FAILED_GRACE) R.string.peppy_play_grace_body_nodate else body))
+        }
+        if (notice.kind in setOf(
+                NativeAccountNoticeKind.PAYMENT_FAILED_GRACE,
+                NativeAccountNoticeKind.ENDING_SCHEDULED,
+                NativeAccountNoticeKind.READ_ONLY_PAST_DUE,
+            )
+        ) {
+            TextButton(
+                onClick = onManage,
+                modifier = Modifier.testTag("play-access-action").semantics {
+                    contentDescription = manageDescription
+                },
+            ) {
+                Text(stringResource(
+                    if (notice.kind == NativeAccountNoticeKind.ENDING_SCHEDULED) {
+                        R.string.peppy_play_resubscribe_cta
+                    } else {
+                        R.string.peppy_play_fix_payment_cta
+                    },
+                ))
+            }
+        }
+    }
+}
+
+private fun formatNoticeDate(deadline: Long?): String =
+    deadline?.let { DateFormat.getDateInstance().format(Date(it * 1_000)) }.orEmpty()

@@ -7,6 +7,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsActions
@@ -15,6 +16,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performSemanticsAction
 import dev.peppy.mobile.account.HostedAccountDeletionEntry
 import dev.peppy.mobile.account.PLAY_SUBSCRIPTIONS_URL
+import dev.peppy.mobile.billing.PlayDeletionContext
 import dev.peppy.mobile.testing.ComposeTestActivityRule
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -102,6 +104,60 @@ class HostedBillingAndDeletionComposeTest {
         }
         compose.onNodeWithTag("delete-direct").performSemanticsAction(SemanticsActions.OnClick)
         compose.onNodeWithTag("account-delete-sheet-view-subscription").assertDoesNotExist()
+    }
+
+    @Test fun playManagedDeletionOpensGooglePlayInsteadOfTheSubscriptionPanel() {
+        val opened = AtomicInteger()
+        val panelActions = AtomicInteger()
+        compose.setContent {
+            MaterialTheme {
+                HostedAccountDeletionEntry(
+                    tag = "delete-play-managed",
+                    onOpenFailed = {},
+                    onViewSubscription = { panelActions.incrementAndGet() },
+                    isPlay = true,
+                    playManaged = true,
+                    openPlaySubscriptions = { opened.incrementAndGet(); true },
+                )
+            }
+        }
+        compose.onNodeWithTag("delete-play-managed").performSemanticsAction(SemanticsActions.OnClick)
+        compose.onNodeWithTag("account-delete-play-cancel").performSemanticsAction(SemanticsActions.OnClick)
+        compose.runOnIdle {
+            assertEquals(0, panelActions.get())
+            assertEquals(1, opened.get())
+        }
+    }
+
+    @Test fun hostedDeletionEntryUsesVerifiedPlayBillingContext() {
+        compose.setContent {
+            MaterialTheme {
+                HostedEnrollmentDeletionEntry(
+                    openDeletion = { false },
+                    playDeletionContext = PlayDeletionContext(true, "peppy.monthly"),
+                )
+            }
+        }
+
+        compose.onNodeWithTag("hosted-delete-account-button").performSemanticsAction(SemanticsActions.OnClick)
+        compose.onNodeWithTag("account-delete-play-cancel").fetchSemanticsNode()
+        compose.onNodeWithTag("account-delete-sheet-view-subscription").assertDoesNotExist()
+    }
+
+    @Test fun reactiveDeletionContextShowsPlayManagementAfterProviderIsVerified() {
+        compose.setContent {
+            MaterialTheme {
+                var deletionContext by remember { mutableStateOf(PlayDeletionContext(false, null)) }
+                SideEffect { deletionContext = PlayDeletionContext(true, "peppy.monthly") }
+                HostedEnrollmentDeletionEntry(
+                    openDeletion = { false },
+                    playDeletionContext = deletionContext,
+                )
+            }
+        }
+
+        compose.onNodeWithTag("hosted-delete-account-button").performSemanticsAction(SemanticsActions.OnClick)
+        compose.onNodeWithTag("account-delete-play-cancel").fetchSemanticsNode()
     }
 
     @Test fun playDeletionWithoutCallbackOpensTrustedSubscriptionListAndClosesSheet() {

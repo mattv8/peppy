@@ -72,6 +72,7 @@ import dev.peppy.mobile.about.LicensesScreen
 import dev.peppy.mobile.about.PRIVACY_URL
 import dev.peppy.mobile.about.ThirdPartyNotices
 import dev.peppy.mobile.account.HostedAccountDeletionEntry
+import dev.peppy.mobile.billing.PlayDeletionContext
 import dev.peppy.mobile.attachments.AttachmentStorageCapacityNotice
 import dev.peppy.mobile.attachments.AttachmentStorageLoad
 import dev.peppy.mobile.attachments.AttachmentStorageSettingsController
@@ -109,6 +110,7 @@ internal fun GatewayAccountSettings(
     attachmentStorageLoader: (Context, GatewayAccountHost.AttachmentStorageScope) -> AttachmentStorageLoad? = GatewayAccountHost::loadAttachmentStorage,
     thirdPartyNoticesLoader: (Context) -> ThirdPartyNotices? = { AssetThirdPartyNotices.openOrNull(it.assets) },
     onRouteChanged: () -> Unit = {},
+    playDeletionContext: PlayDeletionContext = PlayDeletionContext(false, null),
 ) {
     val context = LocalContext.current
     val resources = LocalResources.current
@@ -470,6 +472,8 @@ internal fun GatewayAccountSettings(
                 includeVaultDistinction = account?.self?.role == "owner",
                 onOpenFailed = { failure = resources.getString(R.string.peppy_toggle_android_link_unavailable) },
                 onViewSubscription = onOpenSubscription,
+                playManaged = playDeletionContext.managed,
+                playProductId = playDeletionContext.productId,
             )
         }
         if (settingsMode && account?.self?.role == "owner") Section("settings-group-danger", stringResource(R.string.peppy_toggle_android_settings_danger)) {
