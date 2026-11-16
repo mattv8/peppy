@@ -21,6 +21,7 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import dev.peppy.mobile.MainActivity
 import dev.peppy.mobile.RcsSendWake
+import dev.peppy.mobile.RemoteMessagingRuntime
 import dev.peppy.mobile.R
 import dev.peppy.mobile.GatewayWork
 import dev.peppy.mobile.GatewayEnqueueCause
@@ -65,6 +66,7 @@ internal data class ServiceTestHooks(
         NativeGateway.session(context)?.let { TypingCredentials(it.origin, it.bearerToken, it.deviceId, it.generation) }
     },
     val typingExecutor: Executor = DEFAULT_TYPING_EXECUTOR,
+    val peersPresent: () -> Boolean? = RemoteMessagingRuntime::peersPresent,
 )
 
 private val DEFAULT_NOTIFICATION_EXECUTOR = Executors.newSingleThreadExecutor()
@@ -102,6 +104,8 @@ class GoogleMessagesLinkService : Service() {
     private lateinit var mediaQueue: RcsMediaTransferQueue
     private lateinit var typingBridge: TypingBridge
     private var typingRetirementListener: (() -> Unit)? = null
+    @Volatile private var typingStoppedForPeers = false
+    private val runtimePeersListener: () -> Unit = { requestLiveTypingUpdate() }
     private var eligibilityPublisher: RcsEligibilityPublisher? = null
     private val eligibilityLock = Any()
     private var eligibilityDirty = false
@@ -194,6 +198,7 @@ class GoogleMessagesLinkService : Service() {
         typingBridge = testHooks.typingBridgeFactory(applicationContext)
         TypingReceiveSinkRegistry.sink = typingBridge
         lifecycleGeneration = replaceActive(this)
+        RemoteMessagingRuntime.peersListener = runtimePeersListener
         (getSystemService(ConnectivityManager::class.java))?.let {
             it.registerDefaultNetworkCallback(networkCallback)
             networkCallbackRegistered = true
@@ -220,7 +225,9 @@ class GoogleMessagesLinkService : Service() {
         typingRetirementListener?.invoke()
         typingRetirementListener = null
         typingBridge.stop()
+        typingStoppedForPeers = false
         if (TypingReceiveSinkRegistry.sink === typingBridge) TypingReceiveSinkRegistry.sink = null
+        if (RemoteMessagingRuntime.peersListener === runtimePeersListener) RemoteMessagingRuntime.peersListener = null
         blockedSendRetry.stop()
         nativeRcsSendWork.stop()
         mediaRcsSendWork.stop()
@@ -860,8 +867,19 @@ class GoogleMessagesLinkService : Service() {
                 return@execute
             }
             val credentials = testHooks.typingSession(applicationContext)
+            val peers = testHooks.peersPresent()
             if (!isCurrent(generation)) return@execute
-            if (credentials == null) typingBridge.stop() else typingBridge.start(credentials)
+            when {
+                credentials == null -> typingBridge.stop()
+                peers == false -> if (!typingStoppedForPeers) {
+                    typingStoppedForPeers = true
+                    typingBridge.stop()
+                }
+                else -> {
+                    typingStoppedForPeers = false
+                    typingBridge.start(credentials)
+                }
+            }
         }
     }
 

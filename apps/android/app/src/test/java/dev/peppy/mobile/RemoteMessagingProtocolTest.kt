@@ -56,6 +56,36 @@ class RemoteMessagingProtocolTest {
         assertFalse("blank device ID", RemoteMessagingProtocol.isOwnEvent(ownEvent, ""))
     }
 
+    @Test fun helloRequestsAdaptiveKeepaliveAlongsideVersionAndCursor() {
+        val hello = JSONObject(RemoteMessagingProtocol.hello("42"))
+        assertEquals("adaptive", hello.getString("keepalive"))
+        assertEquals(1, hello.getInt("protocol_version"))
+        assertEquals("42", hello.getString("resume_cursor"))
+    }
+
+    @Test fun keepaliveReadsReadyObjectAndKeepaliveFrames() {
+        assertEquals(RemoteMessagingProtocol.Keepalive(20_000, true), RemoteMessagingProtocol.keepalive("""{"type":"ready","keepalive":{"interval_ms":20000,"peers":true}}"""))
+        assertEquals(RemoteMessagingProtocol.Keepalive(50_000, false), RemoteMessagingProtocol.keepalive("""{"type":"keepalive","interval_ms":50000,"peers":false}"""))
+    }
+
+    @Test fun keepaliveIsNullWhenAbsentMalformedOrOutOfBounds() {
+        assertNull("ready without keepalive", RemoteMessagingProtocol.keepalive("""{"type":"ready","frame_types":["event"],"protocol_version":1}"""))
+        assertNull("event frame", RemoteMessagingProtocol.keepalive("""{"type":"event","keepalive":{"interval_ms":20000,"peers":true}}"""))
+        assertNull("missing peers", RemoteMessagingProtocol.keepalive("""{"type":"keepalive","interval_ms":20000}"""))
+        assertNull("string peers", RemoteMessagingProtocol.keepalive("""{"type":"keepalive","interval_ms":20000,"peers":"true"}"""))
+        assertNull("string interval", RemoteMessagingProtocol.keepalive("""{"type":"keepalive","interval_ms":"20000","peers":true}"""))
+        assertNull("interval 4999", RemoteMessagingProtocol.keepalive("""{"type":"keepalive","interval_ms":4999,"peers":true}"""))
+        assertEquals(RemoteMessagingProtocol.Keepalive(5_000, true), RemoteMessagingProtocol.keepalive("""{"type":"keepalive","interval_ms":5000,"peers":true}"""))
+        assertEquals(RemoteMessagingProtocol.Keepalive(600_000, true), RemoteMessagingProtocol.keepalive("""{"type":"keepalive","interval_ms":600000,"peers":true}"""))
+        assertNull("interval 600001", RemoteMessagingProtocol.keepalive("""{"type":"keepalive","interval_ms":600001,"peers":true}"""))
+        assertNull("malformed JSON", RemoteMessagingProtocol.keepalive("{"))
+        assertNull("oversized frame", RemoteMessagingProtocol.keepalive("""{"type":"keepalive","interval_ms":20000,"peers":true,"padding":"${"x".repeat(70_000)}"}"""))
+    }
+
+    @Test fun keepaliveFramesAreNotSyncHints() {
+        assertFalse(RemoteMessagingProtocol.shouldSync("""{"type":"keepalive","interval_ms":20000,"peers":true}"""))
+    }
+
     @Test fun reconnectDelayIsBoundedAndJittered() {
         assertEquals(1_000L, RemoteMessagingBackoff.delayMs(0, 0.0))
         assertEquals(30_000L, RemoteMessagingBackoff.delayMs(99, 0.0))
