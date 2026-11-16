@@ -369,10 +369,13 @@ This reference records non-obvious Peppy domain constraints.
   held the lock for seconds per pass. Keep `payload_photo_ids` and
   `resolve_payload` enumerating the same slots. See
   [contact media](../crates/client-core/src/contact_media.rs).
-- Battery and timing rules for the Android host: the 25 s socket ping, the
-  15-minute periodic work, observer debounce, and zero-delay observer capture
-  are delivery timing and stay fixed; reduce cost by removing duplicate
-  scheduling and repeated work, not by delaying. Known fixed causes: a relay
+- Battery and timing rules for the Android host: the 15-minute periodic
+  work, observer debounce, and zero-delay observer capture are delivery
+  timing and stay fixed; reduce cost by removing duplicate scheduling and
+  repeated work, not by delaying. The socket keepalive follows the server
+  (see the keepalive rule below): 20 s while another non-Android device of
+  the vault is connected, 50 s when the phone is alone. Do not slow it
+  while such a device is connected. Known fixed causes: a relay
   reconnect that double-scheduled the gateway, a capture→gateway→capture
   loop now gated by a durable `CAPTURE_HINT_PENDING` flag, MMS deferred
   previews re-copied every pass (now re-settled only when the quota has
@@ -400,11 +403,52 @@ This reference records non-obvious Peppy domain constraints.
   [index revalidation](ops/google-messages-link-triage.md#conversation-index-revalidation)
   for its rules and its accepted routing risk. The loops were measured on
   one Pixel 7 on 2026-11-14 (3,322 gateway enqueues, 3,030 single-envelope
-  uploads, and 623 conversation list requests in 6.5 idle hours). The effect
-  of the fixes on a device is not established. See
+  uploads, and 623 conversation list requests in 6.5 idle hours). A second
+  measurement on 2026-11-16 (0.34.3) showed those three down to 8 enqueues,
+  7 uploads, and 16 list requests per hour, and found the next loop: the
+  receive sweep re-fetched history after every reopen (1,607 message list
+  requests in 3 h 41 min). The sweep now ends a walk at the first page whose
+  newest message of any kind is below the recovery floor, and skips a chat
+  whose index activity equals the value at its last completed sweep; see
+  [receive sweep](ops/google-messages-link-triage.md#receive-sweep) for its
+  rules and its accepted risk. The effect of the sweep change on a device
+  is not established. See
   [socket service](../apps/android/app/src/main/java/dev/peppy/mobile/RemoteMessagingService.kt),
-  [eligibility constants](../crates/client-core/src/rcs_capability.rs), and
-  [conversation index](../apps/android/googlemessages/gmlink/conversations.go).
+  [eligibility constants](../crates/client-core/src/rcs_capability.rs),
+  [conversation index](../apps/android/googlemessages/gmlink/conversations.go),
+  and [receive coordinator](../apps/android/app/src/gmlink/java/dev/peppy/mobile/googlemessages/RcsReceiveCoordinator.kt).
+- Socket keepalive on `/v1/ws` is negotiated. A client that sends
+  `"keepalive":"adaptive"` in its hello (only Android does) gets
+  `keepalive: {interval_ms, peers}` in the ready frame and a `keepalive`
+  text frame after every server Ping and whenever `peers` changes. `peers`
+  is true while another device of the vault that is not revoked and not
+  `android` has a responsive socket. With peers the server pings every 20 s
+  and renews a 60 s presence lease; without, every 50 s with a 120 s lease.
+  The 50 s interval is used only while the socket's lease was written at
+  120 s (`heartbeat_delay`): a lone socket is pinged at once after ready,
+  again 20 s later, then every 50 s, and one 20 s interval follows a peer
+  leaving. The presence row starts with a 60 s lease, any later `open`
+  deletes expired rows, and a renew never re-inserts one, so an interval
+  longer than the lease in force can hide a live socket until it
+  reconnects. A keepalive frame never reports an interval shorter than the
+  time to the next frame; the phone's dead-socket limit depends on it. A
+  socket that does not ask is unchanged. 50 s stays under the 60 s idle timeout of
+  a default nginx in front of a self-hosted server. On a server that
+  supports this, the phone sends no ping of its own (in either mode) and
+  reconnects after `2 * interval + 10 s` without an inbound text frame,
+  checked on a `delay` timer and on every wake through
+  `RemoteMessagingService.startIfEligible`; never replace that timer with an
+  alarm or a wakelock. After 60 s without peers the phone closes its
+  `/v1/live` typing socket, and reopens it at once when a peer connects.
+  The peer rule relies on Android having no typing display or origin of its
+  own; revisit it if that changes. The keepalive wakeups were measured on
+  one Pixel 7 on 2026-11-16 (1,956 Wi-Fi wakeups in 24 h, median 16.6 s
+  apart, from two sockets). The effect of the change on a device is not
+  established. See
+  [socket session](../services/server/src/api.rs) (`ws_session_inner`,
+  `KeepaliveMode`), [presence](../services/server/src/presence.rs)
+  (`peer_connected`), and
+  [socket service](../apps/android/app/src/main/java/dev/peppy/mobile/RemoteMessagingService.kt).
 - Encrypted media is published with an atomic no-replace rename first;
   SELinux denies `hard_link` for app data on current Android, so the link
   path is a fallback, not the primary. See
