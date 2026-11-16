@@ -332,7 +332,12 @@ fn archived_conversation_still_yields_a_banner_candidate() {
         .capture_incoming_broadcast(
             incoming("old", "folder-banner-archived-1"),
             None,
-            Some(1_000),
+            Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as i64,
+            ),
         )
         .unwrap()
         .conversation_id;
@@ -360,7 +365,12 @@ fn archived_conversation_still_yields_a_banner_candidate() {
                 ..incoming("new", "folder-banner-archived-2")
             },
             None,
-            Some(2_000),
+            Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as i64,
+            ),
         )
         .unwrap();
     server.upload(&writer);

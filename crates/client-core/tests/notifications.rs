@@ -60,9 +60,87 @@ fn capture(key: &str, instance: &str, text: &str) -> NotificationCapture {
         title: "Subject".into(),
         text: text.into(),
         category: None,
-        posted_at: 42,
+        posted_at: now_ms(),
         dismissible: true,
     }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+#[test]
+fn old_message_stays_unread_without_a_banner_while_fresh_unknown_and_future_messages_banner() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone = unlocked(&config(&dir, "age-phone", &vault), &vault);
+    let desktop = unlocked(&config(&dir, "age-desktop", &vault), &vault);
+    let mut server = Server::default();
+    let old = phone
+        .capture_incoming_broadcast(
+            incoming("old", "age-old"),
+            None,
+            Some(now_ms() - 15 * 60 * 1000 - 1),
+        )
+        .unwrap();
+    phone
+        .capture_incoming_broadcast(incoming("fresh", "age-fresh"), None, Some(now_ms()))
+        .unwrap();
+    phone
+        .capture_incoming(incoming("unknown", "age-unknown"))
+        .unwrap();
+    phone
+        .capture_incoming_broadcast(incoming("future", "age-future"), None, Some(now_ms() + 1))
+        .unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+
+    let old_message = desktop
+        .messages(old.conversation_id)
+        .unwrap()
+        .into_iter()
+        .find(|message| message.payload.record.message_id == old.message_id)
+        .unwrap();
+    assert!(!old_message.seen);
+    let bodies: Vec<_> = desktop
+        .pending_banner_candidates(10)
+        .unwrap()
+        .into_iter()
+        .map(|candidate| candidate.body)
+        .collect();
+    assert_eq!(bodies.len(), 3);
+    assert!(!bodies.contains(&"old".to_owned()));
+    assert!(bodies.contains(&"fresh".to_owned()));
+    assert!(bodies.contains(&"unknown".to_owned()));
+    assert!(bodies.contains(&"future".to_owned()));
+}
+
+#[test]
+fn old_first_post_notification_does_not_banner_but_a_fresh_one_does() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone = unlocked(&config(&dir, "age-notification-phone", &vault), &vault);
+    let desktop = unlocked(&config(&dir, "age-notification-desktop", &vault), &vault);
+    let mut server = Server::default();
+    let mut old = capture("age-old", "one", "old");
+    old.posted_at = now_ms() - 15 * 60 * 1000 - 1;
+    phone.capture_notification(old).unwrap();
+    phone
+        .capture_notification(capture("age-fresh", "one", "fresh"))
+        .unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+
+    let bodies: Vec<_> = desktop
+        .pending_banner_candidates(10)
+        .unwrap()
+        .into_iter()
+        .map(|candidate| candidate.body)
+        .collect();
+    assert_eq!(bodies, ["fresh"]);
 }
 
 #[test]
@@ -357,8 +435,9 @@ fn icon_refresh_keeps_post_time_seen_state_and_single_banner() {
     let phone = unlocked(&config(&dir, "refresh-phone", &vault), &vault);
     let desktop = unlocked(&config(&dir, "refresh-desktop", &vault), &vault);
     let mut server = Server::default();
+    let posted_at = now_ms();
     let mut first = capture("refresh", "one", "body");
-    first.posted_at = 77;
+    first.posted_at = posted_at;
     phone.capture_notification(first).unwrap();
     server.upload(&phone);
     server.sync(&desktop);
@@ -372,7 +451,7 @@ fn icon_refresh_keeps_post_time_seen_state_and_single_banner() {
         .mark_notifications_seen(vec![original.target.clone()])
         .unwrap();
     let mut refresh = capture("refresh", "two", "body");
-    refresh.posted_at = 77;
+    refresh.posted_at = posted_at;
     refresh.app_icon_png_base64 = Some("iVBORw0KGgoAAAANSUhEUgAAACAAAAAg".into());
     phone.capture_notification(refresh).unwrap();
     server.upload(&phone);
@@ -383,7 +462,7 @@ fn icon_refresh_keeps_post_time_seen_state_and_single_banner() {
         .notifications
         .remove(0);
     assert_eq!(updated.target.lifetime, original.target.lifetime);
-    assert_eq!(updated.posted_at, 77);
+    assert_eq!(updated.posted_at, posted_at);
     assert!(updated.seen);
     assert!(updated.app_icon_png_base64.is_some());
     assert!(desktop.pending_banner_candidates(10).unwrap().is_empty());
@@ -396,8 +475,9 @@ fn unseen_icon_refresh_does_not_create_another_banner() {
     let phone = unlocked(&config(&dir, "unseen-refresh-phone", &vault), &vault);
     let desktop = unlocked(&config(&dir, "unseen-refresh-desktop", &vault), &vault);
     let mut server = Server::default();
+    let posted_at = now_ms();
     let mut first = capture("refresh", "one", "body");
-    first.posted_at = 77;
+    first.posted_at = posted_at;
     phone.capture_notification(first).unwrap();
     server.upload(&phone);
     server.sync(&desktop);
@@ -407,7 +487,7 @@ fn unseen_icon_refresh_does_not_create_another_banner() {
         .unwrap();
 
     let mut refresh = capture("refresh", "two", "body");
-    refresh.posted_at = 77;
+    refresh.posted_at = posted_at;
     refresh.app_icon_png_base64 = Some("iVBORw0KGgoAAAANSUhEUgAAACAAAAAg".into());
     phone.capture_notification(refresh).unwrap();
     server.upload(&phone);
@@ -419,7 +499,7 @@ fn unseen_icon_refresh_does_not_create_another_banner() {
         .notifications
         .remove(0);
     assert!(!updated.seen);
-    assert_eq!(updated.posted_at, 77);
+    assert_eq!(updated.posted_at, posted_at);
     assert!(desktop.pending_banner_candidates(10).unwrap().is_empty());
 }
 

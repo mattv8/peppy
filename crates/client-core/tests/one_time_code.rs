@@ -101,7 +101,10 @@ fn capture_notification(
             title: title.into(),
             text: text.into(),
             category: None,
-            posted_at: 42,
+            posted_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64,
             dismissible: true,
         })
         .unwrap();
