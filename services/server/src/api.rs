@@ -5350,6 +5350,8 @@ mod close {
 }
 const WS_PROTOCOL_VERSION: u64 = 1;
 const WS_REPLAY_PAGE: i64 = 100;
+/// Presence lease for adaptive sockets while no other device is responsive.
+const WS_IDLE_LEASE_SECONDS: i64 = 120;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HeartbeatAction {
@@ -5363,6 +5365,93 @@ fn heartbeat_action(has_outstanding_challenge: bool) -> HeartbeatAction {
     } else {
         HeartbeatAction::SendChallenge
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeepaliveMode {
+    Fast,
+    Idle,
+}
+
+impl KeepaliveMode {
+    fn interval(self, options: &TransportOptions) -> Duration {
+        match self {
+            Self::Fast => options.heartbeat_interval,
+            Self::Idle => options.idle_heartbeat_interval,
+        }
+    }
+
+    fn lease_seconds(self) -> i64 {
+        match self {
+            Self::Fast => crate::presence::LEASE_SECONDS,
+            Self::Idle => WS_IDLE_LEASE_SECONDS,
+        }
+    }
+}
+
+fn keepalive_mode(adaptive: bool, peers: bool) -> KeepaliveMode {
+    if adaptive && !peers {
+        KeepaliveMode::Idle
+    } else {
+        KeepaliveMode::Fast
+    }
+}
+
+/// Delay before the next heartbeat challenge. The idle interval is used only while this
+/// socket's current lease was written at the idle length; otherwise the lease (60 s, or 120 s
+/// after an idle renewal) could expire before the idle tick and hide a live socket.
+fn heartbeat_delay(
+    mode: KeepaliveMode,
+    idle_lease_held: bool,
+    options: &TransportOptions,
+) -> Duration {
+    match mode {
+        KeepaliveMode::Idle if idle_lease_held => mode.interval(options),
+        _ => KeepaliveMode::Fast.interval(options),
+    }
+}
+
+/// A failed peer lookup selects fast mode (`peers` true) and is logged.
+fn peers_or_fast(lookup: Result<bool, sqlx::Error>) -> bool {
+    lookup.unwrap_or_else(|error| {
+        crate::presence::warn_unavailable("peer_lookup", &error);
+        true
+    })
+}
+
+async fn current_keepalive_peers(state: &ApiState, principal: &Principal) -> bool {
+    peers_or_fast(
+        crate::presence::peer_connected(&state.db, principal.vault, principal.device).await,
+    )
+}
+
+async fn refresh_keepalive_peers(
+    socket: &mut WebSocket,
+    state: &ApiState,
+    principal: &Principal,
+    options: &TransportOptions,
+    peers: &mut bool,
+    recheck: &mut std::pin::Pin<Box<tokio::time::Sleep>>,
+) -> Result<(), WsStop> {
+    let updated_peers = current_keepalive_peers(state, principal).await;
+    if updated_peers == *peers {
+        return Ok(());
+    }
+    let was_peers = *peers;
+    *peers = updated_peers;
+    let mode = keepalive_mode(true, updated_peers);
+    send_keepalive_frame(socket, options, mode.interval(options), updated_peers).await?;
+    if !was_peers && updated_peers {
+        // Outstanding-challenge rule at a pull-in: the next tick is at most FAST away and
+        // applies the ordinary rule. A challenge sent in idle mode that is still unanswered
+        // then disconnects the socket, the same allowance a fast-mode socket gets. The frame
+        // above reports the interval of the new mode; the real next frame is no later.
+        let deadline = tokio::time::Instant::now() + KeepaliveMode::Fast.interval(options);
+        if deadline < recheck.deadline() {
+            recheck.as_mut().reset(deadline);
+        }
+    }
+    Ok(())
 }
 
 async fn ws_close(socket: &mut WebSocket, code: u16, reason: &'static str) {
@@ -5408,7 +5497,7 @@ enum HelloError {
 
 /// Reads the client hello within the configured timeout. Pings and pongs are
 /// ignored; any other frame is a protocol error.
-async fn read_hello(socket: &mut WebSocket, timeout: Duration) -> Result<i64, HelloError> {
+async fn read_hello(socket: &mut WebSocket, timeout: Duration) -> Result<(i64, bool), HelloError> {
     use HelloError::Rejected;
     let deadline = tokio::time::Instant::now() + timeout;
     let text = loop {
@@ -5436,11 +5525,15 @@ async fn read_hello(socket: &mut WebSocket, timeout: Duration) -> Result<i64, He
         }
         None => return Err(Rejected(close::INVALID_HELLO, "invalid_hello")),
     }
-    hello
+    let cursor = hello
         .get("resume_cursor")
         .and_then(Value::as_str)
         .and_then(|cursor| sync::parse_cursor(cursor).ok())
-        .ok_or(Rejected(close::INVALID_HELLO, "invalid_hello"))
+        .ok_or(Rejected(close::INVALID_HELLO, "invalid_hello"))?;
+    Ok((
+        cursor,
+        hello.get("keepalive").and_then(Value::as_str) == Some("adaptive"),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5477,13 +5570,14 @@ async fn ws_session_inner(
     mut shutdown: Option<tokio::sync::watch::Receiver<bool>>,
 ) {
     let options = Arc::clone(&state.options);
-    let mut cursor = match read_hello(&mut socket, options.hello_timeout).await {
-        Ok(cursor) => cursor,
-        Err(HelloError::Disconnected) => return,
-        Err(HelloError::Rejected(code, reason)) => {
-            return ws_close(&mut socket, code, reason).await;
-        }
-    };
+    let (mut cursor, adaptive_keepalive) =
+        match read_hello(&mut socket, options.hello_timeout).await {
+            Ok(hello) => hello,
+            Err(HelloError::Disconnected) => return,
+            Err(HelloError::Rejected(code, reason)) => {
+                return ws_close(&mut socket, code, reason).await;
+            }
+        };
     if authorize(&state, &principal, Operation::Sync)
         .await
         .is_err()
@@ -5499,9 +5593,10 @@ async fn ws_session_inner(
             return WsStop::Database.close(&mut socket).await;
         }
     };
+    let mut peers = adaptive_keepalive && current_keepalive_peers(&state, &principal).await;
     // Negotiation acknowledgment: the server's version, the accepted resume
     // point and current watermarks, then replay frames follow.
-    let ready = json!({
+    let mut ready = json!({
         "type": "ready",
         "protocol_version": WS_PROTOCOL_VERSION,
         "resume_cursor": cursor.to_string(),
@@ -5509,6 +5604,15 @@ async fn ws_session_inner(
         "replay_floor_cursor": replay_floor.to_string(),
         "frame_types": ["ready", "event", "resync_required", "presence_changed", "drafts_changed"],
     });
+    if adaptive_keepalive {
+        ready["keepalive"] = json!({
+            "interval_ms": keepalive_mode(adaptive_keepalive, peers).interval(&options).as_millis() as u64,
+            "peers": peers,
+        });
+        if let Some(frame_types) = ready["frame_types"].as_array_mut() {
+            frame_types.push(json!("keepalive"));
+        }
+    }
     if let Err(stop) = send_frame(&mut socket, ready.to_string(), options.send_timeout).await {
         return stop.close(&mut socket).await;
     }
@@ -5535,8 +5639,10 @@ async fn ws_session_inner(
     };
     // A pending row is intentionally not advertised; the first challenge Pong
     // performs the connected transition.
-    let mut recheck = tokio::time::interval(Duration::from_secs(20));
+    let mut recheck = Box::pin(tokio::time::sleep(Duration::ZERO));
     let mut challenge: Option<Vec<u8>> = None;
+    // `open` wrote a 60 s lease, so no idle-length lease exists until a renewal at the idle length.
+    let mut idle_lease_held = false;
     // Broadcast is only a latency hint; committed rows are the durable source.
     let mut durable_replay = tokio::time::interval(options.durable_replay_interval);
     durable_replay.tick().await;
@@ -5545,33 +5651,52 @@ async fn ws_session_inner(
     loop {
         let stop = tokio::select! {
             _ = wait_for_shutdown(&mut shutdown) => WsStop::Disconnected,
-            _ = recheck.tick() => match still_active(&state, &principal).await {
-                Ok(true) => {
-                    if authorize(&state, &principal, Operation::Sync).await.is_err() {
-                        WsStop::PolicyDenied
-                    } else {
-                        match heartbeat_action(challenge.is_some()) {
-                            HeartbeatAction::Disconnect => WsStop::Disconnected,
-                            HeartbeatAction::SendChallenge => {
-                            let token = Uuid::new_v4().as_bytes().to_vec();
-                            match tokio::time::timeout(options.send_timeout, socket.send(Message::Ping(token.clone().into()))).await {
-                                Ok(Ok(())) => {
-                                    challenge = Some(token);
-                                    continue;
+            _ = &mut recheck => {
+                if adaptive_keepalive {
+                    peers = current_keepalive_peers(&state, &principal).await;
+                }
+                match still_active(&state, &principal).await {
+                    Ok(true) => {
+                        if authorize(&state, &principal, Operation::Sync).await.is_err() {
+                            WsStop::PolicyDenied
+                        } else {
+                            match heartbeat_action(challenge.is_some()) {
+                                HeartbeatAction::Disconnect => WsStop::Disconnected,
+                                HeartbeatAction::SendChallenge => {
+                                    let token = Uuid::new_v4().as_bytes().to_vec();
+                                    match tokio::time::timeout(options.send_timeout, socket.send(Message::Ping(token.clone().into()))).await {
+                                        Ok(Ok(())) => {
+                                            challenge = Some(token);
+                                            // The keepalive frame reports the delay armed here,
+                                            // so a reported interval is never shorter than the real gap.
+                                            let delay = heartbeat_delay(
+                                                keepalive_mode(adaptive_keepalive, peers),
+                                                idle_lease_held,
+                                                &options,
+                                            );
+                                            if adaptive_keepalive
+                                                && let Err(stop) = send_keepalive_frame(&mut socket, &options, delay, peers).await
+                                            {
+                                                stop
+                                            } else {
+                                                recheck.as_mut().reset(tokio::time::Instant::now() + delay);
+                                                continue;
+                                            }
+                                        }
+                                        Ok(Err(_)) | Err(_) => WsStop::Disconnected,
+                                    }
                                 }
-                                Ok(Err(_)) | Err(_) => WsStop::Disconnected,
-                            }
                             }
                         }
                     }
-                },
-                Ok(false) => {
-                    if presence_active { close_presence(&state, &principal, connection_id).await; }
-                    return ws_close(&mut socket, close::REVOKED, "revoked").await
-                },
-                Err(error) => {
-                    tracing::warn!(error_kind = %error, "websocket revocation recheck failed");
-                    WsStop::Database
+                    Ok(false) => {
+                        if presence_active { close_presence(&state, &principal, connection_id).await; }
+                        return ws_close(&mut socket, close::REVOKED, "revoked").await
+                    }
+                    Err(error) => {
+                        tracing::warn!(error_kind = %error, "websocket revocation recheck failed");
+                        WsStop::Database
+                    }
                 }
             },
             _ = durable_replay.tick() => match send_replay(&mut socket, &state, &principal, &mut cursor).await {
@@ -5593,6 +5718,9 @@ async fn ws_session_inner(
                 Some(Ok(Message::Pong(payload))) => {
                     if challenge.as_ref().is_some_and(|token| token.as_slice() == payload.as_ref()) {
                         challenge = None;
+                        let lease_mode = keepalive_mode(adaptive_keepalive, peers);
+                        // Only a committed renewal at the idle length earns the idle interval.
+                        idle_lease_held = false;
                         if presence_active
                             && let Ok(mut tx) = scope::begin(&state.db, principal.vault).await
                             && let Ok(changed) = crate::presence::renew(
@@ -5600,12 +5728,15 @@ async fn ws_session_inner(
                                 principal.vault,
                                 principal.device,
                                 connection_id,
+                                lease_mode.lease_seconds(),
                             )
                             .await
                             && tx.commit().await.is_ok()
-                            && changed
                         {
-                            let _ = state.presence_changed.send(principal.vault);
+                            idle_lease_held = lease_mode == KeepaliveMode::Idle;
+                            if changed {
+                                let _ = state.presence_changed.send(principal.vault);
+                            }
                         }
                     }
                     continue
@@ -5635,11 +5766,35 @@ async fn ws_session_inner(
             },
             presence = presence_notices.recv() => match presence {
                 Ok(vault) if vault == principal.vault => {
-                    if send_frame(&mut socket, json!({"type":"presence_changed"}).to_string(), options.send_timeout).await.is_err() {
-                        WsStop::Disconnected
-                    } else { continue }
+                    let refreshed = if adaptive_keepalive {
+                        refresh_keepalive_peers(
+                            &mut socket, &state, &principal, &options, &mut peers, &mut recheck,
+                        ).await
+                    } else {
+                        Ok(())
+                    };
+                    match refreshed {
+                        Err(stop) => stop,
+                        Ok(()) => {
+                            if send_frame(&mut socket, json!({"type":"presence_changed"}).to_string(), options.send_timeout).await.is_err() {
+                                WsStop::Disconnected
+                            } else {
+                                continue
+                            }
+                        }
+                    }
                 }
-                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) if adaptive_keepalive => {
+                    if let Err(stop) = refresh_keepalive_peers(
+                        &mut socket, &state, &principal, &options, &mut peers, &mut recheck,
+                    ).await {
+                        stop
+                    } else {
+                        continue
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     if presence_active { close_presence(&state, &principal, connection_id).await; }
                     return
@@ -5729,6 +5884,29 @@ async fn send_frame(
         Err(_) => Err(WsStop::Backpressure),
     }
 }
+
+/// Sends a keepalive frame. Invariant: a reported interval is never shorter than the time to
+/// the next frame. Clients treat `2 * interval_ms + 10 s` of silence as a dead socket, so a
+/// frame reports the delay actually armed for the next Ping, or the mode's interval where the
+/// next frame is only pulled in no later than that interval.
+async fn send_keepalive_frame(
+    socket: &mut WebSocket,
+    options: &TransportOptions,
+    interval: Duration,
+    peers: bool,
+) -> Result<(), WsStop> {
+    send_frame(
+        socket,
+        json!({
+            "type": "keepalive",
+            "interval_ms": interval.as_millis() as u64,
+            "peers": peers,
+        })
+        .to_string(),
+        options.send_timeout,
+    )
+    .await
+}
 /// Sends every retained committed row after `cursor`, page by page, from the
 /// durable log. Any retention or rollback mismatch becomes a typed resync.
 async fn send_replay(
@@ -5811,6 +5989,41 @@ mod tests {
     fn heartbeat_disconnects_before_replacing_an_unanswered_challenge() {
         assert_eq!(heartbeat_action(false), HeartbeatAction::SendChallenge);
         assert_eq!(heartbeat_action(true), HeartbeatAction::Disconnect);
+    }
+
+    #[test]
+    fn keepalive_mode_keeps_legacy_and_lookup_errors_fast() {
+        assert_eq!(keepalive_mode(false, false), KeepaliveMode::Fast);
+        assert_eq!(keepalive_mode(false, true), KeepaliveMode::Fast);
+        assert_eq!(keepalive_mode(true, false), KeepaliveMode::Idle);
+        assert_eq!(keepalive_mode(true, true), KeepaliveMode::Fast);
+        assert!(peers_or_fast(Err(sqlx::Error::PoolTimedOut)));
+        assert!(!peers_or_fast(Ok(false)));
+        assert!(peers_or_fast(Ok(true)));
+    }
+
+    #[test]
+    fn heartbeat_delay_uses_idle_only_with_an_idle_length_lease() {
+        let options = TransportOptions::default();
+        let fast = options.heartbeat_interval;
+        let idle = options.idle_heartbeat_interval;
+        assert_eq!(heartbeat_delay(KeepaliveMode::Fast, false, &options), fast);
+        assert_eq!(heartbeat_delay(KeepaliveMode::Fast, true, &options), fast);
+        assert_eq!(heartbeat_delay(KeepaliveMode::Idle, false, &options), fast);
+        assert_eq!(heartbeat_delay(KeepaliveMode::Idle, true, &options), idle);
+    }
+
+    #[test]
+    fn idle_lease_is_longer_than_the_idle_interval() {
+        let options = TransportOptions::default();
+        assert!(
+            KeepaliveMode::Idle.lease_seconds() as u128 * 1000
+                > 2 * options.idle_heartbeat_interval.as_millis()
+        );
+        assert!(
+            (KeepaliveMode::Fast.lease_seconds() as u128) * 1000
+                > options.heartbeat_interval.as_millis()
+        );
     }
 
     #[test]

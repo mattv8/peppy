@@ -48,9 +48,15 @@ async fn presence_leases_require_a_responsive_pong_and_cleanup_on_close() {
 
     let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
     assert!(
-        presence::renew(&mut tx, server.vault, server.owner_device, connection)
-            .await
-            .unwrap()
+        presence::renew(
+            &mut tx,
+            server.vault,
+            server.owner_device,
+            connection,
+            presence::LEASE_SECONDS,
+        )
+        .await
+        .unwrap()
     );
     tx.commit().await.unwrap();
     let touched: bool = sqlx::query_scalar(
@@ -71,9 +77,15 @@ async fn presence_leases_require_a_responsive_pong_and_cleanup_on_close() {
         .unwrap();
     let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
     assert!(
-        !presence::renew(&mut tx, server.vault, server.owner_device, connection)
-            .await
-            .unwrap()
+        !presence::renew(
+            &mut tx,
+            server.vault,
+            server.owner_device,
+            connection,
+            presence::LEASE_SECONDS,
+        )
+        .await
+        .unwrap()
     );
     tx.commit().await.unwrap();
     let renewed: bool = sqlx::query_scalar("SELECT lease_until > now() FROM device_sockets WHERE vault_id=$1 AND device_id=$2 AND connection_id=$3")
@@ -131,9 +143,15 @@ async fn presence_caps_sockets_and_revocation_invalidates_renewal() {
         .unwrap();
     let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
     assert!(
-        !presence::renew(&mut tx, server.vault, server.owner_device, connections[0])
-            .await
-            .unwrap()
+        !presence::renew(
+            &mut tx,
+            server.vault,
+            server.owner_device,
+            connections[0],
+            presence::LEASE_SECONDS,
+        )
+        .await
+        .unwrap()
     );
 }
 
@@ -2332,6 +2350,404 @@ async fn websocket_draft_hints_are_ready_gated_vault_scoped_and_coalesced() {
 }
 
 #[tokio::test]
+async fn websocket_adaptive_keepalive_ready_frame_is_opt_in() {
+    let server = TestServer::start().await;
+    let mut adaptive = server.connect_ws(&server.owner_token).await;
+    send_adaptive_hello(&mut adaptive, "0").await;
+    let ready = next_json(&mut adaptive, 3).await;
+    assert_eq!(ready["type"], "ready");
+    assert_eq!(
+        ready["keepalive"],
+        json!({"interval_ms": 50_000, "peers": false})
+    );
+    assert_eq!(
+        ready["frame_types"].as_array().unwrap().last(),
+        Some(&json!("keepalive"))
+    );
+
+    for value in [json!("fast"), json!(true), json!(7)] {
+        let mut legacy = server.connect_ws(&server.owner_token).await;
+        legacy
+            .send(tungstenite::Message::Text(
+                json!({"protocol_version":1,"resume_cursor":"0","keepalive":value})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let ready = next_json(&mut legacy, 3).await;
+        assert!(ready.get("keepalive").is_none());
+        assert!(
+            !ready["frame_types"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("keepalive"))
+        );
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn websocket_legacy_keepalive_is_unchanged() {
+    let server = TestServer::start_with(keepalive_options()).await;
+    let (mut ws, ready) = open_socket(&server, &server.owner_token, false).await;
+    assert!(ready.get("keepalive").is_none());
+    assert_eq!(
+        ready["frame_types"],
+        json!([
+            "ready",
+            "event",
+            "resync_required",
+            "presence_changed",
+            "drafts_changed"
+        ])
+    );
+
+    let first = next_ping(&mut ws, Duration::from_millis(750)).await;
+    assert!(first.texts.iter().all(|frame| frame["type"] != "keepalive"));
+    let mut previous = first.at;
+    pong(&mut ws, first.payload).await;
+    wait_for_responsive_sockets(&server, server.owner_device, 1).await;
+    let lease = lease_seconds_left(&server.pool, server.vault, server.owner_device).await;
+    assert!(
+        (50.0..=61.0).contains(&lease),
+        "legacy Pong lease: {lease}s"
+    );
+
+    for _ in 0..3 {
+        let ping = next_ping(&mut ws, FAST + Duration::from_millis(600)).await;
+        let gap = ping.at.duration_since(previous);
+        assert!(
+            gap >= FAST / 2 && gap < IDLE,
+            "legacy Ping gap {gap:?} is not the fast cadence"
+        );
+        assert!(
+            ping.texts.iter().all(|frame| frame["type"] != "keepalive"),
+            "legacy socket received a keepalive frame: {:?}",
+            ping.texts
+        );
+        previous = ping.at;
+        pong(&mut ws, ping.payload).await;
+    }
+    ws.close(None).await.unwrap();
+    server.shutdown().await;
+}
+
+/// A lone adaptive socket: the first challenge is immediate and its keepalive reports FAST
+/// (no idle-length lease exists yet), the second is one FAST later and reports IDLE, and
+/// later challenges follow the idle cadence.
+#[tokio::test]
+async fn websocket_adaptive_keepalive_idles_when_alone() {
+    let server = TestServer::start_with(keepalive_options()).await;
+    let android = provision_kind(&server, "android").await;
+    let (mut ws, ready) = open_socket(&server, &android.token, true).await;
+    assert_eq!(
+        ready["keepalive"],
+        json!({"interval_ms": IDLE.as_millis() as u64, "peers": false})
+    );
+
+    let ready_at = tokio::time::Instant::now();
+    let first = next_ping(&mut ws, Duration::from_millis(750)).await;
+    assert!(
+        first.at.duration_since(ready_at) < IDLE / 2,
+        "the first Ping waited for the idle interval"
+    );
+    let first_at = first.at;
+    let (frame, remaining) =
+        answer_with_lease_check(&server, android.id, &mut ws, first, false).await;
+    assert_eq!(frame, keepalive_frame(FAST, false));
+    assert!(
+        (110.0..=121.0).contains(&remaining),
+        "idle Pong lease: {remaining}s"
+    );
+    wait_for_responsive_sockets(&server, android.id, 1).await;
+
+    let second = next_ping(&mut ws, FAST + Duration::from_millis(600)).await;
+    assert!(
+        second.at.duration_since(first_at) >= FAST / 2,
+        "the second challenge must follow one FAST interval"
+    );
+    let second_at = second.at;
+    let (frame, _) = answer_with_lease_check(&server, android.id, &mut ws, second, false).await;
+    assert_eq!(frame, keepalive_frame(IDLE, false));
+
+    let base = tokio::time::Instant::now();
+    assert_quiet(&mut ws, FAST * 2).await;
+    wait_for_responsive_sockets(&server, android.id, 1).await;
+    let third = next_ping(
+        &mut ws,
+        (second_at + IDLE + Duration::from_secs(1)).saturating_duration_since(base),
+    )
+    .await;
+    assert!(
+        third.at.duration_since(second_at) >= IDLE / 2,
+        "the idle cadence must follow the second challenge"
+    );
+    let (frame, _) = answer_with_lease_check(&server, android.id, &mut ws, third, false).await;
+    assert_eq!(frame, keepalive_frame(IDLE, false));
+    ws.close(None).await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn websocket_adaptive_keepalive_speeds_up_when_a_peer_connects() {
+    let server = TestServer::start_with(keepalive_options()).await;
+    let (_, mut android, desktop) = speed_up_with_desktop(&server).await;
+    desktop.abort();
+    let _ = desktop.await;
+    android.close(None).await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn websocket_adaptive_keepalive_idles_again_when_the_peer_leaves() {
+    let server = TestServer::start_with(keepalive_options()).await;
+    let (android_id, mut android, desktop) = speed_up_with_desktop(&server).await;
+
+    // The peer leaves right after a fast-mode Ping and its keepalive, so the next scheduled tick is
+    // one FAST interval away: the changed frame must come first, with no Ping, well inside that.
+    let trigger = tokio::time::Instant::now();
+    desktop.abort();
+    let (frame, left) =
+        expect_change_without_ping(&mut android, Duration::from_secs(1), false).await;
+    assert_eq!(frame, keepalive_frame(IDLE, false));
+    assert!(
+        left.duration_since(trigger) < FAST / 2,
+        "the leave must be announced well before the next scheduled tick"
+    );
+    let _ = desktop.await;
+
+    // The tick armed while the peer was present still fires, and it arms one FAST interval:
+    // the last renewal was at the fast length, so no idle-length lease exists yet.
+    let first_after = next_ping(&mut android, FAST + Duration::from_millis(600)).await;
+    let first_after_at = first_after.at;
+    let (frame, remaining) =
+        answer_with_lease_check(&server, android_id, &mut android, first_after, false).await;
+    assert_eq!(frame, keepalive_frame(FAST, false));
+    assert!(remaining > 100.0, "idle renewal lease: {remaining}s");
+
+    // Now the renewal is at the idle length, so the cadence is IDLE.
+    let second = next_ping(&mut android, FAST + Duration::from_millis(600)).await;
+    assert!(
+        second.at.duration_since(first_after_at) >= FAST / 2,
+        "the second challenge must follow one FAST interval"
+    );
+    let second_at = second.at;
+    let (frame, _) =
+        answer_with_lease_check(&server, android_id, &mut android, second, false).await;
+    assert_eq!(frame, keepalive_frame(IDLE, false));
+
+    let base = tokio::time::Instant::now();
+    assert_quiet(&mut android, FAST * 2).await;
+    let third = next_ping(
+        &mut android,
+        (second_at + IDLE + Duration::from_secs(1)).saturating_duration_since(base),
+    )
+    .await;
+    assert!(
+        third.at.duration_since(second_at) >= IDLE / 2,
+        "the idle cadence must follow the second challenge"
+    );
+    let (frame, _) = answer_with_lease_check(&server, android_id, &mut android, third, false).await;
+    assert_eq!(frame, keepalive_frame(IDLE, false));
+    android.close(None).await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn websocket_adaptive_keepalive_counts_only_non_android_peers() {
+    let server = TestServer::start_with(keepalive_options()).await;
+    let (android, mut ws) = adaptive_android_alone(&server).await;
+
+    let other_android = provision_kind(&server, "android").await;
+    let other_android_responder = connect_responsive(&server, &other_android).await;
+    let frames = keepalives_for(&mut ws, FAST * 2 + IDLE).await;
+    assert!(
+        !frames.is_empty(),
+        "an idle socket still sends keepalive frames"
+    );
+    assert!(
+        frames.iter().all(|frame| frame["peers"] == false),
+        "a second Android device must not count as a peer: {frames:?}"
+    );
+    assert!(
+        !presence::peer_connected(&server.pool, server.vault, android.id)
+            .await
+            .unwrap()
+    );
+    other_android_responder.abort();
+    let _ = other_android_responder.await;
+
+    for kind in ["browser", "ios"] {
+        let peer = provision_kind(&server, kind).await;
+        let responder = connect_responsive(&server, &peer).await;
+        let (frame, _) = expect_peers_change(&mut ws, Duration::from_secs(1), true).await;
+        assert_eq!(
+            frame,
+            keepalive_frame(FAST, true),
+            "{kind} peer must switch to fast mode"
+        );
+        responder.abort();
+        let _ = responder.await;
+        let (frame, _) = expect_peers_change(&mut ws, Duration::from_secs(1), false).await;
+        assert_eq!(
+            frame,
+            keepalive_frame(IDLE, false),
+            "{kind} peer leaving must return to idle mode"
+        );
+    }
+
+    // Direct complement: each kind's responsive lease row, then the same row after revocation.
+    let plain = server.provision_device("device").await;
+    let mut peers = vec![(plain.id, true)];
+    for (kind, counts) in [
+        ("desktop", true),
+        ("browser", true),
+        ("ios", true),
+        ("android", false),
+    ] {
+        peers.push((provision_kind(&server, kind).await.id, counts));
+    }
+    for (device, counts) in peers {
+        insert_responsive_socket(&server, device).await;
+        assert_eq!(
+            presence::peer_connected(&server.pool, server.vault, android.id)
+                .await
+                .unwrap(),
+            counts,
+            "device {device} must count: {counts}"
+        );
+        sqlx::query("UPDATE devices SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2")
+            .bind(server.vault)
+            .bind(device)
+            .execute(&server.pool)
+            .await
+            .unwrap();
+        assert!(
+            !presence::peer_connected(&server.pool, server.vault, android.id)
+                .await
+                .unwrap(),
+            "a revoked device {device} must not count"
+        );
+    }
+    ws.close(None).await.unwrap();
+    server.shutdown().await;
+}
+
+/// Without an idle-length lease the first challenge is followed by one FAST tick, so an
+/// unanswered first challenge disconnects after about FAST, not IDLE.
+#[tokio::test]
+async fn websocket_unanswered_challenge_disconnects_in_both_keepalive_modes() {
+    let server = TestServer::start_with(keepalive_options()).await;
+
+    let idle = provision_kind(&server, "android").await;
+    let (mut ws, _) = open_socket(&server, &idle.token, true).await;
+    let challenge = next_ping(&mut ws, Duration::from_millis(750)).await;
+    let closed_at =
+        wait_for_socket_removal(&server, idle.id, FAST + Duration::from_millis(1_500)).await;
+    let elapsed = closed_at.duration_since(challenge.at);
+    assert!(
+        elapsed >= FAST / 2 && elapsed <= FAST + Duration::from_millis(1_500),
+        "idle socket closed after {elapsed:?}, expected about one fast tick"
+    );
+    wait_for_close(&mut ws, Duration::from_secs(2)).await;
+
+    // Fast: a responsive desktop peer makes the next tick FAST after the challenge.
+    let desktop = server.provision_device("device").await;
+    let responder = connect_responsive(&server, &desktop).await;
+    wait_for_responsive_sockets(&server, desktop.id, 1).await;
+    let fast = provision_kind(&server, "android").await;
+    let (mut ws, ready) = open_socket(&server, &fast.token, true).await;
+    assert_eq!(
+        ready["keepalive"],
+        json!({"interval_ms": FAST.as_millis() as u64, "peers": true})
+    );
+    let challenge = next_ping(&mut ws, Duration::from_millis(750)).await;
+    let closed_at =
+        wait_for_socket_removal(&server, fast.id, FAST + Duration::from_millis(1_500)).await;
+    let elapsed = closed_at.duration_since(challenge.at);
+    assert!(
+        elapsed >= FAST / 2 && elapsed <= FAST + Duration::from_millis(1_500),
+        "fast socket closed after {elapsed:?}, expected about one fast tick"
+    );
+    wait_for_close(&mut ws, Duration::from_secs(2)).await;
+    responder.abort();
+    let _ = responder.await;
+    server.shutdown().await;
+}
+
+/// Pins the pull-in rule: an idle-cadence challenge left unanswered when a peer connects is
+/// disconnected at the pulled-in tick, one FAST interval after the switch, long before the
+/// original idle deadline. The anchor is the desktop's first Pong, which this test sends itself;
+/// the android socket is not read, so its challenge stays unanswered. No lower bound is asserted:
+/// the close cannot be anchored more tightly than the presence notice's latency.
+#[tokio::test]
+async fn websocket_outstanding_idle_challenge_closes_one_fast_interval_after_the_switch() {
+    let server = TestServer::start_with(keepalive_options()).await;
+    let (android, mut ws) = adaptive_android_alone(&server).await;
+    // Left unread: the socket is not read again until it is closed, so its Pong is never sent.
+    let held = next_ping(&mut ws, IDLE + Duration::from_secs(1)).await;
+
+    let desktop = server.provision_device("device").await;
+    let (mut desktop_ws, _) = open_socket(&server, &desktop.token, false).await;
+    let first = next_ping(&mut desktop_ws, Duration::from_secs(3)).await;
+    let anchor = tokio::time::Instant::now();
+    pong(&mut desktop_ws, first.payload).await;
+    let responder = spawn_responder(desktop_ws);
+
+    let closed_at =
+        wait_for_socket_removal(&server, android.id, IDLE + Duration::from_secs(1)).await;
+    let after_switch = closed_at.duration_since(anchor);
+    assert!(
+        after_switch <= FAST + Duration::from_secs(1),
+        "closed {after_switch:?} after the peer's Pong; the pulled-in tick is one FAST interval after the switch"
+    );
+    assert!(
+        closed_at.duration_since(held.at) < IDLE / 2,
+        "closed near the original idle deadline: the pull-in did not happen"
+    );
+    responder.abort();
+    let _ = responder.await;
+    wait_for_close(&mut ws, Duration::from_secs(2)).await;
+    server.shutdown().await;
+}
+
+/// The scheduled-discovery path, made deterministic: a desktop row becomes responsive by direct SQL,
+/// so no presence notice reaches the android socket. The next scheduled tick must find `peers:true`
+/// itself: its keepalive reports the new state, and the Ping after it comes one FAST interval later.
+#[tokio::test]
+async fn websocket_scheduled_tick_discovers_a_peer_without_a_notice() {
+    let server = TestServer::start_with(keepalive_options()).await;
+    let (android, mut ws) = adaptive_android_alone(&server).await;
+    let desktop = server.provision_device("device").await;
+    insert_responsive_socket(&server, desktop.id).await;
+
+    // The idle tick after the second challenge is still IDLE away, so the row is in place first.
+    let discovered = next_ping(&mut ws, IDLE + Duration::from_secs(1)).await;
+    assert!(
+        discovered
+            .texts
+            .iter()
+            .all(|frame| frame["type"] != "keepalive"),
+        "the change must not be announced before the tick: {:?}",
+        discovered.texts
+    );
+    let discovered_at = discovered.at;
+    let (frame, _) = answer_with_lease_check(&server, android.id, &mut ws, discovered, true).await;
+    assert_eq!(frame, keepalive_frame(FAST, true));
+
+    let next = next_ping(&mut ws, FAST + Duration::from_millis(600)).await;
+    assert!(
+        next.at.duration_since(discovered_at) >= FAST / 2,
+        "the Ping after the discovery tick must follow one FAST interval"
+    );
+    let (frame, _) = answer_with_lease_check(&server, android.id, &mut ws, next, true).await;
+    assert_eq!(frame, keepalive_frame(FAST, true));
+    ws.close(None).await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn websocket_handshake_replays_and_revocation_closes_active_socket() {
     let server = TestServer::start().await;
     let device = server.provision_device("device").await;
@@ -2549,6 +2965,16 @@ async fn send_hello(ws: &mut Ws, resume_cursor: &str) {
     .unwrap();
 }
 
+async fn send_adaptive_hello(ws: &mut Ws, resume_cursor: &str) {
+    ws.send(tungstenite::Message::Text(
+        json!({"protocol_version":1,"resume_cursor":resume_cursor,"keepalive":"adaptive"})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+}
+
 async fn answer_ping(ws: &mut Ws, label: &str, seconds: u64) {
     tokio::time::timeout(Duration::from_secs(seconds), async {
         loop {
@@ -2687,6 +3113,395 @@ where
             "timed out waiting for {what}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Adaptive keepalive cadences: `FAST` while a responsive non-android peer is present, `IDLE` when alone.
+// Wide enough that every lower bound keeps at least FAST/2 = 400 ms of slack on a loaded runner.
+const FAST: Duration = Duration::from_millis(800);
+const IDLE: Duration = Duration::from_secs(3);
+
+fn keepalive_options() -> TransportOptions {
+    TransportOptions {
+        heartbeat_interval: FAST,
+        idle_heartbeat_interval: IDLE,
+        ..Default::default()
+    }
+}
+
+fn keepalive_frame(interval: Duration, peers: bool) -> Value {
+    json!({"type": "keepalive", "interval_ms": interval.as_millis() as u64, "peers": peers})
+}
+
+/// Provisions a device and sets its `devices.kind`, which the harness leaves NULL (desktop).
+async fn provision_kind(server: &TestServer, kind: &str) -> TestDevice {
+    let device = server.provision_device("device").await;
+    sqlx::query("UPDATE devices SET kind=$1 WHERE vault_id=$2 AND device_id=$3")
+        .bind(kind)
+        .bind(server.vault)
+        .bind(device.id)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    device
+}
+
+/// Connects with a legacy or adaptive hello and returns the socket with its ready frame.
+async fn open_socket(server: &TestServer, token: &str, adaptive: bool) -> (Ws, Value) {
+    let mut ws = server.connect_ws(token).await;
+    if adaptive {
+        send_adaptive_hello(&mut ws, "0").await;
+    } else {
+        send_hello(&mut ws, "0").await;
+    }
+    let ready = next_json(&mut ws, 3).await;
+    assert_eq!(ready["type"], "ready");
+    (ws, ready)
+}
+
+/// Connects a legacy desktop-style socket, answers its first Ping, waits until it is responsive,
+/// and keeps answering in the background.
+async fn connect_responsive(server: &TestServer, device: &TestDevice) -> JoinHandle<()> {
+    let (mut ws, _) = open_socket(server, &device.token, false).await;
+    let first = next_ping(&mut ws, Duration::from_secs(3)).await;
+    pong(&mut ws, first.payload).await;
+    wait_for_responsive_sockets(server, device.id, 1).await;
+    spawn_responder(ws)
+}
+
+/// Answers every Ping in the background so a socket that is not under test stays responsive.
+fn spawn_responder(mut ws: Ws) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(Ok(message)) = ws.next().await {
+            if let tungstenite::Message::Ping(payload) = message {
+                let _ = ws.send(tungstenite::Message::Pong(payload)).await;
+            }
+        }
+    })
+}
+
+/// An android-kind adaptive socket alone and responsive. Its first challenge is immediate, its
+/// second follows one FAST interval later (the first renewal was at the fast length), and its
+/// keepalive frames report FAST then IDLE. Returns with no challenge outstanding.
+async fn adaptive_android_alone(server: &TestServer) -> (TestDevice, Ws) {
+    let android = provision_kind(server, "android").await;
+    let (mut ws, _) = open_socket(server, &android.token, true).await;
+    let first = next_ping(&mut ws, Duration::from_millis(750)).await;
+    let first_at = first.at;
+    let (frame, _) = answer_with_lease_check(server, android.id, &mut ws, first, false).await;
+    assert_eq!(frame, keepalive_frame(FAST, false));
+    let second = next_ping(&mut ws, FAST + Duration::from_millis(600)).await;
+    assert!(second.at.duration_since(first_at) >= FAST / 2);
+    let (frame, _) = answer_with_lease_check(server, android.id, &mut ws, second, false).await;
+    assert_eq!(frame, keepalive_frame(IDLE, false));
+    wait_for_responsive_sockets(server, android.id, 1).await;
+    (android, ws)
+}
+
+/// Connects a desktop peer to an idle adaptive android socket and checks the switch to fast mode.
+///
+/// The android socket's idle challenge stays outstanding while the peer connects: the socket is
+/// not read until the peer is responsive. The first read flushes tungstenite's automatic Pong,
+/// which then reaches the server after the switch and must not disconnect the socket. Returns the
+/// android device id, its socket and the peer's responder.
+async fn speed_up_with_desktop(server: &TestServer) -> (Uuid, Ws, JoinHandle<()>) {
+    let (android, mut ws) = adaptive_android_alone(server).await;
+    // The switch is triggered a few milliseconds after this challenge, far inside its IDLE
+    // window, so no scheduled tick can precede the changed frame: the strict reader applies.
+    let held = next_ping(&mut ws, IDLE + Duration::from_secs(1)).await;
+
+    let desktop = server.provision_device("device").await;
+    let responder = connect_responsive(server, &desktop).await;
+    let (frame, switched) = expect_change_without_ping(&mut ws, Duration::from_secs(1), true).await;
+    assert_eq!(frame, keepalive_frame(FAST, true));
+    assert!(
+        switched.duration_since(held.at) < IDLE / 2,
+        "the switch must land well inside the idle window of the held challenge"
+    );
+
+    let fast = next_ping(&mut ws, FAST + Duration::from_millis(600)).await;
+    assert!(
+        fast.at.duration_since(switched) >= FAST / 2,
+        "the switch did not pull the next Ping to the fast cadence"
+    );
+    let (frame, remaining) = answer_with_lease_check(server, android.id, &mut ws, fast, true).await;
+    assert_eq!(frame, keepalive_frame(FAST, true));
+    assert!(
+        (50.0..=61.0).contains(&remaining),
+        "fast lease after the switch: {remaining}s"
+    );
+    (android.id, ws, responder)
+}
+
+/// Seconds left on the lease of `device`'s responsive socket row.
+async fn lease_seconds_left(pool: &PgPool, vault: Uuid, device: Uuid) -> f64 {
+    sqlx::query_scalar::<_, f64>(
+        "SELECT EXTRACT(EPOCH FROM lease_until - now())::float8 FROM device_sockets WHERE vault_id=$1 AND device_id=$2 AND responsive",
+    )
+    .bind(vault)
+    .bind(device)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// The device's socket lease as (`lease_until` in microseconds since the epoch, seconds left).
+async fn lease_snapshot(pool: &PgPool, vault: Uuid, device: Uuid) -> (i64, f64) {
+    sqlx::query_as::<_, (i64, f64)>(
+        "SELECT (EXTRACT(EPOCH FROM lease_until) * 1000000)::bigint, EXTRACT(EPOCH FROM lease_until - now())::float8 FROM device_sockets WHERE vault_id=$1 AND device_id=$2 ORDER BY lease_until DESC LIMIT 1",
+    )
+    .bind(vault)
+    .bind(device)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Waits until a Pong has replaced the lease observed as `before`, then returns its seconds left.
+async fn renewed_lease_seconds_left(pool: &PgPool, vault: Uuid, device: Uuid, before: i64) -> f64 {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let (until, remaining) = lease_snapshot(pool, vault, device).await;
+        if until != before {
+            return remaining;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the Pong did not renew the lease"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// A responsive, unexpired socket row for `device`, inserted directly.
+async fn insert_responsive_socket(server: &TestServer, device: Uuid) {
+    sqlx::query("INSERT INTO device_sockets(connection_id,vault_id,device_id,lease_until,responsive) VALUES($1,$2,$3,now()+make_interval(secs => 60),TRUE)")
+        .bind(Uuid::new_v4())
+        .bind(server.vault)
+        .bind(device)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+}
+
+/// Answers `ping`, reads the keepalive frame that follows it, and checks the lease its Pong writes:
+/// the lease must outlive the interval that frame reports (`remaining > 2 × interval`), so the
+/// socket cannot be hidden between two checks. Returns the frame and the lease seconds left.
+async fn answer_with_lease_check(
+    server: &TestServer,
+    device: Uuid,
+    ws: &mut Ws,
+    ping: ControlPing,
+    peers: bool,
+) -> (Value, f64) {
+    let (before, _) = lease_snapshot(&server.pool, server.vault, device).await;
+    pong(ws, ping.payload).await;
+    let frame = next_keepalive(ws, Duration::from_secs(1), peers).await;
+    let reported = frame["interval_ms"].as_u64().unwrap() as f64 / 1000.0;
+    let remaining = renewed_lease_seconds_left(&server.pool, server.vault, device, before).await;
+    assert!(
+        remaining > 2.0 * reported,
+        "the lease ({remaining}s) must outlive the reported interval ({reported}s)"
+    );
+    (frame, remaining)
+}
+
+async fn pong(ws: &mut Ws, payload: Vec<u8>) {
+    ws.send(tungstenite::Message::Pong(payload.into()))
+        .await
+        .unwrap();
+}
+
+/// A control Ping, the text frames that arrived before it, and when it was read.
+struct ControlPing {
+    payload: Vec<u8>,
+    at: tokio::time::Instant,
+    texts: Vec<Value>,
+}
+
+/// The inbound frames the keepalive tests distinguish. Pongs and binary frames are skipped.
+enum Wire {
+    Ping(Vec<u8>),
+    Text(Value),
+    Closed,
+}
+
+/// The next distinguished frame, or `None` when `deadline` passes first.
+async fn next_wire(ws: &mut Ws, deadline: tokio::time::Instant) -> Option<Wire> {
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, ws.next()).await {
+            Err(_) => return None,
+            Ok(Some(Ok(tungstenite::Message::Ping(payload)))) => {
+                return Some(Wire::Ping(payload.to_vec()));
+            }
+            Ok(Some(Ok(tungstenite::Message::Text(text)))) => {
+                return Some(Wire::Text(serde_json::from_str(&text).unwrap()));
+            }
+            Ok(Some(Ok(tungstenite::Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => {
+                return Some(Wire::Closed);
+            }
+            Ok(Some(Ok(_))) => {}
+        }
+    }
+}
+
+/// Waits for the next Ping without answering it. Presence hints are skipped; other text is kept.
+/// tokio-tungstenite queues a Pong for the Ping and sends it on the next read, write or flush,
+/// so a challenge stays unanswered only while the socket is not read.
+async fn next_ping(ws: &mut Ws, within: Duration) -> ControlPing {
+    let deadline = tokio::time::Instant::now() + within;
+    let mut texts = Vec::new();
+    loop {
+        match next_wire(ws, deadline).await {
+            Some(Wire::Ping(payload)) => {
+                return ControlPing {
+                    payload,
+                    at: tokio::time::Instant::now(),
+                    texts,
+                };
+            }
+            Some(Wire::Text(frame)) if frame["type"] == "presence_changed" => {}
+            Some(Wire::Text(frame)) => texts.push(frame),
+            Some(Wire::Closed) => panic!("socket closed while waiting for a Ping"),
+            None => panic!("no Ping within {within:?}"),
+        }
+    }
+}
+
+/// Waits for a keepalive frame reporting `peers`, answering Pings on the way.
+async fn next_keepalive(ws: &mut Ws, within: Duration, peers: bool) -> Value {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        match next_wire(ws, deadline).await {
+            Some(Wire::Ping(payload)) => pong(ws, payload).await,
+            Some(Wire::Text(frame)) if frame["type"] == "keepalive" && frame["peers"] == peers => {
+                return frame;
+            }
+            Some(Wire::Text(_)) => {}
+            Some(Wire::Closed) => panic!("socket closed while waiting for keepalive peers={peers}"),
+            None => panic!("no keepalive with peers={peers} within {within:?}"),
+        }
+    }
+}
+
+/// Waits for the keepalive frame reporting the new `peers` value after a change, and when it was
+/// received. Both legal orders are accepted: the changed frame alone, or a scheduled Ping followed
+/// by a frame that already reports the new state (a tick that discovered the change itself). Pings
+/// are answered on the way. Use this where the change is not synchronized with the heartbeat.
+async fn expect_peers_change(
+    ws: &mut Ws,
+    within: Duration,
+    peers: bool,
+) -> (Value, tokio::time::Instant) {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        match next_wire(ws, deadline).await {
+            Some(Wire::Ping(payload)) => pong(ws, payload).await,
+            Some(Wire::Text(frame)) if frame["type"] == "keepalive" && frame["peers"] == peers => {
+                return (frame, tokio::time::Instant::now());
+            }
+            Some(Wire::Text(_)) => {}
+            Some(Wire::Closed) => panic!("socket closed while waiting for peers={peers}"),
+            None => panic!("no peers={peers} keepalive within {within:?}"),
+        }
+    }
+}
+
+/// Strict reader for a change the test triggers at a controlled moment, far from any heartbeat
+/// deadline: the changed keepalive frame must arrive with no Ping before it. Callers also bound the
+/// time from their trigger, so a late frame cannot hide behind a legitimately scheduled tick.
+async fn expect_change_without_ping(
+    ws: &mut Ws,
+    within: Duration,
+    peers: bool,
+) -> (Value, tokio::time::Instant) {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        match next_wire(ws, deadline).await {
+            Some(Wire::Ping(_)) => {
+                panic!("a Ping was sent before the peers={peers} keepalive frame")
+            }
+            Some(Wire::Text(frame)) if frame["type"] == "keepalive" && frame["peers"] == peers => {
+                return (frame, tokio::time::Instant::now());
+            }
+            Some(Wire::Text(_)) => {}
+            Some(Wire::Closed) => panic!("socket closed while waiting for peers={peers}"),
+            None => panic!("no peers={peers} keepalive within {within:?}"),
+        }
+    }
+}
+
+/// Collects every keepalive frame for `within`, answering Pings on the way.
+async fn keepalives_for(ws: &mut Ws, within: Duration) -> Vec<Value> {
+    let deadline = tokio::time::Instant::now() + within;
+    let mut frames = Vec::new();
+    loop {
+        match next_wire(ws, deadline).await {
+            Some(Wire::Ping(payload)) => pong(ws, payload).await,
+            Some(Wire::Text(frame)) if frame["type"] == "keepalive" => frames.push(frame),
+            Some(Wire::Text(_)) => {}
+            Some(Wire::Closed) => panic!("socket closed while collecting keepalive frames"),
+            None => return frames,
+        }
+    }
+}
+
+/// Asserts that no Ping and no keepalive frame arrives for `within`.
+async fn assert_quiet(ws: &mut Ws, within: Duration) {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        match next_wire(ws, deadline).await {
+            Some(Wire::Ping(_)) => panic!("unexpected Ping within {within:?}"),
+            Some(Wire::Text(frame)) if frame["type"] == "keepalive" => {
+                panic!("unexpected keepalive frame within {within:?}: {frame}")
+            }
+            Some(Wire::Text(_)) => {}
+            Some(Wire::Closed) => panic!("socket closed within {within:?}"),
+            None => return,
+        }
+    }
+}
+
+/// Waits until the server deletes `device`'s socket row, which happens when the socket closes.
+/// The socket is not read meanwhile, so a queued automatic Pong cannot answer the challenge.
+async fn wait_for_socket_removal(
+    server: &TestServer,
+    device: Uuid,
+    within: Duration,
+) -> tokio::time::Instant {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM device_sockets WHERE vault_id=$1 AND device_id=$2",
+        )
+        .bind(server.vault)
+        .bind(device)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+        if rows == 0 {
+            return tokio::time::Instant::now();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "socket row still present after {within:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Waits for the server to end the socket and returns when it did. Any Ping is a failure:
+/// the unanswered challenge must end the socket at the next tick, not start another.
+async fn wait_for_close(ws: &mut Ws, within: Duration) -> tokio::time::Instant {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        match next_wire(ws, deadline).await {
+            Some(Wire::Closed) => return tokio::time::Instant::now(),
+            Some(Wire::Ping(_)) => panic!("a Ping followed the unanswered challenge"),
+            Some(Wire::Text(_)) => {}
+            None => panic!("socket still open {within:?} after its challenge"),
+        }
     }
 }
 
