@@ -36,7 +36,7 @@ jobs:
       RELEASE_TAG: ${{ inputs.release_tag }}
       TRACK: ${{ inputs.track }}
       # Release checksum key: infra/release/keys/stable-checksums.asc (documented in .agents/ops/release-keys.md).
-      CHECKSUM_KEY_FINGERPRINT: 22973A816783D4DEF91C64BBBDEFEAB01080A42D
+      CHECKSUM_SIGNER_FINGERPRINT: 22973A816783D4DEF91C64BBBDEFEAB01080A42D
     outputs:
       version: ${{ steps.plan.outputs.version }}
       status: ${{ steps.plan.outputs.status }}
@@ -74,7 +74,10 @@ jobs:
           set -euo pipefail
           release_state=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '[.isDraft, .isPrerelease] | @tsv')
           read -r is_draft is_prerelease <<< "$release_state"
-          [ "$is_draft" = false ] && [ "$is_prerelease" = false ] || { echo "$RELEASE_TAG must be a published, non-prerelease release" >&2; exit 1; }
+          if [ "$is_draft" != false ] || [ "$is_prerelease" != false ]; then
+            echo "$RELEASE_TAG must be a published, non-prerelease release" >&2
+            exit 1
+          fi
       - name: Download and verify the release AAB
         env:
           GH_TOKEN: ${{ github.token }}
@@ -86,8 +89,14 @@ jobs:
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$aab" --pattern SHA256SUMS --pattern SHA256SUMS.sig --dir dist/play
           shopt -s nullglob
           aabs=(dist/play/*.aab)
-          [ "${#aabs[@]}" -eq 1 ] && [ "${aabs[0]}" = "dist/play/$aab" ] || { echo "expected exactly one $aab in $RELEASE_TAG" >&2; exit 1; }
-          [ -s dist/play/SHA256SUMS ] && [ -s dist/play/SHA256SUMS.sig ] || { echo 'SHA256SUMS and SHA256SUMS.sig are required' >&2; exit 1; }
+          if [ "${#aabs[@]}" -ne 1 ] || [ "${aabs[0]}" != "dist/play/$aab" ]; then
+            echo "expected exactly one $aab in $RELEASE_TAG" >&2
+            exit 1
+          fi
+          if [ ! -s dist/play/SHA256SUMS ] || [ ! -s dist/play/SHA256SUMS.sig ]; then
+            echo 'SHA256SUMS and SHA256SUMS.sig are required' >&2
+            exit 1
+          fi
 
           # Verify the checksum manifest against the committed release checksum key, pinned by fingerprint.
           gpg_home=$(mktemp -d)
@@ -95,10 +104,10 @@ jobs:
           export GNUPGHOME="$gpg_home"
           gpg --batch --import infra/release/keys/stable-checksums.asc
           key_fingerprints=$(gpg --batch --with-colons --show-keys infra/release/keys/stable-checksums.asc | awk -F: '$1 == "fpr" {print $10}')
-          [ "$(printf '%s\n' "$key_fingerprints" | sed -n 1p)" = "$CHECKSUM_KEY_FINGERPRINT" ] || { echo 'committed checksum key does not match the pinned fingerprint' >&2; exit 1; }
+          [ "$(printf '%s\n' "$key_fingerprints" | sed -n 1p)" = "$CHECKSUM_SIGNER_FINGERPRINT" ] || { echo 'committed checksum key does not match the pinned fingerprint' >&2; exit 1; }
           gpg_status=$(gpg --batch --status-fd 1 --verify dist/play/SHA256SUMS.sig dist/play/SHA256SUMS)
           signer=$(printf '%s\n' "$gpg_status" | awk '$2 == "VALIDSIG" {print $NF}')
-          [ "$signer" = "$CHECKSUM_KEY_FINGERPRINT" ] || { echo 'SHA256SUMS is not signed by the pinned release checksum key' >&2; exit 1; }
+          [ "$signer" = "$CHECKSUM_SIGNER_FINGERPRINT" ] || { echo 'SHA256SUMS is not signed by the pinned release checksum key' >&2; exit 1; }
 
           # Check the AAB digest against the signed manifest.
           line=$(awk -v name="$aab" '$2 == name' dist/play/SHA256SUMS)
