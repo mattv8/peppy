@@ -42,6 +42,18 @@ const REMEMBERED_UNLOCK_VALIDATION_INTERVAL_MS = 60_000;
 const DRAFT_SYNC_DEBOUNCE_MS = 2_000;
 const RECOVERY_CLEAR_ERROR: RpcError = { code: "recovery-clear-failed", message: "Browser recovery could not be forgotten." };
 
+function decimalCursor(value: string): bigint | undefined {
+  try { return BigInt(value); } catch { return undefined; }
+}
+
+function catchingUp(progress: SchedulerSyncProgress | undefined, replayPageInFlight = false): boolean {
+  if (replayPageInFlight) return true;
+  if (progress?.targetHighWater === undefined) return false;
+  const receivedThrough = decimalCursor(progress.receivedThrough);
+  const targetHighWater = decimalCursor(progress.targetHighWater);
+  return receivedThrough !== undefined && targetHighWater !== undefined && receivedThrough < targetHighWater;
+}
+
 export type RpcError = { code: string; message: string; conversationId?: string; currentRevision?: string; draftId?: string };
 export type RpcResponse = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: RpcError };
 export type RpcRequest = { id: number; command: string; args: Record<string, unknown> };
@@ -134,6 +146,7 @@ export interface BrowserNetwork {
   unlockNewEpoch?(passphrase: string): Promise<void>;
   epochStatus?(): "epoch-mismatch" | "needs-unlock" | undefined;
   syncProgress?(): SchedulerSyncProgress | undefined;
+  replayPageInFlight?(): boolean;
   producerReady?(): boolean;
   attachmentRetentionStatus?(): Promise<AttachmentRetentionStatusResult>;
   accountAccess?(): Promise<AccountAccessResult>;
@@ -1020,7 +1033,10 @@ export class BrowserWorkerHost {
           this.presentationRecipients.set(candidate.id, recipient);
           recipient.postMessage({ event: "banner", candidate });
         } : undefined;
-      }, Date.now, ids => ids.forEach(id => this.presentationRecipients.delete(id)));
+      }, Date.now, ids => ids.forEach(id => this.presentationRecipients.delete(id)), () => catchingUp(
+        this.dependencies.network?.syncProgress?.(),
+        this.dependencies.network?.replayPageInFlight?.(),
+      ));
       this.unsubscribeNetwork = this.dependencies.network?.subscribeChanges?.(() => this.changed());
       if (owner.owner.phase === "ready") await this.startNetwork();
     } catch (error) {
@@ -1890,14 +1906,27 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
   let pollPromise: Promise<void> | undefined;
   let pollDelay = 5_000;
   let syncProgress: SchedulerSyncProgress | undefined;
+  let replayPageInFlight = false;
   let activeSession: BrowserSession | undefined;
   let liveSupervisor: LiveSupervisor | undefined;
   const changeListeners = new Set<() => void>();
   const draftSyncPrompt = new DraftSyncPrompt(
     () => polling && scheduler?.isDraftSyncEnabled === true && scheduler.status.connection === "connected",
-    () => { void scheduler?.poll().catch(() => undefined); },
+    () => { void scheduler?.poll().finally(clearReplayPageInFlight).catch(() => undefined); },
   );
+  const notifyChanges = () => { for (const listener of changeListeners) listener(); };
+  const clearReplayPageInFlight = () => {
+    if (!replayPageInFlight) return;
+    replayPageInFlight = false;
+    notifyChanges();
+  };
+  const resetSyncProgress = () => {
+    syncProgress = undefined;
+    replayPageInFlight = false;
+    notifyChanges();
+  };
   const stopNetwork = async () => {
+    resetSyncProgress();
     polling = false;
     if (pollTimer !== undefined) clearTimeout(pollTimer);
     pollTimer = undefined;
@@ -1912,16 +1941,17 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
   const schedulePoll = () => {
     if (!polling || !scheduler) return;
     pollPromise = scheduler.poll().then(status => {
-      for (const listener of changeListeners) listener();
+      notifyChanges();
       if (status.connection === "revoked") {
         polling = false;
         void activeSession?.clearRememberedUnlock().catch(() => undefined);
       }
       pollDelay = status.connection === "connected" ? 5_000 : Math.min(pollDelay * 2, 60_000);
     }).catch(() => {
-      for (const listener of changeListeners) listener();
+      notifyChanges();
       pollDelay = Math.min(pollDelay * 2, 60_000);
     }).finally(() => {
+      clearReplayPageInFlight();
       pollPromise = undefined;
       if (polling) pollTimer = setTimeout(schedulePoll, pollDelay);
     });
@@ -1930,22 +1960,23 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
     const session = activeSession;
     const sendScheduler = scheduler;
     if (!session || !publicTransport || !sendScheduler) throw { code: "draft-reconnect" };
-    return sendBrowserDraft({ session, transport: publicTransport, synchronizeDraft: async () => { await sendScheduler.poll(); }, args });
+    return sendBrowserDraft({ session, transport: publicTransport, synchronizeDraft: async () => { await sendScheduler.poll().finally(clearReplayPageInFlight); }, args });
   };
   return {
     locks,
     terminate,
     network: {
       async start() { if (!scheduler || !retentionAbort) return false; const ready = await scheduler.ensureRetentionNegotiated(retentionAbort.signal); if (!polling) { polling = true; schedulePoll(); } return ready; },
-      wake() { void scheduler?.poll().catch(() => undefined); },
+      wake() { void scheduler?.poll().finally(clearReplayPageInFlight).catch(() => undefined); },
       draftSaved() { draftSyncPrompt.schedule(); },
       flushDraftSync() { draftSyncPrompt.flush(); },
-       startHistorySearch(attemptId) { scheduler?.trackHistorySearch(attemptId); void scheduler?.poll().catch(() => undefined); },
+        startHistorySearch(attemptId) { scheduler?.trackHistorySearch(attemptId); void scheduler?.poll().finally(clearReplayPageInFlight).catch(() => undefined); },
        stopHistorySearch(attemptId) { scheduler?.untrackHistorySearch(attemptId); },
       retryAttachment(id) { scheduler?.retryAttachment(id); },
       async unlockNewEpoch(passphrase) { if (!scheduler) throw { code: "unavailable" }; await scheduler.unlockNewEpoch(passphrase); },
       epochStatus() { const state = scheduler?.epochStatus?.state; return state === "epoch-mismatch" || state === "needs-unlock" ? state : undefined; },
-      syncProgress() { return syncProgress; },
+       syncProgress() { return syncProgress; },
+       replayPageInFlight() { return replayPageInFlight; },
       producerReady() { return scheduler?.producersReady ?? false; },
       async attachmentRetentionStatus() {
         return retentionStatus?.status() ?? { kind: "temporarily_unavailable" };
@@ -2002,6 +2033,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       sendDraft,
        },
     async boot(_signal, onFatal) {
+      resetSyncProgress();
       const modulePromise = loadBrowserCore();
       const core = new BrowserCore(() => modulePromise);
       const module = await modulePromise as EmscriptenCoreModule & { FS: EmscriptenFilesystem };
@@ -2027,9 +2059,10 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
         {
           media: { readCiphertext: (file, expectedBytes, signal) => session.readCiphertext(file, expectedBytes, signal), stageDownload: (bytes, signal) => session.stageDownload(bytes, signal), cleanupStagedDownload: source => session.cleanupStagedDownload(source) },
           rotateEpoch: (profile, header, passphrase) => session.rotate(profile, header, passphrase),
-           onProgress: progress => {
-            syncProgress = progress;
-            for (const listener of changeListeners) listener();
+            onProgress: progress => {
+             syncProgress = progress;
+             replayPageInFlight = progress.phase === "receiving";
+             notifyChanges();
             },
            retention,
         },

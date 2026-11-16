@@ -77,11 +77,13 @@ export class BannerPresenter {
     private readonly deliverToRenderer: () => BannerDelivery | undefined,
     private readonly now: () => number = Date.now,
     private readonly acknowledged?: (ids: readonly string[]) => void,
+    private readonly catchingUp: () => boolean = () => false,
   ) {}
 
   public setContext(context: BannerContext | undefined): void { this.context = context; }
 
   public drain(): Promise<void> {
+    if (this.catchingUp()) return Promise.resolve();
     if (!this.draining) {
       const generation = this.generation;
       const draining = this.drainCandidates(generation).finally(() => {
@@ -125,9 +127,9 @@ export class BannerPresenter {
 
   private async drainCandidates(generation: number): Promise<void> {
     const candidates = bannerCandidates(await this.session.query("pending_banner_candidates", { limit: BANNER_LIMIT }));
-    if (!this.current(generation)) return;
+    if (!this.readyToPresent(generation)) return;
     const preferences = await this.settings.load() ?? DEFAULT_NOTIFICATION_PREFERENCES;
-    if (!this.current(generation)) return;
+    if (!this.readyToPresent(generation)) return;
     const acknowledge: string[] = [];
     for (const candidate of candidates) {
       if (!this.current(generation)) return;
@@ -182,6 +184,10 @@ export class BannerPresenter {
   }
 
   private current(generation: number): boolean { return generation === this.generation; }
+
+  private readyToPresent(generation: number): boolean {
+    return this.current(generation) && !this.catchingUp();
+  }
 
   private async acknowledge(ids: readonly string[]): Promise<void> {
     await this.session.mutate("ack_banner_candidates", { ids });

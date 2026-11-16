@@ -459,6 +459,69 @@ describe("Worker notification presentation settings", () => {
     expect(calls).toEqual(["ack_banner_candidates"]);
   });
 
+  it("holds direct and forwarded banners while catching up, then releases them", async () => {
+    let isCatchingUp = true;
+    const direct = adapter();
+    const directMutate = vi.fn(async () => ({}));
+    const directPresenter = new BannerPresenter(
+      { query: async () => [candidate()], mutate: directMutate },
+      preferences,
+      direct,
+      () => undefined,
+      Date.now,
+      undefined,
+      () => isCatchingUp,
+    );
+    const forwarded: BannerCandidate[] = [];
+    const forwardedMutate = vi.fn(async () => ({}));
+    const forwardedPresenter = new BannerPresenter(
+      { query: async () => [candidate()], mutate: forwardedMutate },
+      preferences,
+      adapter({ available: false, permission: "denied" }),
+      () => value => forwarded.push(value),
+      Date.now,
+      undefined,
+      () => isCatchingUp,
+    );
+    forwardedPresenter.setContext({ view: "settings", notificationPermission: "granted" });
+
+    await directPresenter.drain();
+    await forwardedPresenter.drain();
+
+    expect(direct.shown).toEqual([]);
+    expect(forwarded).toEqual([]);
+    expect(directMutate).not.toHaveBeenCalled();
+    expect(forwardedMutate).not.toHaveBeenCalled();
+
+    isCatchingUp = false;
+    await directPresenter.drain();
+    await forwardedPresenter.drain();
+
+    expect(direct.shown).toHaveLength(1);
+    expect(directMutate).toHaveBeenCalledWith("ack_banner_candidates", { ids: ["candidate-1"] });
+    expect(forwarded).toHaveLength(1);
+    await forwardedPresenter.acknowledgeDisplayed(["candidate-1"]);
+    expect(forwardedMutate).toHaveBeenCalledWith("ack_banner_candidates", { ids: ["candidate-1"] });
+  });
+
+  it("acknowledges candidates already shown when catch-up starts during a drain", async () => {
+    let isCatchingUp = false;
+    const mutate = vi.fn(async () => ({}));
+    const presenter = new BannerPresenter(
+      { query: async () => [candidate()], mutate },
+      preferences,
+      adapter({ show: () => { isCatchingUp = true; } }),
+      () => undefined,
+      Date.now,
+      undefined,
+      () => isCatchingUp,
+    );
+
+    await presenter.drain();
+
+    expect(mutate).toHaveBeenCalledWith("ack_banner_candidates", { ids: ["candidate-1"] });
+  });
+
   it("never carries a one-time code from a core candidate into the shown banner or its acknowledgement", async () => {
     const calls: string[] = [];
     const notification = adapter();
