@@ -89,6 +89,7 @@ import {
   type MessageView,
   type HistoryPage,
   type AppFilter,
+  type MirroredNotification,
   type NotificationCheck,
   type NotificationPreferences,
   type NotificationPersistence,
@@ -100,7 +101,8 @@ import {
   type Draft,
 } from "./bridge/bridge";
 import { useMaximizeButtonRegion } from "./shell/useMaximizeButtonRegion";
-import { dismissibleNotifications, notificationMuteKey, NotificationsView } from "./notifications/Notifications";
+import { dismissibleNotifications, notificationAppName, notificationMuteKey, notificationSourceName, NotificationsView, notificationTuple, visibleNotifications } from "./notifications/Notifications";
+import { NotificationMuteNotice, type NotificationMuteNotice as NotificationMuteNoticeState } from "./notifications/NotificationMuteNotice";
 import { createNotificationActivationDrain, nativeNotificationActivation, type ActivationContext } from "./notifications/notificationActivation";
 import type { NotificationActivation, NotificationActivationTarget } from "@peppy/generated/notification-activation";
 import { NotificationSettings } from "./notifications/NotificationSettings";
@@ -1612,9 +1614,12 @@ function SettingsView({
     }
   }, [activeSection, sectionIds]);
   const selectSection = useCallback((id: string) => {
-    const section = document.getElementById(sectionElementId(id));
-    setActiveSection(id);
-    pendingSectionRef.current = id;
+    const notificationApps = id === "notification-apps";
+    const activeId = notificationApps ? "notifications" : id;
+    const section = document.getElementById(notificationApps ? "notification-apps-group" : sectionElementId(activeId)) ??
+      document.getElementById(sectionElementId(activeId));
+    setActiveSection(activeId);
+    pendingSectionRef.current = activeId;
     if (scrollEndTimer.current) window.clearTimeout(scrollEndTimer.current);
     scrollEndTimer.current = window.setTimeout(() => {
       pendingSectionRef.current = null;
@@ -2242,6 +2247,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (view === "contacts" && contactNavigation.current) return;
     const navigate = () => {
       if (view !== "contacts") setContactTarget(undefined);
+      if (view === "notifications") {
+        setNotificationAppFilter(null);
+        resetNotificationSearch();
+      }
       setActiveViewNow(view);
     };
     if (contactNavigation.current) contactNavigation.current(navigate);
@@ -2262,7 +2271,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const notificationsLocked = snapshot?.encryption.state !== "unlocked";
   const dismissibleNotificationsCount = dismissibleNotifications(snapshot?.notifications ?? [], snapshot?.appFilters ?? [], notificationsLocked).length;
   const contactsOpen = !revoked && activeView === "contacts";
-  const [notificationSettingsRequested, setNotificationSettingsRequested] = useState(false);
+  const [notificationSettingsRequested, setNotificationSettingsRequested] = useState<"notifications" | "notification-apps">();
+  const [notificationAppFilter, setNotificationAppFilter] = useState<string | null>(null);
   const dismissingNotificationsRef = useRef(false);
   const [actionNotice, setActionNotice] = useState<ActionNotice>();
   const [refreshNotice, setRefreshNotice] = useState("");
@@ -2283,6 +2293,46 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const noticeActionBusyRef = useRef(false);
   const [noticeActionBusy, setNoticeActionBusy] = useState(false);
   const [notificationActionNotice, setNotificationActionNotice] = useState("");
+  const [notificationMuteNotice, setNotificationMuteNotice] = useState<NotificationMuteNoticeState>();
+  const [notificationMutePending, setNotificationMutePending] = useState(false);
+  const notificationMutePendingRef = useRef(false);
+  const notificationMuteRetryRef = useRef<"mute" | "unmute">("mute");
+  const notificationMuteGenerationRef = useRef(0);
+  // Undo removes the toast that held focus; land on the restored app's newest row instead of the page.
+  const focusRestoredNotification = (filter: AppFilter) => {
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== mainRef.current) return;
+    const newest = snapshotRef.current?.notifications
+      .filter(notification => notification.target.sourceDeviceId === filter.sourceDeviceId && notification.packageName === filter.packageName)
+      .reduce<MirroredNotification | undefined>((latest, notification) => !latest || notification.postedAt > latest.postedAt ? notification : latest, undefined);
+    if (!newest) return;
+    const { sourceDeviceId, notificationKey, lifetime } = newest.target;
+    document.getElementById(`notif-${notificationTuple(sourceDeviceId, notificationKey, lifetime)}`)?.focus();
+  };
+  const runNotificationMute = (filter: AppFilter, label: string, muted: boolean) => {
+    if (notificationsLocked || appLock?.locked || notificationMutePendingRef.current) return;
+    const generation = notificationMuteGenerationRef.current;
+    notificationMutePendingRef.current = true;
+    setNotificationMutePending(true);
+    notificationMuteRetryRef.current = muted ? "mute" : "unmute";
+    void (async () => {
+      try {
+        await bridge.set_app_muted(filter.sourceDeviceId, filter.packageName, filter.appName, muted);
+        if (generation !== notificationMuteGenerationRef.current) return;
+        setNotificationMuteNotice(muted ? { kind: "success", filter, label } : undefined);
+        const refreshed = refresh();
+        void refreshed.catch(reportRefresh("Could not refresh notifications. "));
+        if (!muted) void refreshed.then(() => requestAnimationFrame(() => focusRestoredNotification(filter)), () => undefined);
+      } catch {
+        if (generation !== notificationMuteGenerationRef.current) return;
+        setNotificationMuteNotice({ kind: "error", filter, label });
+      } finally {
+        if (generation !== notificationMuteGenerationRef.current) return;
+        notificationMutePendingRef.current = false;
+        setNotificationMutePending(false);
+      }
+    })();
+  };
   const [notificationFocus, setNotificationFocus] = useState<{ requestId: string; target: NotificationActivationTarget }>();
   const notificationFocusContext = useRef<{ requestId: string; context: ActivationContext; reported?: boolean } | undefined>(undefined);
   const notificationDrain = useRef<ReturnType<typeof createNotificationActivationDrain> | undefined>(undefined);
@@ -3374,6 +3424,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         setNotice("");
         flushSync(() => {
           setActiveViewNow("notifications");
+          setNotificationAppFilter(null);
+          setNotificationQuery("");
           notificationFocusContext.current = { requestId: request.requestId, context };
           setNotificationFocus({ requestId: request.requestId, target: destination.target });
         });
@@ -3437,11 +3489,19 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   useEffect(() => {
     notificationNavigation.current = undefined;
     notificationDrain.current?.reset();
+    notificationMuteGenerationRef.current += 1;
+    notificationMutePendingRef.current = false;
+    setNotificationMutePending(false);
+    setNotificationAppFilter(null);
+    resetNotificationSearch();
+    setNotificationMuteNotice(undefined);
   }, [renderedSearchSessionKey, loading, appLock?.locked]);
   useEffect(() => {
     if (activeView === "notifications") return;
     notificationFocusContext.current = undefined;
     setNotificationFocus(undefined);
+    setNotificationAppFilter(null);
+    resetNotificationSearch();
   }, [activeView]);
   const notificationFocusResult = (requestId: string, found: boolean) => {
     const pending = notificationFocusContext.current;
@@ -4987,6 +5047,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       }),
     };
   }, [resolution]);
+  const notificationDisplayTitle = useCallback((title: string) => resolution[title]?.displayName ?? title, [resolution]);
+  const [notificationQuery, setNotificationQuery] = useState("");
+  const resetNotificationSearch = () => setNotificationQuery("");
 
   const accountIdentityKey = snapshot ? `${snapshot.connection.origin ?? ""}|${snapshot.sessionScopeId ?? ""}` : null;
   const accountNotice = useAccountNotice(accountIdentityKey);
@@ -6085,6 +6148,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               disabled={notificationsLocked || !dismissibleNotificationsCount || dismissingNotifications}
               onClick={() => {
                 if (dismissingNotificationsRef.current) return;
+                setNotificationAppFilter(null);
+                setNotificationQuery("");
                 dismissingNotificationsRef.current = true;
                 setDismissingNotifications(true);
                 setNotificationActionNotice("");
@@ -6097,6 +6162,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                   });
               }}
             >
+              <CheckCheck size={14} aria-hidden />
               {dismissibleNotificationsCount > 100 ? "Dismiss up to 100" : "Dismiss all"}
             </button>}
           </header>
@@ -6119,6 +6185,18 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             onCancel={() => setSenderUnblockConfirmation(undefined)}
           />}
           {notificationsOpen && notificationActionNotice && <p id="notifications-action-notice" role="status">{notificationActionNotice}</p>}
+          <NotificationMuteNotice
+            notice={notificationMuteNotice}
+            pending={notificationMutePending}
+            errorAction={notificationMuteRetryRef.current}
+            onUndo={() => {
+              if (notificationMuteNotice) runNotificationMute(notificationMuteNotice.filter, notificationMuteNotice.label, false);
+            }}
+            onRetry={() => {
+              if (notificationMuteNotice) runNotificationMute(notificationMuteNotice.filter, notificationMuteNotice.label, notificationMuteRetryRef.current === "mute");
+            }}
+            onDismiss={() => setNotificationMuteNotice(undefined)}
+          />
           {mcpAuthorizationId && snapshot && !(snapshot.encryption.state === "unlocked" && snapshot.deviceRole === "owner" && snapshot.sessionScopeId) && <div id="mcp-authorization-waiting" className="app-notice-row" role="status" data-mcp-authorization-waiting={snapshot.encryption.state === "unlocked" ? "non-owner" : "locked"}><p>{snapshot.encryption.state === "unlocked" ? "An AI client is waiting for owner approval. Approve it from the vault owner device." : "An AI client is waiting for owner approval. Unlock Peppy to continue."}</p><button className="app-notice-dismiss" type="button" onClick={dismissMcpAuthorization}>Dismiss</button></div>}
           {mcpAuthorizationId && snapshot?.encryption.state === "unlocked" && snapshot.deviceRole === "owner" && snapshot.sessionScopeId && <McpAuthorizationConsent key={`${snapshot.sessionScopeId}:${mcpAuthorizationId}`} authorizationId={mcpAuthorizationId} browserHost={browserHost} sessionKey={snapshot.sessionScopeId} focusFallback={mainRef} onClose={dismissMcpAuthorization} />}
           {settingsOpen ? (
@@ -6175,8 +6253,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                typingShare={typingLinkAvailable && bridge.send_typing ? shareTyping : undefined}
                typingShareError={typingShareError}
                onTypingShare={changeTypingShare}
-                requestedSection={notificationSettingsRequested ? "notifications" : undefined}
-                onRequestedSectionConsumed={() => setNotificationSettingsRequested(false)}
+                requestedSection={notificationSettingsRequested}
+                onRequestedSectionConsumed={() => setNotificationSettingsRequested(undefined)}
                 onAccountDeleted={result => {
                   setDeletionResult(result);
                   void refresh().catch(() => undefined);
@@ -6187,7 +6265,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               focusRequest={notificationFocus}
               onFocusResult={notificationFocusResult}
               notifications={snapshot?.notifications ?? []}
-              displayTitle={(title) => resolution[title]?.displayName ?? title}
+              displayTitle={notificationDisplayTitle}
               filters={snapshot?.appFilters ?? []}
               sources={snapshot?.gateways ?? []}
               locked={notificationsLocked}
@@ -6196,8 +6274,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 void bridge.dismiss_notification(target).then(() => refresh()).catch(error => setNotificationActionNotice(`Could not dismiss notification. ${errorText(error)}`));
               }}
               onMute={filter => {
+                if (notificationsLocked || appLock?.locked || notificationMutePendingRef.current) return;
                 setNotificationActionNotice("");
-                void bridge.set_app_muted(filter.sourceDeviceId, filter.packageName, filter.appName, true).then(() => refresh()).catch(error => setNotificationActionNotice(`Could not mute app. ${errorText(error)}`));
+                const visible = visibleNotifications(snapshot?.notifications ?? [], snapshot?.appFilters ?? [], notificationsLocked);
+                const sourceIds = [...new Set(visible.map(notification => notification.target.sourceDeviceId))];
+                const label = sourceIds.length > 1
+                  ? `${notificationAppName(filter.appName, filter.packageName)} on ${notificationSourceName(filter.sourceDeviceId, snapshot?.gateways ?? [], sourceIds)}`
+                  : notificationAppName(filter.appName, filter.packageName);
+                runNotificationMute(filter, label, true);
               }}
               onCopyOneTimeCode={copyOneTimeCode}
               onSeen={targets => {
@@ -6206,7 +6290,34 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                   throw error;
                 });
               }}
-              onSettings={() => { setNotificationSettingsRequested(true); setActiveView("settings"); }}
+              onSettings={() => { setNotificationSettingsRequested("notifications"); setActiveView("settings"); }}
+              onManageApps={() => { setNotificationSettingsRequested("notification-apps"); setActiveView("settings"); }}
+              onDismissMany={async targets => {
+                if (dismissingNotificationsRef.current) return;
+                const pinnedTargets = targets.slice(0, 100);
+                let dismissed = 0;
+                let failure: unknown;
+                dismissingNotificationsRef.current = true;
+                setDismissingNotifications(true);
+                setNotificationActionNotice("");
+                try {
+                  for (const target of pinnedTargets) {
+                    await bridge.dismiss_notification(target);
+                    dismissed += 1;
+                  }
+                } catch (error) {
+                  failure = error;
+                } finally {
+                  await refresh().catch(() => undefined);
+                  dismissingNotificationsRef.current = false;
+                  setDismissingNotifications(false);
+                }
+                if (failure) setNotificationActionNotice(`Dismissed ${dismissed} of ${pinnedTargets.length}. ${errorText(failure)}`);
+              }}
+              query={notificationQuery}
+              onClearQuery={() => setNotificationQuery("")}
+              appFilter={notificationAppFilter}
+              onAppFilter={setNotificationAppFilter}
             />
           ) : contactsOpen ? (
             <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} toneOverrides={toneOverrides} toneDisabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked)} pendingToneSeeds={pendingToneSeeds} toneErrors={toneErrors} onSelectTone={(seed, index) => { void saveTone(seed, index); }} target={contactTarget} onTargetConsumed={(requestId) => setContactTarget(current => current?.requestId === requestId ? undefined : current)} onNavigationGuard={registerContactNavigation} headerHost={contactsHeaderHost} />
