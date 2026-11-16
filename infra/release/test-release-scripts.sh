@@ -10,21 +10,25 @@ test "$(release_linux_rpm_release 0.2.0-staging.5)" = 1
 if release_linux_package_version 0.2.0-dev.1 >/dev/null 2>&1; then printf 'expected invalid Linux package version failure\n' >&2; exit 1; fi
 root=$(mktemp -d); trap 'rm -rf "$root"' EXIT
 fixture="$root/download"
-mkdir -p "$fixture/android-release-artifacts" "$fixture/desktop-linux-release-artifacts" "$fixture/desktop-macos-release-artifacts/apps/desktop/src-tauri/target/release/bundle/dmg" "$fixture/desktop-windows-release-artifacts/nsis" "$fixture/desktop-windows-release-artifacts/msi"
+mkdir -p "$fixture/android-release-artifacts" "$fixture/desktop-linux-release-artifacts" "$fixture/desktop-macos-arm64-release-artifacts/apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg" "$fixture/desktop-macos-x64-release-artifacts/apps/desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg" "$fixture/desktop-windows-release-artifacts/nsis" "$fixture/desktop-windows-release-artifacts/msi"
 printf release > "$fixture/android-release-artifacts/peppy-android.apk"
 printf bundle > "$fixture/android-release-artifacts/peppy-android.aab"
 mkdir -p "$root/linux/appimage" "$root/linux/deb" "$root/linux/rpm"
 printf appimage > "$root/linux/appimage/Peppy.AppImage"; printf deb > "$root/linux/deb/peppy.deb"; printf rpm > "$root/linux/rpm/peppy.rpm"
 tar -C "$root/linux" -czf "$fixture/desktop-linux-release-artifacts/desktop-linux-bundles.tar.gz" appimage deb rpm
-printf mac > "$fixture/desktop-macos-release-artifacts/apps/desktop/src-tauri/target/release/bundle/dmg/Peppy_X_aarch64.dmg"
-printf archive > "$fixture/desktop-macos-release-artifacts/Peppy.app.tar.gz"
+printf arm64 > "$fixture/desktop-macos-arm64-release-artifacts/apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Peppy_X_aarch64.dmg"
+printf x64 > "$fixture/desktop-macos-x64-release-artifacts/apps/desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/Peppy_X_x64.dmg"
+printf arm64-archive > "$fixture/desktop-macos-arm64-release-artifacts/desktop-macos-arm64.app.tar.gz"
+printf x64-archive > "$fixture/desktop-macos-x64-release-artifacts/desktop-macos-x64.app.tar.gz"
 printf exe > "$fixture/desktop-windows-release-artifacts/nsis/Peppy_X_x64-setup.exe"; printf msi > "$fixture/desktop-windows-release-artifacts/msi/Peppy_X_x64_en-US.msi"
 "$script_dir/stage-assets.sh" 0.2.0-staging.5 staging "$fixture" "$root/prerelease"
 test -f "$root/prerelease/peppy-0.2.0-staging.5-linux-x86_64.deb"; test -f "$root/prerelease/peppy-0.2.0-staging.5-linux-x86_64.rpm"; test -s "$root/prerelease/SHA256SUMS"
 test -f "$root/prerelease/peppy-0.2.0-staging.5-android.apk"; test -f "$root/prerelease/peppy-0.2.0-staging.5-android.aab"
 test ! -e "$root/prerelease/peppy-0.2.0-staging.5-android-debug.apk"
-test "$(find "$root/prerelease" -type f | wc -l | tr -d ' ')" = 10; test "$(grep -c . "$root/prerelease/SHA256SUMS")" = 9
+test "$(find "$root/prerelease" -type f | wc -l | tr -d ' ')" = 12; test "$(grep -c . "$root/prerelease/SHA256SUMS")" = 11
 grep -Fq 'peppy-0.2.0-staging.5-android.apk' "$root/prerelease/SHA256SUMS"; grep -Fq 'peppy-0.2.0-staging.5-android.aab' "$root/prerelease/SHA256SUMS"
+test -f "$root/prerelease/peppy-0.2.0-staging.5-macos-arm64.dmg"
+test -f "$root/prerelease/peppy-0.2.0-staging.5-macos-x64.dmg"
 "$script_dir/stage-assets.sh" 0.2.0 stable "$fixture" "$root/stable"; test -f "$root/stable/peppy-0.2.0-linux-x86_64.rpm"
 if "$script_dir/sign-update-assets.sh" 0.2.0 stable "$root/stable" >/dev/null 2>&1; then printf 'expected unsigned signing failure\n' >&2; exit 1; fi
 key="$root/test-updater.key"; alternate_key="$root/alternate-updater.key"
@@ -37,6 +41,8 @@ PEPPY_UPDATE_PUBLIC_KEY=$(<"$key.pub")
 "$script_dir/sign-update-assets.sh" 0.2.0 stable "$root/stable"
 "$script_dir/generate-update-manifest.sh" 0.2.0 stable "$root/stable"
 "$script_dir/verify-update-assets.sh" 0.2.0 stable "$root/stable"
+grep -Fq 'darwin-aarch64-app' "$root/stable/latest.json"
+grep -Fq 'darwin-x86_64-app' "$root/stable/latest.json"
 relative_stable="$root/relative assets/stable"
 mkdir -p "$relative_stable"
 while IFS='|' read -r _ asset; do cp "$root/stable/$asset" "$relative_stable/$asset"; done < <(release_update_targets 0.2.0)
@@ -53,7 +59,7 @@ sed '/^asset_dir=$(CDPATH=.*pwd -P)$/d' "$script_dir/sign-update-assets.sh" > "$
 chmod +x "$mutated_signer"
 if PEPPY_RELEASE_LIB="$script_dir/lib.sh" "$mutated_signer" 0.2.0 stable "$relative_stable_from_caller" >/dev/null 2>&1; then printf 'expected relative signing failure without asset path normalization\n' >&2; exit 1; fi
 "$script_dir/sign-update-assets.sh" 0.2.0 stable "$relative_stable_from_caller"
-test "$(find "$relative_stable" -maxdepth 1 -type f -name '*.sig' | wc -l | tr -d ' ')" = 6
+test "$(find "$relative_stable" -maxdepth 1 -type f -name '*.sig' | wc -l | tr -d ' ')" = 7
 "$script_dir/generate-update-manifest.sh" 0.2.0 stable "$relative_stable_from_caller"
 "$script_dir/verify-update-assets.sh" 0.2.0 stable "$relative_stable_from_caller"
 grep -Fq 'linux-x86_64-appimage' "$root/stable/latest.json"
@@ -72,7 +78,7 @@ PEPPY_UPDATE_PUBLIC_KEY=$(<"$alternate_key.pub")
 if "$script_dir/verify-update-assets.sh" 0.2.0 stable "$relative_stable_from_caller" >/dev/null 2>&1; then printf 'expected wrong-key verification failure\n' >&2; exit 1; fi
 PEPPY_UPDATE_PUBLIC_KEY=$(<"$key.pub")
 cp "$relative_stable/peppy-0.2.0-linux-x86_64.AppImage" "$root/original-appimage"
-printf tampered >> "$relative_stable/peppy-0.2.0-linux-x86_64.AppImage"
+printf tampered >> "$relative_stable/peppy-0.2.0-darwin-x86_64.app.tar.gz"
 if "$script_dir/verify-update-assets.sh" 0.2.0 stable "$relative_stable_from_caller" >/dev/null 2>&1; then printf 'expected tampered-asset verification failure\n' >&2; exit 1; fi
 cp "$root/original-appimage" "$relative_stable/peppy-0.2.0-linux-x86_64.AppImage"
 if cargo run --quiet --locked --manifest-path "$script_dir/manifest-verifier/Cargo.toml" -- 0.2.0 "$relative_stable_from_caller" 0.2.1 >/dev/null 2>&1; then printf 'expected version-binding verification failure\n' >&2; exit 1; fi

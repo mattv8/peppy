@@ -23,7 +23,7 @@ find_exact() {
 }
 copy_asset() { cp "$1" "$out_dir/$2"; }
 mkdir -p "$out_dir"; rm -f "$out_dir"/*
-android="$download_dir/android-release-artifacts"; linux="$download_dir/desktop-linux-release-artifacts"; macos="$download_dir/desktop-macos-release-artifacts"; windows="$download_dir/desktop-windows-release-artifacts"
+android="$download_dir/android-release-artifacts"; linux="$download_dir/desktop-linux-release-artifacts"; macos_arm64="$download_dir/desktop-macos-arm64-release-artifacts"; macos_x64="$download_dir/desktop-macos-x64-release-artifacts"; windows="$download_dir/desktop-windows-release-artifacts"
 if [ "$group" = all ] || [ "$group" = android ]; then
   copy_asset "$(find_exact "$android" 'peppy-android.apk')" "peppy-$version-android.apk"
   copy_asset "$(find_exact "$android" 'peppy-android.aab')" "peppy-$version-android.aab"
@@ -34,8 +34,10 @@ if [ "$group" = all ] || [ "$group" = desktop ]; then
   copy_asset "$(find_exact "$work_dir" '*.AppImage')" "peppy-$version-linux-x86_64.AppImage"
   copy_asset "$(find_exact "$work_dir" '*.deb')" "peppy-$version-linux-x86_64.deb"
   copy_asset "$(find_exact "$work_dir" '*.rpm')" "peppy-$version-linux-x86_64.rpm"
-  copy_asset "$(find_exact "$macos" '*.dmg')" "peppy-$version-macos-aarch64.dmg"
-  copy_asset "$(find_exact "$macos" '*.app.tar.gz')" "peppy-$version-darwin-aarch64.app.tar.gz"
+  copy_asset "$(find_exact "$macos_arm64" '*.dmg')" "peppy-$version-macos-arm64.dmg"
+  copy_asset "$(find_exact "$macos_x64" '*.dmg')" "peppy-$version-macos-x64.dmg"
+  copy_asset "$(find_exact "$macos_arm64" 'desktop-macos-arm64.app.tar.gz')" "peppy-$version-darwin-aarch64.app.tar.gz"
+  copy_asset "$(find_exact "$macos_x64" 'desktop-macos-x64.app.tar.gz')" "peppy-$version-darwin-x86_64.app.tar.gz"
   copy_asset "$(find_exact "$windows" '*.msi')" "peppy-$version-windows-x86_64.msi"
   copy_asset "$(find_exact "$windows" '*-setup.exe')" "peppy-$version-windows-x86_64-setup.exe"
 fi

@@ -5,6 +5,19 @@ config=''
 macos_distribution="${PEPPY_MACOS_DISTRIBUTION-direct}"
 case "$macos_distribution" in direct|app-store) ;; *) echo 'PEPPY_MACOS_DISTRIBUTION must be direct or app-store' >&2; exit 1 ;; esac
 
+xcode_dtxcode() {
+  local version=$1 major minor patch extra
+  IFS=. read -r major minor patch extra <<< "$version"
+  [[ "$major" =~ ^[0-9]+$ && "${minor:-0}" =~ ^[0-9]+$ && "${patch:-0}" =~ ^[0-9]+$ && -z "$extra" ]] || return 1
+  printf '%02d%d%d\n' "$major" "${minor:-0}" "${patch:-0}"
+}
+
+desktop_bundle_dir() {
+  local target_dir="apps/desktop/src-tauri/target"
+  if [ -n "${PEPPY_TAURI_TARGET:-}" ]; then target_dir="$target_dir/$PEPPY_TAURI_TARGET"; fi
+  printf '%s/release/bundle\n' "$target_dir"
+}
+
 if [ "$macos_distribution" = app-store ]; then
   [ "$RUNNER_OS" = macOS ] || { echo 'app-store distribution requires a macOS runner' >&2; exit 1; }
   [ "${GITHUB_ACTIONS:-}" = true ] || { echo 'app-store distribution must run in GitHub Actions' >&2; exit 1; }
@@ -13,6 +26,7 @@ if [ "$macos_distribution" = app-store ]; then
     [[ "${!required:-}" =~ [^[:space:]] ]] || { echo "$required is required for app-store builds" >&2; exit 1; }
   done
   [[ "$MACOS_BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || { echo 'MACOS_BUILD_NUMBER must be a positive integer' >&2; exit 1; }
+  [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'App Store version must match X.Y.Z' >&2; exit 1; }
   # Tauri recognizes these standard names; keep App Store credentials separate from Developer ID inputs.
   export APPLE_CERTIFICATE="$APPLE_MAS_CERTIFICATE_P12"
   export APPLE_CERTIFICATE_PASSWORD="$APPLE_MAS_CERTIFICATE_PASSWORD"
@@ -49,7 +63,7 @@ fi
 
 repair_macos_dmg() {
   [[ "$RUNNER_OS" = macOS && ",$BUNDLES," == *,dmg,* ]] || return 0
-  local output_dir="${PEPPY_DMG_OUTPUT_DIR:-apps/desktop/src-tauri/target/release/bundle/dmg}"
+  local output_dir="${PEPPY_DMG_OUTPUT_DIR:-$(desktop_bundle_dir)/dmg}"
   local -a images
   while IFS= read -r -d '' image; do images+=("$image"); done < <(find "$output_dir" -maxdepth 1 -type f -name '*.dmg' -print0)
   if [ "${#images[@]}" -ne 1 ]; then
@@ -77,7 +91,7 @@ decode_base64() {
 
 package_app_store() {
   (
-  local bundle_output_dir profile='' profile_xml='' application_certificate='' installer_certificate='' entitlements='' signed_entitlements='' keychain='' keychain_password='' keychain_uuid team_id application_identifier signed_team_id signed_application_identifier app pkg_dir pkg previous_keychains_output
+  local bundle_output_dir profile='' profile_xml='' application_certificate='' installer_certificate='' entitlements='' signed_entitlements='' keychain='' keychain_password='' keychain_uuid team_id application_identifier signed_team_id signed_application_identifier app pkg_dir pkg previous_keychains_output xcode_version xcode_build sdk_version sdk_build os_build info_plist executable expanded_pkg='' expanded_pkg_parent='' expanded_app
   local previous_keychains_captured=false
   local keychain_search_list_changed=false
   local keychain_created=false
@@ -90,11 +104,12 @@ package_app_store() {
       security list-keychains -d user -s "${previous_keychains[@]}" >/dev/null 2>&1 || true
     fi
     [ "$keychain_created" != true ] || security delete-keychain "$keychain" >/dev/null 2>&1 || true
+    [ -z "$expanded_pkg_parent" ] || rm -rf "$expanded_pkg_parent" || true
     rm -f "$profile" "$profile_xml" "$application_certificate" "$installer_certificate" "$entitlements" "$signed_entitlements" || true
     return "$status"
   }
   trap cleanup_app_store_keychain EXIT
-  bundle_output_dir="${PEPPY_BUNDLE_OUTPUT_DIR:-apps/desktop/src-tauri/target/release/bundle/macos}"
+  bundle_output_dir="${PEPPY_BUNDLE_OUTPUT_DIR:-apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos}"
   profile=$(mktemp)
   profile_xml=$(mktemp)
   application_certificate=$(mktemp)
@@ -134,9 +149,33 @@ package_app_store() {
   cp packaging/macos/app-store/entitlements.plist "$entitlements"
   plutil -replace 'com\.apple\.application-identifier' -string "$application_identifier" "$entitlements"
   plutil -replace 'com\.apple\.developer\.team-identifier' -string "$team_id" "$entitlements"
+  xcode_version=$(xcode_dtxcode "$(plutil -extract CFBundleShortVersionString raw -o - "$(xcode-select -p)/../version.plist")") || { echo 'could not derive DTXcode from Xcode version' >&2; return 1; }
+  xcode_build=$(plutil -extract ProductBuildVersion raw -o - "$(xcode-select -p)/../version.plist")
+  sdk_version=$(xcrun --sdk macosx --show-sdk-version)
+  sdk_build=$(xcrun --sdk macosx --show-sdk-build-version)
+  os_build=$(sw_vers -buildVersion)
   while IFS= read -r -d '' app; do
     install -m 0644 "$profile" "$app/Contents/embedded.provisionprofile"
-    plutil -replace CFBundleVersion -string "$MACOS_BUILD_NUMBER" "$app/Contents/Info.plist"
+    info_plist="$app/Contents/Info.plist"
+    plutil -replace CFBundleVersion -string "$MACOS_BUILD_NUMBER" "$info_plist"
+    plutil -replace ITSAppUsesNonExemptEncryption -bool true "$info_plist"
+    plutil -replace LSMinimumSystemVersion -string 13.0 "$info_plist"
+    plutil -replace DTXcode -string "$xcode_version" "$info_plist"
+    plutil -replace DTXcodeBuild -string "$xcode_build" "$info_plist"
+    plutil -replace DTSDKName -string "macosx$sdk_version" "$info_plist"
+    plutil -replace DTSDKBuild -string "$sdk_build" "$info_plist"
+    plutil -replace DTPlatformName -string macosx "$info_plist"
+    plutil -replace DTPlatformVersion -string "$sdk_version" "$info_plist"
+    plutil -replace DTPlatformBuild -string "$sdk_build" "$info_plist"
+    plutil -replace DTCompiler -string com.apple.compilers.llvm.clang.1_0 "$info_plist"
+    plutil -replace BuildMachineOSBuild -string "$os_build" "$info_plist"
+    plutil -replace CFBundleSupportedPlatforms -xml '<array><string>MacOSX</string></array>' "$info_plist"
+    while IFS= read -r -d '' nested_code; do
+      codesign --force --sign "$APPLE_MAS_SIGNING_IDENTITY" --keychain "$keychain" "$nested_code"
+    done < <(find "$app/Contents" -type f -print0 | while IFS= read -r -d '' candidate; do file -b "$candidate" | grep -q 'Mach-O' && printf '%s\0' "$candidate"; done)
+    while IFS= read -r -d '' nested_bundle; do
+      codesign --force --sign "$APPLE_MAS_SIGNING_IDENTITY" --keychain "$keychain" "$nested_bundle"
+    done < <(find "$app/Contents" -depth -type d \( -name '*.app' -o -name '*.appex' -o -name '*.framework' -o -name '*.xpc' \) -print0)
     codesign --force --sign "$APPLE_MAS_SIGNING_IDENTITY" --keychain "$keychain" --entitlements "$entitlements" "$app"
     codesign --verify --deep --strict --verbose=2 "$app"
     codesign -d --entitlements :- "$app" > "$signed_entitlements"
@@ -146,10 +185,35 @@ package_app_store() {
     [ "$signed_team_id" = "$team_id" ] || { echo 'App Store bundle team identifier does not match the provisioning profile' >&2; return 1; }
     [ "$signed_application_identifier" = "$application_identifier" ] || { echo 'App Store bundle application identifier does not match the provisioning profile' >&2; return 1; }
     codesign -d -r- "$app" 2>&1 | grep -Fq "$team_id" || { echo 'App Store bundle designated requirement does not match the provisioning-profile team' >&2; return 1; }
-    pkg_dir="${PEPPY_PKG_OUTPUT_DIR:-apps/desktop/src-tauri/target/release/bundle/macos}"
+    pkg_dir="${PEPPY_PKG_OUTPUT_DIR:-apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos}"
     mkdir -p "$pkg_dir"
     pkg="$pkg_dir/Peppy.pkg"
     productbuild --component "$app" /Applications --sign "$APPLE_MAS_INSTALLER_IDENTITY" --keychain "$keychain" "$pkg"
+    pkgutil --check-signature "$pkg"
+    expanded_pkg_parent=$(mktemp -d)
+    expanded_pkg="$expanded_pkg_parent/expanded"
+    pkgutil --expand-full "$pkg" "$expanded_pkg"
+    if find "$expanded_pkg" -type f ! -perm -o=r -print -quit | grep -q .; then
+      echo 'App Store package contains a file that is not world-readable' >&2
+      return 1
+    fi
+    if xattr -r -l "$expanded_pkg" | grep -Fq com.apple.quarantine; then
+      echo 'App Store package contains quarantine attributes' >&2
+      return 1
+    fi
+    expanded_app=$(find "$expanded_pkg" -name '*.app' -type d -print -quit)
+    [ -n "$expanded_app" ] || { echo 'App Store package does not contain an app bundle' >&2; return 1; }
+    executable=$(plutil -extract CFBundleExecutable raw -o - "$expanded_app/Contents/Info.plist")
+    lipo -archs "$expanded_app/Contents/MacOS/$executable" | grep -Eq '(^| )x86_64( |$)' || { echo 'App Store executable is missing x86_64' >&2; return 1; }
+    lipo -archs "$expanded_app/Contents/MacOS/$executable" | grep -Eq '(^| )arm64( |$)' || { echo 'App Store executable is missing arm64' >&2; return 1; }
+    if strings "$expanded_app/Contents/MacOS/$executable" | grep -Eq 'tauri-plugin-updater|latest\.json'; then
+      echo 'App Store executable contains updater markers' >&2
+      return 1
+    fi
+    cp "$info_plist" "$pkg_dir/Peppy.Info.plist"
+    rm -rf "$expanded_pkg_parent"
+    expanded_pkg_parent=''
+    expanded_pkg=''
   done < <(find "$bundle_output_dir" -name '*.app' -type d -print0)
   )
 }
@@ -270,9 +334,19 @@ if [ "$is_linux_prerelease_rpm" = true ]; then
   pnpm --dir apps/desktop exec tauri bundle --bundles rpm --config "$rpm_config"
 else
   if [ -n "$json" ]; then
-    pnpm --dir apps/desktop exec tauri build --bundles "$BUNDLES" --config "$json" -- --locked
+    if [ "$macos_distribution" = app-store ]; then
+      pnpm --dir apps/desktop exec tauri build --bundles "$BUNDLES" --target universal-apple-darwin --config "$json" -- --locked --no-default-features
+    elif [ -n "${PEPPY_TAURI_TARGET:-}" ]; then
+      pnpm --dir apps/desktop exec tauri build --bundles "$BUNDLES" --target "$PEPPY_TAURI_TARGET" --config "$json" -- --locked
+    else
+      pnpm --dir apps/desktop exec tauri build --bundles "$BUNDLES" --config "$json" -- --locked
+    fi
   else
-    pnpm --dir apps/desktop exec tauri build --bundles "$BUNDLES" -- --locked
+    if [ -n "${PEPPY_TAURI_TARGET:-}" ]; then
+      pnpm --dir apps/desktop exec tauri build --bundles "$BUNDLES" --target "$PEPPY_TAURI_TARGET" -- --locked
+    else
+      pnpm --dir apps/desktop exec tauri build --bundles "$BUNDLES" -- --locked
+    fi
   fi
 fi
 
@@ -281,7 +355,7 @@ if [ "$macos_distribution" = direct ]; then repair_macos_dmg; fi
 if [ "$macos_distribution" = app-store ]; then package_app_store; fi
 
 if [ "$TRUSTED_UPDATE_BUILD" = true ] && [ "$RUNNER_OS" = macOS ]; then
-  bundle_output_dir="${PEPPY_BUNDLE_OUTPUT_DIR:-apps/desktop/src-tauri/target/release/bundle/macos}"
+  bundle_output_dir="${PEPPY_BUNDLE_OUTPUT_DIR:-$(desktop_bundle_dir)/macos}"
   while IFS= read -r -d '' application; do
     codesign --verify --deep --strict --verbose=2 "$application"
     info_plist="$application/Contents/Info.plist"
@@ -298,7 +372,7 @@ if [ "$TRUSTED_UPDATE_BUILD" = true ] && [ "$RUNNER_OS" = macOS ]; then
     fi
   done < <(find "$bundle_output_dir" -name '*.app' -type d -print0)
   if [ "$macos_mode" = developer-id ] && [[ ",$BUNDLES," == *,dmg,* ]]; then
-    dmg_output_dir="${PEPPY_DMG_OUTPUT_DIR:-apps/desktop/src-tauri/target/release/bundle/dmg}"
+    dmg_output_dir="${PEPPY_DMG_OUTPUT_DIR:-$(desktop_bundle_dir)/dmg}"
     while IFS= read -r -d '' image; do
       codesign --verify --strict --verbose=2 "$image"
       assert_developer_id_signature "$image" false

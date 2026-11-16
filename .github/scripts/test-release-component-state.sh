@@ -112,12 +112,15 @@ peppy-2.3.4-linux-x86_64.rpm
 peppy-2.3.4-linux-x86_64.rpm.sig
 peppy-2.3.4-darwin-aarch64.app.tar.gz
 peppy-2.3.4-darwin-aarch64.app.tar.gz.sig
+peppy-2.3.4-darwin-x86_64.app.tar.gz
+peppy-2.3.4-darwin-x86_64.app.tar.gz.sig
 peppy-2.3.4-windows-x86_64-setup.exe
 peppy-2.3.4-windows-x86_64-setup.exe.sig
 peppy-2.3.4-windows-x86_64.msi
 peppy-2.3.4-windows-x86_64.msi.sig
 latest.json
-peppy-2.3.4-macos-aarch64.dmg
+peppy-2.3.4-macos-arm64.dmg
+peppy-2.3.4-macos-x64.dmg
 SHA256SUMS
 SHA256SUMS.sig
 EOF
@@ -149,6 +152,7 @@ jq -n --arg version 2.3.4 '
     "linux-x86_64-deb": {url:"https://github.com/mattv8/peppy/releases/download/v2.3.4/peppy-2.3.4-linux-x86_64.deb", signature:"signature"},
     "linux-x86_64-rpm": {url:"https://github.com/mattv8/peppy/releases/download/v2.3.4/peppy-2.3.4-linux-x86_64.rpm", signature:"signature"},
     "darwin-aarch64-app": {url:"https://github.com/mattv8/peppy/releases/download/v2.3.4/peppy-2.3.4-darwin-aarch64.app.tar.gz", signature:"signature"},
+    "darwin-x86_64-app": {url:"https://github.com/mattv8/peppy/releases/download/v2.3.4/peppy-2.3.4-darwin-x86_64.app.tar.gz", signature:"signature"},
     "windows-x86_64-nsis": {url:"https://github.com/mattv8/peppy/releases/download/v2.3.4/peppy-2.3.4-windows-x86_64-setup.exe", signature:"signature"},
     "windows-x86_64-msi": {url:"https://github.com/mattv8/peppy/releases/download/v2.3.4/peppy-2.3.4-windows-x86_64.msi", signature:"signature"}
   }}' > "$root/assets/latest.json"
@@ -293,7 +297,7 @@ run_case() {
   fi
   if grep -Eq '(^| )(create|edit|upload|delete)( |$)' "$root/gh.log"; then case_failure 'GH write attempted'; fi
   [ "$(wc -l < "$root/downloads.log" | tr -d ' ')" -eq "$downloads" ] || case_failure 'wrong download count'
-  if [ "$downloads" -eq 16 ] || [ "$downloads" -eq 4 ]; then
+  if [ "$downloads" -eq 19 ] || [ "$downloads" -eq 4 ]; then
     LC_ALL=C sort "$root/downloads.log" > "$root/downloads.sorted"
     cmp -s "$root/$case_component.names" "$root/downloads.sorted" || case_failure 'wrong exact download names'
   fi
@@ -312,14 +316,14 @@ run_case() {
 
 # Both positives traverse real GPG authority isolation, signature, coverage and hashes.
 # Downstream platform-tool cryptography is mocked, not claimed as platform proof.
-run_case desktop-valid 0 '' desktop 16
+run_case desktop-valid 0 '' desktop 19
 case_component=android active_assets="$root/android-assets" active_metadata="$root/android-release.json"
 run_case android-valid-annotated 0 '' android 4
 case_component=desktop active_assets="$root/assets" active_metadata="$root/release.json"
 git -C "$verify_repo" tag -d v2.3.4 >/dev/null
 git -C "$verify_repo" tag -a v2.3.4 -m fixture "$verify_sha"
 git -C "$verify_repo" push -q --force origin refs/tags/v2.3.4 2>/dev/null
-run_case desktop-valid-annotated 0 '' desktop 16
+run_case desktop-valid-annotated 0 '' desktop 19
 printf other >> "$verify_repo/fixture"
 git -C "$verify_repo" commit -qam other
 other_sha=$(git -C "$verify_repo" rev-parse HEAD)
@@ -349,17 +353,17 @@ metadata_mode=unknown
 run_case metadata-api-error 1 'could not read published release metadata' none 0
 metadata_mode=valid
 mv "$root/assets/latest.json" "$root/latest.json.saved"
-run_case missing-downloaded-asset 1 'could not download an expected release asset' none 13
+run_case missing-downloaded-asset 1 'could not download an expected release asset' none 15
 mv "$root/latest.json.saved" "$root/assets/latest.json"
 
 printf tampered > "$root/assets/peppy-2.3.4-linux-x86_64.AppImage"
-run_case tampered-payload 1 'release checksum verification failed' none 16
+run_case tampered-payload 1 'release checksum verification failed' none 19
 printf 'peppy-2.3.4-linux-x86_64.AppImage\n' > "$root/assets/peppy-2.3.4-linux-x86_64.AppImage"
 selected_key=$wrong_key selected_id=$wrong_id
-run_case wrong-authority 1 'release checksums have an invalid signature' none 16
+run_case wrong-authority 1 'release checksums have an invalid signature' none 19
 selected_key=$authority_key selected_id=$authority_id
 printf malformed > "$root/assets/SHA256SUMS.sig"
-run_case malformed-signature 1 'release checksums have an invalid signature' none 16
+run_case malformed-signature 1 'release checksums have an invalid signature' none 19
 cp "$root/valid-signature" "$root/assets/SHA256SUMS.sig"
 
 for mutation in unsafe-path duplicate missing-checksum; do
@@ -369,29 +373,29 @@ for mutation in unsafe-path duplicate missing-checksum; do
     missing-checksum) sed '1d' "$root/valid-sums" > "$root/assets/SHA256SUMS" ;;
   esac
   GNUPGHOME="$root/gpg-authority" gpg --batch --yes --detach-sign --output "$root/assets/SHA256SUMS.sig" "$root/assets/SHA256SUMS"
-  run_case "$mutation" 1 'release checksums do not cover exactly the expected assets' none 16
+  run_case "$mutation" 1 'release checksums do not cover exactly the expected assets' none 19
   cp "$root/valid-sums" "$root/assets/SHA256SUMS"
   cp "$root/valid-signature" "$root/assets/SHA256SUMS.sig"
 done
 selected_key=
-run_case missing-authority 1 'release checksum verification authority is unavailable' none 16
+run_case missing-authority 1 'release checksum verification authority is unavailable' none 19
 selected_key=$authority_key selected_id=
-run_case missing-selector 1 'release checksum verification key selector is unavailable' none 16
+run_case missing-selector 1 'release checksum verification key selector is unavailable' none 19
 selected_id=0000000000000000000000000000000000000000
-run_case invalid-selector 1 'release checksum verification key selector did not resolve exactly one primary key' none 16
+run_case invalid-selector 1 'release checksum verification key selector did not resolve exactly one primary key' none 19
 selected_id=$authority_id
 
 platform_failure=cargo
-run_case updater-failure 42 'fixture updater rejected' desktop 16
+run_case updater-failure 42 'fixture updater rejected' desktop 19
 platform_failure=jarsigner case_component=android active_assets="$root/android-assets" active_metadata="$root/android-release.json"
 run_case android-verifier-failure 1 'AAB strict signature verification failed' android 4
 platform_failure='' case_component=desktop active_assets="$root/assets" active_metadata="$root/release.json"
 cleanup_failure=true
-run_case cleanup-success-status 0 '' desktop 16
+run_case cleanup-success-status 0 '' desktop 19
 platform_failure=cargo
-run_case cleanup-failure-status 42 'fixture updater rejected' desktop 16
+run_case cleanup-failure-status 42 'fixture updater rejected' desktop 19
 platform_failure='' cleanup_failure=''
-run_case restored-valid 0 '' desktop 16
+run_case restored-valid 0 '' desktop 19
 
 [ "$failures" -eq 0 ] || exit 1
 printf 'release component state checks: %s (%s actual verify cases)\n' "$checks" "$cases"
