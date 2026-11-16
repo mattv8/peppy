@@ -1,0 +1,152 @@
+name: Play publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Stable Android release tag to publish, for example android-v1.2.3
+        required: true
+        type: string
+      track:
+        description: Google Play track
+        required: true
+        type: choice
+        options: [internal, alpha]
+        default: internal
+
+permissions:
+  contents: read
+
+concurrency:
+  group: play-publish-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      attestations: read
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      TRACK: ${{ inputs.track }}
+      # Release checksum key: infra/release/keys/stable-checksums.asc (documented in .agents/ops/release-keys.md).
+      CHECKSUM_KEY_FINGERPRINT: 22973A816783D4DEF91C64BBBDEFEAB01080A42D
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      status: ${{ steps.plan.outputs.status }}
+      track: ${{ steps.plan.outputs.track }}
+    steps:
+      - name: Require production dispatch
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_EVENT_NAME:$GITHUB_REF" = 'workflow_dispatch:refs/heads/production' ] || { echo 'Play publishing requires a workflow dispatch on production' >&2; exit 1; }
+      - id: plan
+        name: Validate release tag and track
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^android-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'release_tag must be a stable android-v<major>.<minor>.<patch> tag' >&2
+            exit 1
+          fi
+          case "$TRACK" in
+            internal) status=completed ;;
+            alpha) status=draft ;;
+            *) echo "unsupported Play track: $TRACK" >&2; exit 1 ;;
+          esac
+          {
+            echo "version=${RELEASE_TAG#android-v}"
+            echo "status=$status"
+            echo "track=$TRACK"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Require a published stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_state=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '[.isDraft, .isPrerelease] | @tsv')
+          read -r is_draft is_prerelease <<< "$release_state"
+          [ "$is_draft" = false ] && [ "$is_prerelease" = false ] || { echo "$RELEASE_TAG must be a published, non-prerelease release" >&2; exit 1; }
+      - name: Download and verify the release AAB
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          aab="peppy-${VERSION}-android.aab"
+          mkdir -p dist/play
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$aab" --pattern SHA256SUMS --pattern SHA256SUMS.sig --dir dist/play
+          shopt -s nullglob
+          aabs=(dist/play/*.aab)
+          [ "${#aabs[@]}" -eq 1 ] && [ "${aabs[0]}" = "dist/play/$aab" ] || { echo "expected exactly one $aab in $RELEASE_TAG" >&2; exit 1; }
+          [ -s dist/play/SHA256SUMS ] && [ -s dist/play/SHA256SUMS.sig ] || { echo 'SHA256SUMS and SHA256SUMS.sig are required' >&2; exit 1; }
+
+          # Verify the checksum manifest against the committed release checksum key, pinned by fingerprint.
+          gpg_home=$(mktemp -d)
+          trap 'rm -rf "$gpg_home"' EXIT
+          export GNUPGHOME="$gpg_home"
+          gpg --batch --import infra/release/keys/stable-checksums.asc
+          key_fingerprints=$(gpg --batch --with-colons --show-keys infra/release/keys/stable-checksums.asc | awk -F: '$1 == "fpr" {print $10}')
+          [ "$(printf '%s\n' "$key_fingerprints" | sed -n 1p)" = "$CHECKSUM_KEY_FINGERPRINT" ] || { echo 'committed checksum key does not match the pinned fingerprint' >&2; exit 1; }
+          gpg_status=$(gpg --batch --status-fd 1 --verify dist/play/SHA256SUMS.sig dist/play/SHA256SUMS)
+          signer=$(printf '%s\n' "$gpg_status" | awk '$2 == "VALIDSIG" {print $NF}')
+          [ "$signer" = "$CHECKSUM_KEY_FINGERPRINT" ] || { echo 'SHA256SUMS is not signed by the pinned release checksum key' >&2; exit 1; }
+
+          # Check the AAB digest against the signed manifest.
+          line=$(awk -v name="$aab" '$2 == name' dist/play/SHA256SUMS)
+          [ "$(printf '%s\n' "$line" | grep -c .)" -eq 1 ] || { echo "SHA256SUMS must list $aab exactly once" >&2; exit 1; }
+          (cd dist/play && printf '%s\n' "$line" | sha256sum -c -)
+
+          # Check the GitHub build provenance attestation for the same bytes.
+          gh attestation verify "dist/play/$aab" --repo "$GITHUB_REPOSITORY" --source-ref refs/heads/production
+      - name: Generate the Play release notes
+        run: |
+          set -euo pipefail
+          notes=apps/android/fastlane/metadata/android/en-US/changelogs/default.txt
+          [ "$(wc -c < "$notes")" -le 500 ] || { echo 'Play release notes exceed 500 bytes' >&2; exit 1; }
+          mkdir -p dist/play/whatsnew
+          cp "$notes" dist/play/whatsnew/whatsnew-en-US
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: play-release
+          path: dist/play/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: play-store
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: play-release
+          path: dist/play
+      - name: Verify the downloaded Play release files
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          [ -f "dist/play/peppy-${VERSION}-android.aab" ] || { echo 'missing Play AAB' >&2; exit 1; }
+          [ -f dist/play/whatsnew/whatsnew-en-US ] || { echo 'missing Play release notes' >&2; exit 1; }
+      - name: Upload to Google Play
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1.1.5
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: dev.peppy.mobile
+          releaseFiles: dist/play/peppy-${{ needs.prepare.outputs.version }}-android.aab
+          track: ${{ needs.prepare.outputs.track }}
+          status: ${{ needs.prepare.outputs.status }}
+          whatsNewDirectory: dist/play/whatsnew
