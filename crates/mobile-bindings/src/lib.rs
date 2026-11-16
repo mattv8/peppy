@@ -229,6 +229,7 @@ pub struct NativeSmsProviderAcquisitionInput {
     pub sent_at_ms: Option<i64>,
     pub date_sent_ms: Option<i64>,
     pub creator: Option<String>,
+    pub provider_read: Option<bool>,
     pub source_row_fingerprint: String,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -265,7 +266,17 @@ pub struct NativeSmsScanPlan {
     pub history_complete: bool,
     pub paused: bool,
     pub pending_recheck_cursor: Option<String>,
+    pub live_gap: Option<NativeSmsLiveGapPlan>,
     pub budget: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeSmsLiveGapPlan {
+    pub source_generation: String,
+    pub subscription_id: String,
+    pub upper_bound: String,
+    pub floor: String,
+    pub cursor: Option<String>,
+    pub token: String,
 }
 /// Current host conditions used solely to increase text-history capture throughput.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
@@ -279,6 +290,7 @@ pub struct NativeSmsReconciliationPlan {
     pub subscription_id: String,
     pub cursor: Option<String>,
     pub upper_bound: String,
+    pub floor: Option<String>,
     pub history_upper_bound: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -308,6 +320,7 @@ pub enum NativeMmsBackfillPause {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum NativeMmsBackfillPhase {
     Live,
+    LiveGap,
     ProviderRescan,
     History,
     Recheck,
@@ -357,6 +370,7 @@ pub struct NativeMmsBackfillScanPlan {
     pub subscription_id: String,
     pub cursor: Option<String>,
     pub provider_rescan_token: Option<String>,
+    pub live_gap_token: Option<String>,
     pub descending: bool,
     pub history_floor: Option<String>,
     pub history_upper_bound: Option<String>,
@@ -389,6 +403,7 @@ pub struct NativeMmsAcquisitionInput {
     pub body: String,
     pub imported: bool,
     pub observed_at_ms: i64,
+    pub provider_read: Option<bool>,
     pub transaction_id: Option<String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -1435,6 +1450,7 @@ fn mms_input(input: NativeMmsAcquisitionInput) -> MmsAcquisitionInput {
         body: input.body,
         imported: input.imported,
         observed_at_ms: input.observed_at_ms,
+        provider_read: input.provider_read,
         transaction_id: input.transaction_id,
     }
 }
@@ -1468,6 +1484,7 @@ fn sms_input(input: NativeSmsProviderAcquisitionInput) -> SmsAcquisitionInput {
         sent_at_ms: input.sent_at_ms,
         date_sent_ms: input.date_sent_ms,
         creator: input.creator,
+        provider_read: input.provider_read,
         source_row_fingerprint: input.source_row_fingerprint,
     }
 }
@@ -1488,6 +1505,7 @@ fn sms_input_view(input: SmsAcquisitionInput) -> NativeSmsProviderAcquisitionInp
         sent_at_ms: input.sent_at_ms,
         date_sent_ms: input.date_sent_ms,
         creator: input.creator,
+        provider_read: input.provider_read,
         source_row_fingerprint: input.source_row_fingerprint,
     }
 }
@@ -1528,6 +1546,14 @@ fn sms_scan_plan_view(plan: SmsScanPlan) -> NativeSmsScanPlan {
         history_complete: plan.history_complete,
         paused: plan.paused,
         pending_recheck_cursor: plan.pending_recheck_cursor,
+        live_gap: plan.live_gap.map(|gap| NativeSmsLiveGapPlan {
+            source_generation: gap.source_generation,
+            subscription_id: gap.subscription_id,
+            upper_bound: gap.upper_bound,
+            floor: gap.floor,
+            cursor: gap.cursor,
+            token: gap.token,
+        }),
         budget: plan.budget,
     }
 }
@@ -1537,6 +1563,7 @@ fn sms_reconciliation_plan_view(plan: SmsReconciliationPlan) -> NativeSmsReconci
         subscription_id: plan.subscription_id,
         cursor: plan.cursor,
         upper_bound: plan.upper_bound,
+        floor: plan.floor,
         history_upper_bound: plan.history_upper_bound,
     }
 }
@@ -1566,6 +1593,7 @@ fn mms_input_view(input: MmsAcquisitionInput) -> NativeMmsAcquisitionInput {
         body: input.body,
         imported: input.imported,
         observed_at_ms: input.observed_at_ms,
+        provider_read: input.provider_read,
         transaction_id: input.transaction_id,
     }
 }
@@ -1598,6 +1626,7 @@ fn mms_backfill_pause_view(value: MmsBackfillPause) -> NativeMmsBackfillPause {
 fn mms_backfill_phase(value: NativeMmsBackfillPhase) -> MmsBackfillPhase {
     match value {
         NativeMmsBackfillPhase::Live => MmsBackfillPhase::Live,
+        NativeMmsBackfillPhase::LiveGap => MmsBackfillPhase::LiveGap,
         NativeMmsBackfillPhase::ProviderRescan => MmsBackfillPhase::ProviderRescan,
         NativeMmsBackfillPhase::History => MmsBackfillPhase::History,
         NativeMmsBackfillPhase::Recheck => MmsBackfillPhase::Recheck,
@@ -1606,6 +1635,7 @@ fn mms_backfill_phase(value: NativeMmsBackfillPhase) -> MmsBackfillPhase {
 fn mms_backfill_phase_view(value: MmsBackfillPhase) -> NativeMmsBackfillPhase {
     match value {
         MmsBackfillPhase::Live => NativeMmsBackfillPhase::Live,
+        MmsBackfillPhase::LiveGap => NativeMmsBackfillPhase::LiveGap,
         MmsBackfillPhase::ProviderRescan => NativeMmsBackfillPhase::ProviderRescan,
         MmsBackfillPhase::History => NativeMmsBackfillPhase::History,
         MmsBackfillPhase::Recheck => NativeMmsBackfillPhase::Recheck,
@@ -1670,6 +1700,7 @@ fn mms_backfill_scan_plan_view(value: MmsBackfillScanPlan) -> NativeMmsBackfillS
         subscription_id: value.subscription_id,
         cursor: value.cursor,
         provider_rescan_token: value.provider_rescan_token,
+        live_gap_token: value.live_gap_token,
         descending: value.descending,
         history_floor: value.history_floor,
         history_upper_bound: value.history_upper_bound,
@@ -2462,6 +2493,26 @@ impl NativeClient {
             )
         })
     }
+    pub fn commit_sms_live_gap_page(
+        &self,
+        source_generation: String,
+        provider_scope: String,
+        token: String,
+        expected_cursor: Option<String>,
+        last_durable_id: Option<String>,
+        exhausted: bool,
+    ) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.commit_sms_live_gap_page(
+                &source_generation,
+                &provider_scope,
+                &token,
+                expected_cursor.as_deref(),
+                last_durable_id.as_deref(),
+                exhausted,
+            )
+        })
+    }
     pub fn set_sms_pending_recheck_cursor(
         &self,
         source_generation: String,
@@ -2695,6 +2746,26 @@ impl NativeClient {
     ) -> Result<bool, MobileBindingsError> {
         with_client(&self.client, |client| {
             client.commit_mms_provider_rescan_page(
+                &generation,
+                &scope,
+                &token,
+                expected_cursor.as_deref(),
+                last_durable_id.as_deref(),
+                exhausted,
+            )
+        })
+    }
+    pub fn commit_mms_live_gap_page(
+        &self,
+        generation: String,
+        scope: String,
+        token: String,
+        expected_cursor: Option<String>,
+        last_durable_id: Option<String>,
+        exhausted: bool,
+    ) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.commit_mms_live_gap_page(
                 &generation,
                 &scope,
                 &token,
@@ -4957,6 +5028,7 @@ mod tests {
             sent_at_ms: Some(date),
             date_sent_ms: Some(date_sent),
             creator: Some("com.google.android.apps.messaging".into()),
+            provider_read: None,
             source_row_fingerprint: format!("fp-{id}-{date}"),
         }
     }
@@ -5141,6 +5213,7 @@ mod tests {
                 sent_at_ms: Some(now + 250),
                 date_sent_ms: Some(0),
                 creator: Some("dev.peppy.mobile".into()),
+                provider_read: None,
                 source_row_fingerprint: "fp-2".into(),
             })
             .unwrap();

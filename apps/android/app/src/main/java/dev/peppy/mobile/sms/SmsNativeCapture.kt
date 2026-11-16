@@ -18,6 +18,7 @@ import dev.peppy.mobile.SmsCaptureProvider
 import dev.peppy.mobile.SmsCaptureRunner
 import dev.peppy.mobile.SmsCaptureSummary
 import dev.peppy.mobile.SmsCompletion
+import dev.peppy.mobile.SmsLiveGapPlan
 import dev.peppy.mobile.SmsReconciliationPlan
 import dev.peppy.mobile.diagnostics.SyncDiagnosticStage
 import dev.peppy.mobile.diagnostics.SyncDiagnostics
@@ -33,6 +34,7 @@ import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.NativeHistoryImportConditions
 import uniffi.peppy_mobile_bindings.NativeSmsAcquisitionState
+import uniffi.peppy_mobile_bindings.NativeSmsLiveGapPlan
 import uniffi.peppy_mobile_bindings.NativeSmsProviderAcquisitionInput
 import uniffi.peppy_mobile_bindings.NativeSmsSource
 
@@ -88,8 +90,34 @@ internal object SmsNativeCapture : SmsCaptureRunner {
             val core = coreFactory(client)
             val allowHistoryContinuation = conditions.unmeteredNetwork || conditions.charging
             var recheckPending = true
+            var liveGap = plans.firstOrNull { !it.imported }?.liveGap?.toCapturePlan()
             var summary = SmsCaptureSummary()
             for (plan in plans) {
+                if (plan.imported && liveGap != null) {
+                    val gap = requireNotNull(liveGap)
+                    val deadline = nanoTime() + RECONCILIATION_LOOP_BUDGET_NANOS
+                    val result = SmsCapture.captureLiveGap(gap, core, reader, nanoTime, deadline)
+                    summary += result.summary
+                    if (result.summary.providerError) {
+                        client.setSmsProviderError(generation, scope, true)
+                        return summary
+                    }
+                    if (result.summary.coreError) return summary
+                    if (result.lastDurableId != null || result.exhausted) {
+                        if (!client.commitSmsLiveGapPage(
+                                gap.sourceGeneration,
+                                gap.subscriptionId,
+                                gap.token,
+                                gap.cursor?.toString(),
+                                result.lastDurableId?.toString(),
+                                result.exhausted,
+                            )
+                        ) return summary.copy(coreError = true, more = true)
+                    }
+                    liveGap = null
+                    if (!result.exhausted) summary = summary.copy(more = true)
+                    if (shouldYield() || nanoTime() >= deadline) return summary
+                }
                 // The first plan owns pending recheck I/O. A claim starts only once that shared
                 // work has run, so its observation count is exclusively this history slice.
                 var admission: MessageHistoryRequestCoordinator.Admission? = null
@@ -177,15 +205,17 @@ internal object SmsNativeCapture : SmsCaptureRunner {
                         return summary
                     }
                     if (result.summary.coreError) return summary
-                    client.completeSmsReconciliation(
-                        reconciliation.sourceGeneration,
-                        reconciliation.subscriptionId,
-                        reconciliation.upperBound,
-                        result.cursor.takeIf { it > 0 }?.toString(),
-                        result.exhausted,
-                    )
+                    if (result.exhausted || result.summary.advanced) {
+                        client.completeSmsReconciliation(
+                            reconciliation.sourceGeneration,
+                            reconciliation.subscriptionId,
+                            reconciliation.upperBound,
+                            result.cursor?.toString(),
+                            result.exhausted,
+                        )
+                    }
                     if (result.exhausted) break
-                    if (!result.summary.advanced || result.cursor <= plan.cursor || result.summary.paused > 0) {
+                    if (!result.summary.advanced || result.cursor == plan.cursor || result.summary.paused > 0) {
                         more = result.summary.more
                         break
                     }
@@ -321,9 +351,19 @@ private fun uniffi.peppy_mobile_bindings.NativeSmsScanPlan.toCapturePlan(allowHi
 private fun uniffi.peppy_mobile_bindings.NativeSmsReconciliationPlan.toCapturePlan() = SmsReconciliationPlan(
     sourceGeneration,
     subscriptionId,
-    cursor?.toLongOrNull() ?: 0L,
+    cursor?.toLongOrNull(),
     upperBound.toLongOrNull() ?: 0L,
     historyUpperBound?.toLongOrNull(),
+    floor?.toLongOrNull(),
+)
+
+private fun uniffi.peppy_mobile_bindings.NativeSmsLiveGapPlan.toCapturePlan() = SmsLiveGapPlan(
+    sourceGeneration,
+    subscriptionId,
+    upperBound.toLongOrNull() ?: 0L,
+    floor.toLongOrNull() ?: 0L,
+    cursor?.toLongOrNull(),
+    token,
 )
 
 private fun uniffi.peppy_mobile_bindings.NativeSmsProviderAcquisitionInput.toCaptureInput() = SmsAcquisitionInput(
@@ -339,6 +379,7 @@ private fun uniffi.peppy_mobile_bindings.NativeSmsProviderAcquisitionInput.toCap
     sentAtMs,
     dateSentMs,
     creator,
+    providerRead,
     sourceRowFingerprint,
     source.broadcastId,
 )
@@ -353,6 +394,7 @@ private fun SmsAcquisitionInput.toNativeInput() = NativeSmsProviderAcquisitionIn
     sentAtMs,
     dateSentMs,
     creator,
+    providerRead,
     sourceRowFingerprint,
 )
 

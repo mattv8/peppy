@@ -204,6 +204,21 @@ class MmsProviderTest {
         assertFalse(plain.textOnly)
     }
 
+    @Test fun providerWithoutReadColumnStillReadsMessages() {
+        provider.readColumn = false
+        provider.messages += message(1, 128)
+        provider.parts[1] = listOf(part(10))
+
+        assertNull(reader.read(1)!!.read)
+    }
+
+    @Test fun providerReadColumnIsCarried() {
+        provider.messages += message(1, 128, read = true)
+        provider.parts[1] = listOf(part(10))
+
+        assertEquals(true, reader.read(1)!!.read)
+    }
+
     @Test fun optionalColumnsAreProbedOnceWhenProviderHasThem() {
         (1..3).forEach { id -> provider.messages += message(id.toLong(), 128); provider.parts[id.toLong()] = listOf(part(id.toLong())) }
 
@@ -274,7 +289,8 @@ class MmsProviderTest {
         expirySeconds: Long? = null,
         restricted: Boolean = false,
         textOnly: Boolean = false,
-    ) = Msg(id, type, box, sub, subject, dateSeconds, expirySeconds, restricted, textOnly)
+        read: Boolean = false,
+    ) = Msg(id, type, box, sub, subject, dateSeconds, expirySeconds, restricted, textOnly, read)
     private fun part(id: Long) = Part(id)
 
     data class Msg(
@@ -287,6 +303,7 @@ class MmsProviderTest {
         val expirySeconds: Long?,
         val restricted: Boolean = false,
         val textOnly: Boolean = false,
+        val read: Boolean = false,
     )
     data class Part(val id: Long, val text: String? = null)
     /** Rejects unknown projection columns like real providers do when a column is absent from the schema. */
@@ -298,6 +315,7 @@ class MmsProviderTest {
         var nullPartsCursor = false
         /** Whether the schema has the optional `restricted` and `text_only` columns (absent on Android 14 AOSP). */
         var optionalColumns = true
+        var readColumn = true
         /** Queries of the base URI whose projection names an optional column; the production probe. */
         var probes = 0
         override fun onCreate() = true
@@ -310,10 +328,14 @@ class MmsProviderTest {
             val nullCursor = when { isBase -> false; isAddress -> nullAddressCursor; isPart -> nullPartsCursor; else -> nullMessageCursor }
             if (nullCursor) return null
             val known = when {
-                isBase -> setOf("_id") + if (optionalColumns) OPTIONAL_COLUMNS else emptySet()
+                isBase -> setOf("_id") +
+                    (if (optionalColumns) OPTIONAL_COLUMNS else emptySet()) +
+                    (if (readColumn) setOf("read") else emptySet())
                 isAddress -> setOf("address", "type")
                 isPart -> setOf("_id", "seq", "ct", "name", "fn", "chset", "text")
-                else -> setOf("_id", "thread_id", "sub_id", "msg_box", "date", "tr_id", "sub", "m_type", "exp") + if (optionalColumns) OPTIONAL_COLUMNS else emptySet()
+                else -> setOf("_id", "thread_id", "sub_id", "msg_box", "date", "tr_id", "sub", "m_type", "exp") +
+                    (if (optionalColumns) OPTIONAL_COLUMNS else emptySet()) +
+                    (if (readColumn) setOf("read") else emptySet())
             }
             val requested = projection?.toList().orEmpty()
             if (isBase && requested.any { it in OPTIONAL_COLUMNS }) probes++
@@ -338,7 +360,7 @@ class MmsProviderTest {
         private fun messageRow(m: Msg): Map<String, Any?> = mapOf(
             "_id" to m.id, "thread_id" to 1L, "sub_id" to m.sub.toLong(), "msg_box" to m.box.toLong(), "date" to m.dateSeconds,
             "tr_id" to null, "sub" to m.subject, "m_type" to m.type.toLong(), "exp" to m.expirySeconds,
-            "restricted" to (if (m.restricted) 1L else 0L), "text_only" to (if (m.textOnly) 1L else 0L),
+            "restricted" to (if (m.restricted) 1L else 0L), "text_only" to (if (m.textOnly) 1L else 0L), "read" to (if (m.read) 1L else 0L),
         )
         override fun getType(uri: Uri): String? = null
         override fun insert(uri: Uri, values: ContentValues?): Uri? = null

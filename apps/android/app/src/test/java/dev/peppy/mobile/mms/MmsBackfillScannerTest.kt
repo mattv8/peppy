@@ -355,6 +355,68 @@ class MmsBackfillScannerTest {
         assertFalse(more)
     }
 
+    @Test fun liveGapUsesTokenedCommitAfterLiveAndBeforeHistory() {
+        val committed = mutableListOf<String>()
+        val delegate = FakeCore(
+            listOf(
+                MmsBackfillScanPlan(MmsBackfillPhase.LIVE, "20", "30", false, false, 32),
+                MmsBackfillScanPlan(MmsBackfillPhase.LIVE_GAP, "15", "20", false, false, 32, true, "10", liveGapToken = "token"),
+                MmsBackfillScanPlan(MmsBackfillPhase.HISTORY, null, "20", false, false, 32),
+            ),
+        )
+        val core = object : MmsBackfillCore by delegate {
+            override fun commitLiveGapPage(
+                generation: String,
+                scope: String,
+                token: String,
+                expectedCursor: String?,
+                lastDurableId: String?,
+                exhausted: Boolean,
+            ): Boolean {
+                committed += "$token:$expectedCursor:$lastDurableId:$exhausted"
+                return true
+            }
+        }
+
+        MmsBackfillScanner(core).run(
+            "generation", "scope", MmsLegacyBackfillState(null, null, null), "30", 1L, idle,
+            scanPage = { plan ->
+                when (plan.phase) {
+                    MmsBackfillPhase.LIVE -> MmsBackfillPageResult("30", true, false)
+                    MmsBackfillPhase.LIVE_GAP -> MmsBackfillPageResult("11", true, false)
+                    else -> MmsBackfillPageResult(null, true, false)
+                }
+            },
+            recheck = { error("unused") },
+        )
+
+        assertEquals(listOf(MmsBackfillPhase.LIVE to "30"), delegate.advanced)
+        assertEquals(listOf("token:15:11:true"), committed)
+    }
+
+    @Test fun staleLiveGapCommitKeepsAContinuationWithoutAdvancing() {
+        val delegate = FakeCore(
+            listOf(MmsBackfillScanPlan(MmsBackfillPhase.LIVE_GAP, "15", "20", false, false, 32, true, "10", liveGapToken = "token")),
+        )
+        val core = object : MmsBackfillCore by delegate {
+            override fun commitLiveGapPage(
+                generation: String,
+                scope: String,
+                token: String,
+                expectedCursor: String?,
+                lastDurableId: String?,
+                exhausted: Boolean,
+            ) = false
+        }
+
+        assertTrue(MmsBackfillScanner(core).run(
+            "generation", "scope", MmsLegacyBackfillState(null, null, null), "20", 1L, idle,
+            scanPage = { MmsBackfillPageResult("10", exhausted = true, more = false) },
+            recheck = { error("unused") },
+        ))
+        assertTrue(delegate.advanced.isEmpty())
+    }
+
     @Test fun staleProviderRescanCommitKeepsAContinuationWithoutAdvancing() {
         val delegate = FakeCore(
             listOf(MmsBackfillScanPlan(MmsBackfillPhase.PROVIDER_RESCAN, "9", "20", false, false, 32, true, null, "token")),
@@ -456,6 +518,14 @@ class MmsBackfillScannerTest {
             return finishResult
         }
         override fun commitProviderRescanPage(
+            generation: String,
+            scope: String,
+            token: String,
+            expectedCursor: String?,
+            lastDurableId: String?,
+            exhausted: Boolean,
+        ) = false
+        override fun commitLiveGapPage(
             generation: String,
             scope: String,
             token: String,

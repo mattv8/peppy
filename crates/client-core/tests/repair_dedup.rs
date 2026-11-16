@@ -35,6 +35,7 @@ fn sms_row(
         sent_at_ms: Some(sent_at_ms),
         date_sent_ms: Some(sent_at_ms),
         creator: None,
+        provider_read: None,
         source_row_fingerprint: format!("{generation}:{id}:{sent_at_ms}"),
     }
 }
@@ -71,6 +72,7 @@ fn mms_row(generation: &str, id: &str, observed_at_ms: i64) -> MmsAcquisitionInp
         body: "mms body".into(),
         imported: true,
         observed_at_ms,
+        provider_read: None,
         transaction_id: None,
     }
 }

@@ -419,6 +419,7 @@ class MmsCaptureOrchestrationTest {
                         "mms",
                         "3",
                         null,
+                        null,
                         false,
                         null,
                         "9",
@@ -1340,6 +1341,7 @@ class MmsCaptureOrchestrationTest {
             advanced += phase to providerId
             when (phase) {
                 MmsBackfillPhase.LIVE -> liveCursor = providerId
+                MmsBackfillPhase.LIVE_GAP -> error("live gap uses its tokened commit")
                 MmsBackfillPhase.HISTORY -> historyCursor = providerId
                 MmsBackfillPhase.PROVIDER_RESCAN -> error("provider rescan uses its tokened commit")
                 MmsBackfillPhase.RECHECK -> error("recheck has no page checkpoint")
@@ -1362,6 +1364,14 @@ class MmsCaptureOrchestrationTest {
             rescanCommits += "$token:$expectedCursor:$lastDurableId:$exhausted"
             return true
         }
+        override fun commitLiveGapPage(
+            generation: String,
+            scope: String,
+            token: String,
+            expectedCursor: String?,
+            lastDurableId: String?,
+            exhausted: Boolean,
+        ) = true
         val dueConditions = mutableListOf<MmsBackfillRecheckConditions>()
         val recheckOutcomes = mutableListOf<MmsBackfillRecheckOutcome>()
         override fun dueRechecks(generation: String, scope: String, nowMs: Long, conditions: MmsBackfillRecheckConditions): MmsBackfillRecheck {
@@ -1389,6 +1399,7 @@ class MmsCaptureOrchestrationTest {
                 "",
                 false,
                 0,
+                null,
                 null,
             )
             acquisitions[providerMessageId] = NativeMmsAcquisition(

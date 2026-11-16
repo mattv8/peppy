@@ -487,6 +487,7 @@ fn browser_projections_preserve_media_meta_on_all_paths() {
             body: "picture".into(),
             imported: false,
             observed_at_ms: 1,
+            provider_read: None,
             transaction_id: None,
         })
         .unwrap();

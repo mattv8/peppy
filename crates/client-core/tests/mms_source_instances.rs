@@ -19,6 +19,7 @@ fn input(transaction_id: Option<&str>) -> MmsAcquisitionInput {
         body: "message body".into(),
         imported: false,
         observed_at_ms: 1,
+        provider_read: None,
         transaction_id: transaction_id.map(str::to_owned),
     }
 }

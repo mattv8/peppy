@@ -82,6 +82,7 @@ class SmsProviderReader(context: Context) {
         return SmsProviderPage(records, through)
     }
 
+    /** Reads `(floor, upperBound]` newest-first; a cursor is the exclusive ceiling for the next page. */
     fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int): SmsProviderPage {
         require(upperBound >= 0)
         require(floor == null || floor >= 0)

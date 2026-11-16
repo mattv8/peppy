@@ -10,7 +10,7 @@ import dev.peppy.mobile.gateway.MmsHistoryCaptureAdmission
 import kotlinx.coroutines.CancellationException
 
 
-internal enum class MmsBackfillPhase { LIVE, PROVIDER_RESCAN, HISTORY, RECHECK }
+internal enum class MmsBackfillPhase { LIVE, LIVE_GAP, PROVIDER_RESCAN, HISTORY, RECHECK }
 internal enum class MmsBackfillRecheckState { PENDING, BLOCKED, UNAVAILABLE, COMPLETE }
 internal enum class MmsBackfillRecheckOutcome { PROGRESS, VERIFIED, UNCHANGED_UNAVAILABLE, UNCHANGED_PART_UNAVAILABLE, TRANSIENT_FAILURE, PROVIDER_CHANGED, AWAITING_PROVIDER }
 internal data class MmsBackfillRecheckConditions(
@@ -36,6 +36,7 @@ internal data class MmsBackfillScanPlan(
     val descending: Boolean = false,
     val historyFloor: String? = null,
     val providerRescanToken: String? = null,
+    val liveGapToken: String? = null,
 )
 
 internal data class MmsBackfillRecheckRequest(
@@ -60,6 +61,14 @@ internal interface MmsBackfillCore {
     fun advance(generation: String, scope: String, phase: MmsBackfillPhase, providerId: String)
     fun finish(generation: String, scope: String, phase: MmsBackfillPhase, bound: String, exhausted: Boolean): Boolean
     fun commitProviderRescanPage(
+        generation: String,
+        scope: String,
+        token: String,
+        expectedCursor: String?,
+        lastDurableId: String?,
+        exhausted: Boolean,
+    ): Boolean
+    fun commitLiveGapPage(
         generation: String,
         scope: String,
         token: String,
@@ -163,7 +172,25 @@ internal class MmsBackfillScanner(private val core: MmsBackfillCore) {
                 continue
             }
             try {
-                if (plan.phase == MmsBackfillPhase.PROVIDER_RESCAN) {
+                if (plan.phase == MmsBackfillPhase.LIVE_GAP) {
+                    if (result.lastDurableId == null && !result.exhausted) {
+                        more = more || result.more
+                        continue
+                    }
+                    val token = requireNotNull(plan.liveGapToken) { "live gap plan missing token" }
+                    if (!core.commitLiveGapPage(
+                            generation,
+                            scope,
+                            token,
+                            plan.cursor,
+                            result.lastDurableId,
+                            result.exhausted,
+                        )
+                    ) {
+                        more = true
+                        continue
+                    }
+                } else if (plan.phase == MmsBackfillPhase.PROVIDER_RESCAN) {
                     if (!canCommitProviderRescan()) continue
                     if (result.lastDurableId == null && !result.exhausted) {
                         more = more || result.more

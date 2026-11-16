@@ -18,6 +18,7 @@ fn input(id: &str) -> MmsAcquisitionInput {
         body: "pending".into(),
         imported: false,
         observed_at_ms: 0,
+        provider_read: None,
         transaction_id: None,
     }
 }

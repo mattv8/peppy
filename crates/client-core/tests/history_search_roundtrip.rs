@@ -80,6 +80,7 @@ fn history_row() -> SmsAcquisitionInput {
         sent_at_ms: Some(1_700_000_000_000),
         date_sent_ms: Some(1_700_000_000_000),
         creator: None,
+        provider_read: None,
         source_row_fingerprint: format!("{PROVIDER_ROW}:{BODY}"),
     }
 }

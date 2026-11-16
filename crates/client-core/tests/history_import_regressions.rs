@@ -20,6 +20,7 @@ fn mms_input(id: &str, imported: bool) -> MmsAcquisitionInput {
         body: id.into(),
         imported,
         observed_at_ms: 1,
+        provider_read: None,
         transaction_id: None,
     }
 }
@@ -639,6 +640,7 @@ fn reverse_inserted_history_keeps_the_newest_message_as_the_conversation_match_a
                 sent_at_ms: Some(sent_at_ms),
                 date_sent_ms: Some(sent_at_ms),
                 creator: None,
+                provider_read: None,
                 source_row_fingerprint: id.into(),
             })
             .unwrap();
@@ -668,6 +670,7 @@ fn reverse_inserted_history_keeps_the_newest_message_as_the_conversation_match_a
             sent_at_ms: Some(400),
             date_sent_ms: Some(400),
             creator: None,
+            provider_read: None,
             source_row_fingerprint: "31".into(),
         })
         .unwrap();

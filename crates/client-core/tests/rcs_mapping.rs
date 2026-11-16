@@ -165,6 +165,7 @@ fn capture_thread_sms(
             sent_at_ms: Some(1),
             date_sent_ms: Some(1),
             creator: None,
+            provider_read: None,
             source_row_fingerprint: format!("fingerprint-{row}"),
         })
         .unwrap();
@@ -199,6 +200,7 @@ fn capture_thread_mms(
             body: "mirrored chat message".into(),
             imported: true,
             observed_at_ms: 1,
+            provider_read: None,
             transaction_id: None,
         })
         .unwrap();

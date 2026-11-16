@@ -1757,6 +1757,7 @@ fn mirrored_acquisition(provider_message_id: &str) -> MmsAcquisitionInput {
         body: "mirrored chat message".into(),
         imported: false,
         observed_at_ms: wall_clock_ms(),
+        provider_read: None,
         transaction_id: Some(mirrored_transaction_id(MIRRORED_MESSAGE_ID)),
     }
 }
@@ -1802,6 +1803,7 @@ fn link_owned_gateway_with_its_send() -> (SendProofGateway, u64, CommandId) {
             sent_at_ms: Some(1),
             date_sent_ms: Some(1),
             creator: None,
+            provider_read: None,
             source_row_fingerprint: "thread-text-fingerprint".into(),
         })
         .unwrap();

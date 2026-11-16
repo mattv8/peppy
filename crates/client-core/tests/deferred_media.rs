@@ -84,6 +84,7 @@ fn captured_image(
         body: "caption".into(),
         imported,
         observed_at_ms: 1,
+        provider_read: None,
         transaction_id: None,
     };
     let a = phone.begin_mms_acquisition(input).unwrap();

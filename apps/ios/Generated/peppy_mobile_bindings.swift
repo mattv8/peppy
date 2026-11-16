@@ -711,7 +711,11 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      */
     func cleanupUploadedGatewayMmsCiphertext(limit: UInt32) throws  -> NativeGatewayMmsCleanup
     
+    func commitMmsLiveGapPage(generation: String, scope: String, token: String, expectedCursor: String?, lastDurableId: String?, exhausted: Bool) throws  -> Bool
+    
     func commitMmsProviderRescanPage(generation: String, scope: String, token: String, expectedCursor: String?, lastDurableId: String?, exhausted: Bool) throws  -> Bool
+    
+    func commitSmsLiveGapPage(sourceGeneration: String, providerScope: String, token: String, expectedCursor: String?, lastDurableId: String?, exhausted: Bool) throws  -> Bool
     
     /**
      * One bounded compaction frontier backfill step (readiness JSON plus `processed`).
@@ -1679,6 +1683,21 @@ open func cleanupUploadedGatewayMmsCiphertext(limit: UInt32)throws  -> NativeGat
 })
 }
     
+open func commitMmsLiveGapPage(generation: String, scope: String, token: String, expectedCursor: String?, lastDurableId: String?, exhausted: Bool)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_commit_mms_live_gap_page(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(generation),
+        FfiConverterString.lower(scope),
+        FfiConverterString.lower(token),
+        FfiConverterOptionString.lower(expectedCursor),
+        FfiConverterOptionString.lower(lastDurableId),
+        FfiConverterBool.lower(exhausted),uniffiCallStatus
+    )
+})
+}
+    
 open func commitMmsProviderRescanPage(generation: String, scope: String, token: String, expectedCursor: String?, lastDurableId: String?, exhausted: Bool)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1686,6 +1705,21 @@ open func commitMmsProviderRescanPage(generation: String, scope: String, token: 
             self.uniffiCloneHandle(),
         FfiConverterString.lower(generation),
         FfiConverterString.lower(scope),
+        FfiConverterString.lower(token),
+        FfiConverterOptionString.lower(expectedCursor),
+        FfiConverterOptionString.lower(lastDurableId),
+        FfiConverterBool.lower(exhausted),uniffiCallStatus
+    )
+})
+}
+    
+open func commitSmsLiveGapPage(sourceGeneration: String, providerScope: String, token: String, expectedCursor: String?, lastDurableId: String?, exhausted: Bool)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_commit_sms_live_gap_page(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sourceGeneration),
+        FfiConverterString.lower(providerScope),
         FfiConverterString.lower(token),
         FfiConverterOptionString.lower(expectedCursor),
         FfiConverterOptionString.lower(lastDurableId),
@@ -8198,11 +8232,12 @@ public struct NativeMmsAcquisitionInput: Equatable, Hashable {
     public var body: String
     public var imported: Bool
     public var observedAtMs: Int64
+    public var providerRead: Bool?
     public var transactionId: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(source: NativeMmsSource, incoming: Bool, senderAddress: String?, recipients: [String], subject: String?, body: String, imported: Bool, observedAtMs: Int64, transactionId: String?) {
+    public init(source: NativeMmsSource, incoming: Bool, senderAddress: String?, recipients: [String], subject: String?, body: String, imported: Bool, observedAtMs: Int64, providerRead: Bool?, transactionId: String?) {
         self.source = source
         self.incoming = incoming
         self.senderAddress = senderAddress
@@ -8211,6 +8246,7 @@ public struct NativeMmsAcquisitionInput: Equatable, Hashable {
         self.body = body
         self.imported = imported
         self.observedAtMs = observedAtMs
+        self.providerRead = providerRead
         self.transactionId = transactionId
     }
 
@@ -8238,6 +8274,7 @@ public struct FfiConverterTypeNativeMmsAcquisitionInput: FfiConverterRustBuffer 
                 body: FfiConverterString.read(from: &buf), 
                 imported: FfiConverterBool.read(from: &buf), 
                 observedAtMs: FfiConverterInt64.read(from: &buf), 
+                providerRead: FfiConverterOptionBool.read(from: &buf), 
                 transactionId: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -8251,6 +8288,7 @@ public struct FfiConverterTypeNativeMmsAcquisitionInput: FfiConverterRustBuffer 
         FfiConverterString.write(value.body, into: &buf)
         FfiConverterBool.write(value.imported, into: &buf)
         FfiConverterInt64.write(value.observedAtMs, into: &buf)
+        FfiConverterOptionBool.write(value.providerRead, into: &buf)
         FfiConverterOptionString.write(value.transactionId, into: &buf)
     }
 }
@@ -8541,6 +8579,7 @@ public struct NativeMmsBackfillScanPlan: Equatable, Hashable {
     public var subscriptionId: String
     public var cursor: String?
     public var providerRescanToken: String?
+    public var liveGapToken: String?
     public var descending: Bool
     public var historyFloor: String?
     public var historyUpperBound: String?
@@ -8551,12 +8590,13 @@ public struct NativeMmsBackfillScanPlan: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(phase: NativeMmsBackfillPhase, sourceGeneration: String, subscriptionId: String, cursor: String?, providerRescanToken: String?, descending: Bool, historyFloor: String?, historyUpperBound: String?, historyComplete: Bool, paused: Bool, pause: NativeMmsBackfillPause?, budget: UInt64) {
+    public init(phase: NativeMmsBackfillPhase, sourceGeneration: String, subscriptionId: String, cursor: String?, providerRescanToken: String?, liveGapToken: String?, descending: Bool, historyFloor: String?, historyUpperBound: String?, historyComplete: Bool, paused: Bool, pause: NativeMmsBackfillPause?, budget: UInt64) {
         self.phase = phase
         self.sourceGeneration = sourceGeneration
         self.subscriptionId = subscriptionId
         self.cursor = cursor
         self.providerRescanToken = providerRescanToken
+        self.liveGapToken = liveGapToken
         self.descending = descending
         self.historyFloor = historyFloor
         self.historyUpperBound = historyUpperBound
@@ -8587,6 +8627,7 @@ public struct FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer 
                 subscriptionId: FfiConverterString.read(from: &buf), 
                 cursor: FfiConverterOptionString.read(from: &buf), 
                 providerRescanToken: FfiConverterOptionString.read(from: &buf), 
+                liveGapToken: FfiConverterOptionString.read(from: &buf), 
                 descending: FfiConverterBool.read(from: &buf), 
                 historyFloor: FfiConverterOptionString.read(from: &buf), 
                 historyUpperBound: FfiConverterOptionString.read(from: &buf), 
@@ -8603,6 +8644,7 @@ public struct FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer 
         FfiConverterString.write(value.subscriptionId, into: &buf)
         FfiConverterOptionString.write(value.cursor, into: &buf)
         FfiConverterOptionString.write(value.providerRescanToken, into: &buf)
+        FfiConverterOptionString.write(value.liveGapToken, into: &buf)
         FfiConverterBool.write(value.descending, into: &buf)
         FfiConverterOptionString.write(value.historyFloor, into: &buf)
         FfiConverterOptionString.write(value.historyUpperBound, into: &buf)
@@ -11549,6 +11591,76 @@ public func FfiConverterTypeNativeSmsHistoryStatus_lower(_ value: NativeSmsHisto
 }
 
 
+public struct NativeSmsLiveGapPlan: Equatable, Hashable {
+    public var sourceGeneration: String
+    public var subscriptionId: String
+    public var upperBound: String
+    public var floor: String
+    public var cursor: String?
+    public var token: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sourceGeneration: String, subscriptionId: String, upperBound: String, floor: String, cursor: String?, token: String) {
+        self.sourceGeneration = sourceGeneration
+        self.subscriptionId = subscriptionId
+        self.upperBound = upperBound
+        self.floor = floor
+        self.cursor = cursor
+        self.token = token
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeSmsLiveGapPlan: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeSmsLiveGapPlan: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSmsLiveGapPlan {
+        return
+            try NativeSmsLiveGapPlan(
+                sourceGeneration: FfiConverterString.read(from: &buf), 
+                subscriptionId: FfiConverterString.read(from: &buf), 
+                upperBound: FfiConverterString.read(from: &buf), 
+                floor: FfiConverterString.read(from: &buf), 
+                cursor: FfiConverterOptionString.read(from: &buf), 
+                token: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeSmsLiveGapPlan, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.sourceGeneration, into: &buf)
+        FfiConverterString.write(value.subscriptionId, into: &buf)
+        FfiConverterString.write(value.upperBound, into: &buf)
+        FfiConverterString.write(value.floor, into: &buf)
+        FfiConverterOptionString.write(value.cursor, into: &buf)
+        FfiConverterString.write(value.token, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsLiveGapPlan_lift(_ buf: RustBuffer) throws -> NativeSmsLiveGapPlan {
+    return try FfiConverterTypeNativeSmsLiveGapPlan.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsLiveGapPlan_lower(_ value: NativeSmsLiveGapPlan) -> RustBuffer {
+    return FfiConverterTypeNativeSmsLiveGapPlan.lower(value)
+}
+
+
 public struct NativeSmsProviderAcquisitionInput: Equatable, Hashable {
     public var source: NativeSmsSource
     public var incoming: Bool
@@ -11559,11 +11671,12 @@ public struct NativeSmsProviderAcquisitionInput: Equatable, Hashable {
     public var sentAtMs: Int64?
     public var dateSentMs: Int64?
     public var creator: String?
+    public var providerRead: Bool?
     public var sourceRowFingerprint: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(source: NativeSmsSource, incoming: Bool, senderAddress: String?, recipients: [String], body: String, imported: Bool, sentAtMs: Int64?, dateSentMs: Int64?, creator: String?, sourceRowFingerprint: String) {
+    public init(source: NativeSmsSource, incoming: Bool, senderAddress: String?, recipients: [String], body: String, imported: Bool, sentAtMs: Int64?, dateSentMs: Int64?, creator: String?, providerRead: Bool?, sourceRowFingerprint: String) {
         self.source = source
         self.incoming = incoming
         self.senderAddress = senderAddress
@@ -11573,6 +11686,7 @@ public struct NativeSmsProviderAcquisitionInput: Equatable, Hashable {
         self.sentAtMs = sentAtMs
         self.dateSentMs = dateSentMs
         self.creator = creator
+        self.providerRead = providerRead
         self.sourceRowFingerprint = sourceRowFingerprint
     }
 
@@ -11601,6 +11715,7 @@ public struct FfiConverterTypeNativeSmsProviderAcquisitionInput: FfiConverterRus
                 sentAtMs: FfiConverterOptionInt64.read(from: &buf), 
                 dateSentMs: FfiConverterOptionInt64.read(from: &buf), 
                 creator: FfiConverterOptionString.read(from: &buf), 
+                providerRead: FfiConverterOptionBool.read(from: &buf), 
                 sourceRowFingerprint: FfiConverterString.read(from: &buf)
         )
     }
@@ -11615,6 +11730,7 @@ public struct FfiConverterTypeNativeSmsProviderAcquisitionInput: FfiConverterRus
         FfiConverterOptionInt64.write(value.sentAtMs, into: &buf)
         FfiConverterOptionInt64.write(value.dateSentMs, into: &buf)
         FfiConverterOptionString.write(value.creator, into: &buf)
+        FfiConverterOptionBool.write(value.providerRead, into: &buf)
         FfiConverterString.write(value.sourceRowFingerprint, into: &buf)
     }
 }
@@ -11640,15 +11756,17 @@ public struct NativeSmsReconciliationPlan: Equatable, Hashable {
     public var subscriptionId: String
     public var cursor: String?
     public var upperBound: String
+    public var floor: String?
     public var historyUpperBound: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(sourceGeneration: String, subscriptionId: String, cursor: String?, upperBound: String, historyUpperBound: String?) {
+    public init(sourceGeneration: String, subscriptionId: String, cursor: String?, upperBound: String, floor: String?, historyUpperBound: String?) {
         self.sourceGeneration = sourceGeneration
         self.subscriptionId = subscriptionId
         self.cursor = cursor
         self.upperBound = upperBound
+        self.floor = floor
         self.historyUpperBound = historyUpperBound
     }
 
@@ -11672,6 +11790,7 @@ public struct FfiConverterTypeNativeSmsReconciliationPlan: FfiConverterRustBuffe
                 subscriptionId: FfiConverterString.read(from: &buf), 
                 cursor: FfiConverterOptionString.read(from: &buf), 
                 upperBound: FfiConverterString.read(from: &buf), 
+                floor: FfiConverterOptionString.read(from: &buf), 
                 historyUpperBound: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -11681,6 +11800,7 @@ public struct FfiConverterTypeNativeSmsReconciliationPlan: FfiConverterRustBuffe
         FfiConverterString.write(value.subscriptionId, into: &buf)
         FfiConverterOptionString.write(value.cursor, into: &buf)
         FfiConverterString.write(value.upperBound, into: &buf)
+        FfiConverterOptionString.write(value.floor, into: &buf)
         FfiConverterOptionString.write(value.historyUpperBound, into: &buf)
     }
 }
@@ -11712,11 +11832,12 @@ public struct NativeSmsScanPlan: Equatable, Hashable {
     public var historyComplete: Bool
     public var paused: Bool
     public var pendingRecheckCursor: String?
+    public var liveGap: NativeSmsLiveGapPlan?
     public var budget: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(sourceGeneration: String, subscriptionId: String, imported: Bool, checkpoint: String?, descending: Bool, historyFloor: String?, historyUpperBound: String?, historyComplete: Bool, paused: Bool, pendingRecheckCursor: String?, budget: UInt64) {
+    public init(sourceGeneration: String, subscriptionId: String, imported: Bool, checkpoint: String?, descending: Bool, historyFloor: String?, historyUpperBound: String?, historyComplete: Bool, paused: Bool, pendingRecheckCursor: String?, liveGap: NativeSmsLiveGapPlan?, budget: UInt64) {
         self.sourceGeneration = sourceGeneration
         self.subscriptionId = subscriptionId
         self.imported = imported
@@ -11727,6 +11848,7 @@ public struct NativeSmsScanPlan: Equatable, Hashable {
         self.historyComplete = historyComplete
         self.paused = paused
         self.pendingRecheckCursor = pendingRecheckCursor
+        self.liveGap = liveGap
         self.budget = budget
     }
 
@@ -11756,6 +11878,7 @@ public struct FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer {
                 historyComplete: FfiConverterBool.read(from: &buf), 
                 paused: FfiConverterBool.read(from: &buf), 
                 pendingRecheckCursor: FfiConverterOptionString.read(from: &buf), 
+                liveGap: FfiConverterOptionTypeNativeSmsLiveGapPlan.read(from: &buf), 
                 budget: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -11771,6 +11894,7 @@ public struct FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer {
         FfiConverterBool.write(value.historyComplete, into: &buf)
         FfiConverterBool.write(value.paused, into: &buf)
         FfiConverterOptionString.write(value.pendingRecheckCursor, into: &buf)
+        FfiConverterOptionTypeNativeSmsLiveGapPlan.write(value.liveGap, into: &buf)
         FfiConverterUInt64.write(value.budget, into: &buf)
     }
 }
@@ -14740,6 +14864,7 @@ public func FfiConverterTypeNativeMmsBackfillPause_lower(_ value: NativeMmsBackf
 public enum NativeMmsBackfillPhase: Equatable, Hashable {
     
     case live
+    case liveGap
     case providerRescan
     case history
     case recheck
@@ -14766,11 +14891,13 @@ public struct FfiConverterTypeNativeMmsBackfillPhase: FfiConverterRustBuffer {
         
         case 1: return .live
         
-        case 2: return .providerRescan
+        case 2: return .liveGap
         
-        case 3: return .history
+        case 3: return .providerRescan
         
-        case 4: return .recheck
+        case 4: return .history
+        
+        case 5: return .recheck
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -14784,16 +14911,20 @@ public struct FfiConverterTypeNativeMmsBackfillPhase: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
         
         
-        case .providerRescan:
+        case .liveGap:
             writeInt(&buf, Int32(2))
         
         
-        case .history:
+        case .providerRescan:
             writeInt(&buf, Int32(3))
         
         
-        case .recheck:
+        case .history:
             writeInt(&buf, Int32(4))
+        
+        
+        case .recheck:
+            writeInt(&buf, Int32(5))
         
         }
     }
@@ -17967,6 +18098,30 @@ fileprivate struct FfiConverterOptionTypeNativeRcsUnlinkCutoverGenerations: FfiC
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeNativeSmsLiveGapPlan: FfiConverterRustBuffer {
+    typealias SwiftType = NativeSmsLiveGapPlan?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNativeSmsLiveGapPlan.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNativeSmsLiveGapPlan.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeNativeSmsReconciliationPlan: FfiConverterRustBuffer {
     typealias SwiftType = NativeSmsReconciliationPlan?
 
@@ -19981,7 +20136,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext() != 13469) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_commit_mms_live_gap_page() != 1568) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_commit_mms_provider_rescan_page() != 8014) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_commit_sms_live_gap_page() != 41744) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compaction_backfill_step_json() != 57580) {

@@ -21,6 +21,7 @@ fn sms_input(id: &str, date: i64) -> SmsAcquisitionInput {
         sent_at_ms: Some(date),
         date_sent_ms: Some(date),
         creator: None,
+        provider_read: None,
         source_row_fingerprint: format!("fingerprint-{id}"),
     }
 }
@@ -373,6 +374,7 @@ fn mms_read_requires_mms_policy_and_uses_transaction_identity_without_fingerprin
         body: "mms".into(),
         imported: false,
         observed_at_ms: 10,
+        provider_read: None,
         transaction_id: Some("pdu-one".into()),
     };
     let acquisition = client.begin_mms_acquisition(input).unwrap();

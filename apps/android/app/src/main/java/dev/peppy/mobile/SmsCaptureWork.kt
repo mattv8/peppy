@@ -50,6 +50,7 @@ data class SmsAcquisitionInput(
     val sentAtMs: Long?,
     val dateSentMs: Long?,
     val creator: String?,
+    val providerRead: Boolean?,
     val sourceRowFingerprint: String = "",
     /** The `SMS_RECEIVED` identity derived from this row's evidence, for incoming rows only. */
     val broadcastId: String? = null,
@@ -79,15 +80,31 @@ internal data class SmsCapturePlan(
 internal data class SmsReconciliationPlan(
     val sourceGeneration: String,
     val subscriptionId: String,
-    val cursor: Long,
+    val cursor: Long?,
     val upperBound: Long,
     /** Rows at or below the frozen history baseline are imported history (read, no banner). */
     val historyUpperBound: Long? = null,
+    val floor: Long? = null,
 )
 
 internal data class SmsReconciliationResult(
     val summary: SmsCaptureSummary,
-    val cursor: Long,
+    val cursor: Long?,
+    val exhausted: Boolean,
+)
+
+internal data class SmsLiveGapPlan(
+    val sourceGeneration: String,
+    val subscriptionId: String,
+    val upperBound: Long,
+    val floor: Long,
+    val cursor: Long?,
+    val token: String,
+)
+
+internal data class SmsLiveGapResult(
+    val summary: SmsCaptureSummary,
+    val lastDurableId: Long?,
     val exhausted: Boolean,
 )
 
@@ -453,7 +470,7 @@ internal object SmsCapture {
         nanoTime: () -> Long = System::nanoTime,
     ): SmsCaptureSummary = runInternal(plan, core, provider, nanoTime, recheckPending = false)
 
-    /** Re-observes a bounded ascending provider page without altering forward/history checkpoints. */
+    /** Re-observes a bounded descending provider page without altering forward/history checkpoints. */
     fun reconcile(
         plan: SmsReconciliationPlan,
         core: SmsCaptureCore,
@@ -464,26 +481,55 @@ internal object SmsCapture {
         val deadline = deadlineNanos ?: nanoTime() + PASS_BUDGET_NANOS
         fun expired() = nanoTime() >= deadline
         return try {
-            val page = provider.page(plan.cursor, PAGE)
+            val page = provider.descendingPage(plan.cursor?.takeIf { it > 0 }, plan.upperBound, plan.floor, PAGE)
             var result = SmsCaptureSummary(rowsQueried = page.records.size)
             var cursor = plan.cursor
+            val historyBound = plan.historyUpperBound ?: plan.floor
             for (row in page.records) {
-                if (row.id > plan.upperBound) break
                 if (expired()) return SmsReconciliationResult(result.copy(more = true, budgetExhausted = true), cursor, false)
-                val imported = plan.historyUpperBound != null && row.id <= plan.historyUpperBound
+                val imported = historyBound != null && row.id <= historyBound
                 val outcome = process(core, row, plan.sourceGeneration, imported, existing = null)
                 result = merge(result, outcome.summary()).copy(processed = result.processed + 1)
                 if (outcome.coreError || outcome.providerError || !outcome.providerDurable) return SmsReconciliationResult(result, cursor, false)
                 cursor = row.id
                 result = result.copy(advanced = true)
             }
-            val exhausted = page.records.isEmpty() || page.records.any { it.id > plan.upperBound } ||
-                page.records.size < PAGE
+            val exhausted = page.records.size < PAGE
             SmsReconciliationResult(result.copy(more = result.more || !exhausted), cursor, exhausted)
         } catch (_: SmsProviderException) {
             SmsReconciliationResult(SmsCaptureSummary(more = true, providerError = true), plan.cursor, false)
         } catch (_: Exception) {
             SmsReconciliationResult(SmsCaptureSummary(coreError = true), plan.cursor, false)
+        }
+    }
+
+    /** Captures one descending live-gap page without using the ordinary scan checkpoint. */
+    fun captureLiveGap(
+        plan: SmsLiveGapPlan,
+        core: SmsCaptureCore,
+        provider: SmsCaptureProvider,
+        nanoTime: () -> Long = System::nanoTime,
+        deadlineNanos: Long? = null,
+    ): SmsLiveGapResult {
+        val deadline = deadlineNanos ?: nanoTime() + PASS_BUDGET_NANOS
+        return try {
+            val page = provider.descendingPage(plan.cursor, plan.upperBound, plan.floor, PAGE)
+            var result = SmsCaptureSummary(rowsQueried = page.records.size, scanObservations = page.records.size)
+            var lastDurableId: Long? = null
+            for (row in page.records) {
+                if (nanoTime() >= deadline) return SmsLiveGapResult(result.copy(more = true, budgetExhausted = true), lastDurableId, false)
+                val outcome = process(core, row, plan.sourceGeneration, imported = false, existing = null)
+                result = merge(result, outcome.summary()).copy(processed = result.processed + 1)
+                if (!outcome.providerDurable) return SmsLiveGapResult(result, lastDurableId, false)
+                lastDurableId = row.id
+                result = result.copy(advanced = true)
+            }
+            val exhausted = page.records.size < PAGE
+            SmsLiveGapResult(result.copy(more = !exhausted), lastDurableId, exhausted)
+        } catch (_: SmsProviderException) {
+            SmsLiveGapResult(SmsCaptureSummary(more = true, providerError = true), null, false)
+        } catch (_: Exception) {
+            SmsLiveGapResult(SmsCaptureSummary(coreError = true), null, false)
         }
     }
 
@@ -710,7 +756,7 @@ internal object SmsCapture {
         return SmsAcquisitionInput(
             sourceGeneration, subscription, row.id.toString(), row.threadId?.toString(),
             incoming, row.address, if (incoming) emptyList() else listOfNotNull(row.address), row.body.orEmpty(), imported,
-            row.dateMs, row.dateSentMs, row.creator, sourceRowFingerprint(row),
+            row.dateMs, row.dateSentMs, row.creator, row.read, sourceRowFingerprint(row),
             broadcastId = if (incoming) broadcastId(row) else null,
         )
     }
