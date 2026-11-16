@@ -110,6 +110,27 @@ class SyncDiagnosticsTest : GatewayTestBase() {
         assertEquals(0L, event.getValue(SyncTraceField.SUCCESS.code.toString()))
     }
 
+    @Test fun cachedNativeOpenDoesNotRecordButColdAndFailedOpensDo() {
+        val events = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+            assertEquals("cached", SyncDiagnostics.measureNativeOpen(cold = false) { "cached" })
+            assertEquals("cold", SyncDiagnostics.measureNativeOpen(cold = true) { "cold" })
+            assertNull(SyncDiagnostics.measureNativeOpen(cold = false, succeeded = { it != null }) { null })
+            try {
+                SyncDiagnostics.measureNativeOpen(cold = false) { throw IllegalStateException("failed") }
+            } catch (_: IllegalStateException) {
+            }
+        }
+
+        assertEquals(3, events.size)
+        assertEquals(1L, traceFields(events[0]).getValue(SyncTraceField.COLD.code.toString()))
+        assertEquals(1L, traceFields(events[0]).getValue(SyncTraceField.SUCCESS.code.toString()))
+        assertEquals(0L, traceFields(events[1]).getValue(SyncTraceField.COLD.code.toString()))
+        assertEquals(0L, traceFields(events[1]).getValue(SyncTraceField.SUCCESS.code.toString()))
+        assertEquals(0L, traceFields(events[2]).getValue(SyncTraceField.COLD.code.toString()))
+        assertEquals(0L, traceFields(events[2]).getValue(SyncTraceField.SUCCESS.code.toString()))
+    }
+
     @Test fun disabledMeasurementMethodsDoNotReadThrowingSuppliers() {
         SyncDiagnostics.withTestConfiguration(false, { error("clock") }, { error("CPU") }, { error("sink") }) {
             assertEquals("result", SyncDiagnostics.measure(SyncTraceEvent.HTTP_REQUEST) { "result" })

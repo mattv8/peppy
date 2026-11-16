@@ -156,11 +156,11 @@ class MmsStatusReceiver : BroadcastReceiver() {
             scheduler = ReceiverWork.evidenceScheduler,
             receivedAtMillis = receivedAt,
             finish = { pending.finish() },
-            recovery = { GatewayScheduler.schedule(app) },
+            recovery = { GatewayScheduler.schedule(app, GatewayEnqueueCause.MMS_CALLBACK) },
         ) {
             record(app, intent, code)?.let { evidence ->
-                GatewayScheduler.schedule(app)
-                ReceiverWork.submitCallbackApply(recovery = { GatewayScheduler.schedule(app) }, work = {
+                GatewayScheduler.schedule(app, GatewayEnqueueCause.MMS_CALLBACK)
+                ReceiverWork.submitCallbackApply(recovery = { GatewayScheduler.schedule(app, GatewayEnqueueCause.MMS_CALLBACK) }, work = {
                     NativeGateway.open(app)?.let { MmsCallbackReconciler.apply(it, evidence.store, evidence.commandId, evidence.result) }
                 })
             }
@@ -171,7 +171,7 @@ class MmsStatusReceiver : BroadcastReceiver() {
         internal fun handle(context: Context, intent: Intent, resultCode: Int): NativeSendResult? {
             val recorded = record(context, intent, resultCode) ?: return null
             NativeGateway.open(context)?.let { MmsCallbackReconciler.apply(it, recorded.store, recorded.commandId, recorded.result) }
-            GatewayScheduler.schedule(context)
+            GatewayScheduler.schedule(context, GatewayEnqueueCause.MMS_CALLBACK)
             return recorded.result
         }
 
@@ -185,7 +185,7 @@ class MmsStatusReceiver : BroadcastReceiver() {
             val store = MmsCallbackStore(context)
             if (resultCode != Activity.RESULT_OK) {
                 store.unknown(commandId, resultCode)
-                GatewayScheduler.schedule(context)
+                GatewayScheduler.schedule(context, GatewayEnqueueCause.MMS_CALLBACK)
                 return null
             }
             val result = NativeSendResult.SENT

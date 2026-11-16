@@ -12,7 +12,7 @@ class PeppyMessagingService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
         if (!RelayWakeRuntime.acceptsWakes(applicationContext)) return
         when (message.data["kind"]) {
-            "wake" -> RemoteMessagingService.resumeOrEnqueue(applicationContext)
+            "wake" -> RemoteMessagingService.resumeOrEnqueue(applicationContext, GatewayEnqueueCause.RELAY_WAKE)
             "challenge" -> {
                 val value = message.data["value"] ?: return
                 RelayWakeRuntime.challenge(applicationContext, value)

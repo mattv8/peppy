@@ -27,7 +27,7 @@ import uniffi.peppy_mobile_bindings.NativeSendResult
 object GatewayScheduler {
     @VisibleForTesting
     @Volatile
-    internal var schedule: (Context) -> Unit = { GatewayWork.enqueueUrgent(it) }
+    internal var schedule: (Context, GatewayEnqueueCause) -> Unit = { context, cause -> GatewayWork.enqueueUrgent(context, cause) }
 }
 
 /** One PDU's text as decoded by the platform. */
@@ -122,7 +122,7 @@ object IncomingCapture {
                 // Rejected by core validation; nothing durable to sync for this sender.
             }
         }
-        if (captured > 0) GatewayScheduler.schedule(context)
+        if (captured > 0) GatewayScheduler.schedule(context, GatewayEnqueueCause.SMS_RECEIVER)
         return captured
     }
 
@@ -148,11 +148,11 @@ class SmsStatusReceiver : BroadcastReceiver() {
             scheduler = ReceiverWork.evidenceScheduler,
             receivedAtMillis = receivedAt,
             finish = { pending.finish() },
-            recovery = { GatewayScheduler.schedule(app) },
+            recovery = { GatewayScheduler.schedule(app, GatewayEnqueueCause.SMS_RECEIVER) },
         ) {
             record(app, intent, code)?.let { evidence ->
-                GatewayScheduler.schedule(app)
-                ReceiverWork.submitCallbackApply(recovery = { GatewayScheduler.schedule(app) }, work = {
+                GatewayScheduler.schedule(app, GatewayEnqueueCause.SMS_RECEIVER)
+                ReceiverWork.submitCallbackApply(recovery = { GatewayScheduler.schedule(app, GatewayEnqueueCause.SMS_RECEIVER) }, work = {
                     NativeGateway.open(app)?.let { SmsCallbackReconciler.apply(it, evidence.store, evidence.commandId, evidence.result) }
                 })
             }
@@ -170,7 +170,7 @@ class SmsStatusReceiver : BroadcastReceiver() {
         internal fun handle(context: Context, intent: Intent, resultCode: Int): NativeSendResult? {
             val recorded = record(context, intent, resultCode) ?: return null
             val accepted = NativeGateway.open(context)?.let { SmsCallbackReconciler.apply(it, recorded.store, recorded.commandId, recorded.result) } == true
-            GatewayScheduler.schedule(context)
+            GatewayScheduler.schedule(context, GatewayEnqueueCause.SMS_RECEIVER)
             return recorded.result.takeIf { accepted }
         }
 

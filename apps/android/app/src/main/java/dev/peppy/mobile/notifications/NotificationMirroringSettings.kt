@@ -24,6 +24,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import dev.peppy.mobile.GatewayWork
+import dev.peppy.mobile.GatewayEnqueueCause
 import dev.peppy.mobile.NotificationMirrorAccess
 import dev.peppy.mobile.NotificationMirrorPreferences
 import dev.peppy.mobile.NotificationMirrorService
@@ -70,7 +71,7 @@ internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, 
             enabled = persistedValue
             if (persistedValue) {
                 NotificationMirrorService.reconcile()
-                GatewayWork.enqueue(context)
+                GatewayWork.enqueue(context, GatewayEnqueueCause.SETTINGS)
             } else {
                 NotificationMirrorService.clearPendingCaptures()
             }

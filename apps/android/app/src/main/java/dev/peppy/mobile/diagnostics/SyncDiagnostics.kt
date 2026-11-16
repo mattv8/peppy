@@ -7,7 +7,7 @@ import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicLong
 
 internal enum class SyncTraceEvent(val code: Long) {
-    OBSERVER_HINT(1), OBSERVER_DISPATCH(2), CAPTURE_ENQUEUE(3), CAPTURE_START(4), CAPTURE_END(5), CAPTURE_RETRY(6), CAPTURE_CONTINUATION(7), CAPTURE_PLAN(8), CAPTURE_SUMMARY(9), PROVIDER_QUERY(10), NATIVE_OPEN(11), GATEWAY_ENQUEUE(12), GATEWAY_START(13), GATEWAY_END(14), GATEWAY_PHASE(15), HTTP_REQUEST(16), OUTBOX_ACK(17), CAPTURE_PROGRESS(18), NATIVE_CALL(19), GATEWAY_PROGRESS(20), CONTACT_PROGRESS(21), SOCKET_STATE(22), NOTIFICATION_PROGRESS(23), DIAGNOSTIC_STATE(24), MMS_CAPTURE_PASS(25), PHONE_READ_PASS(26), GM_LINK(27),
+    OBSERVER_HINT(1), OBSERVER_DISPATCH(2), CAPTURE_ENQUEUE(3), CAPTURE_START(4), CAPTURE_END(5), CAPTURE_RETRY(6), CAPTURE_CONTINUATION(7), CAPTURE_PLAN(8), CAPTURE_SUMMARY(9), PROVIDER_QUERY(10), NATIVE_OPEN(11), GATEWAY_ENQUEUE(12), GATEWAY_START(13), GATEWAY_END(14), GATEWAY_PHASE(15), HTTP_REQUEST(16), OUTBOX_ACK(17), CAPTURE_PROGRESS(18), NATIVE_CALL(19), GATEWAY_PROGRESS(20), CONTACT_PROGRESS(21), SOCKET_STATE(22), NOTIFICATION_PROGRESS(23), DIAGNOSTIC_STATE(24), MMS_CAPTURE_PASS(25), PHONE_READ_PASS(26), GM_LINK(27), RCS_SWEEP(28),
 }
 
 internal enum class SyncTraceField(val code: Long) {
@@ -184,7 +184,9 @@ internal object SyncDiagnostics {
         if (!enabled) return block()
         val start = nowMs(); val startCpu = configuration.cpuMs()
         return try {
-            block().also { result -> record(SyncTraceEvent.NATIVE_OPEN, SyncTraceField.COLD to if (cold) 1 else 0, SyncTraceField.DURATION_MS to (nowMs() - start), SyncTraceField.CPU_MS to (configuration.cpuMs() - startCpu), SyncTraceField.SUCCESS to if (succeeded(result)) 1 else 0) }
+            block().also { result ->
+                if (cold || !succeeded(result)) record(SyncTraceEvent.NATIVE_OPEN, SyncTraceField.COLD to if (cold) 1 else 0, SyncTraceField.DURATION_MS to (nowMs() - start), SyncTraceField.CPU_MS to (configuration.cpuMs() - startCpu), SyncTraceField.SUCCESS to if (succeeded(result)) 1 else 0)
+            }
         } catch (error: Throwable) {
             record(SyncTraceEvent.NATIVE_OPEN, SyncTraceField.COLD to if (cold) 1 else 0, SyncTraceField.DURATION_MS to (nowMs() - start), SyncTraceField.CPU_MS to (configuration.cpuMs() - startCpu), SyncTraceField.SUCCESS to 0)
             throw error

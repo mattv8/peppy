@@ -2,6 +2,7 @@ package dev.peppy.mobile.diagnostics
 
 import android.provider.OpenableColumns
 import androidx.core.content.FileProvider
+import dev.peppy.mobile.GatewayEnqueueCause
 import androidx.test.core.app.ApplicationProvider
 import dev.peppy.mobile.BuildConfig
 import java.io.File
@@ -149,6 +150,11 @@ class DiagnosticsLogTest {
         assertTrue(header.startsWith("schema=2 "))
         assertTrue(header.contains("25:mms_capture_pass"))
         assertTrue(header.contains("26:phone_read_pass"))
+        assertTrue(header.contains("27:gm_link"))
+        assertTrue(header.contains("28:rcs_sweep(rows=considered,count=skipped,processed=complete,pending=incomplete,unavailable=aborted,page_queries=pages)"))
+        assertTrue(header.contains("gateway_enqueue(reason=cause)"))
+        val causes = GatewayEnqueueCause.entries.joinToString(",") { "${it.code}:${it.name.lowercase()}" }
+        assertTrue(header.contains("gateway_enqueue_causes=$causes"))
         assertTrue(header.contains("40:provider_reads"))
         assertTrue(header.contains("45:provider_failure_high_water_page"))
         assertTrue(header.contains("59:recheck_provider_changed"))

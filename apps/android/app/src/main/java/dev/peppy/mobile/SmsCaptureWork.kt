@@ -270,7 +270,7 @@ internal object PhoneReadCaptureWork {
     @Volatile internal var runner = PhoneReadCaptureRunner { context ->
         NativeGateway.open(context)?.let { PhoneReadIngest.run(context, it) } ?: false
     }
-    @Volatile internal var onApplied: (Context) -> Unit = { GatewayWork.enqueueAfterCapture(it) }
+    @Volatile internal var onApplied: (Context) -> Unit = { GatewayWork.enqueueAfterCapture(it, GatewayEnqueueCause.SMS_CAPTURE) }
     @Volatile internal var lastRunMs: Long? = null
     @Volatile internal var clockMs: () -> Long = System::currentTimeMillis
 

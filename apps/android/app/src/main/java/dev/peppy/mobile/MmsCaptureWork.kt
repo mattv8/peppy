@@ -154,12 +154,12 @@ object MmsCaptureWork {
     }
 
     internal fun handleResult(context: Context, result: MmsCaptureSummary) {
-        if (result.captured > 0) GatewayWork.enqueueAfterCapture(context)
+        if (result.captured > 0) GatewayWork.enqueueAfterCapture(context, GatewayEnqueueCause.MMS_CAPTURE)
         hintScheduler.requestContinuation(result.more, scheduleSink(context))
     }
 
     private fun handleHintResult(context: Context, result: MmsCaptureSummary) {
-        if (result.captured > 0) GatewayWork.enqueueAfterCapture(context)
+        if (result.captured > 0) GatewayWork.enqueueAfterCapture(context, GatewayEnqueueCause.MMS_CAPTURE)
         if (result.more) hintScheduler.requestHint(hintScheduleSink(context))
     }
 
@@ -382,7 +382,7 @@ internal object MmsCapture {
         if (!eligible) return MmsCaptureSummary(0, 0, 0, false)
         val native = NativeGateway.producerClient(context) ?: run {
             MmsCaptureWork.deferUntilProducerReady(context, manualRecheck, providerChanged)
-            GatewayWork.enqueue(context.applicationContext)
+            GatewayWork.enqueue(context.applicationContext, GatewayEnqueueCause.MMS_CAPTURE)
             return MmsCaptureSummary(0, 0, 0, false)
         }
         val route = SimRoutes.current().singleOrNull()
@@ -411,7 +411,7 @@ internal object MmsCapture {
             NativeCore(native),
             provider,
             context.noBackupFilesDir,
-            onControlPublished = { GatewayWork.enqueueAfterCapture(context.applicationContext) },
+            onControlPublished = { GatewayWork.enqueueAfterCapture(context.applicationContext, GatewayEnqueueCause.HISTORY_CONTROL) },
             restrictedAccess = { restrictedMessageAccess(context) },
         )
     }

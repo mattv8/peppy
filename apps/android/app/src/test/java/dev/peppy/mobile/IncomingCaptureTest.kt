@@ -31,7 +31,10 @@ class IncomingCaptureTest : GatewayTestBase() {
         grant(Manifest.permission.RECEIVE_SMS)
         assertEquals(ImportResult.IMPORTED, enroll()) // database open, shared keys locked
         val seenAtSchedule = mutableListOf<List<String>>()
-        GatewayScheduler.schedule = { seenAtSchedule += allMessages().map { it.body } }
+        GatewayScheduler.schedule = { _, cause ->
+            assertEquals(GatewayEnqueueCause.SMS_RECEIVER, cause)
+            seenAtSchedule += allMessages().map { it.body }
+        }
 
         assertEquals(1, IncomingCapture.handle(context, parts))
         assertEquals("the concatenated message was already in the core when sync was scheduled", listOf(listOf("first half, second half")), seenAtSchedule)
@@ -124,7 +127,10 @@ class IncomingCaptureTest : GatewayTestBase() {
         val events = mutableListOf<String>()
         ReceiverWork.executor = java.util.concurrent.Executor { queued += it }
         try {
-            GatewayScheduler.schedule = { events += "schedule:${allMessages().size}" }
+            GatewayScheduler.schedule = { _, cause ->
+                assertEquals(GatewayEnqueueCause.SMS_RECEIVER, cause)
+                events += "schedule:${allMessages().size}"
+            }
             ReceiverWork.run(finish = { events += "finish" }) { IncomingCapture.handle(context, parts) }
             assertTrue("nothing finishes before the owned executor runs", events.isEmpty())
             queued.single().run()

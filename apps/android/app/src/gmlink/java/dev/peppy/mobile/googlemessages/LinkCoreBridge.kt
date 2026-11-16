@@ -2,6 +2,7 @@ package dev.peppy.mobile.googlemessages
 
 import android.content.Context
 import dev.peppy.mobile.GatewayWork
+import dev.peppy.mobile.GatewayEnqueueCause
 import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
 import dev.peppy.mobile.gateway.NativeGateway
 import java.util.concurrent.Executors
@@ -168,7 +169,7 @@ internal object LinkCoreBridge {
 
     private fun enqueueGatewayPass(context: Context) {
         runCatching {
-            LinkCoreBridgeTestHooks.enqueueGatewayPass?.invoke() ?: GatewayWork.enqueueAfterCapture(context.applicationContext)
+            LinkCoreBridgeTestHooks.enqueueGatewayPass?.invoke() ?: GatewayWork.enqueueAfterCapture(context.applicationContext, GatewayEnqueueCause.RCS_LINK)
         }
     }
 

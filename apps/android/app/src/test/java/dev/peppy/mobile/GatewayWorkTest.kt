@@ -15,6 +15,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import dev.peppy.mobile.diagnostics.SyncDiagnostics
+import dev.peppy.mobile.diagnostics.SyncTraceEvent
+import dev.peppy.mobile.diagnostics.SyncTraceField
 
 
 @RunWith(RobolectricTestRunner::class)
@@ -41,8 +44,8 @@ class GatewayWorkTest {
             Configuration.Builder().setExecutor(SynchronousExecutor()).build(),
         )
 
-        GatewayWork.enqueue(context)
-        GatewayWork.enqueue(context)
+        GatewayWork.enqueue(context, GatewayEnqueueCause.SETTINGS)
+        GatewayWork.enqueue(context, GatewayEnqueueCause.SETTINGS)
 
         assertEquals(1, WorkManager.getInstance(context).getWorkInfosForUniqueWork(GatewayWork.NAME).get().size)
     }
@@ -51,7 +54,7 @@ class GatewayWorkTest {
         val context = testContext()
         GatewayWork.beginPass(context)
 
-        GatewayWork.enqueueAfterCapture(context)
+        GatewayWork.enqueueAfterCapture(context, GatewayEnqueueCause.SMS_CAPTURE)
 
         assertFalse(GatewayWork.beginPass(context))
     }
@@ -59,9 +62,9 @@ class GatewayWorkTest {
     @Test fun ordinaryAndUrgentEnqueuesRequestCapture() {
         val context = testContext()
 
-        GatewayWork.enqueue(context)
+        GatewayWork.enqueue(context, GatewayEnqueueCause.SETTINGS)
         assertTrue(GatewayWork.beginPass(context))
-        GatewayWork.enqueueUrgent(context)
+        GatewayWork.enqueueUrgent(context, GatewayEnqueueCause.RELAY_WAKE)
 
         assertTrue(GatewayWork.beginPass(context))
     }
@@ -69,7 +72,7 @@ class GatewayWorkTest {
     @Test fun captureHintIsClearedAfterAPass() {
         val context = testContext()
 
-        GatewayWork.enqueue(context)
+        GatewayWork.enqueue(context, GatewayEnqueueCause.SETTINGS)
 
         assertTrue(GatewayWork.beginPass(context))
         assertFalse(GatewayWork.beginPass(context))
@@ -77,7 +80,7 @@ class GatewayWorkTest {
 
     @Test fun deferredProducerPassRestoresConsumedCaptureHint() {
         val context = testContext()
-        GatewayWork.enqueue(context)
+        GatewayWork.enqueue(context, GatewayEnqueueCause.SETTINGS)
         assertTrue(GatewayWork.beginPass(context))
 
         GatewayWork.restoreCaptureHint(context)
@@ -114,6 +117,28 @@ class GatewayWorkTest {
         assertEquals(0L, normal.initialDelay)
     }
 
+    @Test fun enqueueRecordsTheCauseForEachEntryPoint() {
+        val events = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+            val context = testContext()
+            GatewayWork.enqueue(context, GatewayEnqueueCause.SETTINGS)
+            GatewayWork.enqueueUrgent(context, GatewayEnqueueCause.RELAY_WAKE)
+            GatewayWork.enqueueAfterCapture(context, GatewayEnqueueCause.SMS_CAPTURE)
+        }
+
+        val causes = events.map(::traceFields)
+            .filter { it["event"] == SyncTraceEvent.GATEWAY_ENQUEUE.code }
+            .map { it.getValue(SyncTraceField.REASON.code.toString()) }
+        assertEquals(
+            listOf(
+                GatewayEnqueueCause.SETTINGS.code,
+                GatewayEnqueueCause.RELAY_WAKE.code,
+                GatewayEnqueueCause.SMS_CAPTURE.code,
+            ),
+            causes,
+        )
+    }
+
     @After fun finishCoalescedPass() {
         GatewayWork.finishPass()
     }
@@ -127,5 +152,10 @@ class GatewayWorkTest {
             Configuration.Builder().setExecutor(SynchronousExecutor()).build(),
         )
         return context
+    }
+
+    private fun traceFields(line: String): Map<String, Long> = line.split(' ').associate { token ->
+        val (key, value) = token.split('=', limit = 2)
+        key to value.toLong()
     }
 }

@@ -99,13 +99,13 @@ class RemoteMessagingProtocolTest {
 
         // Disabled wake still queues bounded sync and must not start the FGS.
         RemoteMessagingPreferences.setEnabled(context, false)
-        RemoteMessagingService.resumeOrEnqueue(context)
+        RemoteMessagingService.resumeOrEnqueue(context, GatewayEnqueueCause.RELAY_WAKE)
         assertEquals(1, WorkManager.getInstance(context).getWorkInfosForUniqueWork(GatewayWork.NAME).get().size)
         assertNull(shadow.nextStartedService)
 
         // Enabled wake requests the FGS without any caller-thread session check; the service decides eligibility.
         RemoteMessagingPreferences.setEnabled(context, true)
-        RemoteMessagingService.resumeOrEnqueue(context)
+        RemoteMessagingService.resumeOrEnqueue(context, GatewayEnqueueCause.RELAY_WAKE)
         assertEquals(RemoteMessagingService::class.java.name, shadow.nextStartedService.component?.className)
     }
 

@@ -45,6 +45,7 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.peppy.mobile.GatewayWork
+import dev.peppy.mobile.GatewayEnqueueCause
 import dev.peppy.mobile.ObservedNotificationApp
 import dev.peppy.mobile.R
 import dev.peppy.mobile.approval.actions
@@ -100,7 +101,7 @@ internal class NativeNotificationAppFilterActions(
         try {
             val session = NativeGateway.session(context) ?: return@withContext false
             session.client.setAppMuted(session.client.notificationSourceDeviceId(), app.packageName, app.label, muted)
-            GatewayWork.enqueue(context)
+            GatewayWork.enqueue(context, GatewayEnqueueCause.SETTINGS)
             true
         } catch (_: MobileBindingsException) {
             false

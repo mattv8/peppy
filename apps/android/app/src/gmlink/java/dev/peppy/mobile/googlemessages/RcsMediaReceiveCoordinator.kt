@@ -2,6 +2,7 @@ package dev.peppy.mobile.googlemessages
 
 import android.content.Context
 import dev.peppy.mobile.GatewayWork
+import dev.peppy.mobile.GatewayEnqueueCause
 import dev.peppy.mobile.GatewayAuthException
 import dev.peppy.mobile.attachments.AttachmentRetentionDriver
 import dev.peppy.mobile.gateway.GatewayAccountIdentity
@@ -252,5 +253,5 @@ private class AndroidRcsMediaReceiveIo(
         handle.downloadRcsMedia(JSONObject().put("media_ref", task.mediaRef).put("dest_path", destination.absolutePath)
             .put("max_bytes", task.plaintextBytes.toLong()).toString())
     }
-    override fun wake() = GatewayWork.enqueueAfterCapture(context)
+    override fun wake() = GatewayWork.enqueueAfterCapture(context, GatewayEnqueueCause.RCS_MEDIA)
 }
