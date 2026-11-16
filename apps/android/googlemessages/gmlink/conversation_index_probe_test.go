@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -247,6 +248,39 @@ func TestConversationProbeRequiresCompleteEmptyBasisForEmptyPage(t *testing.T) {
 	if !(&Link{}).conversationProbeMatches(empty, &gmproto.ListConversationsResponse{}) {
 		t.Fatal("empty page did not adopt an empty basis")
 	}
+}
+
+func TestConversationIndexResultsDescribePublication(t *testing.T) {
+	t.Run("adopted", func(t *testing.T) {
+		link, _, cleanup, _, _ := preparedRcsFixtureWithPhone(t)
+		defer cleanup()
+		link.mu.Lock()
+		link.conversationIndexScannedAt = time.Now().Add(-conversationIndexMaxAge)
+		link.mu.Unlock()
+
+		if result := link.EnsureConversationIndex(); result != `{"code":"ok","index":"adopted"}` {
+			t.Fatalf("EnsureConversationIndex = %s", result)
+		}
+	})
+	t.Run("scanned", func(t *testing.T) {
+		link, _, cleanup, _, _ := preparedRcsFixtureWithPhone(t)
+		defer cleanup()
+		link.mu.Lock()
+		link.invalidateConversationCompletenessLocked()
+		link.mu.Unlock()
+
+		if result := link.EnsureConversationIndex(); result != `{"code":"ok","index":"scanned"}` {
+			t.Fatalf("EnsureConversationIndex = %s", result)
+		}
+	})
+	t.Run("refresh", func(t *testing.T) {
+		link, _, cleanup, _, _ := preparedRcsFixtureWithPhone(t)
+		defer cleanup()
+
+		if result := link.RefreshConversationIndex(); result != `{"code":"ok","index":"scanned"}` {
+			t.Fatalf("RefreshConversationIndex = %s", result)
+		}
+	})
 }
 
 // Spec 4.3 case 1: a clean retire and a reopen inside the gap adopt the basis with one list request.
@@ -664,7 +698,7 @@ func TestProbe14RefreshDropsBasisAndFailedScanLeavesNoProbe(t *testing.T) {
 	if !captured {
 		t.Fatal("no basis captured before the refresh")
 	}
-	if result := link.RefreshConversationIndex(); result == `{"code":"ok"}` {
+	if result := link.RefreshConversationIndex(); strings.Contains(result, `"code":"ok"`) {
 		t.Fatal("refresh without a runtime client reported ok")
 	}
 	link.mu.Lock()
@@ -710,7 +744,7 @@ func TestProbe15StaleAdoptedRosterRefusesAtCommit(t *testing.T) {
 	if source == (libgm.StreamSource{}) {
 		t.Fatal("the fixture stream is not open")
 	}
-	if result := link.RefreshConversationIndex(); result != `{"code":"ok"}` {
+	if result := link.RefreshConversationIndex(); result != `{"code":"ok","index":"scanned"}` {
 		t.Fatal(result)
 	}
 
@@ -720,7 +754,7 @@ func TestProbe15StaleAdoptedRosterRefusesAtCommit(t *testing.T) {
 	deliver(link, &events.ActiveSessionSet{})
 	deliver(link, probeSettings())
 	listsBefore := len(phone.listRequests())
-	if result := link.EnsureConversationIndex(); result != `{"code":"ok"}` {
+	if result := link.EnsureConversationIndex(); result != `{"code":"ok","index":"adopted"}` {
 		t.Fatalf("ensure = %s", result)
 	}
 	if lists := len(phone.listRequests()) - listsBefore; lists != 1 {
@@ -899,7 +933,7 @@ func TestProbeF1ForcedRefreshFailureLeavesNoBasis(t *testing.T) {
 	link.mu.Lock()
 	link.ticketNow = clock.Now
 	link.mu.Unlock()
-	if result := link.RefreshConversationIndex(); result != `{"code":"ok"}` {
+	if result := link.RefreshConversationIndex(); result != `{"code":"ok","index":"scanned"}` {
 		t.Fatal(result)
 	}
 	link.mu.Lock()
@@ -942,7 +976,7 @@ func TestProbeF1ForcedRefreshFailureLeavesNoBasis(t *testing.T) {
 
 	phone.configure(func(knobs *fixtureKnobs) { knobs.failAction, knobs.failStatus = 0, 0 })
 	before := len(phone.listRequests())
-	if result := link.EnsureConversationIndex(); result != `{"code":"ok"}` {
+	if result := link.EnsureConversationIndex(); result != `{"code":"ok","index":"scanned"}` {
 		t.Fatalf("ensure = %s", result)
 	}
 	shapes := phone.listRequests()[before:]

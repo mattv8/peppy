@@ -601,9 +601,9 @@ func (link *Link) RefreshConversationIndex() string {
 	link.mu.Lock()
 	link.clearConversationProbeBasisLocked()
 	link.mu.Unlock()
-	return refreshConversationIndexJSON(link.withConversationIndexRefresh(func(runCtx context.Context, generation, streamEpoch uint64, load conversationPageLoader) string {
+	return refreshConversationIndexResultJSON(link.withConversationIndexRefresh(func(runCtx context.Context, generation, streamEpoch uint64, load conversationPageLoader) string {
 		return link.refreshConversationIndexWith(runCtx, generation, streamEpoch, load)
-	}))
+	}), "scanned")
 }
 
 func (link *Link) withConversationIndexRefresh(refresh func(context.Context, uint64, uint64, conversationPageLoader) string) string {
@@ -635,9 +635,14 @@ func (link *Link) withConversationIndexRefresh(refresh func(context.Context, uin
 // EnsureConversationIndex reports ok when the published index is still usable and revalidates it otherwise.
 func (link *Link) EnsureConversationIndex() string {
 	if link.hasM2Verification() && link.conversationIndexUsable() {
-		return refreshConversationIndexJSON("")
+		return refreshConversationIndexResultJSON("", "reused")
 	}
-	return refreshConversationIndexJSON(link.withConversationIndexRefresh(link.ensureConversationIndexWith))
+	var result conversationIndexEnsureResult
+	refusal := link.withConversationIndexRefresh(func(runCtx context.Context, generation, streamEpoch uint64, load conversationPageLoader) string {
+		result = link.ensureConversationIndexWithResult(runCtx, generation, streamEpoch, load)
+		return result.code
+	})
+	return refreshConversationIndexResultJSON(refusal, result.index)
 }
 
 func (link *Link) conversationIndexUsable() bool {
@@ -668,16 +673,25 @@ func (link *Link) refreshConversationIndexWith(runCtx context.Context, generatio
 	}
 }
 
-// ensureConversationIndexWith revalidates a retained basis with one inbox page and falls back to a full scan.
-// A complete index that has aged out of reuse is retained as a basis first, before it is invalidated.
+type conversationIndexEnsureResult struct {
+	code  string
+	index string
+}
+
 func (link *Link) ensureConversationIndexWith(runCtx context.Context, generation, streamEpoch uint64, load conversationPageLoader) string {
+	return link.ensureConversationIndexWithResult(runCtx, generation, streamEpoch, load).code
+}
+
+// ensureConversationIndexWithResult revalidates a retained basis with one inbox page and falls back to a full scan.
+// A complete index that has aged out of reuse is retained as a basis first, before it is invalidated.
+func (link *Link) ensureConversationIndexWithResult(runCtx context.Context, generation, streamEpoch uint64, load conversationPageLoader) conversationIndexEnsureResult {
 	link.mu.Lock()
 	link.retainAgedConversationProbeBasisLocked()
 	link.mu.Unlock()
 	indexRevision, started := link.beginConversationIndexRefreshFor(generation, streamEpoch)
 	if !started {
 		link.emit("conversation_refresh", "publication_stale", 0)
-		return "conversation_lookup_stale"
+		return conversationIndexEnsureResult{code: "conversation_lookup_stale"}
 	}
 	link.mu.Lock()
 	basis := link.conversationProbeBasis
@@ -692,10 +706,10 @@ func (link *Link) ensureConversationIndexWith(runCtx context.Context, generation
 			switch outcome {
 			case probeAdopted:
 				link.emit("conversation_refresh", "probe_adopted", 0)
-				return "ok"
+				return conversationIndexEnsureResult{code: "ok", index: "adopted"}
 			case probeSuperseded:
 				link.emit("conversation_refresh", "publication_stale", 0)
-				return "conversation_lookup_stale"
+				return conversationIndexEnsureResult{code: "conversation_lookup_stale"}
 			}
 		} else {
 			cancel()
@@ -703,7 +717,7 @@ func (link *Link) ensureConversationIndexWith(runCtx context.Context, generation
 		link.emit("conversation_refresh", "probe_missed", 0)
 	}
 	// The full scan drops any basis in the critical section that begins it.
-	return link.refreshConversationIndexWith(runCtx, generation, streamEpoch, load)
+	return conversationIndexEnsureResult{code: link.refreshConversationIndexWith(runCtx, generation, streamEpoch, load), index: "scanned"}
 }
 
 // retainAgedConversationProbeBasisLocked keeps a complete index that has aged out of reuse as a basis. It
@@ -825,6 +839,14 @@ func (link *Link) hasPendingConversationEvents() bool {
 
 func refreshConversationIndexJSON(refusal string) string {
 	return conversationJSON(refreshConversationIndexCode(refusal))
+}
+
+func refreshConversationIndexResultJSON(refusal, index string) string {
+	code := refreshConversationIndexCode(refusal)
+	if code != "ok" {
+		index = ""
+	}
+	return conversationIndexJSON(code, index)
 }
 
 func refreshConversationIndexCode(refusal string) string {

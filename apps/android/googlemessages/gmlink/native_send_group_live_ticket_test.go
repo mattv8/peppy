@@ -54,7 +54,7 @@ func nativeGroupLiveTicket(t *testing.T, commandID string) (*Link, *phoneFixture
 	phone.mu.Lock()
 	phone.conversations = []*gmproto.Conversation{group}
 	phone.mu.Unlock()
-	if result := link.RefreshConversationIndex(); result != `{"code":"ok"}` {
+	if result := link.RefreshConversationIndex(); result != `{"code":"ok","index":"scanned"}` {
 		cleanup()
 		t.Fatal(result)
 	}
