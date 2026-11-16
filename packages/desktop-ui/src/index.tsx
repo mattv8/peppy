@@ -60,7 +60,7 @@ export { formatComposerReason, InlineStatus, type InlineStatusAction, type Inlin
 import type { ConversationFolder } from "./bridge-contracts";
 export { TonePicker, TONE_PRESETS, type TonePickerProps } from "./TonePicker";
 export { ToneOverridesProvider, incomingToneSeed, toneIndex, toneStyle, useToneOverrides, useToneStyle, type ToneOverrides } from "./tone";
-export { OmniSearch, type OmniSearchProps } from "./OmniSearch";
+export { OmniSearch, type OmniNotificationHit, type OmniNotificationResults, type OmniSearchProps, type OmniSearchScope, type OmniTextSegment } from "./OmniSearch";
 export { ResizeHandle, type ResizeHandleProps } from "./ResizeHandle";
 export { SyncProgress, type SyncProgressProps } from "./SyncProgress";
 export { AttachmentStorageSettings, attachmentStorageRemovalText, type AttachmentStorageCopy, type AttachmentStorageSettingsProps, type StoragePurchaseProps, type StoragePurchaseState } from "./AttachmentStorageSettings";

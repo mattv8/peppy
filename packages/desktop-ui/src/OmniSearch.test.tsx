@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { historyPresentation, OmniSearch } from "./OmniSearch";
+import type { OmniNotificationResults, OmniSearchScope } from "./OmniSearch";
 import type { HistorySearchSnapshot, LocalSearchHit, LocalSearchPage } from "./bridge-contracts";
 import { formatDateTime } from "./datetime";
 
@@ -45,6 +46,289 @@ afterEach(() => {
 });
 
 describe("OmniSearch", () => {
+  it("uses a controlled scoped query without a popover or async search", () => {
+    const onSearch = vi.fn(async (request) => page(request.query));
+    const onQueryChange = vi.fn();
+    const onExit = vi.fn();
+    const scope: OmniSearchScope = { label: "Notifications", placeholder: "Search notifications", query: "alert", onQueryChange, onExit };
+    const { rerender } = render(<OmniSearch sessionKey="one" onSearch={onSearch} onActivate={() => {}} scope={scope} />);
+    const input = screen.getByRole("searchbox", { name: "Search Peppy" });
+    expect(input).toHaveValue("alert");
+    expect(input).not.toHaveAttribute("aria-controls");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    fireEvent.change(input, { target: { value: "updated" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search everything, not just Notifications" }));
+    rerender(<OmniSearch sessionKey="one" onSearch={onSearch} onActivate={() => {}} scope={{ ...scope, query: "" }} />);
+    fireEvent.keyDown(input, { key: "Backspace" });
+    expect(onQueryChange).toHaveBeenCalledWith("updated");
+    expect(onExit).toHaveBeenCalledTimes(2);
+    expect(onSearch).not.toHaveBeenCalled();
+  });
+
+  it("adds notification hits after contacts and activates their actions", async () => {
+    vi.useFakeTimers();
+    const onActivate = vi.fn();
+    const onShowAll = vi.fn();
+    const notifications: OmniNotificationResults = {
+      search: () => ({
+        hits: [{ key: "key one", appName: "Slack", sourceName: "Pixel", title: [{ text: "Alert", match: true }], snippet: [{ text: "Message", match: false }], timeLabel: "1m", timeTitle: "One minute ago" }],
+        total: 4,
+      }),
+      onActivate,
+      onShowAll,
+    };
+    render(<OmniSearch sessionKey="one" onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }])} onActivate={() => {}} notificationResults={notifications} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    expect(input).toHaveAttribute("placeholder", "Search messages, conversations, contacts, notifications");
+    fireEvent.change(input, { target: { value: "alert" } });
+    await act(async () => { vi.advanceTimersByTime(100); await Promise.resolve(); });
+    expect(screen.getByText("Contacts").compareDocumentPosition(screen.getByText("Notifications")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.keyDown(input, { key: "End" });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onShowAll).toHaveBeenCalledWith("alert");
+  });
+
+  it("clears scoped text, disables Clear when empty, and restores the input focus", () => {
+    const onQueryChange = vi.fn();
+    const scope = { label: "Notifications", placeholder: "Search notifications", query: "alert", onQueryChange, onExit: vi.fn() };
+    const { rerender } = render(<OmniSearch sessionKey="one" onSearch={async (request) => page(request.query)} onActivate={() => {}} scope={scope} />);
+    const input = screen.getByRole("searchbox");
+    fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(onQueryChange).toHaveBeenCalledWith("");
+    expect(input).toHaveFocus();
+    rerender(<OmniSearch sessionKey="one" onSearch={async (request) => page(request.query)} onActivate={() => {}} scope={{ ...scope, query: "" }} />);
+    expect(screen.getByRole("button", { name: "Clear search" })).toBeDisabled();
+  });
+
+  it("handles scoped Escape, Backspace, and ignored navigation keys", () => {
+    const onQueryChange = vi.fn();
+    const onExit = vi.fn();
+    const scope = { label: "Notifications", placeholder: "Search notifications", query: "alert", onQueryChange, onExit };
+    const { rerender } = render(<><button type="button">Open</button><OmniSearch sessionKey="one" onSearch={async (request) => page(request.query)} onActivate={() => {}} scope={scope} /></>);
+    const input = screen.getByRole("searchbox");
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(onQueryChange).toHaveBeenCalledWith("");
+    rerender(<><button type="button">Open</button><OmniSearch sessionKey="one" onSearch={async (request) => page(request.query)} onActivate={() => {}} scope={{ ...scope, query: "" }} /></>);
+    const opener = screen.getByRole("button", { name: "Open" });
+    opener.focus();
+    input.focus();
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(opener).toHaveFocus();
+    fireEvent.keyDown(input, { key: "Backspace" });
+    expect(onExit).toHaveBeenCalledOnce();
+    rerender(<><button type="button">Open</button><OmniSearch sessionKey="one" onSearch={async (request) => page(request.query)} onActivate={() => {}} scope={scope} /></>);
+    fireEvent.keyDown(input, { key: "Backspace" });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(onExit).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("keeps scoped values intact across session changes and caps code points", () => {
+    const onQueryChange = vi.fn();
+    const scope = { label: "Notifications", placeholder: "Search notifications", query: "kept", onQueryChange, onExit: vi.fn() };
+    const { rerender } = render(<OmniSearch sessionKey="one" onSearch={async (request) => page(request.query)} onActivate={() => {}} scope={scope} />);
+    const input = screen.getByRole("searchbox");
+    rerender(<OmniSearch sessionKey="two" disabled onSearch={async (request) => page(request.query)} onActivate={() => {}} scope={scope} />);
+    expect(input).toHaveValue("kept");
+    expect(onQueryChange).not.toHaveBeenCalled();
+    fireEvent.change(input, { target: { value: "😀".repeat(129) } });
+    expect(onQueryChange).toHaveBeenLastCalledWith("😀".repeat(128));
+  });
+
+  it("keeps scoped shortcuts local and seeds an unscoped focused query", async () => {
+    vi.useFakeTimers();
+    const onOpenChange = vi.fn();
+    const onSearch = vi.fn(async (request) => page(request.query));
+    const scope = { label: "Notifications", placeholder: "Search notifications", query: "alert", onQueryChange: vi.fn(), onExit: vi.fn() };
+    const { rerender } = render(<><button type="button">Open</button><OmniSearch sessionKey="one" onSearch={onSearch} onActivate={() => {}} onOpenChange={onOpenChange} scope={scope} /></>);
+    const input = screen.getByRole("searchbox");
+    fireEvent.keyDown(document, { key: "k", metaKey: true });
+    fireEvent.keyDown(document, { key: "k", ctrlKey: true });
+    expect(input).toHaveFocus();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(onOpenChange).not.toHaveBeenCalledWith(true);
+    rerender(<><button type="button">Open</button><OmniSearch sessionKey="one" onSearch={onSearch} onActivate={() => {}} onOpenChange={onOpenChange} /></>);
+    await act(async () => { vi.advanceTimersByTime(100); await Promise.resolve(); });
+    expect(onSearch).toHaveBeenCalledWith({ query: "alert", kind: "all", limit: 6 });
+    expect(screen.getByRole("listbox")).toBeInTheDocument();
+    screen.getByRole("button", { name: "Open" }).focus();
+    rerender(<><button type="button">Open</button><OmniSearch sessionKey="one" onSearch={onSearch} onActivate={() => {}} scope={scope} /></>);
+    rerender(<><button type="button">Open</button><OmniSearch sessionKey="one" onSearch={onSearch} onActivate={() => {}} /></>);
+    expect(input).toHaveValue("");
+  });
+
+  it("renders notification content, fallback icon, and suppresses an empty Rust result", async () => {
+    vi.useFakeTimers();
+    const notifications: OmniNotificationResults = {
+      search: vi.fn(() => ({ hits: [{ key: "one", appName: "Slack", iconPngBase64: "bad", title: [{ text: "Alert", match: true }, { text: " plain", match: false }], snippet: [{ text: "Match", match: false }], timeLabel: "1m" }], total: 1 })),
+      onActivate: vi.fn(),
+      onShowAll: vi.fn(),
+    };
+    render(<OmniSearch sessionKey="one" onSearch={async (request) => page(request.query, [])} onActivate={() => {}} notificationResults={notifications} />);
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: " alert " } });
+    expect(notifications.search).toHaveBeenCalledWith("alert");
+    await act(async () => { vi.advanceTimersByTime(100); await Promise.resolve(); });
+    expect(screen.getByText("Show all 1 in Notifications")).toBeInTheDocument();
+    expect(screen.queryByText("Pixel")).not.toBeInTheDocument();
+    expect(document.querySelectorAll("mark")).toHaveLength(1);
+    expect(screen.queryByText("No matches.")).not.toBeInTheDocument();
+    fireEvent.error(document.querySelector("[data-omni-notification-hit] img")!);
+    expect(screen.getByText("S")).toBeInTheDocument();
+  });
+
+  it("activates notification hits by keyboard and click, and hides them outside all results", async () => {
+    vi.useFakeTimers();
+    const onActivate = vi.fn();
+    const onShowAll = vi.fn();
+    const notifications: OmniNotificationResults = {
+      search: () => ({ hits: Array.from({ length: 4 }, (_, index) => ({ key: `n${index}`, appName: "Slack", title: [{ text: `Hit ${index}`, match: false }], snippet: [] })), total: 4 }),
+      onActivate,
+      onShowAll,
+    };
+    render(<OmniSearch sessionKey="one" onSearch={async (request) => ({ ...page(request.query, []), hasMore: { conversation: false, message: false, contact: true } })} onActivate={() => {}} notificationResults={notifications} />);
+    const input = screen.getByRole("combobox");
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "alert" } });
+    expect(document.querySelectorAll("[data-omni-notification-hit]")).toHaveLength(3);
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input).toHaveAttribute("aria-activedescendant", expect.stringContaining("notification-n1"));
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onActivate).toHaveBeenCalledWith("n1");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "alert" } });
+    fireEvent.click(document.querySelector("[data-omni-notification-hit]")!);
+    expect(onActivate).toHaveBeenCalledTimes(2);
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "alert" } });
+    fireEvent.click(screen.getByRole("option", { name: "Show all 4 in Notifications" }));
+    expect(onShowAll).toHaveBeenCalledWith("alert");
+  });
+
+  it("hides notification results in category drill-down and while disabled", async () => {
+    vi.useFakeTimers();
+    const notifications: OmniNotificationResults = {
+      search: () => ({ hits: [{ key: "one", appName: "Slack", title: [{ text: "Alert", match: false }], snippet: [] }], total: 1 }),
+      onActivate: vi.fn(),
+      onShowAll: vi.fn(),
+    };
+    const onSearch = vi.fn(async (request) => request.kind === "all"
+      ? { ...page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }]), hasMore: { conversation: false, message: false, contact: true } }
+      : page(request.query));
+    const { rerender } = render(<OmniSearch sessionKey="one" onSearch={onSearch} onActivate={() => {}} notificationResults={notifications} />);
+    const input = screen.getByRole("combobox");
+    fireEvent.change(input, { target: { value: "alert" } });
+    await act(async () => { vi.advanceTimersByTime(100); await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("option", { name: "Show all contacts" }));
+    expect(screen.queryByText("Notifications")).not.toBeInTheDocument();
+    rerender(<OmniSearch sessionKey="one" disabled onSearch={onSearch} onActivate={() => {}} notificationResults={notifications} />);
+    expect(screen.queryByText("Notifications")).not.toBeInTheDocument();
+  });
+
+  it("does not invalidate an in-flight Rust search when notification results change", async () => {
+    vi.useFakeTimers();
+    const request = deferred<ReturnType<typeof page>>();
+    const onSearch = vi.fn(() => request.promise);
+    const notifications = (key: string): OmniNotificationResults => ({
+      search: () => ({ hits: [{ key, appName: "Slack", title: [{ text: key, match: false }], snippet: [] }], total: 1 }),
+      onActivate: vi.fn(),
+      onShowAll: vi.fn(),
+    });
+    const { rerender } = render(<OmniSearch sessionKey="one" onSearch={onSearch} onActivate={() => {}} notificationResults={notifications("first")} />);
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "alert" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    rerender(<OmniSearch sessionKey="one" onSearch={onSearch} onActivate={() => {}} notificationResults={notifications("second")} />);
+    await act(async () => { request.resolve(page("alert")); await Promise.resolve(); });
+    expect(onSearch).toHaveBeenCalledOnce();
+    expect(screen.getByText("Aurora")).toBeInTheDocument();
+    expect(screen.getByText("second")).toBeInTheDocument();
+  });
+
+  it("selects the first displayed Rust result before notification hits", async () => {
+    vi.useFakeTimers();
+    const onActivate = vi.fn();
+    const notifications: OmniNotificationResults = { search: () => ({ hits: [{ key: "notification", appName: "Slack", title: [{ text: "Alert", match: false }], snippet: [] }], total: 1 }), onActivate: vi.fn(), onShowAll: vi.fn() };
+    render(<OmniSearch sessionKey="one" onSearch={async (request) => page(request.query, [{ kind: "message", conversationId: "conversation", messageId: "message", title: "Message", snippet: "Body", timestamp: "Now" }])} onActivate={onActivate} notificationResults={notifications} />);
+    const input = screen.getByRole("combobox");
+    fireEvent.change(input, { target: { value: "alert" } });
+    await act(async () => { vi.advanceTimersByTime(100); await Promise.resolve(); });
+    expect(input).toHaveAttribute("aria-activedescendant", expect.stringContaining("message-conversation-message"));
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onActivate).toHaveBeenCalledWith({ kind: "message", conversationId: "conversation", messageId: "message", title: "Message", snippet: "Body", timestamp: "Now" });
+  });
+
+  it("starts a typed valid phone before its pending search completes", async () => {
+    vi.useFakeTimers();
+    const pending = deferred<ReturnType<typeof page>>();
+    const onStartConversation = vi.fn(async () => false);
+    render(<OmniSearch sessionKey="one" onSearch={() => pending.promise} onActivate={() => {}} onStartConversation={onStartConversation} />);
+    const input = screen.getByRole("combobox");
+    fireEvent.change(input, { target: { value: "+14155552671" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onStartConversation).toHaveBeenCalledWith("+14155552671", expect.any(AbortSignal));
+  });
+
+  it("selects Retry after a failed search so Enter retries", async () => {
+    vi.useFakeTimers();
+    const onSearch = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(page("missing", []));
+    render(<OmniSearch sessionKey="one" onSearch={onSearch} onActivate={() => {}} />);
+    const input = screen.getByRole("combobox");
+    fireEvent.change(input, { target: { value: "missing" } });
+    await act(async () => { vi.advanceTimersByTime(100); await Promise.resolve(); });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await act(async () => { vi.advanceTimersByTime(100); await Promise.resolve(); });
+    expect(onSearch).toHaveBeenCalledTimes(2);
+  });
+
+  it("selects and activates the first notification when Rust has no results", async () => {
+    vi.useFakeTimers();
+    const onActivate = vi.fn();
+    const notifications: OmniNotificationResults = { search: () => ({ hits: [{ key: "first", appName: "Slack", title: [{ text: "Alert", match: false }], snippet: [] }], total: 1 }), onActivate, onShowAll: vi.fn() };
+    render(<OmniSearch sessionKey="one" onSearch={async (request) => page(request.query, [])} onActivate={() => {}} notificationResults={notifications} />);
+    const input = screen.getByRole("combobox");
+    fireEvent.change(input, { target: { value: "alert" } });
+    await act(async () => { vi.advanceTimersByTime(100); await Promise.resolve(); });
+    expect(input).toHaveAttribute("aria-activedescendant", expect.stringContaining("notification-first"));
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onActivate).toHaveBeenCalledWith("first");
+  });
+
+  it("resets a category on scope entry and exits focused scope into all results", async () => {
+    vi.useFakeTimers();
+    const onSearch = vi.fn(async (request) => request.kind === "all"
+      ? { ...page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }]), hasMore: { conversation: false, message: false, contact: true } }
+      : page(request.query));
+    const notifications: OmniNotificationResults = { search: () => ({ hits: [{ key: "one", appName: "Slack", title: [{ text: "Alert", match: false }], snippet: [] }], total: 1 }), onActivate: vi.fn(), onShowAll: vi.fn() };
+    const scope: OmniSearchScope = { label: "Notifications", placeholder: "Search notifications", query: "alert", onQueryChange: vi.fn(), onExit: vi.fn() };
+    const { rerender } = render(<OmniSearch sessionKey="one" onSearch={onSearch} onActivate={() => {}} notificationResults={notifications} />);
+    const input = screen.getByRole("combobox");
+    fireEvent.change(input, { target: { value: "alert" } });
+    await act(async () => { vi.advanceTimersByTime(100); await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("option", { name: "Show all contacts" }));
+    rerender(<OmniSearch sessionKey="one" onSearch={onSearch} onActivate={() => {}} notificationResults={notifications} scope={scope} />);
+    expect(screen.getByRole("searchbox")).not.toHaveAttribute("aria-autocomplete");
+    fireEvent.click(screen.getByRole("button", { name: "Search everything, not just Notifications" }));
+    rerender(<OmniSearch sessionKey="one" onSearch={onSearch} onActivate={() => {}} notificationResults={notifications} />);
+    await act(async () => { vi.advanceTimersByTime(100); await Promise.resolve(); });
+    expect(onSearch).toHaveBeenLastCalledWith({ query: "alert", kind: "all", limit: 6 });
+    expect(screen.getByText("Notifications")).toBeInTheDocument();
+  });
+
+  it("opens an unscoped popover after a focused empty scoped exit and omits zero notification text", () => {
+    const scope: OmniSearchScope = { label: "Notifications", placeholder: "Search notifications", query: "", onQueryChange: vi.fn(), onExit: vi.fn() };
+    const notifications: OmniNotificationResults = { search: () => ({ hits: [], total: 0 }), onActivate: vi.fn(), onShowAll: vi.fn() };
+    const { rerender } = render(<OmniSearch sessionKey="one" onSearch={async (request) => page(request.query)} onActivate={() => {}} scope={scope} />);
+    const input = screen.getByRole("searchbox");
+    input.focus();
+    rerender(<OmniSearch sessionKey="one" onSearch={async (request) => page(request.query)} onActivate={() => {}} notificationResults={notifications} />);
+    expect(screen.getByRole("combobox")).toHaveAttribute("aria-autocomplete", "list");
+    expect(screen.getByRole("listbox")).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "alert" } });
+    expect(document.querySelector("[data-omni-search-results]")).not.toHaveTextContent("0");
+  });
+
   it("debounces a completed query before searching", async () => {
     vi.useFakeTimers();
     const onSearch = vi.fn(async (request) => page(request.query));
