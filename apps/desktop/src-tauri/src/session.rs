@@ -35,6 +35,10 @@ use tokio_util::sync::CancellationToken;
 
 pub type Notifier = Arc<dyn Fn() + Send + Sync>;
 
+fn replay_is_behind(progress: &ReplayProgress, target: Option<Cursor>) -> bool {
+    target.is_some_and(|target| progress.received_through < target)
+}
+
 const INITIAL_HISTORY_MESSAGES: usize = 50;
 const MAX_PREVIEWS_PER_SNAPSHOT: usize = 12;
 /// Per-session decoded attachment preview entries. Snapshot hydration adds at most 12 entries.
@@ -173,7 +177,19 @@ pub struct Session {
     /// Authenticated high-water mark for the current replay round. This is transient because it
     /// describes a server replay cut rather than local durable state.
     replay_target_high_water: Mutex<Option<Cursor>>,
+    replay_page_in_flight: AtomicBool,
     deferred_follow_up: DeferredFollowUp,
+}
+
+pub(crate) struct ReplayPageInFlight<'a>(&'a Session);
+
+impl Drop for ReplayPageInFlight<'_> {
+    fn drop(&mut self) {
+        self.0
+            .replay_page_in_flight
+            .store(false, Ordering::Release);
+        self.0.notify();
+    }
 }
 
 struct BoundedCache {
@@ -533,6 +549,7 @@ pub fn open_session(
         mismatch: AtomicBool::new(false),
         abandoned_snapshot: Mutex::new(None),
         replay_target_high_water: Mutex::new(None),
+        replay_page_in_flight: AtomicBool::new(false),
         repair_wake: Notify::new(),
         repair_attempted: AtomicBool::new(false),
         index_driver_running: AtomicBool::new(false),
@@ -823,12 +840,24 @@ impl Session {
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
+    pub(crate) fn replay_page_in_flight(&self) -> ReplayPageInFlight<'_> {
+        self.replay_page_in_flight.store(true, Ordering::Release);
+        ReplayPageInFlight(self)
+    }
+
+    /// Whether a known replay cut remains ahead of the locally received frontier.
+    pub fn catching_up(&self) -> BridgeResult<bool> {
+        let progress = self.replay_progress()?;
+        Ok(self.replay_page_in_flight.load(Ordering::Acquire)
+            || replay_is_behind(&progress, self.replay_target_high_water()))
+    }
+
     fn sync_progress(&self) -> BridgeResult<dto::SyncProgress> {
         let progress = self.replay_progress()?;
         let target_high_water = self.replay_target_high_water();
         let phase = if progress.waiting_for_keys > 0 {
             dto::SyncProgressPhase::WaitingForKeys
-        } else if target_high_water.is_some_and(|target| progress.received_through < target) {
+        } else if replay_is_behind(&progress, target_high_water) {
             dto::SyncProgressPhase::Receiving
         } else if progress.processed_through < progress.received_through {
             dto::SyncProgressPhase::Applying
@@ -2123,6 +2152,35 @@ mod tests {
     };
     use peppy_client_core::IncomingSms;
     use std::{collections::BTreeMap, sync::atomic::AtomicUsize};
+
+    fn replay_page_error(session: &Session) -> BridgeResult<()> {
+        let _page = session.replay_page_in_flight();
+        assert!(session.catching_up().unwrap());
+        Err(BridgeError::host_state())
+    }
+
+    #[test]
+    fn replay_page_error_clears_the_catch_up_guard_and_wakes() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let session = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            {
+                let wakes = wakes.clone();
+                Arc::new(move || {
+                    wakes.fetch_add(1, Ordering::AcqRel);
+                })
+            },
+        )
+        .unwrap();
+
+        assert!(replay_page_error(&session).is_err());
+        assert!(!session.catching_up().unwrap());
+        assert_eq!(wakes.load(Ordering::Acquire), 1);
+    }
 
     #[test]
     fn pasted_attachment_temporary_file_is_removed_after_success_and_failure() {

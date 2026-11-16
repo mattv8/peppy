@@ -9,7 +9,7 @@ use crate::{
     origin::websocket_url,
     session::{Session, VaultSummary},
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use peppy_client_core::{
     Client, Cursor, DraftPush, DraftPushOutcome, DraftTerminalReasonCore, DraftTransferDirection,
     DraftUpload, EnvelopePurpose, HistorySearchReplayProof, HistorySearchSyncFacts, KeyProfile,
@@ -46,6 +46,8 @@ const WS_PING_AFTER: Duration = Duration::from_secs(45);
 const WS_IDLE_LIMIT: Duration = Duration::from_secs(120);
 const WS_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_REPLAY_PAGES_PER_ROUND: usize = 20;
+const WS_BATCH_FRAMES: usize = 100;
+const WS_BATCH_BYTES: usize = 4 * 1024 * 1024;
 const MAX_OUTBOX_BATCHES: usize = 8;
 const OUTBOX_BATCH: usize = 32;
 const MEDIA_PER_ROUND: usize = 4;
@@ -61,6 +63,84 @@ const WS_CLOSE_RESYNC: u16 = 4409;
 struct DraftSaveWake {
     generation: u64,
     cancel: tokio_util::sync::CancellationToken,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReplayOutcome {
+    CaughtUp,
+    MorePages,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiveBatchDecision {
+    Append,
+    Flush,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeferredFrameControl {
+    Cancelled,
+    Resync,
+    Liveness,
+    RefreshPresence,
+    ProcessFrame,
+}
+
+enum LiveBatchItem<'a> {
+    Event {
+        cursor: &'a str,
+        envelope_bytes: usize,
+    },
+    Other,
+}
+
+fn live_batch_decision(
+    batch_len: usize,
+    batch_bytes: usize,
+    previous_cursor: Option<&str>,
+    next: LiveBatchItem<'_>,
+) -> LiveBatchDecision {
+    let LiveBatchItem::Event {
+        cursor,
+        envelope_bytes,
+    } = next
+    else {
+        return LiveBatchDecision::Flush;
+    };
+    let cursor_regressed = previous_cursor
+        .and_then(|previous| previous.parse::<u64>().ok().zip(cursor.parse::<u64>().ok()))
+        .is_some_and(|(previous, cursor)| cursor <= previous);
+    if batch_len >= WS_BATCH_FRAMES
+        || batch_bytes >= WS_BATCH_BYTES
+        || batch_bytes + envelope_bytes >= WS_BATCH_BYTES
+        || cursor_regressed
+    {
+        LiveBatchDecision::Flush
+    } else {
+        LiveBatchDecision::Append
+    }
+}
+
+fn deferred_frame_control(
+    cancel: &tokio_util::sync::CancellationToken,
+    repair_wake: &tokio::sync::Notify,
+    replay_wake: &tokio::sync::Notify,
+    liveness: &mut tokio::time::Interval,
+    presence_refresh_due: Option<Instant>,
+) -> DeferredFrameControl {
+    if cancel.is_cancelled() {
+        DeferredFrameControl::Cancelled
+    } else if repair_wake.notified().now_or_never().is_some()
+        || replay_wake.notified().now_or_never().is_some()
+    {
+        DeferredFrameControl::Resync
+    } else if liveness.tick().now_or_never().is_some() {
+        DeferredFrameControl::Liveness
+    } else if presence_refresh_due.is_some_and(|due| due <= Instant::now()) {
+        DeferredFrameControl::RefreshPresence
+    } else {
+        DeferredFrameControl::ProcessFrame
+    }
 }
 
 static DRAFT_SAVE_WAKE_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -709,7 +789,7 @@ async fn import_cut(
 }
 
 /// HTTP replay after the durable receive cursor (bounded pages, adaptive size).
-async fn replay(session: &Arc<Session>) -> BridgeResult<()> {
+async fn replay(session: &Arc<Session>) -> BridgeResult<ReplayOutcome> {
     let mut limit = 100usize;
     let mut pages = 0;
     let mut caught_up = false;
@@ -762,6 +842,7 @@ async fn replay(session: &Arc<Session>) -> BridgeResult<()> {
             caught_up = true;
             break;
         }
+        let _page_in_flight = session.replay_page_in_flight();
         match ingest_page(session, page.events).await {
             Ok(()) => {}
             Err(error) if error.code == "invalid-request" && limit > 1 => {
@@ -786,6 +867,30 @@ async fn replay(session: &Arc<Session>) -> BridgeResult<()> {
         session
             .attachment_retention_replay_observed
             .store(true, std::sync::atomic::Ordering::Release);
+    }
+    Ok(if caught_up || session.cancel.is_cancelled() {
+        ReplayOutcome::CaughtUp
+    } else {
+        ReplayOutcome::MorePages
+    })
+}
+
+async fn replay_until_caught_up(session: &Arc<Session>) -> BridgeResult<()> {
+    let mut replay_outcome = ReplayOutcome::MorePages;
+    while replay_outcome == ReplayOutcome::MorePages && !session.cancel.is_cancelled() {
+        let before_client = client(session);
+        let before = blocking(move || before_client.receive_cursor().map_err(core_error))
+            .await?
+            .0;
+        replay_outcome = replay(session).await?;
+        let after_client = client(session);
+        let advanced = blocking(move || after_client.receive_cursor().map_err(core_error))
+            .await?
+            .0
+            > before;
+        if !advanced {
+            break;
+        }
     }
     Ok(())
 }
@@ -2345,41 +2450,83 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
     let mut presence_refresh_due = None;
     let mut pinged = false;
     let mut liveness = tokio::time::interval(Duration::from_secs(15));
-    loop {
-        let next = tokio::select! {
-            _ = session.cancel.cancelled() => { let _ = timeout(WS_CLOSE_TIMEOUT, socket.close(None)).await; return WsEnd::Cancelled }
-            // A manual contact repair runs in the next HTTP round.
-            _ = session.repair_wake.notified() => { let _ = timeout(WS_CLOSE_TIMEOUT, socket.close(None)).await; return WsEnd::Resync }
-            _ = session.replay_wake.notified() => { let _ = timeout(WS_CLOSE_TIMEOUT, socket.close(None)).await; return WsEnd::Resync }
-            _ = liveness.tick() => {
-                let idle = last_frame.elapsed();
-                if idle > WS_IDLE_LIMIT {
-                    return ended("live-timeout");
+    let mut pending = None;
+    'frames: loop {
+        let next = if pending.is_some() {
+            match deferred_frame_control(
+                &session.cancel,
+                &session.repair_wake,
+                &session.replay_wake,
+                &mut liveness,
+                presence_refresh_due,
+            ) {
+                DeferredFrameControl::Cancelled => {
+                    let _ = timeout(WS_CLOSE_TIMEOUT, socket.close(None)).await;
+                    return WsEnd::Cancelled;
                 }
-                if idle > WS_PING_AFTER && !pinged {
-                    pinged = true;
-                    if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                DeferredFrameControl::Resync => {
+                    let _ = timeout(WS_CLOSE_TIMEOUT, socket.close(None)).await;
+                    return WsEnd::Resync;
+                }
+                DeferredFrameControl::Liveness => {
+                    let idle = last_frame.elapsed();
+                    if idle > WS_IDLE_LIMIT {
+                        return ended("live-timeout");
+                    }
+                    if idle > WS_PING_AFTER && !pinged {
+                        pinged = true;
+                        if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                            return ended("live-unavailable");
+                        }
+                    } else if socket.flush().await.is_err() {
                         return ended("live-unavailable");
                     }
-                } else if socket.flush().await.is_err() {
-                    return ended("live-unavailable");
+                    continue;
                 }
-                continue;
-            }
-            _ = async {
-                match presence_refresh_due {
-                    Some(due) => tokio::time::sleep_until(due).await,
-                    None => std::future::pending().await,
+                DeferredFrameControl::RefreshPresence => {
+                    presence_refresh_due = None;
+                    let _ = refresh_gateways(session).await;
+                    continue;
                 }
-            } => {
-                presence_refresh_due = None;
-                let _ = refresh_gateways(session).await;
-                continue;
+                DeferredFrameControl::ProcessFrame => pending.take().unwrap(),
             }
-            next = socket.next() => next,
+        } else {
+            let next = tokio::select! {
+                _ = session.cancel.cancelled() => { let _ = timeout(WS_CLOSE_TIMEOUT, socket.close(None)).await; return WsEnd::Cancelled }
+                // A manual contact repair runs in the next HTTP round.
+                _ = session.repair_wake.notified() => { let _ = timeout(WS_CLOSE_TIMEOUT, socket.close(None)).await; return WsEnd::Resync }
+                _ = session.replay_wake.notified() => { let _ = timeout(WS_CLOSE_TIMEOUT, socket.close(None)).await; return WsEnd::Resync }
+                _ = liveness.tick() => {
+                    let idle = last_frame.elapsed();
+                    if idle > WS_IDLE_LIMIT {
+                        return ended("live-timeout");
+                    }
+                    if idle > WS_PING_AFTER && !pinged {
+                        pinged = true;
+                        if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                            return ended("live-unavailable");
+                        }
+                    } else if socket.flush().await.is_err() {
+                        return ended("live-unavailable");
+                    }
+                    continue;
+                }
+                _ = async {
+                    match presence_refresh_due {
+                        Some(due) => tokio::time::sleep_until(due).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    presence_refresh_due = None;
+                    let _ = refresh_gateways(session).await;
+                    continue;
+                }
+                next = socket.next() => next,
+            };
+            last_frame = Instant::now();
+            pinged = false;
+            next
         };
-        last_frame = Instant::now();
-        pinged = false;
         match next {
             Some(Ok(Message::Text(text))) => {
                 let Ok(frame) = serde_json::from_str::<Frame>(text.as_str()) else {
@@ -2390,9 +2537,65 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                         let (Some(cursor), Some(envelope)) = (frame.cursor, frame.envelope) else {
                             return ended("live-protocol");
                         };
-                        if let Err(error) =
-                            ingest_page(session, vec![RawRecord { cursor, envelope }]).await
-                        {
+                        let mut records = vec![RawRecord { cursor, envelope }];
+                        let mut batch_bytes = records[0].envelope.get().len();
+                        loop {
+                            if records.len() >= WS_BATCH_FRAMES || batch_bytes >= WS_BATCH_BYTES {
+                                break;
+                            }
+                            let Some(next) = socket.next().now_or_never() else {
+                                break;
+                            };
+                            last_frame = Instant::now();
+                            pinged = false;
+                            let Some(Ok(Message::Text(next_text))) = next else {
+                                pending = Some(next);
+                                break;
+                            };
+                            let Ok(next_frame) =
+                                serde_json::from_str::<Frame>(next_text.as_str())
+                            else {
+                                pending = Some(Some(Ok(Message::Text(next_text))));
+                                break;
+                            };
+                            if next_frame.kind != "event"
+                                || next_frame.cursor.is_none()
+                                || next_frame.envelope.is_none()
+                            {
+                                debug_assert_eq!(
+                                    live_batch_decision(
+                                        records.len(),
+                                        batch_bytes,
+                                        records.last().map(|record| record.cursor.as_str()),
+                                        LiveBatchItem::Other,
+                                    ),
+                                    LiveBatchDecision::Flush
+                                );
+                                pending = Some(Some(Ok(Message::Text(next_text))));
+                                break;
+                            }
+                            let next_cursor = next_frame.cursor.as_deref().unwrap();
+                            let next_envelope = next_frame.envelope.as_ref().unwrap();
+                            if live_batch_decision(
+                                records.len(),
+                                batch_bytes,
+                                records.last().map(|record| record.cursor.as_str()),
+                                LiveBatchItem::Event {
+                                    cursor: next_cursor,
+                                    envelope_bytes: next_envelope.get().len(),
+                                },
+                            ) == LiveBatchDecision::Flush
+                            {
+                                pending = Some(Some(Ok(Message::Text(next_text))));
+                                break;
+                            }
+                            batch_bytes += next_envelope.get().len();
+                            records.push(RawRecord {
+                                cursor: next_frame.cursor.unwrap(),
+                                envelope: next_frame.envelope.unwrap(),
+                            });
+                        }
+                        if let Err(error) = ingest_page(session, records).await {
                             session.set_status(|status| status.error_code = Some(error.code));
                             return ended(error.code);
                         }
@@ -2402,6 +2605,7 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                             return ended("core");
                         }
                         let _ = observe_history_progress(session).await;
+                        continue 'frames;
                     }
                     "resync_required" => return WsEnd::Resync,
                     "presence_changed" | "drafts_changed" => {
@@ -2434,7 +2638,7 @@ async fn live(session: Arc<Session>) {
         let round = async {
             refresh_vault(&session).await?;
             probe_snapshot_capability(&session).await?;
-            replay(&session).await?;
+            replay_until_caught_up(&session).await?;
             if session
                 .attachment_retention_supported
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -2504,6 +2708,7 @@ mod transport_status_tests {
         tests::{fixture_at, open},
         AppState,
     };
+    use serde_json::json;
     use std::{
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -2511,6 +2716,173 @@ mod transport_status_tests {
         },
         time::Duration,
     };
+
+    #[test]
+    fn live_batch_decision_preserves_cursor_order_and_boundaries() {
+        assert_eq!(
+            live_batch_decision(
+                1,
+                8,
+                Some("4"),
+                LiveBatchItem::Event {
+                    cursor: "5",
+                    envelope_bytes: 8,
+                },
+            ),
+            LiveBatchDecision::Append
+        );
+        assert_eq!(
+            live_batch_decision(
+                1,
+                8,
+                Some("5"),
+                LiveBatchItem::Event {
+                    cursor: "5",
+                    envelope_bytes: 8,
+                },
+            ),
+            LiveBatchDecision::Flush
+        );
+        assert_eq!(
+            live_batch_decision(
+                WS_BATCH_FRAMES,
+                8,
+                Some("5"),
+                LiveBatchItem::Event {
+                    cursor: "6",
+                    envelope_bytes: 8,
+                },
+            ),
+            LiveBatchDecision::Flush
+        );
+        assert_eq!(
+            live_batch_decision(
+                1,
+                WS_BATCH_BYTES - 1,
+                Some("5"),
+                LiveBatchItem::Event {
+                    cursor: "6",
+                    envelope_bytes: 1,
+                },
+            ),
+            LiveBatchDecision::Flush
+        );
+        assert_eq!(
+            live_batch_decision(1, 8, Some("5"), LiveBatchItem::Other),
+            LiveBatchDecision::Flush
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_frames_prioritize_cancellation_and_wakes() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let repair_wake = tokio::sync::Notify::new();
+        let replay_wake = tokio::sync::Notify::new();
+        let mut liveness = tokio::time::interval(Duration::from_secs(3600));
+        liveness.tick().await;
+
+        cancel.cancel();
+        assert_eq!(
+            deferred_frame_control(
+                &cancel,
+                &repair_wake,
+                &replay_wake,
+                &mut liveness,
+                None,
+            ),
+            DeferredFrameControl::Cancelled
+        );
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        repair_wake.notify_one();
+        assert_eq!(
+            deferred_frame_control(
+                &cancel,
+                &repair_wake,
+                &replay_wake,
+                &mut liveness,
+                None,
+            ),
+            DeferredFrameControl::Resync
+        );
+
+        replay_wake.notify_one();
+        assert_eq!(
+            deferred_frame_control(
+                &cancel,
+                &repair_wake,
+                &replay_wake,
+                &mut liveness,
+                None,
+            ),
+            DeferredFrameControl::Resync
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_catch_up_fetches_past_one_round_until_a_short_page() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let route_requests = requests.clone();
+        let (origin, _) = mock_server(move |method, path, _| match (method, path) {
+            ("GET", path) if path.starts_with("/v1/events?") => {
+                let page = route_requests.fetch_add(1, Ordering::SeqCst);
+                let count = if page < MAX_REPLAY_PAGES_PER_ROUND {
+                    100
+                } else {
+                    1
+                };
+                let first = page * 100 + 1;
+                let events = (first..first + count)
+                    .map(|cursor| json!({"cursor": cursor.to_string(), "envelope": "event"}))
+                    .collect::<Vec<_>>();
+                (200, json!({"events": events}).to_string())
+            }
+            _ => (404, "{}".into()),
+        })
+        .await;
+        let fixture = fixture_at(&origin);
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+
+        replay_until_caught_up(&session).await.unwrap();
+
+        assert_eq!(requests.load(Ordering::SeqCst), MAX_REPLAY_PAGES_PER_ROUND + 1);
+        assert_eq!(
+            session.client.receive_cursor().unwrap(),
+            Cursor((MAX_REPLAY_PAGES_PER_ROUND * 100 + 1) as u64)
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_catch_up_stops_when_a_full_round_does_not_advance_the_cursor() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let route_requests = requests.clone();
+        let events = (1..=100)
+            .map(|cursor| json!({"cursor": cursor.to_string(), "envelope": "event"}))
+            .collect::<Vec<_>>();
+        let response = json!({"events": events}).to_string();
+        let (origin, _) = mock_server(move |method, path, _| match (method, path) {
+            ("GET", path) if path.starts_with("/v1/events?") => {
+                route_requests.fetch_add(1, Ordering::SeqCst);
+                (200, response.clone())
+            }
+            _ => (404, "{}".into()),
+        })
+        .await;
+        let fixture = fixture_at(&origin);
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+        for cursor in 1..=100 {
+            session.client.ingest_raw(br#""event""#, Cursor(cursor)).unwrap();
+        }
+
+        replay_until_caught_up(&session).await.unwrap();
+
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            MAX_REPLAY_PAGES_PER_ROUND,
+            "a non-advancing round must not start another replay round"
+        );
+        assert_eq!(session.client.receive_cursor().unwrap(), Cursor(100));
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn draft_save_wake_debounces_many_saves() {

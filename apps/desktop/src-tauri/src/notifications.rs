@@ -615,6 +615,9 @@ fn drain_with_candidate_delivery(
         .drain_lock
         .lock()
         .unwrap_or_else(|p| p.into_inner());
+    if session.catching_up()? {
+        return Ok(false);
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
@@ -936,6 +939,76 @@ mod tests {
             .unwrap()
             .as_millis() as i64;
         mirrored_candidates(&vec![now; count])
+    }
+
+    #[test]
+    fn banner_drain_holds_candidates_until_replay_catches_up() {
+        let (_fixture, session, settings, _phone) = recent_mirrored_candidates(1);
+        let posts = std::cell::Cell::new(0);
+        session.set_replay_target_high_water(Some(peppy_client_core::Cursor(1)));
+        let page = session.replay_page_in_flight();
+
+        assert!(session.catching_up().unwrap());
+        assert!(!drain_with_delivery(
+            &session,
+            &settings,
+            || false,
+            |_, _| false,
+            |_, _, _, _, _| {
+                posts.set(posts.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap());
+        assert_eq!(posts.get(), 0);
+        assert_eq!(session.client.pending_banner_candidates(10).unwrap().len(), 1);
+
+        drop(page);
+        assert!(!session.catching_up().unwrap());
+        drain_with_delivery(
+            &session,
+            &settings,
+            || false,
+            |_, _| false,
+            |_, _, _, _, _| {
+                posts.set(posts.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(posts.get(), 1);
+        assert!(session
+            .client
+            .pending_banner_candidates(10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn banner_drain_does_not_hold_when_replay_target_is_unknown() {
+        let (_fixture, session, settings, _phone) = recent_mirrored_candidates(1);
+        let posts = std::cell::Cell::new(0);
+
+        assert!(!session.catching_up().unwrap());
+        drain_with_delivery(
+            &session,
+            &settings,
+            || false,
+            |_, _| false,
+            |_, _, _, _, _| {
+                posts.set(posts.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(posts.get(), 1);
+        assert!(session
+            .client
+            .pending_banner_candidates(10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
