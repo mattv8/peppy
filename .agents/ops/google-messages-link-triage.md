@@ -59,6 +59,27 @@ libgm reopens its long-poll stream about every 16 minutes on the evidence device
 
 What the probe cannot see: a change to a conversation outside the first inbox page that happened during a reopen and that Google did not redeliver. Such a record can be stale for up to two hours. While it is, a message to a chat that only just became RCS-capable can go out as SMS, outbound typing can use the chat's previous SIM (`typing.go` reads the cached `DefaultOutgoingID`), and group reconcile and eligibility for that chat can be late. The owner accepted this on 2026-11-15. A fresh fetch before a carrier-only decision would remove the SMS case and is not built.
 
+## Receive sweep
+
+After every readiness pass (so after every stream reopen, about every 16 minutes on the evidence device) `RcsReceiveCoordinator.resume` recovers history for the chats the link owns. It used to walk the same chats again each time: 1,607 message list requests in 3 hours 41 minutes on 2026-11-16, in bursts of 86 to 131 after each reopen. Two causes, both fixed:
+
+- A walk ended only on the last page or on a page whose projected records were all below the floor (`watermark - 15 min`). Go reports `has_more` for every non-empty page and drops messages it does not project, so a chat with no projectable record near the top (carrier messages in a chat that Google also offers over RCS) was walked to the end of its history, or to the 32-page cap, where it wrote no state and repeated. A walk now also ends at the first page whose newest message of any kind is below the floor (`newest_ms` in the page JSON, computed over every message on the page).
+- A completed recovery sets the watermark to the newest projected record, so a chat with any message since then is never idle. The coordinator now keeps an in-memory memo of each chat's index last-activity at its last completed sweep and skips a chat whose activity is unchanged.
+
+Rules for the memo:
+
+- It is skipped only when the stored activity equals the current one, the entry is under two hours old (`SWEEP_MEMO_MAX_AGE_MS`), and the chat has no resume hint and is not incomplete. Activity of zero or unknown is always swept.
+- Only a completed walk that started at the newest page stores an entry. A walk resumed from a hint covers the older tail only and stores nothing.
+- A full index scan clears it: `GoogleMessagesLinkService.conversationIndexReady` calls `invalidateSweepMemo` for every successful index result that is not `"index":"reused"` or `"index":"adopted"`, including a result with no `index` field. A sweep that was running across the clear stores nothing (`memoGeneration`).
+- A targeted recovery after a claim ignores the memo and removes that chat's entry. The live receive path never reads it.
+- It is never persisted. The coordinator is created per opened link handle, so a new handle or a process restart starts empty.
+
+What the memo cannot see: a delivery or read status that changed during a reopen and that Google did not redeliver. Status does not move a chat's last activity, so such a mark can lag until the next full scan or the two-hour age, whichever is first. A missed message either moves the first inbox page (the probe misses, a full scan runs, the memo is cleared) or sits in a chat outside that page, which is the exposure described under index revalidation. The owner accepted this on 2026-11-16.
+
+Not fixed: the watermark advances only to a projected record. A chat whose new traffic is never projectable keeps its watermark, so each new message there costs one walk from the newest page down to it, and the walk grows. Past 3,200 such messages it would reach the page cap on every sweep again. Advancing the watermark after a walk with no projected record would change what recovery may skip for messages that become projectable later (`status_unproven`, `message_unproven`), so it needs a core decision first.
+
+A page entirely below the floor is still offered to `core.invalidate` for protocol-switch signals before the walk ends; deeper pages no longer are. The 1,081 signals the measured walks offered were all older than 24 hours and all skipped.
+
 ## Reading the link's diagnostics
 
 Diagnostics are off unless enabled in **Settings → Diagnostics**. When on, each link event also goes to logcat as `PeppyRcsDiagnostics: reason=<n>`, with `n` from the append-only table in [GoogleMessagesLinkDiagnostics.kt](../../apps/android/app/src/main/java/dev/peppy/mobile/diagnostics/GoogleMessagesLinkDiagnostics.kt). Other diagnostic events, including provider-capture reasons from `SyncDiagnosticReason`, appear only in the exported file.
@@ -74,6 +95,9 @@ Diagnostics are off unless enabled in **Settings → Diagnostics**. When on, eac
 | 282 after 26, 48, 199, 33 | A stream reopen followed by a one-page probe that adopted the kept index. Expect one or two list requests (178) per reopen. |
 | 283, then many 168 and 171 and a final 169 to 173 | The probe found a difference or failed, and a full scan ran (every inbox page, then archive and spam). A probe on its own shows one 168 and one 171. On every reopen it means the first inbox page never matches the kept index. See the evidence boundary. |
 | 161 between a probe's list request and a later 282 | The probe matched but the stream epoch moved during the request. The next readiness pass probes again. |
+| 45 with 284 on every sweep | A recovery reached the 32-page cap (`recovery_incomplete/page_cap`). The chat has more unprojectable history above its watermark than one walk covers. See [Receive sweep](#receive-sweep). |
+| 45 with 285 or 286 | A history page failed to load (285), or its cursor was missing or repeated (286). The hint is cleared and the next sweep starts at the newest page. |
+| Event 28 with `PAGE_QUERIES` near zero after a 282 | The expected idle sweep: the probe adopted the index and unchanged chats were skipped. A sweep that fetches after a 283 is expected too, because the full scan cleared the memo. |
 | 226 | A mirrored text row was skipped because the link already delivered it. |
 | 231 on every mirrored text | The link did not deliver, or its IDs do not match the row's ID. See the evidence boundary. |
 | 230 | A mirrored row is waiting one capture pass for the link. |
