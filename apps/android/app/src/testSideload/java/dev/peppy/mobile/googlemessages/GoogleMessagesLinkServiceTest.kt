@@ -11,6 +11,8 @@ import org.junit.After
 import org.junit.Before
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -18,6 +20,7 @@ import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.android.controller.ServiceController
 import org.robolectric.annotation.Config
+import dev.peppy.mobile.RemoteMessagingRuntime
 import dev.peppy.mobile.googlemessages.live.LiveTypingCredentials
 import dev.peppy.mobile.googlemessages.live.LiveTypingListener
 import uniffi.peppy_mobile_bindings.NativeLiveClock
@@ -64,6 +67,7 @@ class GoogleMessagesLinkServiceTest {
         LinkCoreBridge.resetForTest()
         GoogleMessagesLinkService.testHooks = ServiceTestHooks()
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = null
+        RemoteMessagingRuntime.peersListener = null
     }
 
 
@@ -979,6 +983,89 @@ class GoogleMessagesLinkServiceTest {
         handle.allowRunReturn.countDown()
     }
 
+    private fun assertTypingStartsWithPeers(peers: Boolean?) {
+        val handle = MutableStatusRunHandle()
+        val typing = TypingFixture().apply { this.peers = peers }
+        val controller = startTypingService(handle, typing)
+        goLinkedAndRunning(handle)
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+
+        assertEquals(1, typing.transport.starts.get())
+        assertTrue(typing.transport.running)
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `present peers start the typing host as before`() = assertTypingStartsWithPeers(true)
+
+    @Test fun `unknown peers start the typing host as before`() = assertTypingStartsWithPeers(null)
+
+    @Test fun `absent peers stop the typing host instead of starting it`() {
+        val handle = MutableStatusRunHandle()
+        val typing = TypingFixture().apply { peers = false }
+        val controller = startTypingService(handle, typing)
+        goLinkedAndRunning(handle)
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+
+        assertEquals(0, typing.transport.starts.get())
+        assertFalse(typing.transport.running)
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `peers changes re-evaluate the typing host through the runtime listener`() {
+        val handle = MutableStatusRunHandle()
+        val typing = TypingFixture().apply { peers = true }
+        val controller = startTypingService(handle, typing)
+        goLinkedAndRunning(handle)
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+        assertTrue(typing.transport.running)
+
+        typing.peers = false
+        RemoteMessagingRuntime.peersListener?.invoke()
+        assertFalse(typing.transport.running)
+
+        typing.peers = true
+        RemoteMessagingRuntime.peersListener?.invoke()
+        assertEquals(2, typing.transport.starts.get())
+        assertTrue(typing.transport.running)
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `repeated absent peers stop the typing bridge once until peers return`() {
+        val handle = MutableStatusRunHandle()
+        val typing = TypingFixture().apply { peers = false }
+        val controller = startTypingService(handle, typing)
+        goLinkedAndRunning(handle)
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+        val stops = typing.core.disables.get()
+        assertTrue(stops > 0)
+
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+        RemoteMessagingRuntime.peersListener?.invoke()
+        assertEquals(stops, typing.core.disables.get())
+
+        typing.peers = true
+        RemoteMessagingRuntime.peersListener?.invoke()
+        typing.peers = false
+        RemoteMessagingRuntime.peersListener?.invoke()
+        assertEquals(stops + 1, typing.core.disables.get())
+        controller.destroy()
+        handle.allowRunReturn.countDown()
+    }
+
+    @Test fun `typing peers listener is registered while the service is active and cleared on destroy`() {
+        val handle = MutableStatusRunHandle()
+        val controller = startTypingService(handle, TypingFixture())
+        assertNotNull(RemoteMessagingRuntime.peersListener)
+
+        controller.destroy()
+
+        assertNull(RemoteMessagingRuntime.peersListener)
+        handle.allowRunReturn.countDown()
+    }
+
     private fun startTypingService(handle: MutableStatusRunHandle, typing: TypingFixture): ServiceController<GoogleMessagesLinkService> {
         installTypingHooks(typing)
         installEngine(handle)
@@ -1012,6 +1099,7 @@ class GoogleMessagesLinkServiceTest {
             },
             typingSession = { typing.session },
             typingExecutor = typingExecutor,
+            peersPresent = { typing.peers },
         )
     }
 
@@ -1019,6 +1107,7 @@ class GoogleMessagesLinkServiceTest {
         val transport = FakeLiveTypingHost()
         val core = FakeTypingCore()
         @Volatile var session: TypingCredentials? = TypingCredentials("https://example.test", "bearer", "gateway", 1)
+        @Volatile var peers: Boolean? = null
     }
 
     private class FakeLiveTypingHost : TypingTransport {

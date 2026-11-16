@@ -11,6 +11,7 @@ import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import dev.peppy.mobile.diagnostics.BackgroundDiagnostics
@@ -42,7 +43,29 @@ internal object RemoteMessagingProtocol {
     private const val LARGE_FRAME_PREFIX_CHARS = 4 * 1024
     private val LARGE_EVENT = Regex(""""type"\s*:\s*"event"""")
 
-    fun hello(cursor: String): String = JSONObject().put("protocol_version", 1).put("resume_cursor", cursor).toString()
+    private val KEEPALIVE_INTERVAL_RANGE_MS = 5_000L..600_000L
+
+    data class Keepalive(val intervalMs: Long, val peers: Boolean)
+
+    fun hello(cursor: String): String = JSONObject().put("protocol_version", 1).put("resume_cursor", cursor).put("keepalive", "adaptive").toString()
+    fun keepalive(frame: String): Keepalive? {
+        if (frame.toByteArray(Charsets.UTF_8).size > SMALL_FRAME_BYTES) return null
+        return try {
+            val json = JSONObject(frame)
+            when (json.optString("type")) {
+                "ready" -> json.optJSONObject("keepalive")?.let(::parseKeepalive)
+                "keepalive" -> parseKeepalive(json)
+                else -> null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+    private fun parseKeepalive(json: JSONObject): Keepalive? {
+        val intervalMs = (json.opt("interval_ms") as? Number)?.toLong() ?: return null
+        val peers = json.opt("peers") as? Boolean ?: return null
+        return Keepalive(intervalMs, peers).takeIf { intervalMs in KEEPALIVE_INTERVAL_RANGE_MS }
+    }
     fun frameType(frame: String): String? {
         val bytes = frame.toByteArray(Charsets.UTF_8).size
         if (bytes > MAX_FRAME_BYTES) return null
@@ -75,6 +98,61 @@ internal object RemoteMessagingBackoff {
     }
 }
 
+internal object RemoteMessagingLiveness {
+    const val HANDSHAKE_SILENCE_MS = 30_000L
+    private const val UNKNOWN_CHECK_MS = 10_000L
+
+    fun silenceLimitMs(keepalive: RemoteMessagingProtocol.Keepalive?): Long =
+        keepalive?.let { 2 * it.intervalMs + 10_000L } ?: HANDSHAKE_SILENCE_MS
+    fun checkEveryMs(keepalive: RemoteMessagingProtocol.Keepalive?): Long = keepalive?.intervalMs ?: UNKNOWN_CHECK_MS
+    fun isStale(lastInboundElapsedMs: Long, nowElapsedMs: Long, keepalive: RemoteMessagingProtocol.Keepalive?): Boolean =
+        nowElapsedMs - lastInboundElapsedMs >= silenceLimitMs(keepalive)
+    /** The wait before the next check: one cadence, or less when the silence limit ends sooner. */
+    fun nextCheckDelayMs(lastInboundElapsedMs: Long, nowElapsedMs: Long, keepalive: RemoteMessagingProtocol.Keepalive?): Long =
+        minOf(checkEveryMs(keepalive), lastInboundElapsedMs + silenceLimitMs(keepalive) - nowElapsedMs).coerceAtLeast(1L)
+}
+
+/** Reports `false` only after the socket has said so for [graceMs]; a flap inside the grace keeps the previous value. */
+internal class PeerPresenceGate(private val graceMs: Long = PEERS_ABSENT_GRACE_MS) {
+    private var raw: Boolean? = null
+    private var falseSinceElapsedMs: Long? = null
+    private var settledBeforeFalse: Boolean? = null
+
+    fun onKeepalive(peers: Boolean, nowElapsedMs: Long) {
+        if (peers) {
+            raw = true
+            falseSinceElapsedMs = null
+            return
+        }
+        if (raw == false) return
+        settledBeforeFalse = if (raw == true) true else null
+        raw = false
+        falseSinceElapsedMs = nowElapsedMs
+    }
+
+    fun reset() {
+        raw = null
+        falseSinceElapsedMs = null
+        settledBeforeFalse = null
+    }
+
+    fun value(nowElapsedMs: Long): Boolean? {
+        if (raw != false) return raw
+        val since = falseSinceElapsedMs ?: return null
+        return if (nowElapsedMs - since >= graceMs) false else settledBeforeFalse
+    }
+
+    fun remainingGraceMs(nowElapsedMs: Long): Long? {
+        if (raw != false) return null
+        val since = falseSinceElapsedMs ?: return null
+        return (since + graceMs - nowElapsedMs).takeIf { it > 0 }
+    }
+
+    companion object {
+        const val PEERS_ABSENT_GRACE_MS = 60_000L
+    }
+}
+
 internal enum class RemoteMessagingStatus { CONNECTED, RECONNECTING, LOCKED }
 
 /** Generation fence shared by service callbacks and lifecycle teardown. */
@@ -99,6 +177,17 @@ internal object RemoteMessagingRuntime {
     @Volatile private var current = RemoteMessagingStatus.LOCKED
     fun status() = current
     fun set(status: RemoteMessagingStatus) { current = status }
+
+    @Volatile private var peers: Boolean? = null
+    /** Called on the socket thread when [peersPresent] changes; it must not block. */
+    @Volatile var peersListener: (() -> Unit)? = null
+    /** Whether another non-Android device of the vault is connected. Null means unknown: behave as if one is. */
+    fun peersPresent(): Boolean? = peers
+    fun setPeersPresent(value: Boolean?) {
+        if (peers == value) return
+        peers = value
+        peersListener?.invoke()
+    }
 }
 
 internal object RemoteMessagingPreferences {
@@ -106,6 +195,17 @@ internal object RemoteMessagingPreferences {
     private const val ENABLED = "enabled.v1"
     fun enabled(context: Context) = context.getSharedPreferences(FILE, 0).getBoolean(ENABLED, true)
     fun setEnabled(context: Context, enabled: Boolean) = context.getSharedPreferences(FILE, 0).edit().putBoolean(ENABLED, enabled).apply()
+
+    private const val KEEPALIVE_ORIGIN = "keepalive.adaptive.origin.v1"
+    /** The server origin that last answered with adaptive keepalive; one origin at a time. */
+    fun adaptiveKeepalive(context: Context, origin: String) = context.getSharedPreferences(FILE, 0).getString(KEEPALIVE_ORIGIN, null) == origin
+    fun setAdaptiveKeepalive(context: Context, origin: String, supported: Boolean) {
+        val prefs = context.getSharedPreferences(FILE, 0)
+        val edit = prefs.edit()
+        if (supported) edit.putString(KEEPALIVE_ORIGIN, origin)
+        else if (adaptiveKeepalive(context, origin)) edit.remove(KEEPALIVE_ORIGIN)
+        edit.apply()
+    }
 }
 
 /** A serialized hint transport. Durable replay and every carrier effect stay in [GatewaySyncWorker]. */
@@ -113,12 +213,19 @@ class RemoteMessagingService : Service() {
     private val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val client = OkHttpClient.Builder().pingInterval(25, TimeUnit.SECONDS).followRedirects(false).build()
+    private val quietClient = client.newBuilder().pingInterval(0, TimeUnit.MILLISECONDS).build()
     private val fence = RemoteMessagingFence()
     private var socket: WebSocket? = null // accessed only on [dispatcher]
     private var activeIdentity: String? = null
     private var reconnects = 0
     private var connected = false
     private var reconnectJob: Job? = null
+    private var quietConnection = false // adaptive keepalive: no OkHttp ping, liveness from inbound silence
+    private var keepalive: RemoteMessagingProtocol.Keepalive? = null
+    private var lastInboundElapsedMs = 0L
+    private var watchdogJob: Job? = null
+    private val peerGate = PeerPresenceGate()
+    private var peersJob: Job? = null
     private var readyFrames = 0
     private var eventFrames = 0
     private var resyncFrames = 0
@@ -147,7 +254,15 @@ class RemoteMessagingService : Service() {
         if (!RemoteMessagingPreferences.enabled(this)) return stopLocked()
         val session = NativeGateway.session(this) ?: return stopLocked()
         val identity = identity(session)
-        if (identity == activeIdentity && socket != null) return
+        if (identity == activeIdentity && socket != null) {
+            // A wake may find a quiet socket that died silently during sleep; reconnect it at once.
+            if (!quietConnection || !RemoteMessagingLiveness.isStale(lastInboundElapsedMs, SystemClock.elapsedRealtime(), keepalive)) return
+            connected = false
+            val token = fence.next()
+            cancelSocket()
+            connect(session, token)
+            return
+        }
         val token = fence.next()
         cancelSocket()
         activeIdentity = identity
@@ -162,7 +277,23 @@ class RemoteMessagingService : Service() {
         reconnectJob = null
         cancelSocket()
         updateStatus(RemoteMessagingStatus.RECONNECTING)
-        socket = client.newWebSocket(GatewayHttp(session.origin, session.bearerToken).webSocketRequest(), listener(session, token))
+        quietConnection = RemoteMessagingPreferences.adaptiveKeepalive(this, session.origin)
+        keepalive = null
+        lastInboundElapsedMs = SystemClock.elapsedRealtime()
+        val webSocket = (if (quietConnection) quietClient else client)
+            .newWebSocket(GatewayHttp(session.origin, session.bearerToken).webSocketRequest(), listener(session, token))
+        socket = webSocket
+        if (quietConnection) startWatchdog(webSocket, token)
+    }
+
+    private fun startWatchdog(webSocket: WebSocket, token: Long) {
+        watchdogJob = scope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(RemoteMessagingLiveness.nextCheckDelayMs(lastInboundElapsedMs, SystemClock.elapsedRealtime(), keepalive))
+                if (!isCurrent(token) || socket !== webSocket) return@launch
+                if (RemoteMessagingLiveness.isStale(lastInboundElapsedMs, SystemClock.elapsedRealtime(), keepalive)) return@launch scheduleReconnect(token)
+            }
+        }
     }
 
     private fun listener(session: GatewaySession, token: Long) = object : WebSocketListener() {
@@ -171,14 +302,42 @@ class RemoteMessagingService : Service() {
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) = serialized(token, webSocket) {
+            lastInboundElapsedMs = SystemClock.elapsedRealtime()
             when (RemoteMessagingProtocol.frameType(text)) {
-                "ready" -> if (!connected) {
-                    recordFrame(SocketFrame.READY)
-                    connected = true
-                    reconnects = 0
-                    updateStatus(RemoteMessagingStatus.CONNECTED)
-                    GatewayWork.enqueueUrgent(applicationContext, GatewayEnqueueCause.SOCKET_READY)
-                } else recordFrame(SocketFrame.READY)
+                "ready" -> {
+                    val advertised = RemoteMessagingProtocol.keepalive(text)
+                    if (advertised != null) {
+                        RemoteMessagingPreferences.setAdaptiveKeepalive(this@RemoteMessagingService, session.origin, true)
+                        keepalive = advertised
+                        observePeers(advertised.peers)
+                    } else {
+                        RemoteMessagingPreferences.setAdaptiveKeepalive(this@RemoteMessagingService, session.origin, false)
+                        peerGate.reset()
+                        publishPeers()
+                        if (quietConnection) {
+                            // The server does not support adaptive keepalive: fall back to the pinging client at once.
+                            recordFrame(SocketFrame.READY)
+                            val downgradeToken = fence.next()
+                            cancelSocket()
+                            connect(session, downgradeToken)
+                            return@serialized
+                        }
+                    }
+                    if (!connected) {
+                        recordFrame(SocketFrame.READY)
+                        connected = true
+                        reconnects = 0
+                        updateStatus(RemoteMessagingStatus.CONNECTED)
+                        GatewayWork.enqueueUrgent(applicationContext, GatewayEnqueueCause.SOCKET_READY)
+                    } else recordFrame(SocketFrame.READY)
+                }
+                "keepalive" -> {
+                    recordFrame(SocketFrame.OTHER)
+                    RemoteMessagingProtocol.keepalive(text)?.let {
+                        keepalive = it
+                        observePeers(it.peers)
+                    }
+                }
                 "event" -> {
                     recordFrame(SocketFrame.EVENT)
                     if (!RemoteMessagingProtocol.isOwnEvent(text, session.deviceId)) GatewayWork.enqueueUrgent(applicationContext, GatewayEnqueueCause.SOCKET_EVENT)
@@ -227,14 +386,44 @@ class RemoteMessagingService : Service() {
         }
     }
 
+    private fun observePeers(peers: Boolean) {
+        peerGate.onKeepalive(peers, SystemClock.elapsedRealtime())
+        publishPeers()
+    }
+
+    private fun publishPeers() {
+        val now = SystemClock.elapsedRealtime()
+        RemoteMessagingRuntime.setPeersPresent(peerGate.value(now))
+        peersJob?.cancel()
+        peersJob = null
+        val remaining = peerGate.remainingGraceMs(now) ?: return
+        peersJob = scope.launch {
+            kotlinx.coroutines.delay(remaining)
+            publishPeers()
+        }
+    }
+
+    private fun resetPeers() {
+        peerGate.reset()
+        peersJob?.cancel()
+        peersJob = null
+        RemoteMessagingRuntime.setPeersPresent(null)
+    }
+
     private fun isCurrent(token: Long) = fence.accepts(token)
-    private fun cancelSocket() { socket?.cancel(); socket = null }
+    private fun cancelSocket() {
+        watchdogJob?.cancel()
+        watchdogJob = null
+        socket?.cancel()
+        socket = null
+    }
     private fun stopLocked() {
         fence.stop()
         reconnectJob?.cancel()
         reconnectJob = null
         cancelSocket()
         connected = false
+        resetPeers()
         updateStatus(RemoteMessagingStatus.LOCKED)
         stopSelf()
     }
@@ -295,6 +484,7 @@ class RemoteMessagingService : Service() {
             reconnectJob = null
             cancelSocket()
             connected = false
+            resetPeers()
             RemoteMessagingRuntime.set(RemoteMessagingStatus.LOCKED)
             scope.cancel()
             dispatcher.close()
@@ -330,6 +520,7 @@ class RemoteMessagingService : Service() {
 
         fun stop(context: Context) {
             RemoteMessagingRuntime.set(RemoteMessagingStatus.LOCKED)
+            RemoteMessagingRuntime.setPeersPresent(null)
             context.stopService(Intent(context, RemoteMessagingService::class.java))
         }
     }
