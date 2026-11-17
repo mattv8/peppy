@@ -1152,3 +1152,113 @@ fn blocked_rows_do_not_disagree_with_pending_only_admission_capacity() {
         MAX_MMS_ACQUISITIONS as u64
     );
 }
+
+fn live_input(id: &str) -> MmsAcquisitionInput {
+    MmsAcquisitionInput {
+        imported: false,
+        ..input(id)
+    }
+}
+
+fn plan_for(plans: &[MmsBackfillScanPlan], phase: MmsBackfillPhase) -> &MmsBackfillScanPlan {
+    plans.iter().find(|plan| plan.phase == phase).unwrap()
+}
+
+#[test]
+fn absolute_ceiling_keeps_live_plans_running_and_pauses_only_history() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "absolute-live", &vault), &vault);
+    client
+        .plan_mms_backfill_scans("phone-install", "sim-1", "10")
+        .unwrap();
+    client
+        .record_recovery_snapshot_capacity(Cursor(MAX_SNAPSHOT_RECORDS), MAX_SNAPSHOT_RECORDS)
+        .unwrap();
+    client
+        .request_mms_provider_rescan("phone-install", "sim-1", "600")
+        .unwrap();
+
+    let plans = client
+        .plan_mms_backfill_scans("phone-install", "sim-1", "600")
+        .unwrap();
+    assert_eq!(
+        live_plan(&plans).pause,
+        Some(MmsBackfillPause::AbsoluteRecoveryCapacity)
+    );
+    assert!(!live_plan(&plans).paused);
+    assert!(!plan_for(&plans, MmsBackfillPhase::LiveGap).paused);
+    assert!(history_plan(&plans).paused);
+    assert!(plan_for(&plans, MmsBackfillPhase::ProviderRescan).paused);
+    assert!(!plan_for(&plans, MmsBackfillPhase::Recheck).paused);
+    assert_eq!(
+        client
+            .mms_backfill_status("phone-install", "sim-1")
+            .unwrap()
+            .pause,
+        Some(MmsBackfillPause::AbsoluteRecoveryCapacity)
+    );
+}
+
+#[test]
+fn absolute_ceiling_with_local_pressure_reports_local_and_pauses_live_plans() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "absolute-local", &vault), &vault);
+    client
+        .plan_mms_backfill_scans("phone-install", "sim-1", "10")
+        .unwrap();
+    for number in 0..MAX_MMS_ACQUISITIONS {
+        client
+            .begin_mms_acquisition(live_input(&number.to_string()))
+            .unwrap();
+    }
+    client
+        .record_recovery_snapshot_capacity(Cursor(MAX_SNAPSHOT_RECORDS), MAX_SNAPSHOT_RECORDS)
+        .unwrap();
+
+    let plans = client
+        .plan_mms_backfill_scans("phone-install", "sim-1", "600")
+        .unwrap();
+    assert_eq!(
+        live_plan(&plans).pause,
+        Some(MmsBackfillPause::LocalCapacity)
+    );
+    assert!(live_plan(&plans).paused);
+    assert!(plan_for(&plans, MmsBackfillPhase::LiveGap).paused);
+    assert!(history_plan(&plans).paused);
+    assert!(!plan_for(&plans, MmsBackfillPhase::Recheck).paused);
+    assert_eq!(
+        client
+            .mms_backfill_status("phone-install", "sim-1")
+            .unwrap()
+            .pause,
+        Some(MmsBackfillPause::LocalCapacity)
+    );
+}
+
+#[test]
+fn absolute_ceiling_still_captures_live_mms_and_refuses_imported_history() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "absolute-capture", &vault), &vault);
+    client
+        .record_recovery_snapshot_capacity(Cursor(MAX_SNAPSHOT_RECORDS), MAX_SNAPSHOT_RECORDS)
+        .unwrap();
+
+    let acquisition = client.begin_mms_acquisition(live_input("live-1")).unwrap();
+    assert_eq!(acquisition.state, MmsAcquisitionState::Pending);
+    let captured = client
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+    assert!(!captured.duplicate);
+    assert_eq!(
+        client.messages(captured.conversation_id).unwrap().len(),
+        1,
+        "the live capture produces its message"
+    );
+    assert_eq!(
+        client.begin_mms_acquisition(input("history-1")),
+        Err(Error::MmsAcquisitionLimit)
+    );
+}
