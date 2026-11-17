@@ -1931,3 +1931,370 @@ it("uploads and checkpoints draft attachments before pushing their draft revisio
   expect(fixture.mutations).toContainEqual(["_worker_draft_attachment_transfer_clear", { attachmentId: "attachment" }]);
   expect(events.indexOf("push")).toBeGreaterThan(events.findIndex(event => event.startsWith("upload:")));
 });
+type FakeSnapshotProgress = {
+  generation: string;
+  highWater: string;
+  expectedRecords: string;
+  receivedRecords: string;
+  lastCursor: string;
+  manifest?: boolean;
+  serverCompactionGeneration?: string;
+};
+type ManifestEntry = { cursor: string; digest: string; flags: number };
+type SnapshotFixtureOptions = {
+  manifest?: boolean;
+  fenced?: boolean;
+  serverCount?: number;
+  held?: string[];
+  flags?: Record<string, number>;
+  existing?: FakeSnapshotProgress;
+  manifestFailures?: unknown[];
+  recordFailures?: unknown[];
+  emptyManifest?: boolean;
+};
+
+/** Server holds cursors 1 to `serverCount`; the device journal holds `held`. The fake core verifies manifest entries against `held`. */
+function snapshotFixture(options: SnapshotFixtureOptions = {}) {
+  const calls: string[] = [];
+  const manifestAppends: ManifestEntry[][] = [];
+  const serverCount = options.serverCount ?? 5;
+  const serverCursors = Array.from({ length: serverCount }, (_, index) => String(index + 1));
+  const held = new Set(options.held ?? []);
+  const flags = options.flags ?? {};
+  const manifestFailures = [...(options.manifestFailures ?? [])];
+  const recordFailures = [...(options.recordFailures ?? [])];
+  let progress: FakeSnapshotProgress | null = options.existing ?? null;
+  let generations = 0;
+  let eventRequests = 0;
+  const session = {
+    hydrate: async () => undefined,
+    query: async (command: string) => {
+      if (command === "snapshot_progress") return { progress };
+      if (command === "receive_cursor") return { cursor: "0" };
+      if (command === "pending_outbox") return { envelopes: [] };
+      if (command === "sync_work_status") return {};
+      if (command === "_worker_apply_server_context") return {};
+      return [];
+    },
+    mutate: async (command: string, args: Record<string, unknown>) => {
+      if (command === "begin_snapshot" || command === "begin_snapshot_manifest") {
+        calls.push(`core:${command}`);
+        generations += 1;
+        progress = {
+          generation: String(generations),
+          highWater: String(serverCount),
+          expectedRecords: String(serverCount),
+          receivedRecords: "0",
+          lastCursor: "0",
+          manifest: command === "begin_snapshot_manifest",
+          serverCompactionGeneration: typeof args.serverCompactionGeneration === "string" ? args.serverCompactionGeneration : undefined,
+        };
+        return progress;
+      }
+      if (command === "append_snapshot_manifest") {
+        const entries = args.entries as ManifestEntry[];
+        calls.push(`core:append_snapshot_manifest ${cursorList(entries)}`);
+        manifestAppends.push(entries);
+        const current = progress as FakeSnapshotProgress;
+        let verified = 0;
+        while (verified < entries.length && held.has(entries[verified].cursor)) verified += 1;
+        let missing = 0;
+        while (verified + missing < entries.length && !held.has(entries[verified + missing].cursor)) missing += 1;
+        progress = {
+          ...current,
+          receivedRecords: String(Number(current.receivedRecords) + verified),
+          lastCursor: verified > 0 ? entries[verified - 1].cursor : current.lastCursor,
+        };
+        return { progress, missing };
+      }
+      if (command === "append_snapshot_page") {
+        const records = args.records as { cursor: string }[];
+        calls.push(`core:append_snapshot_page ${cursorList(records)}`);
+        const current = progress as FakeSnapshotProgress;
+        progress = {
+          ...current,
+          receivedRecords: String(Number(current.receivedRecords) + records.length),
+          lastCursor: records[records.length - 1].cursor,
+        };
+        return progress;
+      }
+      if (command === "finish_snapshot") calls.push("core:finish_snapshot");
+      return command === "apply_pending" ? { applied: 0, quarantined: 0, drained: 0 } : {};
+    },
+  };
+  const transport = {
+    json: async (path: string) => {
+      calls.push(`http:${path}`);
+      if (path.startsWith("/v1/events")) {
+        eventRequests += 1;
+        if (eventRequests === 1) throw new TransportError("status", 409, "resync_required");
+        return { events: [], next_after: null, high_water_cursor: String(serverCount) };
+      }
+      if (path === "/v1/snapshot") {
+        return {
+          high_water_cursor: String(serverCount),
+          record_count: String(serverCount),
+          ...(options.manifest === false ? {} : { manifest_supported: true, max_manifest_page_size: 5000 }),
+          ...(options.fenced ? { compaction_supported: true, compaction_generation: "3" } : {}),
+        };
+      }
+      if (path.startsWith("/v1/snapshot/manifest")) {
+        const failure = manifestFailures.shift();
+        if (failure) throw failure;
+        const query = new URL(path, "http://vault.test").searchParams;
+        if (options.emptyManifest) return { high_water_cursor: String(serverCount), compaction_generation: "0", next_after: null, entries: [] };
+        const after = Number(query.get("after"));
+        const limit = Number(query.get("limit"));
+        const entries = serverCursors
+          .filter(cursor => Number(cursor) > after)
+          .slice(0, limit)
+          .map(cursor => ({ cursor, digest: "0".repeat(64), flags: flags[cursor] ?? 0 }));
+        return { high_water_cursor: String(serverCount), compaction_generation: "0", next_after: null, entries };
+      }
+      if (path.startsWith("/v1/snapshot/records")) {
+        const failure = recordFailures.shift();
+        if (failure) throw failure;
+        const query = new URL(path, "http://vault.test").searchParams;
+        const after = Number(query.get("after"));
+        const limit = Number(query.get("limit"));
+        const records = serverCursors
+          .filter(cursor => Number(cursor) > after)
+          .slice(0, limit)
+          .map(cursor => ({ cursor, envelope: {} }));
+        return { records, next_after: null };
+      }
+      if (path === "/v1/devices") return { devices: [] };
+      if (path === "/v1/capabilities") return { capabilities: [] };
+      throw new Error(path);
+    },
+    upload: async () => undefined,
+    download: async () => new Uint8Array(),
+  };
+  return { scheduler: new BrowserScheduler(session, transport), calls, manifestAppends };
+}
+
+/** Snapshot-cut calls only: /v1/snapshot requests and the begin, append and finish core commands. */
+function snapshotCalls(calls: string[]): string[] {
+  return calls.filter(call => call.startsWith("http:/v1/snapshot") || /^core:(begin_snapshot|append_snapshot|finish_snapshot)/.test(call));
+}
+
+/** Cursors as a list, or a range with its count once the list is longer than five. */
+function cursorList(items: { cursor: string }[]): string {
+  const cursors = items.map(item => item.cursor);
+  return cursors.length > 5 ? `${cursors[0]}..${cursors[cursors.length - 1]} (${cursors.length})` : cursors.join(",");
+}
+
+describe("verified resync through the server manifest", () => {
+  it("downloads only the records the manifest reports missing", async () => {
+    const { scheduler, calls } = snapshotFixture({ held: ["1", "2", "3"] });
+
+    await expect(scheduler.poll()).resolves.toEqual({ connection: "connected" });
+
+    expect(snapshotCalls(calls)).toEqual([
+      "http:/v1/snapshot",
+      "core:begin_snapshot_manifest",
+      "http:/v1/snapshot/manifest?high_water=5&after=0&limit=5000",
+      "core:append_snapshot_manifest 1,2,3,4,5",
+      "http:/v1/snapshot/records?high_water=5&after=3&limit=2",
+      "core:append_snapshot_page 4,5",
+      "core:finish_snapshot",
+    ]);
+  });
+
+  it("keeps the full record import when the server does not advertise the manifest", async () => {
+    const { scheduler, calls } = snapshotFixture({ manifest: false });
+
+    await expect(scheduler.poll()).resolves.toEqual({ connection: "connected" });
+
+    expect(snapshotCalls(calls)).toEqual([
+      "http:/v1/snapshot",
+      "core:begin_snapshot",
+      "http:/v1/snapshot/records?high_water=5&after=0&limit=100",
+      "core:append_snapshot_page 1,2,3,4,5",
+      "core:finish_snapshot",
+    ]);
+  });
+
+  it("restarts the cut from a fresh snapshot when the manifest request reports resync", async () => {
+    const { scheduler, calls } = snapshotFixture({
+      held: ["1", "2", "3"],
+      manifestFailures: [new TransportError("status", 409, "resync_required")],
+    });
+
+    await expect(scheduler.poll()).resolves.toEqual({ connection: "connected" });
+
+    expect(snapshotCalls(calls)).toEqual([
+      "http:/v1/snapshot",
+      "core:begin_snapshot_manifest",
+      "http:/v1/snapshot/manifest?high_water=5&after=0&limit=5000",
+      "http:/v1/snapshot",
+      "core:begin_snapshot_manifest",
+      "http:/v1/snapshot/manifest?high_water=5&after=0&limit=5000",
+      "core:append_snapshot_manifest 1,2,3,4,5",
+      "http:/v1/snapshot/records?high_water=5&after=3&limit=2",
+      "core:append_snapshot_page 4,5",
+      "core:finish_snapshot",
+    ]);
+  });
+
+  it("continues a resumed manifest generation with the manifest from its last cursor", async () => {
+    const { scheduler, calls } = snapshotFixture({
+      held: ["1", "2", "3"],
+      existing: { generation: "7", highWater: "5", expectedRecords: "5", receivedRecords: "3", lastCursor: "3", manifest: true },
+    });
+
+    await expect(scheduler.poll()).resolves.toEqual({ connection: "connected" });
+
+    expect(snapshotCalls(calls)).toEqual([
+      "http:/v1/snapshot/manifest?high_water=5&after=3&limit=5000",
+      "core:append_snapshot_manifest 4,5",
+      "http:/v1/snapshot/records?high_water=5&after=3&limit=2",
+      "core:append_snapshot_page 4,5",
+      "core:finish_snapshot",
+    ]);
+  });
+
+  it("restarts with the full import when a resumed manifest generation meets a server without the manifest route", async () => {
+    const { scheduler, calls } = snapshotFixture({
+      existing: { generation: "7", highWater: "5", expectedRecords: "5", receivedRecords: "3", lastCursor: "3", manifest: true },
+      manifestFailures: [new TransportError("status", 404)],
+    });
+
+    await expect(scheduler.poll()).resolves.toEqual({ connection: "connected" });
+
+    expect(snapshotCalls(calls)).toEqual([
+      "http:/v1/snapshot/manifest?high_water=5&after=3&limit=5000",
+      "http:/v1/snapshot",
+      "core:begin_snapshot",
+      "http:/v1/snapshot/records?high_water=5&after=0&limit=100",
+      "core:append_snapshot_page 1,2,3,4,5",
+      "core:finish_snapshot",
+    ]);
+  });
+
+  it("fails the attempt when a manifest page has no entries and nothing is missing", async () => {
+    const { scheduler, calls } = snapshotFixture({ emptyManifest: true });
+
+    await expect(scheduler.poll()).resolves.toEqual({ connection: "error" });
+
+    const attempt = [
+      "http:/v1/snapshot",
+      "core:begin_snapshot_manifest",
+      "http:/v1/snapshot/manifest?high_water=5&after=0&limit=5000",
+    ];
+    expect(snapshotCalls(calls)).toEqual([...attempt, ...attempt, ...attempt]);
+  });
+
+  it("carries the compaction generation on manifest and records requests of a fenced cut", async () => {
+    const { scheduler, calls } = snapshotFixture({ fenced: true, held: ["1", "2", "3"] });
+
+    await expect(scheduler.poll()).resolves.toEqual({ connection: "connected" });
+
+    expect(snapshotCalls(calls)).toEqual([
+      "http:/v1/snapshot",
+      "core:begin_snapshot_manifest",
+      "http:/v1/snapshot/manifest?high_water=5&after=0&limit=5000&compaction_generation=3",
+      "core:append_snapshot_manifest 1,2,3,4,5",
+      "http:/v1/snapshot/records?high_water=5&after=3&limit=2&compaction_generation=3",
+      "core:append_snapshot_page 4,5",
+      "core:finish_snapshot",
+    ]);
+  });
+
+  it("continues a multi-page manifest when the missing run ends at the first page boundary", async () => {
+    const { scheduler, calls } = snapshotFixture({
+      serverCount: 5002,
+      held: Array.from({ length: 4998 }, (_, index) => String(index + 1)),
+    });
+
+    await expect(scheduler.poll()).resolves.toEqual({ connection: "connected" });
+
+    expect(snapshotCalls(calls)).toEqual([
+      "http:/v1/snapshot",
+      "core:begin_snapshot_manifest",
+      "http:/v1/snapshot/manifest?high_water=5002&after=0&limit=5000",
+      "core:append_snapshot_manifest 1..5000 (5000)",
+      "http:/v1/snapshot/records?high_water=5002&after=4998&limit=2",
+      "core:append_snapshot_page 4999,5000",
+      "http:/v1/snapshot/manifest?high_water=5002&after=5000&limit=5000",
+      "core:append_snapshot_manifest 5001,5002",
+      "http:/v1/snapshot/records?high_water=5002&after=5000&limit=2",
+      "core:append_snapshot_page 5001,5002",
+      "core:finish_snapshot",
+    ]);
+  });
+
+  it("downloads a missing run longer than the records page limit in bounded records requests", async () => {
+    const { scheduler, calls } = snapshotFixture({ serverCount: 250 });
+
+    await expect(scheduler.poll()).resolves.toEqual({ connection: "connected" });
+
+    expect(snapshotCalls(calls)).toEqual([
+      "http:/v1/snapshot",
+      "core:begin_snapshot_manifest",
+      "http:/v1/snapshot/manifest?high_water=250&after=0&limit=5000",
+      "core:append_snapshot_manifest 1..250 (250)",
+      "http:/v1/snapshot/records?high_water=250&after=0&limit=100",
+      "core:append_snapshot_page 1..100 (100)",
+      "http:/v1/snapshot/records?high_water=250&after=100&limit=100",
+      "core:append_snapshot_page 101..200 (100)",
+      "http:/v1/snapshot/records?high_water=250&after=200&limit=50",
+      "core:append_snapshot_page 201..250 (50)",
+      "core:finish_snapshot",
+    ]);
+  });
+
+  it("passes manifest flags to the core unchanged", async () => {
+    const { scheduler, manifestAppends } = snapshotFixture({ flags: { "2": 1, "3": 2, "4": 3 } });
+
+    await expect(scheduler.poll()).resolves.toEqual({ connection: "connected" });
+
+    expect(manifestAppends[0]).toEqual([
+      { cursor: "1", digest: "0".repeat(64), flags: 0 },
+      { cursor: "2", digest: "0".repeat(64), flags: 1 },
+      { cursor: "3", digest: "0".repeat(64), flags: 2 },
+      { cursor: "4", digest: "0".repeat(64), flags: 3 },
+      { cursor: "5", digest: "0".repeat(64), flags: 0 },
+    ]);
+  });
+
+  it("completes a fresh manifest generation that gets 404 with the full import without spending a resync attempt", async () => {
+    const { scheduler, calls } = snapshotFixture({
+      manifestFailures: [new TransportError("status", 404)],
+      recordFailures: [new TransportError("status", 409, "resync_required"), new TransportError("status", 409, "resync_required")],
+    });
+
+    await expect(scheduler.poll()).resolves.toEqual({ connection: "connected" });
+
+    expect(snapshotCalls(calls)).toEqual([
+      "http:/v1/snapshot",
+      "core:begin_snapshot_manifest",
+      "http:/v1/snapshot/manifest?high_water=5&after=0&limit=5000",
+      "http:/v1/snapshot",
+      "core:begin_snapshot",
+      "http:/v1/snapshot/records?high_water=5&after=0&limit=100",
+      "http:/v1/snapshot",
+      "core:begin_snapshot",
+      "http:/v1/snapshot/records?high_water=5&after=0&limit=100",
+      "http:/v1/snapshot",
+      "core:begin_snapshot",
+      "http:/v1/snapshot/records?high_water=5&after=0&limit=100",
+      "core:append_snapshot_page 1,2,3,4,5",
+      "core:finish_snapshot",
+    ]);
+  });
+
+  it("keeps a resumed non-manifest generation on the full import when the server advertises the manifest", async () => {
+    const { scheduler, calls } = snapshotFixture({
+      existing: { generation: "7", highWater: "5", expectedRecords: "5", receivedRecords: "3", lastCursor: "3", manifest: false },
+    });
+
+    await expect(scheduler.poll()).resolves.toEqual({ connection: "connected" });
+
+    expect(snapshotCalls(calls)).toEqual([
+      "http:/v1/snapshot/records?high_water=5&after=3&limit=100",
+      "core:append_snapshot_page 4,5",
+      "core:finish_snapshot",
+    ]);
+  });
+});
