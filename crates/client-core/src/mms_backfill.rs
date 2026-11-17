@@ -2118,10 +2118,10 @@ fn classify_recovery_capacity(
     // Database pages include indexes, old outbox copies and superseded journal records. They are
     // an import-reserve warning, not proof that the retained server snapshot hit its byte limit.
     if records.max(transport_records)
-        >= MAX_SNAPSHOT_RECORDS.saturating_sub(LIVE_SNAPSHOT_RECORD_HEADROOM)
+        >= RECOVERY_RECORD_BUDGET.saturating_sub(LIVE_SNAPSHOT_RECORD_HEADROOM)
     {
         RecoveryCapacity::Absolute
-    } else if records >= MAX_SNAPSHOT_RECORDS - RECOVERY_RECORD_RESERVE
+    } else if records >= RECOVERY_RECORD_BUDGET - RECOVERY_RECORD_RESERVE
         || bytes >= MAX_SNAPSHOT_BYTES - RECOVERY_BYTE_RESERVE
     {
         RecoveryCapacity::Reserve
@@ -2143,10 +2143,10 @@ fn known_transport_record_count(conn: &Connection) -> Result<u64, Error> {
         .map_err(|_| Error::Database)?;
     let tail: i64 = conn.query_row(
         "SELECT COUNT(*) FROM (SELECT 1 FROM journal WHERE cursor>? LIMIT ?)",
-        params![high, MAX_SNAPSHOT_RECORDS],
+        params![high, RECOVERY_RECORD_BUDGET],
         |r| r.get(0),
     )?;
-    let pending:i64=conn.query_row("SELECT COUNT(*) FROM (SELECT 1 FROM outbox WHERE state='unsealed' UNION ALL SELECT 1 FROM outbox WHERE state='queued' LIMIT ?)",[MAX_SNAPSHOT_RECORDS],|r|r.get(0))?;
+    let pending:i64=conn.query_row("SELECT COUNT(*) FROM (SELECT 1 FROM outbox WHERE state='unsealed' UNION ALL SELECT 1 FROM outbox WHERE state='queued' LIMIT ?)",[RECOVERY_RECORD_BUDGET],|r|r.get(0))?;
     let acknowledgements: u64 = get_meta(conn, SNAPSHOT_ACKS_META)?
         .unwrap_or_else(|| "0".into())
         .parse()
@@ -2251,7 +2251,7 @@ mod tests {
             RecoveryCapacity::Reserve
         );
         assert_eq!(
-            classify_recovery_capacity(100, MAX_SNAPSHOT_RECORDS - 1, 4096),
+            classify_recovery_capacity(100, RECOVERY_RECORD_BUDGET - 1, 4096),
             RecoveryCapacity::Absolute
         );
     }
@@ -2316,7 +2316,7 @@ mod tests {
         let conn = capacity_connection();
         conn.execute(
             "INSERT INTO messages(local_order) VALUES(?)",
-            [MAX_SNAPSHOT_RECORDS],
+            [RECOVERY_RECORD_BUDGET],
         )
         .unwrap();
         assert_eq!(
@@ -2372,7 +2372,7 @@ mod tests {
             .unwrap();
         conn.execute(
             "INSERT INTO messages(local_order) VALUES(?)",
-            [MAX_SNAPSHOT_RECORDS - RECOVERY_RECORD_RESERVE],
+            [RECOVERY_RECORD_BUDGET - RECOVERY_RECORD_RESERVE],
         )
         .unwrap();
         assert_eq!(
@@ -2416,7 +2416,7 @@ mod tests {
         let conn = capacity_connection();
         conn.execute(
             "INSERT INTO messages(local_order) VALUES(?)",
-            [MAX_SNAPSHOT_RECORDS - RECOVERY_RECORD_RESERVE],
+            [RECOVERY_RECORD_BUDGET - RECOVERY_RECORD_RESERVE],
         )
         .unwrap();
 
@@ -2438,7 +2438,7 @@ mod tests {
         let conn = capacity_connection();
         conn.execute(
             "INSERT INTO messages(local_order) VALUES(?)",
-            [MAX_SNAPSHOT_RECORDS],
+            [RECOVERY_RECORD_BUDGET],
         )
         .unwrap();
 
@@ -2453,7 +2453,8 @@ mod tests {
         let conn = capacity_connection();
         conn.execute("INSERT INTO messages(local_order) VALUES(?)", [100])
             .unwrap();
-        record_snapshot_capacity(&conn, MAX_SNAPSHOT_RECORDS, MAX_SNAPSHOT_RECORDS - 10).unwrap();
+        record_snapshot_capacity(&conn, RECOVERY_RECORD_BUDGET, RECOVERY_RECORD_BUDGET - 10)
+            .unwrap();
         assert_eq!(
             recovery_capacity(&conn).unwrap(),
             RecoveryCapacity::Absolute
@@ -2463,7 +2464,7 @@ mod tests {
         lower
             .execute(
                 "INSERT INTO messages(local_order) VALUES(?)",
-                [MAX_SNAPSHOT_RECORDS - RECOVERY_RECORD_RESERVE],
+                [RECOVERY_RECORD_BUDGET - RECOVERY_RECORD_RESERVE],
             )
             .unwrap();
         assert_eq!(
@@ -2832,13 +2833,16 @@ mod tests {
     /// The measured recovery capacity is at the snapshot ceiling.
     fn record_absolute_capacity(client: &Client) {
         client
-            .record_recovery_snapshot_capacity(Cursor(MAX_SNAPSHOT_RECORDS), MAX_SNAPSHOT_RECORDS)
+            .record_recovery_snapshot_capacity(
+                Cursor(RECOVERY_RECORD_BUDGET),
+                RECOVERY_RECORD_BUDGET,
+            )
             .unwrap();
     }
 
     fn restore_recovery_capacity(client: &Client) {
         client
-            .record_recovery_snapshot_capacity(Cursor(MAX_SNAPSHOT_RECORDS + 1), 0)
+            .record_recovery_snapshot_capacity(Cursor(RECOVERY_RECORD_BUDGET + 1), 0)
             .unwrap();
     }
 

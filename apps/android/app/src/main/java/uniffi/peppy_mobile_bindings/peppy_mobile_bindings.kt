@@ -17255,6 +17255,12 @@ sealed class MobileBindingsException: kotlin.Exception() {
             get() = ""
     }
     
+    class SnapshotTooLarge(
+        ) : MobileBindingsException() {
+        override val message
+            get() = ""
+    }
+    
     class LockPoisoned(
         ) : MobileBindingsException() {
         override val message
@@ -17307,8 +17313,9 @@ public object FfiConverterTypeMobileBindingsError : FfiConverterRustBuffer<Mobil
             19 -> MobileBindingsException.MmsAcquisitionLimit()
             20 -> MobileBindingsException.MmsMediaQuota()
             21 -> MobileBindingsException.SmsCapacity()
-            22 -> MobileBindingsException.LockPoisoned()
-            23 -> MobileBindingsException.GroupMembersChanged()
+            22 -> MobileBindingsException.SnapshotTooLarge()
+            23 -> MobileBindingsException.LockPoisoned()
+            24 -> MobileBindingsException.GroupMembersChanged()
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
@@ -17396,6 +17403,10 @@ public object FfiConverterTypeMobileBindingsError : FfiConverterRustBuffer<Mobil
                 4UL
             )
             is MobileBindingsException.SmsCapacity -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is MobileBindingsException.SnapshotTooLarge -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
@@ -17496,12 +17507,16 @@ public object FfiConverterTypeMobileBindingsError : FfiConverterRustBuffer<Mobil
                 buf.putInt(21)
                 Unit
             }
-            is MobileBindingsException.LockPoisoned -> {
+            is MobileBindingsException.SnapshotTooLarge -> {
                 buf.putInt(22)
                 Unit
             }
-            is MobileBindingsException.GroupMembersChanged -> {
+            is MobileBindingsException.LockPoisoned -> {
                 buf.putInt(23)
+                Unit
+            }
+            is MobileBindingsException.GroupMembersChanged -> {
+                buf.putInt(24)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

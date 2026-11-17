@@ -123,6 +123,10 @@ pub(crate) fn core(error: CoreError) -> Failure {
             "The local database belongs to a different vault or device. Nothing was reset.",
         ),
         CoreError::KeysUnavailable => Failure::new("locked", "Unlock sync before this operation."),
+        CoreError::SnapshotTooLarge => Failure::new(
+            "snapshot-too-large",
+            "This snapshot exceeds what this build can import.",
+        ),
         CoreError::NotFound => {
             Failure::new("not-found", "The requested stored item was not found.")
         }

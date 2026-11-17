@@ -1173,7 +1173,7 @@ fn absolute_ceiling_keeps_live_plans_running_and_pauses_only_history() {
         .plan_mms_backfill_scans("phone-install", "sim-1", "10")
         .unwrap();
     client
-        .record_recovery_snapshot_capacity(Cursor(MAX_SNAPSHOT_RECORDS), MAX_SNAPSHOT_RECORDS)
+        .record_recovery_snapshot_capacity(Cursor(RECOVERY_RECORD_BUDGET), RECOVERY_RECORD_BUDGET)
         .unwrap();
     client
         .request_mms_provider_rescan("phone-install", "sim-1", "600")
@@ -1214,7 +1214,7 @@ fn absolute_ceiling_with_local_pressure_reports_local_and_pauses_live_plans() {
             .unwrap();
     }
     client
-        .record_recovery_snapshot_capacity(Cursor(MAX_SNAPSHOT_RECORDS), MAX_SNAPSHOT_RECORDS)
+        .record_recovery_snapshot_capacity(Cursor(RECOVERY_RECORD_BUDGET), RECOVERY_RECORD_BUDGET)
         .unwrap();
 
     let plans = client
@@ -1243,7 +1243,7 @@ fn absolute_ceiling_still_captures_live_mms_and_refuses_imported_history() {
     let vault = Vault::new();
     let client = unlocked(&config(&dir, "absolute-capture", &vault), &vault);
     client
-        .record_recovery_snapshot_capacity(Cursor(MAX_SNAPSHOT_RECORDS), MAX_SNAPSHOT_RECORDS)
+        .record_recovery_snapshot_capacity(Cursor(RECOVERY_RECORD_BUDGET), RECOVERY_RECORD_BUDGET)
         .unwrap();
 
     let acquisition = client.begin_mms_acquisition(live_input("live-1")).unwrap();

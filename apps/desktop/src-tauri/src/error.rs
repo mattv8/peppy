@@ -99,6 +99,10 @@ pub fn core_error(error: CoreError) -> BridgeError {
             "The server key profile does not match the profile pinned on this device.",
         ),
         CoreError::KeysUnavailable => BridgeError::new("locked", "Unlock sync before this operation."),
+        CoreError::SnapshotTooLarge => BridgeError::new(
+            "snapshot-too-large",
+            "This snapshot exceeds what this build can import.",
+        ),
         CoreError::InvalidRequest(reason) => BridgeError::new("invalid-request", format!("Request rejected: {reason}.")),
         CoreError::InvalidMedia => BridgeError::new(
             "attachment-invalid",

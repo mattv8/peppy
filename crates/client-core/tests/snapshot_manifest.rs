@@ -860,25 +860,11 @@ fn manifest_verified_entries_beyond_expected_fail_the_generation() {
 }
 
 #[test]
-fn manifest_begin_counts_the_download_lower_bound_against_max_snapshot_records() {
+fn snapshot_transport_ceiling_applies_to_full_and_manifest_begins() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
-    let log = plain_log(&dir, &vault, 1);
     let cfg = config(&dir, "caps-begin", &vault);
     let device = unlocked(&cfg, &vault);
-    assert_eq!(
-        device
-            .begin_snapshot_with_manifest(Cursor(200_000), 100_001, None)
-            .map(|_| ()),
-        Err(Error::InvalidRequest("snapshot record count"))
-    );
-    assert!(
-        device.snapshot_progress().unwrap().is_none(),
-        "refusal changes nothing"
-    );
-
-    // One journaled record lowers the download bound to exactly MAX_SNAPSHOT_RECORDS.
-    device.ingest(&log[0], Cursor(1)).unwrap();
     assert!(
         device
             .begin_snapshot_with_manifest(Cursor(200_000), 100_001, None)
@@ -887,13 +873,27 @@ fn manifest_begin_counts_the_download_lower_bound_against_max_snapshot_records()
     );
     assert_eq!(
         device
-            .begin_snapshot(Cursor(200_000), 100_001, SnapshotPurpose::Resync)
+            .begin_snapshot(
+                Cursor(MAX_SNAPSHOT_RECORDS + 1),
+                MAX_SNAPSHOT_RECORDS + 1,
+                SnapshotPurpose::Resync
+            )
             .map(|_| ()),
-        Err(Error::InvalidRequest("snapshot record count"))
+        Err(Error::SnapshotTooLarge)
     );
     assert!(
         device.snapshot_progress().unwrap().unwrap().manifest,
-        "a refused full begin keeps the manifest generation"
+        "a rejected oversized begin keeps the manifest generation"
+    );
+    assert_eq!(
+        device
+            .begin_snapshot_with_manifest(
+                Cursor(MAX_SNAPSHOT_RECORDS + 1),
+                MAX_SNAPSHOT_RECORDS + 1,
+                None,
+            )
+            .map(|_| ()),
+        Err(Error::SnapshotTooLarge)
     );
 }
 
@@ -907,28 +907,28 @@ fn insert_journal_rows(config: &ClientConfig, count: u64) {
 }
 
 #[test]
-fn manifest_accepts_a_150000_record_vault_when_the_device_holds_enough() {
+fn full_and_manifest_accept_a_150000_record_vault() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
     let cfg = config(&dir, "large-vault", &vault);
     let device = unlocked(&cfg, &vault);
-    insert_journal_rows(&cfg, 50_000);
     assert!(
         device
             .begin_snapshot_with_manifest(Cursor(150_000), 150_000, None)
             .unwrap()
             .manifest
     );
+    assert!(device.snapshot_progress().unwrap().unwrap().manifest);
     assert_eq!(
         device
             .begin_snapshot(Cursor(150_000), 150_000, SnapshotPurpose::Resync)
             .map(|_| ()),
-        Err(Error::InvalidRequest("snapshot record count"))
+        Ok(())
     );
 }
 
 #[test]
-fn manifest_record_count_is_bounded_by_max_snapshot_manifest_records() {
+fn manifest_record_count_is_bounded_by_transport_ceiling() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
     let cfg = config(&dir, "manifest-max", &vault);
@@ -937,7 +937,7 @@ fn manifest_record_count_is_bounded_by_max_snapshot_manifest_records() {
         device
             .begin_snapshot_with_manifest(Cursor(1_000_001), 1_000_001, None)
             .map(|_| ()),
-        Err(Error::InvalidRequest("snapshot record count"))
+        Err(Error::SnapshotTooLarge)
     );
     insert_journal_rows(&cfg, 900_000);
     assert!(
@@ -949,9 +949,9 @@ fn manifest_record_count_is_bounded_by_max_snapshot_manifest_records() {
 }
 
 #[test]
-fn manifest_download_cap_fails_the_generation_at_100001_downloads() {
+fn manifest_downloads_more_than_recovery_budget() {
     // Every record below is a download: the journal copy at cursor 1 cannot verify, so the
-    // generation downloads all 100,001 records. The download cap is what must fail it.
+    // generation downloads all 100,001 records without using the recovery-import budget.
     // Placeholder bytes are unparseable, so `raw_wire` stores them unchanged; the cap counts
     // records, not their content, so this exercises the real accounting without 100,001 envelopes.
     let dir = TempDir::new().unwrap();
@@ -981,17 +981,116 @@ fn manifest_download_cap_fails_the_generation_at_100001_downloads() {
             .unwrap();
         first += 500;
     }
-    assert_eq!(
-        device.append_snapshot_raw_page(
+    device
+        .append_snapshot_raw_page(
             session.generation,
             &[RawSnapshotRecord {
                 cursor: Cursor(100_001),
                 envelope_json: b"x".to_vec(),
             }],
-        ),
-        Err(Error::SnapshotMismatch)
-    );
-    assert!(device.snapshot_progress().unwrap().is_none());
+        )
+        .unwrap();
+    device.finish_snapshot(session.generation).unwrap();
+    assert!(device.apply_pending(1).unwrap().snapshot_remaining > 0);
+}
+
+fn snapshot_record_count(config: &ClientConfig) -> i64 {
+    raw(config)
+        .query_row("SELECT COUNT(*) FROM snapshot_records", [], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn fresh_device_stages_large_full_and_manifest_generations() {
+    const RECORDS: u64 = RECOVERY_RECORD_BUDGET + 1;
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "large-fresh", &vault);
+    let device = unlocked(&cfg, &vault);
+
+    let full = device
+        .begin_snapshot(Cursor(RECORDS), RECORDS, SnapshotPurpose::Resync)
+        .unwrap();
+    for first in (1..=RECORDS).step_by(MAX_SNAPSHOT_PAGE) {
+        let end = (first + MAX_SNAPSHOT_PAGE as u64).min(RECORDS + 1);
+        let records: Vec<_> = (first..end)
+            .map(|cursor| RawSnapshotRecord {
+                cursor: Cursor(cursor),
+                envelope_json: b"x".to_vec(),
+            })
+            .collect();
+        device
+            .append_snapshot_raw_page(full.generation, &records)
+            .unwrap();
+    }
+    device.finish_snapshot(full.generation).unwrap();
+    assert!(device.apply_pending(1).unwrap().snapshot_remaining > 0);
+
+    let manifest_cfg = config(&dir, "large-fresh-manifest", &vault);
+    let manifest_device = unlocked(&manifest_cfg, &vault);
+    let manifest = manifest_device
+        .begin_snapshot_with_manifest(Cursor(RECORDS), RECORDS, None)
+        .unwrap();
+    for first in (1..=RECORDS).step_by(MAX_SNAPSHOT_PAGE) {
+        let end = (first + MAX_SNAPSHOT_PAGE as u64).min(RECORDS + 1);
+        let entries: Vec<_> = (first..end)
+            .map(|cursor| SnapshotManifestEntry {
+                cursor: Cursor(cursor),
+                digest: [0; 32],
+                has_compaction: false,
+                has_origin_tag: false,
+            })
+            .collect();
+        let page = manifest_device
+            .append_snapshot_manifest(manifest.generation, &entries)
+            .unwrap();
+        assert_eq!(page.missing as usize, entries.len());
+        let records: Vec<_> = (first..end)
+            .map(|cursor| RawSnapshotRecord {
+                cursor: Cursor(cursor),
+                envelope_json: b"x".to_vec(),
+            })
+            .collect();
+        manifest_device
+            .append_snapshot_raw_page(manifest.generation, &records)
+            .unwrap();
+    }
+    manifest_device
+        .finish_snapshot(manifest.generation)
+        .unwrap();
+    assert!(manifest_device.apply_pending(1).unwrap().snapshot_remaining > 0);
+}
+
+#[test]
+fn staging_appends_pace_obsolete_generation_garbage_collection() {
+    const RECORDS: u64 = 4_000;
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "paced-gc", &vault);
+    let device = unlocked(&cfg, &vault);
+
+    for _ in 0..4 {
+        let session = device
+            .begin_snapshot(Cursor(RECORDS), RECORDS, SnapshotPurpose::Resync)
+            .unwrap();
+        for first in (1..=RECORDS).step_by(MAX_SNAPSHOT_PAGE) {
+            let end = (first + MAX_SNAPSHOT_PAGE as u64).min(RECORDS + 1);
+            let records: Vec<_> = (first..end)
+                .map(|cursor| RawSnapshotRecord {
+                    cursor: Cursor(cursor),
+                    envelope_json: b"x".to_vec(),
+                })
+                .collect();
+            device
+                .append_snapshot_raw_page(session.generation, &records)
+                .unwrap();
+            assert!(
+                snapshot_record_count(&cfg) <= RECORDS as i64 + 2_000,
+                "obsolete rows are purged with every append"
+            );
+        }
+    }
+    assert_eq!(snapshot_record_count(&cfg), RECORDS as i64);
 }
 
 #[test]
@@ -1499,7 +1598,7 @@ fn manifest_byte_limit_is_enforced_per_verified_row_and_rolls_back_the_page() {
     // One more verified row exceeds the limit: the generation fails and that row is not staged.
     assert_eq!(
         device.append_snapshot_manifest(exact.generation, &entries[2..3]),
-        Err(Error::SnapshotMismatch)
+        Err(Error::SnapshotTooLarge)
     );
     assert_eq!(staged_count(&cfg, exact.generation), 2, "earlier rows stay");
 
@@ -1513,7 +1612,7 @@ fn manifest_byte_limit_is_enforced_per_verified_row_and_rolls_back_the_page() {
         .unwrap();
     assert_eq!(
         device.append_snapshot_manifest(prefix.generation, &entries[1..4]),
-        Err(Error::SnapshotMismatch)
+        Err(Error::SnapshotTooLarge)
     );
     assert_eq!(
         staged_count(&cfg, prefix.generation),
@@ -1530,5 +1629,20 @@ fn manifest_byte_limit_is_enforced_per_verified_row_and_rolls_back_the_page() {
     assert_eq!(
         device.append_snapshot_manifest(prefix.generation, &entries[1..2]),
         Err(Error::InvalidRequest("snapshot manifest generation"))
+    );
+
+    let raw_limit = device
+        .begin_snapshot(Cursor(1), 1, SnapshotPurpose::Resync)
+        .unwrap();
+    set_received_bytes(&cfg, raw_limit.generation, max);
+    assert_eq!(
+        device.append_snapshot_raw_page(
+            raw_limit.generation,
+            &[RawSnapshotRecord {
+                cursor: Cursor(1),
+                envelope_json: b"x".to_vec(),
+            }],
+        ),
+        Err(Error::SnapshotTooLarge)
     );
 }
