@@ -35,7 +35,7 @@ class HttpResult(val code: Int, val body: String?) {
 class GatewayTransportException(message: String) : IOException(message)
 
 internal enum class GatewayHttpMethod(val code: Long) { GET(1), POST(2), PUT(3), DELETE(4), OTHER(5) }
-internal enum class GatewayHttpRoute(val code: Long) { CAPABILITIES(1), COMPACTION_CAPABILITY(2), EVENTS(3), SNAPSHOT(4), SNAPSHOT_RECORDS(5), VAULT(6), ATTACHMENTS(7), OTHER(8) }
+internal enum class GatewayHttpRoute(val code: Long) { CAPABILITIES(1), COMPACTION_CAPABILITY(2), EVENTS(3), SNAPSHOT(4), SNAPSHOT_RECORDS(5), VAULT(6), ATTACHMENTS(7), OTHER(8), SNAPSHOT_MANIFEST(9) }
 
 /**
  * Authenticated HTTP to the credential's canonical origin. Redirects are disabled so the bearer
@@ -333,6 +333,7 @@ class GatewayHttp(
             "/v1/events" -> GatewayHttpRoute.EVENTS
             "/v1/snapshot" -> GatewayHttpRoute.SNAPSHOT
             "/v1/snapshot/records" -> GatewayHttpRoute.SNAPSHOT_RECORDS
+            "/v1/snapshot/manifest" -> GatewayHttpRoute.SNAPSHOT_MANIFEST
             "/v1/vault" -> GatewayHttpRoute.VAULT
             else -> if (path.substringBefore('?').startsWith("/v1/attachments/")) GatewayHttpRoute.ATTACHMENTS else GatewayHttpRoute.OTHER
         }
