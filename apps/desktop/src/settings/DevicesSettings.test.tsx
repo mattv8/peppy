@@ -72,6 +72,38 @@ describe("DevicesSettings", () => {
     expect(screen.getByRole("button", { name: "Settings navigation" })).toHaveFocus();
   });
 
+  it("does not show an add-device action without a callback", () => {
+    render(<DevicesSettings />);
+
+    expect(screen.queryByRole("button", { name: "Add new device" })).not.toBeInTheDocument();
+  });
+
+  it("calls the add-device callback", () => {
+    const onAddDevice = vi.fn();
+    render(<DevicesSettings unlocked onAddDevice={onAddDevice} />);
+
+    const addDevice = screen.getByRole("button", { name: "Add new device" });
+    expect(addDevice).toBeEnabled();
+    fireEvent.click(addDevice);
+    expect(onAddDevice).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [{ serverOffline: true, unlocked: true }, "Unavailable while offline."],
+    [{ unlocked: false }, "Unlock Peppy to add a device."],
+    [{ unlocked: true, accountReadOnly: true }, "Adding devices is paused while the account is read-only."],
+    [{ serverOffline: true, unlocked: false, accountReadOnly: true }, "Unavailable while offline."],
+    [{ unlocked: false, accountReadOnly: true }, "Unlock Peppy to add a device."],
+  ])("disables adding a device when unavailable (%j)", (props, note) => {
+    render(<DevicesSettings {...props} onAddDevice={vi.fn()} />);
+
+    const addDevice = screen.getByRole("button", { name: "Add new device" });
+    const addDeviceNote = screen.getByText(note);
+    expect(addDevice).toBeDisabled();
+    expect(addDeviceNote).toHaveAttribute("id", "devices-add-device-note");
+    expect(addDevice).toHaveAttribute("aria-describedby", "devices-add-device-note");
+  });
+
   it("keeps current and last owner devices from removal", async () => {
     render(<DevicesSettings />);
     expect(await screen.findByText("This Mac")).toBeInTheDocument();

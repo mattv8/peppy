@@ -10,6 +10,10 @@
 #settings-devices [data-device-badge="presence"][data-presence-state="paused"] { color: var(--peppy-text-secondary); }
 #settings-devices [data-device-badge="account-paused"] { color: var(--peppy-text-secondary); }
 #settings-devices [data-device-badge="cleanup"] { color: var(--peppy-warning-text); }
+#settings-devices #devices-intro-row { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px 12px; }
+#settings-devices #devices-intro-row [data-devices-intro-copy] { display: grid; flex: 1 1 240px; min-width: 0; gap: 2px; }
+#settings-devices #devices-intro-row [data-devices-intro-copy] > p { margin: 0; }
+#settings-devices #devices-add-device { display: inline-flex; flex: none; align-items: center; gap: 6px; }
 #settings-devices [data-mcp-actions] { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 #mcp-device-details [data-mcp-details] { display: grid; gap: 8px; margin: 0; }
 #mcp-device-details [data-mcp-details] > div { display: grid; gap: 2px; }
@@ -40,4 +44,4 @@
 #mcp-device-details [role="alert"], #mcp-authorization-consent [role="alert"] { color: var(--peppy-error-text); }
 #mcp-device-details small, #mcp-device-details .settings-note, #mcp-authorization-consent small, #mcp-authorization-consent .settings-note { color: var(--peppy-text-secondary); font-size: 12px; }
 @media (forced-colors: active) { #settings-devices [data-device-badge], #mcp-authorization-consent [data-mcp-redirect-local] { border-color: CanvasText; } }
-@media (max-width: 480px) { #settings-devices li, #mcp-device-details [data-mcp-grant] { align-items: flex-start; flex-wrap: wrap; } #settings-devices li button { margin-left: auto; } #mcp-device-details [data-mcp-grant] > button { margin-left: auto; width: auto; } #mcp-device-details [data-mcp-grant-confirm] { width: 100%; justify-content: flex-end; } #mcp-authorization-consent #mcp-authorization-identity > div { grid-template-columns: 1fr; } }
+@media (max-width: 480px) { #settings-devices li, #settings-devices #devices-intro-row, #mcp-device-details [data-mcp-grant] { align-items: flex-start; flex-wrap: wrap; } #settings-devices li button, #settings-devices #devices-add-device { margin-left: auto; } #mcp-device-details [data-mcp-grant] > button { margin-left: auto; width: auto; } #mcp-device-details [data-mcp-grant-confirm] { width: 100%; justify-content: flex-end; } #mcp-authorization-consent #mcp-authorization-identity > div { grid-template-columns: 1fr; } }
