@@ -32,6 +32,7 @@ public struct SyncReport: Equatable, Sendable {
     public var superseded: UInt64 = 0
     public var quarantined: UInt64 = 0
     public var waitingForKeys: UInt64 = 0
+    /// Records downloaded from the server in this pass; records verified from the local journal are not counted.
     public var snapshotRecords = 0
     public var snapshotPublished = false
     public var snapshotRemaining: UInt64 = 0
@@ -52,6 +53,9 @@ public struct SyncReport: Equatable, Sendable {
     public var repairUnavailable = false
 }
 
+/// Thrown only by the manifest GET when the server answers 404 or 405. `importSnapshot` alone catches it.
+private struct ManifestRouteUnavailable: Error {}
+
 /// One bounded, origin-bound foreground pass:
 /// upload sealed outbox → finish staged snapshot → drain published snapshot → live replay (or a new
 /// snapshot on `resync_required`) → bounded apply. All message state goes through the core facade.
@@ -62,11 +66,18 @@ struct ForegroundSync: Sendable {
     let vaultId: String
     var budget = SyncBudget()
 
+    /// The server clamps `limit` to its maximum manifest page of 5,000 entries.
+    private static let manifestPageLimit = 5_000
+    /// About 125 bytes per entry, so a 5,000-entry page is about 625 KB; 2 MiB leaves margin.
+    private static let maxManifestPageBytes = 2 * 1024 * 1024
+
     /// Per-pass mutable state.
     private struct Pass {
         var report = SyncReport()
         var meter: RequestMeter
         var applyRounds = 0
+        /// Set once the manifest route answered 404/405; later begins in this pass are full imports.
+        var manifestRouteMissing = false
     }
 
     func run() async throws -> SyncReport {
@@ -266,13 +277,19 @@ struct ForegroundSync: Sendable {
             pass.report.repairSnapshotStarted = false
             return
         }
-        let progress = try client.beginSnapshotWithCompaction(
-            highWater: String(try cut.decimal("high_water_cursor")),
-            recordCount: try cut.decimal("record_count"),
-            purpose: .resync,
-            serverCompactionGeneration: generation
-        )
+        let highWater = String(try cut.decimal("high_water_cursor"))
+        let recordCount = try cut.decimal("record_count")
+        let manifest = try !pass.manifestRouteMissing && manifestSupported(cut)
+        let progress = try manifest
+            ? client.beginSnapshotWithManifest(highWater: highWater, recordCount: recordCount, serverCompactionGeneration: generation)
+            : client.beginSnapshotWithCompaction(highWater: highWater, recordCount: recordCount, purpose: .resync, serverCompactionGeneration: generation)
         try await importSnapshot(resuming: progress, restartOnResync: restartOnResync, &pass)
+    }
+
+    private func manifestSupported(_ cut: [String: Any]) throws -> Bool {
+        guard let supported = cut["manifest_supported"] else { return false }
+        guard let enabled = supported as? Bool else { throw ClientError.invalidResponse("manifest_supported") }
+        return enabled
     }
 
     /// A staged generation or undrained published records must finish before live replay continues.
@@ -285,35 +302,84 @@ struct ForegroundSync: Sendable {
     ) async throws {
         var progress = start
         while progress.receivedRecords < progress.expectedRecords {
-            let page: [String: Any]
             do {
-                page = try await server.get("/v1/snapshot/records", query: [
-                    URLQueryItem(name: "high_water", value: progress.highWater),
-                    URLQueryItem(name: "after", value: progress.lastCursor),
-                    URLQueryItem(name: "limit", value: String(min(budget.pageLimit, 200))),
-                    URLQueryItem(name: "compaction_generation", value: progress.serverCompactionGeneration),
-                ], limit: ServerClient.maxPageBytes, meter: &pass.meter)
+                if progress.manifest {
+                    try await appendManifestPage(&progress, &pass)
+                } else {
+                    _ = try await appendRecordsPage(&progress, limit: min(budget.pageLimit, 200), &pass)
+                }
             } catch ClientError.resyncRequired(let reason) {
                 // The cut is no longer valid on the server (e.g. rollback); restage once from a new cut.
                 guard restartOnResync else { throw ClientError.resyncRequired(reason: reason) }
                 return try await startSnapshot(restartOnResync: false, &pass)
+            } catch is ManifestRouteUnavailable {
+                // Restage as a full import; this pass never begins a manifest generation again, and the resync retry carries over.
+                pass.manifestRouteMissing = true
+                return try await startSnapshot(restartOnResync: restartOnResync, &pass)
             }
-            let records = try page.objects("records").map { record in
-                NativeRawSnapshotRecord(
-                    cursor: String(try record.decimal("cursor")),
-                    envelopeJson: try record.object("envelope").jsonData()
-                )
-            }
-            guard !records.isEmpty else { throw ClientError.invalidResponse("short snapshot") }
-            try Task.checkCancellation()
-            progress = try client.appendSnapshotRawPage(generation: progress.generation, records: records)
-            pass.report.snapshotRecords += records.count
         }
         _ = try client.finishSnapshot(generation: progress.generation)
         pass.report.snapshotPublished = true
         // Published, nothing drained yet; `applyPending` refines this.
         pass.report.snapshotRemaining = progress.expectedRecords
         try applyPending(&pass)
+    }
+
+    /// Verifies one manifest page against the staged journal, then downloads the records it reports missing.
+    /// The core consumes the verified prefix, so the next manifest request starts at the new cursor.
+    private func appendManifestPage(_ progress: inout NativeSnapshotProgress, _ pass: inout Pass) async throws {
+        let page: [String: Any]
+        do {
+            page = try await server.get("/v1/snapshot/manifest", query: [
+                URLQueryItem(name: "high_water", value: progress.highWater),
+                URLQueryItem(name: "after", value: progress.lastCursor),
+                URLQueryItem(name: "limit", value: String(Self.manifestPageLimit)),
+                URLQueryItem(name: "compaction_generation", value: progress.serverCompactionGeneration),
+            ], limit: Self.maxManifestPageBytes, meter: &pass.meter)
+        } catch ClientError.server(let status, _) where status == 404 || status == 405 {
+            throw ManifestRouteUnavailable()
+        }
+        let entries = try page.objects("entries").map { entry in
+            NativeSnapshotManifestEntry(
+                cursor: String(try entry.decimal("cursor")),
+                digest: try entry.string("digest"),
+                flags: try manifestFlags(entry)
+            )
+        }
+        guard !entries.isEmpty else { throw ClientError.invalidResponse("short manifest") }
+        try Task.checkCancellation()
+        let verified = try client.appendSnapshotManifest(generation: progress.generation, entries: entries)
+        progress = verified.progress
+        var missing = Int(verified.missing)
+        while missing > 0 {
+            missing -= try await appendRecordsPage(&progress, limit: min(missing, min(budget.pageLimit, 200)), &pass)
+        }
+    }
+
+    private func manifestFlags(_ entry: [String: Any]) throws -> UInt8 {
+        guard let flags = UInt8(exactly: try entry.integer("flags")) else { throw ClientError.invalidResponse("flags") }
+        return flags
+    }
+
+    /// Downloads one records page after the staged cursor and appends it. Returns the records it carried.
+    private func appendRecordsPage(_ progress: inout NativeSnapshotProgress, limit: Int, _ pass: inout Pass) async throws -> Int {
+        let page = try await server.get("/v1/snapshot/records", query: [
+            URLQueryItem(name: "high_water", value: progress.highWater),
+            URLQueryItem(name: "after", value: progress.lastCursor),
+            URLQueryItem(name: "limit", value: String(limit)),
+            URLQueryItem(name: "compaction_generation", value: progress.serverCompactionGeneration),
+        ], limit: ServerClient.maxPageBytes, meter: &pass.meter)
+        let records = try page.objects("records").map { record in
+            NativeRawSnapshotRecord(
+                cursor: String(try record.decimal("cursor")),
+                envelopeJson: try record.object("envelope").jsonData()
+            )
+        }
+        guard !records.isEmpty else { throw ClientError.invalidResponse("short snapshot") }
+        try Task.checkCancellation()
+        progress = try client.appendSnapshotRawPage(generation: progress.generation, records: records)
+        pass.report.snapshotRecords += records.count
+        return records.count
     }
 
     /// Drains published snapshot records and applies journaled ones until idle or out of rounds.
