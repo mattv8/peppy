@@ -465,6 +465,22 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
+    typealias FfiType = UInt8
+    typealias SwiftType = UInt8
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt8 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: UInt8, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
     typealias FfiType = UInt16
     typealias SwiftType = UInt16
@@ -638,6 +654,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func advanceMmsBackfillPage(generation: String, scope: String, phase: NativeMmsBackfillPhase, providerId: String) throws 
     
+    func appendSnapshotManifest(generation: UInt64, entries: [NativeSnapshotManifestEntry]) throws  -> NativeSnapshotManifestProgress
+    
     func appendSnapshotRawPage(generation: UInt64, records: [NativeRawSnapshotRecord]) throws  -> NativeSnapshotProgress
     
     /**
@@ -686,6 +704,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func beginSnapshot(highWater: String, recordCount: UInt64, purpose: NativeSnapshotPurpose) throws  -> NativeSnapshotProgress
     
     func beginSnapshotWithCompaction(highWater: String, recordCount: UInt64, purpose: NativeSnapshotPurpose, serverCompactionGeneration: String?) throws  -> NativeSnapshotProgress
+    
+    func beginSnapshotWithManifest(highWater: String, recordCount: UInt64, serverCompactionGeneration: String?) throws  -> NativeSnapshotProgress
     
     /**
      * Contact DTOs are Rust-owned JSON schemas; native hosts must not maintain a parallel wire model.
@@ -1396,6 +1416,17 @@ open func advanceMmsBackfillPage(generation: String, scope: String, phase: Nativ
 }
 }
     
+open func appendSnapshotManifest(generation: UInt64, entries: [NativeSnapshotManifestEntry])throws  -> NativeSnapshotManifestProgress  {
+    return try  FfiConverterTypeNativeSnapshotManifestProgress_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_append_snapshot_manifest(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(generation),
+        FfiConverterSequenceTypeNativeSnapshotManifestEntry.lower(entries),uniffiCallStatus
+    )
+})
+}
+    
 open func appendSnapshotRawPage(generation: UInt64, records: [NativeRawSnapshotRecord])throws  -> NativeSnapshotProgress  {
     return try  FfiConverterTypeNativeSnapshotProgress_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1604,6 +1635,18 @@ open func beginSnapshotWithCompaction(highWater: String, recordCount: UInt64, pu
         FfiConverterString.lower(highWater),
         FfiConverterUInt64.lower(recordCount),
         FfiConverterTypeNativeSnapshotPurpose_lower(purpose),
+        FfiConverterOptionString.lower(serverCompactionGeneration),uniffiCallStatus
+    )
+})
+}
+    
+open func beginSnapshotWithManifest(highWater: String, recordCount: UInt64, serverCompactionGeneration: String?)throws  -> NativeSnapshotProgress  {
+    return try  FfiConverterTypeNativeSnapshotProgress_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_snapshot_with_manifest(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(highWater),
+        FfiConverterUInt64.lower(recordCount),
         FfiConverterOptionString.lower(serverCompactionGeneration),uniffiCallStatus
     )
 })
@@ -12043,6 +12086,118 @@ public func FfiConverterTypeNativeSmsSource_lower(_ value: NativeSmsSource) -> R
 }
 
 
+public struct NativeSnapshotManifestEntry: Equatable, Hashable {
+    public var cursor: String
+    public var digest: String
+    public var flags: UInt8
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(cursor: String, digest: String, flags: UInt8) {
+        self.cursor = cursor
+        self.digest = digest
+        self.flags = flags
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeSnapshotManifestEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeSnapshotManifestEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSnapshotManifestEntry {
+        return
+            try NativeSnapshotManifestEntry(
+                cursor: FfiConverterString.read(from: &buf), 
+                digest: FfiConverterString.read(from: &buf), 
+                flags: FfiConverterUInt8.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeSnapshotManifestEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.cursor, into: &buf)
+        FfiConverterString.write(value.digest, into: &buf)
+        FfiConverterUInt8.write(value.flags, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSnapshotManifestEntry_lift(_ buf: RustBuffer) throws -> NativeSnapshotManifestEntry {
+    return try FfiConverterTypeNativeSnapshotManifestEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSnapshotManifestEntry_lower(_ value: NativeSnapshotManifestEntry) -> RustBuffer {
+    return FfiConverterTypeNativeSnapshotManifestEntry.lower(value)
+}
+
+
+public struct NativeSnapshotManifestProgress: Equatable, Hashable {
+    public var progress: NativeSnapshotProgress
+    public var missing: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(progress: NativeSnapshotProgress, missing: UInt32) {
+        self.progress = progress
+        self.missing = missing
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeSnapshotManifestProgress: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeSnapshotManifestProgress: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSnapshotManifestProgress {
+        return
+            try NativeSnapshotManifestProgress(
+                progress: FfiConverterTypeNativeSnapshotProgress.read(from: &buf), 
+                missing: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeSnapshotManifestProgress, into buf: inout [UInt8]) {
+        FfiConverterTypeNativeSnapshotProgress.write(value.progress, into: &buf)
+        FfiConverterUInt32.write(value.missing, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSnapshotManifestProgress_lift(_ buf: RustBuffer) throws -> NativeSnapshotManifestProgress {
+    return try FfiConverterTypeNativeSnapshotManifestProgress.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSnapshotManifestProgress_lower(_ value: NativeSnapshotManifestProgress) -> RustBuffer {
+    return FfiConverterTypeNativeSnapshotManifestProgress.lower(value)
+}
+
+
 public struct NativeSnapshotProgress: Equatable, Hashable {
     public var generation: UInt64
     public var highWater: String
@@ -12050,16 +12205,18 @@ public struct NativeSnapshotProgress: Equatable, Hashable {
     public var receivedRecords: UInt64
     public var lastCursor: String
     public var serverCompactionGeneration: String?
+    public var manifest: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(generation: UInt64, highWater: String, expectedRecords: UInt64, receivedRecords: UInt64, lastCursor: String, serverCompactionGeneration: String?) {
+    public init(generation: UInt64, highWater: String, expectedRecords: UInt64, receivedRecords: UInt64, lastCursor: String, serverCompactionGeneration: String?, manifest: Bool) {
         self.generation = generation
         self.highWater = highWater
         self.expectedRecords = expectedRecords
         self.receivedRecords = receivedRecords
         self.lastCursor = lastCursor
         self.serverCompactionGeneration = serverCompactionGeneration
+        self.manifest = manifest
     }
 
     
@@ -12083,7 +12240,8 @@ public struct FfiConverterTypeNativeSnapshotProgress: FfiConverterRustBuffer {
                 expectedRecords: FfiConverterUInt64.read(from: &buf), 
                 receivedRecords: FfiConverterUInt64.read(from: &buf), 
                 lastCursor: FfiConverterString.read(from: &buf), 
-                serverCompactionGeneration: FfiConverterOptionString.read(from: &buf)
+                serverCompactionGeneration: FfiConverterOptionString.read(from: &buf), 
+                manifest: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -12094,6 +12252,7 @@ public struct FfiConverterTypeNativeSnapshotProgress: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.receivedRecords, into: &buf)
         FfiConverterString.write(value.lastCursor, into: &buf)
         FfiConverterOptionString.write(value.serverCompactionGeneration, into: &buf)
+        FfiConverterBool.write(value.manifest, into: &buf)
     }
 }
 
@@ -19038,6 +19197,31 @@ fileprivate struct FfiConverterSequenceTypeNativeSmsScanPlan: FfiConverterRustBu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeNativeSnapshotManifestEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [NativeSnapshotManifestEntry]
+
+    public static func write(_ value: [NativeSnapshotManifestEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeNativeSnapshotManifestEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [NativeSnapshotManifestEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [NativeSnapshotManifestEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeNativeSnapshotManifestEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeNativeRcsBootstrapResolution: FfiConverterRustBuffer {
     typealias SwiftType = [NativeRcsBootstrapResolution]
 
@@ -20058,6 +20242,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_advance_mms_backfill_page() != 31337) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_append_snapshot_manifest() != 36009) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_append_snapshot_raw_page() != 34355) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20116,6 +20303,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_snapshot_with_compaction() != 12430) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_snapshot_with_manifest() != 64430) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_contact_book() != 63925) {

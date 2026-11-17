@@ -289,6 +289,105 @@ fn compaction_is_outside_legacy_aad_and_digest_but_validated() {
     assert_eq!(event.validate(), Err(EnvelopeError::InvalidCompaction));
 }
 
+/// The fields of `Envelope`, as the wire and the derived schema name them. Every field is either
+/// covered by `wire_digest()` (AAD or ciphertext) or is `compaction` / `origin_tag`, which the
+/// snapshot manifest carries as presence flags because the digest does not cover them
+/// (`origin_tag_round_trips_...` and `compaction_is_outside_...` pin that).
+const ENVELOPE_FIELDS: [&str; 14] = [
+    "ciphertext",
+    "command_id",
+    "compaction",
+    "crypto_suite",
+    "envelope_id",
+    "key_epoch",
+    "origin_tag",
+    "producer_device_id",
+    "producer_sequence",
+    "profile_fingerprint",
+    "protocol_version",
+    "purpose",
+    "route",
+    "vault_id",
+];
+
+/// Guard for future envelope fields. Two checks: the serialized keys of an envelope with every
+/// optional field populated, and the property names of the derived event schema, which list
+/// optional fields that serialization omits. A new field must therefore be decided (digest-covered,
+/// or a manifest flag) before this passes. The `envelope()` fixture is an exhaustive struct
+/// literal, so a new field also fails to compile until the fixture sets it. Nested changes inside
+/// `route` or `compaction` are not covered by this test; review them against `aad_bytes` directly.
+#[test]
+fn envelope_top_level_fields_are_decided_against_the_digest() {
+    let mut event = envelope();
+    event.purpose = EnvelopePurpose::Event;
+    event.command_id = Some(CommandId::new());
+    event.route = Some(GatewayRoute::RcsLink {
+        gateway_device_id: DeviceId::new(),
+    });
+    event.compaction = Some(CompactionMetadata {
+        key: vec![7; 32],
+        terminal: false,
+        supersedes: Vec::new(),
+        checkpoint: false,
+    });
+    event.origin_tag = Some([7; 32]);
+    let value = serde_json::to_value(&event).unwrap();
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    let mut expected = ENVELOPE_FIELDS;
+    expected.sort_unstable();
+    assert_eq!(
+        keys, expected,
+        "a new top-level field must be decided: digest-covered, or a manifest flag"
+    );
+
+    let contracts = peppy_protocol::generate_contracts();
+    let schema: serde_json::Value = serde_json::from_str(&contracts.event_schema).unwrap();
+    let mut schema_fields: Vec<&str> = schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    schema_fields.sort_unstable();
+    assert_eq!(
+        schema_fields, expected,
+        "the schema lists optional fields that serialization omits; decide them too"
+    );
+
+    // Digest-covered fields varied through the public API change the digest. Events carry no
+    // command id and no RCS-link route in a valid envelope, so the valid copy drops both (the
+    // key checks above are serialization only).
+    event.command_id = None;
+    event.route = None;
+    let digest = event.wire_digest().unwrap();
+    let mut changed = event.clone();
+    changed.ciphertext[0] ^= 1;
+    assert_ne!(changed.wire_digest().unwrap(), digest, "ciphertext");
+    let mut changed = event.clone();
+    changed.envelope_id = EnvelopeId::new();
+    assert_ne!(changed.wire_digest().unwrap(), digest, "envelope_id");
+    let mut changed = event.clone();
+    changed.profile_fingerprint = "b".repeat(64);
+    assert_ne!(
+        changed.wire_digest().unwrap(),
+        digest,
+        "profile_fingerprint"
+    );
+    // The fixture sequence is u64::MAX, which validation rejects, so pick another valid value.
+    let mut changed = event.clone();
+    changed.producer_sequence = SourceSequence(1);
+    assert_ne!(changed.wire_digest().unwrap(), digest, "producer_sequence");
+    let mut changed = event.clone();
+    changed.key_epoch += 1;
+    assert_ne!(changed.wire_digest().unwrap(), digest, "key_epoch");
+}
+
 #[test]
 fn compaction_rejects_own_current_or_future_references() {
     let mut event = envelope();

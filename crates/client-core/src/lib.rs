@@ -198,7 +198,9 @@ pub use rcs_receive::{
 };
 pub use rcs_send::{CarrierOnlyProof, RcsPermit};
 pub use rcs_target::{RcsTargetClassification, RcsTargetDecision, ValidatedCarrierRouteContext};
-use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{
+    Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 pub use snapshot_projection::{SnapshotProjectionState, SnapshotProjectionStatus};
@@ -236,6 +238,10 @@ pub struct PendingDownload {
 pub const MAX_SNAPSHOT_PAGE: usize = 500;
 /// Records per staged snapshot generation.
 pub const MAX_SNAPSHOT_RECORDS: u64 = 100_000;
+/// Entries per verified snapshot manifest page.
+pub const MAX_SNAPSHOT_MANIFEST_PAGE: usize = 5_000;
+/// Maximum records in a verified snapshot manifest generation.
+pub const MAX_SNAPSHOT_MANIFEST_RECORDS: u64 = 1_000_000;
 /// Maximum read acknowledgements committed in one transaction.
 pub const READ_STATE_BATCH_SIZE: usize = MAX_SEAL_BATCH;
 /// Input bytes per snapshot page (typed records count their canonical JSON).
@@ -1269,6 +1275,22 @@ pub struct SnapshotProgress {
     pub received_records: u64,
     pub last_cursor: Cursor,
     pub server_compaction_generation: Option<u64>,
+    pub manifest: bool,
+}
+/// One server manifest entry. It verifies only when neither flag is set and the journal copy has
+/// neither `compaction` nor `origin_tag`: the digest does not cover those headers, so a flagged
+/// entry is always downloaded and byte-compared against the journal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotManifestEntry {
+    pub cursor: Cursor,
+    pub digest: [u8; 32],
+    pub has_compaction: bool,
+    pub has_origin_tag: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SnapshotManifestProgress {
+    pub progress: SnapshotProgress,
+    pub missing: u32,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SnapshotReport {
@@ -7436,7 +7458,7 @@ impl Client {
         record_count: u64,
         purpose: SnapshotPurpose,
     ) -> Result<SnapshotProgress, Error> {
-        self.begin_snapshot_with_compaction(high_water, record_count, purpose, None)
+        self.begin_snapshot_inner(high_water, record_count, purpose, None, false)
     }
 
     /// Starts a staged snapshot and durably records the trusted server compaction generation.
@@ -7448,18 +7470,69 @@ impl Client {
         purpose: SnapshotPurpose,
         server_compaction_generation: Option<u64>,
     ) -> Result<SnapshotProgress, Error> {
+        self.begin_snapshot_inner(
+            high_water,
+            record_count,
+            purpose,
+            server_compaction_generation,
+            false,
+        )
+    }
+
+    /// Starts a resync generation that verifies a server manifest against the local journal
+    /// (`append_snapshot_manifest`) and downloads only the records the journal cannot verify.
+    /// Its record count may exceed `MAX_SNAPSHOT_RECORDS` up to `MAX_SNAPSHOT_MANIFEST_RECORDS`.
+    pub fn begin_snapshot_with_manifest(
+        &self,
+        high_water: Cursor,
+        record_count: u64,
+        server_compaction_generation: Option<u64>,
+    ) -> Result<SnapshotProgress, Error> {
+        self.begin_snapshot_inner(
+            high_water,
+            record_count,
+            SnapshotPurpose::Resync,
+            server_compaction_generation,
+            true,
+        )
+    }
+
+    fn begin_snapshot_inner(
+        &self,
+        high_water: Cursor,
+        record_count: u64,
+        purpose: SnapshotPurpose,
+        server_compaction_generation: Option<u64>,
+        manifest: bool,
+    ) -> Result<SnapshotProgress, Error> {
         let mut guard = self.lock()?;
         if purpose == SnapshotPurpose::Restore {
             set_meta(&guard.conn, "restore_guard", "1")?;
             attachment_retention::require_reconciliation(&guard.conn)?;
         }
         let high = i64::try_from(high_water.0).map_err(|_| Error::InvalidCursor)?;
-        if record_count > MAX_SNAPSHOT_RECORDS || record_count > high_water.0 {
+        let max_records = if manifest {
+            MAX_SNAPSHOT_MANIFEST_RECORDS
+        } else {
+            MAX_SNAPSHOT_RECORDS
+        };
+        if record_count > high_water.0 || record_count > max_records {
             return Err(Error::InvalidRequest("snapshot record count"));
         }
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if manifest {
+            // Lower bound of the download: the records this device cannot verify from its journal.
+            let journaled: u64 = tx.query_row(
+                "SELECT COUNT(*) FROM journal WHERE cursor<=?",
+                params![high],
+                |row| row.get(0),
+            )?;
+            if record_count.saturating_sub(journaled) > MAX_SNAPSHOT_RECORDS {
+                return Err(Error::InvalidRequest("snapshot record count"));
+            }
+        }
         initial_replay::observe_server_high_water(&tx, high_water.0)?;
         phone_read::retire_all_phone_read_effects(&tx)?;
         mms_backfill::record_snapshot_capacity(&tx, high_water.0, record_count)?;
@@ -7478,6 +7551,15 @@ impl Client {
             .unwrap_or(0)
             + 1;
         set_meta(&tx, "snapshot_generation", &generation.to_string())?;
+        if manifest {
+            set_meta(&tx, "snapshot_manifest_generation", &generation.to_string())?;
+            set_meta(&tx, "snapshot_manifest_verified", "0")?;
+        } else {
+            tx.execute(
+                "DELETE FROM metadata WHERE k IN ('snapshot_manifest_generation','snapshot_manifest_verified')",
+                [],
+            )?;
+        }
         set_meta(
             &tx,
             "server_compaction_supported",
@@ -7503,6 +7585,7 @@ impl Client {
             received_records: 0,
             last_cursor: Cursor(0),
             server_compaction_generation,
+            manifest,
         })
     }
 
@@ -7560,6 +7643,55 @@ impl Client {
             .map(|r| Ok((r.cursor, raw_wire(&r.envelope_json)?)))
             .collect::<Result<Vec<_>, Error>>()?;
         self.append_wires(generation, page)
+    }
+
+    /// Verifies a page of manifest entries in cursor order and stages each verified journal copy
+    /// by copying the row inside SQLite. An entry verifies only when it carries neither header
+    /// flag and its journal copy carries neither `compaction` nor `origin_tag`, because the digest
+    /// does not cover those headers; any other entry is reported missing and downloaded. The
+    /// returned `missing` counts the consecutive unverified entries starting at the first one on
+    /// this page; the host downloads that many records from `progress.last_cursor` next.
+    pub fn append_snapshot_manifest(
+        &self,
+        generation: u64,
+        entries: &[SnapshotManifestEntry],
+    ) -> Result<SnapshotManifestProgress, Error> {
+        if entries.is_empty() || entries.len() > MAX_SNAPSHOT_MANIFEST_PAGE {
+            return Err(Error::InvalidRequest("snapshot manifest page"));
+        }
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut current = current_staging(&tx, generation)?
+            .filter(|current| current.manifest)
+            .ok_or(Error::InvalidRequest("snapshot manifest generation"))?;
+        let Some(staged) = stage_manifest_entries(&tx, &current, entries)? else {
+            // Nothing from this page is kept: roll the staged rows back, then record the failure.
+            tx.rollback()?;
+            fail_generation(&mut guard.conn, generation, current.number)?;
+            return Err(Error::SnapshotMismatch);
+        };
+        current.received += staged.verified;
+        current.received_bytes += staged.bytes;
+        current.overlap += staged.verified;
+        current.last_cursor = staged.last_cursor;
+        write_generation_counters(&tx, &current)?;
+        let prior_verified = get_meta(&tx, "snapshot_manifest_verified")?
+            .map(|value| value.parse::<i64>().map_err(|_| Error::Database))
+            .transpose()?
+            .unwrap_or(0);
+        set_meta(
+            &tx,
+            "snapshot_manifest_verified",
+            &(prior_verified + staged.verified).to_string(),
+        )?;
+        let progress = current.progress()?;
+        tx.commit()?;
+        Ok(SnapshotManifestProgress {
+            progress,
+            missing: staged.missing,
+        })
     }
 
     /// Publishes a complete generation in one short transaction: marks it published and raises
@@ -7664,11 +7796,21 @@ impl Client {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut current = current_staging(&tx, generation)?.ok_or(Error::SnapshotMismatch)?;
         let page_bytes: i64 = page.iter().map(|(_, wire)| wire.len() as i64).sum();
+        let verified = if current.manifest {
+            get_meta(&tx, "snapshot_manifest_verified")?
+                .map(|value| value.parse::<i64>().map_err(|_| Error::Database))
+                .transpose()?
+                .unwrap_or(0)
+        } else {
+            0
+        };
         // Validate the whole page with indexed lookups before staging anything.
         let mut last = current.last_cursor;
         let mut overlap = 0;
         let mut valid = current.received + page.len() as i64 <= current.expected
-            && current.received_bytes + page_bytes <= MAX_SNAPSHOT_BYTES as i64;
+            && current.received_bytes + page_bytes <= MAX_SNAPSHOT_BYTES as i64
+            && (!current.manifest
+                || current.received + page.len() as i64 - verified <= MAX_SNAPSHOT_RECORDS as i64);
         {
             let mut journal_wire = tx.prepare("SELECT wire FROM journal WHERE cursor=?")?;
             for (cursor, wire) in &page {
@@ -7708,16 +7850,7 @@ impl Client {
         current.received_bytes += page_bytes;
         current.overlap += overlap;
         current.last_cursor = last;
-        tx.execute(
-            "UPDATE snapshot_generations SET received=?,received_bytes=?,overlap=?,last_cursor=? WHERE generation=?",
-            params![
-                current.received,
-                current.received_bytes,
-                current.overlap,
-                current.last_cursor,
-                current.number
-            ],
-        )?;
+        write_generation_counters(&tx, &current)?;
         tx.commit()?;
         current.progress()
     }
@@ -8384,6 +8517,7 @@ struct Generation {
     drained: i64,
     published: bool,
     server_compaction_generation: Option<u64>,
+    manifest: bool,
 }
 impl Generation {
     fn progress(&self) -> Result<SnapshotProgress, Error> {
@@ -8395,17 +8529,19 @@ impl Generation {
             received_records: u(self.received)?,
             last_cursor: Cursor(u(self.last_cursor)?),
             server_compaction_generation: self.server_compaction_generation,
+            manifest: self.manifest,
         })
     }
 }
 fn active_generation(conn: &Connection) -> Result<Option<Generation>, Error> {
-    Ok(conn
+    let mut generation = conn
         .query_row(
             "SELECT generation,high_water,expected,received,received_bytes,overlap,last_cursor,state,drained,server_compaction_generation FROM snapshot_generations WHERE state IN ('staging','published') ORDER BY generation DESC LIMIT 1",
             [],
             |r| {
+                let number = r.get(0)?;
                 Ok(Generation {
-                    number: r.get(0)?,
+                    number,
                     high_water: r.get(1)?,
                     expected: r.get(2)?,
                     received: r.get(3)?,
@@ -8415,15 +8551,149 @@ fn active_generation(conn: &Connection) -> Result<Option<Generation>, Error> {
                     published: r.get::<_, String>(7)? == "published",
                     drained: r.get(8)?,
                     server_compaction_generation: r.get::<_, Option<String>>(9)?.map(|v| v.parse::<u64>().map_err(|_| rusqlite::Error::InvalidQuery)).transpose()?,
+                    manifest: false,
                 })
             },
         )
-        .optional()?)
+        .optional()?;
+    if let Some(generation) = &mut generation {
+        generation.manifest = get_meta(conn, "snapshot_manifest_generation")?
+            .is_some_and(|value| value == generation.number.to_string());
+    }
+    Ok(generation)
 }
 /// The caller's generation only if it is the newest and still staging.
 fn current_staging(conn: &Connection, generation: u64) -> Result<Option<Generation>, Error> {
     Ok(active_generation(conn)?
         .filter(|g| !g.published && u64::try_from(g.number).ok() == Some(generation)))
+}
+
+/// What one manifest page staged inside its transaction.
+struct ManifestStaging {
+    verified: i64,
+    bytes: i64,
+    last_cursor: i64,
+    missing: u32,
+}
+
+/// Stages the verified prefix of a manifest page. Returns `None` when the page fails the
+/// generation: a cursor is out of order, outside i64 or above high-water, or the verified rows
+/// would exceed `expected` or the byte limit. The check runs before each row is copied, so the
+/// page never holds more than one wire in memory.
+fn stage_manifest_entries(
+    tx: &Transaction<'_>,
+    current: &Generation,
+    entries: &[SnapshotManifestEntry],
+) -> Result<Option<ManifestStaging>, Error> {
+    let mut last = current.last_cursor;
+    for entry in entries {
+        let Ok(cursor) = i64::try_from(entry.cursor.0) else {
+            return Ok(None);
+        };
+        if cursor <= last || cursor > current.high_water {
+            return Ok(None);
+        }
+        last = cursor;
+    }
+    let mut staged = ManifestStaging {
+        verified: 0,
+        bytes: 0,
+        last_cursor: current.last_cursor,
+        missing: 0,
+    };
+    let mut copy = tx.prepare(
+        "INSERT INTO snapshot_records(generation,cursor,wire) SELECT ?1,cursor,wire FROM journal WHERE cursor=?2",
+    )?;
+    for (index, entry) in entries.iter().enumerate() {
+        let Some(length) = verified_journal_length(tx, entry)? else {
+            for entry in &entries[index..] {
+                if verified_journal_length(tx, entry)?.is_some() {
+                    break;
+                }
+                staged.missing += 1;
+            }
+            return Ok(Some(staged));
+        };
+        let cursor = to_i64(entry.cursor.0)?;
+        if current.received + staged.verified + 1 > current.expected
+            || current.received_bytes + staged.bytes + length > MAX_SNAPSHOT_BYTES as i64
+        {
+            return Ok(None);
+        }
+        copy.execute(params![current.number, cursor])?;
+        staged.verified += 1;
+        staged.bytes += length;
+        staged.last_cursor = cursor;
+    }
+    Ok(Some(staged))
+}
+
+/// The byte length of the journal copy at the entry's cursor when the entry verifies: neither
+/// flag is set, the copy parses with neither `compaction` nor `origin_tag`, and its digest equals
+/// the entry digest. The digest does not cover those two headers, so flagged records are never
+/// verified and always go through the byte comparison of `append_wires`.
+fn verified_journal_length(
+    conn: &Connection,
+    entry: &SnapshotManifestEntry,
+) -> Result<Option<i64>, Error> {
+    if entry.has_compaction || entry.has_origin_tag {
+        return Ok(None);
+    }
+    let wire: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT wire FROM journal WHERE cursor=?",
+            params![to_i64(entry.cursor.0)?],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(wire) = wire else {
+        return Ok(None);
+    };
+    let verifies = parse_wire(&wire).is_some_and(|envelope| {
+        envelope.compaction.is_none()
+            && envelope.origin_tag.is_none()
+            && envelope
+                .wire_digest()
+                .is_ok_and(|digest| digest == entry.digest)
+    });
+    if verifies {
+        Ok(Some(
+            i64::try_from(wire.len()).map_err(|_| Error::Database)?,
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Writes a generation's staging counters after rows were added to `snapshot_records`.
+fn write_generation_counters(conn: &Connection, current: &Generation) -> Result<(), Error> {
+    conn.execute(
+        "UPDATE snapshot_generations SET received=?,received_bytes=?,overlap=?,last_cursor=? WHERE generation=?",
+        params![
+            current.received,
+            current.received_bytes,
+            current.overlap,
+            current.last_cursor,
+            current.number
+        ],
+    )?;
+    Ok(())
+}
+
+/// Marks a generation failed in its own transaction, after a page's staged rows were rolled back.
+fn fail_generation(conn: &mut Connection, generation: u64, number: i64) -> Result<(), Error> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    fail_snapshot_generation(&tx, generation, number)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn fail_snapshot_generation(conn: &Connection, generation: u64, number: i64) -> Result<(), Error> {
+    conn.execute(
+        "UPDATE snapshot_generations SET state='failed' WHERE generation=?",
+        params![number],
+    )?;
+    attachment_retention::mark_restore_generation(conn, generation, "failed")
 }
 /// Moves up to `limit` published records into the journal (classified like live ingest, marked
 /// historical; own-echo acknowledgments happen only here, after publication). Returns the last
@@ -21586,6 +21856,7 @@ mod tests {
                 received_records: 2,
                 last_cursor: Cursor(2),
                 server_compaction_generation: Some(45),
+                manifest: false,
             }
         );
         target.finish_snapshot(session.generation).unwrap();
