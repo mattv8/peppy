@@ -34,12 +34,30 @@ history and rejects reuse. Canonical wire types and route names live in
 `peppy-hosted-api::tester_admin_v2`, including the retained vault header used for
 explicit old-profile recovery after rotation.
 
-`close` invalidates a handle and clears its stored purpose key before removal.
+`close` invalidates a handle and clears its stored purpose keys and beta-seat keypair before removal.
 Request secret fields and FFI request/response allocations are cleared on their
 documented lifecycle. These measures are best effort: compiler temporaries and
 JavaScript/browser copies can remain. Terminate the worker on lock, page exit,
 account/session change, or permission loss; do not promise complete memory
 erasure. Never persist phrases, handles, keys, or decrypted tester lists.
+
+## Beta seats
+
+`unlock` also derives purpose ID 9, `BetaSeats`, as an X25519 sealed-box keypair.
+Beta-seat payloads are sealed boxes whose plaintext is:
+
+```text
+"peppy-beta-seat-v1\0"
+beta program UUID (16 bytes)
+beta seat UUID (16 bytes)
+verified email UTF-8 (1–320 bytes)
+```
+
+`betaPublicKey { handle }` returns the base64url-unpadded public key.
+`betaOpen { handle, programId, seatId, sealedEmail }` returns the plaintext email
+only after the sealed payload authenticates for that context. `betaReseal {
+fromHandle, toHandle, programId, seatId, sealedEmail }` opens and reseals for the
+destination public key, returning only base64url-unpadded `sealedEmail`.
 
 The worker bounds request size to 64 KiB, plaintext size to 4 KiB, and concurrent
 sessions to eight. It returns structured failures for malformed requests, failed
