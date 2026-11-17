@@ -172,10 +172,13 @@ internal fun ObserveServerReachability(enrolled: Boolean, bindingRefresh: Int) {
 
 private val probeMutex = Mutex()
 
+/** Event replay would record this device's cursor; the capabilities read reports nothing and authenticates the same way. */
+internal const val REACHABILITY_PROBE_PATH = "/v1/capabilities"
+
 private suspend fun probeServer(context: Context, binding: GatewayReachabilityBinding) = probeMutex.withLock {
     if (withContext(Dispatchers.IO) { NativeGateway.reachabilityBinding(context) }?.sameBinding(binding) != true) return
     try {
-        val response = withContext(Dispatchers.IO) { GatewayHttp(binding.origin, binding.bearerToken).get("/v1/events?after=0&limit=1") }
+        val response = withContext(Dispatchers.IO) { GatewayHttp(binding.origin, binding.bearerToken).get(REACHABILITY_PROBE_PATH) }
         if (ServerReachabilityState.recordResponse(binding, response)) GatewayWork.enqueue(context, GatewayEnqueueCause.REACHABILITY)
     } catch (error: Exception) {
         ServerReachabilityState.recordFailure(binding, error)
