@@ -96,7 +96,13 @@ This reference records non-obvious Peppy domain constraints.
   and monotonic. Snapshot commands are historical and never authorize carrier
   work. A restore guard persists before import validation, so do not claim a
   rejected restore leaves all state unchanged.
-- Server replay is retained transport history. Snapshot ciphertext rows are not
+- Server replay is retained transport history. Its floor advances to the lowest
+  cursor the vault's counted devices reported (`device_cursors`, written from
+  `after=` on `GET /v1/events` and `resume_cursor` in the hello), or by age
+  (`PEPPY_REPLAY_RETENTION_DAYS`), whichever is further. A device counts while it
+  is not revoked and reported within the retention. Only a real sync may call
+  `GET /v1/events`: its `after` is recorded as the device's position, and a lower
+  value overwrites a higher one. Snapshot ciphertext rows are not
   updated in place; eligible superseded records can be pruned through compaction.
   A snapshot generation fences that changing retained set. Never equate a replay
   cursor with a snapshot generation. See [sync API](../services/server/src/api/sync.rs).
