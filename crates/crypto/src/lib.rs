@@ -1,4 +1,5 @@
 //! Generic cryptographic building blocks. Protocol envelope integration is deliberately external.
+pub mod beta_seats;
 pub mod computer_enrollment;
 pub mod enrollment;
 pub mod filesystem;
@@ -163,6 +164,8 @@ pub enum KeyPurpose {
     LocalWrap,
     /// Tester registry envelopes bound to an authenticated vault profile.
     TesterRegistry,
+    /// Beta-seat email sealed boxes bound to an authenticated vault profile.
+    BetaSeats,
     /// Recovery wrappers for the vault's immutable identity anchor.
     VaultIdentityRecovery,
     /// Encrypted compose-draft records. This purpose is intentionally separate from envelopes.
@@ -177,6 +180,7 @@ impl KeyPurpose {
             Self::Compaction => 4,
             Self::LocalWrap => 5,
             Self::TesterRegistry => 6,
+            Self::BetaSeats => 9,
             Self::VaultIdentityRecovery => 8,
             Self::Draft => 7,
         }
@@ -591,6 +595,7 @@ mod tests {
             KeyPurpose::Compaction,
             KeyPurpose::LocalWrap,
             KeyPurpose::TesterRegistry,
+            KeyPurpose::BetaSeats,
             KeyPurpose::Draft,
             KeyPurpose::VaultIdentityRecovery,
         ];
