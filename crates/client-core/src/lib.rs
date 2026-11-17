@@ -236,12 +236,12 @@ pub struct PendingDownload {
 }
 /// Records per `append_snapshot_page` call.
 pub const MAX_SNAPSHOT_PAGE: usize = 500;
-/// Records per staged snapshot generation.
-pub const MAX_SNAPSHOT_RECORDS: u64 = 100_000;
+/// Transport sanity ceiling for records in a staged snapshot generation.
+pub const MAX_SNAPSHOT_RECORDS: u64 = 1_000_000;
+/// Product budget for history recovery imports, distinct from the snapshot transport ceiling.
+pub const RECOVERY_RECORD_BUDGET: u64 = 100_000;
 /// Entries per verified snapshot manifest page.
 pub const MAX_SNAPSHOT_MANIFEST_PAGE: usize = 5_000;
-/// Maximum records in a verified snapshot manifest generation.
-pub const MAX_SNAPSHOT_MANIFEST_RECORDS: u64 = 1_000_000;
 /// Maximum read acknowledgements committed in one transaction.
 pub const READ_STATE_BATCH_SIZE: usize = MAX_SEAL_BATCH;
 /// Input bytes per snapshot page (typed records count their canonical JSON).
@@ -390,6 +390,8 @@ pub enum Error {
     AttachmentRemovedByStoragePolicy,
     #[error("snapshot import is inconsistent or no longer current; live state is unchanged")]
     SnapshotMismatch,
+    #[error("snapshot exceeds what this build can import")]
+    SnapshotTooLarge,
     #[error("MMS acquisition limit reached")]
     MmsAcquisitionLimit,
     #[error("MMS pending media quota exceeded")]
@@ -7481,7 +7483,6 @@ impl Client {
 
     /// Starts a resync generation that verifies a server manifest against the local journal
     /// (`append_snapshot_manifest`) and downloads only the records the journal cannot verify.
-    /// Its record count may exceed `MAX_SNAPSHOT_RECORDS` up to `MAX_SNAPSHOT_MANIFEST_RECORDS`.
     pub fn begin_snapshot_with_manifest(
         &self,
         high_water: Cursor,
@@ -7511,28 +7512,15 @@ impl Client {
             attachment_retention::require_reconciliation(&guard.conn)?;
         }
         let high = i64::try_from(high_water.0).map_err(|_| Error::InvalidCursor)?;
-        let max_records = if manifest {
-            MAX_SNAPSHOT_MANIFEST_RECORDS
-        } else {
-            MAX_SNAPSHOT_RECORDS
-        };
-        if record_count > high_water.0 || record_count > max_records {
+        if record_count > high_water.0 {
             return Err(Error::InvalidRequest("snapshot record count"));
+        }
+        if record_count > MAX_SNAPSHOT_RECORDS {
+            return Err(Error::SnapshotTooLarge);
         }
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if manifest {
-            // Lower bound of the download: the records this device cannot verify from its journal.
-            let journaled: u64 = tx.query_row(
-                "SELECT COUNT(*) FROM journal WHERE cursor<=?",
-                params![high],
-                |row| row.get(0),
-            )?;
-            if record_count.saturating_sub(journaled) > MAX_SNAPSHOT_RECORDS {
-                return Err(Error::InvalidRequest("snapshot record count"));
-            }
-        }
         initial_replay::observe_server_high_water(&tx, high_water.0)?;
         phone_read::retire_all_phone_read_effects(&tx)?;
         mms_backfill::record_snapshot_capacity(&tx, high_water.0, record_count)?;
@@ -7666,11 +7654,17 @@ impl Client {
         let mut current = current_staging(&tx, generation)?
             .filter(|current| current.manifest)
             .ok_or(Error::InvalidRequest("snapshot manifest generation"))?;
-        let Some(staged) = stage_manifest_entries(&tx, &current, entries)? else {
-            // Nothing from this page is kept: roll the staged rows back, then record the failure.
-            tx.rollback()?;
-            fail_generation(&mut guard.conn, generation, current.number)?;
-            return Err(Error::SnapshotMismatch);
+        let staged = match stage_manifest_entries(&tx, &current, entries)? {
+            Ok(staged) => staged,
+            Err(error) => {
+                // Nothing from this page is kept: roll the staged rows back, then record the failure.
+                tx.rollback()?;
+                fail_generation(&mut guard.conn, generation, current.number)?;
+                return Err(match error {
+                    ManifestStageError::Mismatch => Error::SnapshotMismatch,
+                    ManifestStageError::TooLarge => Error::SnapshotTooLarge,
+                });
+            }
         };
         current.received += staged.verified;
         current.received_bytes += staged.bytes;
@@ -7686,6 +7680,7 @@ impl Client {
             "snapshot_manifest_verified",
             &(prior_verified + staged.verified).to_string(),
         )?;
+        collect_snapshot_staging_garbage(&tx)?;
         let progress = current.progress()?;
         tx.commit()?;
         Ok(SnapshotManifestProgress {
@@ -7796,21 +7791,12 @@ impl Client {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut current = current_staging(&tx, generation)?.ok_or(Error::SnapshotMismatch)?;
         let page_bytes: i64 = page.iter().map(|(_, wire)| wire.len() as i64).sum();
-        let verified = if current.manifest {
-            get_meta(&tx, "snapshot_manifest_verified")?
-                .map(|value| value.parse::<i64>().map_err(|_| Error::Database))
-                .transpose()?
-                .unwrap_or(0)
-        } else {
-            0
-        };
         // Validate the whole page with indexed lookups before staging anything.
         let mut last = current.last_cursor;
         let mut overlap = 0;
-        let mut valid = current.received + page.len() as i64 <= current.expected
-            && current.received_bytes + page_bytes <= MAX_SNAPSHOT_BYTES as i64
-            && (!current.manifest
-                || current.received + page.len() as i64 - verified <= MAX_SNAPSHOT_RECORDS as i64);
+        let exceeds_byte_limit = current.received_bytes + page_bytes > MAX_SNAPSHOT_BYTES as i64;
+        let mut valid =
+            current.received + page.len() as i64 <= current.expected && !exceeds_byte_limit;
         {
             let mut journal_wire = tx.prepare("SELECT wire FROM journal WHERE cursor=?")?;
             for (cursor, wire) in &page {
@@ -7837,7 +7823,11 @@ impl Client {
             )?;
             attachment_retention::mark_restore_generation(&tx, generation, "failed")?;
             tx.commit()?;
-            return Err(Error::SnapshotMismatch);
+            return Err(if exceeds_byte_limit {
+                Error::SnapshotTooLarge
+            } else {
+                Error::SnapshotMismatch
+            });
         }
         {
             let mut insert =
@@ -7851,6 +7841,7 @@ impl Client {
         current.overlap += overlap;
         current.last_cursor = last;
         write_generation_counters(&tx, &current)?;
+        collect_snapshot_staging_garbage(&tx)?;
         tx.commit()?;
         current.progress()
     }
@@ -8576,22 +8567,26 @@ struct ManifestStaging {
     missing: u32,
 }
 
-/// Stages the verified prefix of a manifest page. Returns `None` when the page fails the
-/// generation: a cursor is out of order, outside i64 or above high-water, or the verified rows
-/// would exceed `expected` or the byte limit. The check runs before each row is copied, so the
-/// page never holds more than one wire in memory.
+enum ManifestStageError {
+    Mismatch,
+    TooLarge,
+}
+
+/// Stages the verified prefix of a manifest page. A malformed page fails the generation as a
+/// mismatch; a byte-limit failure is reported separately. The check runs before each row is
+/// copied, so the page never holds more than one wire in memory.
 fn stage_manifest_entries(
     tx: &Transaction<'_>,
     current: &Generation,
     entries: &[SnapshotManifestEntry],
-) -> Result<Option<ManifestStaging>, Error> {
+) -> Result<Result<ManifestStaging, ManifestStageError>, Error> {
     let mut last = current.last_cursor;
     for entry in entries {
         let Ok(cursor) = i64::try_from(entry.cursor.0) else {
-            return Ok(None);
+            return Ok(Err(ManifestStageError::Mismatch));
         };
         if cursor <= last || cursor > current.high_water {
-            return Ok(None);
+            return Ok(Err(ManifestStageError::Mismatch));
         }
         last = cursor;
     }
@@ -8612,20 +8607,21 @@ fn stage_manifest_entries(
                 }
                 staged.missing += 1;
             }
-            return Ok(Some(staged));
+            return Ok(Ok(staged));
         };
         let cursor = to_i64(entry.cursor.0)?;
-        if current.received + staged.verified + 1 > current.expected
-            || current.received_bytes + staged.bytes + length > MAX_SNAPSHOT_BYTES as i64
-        {
-            return Ok(None);
+        if current.received + staged.verified + 1 > current.expected {
+            return Ok(Err(ManifestStageError::Mismatch));
+        }
+        if current.received_bytes + staged.bytes + length > MAX_SNAPSHOT_BYTES as i64 {
+            return Ok(Err(ManifestStageError::TooLarge));
         }
         copy.execute(params![current.number, cursor])?;
         staged.verified += 1;
         staged.bytes += length;
         staged.last_cursor = cursor;
     }
-    Ok(Some(staged))
+    Ok(Ok(staged))
 }
 
 /// The byte length of the journal copy at the entry's cursor when the entry verifies: neither
@@ -8824,6 +8820,12 @@ fn take_within_budget<T>(
 
 /// Removes a bounded batch of obsolete/failed staging rows and empty generation rows.
 fn collect_snapshot_garbage(conn: &Connection) -> Result<(), Error> {
+    collect_snapshot_staging_garbage(conn)?;
+    snapshot_projection::collect_garbage(conn)
+}
+
+/// Removes a bounded batch of obsolete/failed snapshot staging rows.
+fn collect_snapshot_staging_garbage(conn: &Connection) -> Result<(), Error> {
     conn.execute(
         "DELETE FROM snapshot_records WHERE rowid IN (SELECT r.rowid FROM snapshot_records r JOIN snapshot_generations g ON g.generation=r.generation WHERE g.state IN ('failed','obsolete') LIMIT ?)",
         params![SNAPSHOT_GC_BATCH],
@@ -8832,7 +8834,7 @@ fn collect_snapshot_garbage(conn: &Connection) -> Result<(), Error> {
         "DELETE FROM snapshot_generations WHERE state IN ('failed','obsolete') AND NOT EXISTS (SELECT 1 FROM snapshot_records r WHERE r.generation=snapshot_generations.generation)",
         [],
     )?;
-    snapshot_projection::collect_garbage(conn)
+    Ok(())
 }
 /// Canonical stored bytes for typed input (oversize serialization becomes a digest marker).
 fn typed_wire(envelope: &Envelope) -> Result<Vec<u8>, Error> {

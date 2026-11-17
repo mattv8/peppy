@@ -12868,6 +12868,7 @@ enum MobileBindingsError: Swift.Error, Equatable, Hashable, Foundation.Localized
     case MmsAcquisitionLimit
     case MmsMediaQuota
     case SmsCapacity
+    case SnapshotTooLarge
     case LockPoisoned
     case GroupMembersChanged
 
@@ -12920,8 +12921,9 @@ public struct FfiConverterTypeMobileBindingsError: FfiConverterRustBuffer {
         case 19: return .MmsAcquisitionLimit
         case 20: return .MmsMediaQuota
         case 21: return .SmsCapacity
-        case 22: return .LockPoisoned
-        case 23: return .GroupMembersChanged
+        case 22: return .SnapshotTooLarge
+        case 23: return .LockPoisoned
+        case 24: return .GroupMembersChanged
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -13018,12 +13020,16 @@ public struct FfiConverterTypeMobileBindingsError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(21))
         
         
-        case .LockPoisoned:
+        case .SnapshotTooLarge:
             writeInt(&buf, Int32(22))
         
         
-        case .GroupMembersChanged:
+        case .LockPoisoned:
             writeInt(&buf, Int32(23))
+        
+        
+        case .GroupMembersChanged:
+            writeInt(&buf, Int32(24))
         
         }
     }

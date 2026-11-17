@@ -908,6 +908,8 @@ pub enum MobileBindingsError {
     MmsMediaQuota,
     #[error("SMS acquisition capacity reached")]
     SmsCapacity,
+    #[error("snapshot exceeds what this build can import")]
+    SnapshotTooLarge,
     #[error("internal native state is unavailable")]
     LockPoisoned,
     #[error("group members changed")]
@@ -943,6 +945,7 @@ impl From<CoreError> for MobileBindingsError {
             CoreError::AttachmentRemovedByStoragePolicy => Self::AttachmentRemovedByStoragePolicy,
             CoreError::Storage => Self::Storage,
             CoreError::SnapshotMismatch => Self::Conflict,
+            CoreError::SnapshotTooLarge => Self::SnapshotTooLarge,
             CoreError::MmsAcquisitionLimit => Self::MmsAcquisitionLimit,
             CoreError::MmsMediaQuota => Self::MmsMediaQuota,
             CoreError::SmsCapacity => Self::SmsCapacity,
@@ -4292,8 +4295,8 @@ mod tests {
             Err(MobileBindingsError::InvalidRequest)
         ));
         assert!(matches!(
-            client.begin_snapshot_with_manifest("200000".into(), 100_002, None),
-            Err(MobileBindingsError::InvalidRequest)
+            client.begin_snapshot_with_manifest("1000001".into(), 1_000_001, None),
+            Err(MobileBindingsError::SnapshotTooLarge)
         ));
         assert!(
             !client

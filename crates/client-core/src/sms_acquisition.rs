@@ -176,7 +176,7 @@ struct Limits {
 const LIMITS: Limits = Limits {
     pending: MAX_PENDING_SMS_ACQUISITIONS,
     pending_bytes: MAX_PENDING_SMS_ACQUISITION_BYTES,
-    recovery_records: crate::MAX_SNAPSHOT_RECORDS - RECOVERY_RECORD_RESERVE,
+    recovery_records: crate::RECOVERY_RECORD_BUDGET - RECOVERY_RECORD_RESERVE,
     recovery_bytes: crate::MAX_SNAPSHOT_BYTES - RECOVERY_BYTE_RESERVE,
 };
 
