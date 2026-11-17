@@ -69,7 +69,7 @@ Agent reference for security-sensitive behavior. Preserve these boundaries when 
 - The server sees opaque grouping keys, supersession relationships, deletion timing, and attachment-to-envelope association needed for safe reclamation. It does not receive contact fields, photo plaintext, or encryption keys.
 - Attachment release requires the current nonzero generation, a cutoff no later than the replay floor, and proof that every reference compacted. Private-object deletion, elapsed time, or empty references do not authorize release.
 - Superseded ciphertext is not removed immediately. Retained duplicate-detection identities continue to consume server storage after compaction.
-- Snapshot imports are staged and monotonic. Historical snapshot commands never execute carrier work. Restore guards persist before import validation, so a rejected restore is not a guarantee of unchanged local state.
+- Snapshot imports are staged and monotonic. A manifest resync shows the server which cursors a device lacks (cursors only, no content). Historical snapshot commands never execute carrier work. Restore guards persist before import validation, so a rejected restore is not a guarantee of unchanged local state.
 
 ## Clean-install and rename boundaries
 

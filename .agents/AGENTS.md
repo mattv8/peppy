@@ -100,6 +100,15 @@ This reference records non-obvious Peppy domain constraints.
   updated in place; eligible superseded records can be pruned through compaction.
   A snapshot generation fences that changing retained set. Never equate a replay
   cursor with a snapshot generation. See [sync API](../services/server/src/api/sync.rs).
+- A device whose cursor expired resyncs through the snapshot manifest
+  (`GET /v1/snapshot/manifest`) when the server advertises it: it stages its own
+  journal copy of each record whose digest matches and downloads the rest, so the
+  staged generation equals a full import's. The digest covers AAD and ciphertext
+  only. A record that carries `compaction` or `origin_tag` on either side is never
+  verified; it is downloaded and byte-compared. Decide any new top-level envelope
+  field against that rule (the protocol contract test pins the field set). Restore
+  imports never use the manifest. See
+  [manifest tests](../crates/client-core/tests/snapshot_manifest.rs).
 - Attachment release requires the current nonzero compaction generation, a
   cutoff no later than the replay floor, and proof that every registered
   reference was compacted. Empty reference sets, elapsed time, or private-object
