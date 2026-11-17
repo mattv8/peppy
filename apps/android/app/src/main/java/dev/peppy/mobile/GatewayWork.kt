@@ -68,6 +68,7 @@ import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.NativeIngestState
 import uniffi.peppy_mobile_bindings.NativeRawSnapshotRecord
+import uniffi.peppy_mobile_bindings.NativeSnapshotManifestEntry
 import uniffi.peppy_mobile_bindings.NativeSnapshotProgress
 import uniffi.peppy_mobile_bindings.NativeSnapshotPurpose
 
@@ -567,9 +568,27 @@ class GatewaySync(
 
     private enum class Stage { STAGING, FINISHED, OWN_RECORDS }
 
-    private fun beginSnapshot(purpose: NativeSnapshotPurpose, cut: JSONObject? = null): NativeSnapshotProgress {
+    /** One staging request: progress, an impossible cut (restart), or own-device history (reused identity). */
+    private sealed interface StageStep {
+        class Manifest(val progress: NativeSnapshotProgress) : StageStep
+        class Downloaded(val progress: NativeSnapshotProgress, val count: Int) : StageStep
+        object ManifestUnavailable : StageStep
+        object Impossible : StageStep
+        object OwnRecords : StageStep
+    }
+
+    private fun beginSnapshot(
+        purpose: NativeSnapshotPurpose,
+        cut: JSONObject? = null,
+        manifestAllowed: Boolean = true,
+    ): NativeSnapshotProgress {
         val start = cut ?: JSONObject(checkBody(http.get("/v1/snapshot")))
         val generation = snapshotCompactionState(start).generation
+        if (purpose == NativeSnapshotPurpose.RESYNC && manifestAllowed && snapshotManifestSupported(start)) {
+            return client.beginSnapshotWithManifest(
+                start.getString("high_water_cursor"), start.getString("record_count").toULong(), generation,
+            )
+        }
         return client.beginSnapshotWithCompaction(
             start.getString("high_water_cursor"), start.getString("record_count").toULong(), purpose, generation,
         )
@@ -651,6 +670,12 @@ class GatewaySync(
         else -> throw JSONException("origin_tags_supported")
     }
 
+    private fun snapshotManifestSupported(start: JSONObject): Boolean = when (val value = start.opt("manifest_supported")) {
+        null, JSONObject.NULL -> false
+        is Boolean -> value
+        else -> throw JSONException("manifest_supported")
+    }
+
     /**
      * Stages up to [SNAPSHOT_PAGES] pages. An impossible cut (server 400/409, an empty page before
      * the expected count, or a page the core refuses) restarts staging from a fresh `/v1/snapshot`
@@ -659,39 +684,28 @@ class GatewaySync(
     private fun stage(initial: NativeSnapshotProgress, purpose: NativeSnapshotPurpose, detectOwnRecords: Boolean): Stage {
         var progress = initial
         var restarted = false
+        // A 404/405 manifest route stays unavailable for the rest of this call, restarts included.
+        var manifestAllowed = true
         repeat(SNAPSHOT_PAGES) {
             if (progress.receivedRecords >= progress.expectedRecords) {
                 client.finishSnapshot(progress.generation)
                 return Stage.FINISHED
             }
-            val response = http.get(
-                "/v1/snapshot/records?high_water=${progress.highWater}&after=${progress.lastCursor}&limit=$SNAPSHOT_PAGE${progress.serverCompactionGeneration?.let { "&compaction_generation=$it" } ?: ""}",
-            )
-            if (response.code == 401 || response.code == 403) throw GatewayAuthException()
-            val page = if (response.ok) JSONObject(checkBody(response)).getJSONArray("records") else null
-            val impossibleCut = response.code == 400 || response.code == 409 || page?.length() == 0
-            if (!impossibleCut && page == null) throw GatewayTransportException("HTTP ${response.code}")
-            val next = if (impossibleCut) null else {
-                val records = (0 until page!!.length()).map { index ->
-                    val row = page.getJSONObject(index)
-                    val envelope = row.getJSONObject("envelope")
-                    if (detectOwnRecords && envelope.optString("producer_device_id") == deviceId) return Stage.OWN_RECORDS
-                    NativeRawSnapshotRecord(row.getString("cursor"), envelope.toString().toByteArray(Charsets.UTF_8))
+            when (val step = if (progress.manifest) stageManifestPage(progress, detectOwnRecords) else stageRecordsPage(progress, SNAPSHOT_PAGE, detectOwnRecords)) {
+                StageStep.OwnRecords -> return Stage.OWN_RECORDS
+                // Full cut; like the restart below, this re-fetches /v1/snapshot on the contact-repair path too.
+                StageStep.ManifestUnavailable -> {
+                    manifestAllowed = false
+                    progress = beginSnapshot(purpose, manifestAllowed = false)
                 }
-                try {
-                    client.appendSnapshotRawPage(progress.generation, records).also {
-                        if (diagnosticsEnabled) snapshotReceived += records.size.toLong()
-                    }
-                } catch (_: MobileBindingsException.InvalidRequest) {
-                    null
+                StageStep.Impossible -> {
+                    if (restarted) throw GatewayTransportException("snapshot cut unavailable")
+                    restarted = true
+                    // Re-fetches /v1/snapshot (also on the contact-repair path), as the existing restart does.
+                    progress = beginSnapshot(purpose, manifestAllowed = manifestAllowed) // obsoletes the broken staging generation
                 }
-            }
-            if (next == null) {
-                if (restarted) throw GatewayTransportException("snapshot cut unavailable")
-                restarted = true
-                progress = beginSnapshot(purpose) // obsoletes the broken staging generation
-            } else {
-                progress = next
+                is StageStep.Manifest -> progress = step.progress
+                is StageStep.Downloaded -> progress = step.progress
             }
         }
         if (progress.receivedRecords >= progress.expectedRecords) {
@@ -699,6 +713,82 @@ class GatewaySync(
             return Stage.FINISHED
         }
         return Stage.STAGING
+    }
+
+    /**
+     * Verifies one manifest page against the journal, then downloads exactly the run the core reports
+     * missing. A 404/405 manifest route is [StageStep.ManifestUnavailable]; a refused or malformed page
+     * is [StageStep.Impossible], which restarts the cut like a refused records page.
+     */
+    private fun stageManifestPage(progress: NativeSnapshotProgress, detectOwnRecords: Boolean): StageStep {
+        // The server clamps the limit to its 5,000 maximum, the value it advertises.
+        val response = http.get(
+            "/v1/snapshot/manifest?high_water=${progress.highWater}&after=${progress.lastCursor}&limit=$SNAPSHOT_MANIFEST_PAGE${progress.serverCompactionGeneration?.let { "&compaction_generation=$it" } ?: ""}",
+        )
+        if (response.code == 401 || response.code == 403) throw GatewayAuthException()
+        if (response.code == 404 || response.code == 405) return StageStep.ManifestUnavailable
+        if (response.code == 400 || response.code == 409) return StageStep.Impossible
+        val entries = parseManifestEntries(checkBody(response)) ?: return StageStep.Impossible
+        if (entries.isEmpty()) return StageStep.Impossible
+        val manifest = try {
+            client.appendSnapshotManifest(progress.generation, entries)
+        } catch (_: MobileBindingsException.InvalidRequest) {
+            return StageStep.Impossible
+        }
+        var next = manifest.progress
+        var missing = manifest.missing.toInt()
+        while (missing > 0) {
+            when (val step = stageRecordsPage(next, minOf(missing, SNAPSHOT_PAGE), detectOwnRecords)) {
+                is StageStep.Downloaded -> {
+                    next = step.progress
+                    missing -= step.count
+                }
+                else -> return step
+            }
+        }
+        return StageStep.Manifest(next)
+    }
+
+    /** Strict manifest entries: `cursor` and `digest` are JSON strings and `flags` a JSON integer 0..3. Null when malformed. */
+    private fun parseManifestEntries(body: String): List<NativeSnapshotManifestEntry>? {
+        val entries = try {
+            JSONObject(body).getJSONArray("entries")
+        } catch (_: JSONException) {
+            return null
+        }
+        val parsed = ArrayList<NativeSnapshotManifestEntry>(entries.length())
+        for (index in 0 until entries.length()) {
+            val entry = entries.optJSONObject(index) ?: return null
+            val cursor = entry.opt("cursor") as? String ?: return null
+            val digest = entry.opt("digest") as? String ?: return null
+            val flags = entry.opt("flags") as? Int ?: return null
+            if (flags !in 0..3) return null
+            parsed += NativeSnapshotManifestEntry(cursor, digest, flags.toUByte())
+        }
+        return parsed
+    }
+
+    private fun stageRecordsPage(progress: NativeSnapshotProgress, limit: Int, detectOwnRecords: Boolean): StageStep {
+        val response = http.get(
+            "/v1/snapshot/records?high_water=${progress.highWater}&after=${progress.lastCursor}&limit=$limit${progress.serverCompactionGeneration?.let { "&compaction_generation=$it" } ?: ""}",
+        )
+        if (response.code == 401 || response.code == 403) throw GatewayAuthException()
+        val page = if (response.ok) JSONObject(checkBody(response)).getJSONArray("records") else null
+        if (response.code == 400 || response.code == 409 || page?.length() == 0) return StageStep.Impossible
+        if (page == null) throw GatewayTransportException("HTTP ${response.code}")
+        val records = (0 until page.length()).map { index ->
+            val row = page.getJSONObject(index)
+            val envelope = row.getJSONObject("envelope")
+            if (detectOwnRecords && envelope.optString("producer_device_id") == deviceId) return StageStep.OwnRecords
+            NativeRawSnapshotRecord(row.getString("cursor"), envelope.toString().toByteArray(Charsets.UTF_8))
+        }
+        val staged = try {
+            client.appendSnapshotRawPage(progress.generation, records)
+        } catch (_: MobileBindingsException.InvalidRequest) {
+            return StageStep.Impossible
+        }
+        if (diagnosticsEnabled) snapshotReceived += records.size.toLong()
+        return StageStep.Downloaded(staged, records.size)
     }
 
     /** `applied == 0` is not completion; only `snapshotRemaining == 0` ends a snapshot drain. */
@@ -809,6 +899,8 @@ class GatewaySync(
         const val RECEIVE_PAGES = 4
         const val SNAPSHOT_PAGES = 4
         const val SNAPSHOT_PAGE = 200
+        /** The server's manifest maximum; a resumed generation needs no advertisement fetch. */
+        const val SNAPSHOT_MANIFEST_PAGE = 5_000
         const val APPLY_BATCHES = 4
         const val APPLY_BATCH = 50
         const val OUTBOX_BATCH = 50

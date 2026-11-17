@@ -349,5 +349,6 @@ internal class DiagnosticsLog(
             .plus(" mms_pause=0:none,1:absolute_recovery_capacity,2:recovery_capacity,3:local_capacity,4:remote_storage")
             .plus(" 27:gm_link 28:rcs_sweep(rows=considered,count=skipped,processed=complete,pending=incomplete,unavailable=aborted,page_queries=pages)")
             .plus(" gateway_enqueue(reason=cause) gateway_enqueue_causes=1:socket_ready,2:socket_event,3:socket_resync,4:relay_wake,5:notification_listener,6:notification_reconcile,7:sms_receiver,8:sms_capture,9:mms_capture,10:history_control,11:worker_continuation,12:reachability,13:unlock,14:settings,15:enrollment,16:rcs_link,17:rcs_receive,18:rcs_media,19:rcs_send,20:rcs_refusal,21:contact_sync,22:mms_callback,23:boot,24:foreground,25:notification_removed")
+            .plus(" http_routes=1:capabilities,2:compaction_capability,3:events,4:snapshot,5:snapshot_records,6:vault,7:attachments,8:other,9:snapshot_manifest")
     }
 }
