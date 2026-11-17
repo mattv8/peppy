@@ -3929,6 +3929,707 @@ async fn snapshot_manifest_observes_compaction_generation_and_deletion() {
     server.shutdown().await;
 }
 
+// Verified resync end to end: the real client core drives the real snapshot routes, following
+// the reference host loop of spec 4.3. The helpers below parse the real JSON; nothing is mocked.
+
+use peppy_client_core::{
+    Client as CoreClient, ClientConfig, Cursor, DatabaseKey, DeviceId, IngestResult,
+    NotificationCapture, RawSnapshotRecord, SnapshotManifestEntry, SnapshotPurpose, VaultId,
+};
+use std::time::Instant;
+
+const RESYNC_PASSPHRASE: &str = "correct horse battery staple";
+
+/// A real vault (owner profile and header from `peppy-crypto`) plus a directory for client databases.
+struct RealVault {
+    server: TestServer,
+    dir: tempfile::TempDir,
+    profile: KeyProfile,
+    header: peppy_crypto::VaultCheckHeader,
+}
+
+async fn real_vault() -> RealVault {
+    let profile = KeyProfile::new(Uuid::new_v4(), 1).unwrap();
+    let root = derive_root_key(RESYNC_PASSPHRASE, &profile).unwrap();
+    let header = peppy_crypto::create_vault_check_header(&root, profile.clone()).unwrap();
+    let server = TestServer::start_real(&profile, &header).await;
+    RealVault {
+        server,
+        dir: tempfile::TempDir::new().unwrap(),
+        profile,
+        header,
+    }
+}
+
+impl RealVault {
+    /// A client database for `device`, unlocked with the vault passphrase.
+    fn open(&self, name: &str, device: Uuid) -> CoreClient {
+        let client = CoreClient::open(
+            ClientConfig {
+                database_path: self.dir.path().join(name),
+                vault_id: VaultId(self.server.vault),
+                device_id: DeviceId(device),
+            },
+            DatabaseKey::new(&[5; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(&self.profile, &self.header, RESYNC_PASSPHRASE)
+            .unwrap();
+        client
+    }
+}
+
+fn cursor_of(value: &Value) -> u64 {
+    match value {
+        Value::String(text) => text.parse().expect("decimal cursor"),
+        other => other.as_u64().expect("numeric cursor"),
+    }
+}
+
+fn capture(key: &str, text: &str) -> NotificationCapture {
+    NotificationCapture {
+        notification_key: key.into(),
+        instance: "i".into(),
+        package_name: "com.example".into(),
+        app_name: "App".into(),
+        app_icon_png_base64: None,
+        title: "Download".into(),
+        text: text.into(),
+        category: None,
+        posted_at: 1,
+        dismissible: true,
+    }
+}
+
+/// The app's upgrade handshake: declare the capability, then record the snapshot's fields.
+async fn enable_compaction(server: &TestServer, client: &CoreClient) {
+    let (status, _) = server
+        .post(&server.owner_token, "/v1/compaction/capability", &json!({}))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, start) = server.get(&server.owner_token, "/v1/snapshot").await;
+    client
+        .set_server_compaction_state(
+            start["compaction_supported"].as_bool().unwrap(),
+            start["compaction_active"].as_bool().unwrap(),
+        )
+        .unwrap();
+}
+
+/// Uploads everything the producer queued, as the app's outbox does, acking each row.
+async fn publish(server: &TestServer, producer: &CoreClient) {
+    for envelope in producer.pending_outbox().unwrap() {
+        let (status, body) = server
+            .post(
+                &server.owner_token,
+                "/v1/events",
+                &serde_json::to_value(&envelope).unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        producer.ack_outbox(envelope.envelope_id).unwrap();
+    }
+}
+
+/// Pulls `/v1/events` from `after` to the end, as a device does: `(cursor, envelope JSON)`.
+async fn fetch_events(server: &TestServer, after: u64) -> Vec<(u64, Vec<u8>)> {
+    let mut events = Vec::new();
+    let mut cursor = after;
+    loop {
+        let (status, page) = server
+            .get(&server.owner_token, &format!("/v1/events?after={cursor}"))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        for record in page["events"].as_array().expect("events") {
+            events.push((
+                cursor_of(&record["cursor"]),
+                serde_json::to_vec(&record["envelope"]).unwrap(),
+            ));
+        }
+        match page["next_after"].as_str() {
+            Some(next) => cursor = next.parse().unwrap(),
+            None => return events,
+        }
+    }
+}
+
+/// Journals the fetched records whose cursor `keep` accepts, as the device's replay does.
+fn journal(device: &CoreClient, events: &[(u64, Vec<u8>)], keep: impl Fn(u64) -> bool) {
+    for (cursor, envelope_json) in events {
+        if keep(*cursor) {
+            let result = device.ingest_raw(envelope_json, Cursor(*cursor)).unwrap();
+            assert!(
+                matches!(result, IngestResult::Journaled),
+                "cursor {cursor} was not journaled"
+            );
+        }
+    }
+}
+
+/// Makes a device cursor `held` fall below the replay floor, as the prune tests do: every
+/// transport row up to `high` is aged past retention and pruned.
+async fn expire_cursor(server: &TestServer, held: i64, high: i64) {
+    sqlx::query(
+        "UPDATE event_log SET created_at=now()-interval '31 days' WHERE vault_id=$1 AND cursor<=$2",
+    )
+    .bind(server.vault)
+    .bind(high)
+    .execute(&server.pool)
+    .await
+    .unwrap();
+    let retention = Duration::from_secs(30 * 86_400);
+    assert!(prune_replay_log(&server.pool, retention).await.unwrap() > 0);
+    let (status, body) = server
+        .get(&server.owner_token, &format!("/v1/events?after={held}"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["reason"], "cursor_expired");
+}
+
+fn hex_digest(text: &str) -> [u8; 32] {
+    assert!(
+        text.len() == 64
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "manifest digest must be 64 lowercase hex: {text}"
+    );
+    hex::decode(text)
+        .unwrap()
+        .try_into()
+        .expect("32-byte digest")
+}
+
+/// Parses a manifest page exactly as the wire contract describes it (spec 3.2).
+fn manifest_entries(page: &Value) -> Vec<SnapshotManifestEntry> {
+    page["entries"]
+        .as_array()
+        .expect("manifest entries")
+        .iter()
+        .map(|entry| {
+            let flags = entry["flags"].as_u64().expect("flags");
+            assert!(flags <= 3, "unknown manifest flag bits: {flags}");
+            SnapshotManifestEntry {
+                cursor: Cursor(cursor_of(&entry["cursor"])),
+                digest: hex_digest(entry["digest"].as_str().expect("digest")),
+                has_compaction: flags & 1 != 0,
+                has_origin_tag: flags & 2 != 0,
+            }
+        })
+        .collect()
+}
+
+fn raw_records(records: &Value) -> Vec<RawSnapshotRecord> {
+    records
+        .as_array()
+        .expect("snapshot records")
+        .iter()
+        .map(|record| RawSnapshotRecord {
+            cursor: Cursor(cursor_of(&record["cursor"])),
+            envelope_json: serde_json::to_vec(&record["envelope"]).unwrap(),
+        })
+        .collect()
+}
+
+/// The envelopes the records route serves for a cut: the oracle for what the manifest must flag.
+async fn served_cut(server: &TestServer, high: u64, generation: u64) -> Vec<(u64, Value)> {
+    let (status, page) = server
+        .get(
+            &server.owner_token,
+            &format!("/v1/snapshot/records?high_water={high}&compaction_generation={generation}&after=0&limit=200"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    page["records"]
+        .as_array()
+        .expect("snapshot records")
+        .iter()
+        .map(|record| (cursor_of(&record["cursor"]), record["envelope"].clone()))
+        .collect()
+}
+
+/// Full import of the cut described by `start`: the reference the manifest path must match.
+async fn full_import(server: &TestServer, device: &CoreClient, start: &Value) {
+    let high = cursor_of(&start["high_water_cursor"]);
+    let generation = cursor_of(&start["compaction_generation"]);
+    let count = cursor_of(&start["record_count"]);
+    let mut progress = device
+        .begin_snapshot_with_compaction(
+            Cursor(high),
+            count,
+            SnapshotPurpose::Resync,
+            Some(generation),
+        )
+        .unwrap();
+    while progress.received_records < progress.expected_records {
+        let (status, page) = server
+            .get(
+                &server.owner_token,
+                &format!(
+                    "/v1/snapshot/records?high_water={high}&compaction_generation={generation}&after={}&limit=200",
+                    progress.last_cursor.0
+                ),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let records = raw_records(&page["records"]);
+        assert!(!records.is_empty(), "full import stalled: {page}");
+        progress = device
+            .append_snapshot_raw_page(progress.generation, &records)
+            .unwrap();
+    }
+    device.finish_snapshot(progress.generation).unwrap();
+    while device.apply_pending(100).unwrap().snapshot_remaining > 0 {}
+}
+
+#[derive(Default)]
+struct ResyncTrace {
+    /// `(after, missing)` of every manifest page the host read, in order.
+    pages: Vec<(u64, u32)>,
+    /// `(cursor, has_compaction, has_origin_tag)` of every manifest entry listed, in order.
+    entries: Vec<(u64, bool, bool)>,
+    /// Cursors downloaded through `/v1/snapshot/records`, in order.
+    downloaded: Vec<u64>,
+}
+
+impl ResyncTrace {
+    fn listed(&self) -> Vec<u64> {
+        self.entries.iter().map(|entry| entry.0).collect()
+    }
+}
+
+/// The reference host loop of spec 4.3 against the real routes, driven by the real core.
+async fn resync_through_manifest(
+    server: &TestServer,
+    device: &CoreClient,
+    limit: u16,
+) -> ResyncTrace {
+    let (status, start) = server.get(&server.owner_token, "/v1/snapshot").await;
+    assert_eq!(status, StatusCode::OK, "{start}");
+    assert_eq!(start["manifest_supported"], true);
+    let high = cursor_of(&start["high_water_cursor"]);
+    let generation = cursor_of(&start["compaction_generation"]);
+    let count = cursor_of(&start["record_count"]);
+    let mut trace = ResyncTrace::default();
+    let mut progress = device
+        .begin_snapshot_with_manifest(Cursor(high), count, Some(generation))
+        .unwrap();
+    while progress.received_records < progress.expected_records {
+        let after = progress.last_cursor.0;
+        let (status, page) = server
+            .get(
+                &server.owner_token,
+                &format!(
+                    "/v1/snapshot/manifest?high_water={high}&compaction_generation={generation}&after={after}&limit={limit}"
+                ),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let entries = manifest_entries(&page);
+        assert!(
+            !entries.is_empty(),
+            "server sent no manifest progress: {page}"
+        );
+        trace.entries.extend(
+            entries
+                .iter()
+                .map(|entry| (entry.cursor.0, entry.has_compaction, entry.has_origin_tag)),
+        );
+        let manifest = device
+            .append_snapshot_manifest(progress.generation, &entries)
+            .unwrap();
+        trace.pages.push((after, manifest.missing));
+        progress = manifest.progress;
+        let mut remaining = manifest.missing;
+        while remaining > 0 {
+            let after = progress.last_cursor.0;
+            let page_size = remaining.min(200);
+            let (status, records) = server
+                .get(
+                    &server.owner_token,
+                    &format!(
+                        "/v1/snapshot/records?high_water={high}&compaction_generation={generation}&after={after}&limit={page_size}"
+                    ),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{records}");
+            let raw = raw_records(&records["records"]);
+            assert!(
+                !raw.is_empty() && raw.len() <= remaining as usize,
+                "download must supply exactly the missing run: {records}"
+            );
+            trace
+                .downloaded
+                .extend(raw.iter().map(|record| record.cursor.0));
+            progress = device
+                .append_snapshot_raw_page(progress.generation, &raw)
+                .unwrap();
+            remaining -= raw.len() as u32;
+        }
+    }
+    device.finish_snapshot(progress.generation).unwrap();
+    while device.apply_pending(100).unwrap().snapshot_remaining > 0 {}
+    trace
+}
+
+/// What a user can observe on a device after sync: cursors, quarantine and notifications.
+fn observed(device: &CoreClient) -> Value {
+    let progress = device.replay_progress().unwrap();
+    json!({
+        "receive_cursor": device.receive_cursor().unwrap().0,
+        "received_through": progress.received_through.0,
+        "processed_through": progress.processed_through.0,
+        "waiting_for_keys": progress.waiting_for_keys,
+        "quarantined": device.quarantine_count().unwrap(),
+        "notifications": serde_json::to_value(device.notification_snapshot().unwrap()).unwrap(),
+    })
+}
+
+fn is_flagged(envelope: &Value) -> bool {
+    !envelope["compaction"].is_null() || !envelope["origin_tag"].is_null()
+}
+
+#[tokio::test]
+async fn verified_resync_downloads_only_the_records_the_journal_lacks() {
+    let real = real_vault().await;
+    let server = &real.server;
+    let producer = real.open("producer.db", server.owner_device);
+    let held_device = real.open("held.db", Uuid::new_v4());
+    let fresh = real.open("fresh.db", Uuid::new_v4());
+
+    for i in 0..6 {
+        producer
+            .capture_notification(capture(&format!("n{i}"), "held"))
+            .unwrap();
+    }
+    publish(server, &producer).await;
+    let held = fetch_events(server, 0).await;
+    assert_eq!(
+        held.iter().map(|event| event.0).collect::<Vec<_>>(),
+        (1..=6).collect::<Vec<_>>()
+    );
+    journal(&held_device, &held, |_| true);
+    held_device.apply_pending(100).unwrap();
+
+    // Four more records the device never fetches.
+    for i in 6..10 {
+        producer
+            .capture_notification(capture(&format!("n{i}"), "missing"))
+            .unwrap();
+    }
+    publish(server, &producer).await;
+    expire_cursor(server, 6, 10).await;
+
+    let (status, start) = server.get(&server.owner_token, "/v1/snapshot").await;
+    assert_eq!(status, StatusCode::OK, "{start}");
+    assert_eq!(start["manifest_supported"], true);
+    assert_eq!(start["max_manifest_page_size"], 5_000);
+    assert_eq!(start["high_water_cursor"], "10");
+    assert_eq!(start["record_count"], "10");
+
+    let trace = resync_through_manifest(server, &held_device, 4).await;
+    assert_eq!(trace.listed(), (1..=10).collect::<Vec<_>>());
+    assert!(trace.entries.iter().all(|entry| !entry.1 && !entry.2));
+    assert_eq!(trace.pages, vec![(0, 0), (4, 2), (8, 2)]);
+    assert_eq!(
+        trace.downloaded,
+        vec![7, 8, 9, 10],
+        "exactly the M records the journal lacks"
+    );
+
+    full_import(server, &fresh, &start).await;
+    assert_eq!(observed(&held_device), observed(&fresh));
+    assert_eq!(observed(&held_device)["receive_cursor"], 10);
+    assert_eq!(
+        observed(&held_device)["notifications"]["notifications"]
+            .as_array()
+            .unwrap()
+            .len(),
+        10
+    );
+    real.server.shutdown().await;
+}
+
+#[tokio::test]
+async fn verified_resync_downloads_flagged_held_records_and_matches_a_full_import() {
+    let real = real_vault().await;
+    let server = &real.server;
+    let producer = real.open("producer.db", server.owner_device);
+    let held_device = real.open("held.db", Uuid::new_v4());
+    let fresh = real.open("fresh.db", Uuid::new_v4());
+    enable_compaction(server, &producer).await;
+
+    // Held: a superseding chain, its compaction removal (flag bit 0), and an origin-tagged
+    // record (flag bit 1). This core never produces origin tags, so the server fixture supplies
+    // one; the envelope is journaled like any other record.
+    for text in ["10%", "50%", "90%"] {
+        producer
+            .capture_notification(capture("progress", text))
+            .unwrap();
+    }
+    publish(server, &producer).await;
+    producer.remove_notification("progress", "i").unwrap();
+    publish(server, &producer).await;
+    // A second producer, so the fixture does not take the owner's next producer sequence.
+    let gateway = server.provision_device("gateway").await;
+    let tagged = with_origin_tag(
+        set_fingerprint(
+            event(server.vault, gateway.id, 1, Uuid::new_v4(), 5),
+            &server.fingerprint,
+        ),
+        [7; 32],
+    );
+    let (status, accepted) = server.post(&gateway.token, "/v1/events", &tagged).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["cursor"], "5");
+
+    let held = fetch_events(server, 0).await;
+    assert_eq!(held.len(), 5);
+    journal(&held_device, &held, |_| true);
+    held_device.apply_pending(100).unwrap();
+
+    for i in 0..2 {
+        producer
+            .capture_notification(capture(&format!("n{i}"), "missing"))
+            .unwrap();
+    }
+    publish(server, &producer).await;
+    expire_cursor(server, 5, 7).await;
+
+    let (_, start) = server.get(&server.owner_token, "/v1/snapshot").await;
+    let served = served_cut(server, 7, cursor_of(&start["compaction_generation"])).await;
+    let flagged: Vec<u64> = served
+        .iter()
+        .filter(|(_, envelope)| is_flagged(envelope))
+        .map(|(cursor, _)| *cursor)
+        .collect();
+    assert!(
+        flagged.contains(&4),
+        "removal must carry compaction: {flagged:?}"
+    );
+    assert!(
+        flagged.contains(&5),
+        "tagged record must carry origin_tag: {flagged:?}"
+    );
+    let held_cursors: Vec<u64> = held.iter().map(|event| event.0).collect();
+    let expected_downloads: Vec<u64> = (1..=7)
+        .filter(|cursor| !held_cursors.contains(cursor) || flagged.contains(cursor))
+        .collect();
+
+    let trace = resync_through_manifest(server, &held_device, 3).await;
+    for (cursor, has_compaction, has_origin_tag) in &trace.entries {
+        let envelope = &served.iter().find(|(c, _)| c == cursor).unwrap().1;
+        assert_eq!(
+            *has_compaction,
+            !envelope["compaction"].is_null(),
+            "cursor {cursor}"
+        );
+        assert_eq!(
+            *has_origin_tag,
+            !envelope["origin_tag"].is_null(),
+            "cursor {cursor}"
+        );
+    }
+    assert_eq!(trace.downloaded, expected_downloads);
+
+    full_import(server, &fresh, &start).await;
+    assert_eq!(observed(&held_device), observed(&fresh));
+    assert_eq!(observed(&held_device)["receive_cursor"], 7);
+    real.server.shutdown().await;
+}
+
+#[tokio::test]
+async fn verified_resync_after_compaction_omits_compacted_cursors_and_fences_the_old_generation() {
+    let real = real_vault().await;
+    let server = &real.server;
+    let producer = real.open("producer.db", server.owner_device);
+    let held_device = real.open("held.db", Uuid::new_v4());
+    let fresh = real.open("fresh.db", Uuid::new_v4());
+    enable_compaction(server, &producer).await;
+
+    for text in ["10%", "50%", "90%"] {
+        producer
+            .capture_notification(capture("progress", text))
+            .unwrap();
+    }
+    publish(server, &producer).await;
+    producer.remove_notification("progress", "i").unwrap();
+    publish(server, &producer).await;
+    let held = fetch_events(server, 0).await;
+    assert_eq!(held.len(), 4);
+    journal(&held_device, &held, |_| true);
+    held_device.apply_pending(100).unwrap();
+
+    for i in 0..2 {
+        producer
+            .capture_notification(capture(&format!("n{i}"), "later"))
+            .unwrap();
+    }
+    publish(server, &producer).await;
+    expire_cursor(server, 4, 6).await;
+
+    // Cursors 1..=3 are superseded by the removal and sit below the floor: compaction deletes them.
+    assert!(compact_records(&server.pool).await.unwrap() > 0);
+    let remaining: Vec<i64> = sqlx::query_scalar(
+        "SELECT cursor FROM encrypted_records WHERE vault_id=$1 ORDER BY cursor",
+    )
+    .bind(server.vault)
+    .fetch_all(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining, vec![4, 5, 6]);
+
+    let (_, start) = server.get(&server.owner_token, "/v1/snapshot").await;
+    assert_eq!(start["compaction_generation"], "1");
+    assert_eq!(start["record_count"], "3");
+    // A request carrying the old generation is refused with the same resync body as records.
+    let (records_status, records_resync) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/records?high_water=6&compaction_generation=0&after=0",
+        )
+        .await;
+    let (manifest_status, manifest_resync) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/manifest?high_water=6&compaction_generation=0&after=0",
+        )
+        .await;
+    assert_eq!(records_status, StatusCode::CONFLICT);
+    assert_eq!(manifest_status, StatusCode::CONFLICT);
+    assert_eq!(manifest_resync, records_resync);
+    assert_eq!(manifest_resync["reason"], "compaction_generation_changed");
+
+    let trace = resync_through_manifest(server, &held_device, 2).await;
+    assert_eq!(
+        trace.listed(),
+        vec![4, 5, 6],
+        "compacted cursors 1..=3 must be absent"
+    );
+    assert_eq!(trace.pages, vec![(0, 2), (5, 1)]);
+    assert_eq!(trace.downloaded, vec![4, 5, 6]);
+
+    full_import(server, &fresh, &start).await;
+    assert_eq!(observed(&held_device), observed(&fresh));
+    assert_eq!(observed(&held_device)["receive_cursor"], 6);
+    real.server.shutdown().await;
+}
+
+#[tokio::test]
+async fn verified_resync_pages_missing_runs_across_manifest_boundaries() {
+    let real = real_vault().await;
+    let server = &real.server;
+    let producer = real.open("producer.db", server.owner_device);
+    let held_device = real.open("held.db", Uuid::new_v4());
+    let fresh = real.open("fresh.db", Uuid::new_v4());
+
+    for i in 0..12 {
+        producer
+            .capture_notification(capture(&format!("n{i:02}"), "x"))
+            .unwrap();
+    }
+    publish(server, &producer).await;
+    let events = fetch_events(server, 0).await;
+    assert_eq!(events.len(), 12);
+    // Held cursors leave gaps: missing 2..=4, 7 and 12.
+    let held = [1, 5, 6, 8, 9, 10, 11];
+    journal(&held_device, &events, |cursor| held.contains(&cursor));
+    expire_cursor(server, 1, 12).await;
+
+    // With limit 3, the page after 0 is [1 held, 2 and 3 missing]: its missing run 2..=3 ends at
+    // the page boundary. The page after 3 is [4 missing, 5 and 6 held]: the run 2..=4 spans two
+    // manifest pages. Held 5 and 6 are ignored until the host asks again from cursor 4.
+    let trace = resync_through_manifest(server, &held_device, 3).await;
+    assert_eq!(trace.pages, vec![(0, 2), (3, 1), (4, 1), (7, 0), (10, 1)]);
+    assert_eq!(
+        trace.listed(),
+        vec![1, 2, 3, 4, 5, 6, 5, 6, 7, 8, 9, 10, 11, 12]
+    );
+    assert_eq!(trace.downloaded, vec![2, 3, 4, 7, 12]);
+
+    let (_, start) = server.get(&server.owner_token, "/v1/snapshot").await;
+    full_import(server, &fresh, &start).await;
+    assert_eq!(observed(&held_device), observed(&fresh));
+    assert_eq!(observed(&held_device)["receive_cursor"], 12);
+    real.server.shutdown().await;
+}
+
+/// Timing note, not an assertion: the server cost of one 5,000-entry manifest page against the
+/// same range paged as records. Run with `-- --nocapture` to see the numbers.
+#[tokio::test]
+async fn manifest_cost_at_five_thousand_records() {
+    let server = TestServer::start().await;
+    let seeding = Instant::now();
+    // About 1.4 KB per served envelope: an 800-byte ciphertext, base64-encoded.
+    sqlx::query(
+        "INSERT INTO encrypted_records(vault_id,producer_device_id,envelope_id,cursor,producer_sequence,purpose,command_id,cipher_digest,envelope)
+         SELECT $1,$2,md5(cursor::text)::uuid,cursor,cursor,'event',NULL,decode(md5(cursor::text)||md5(cursor::text||'x'),'hex'),
+                jsonb_build_object('protocol_version',1,'envelope_id',md5(cursor::text)::uuid,'command_id',NULL::text,
+                    'vault_id',$1::text,'producer_device_id',$2::text,'producer_sequence',cursor::text,'key_epoch',1,
+                    'crypto_suite',1,'profile_fingerprint',$3::text,'purpose','event','route',NULL::text,
+                    'ciphertext',repeat('QUJD',267))
+         FROM generate_series(1,5000) AS cursor",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .bind(&server.fingerprint)
+    .execute(&server.pool)
+    .await
+    .expect("seed 5000 records");
+    sqlx::query("UPDATE vaults SET next_cursor=5000 WHERE vault_id=$1")
+        .bind(server.vault)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let seeded = seeding.elapsed();
+
+    let (_, start) = server.get(&server.owner_token, "/v1/snapshot").await;
+    assert_eq!(start["record_count"], "5000");
+    let timed = Instant::now();
+    let (status, manifest) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/manifest?high_water=5000&compaction_generation=0&after=0&limit=5000",
+        )
+        .await;
+    let manifest_time = timed.elapsed();
+    assert_eq!(status, StatusCode::OK, "{manifest}");
+    assert_eq!(manifest["entries"].as_array().unwrap().len(), 5_000);
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap().len();
+
+    let timed = Instant::now();
+    let (mut after, mut requests, mut served, mut envelope_bytes) = (0u64, 0u32, 0usize, 0usize);
+    loop {
+        let (status, page) = server
+            .get(
+                &server.owner_token,
+                &format!("/v1/snapshot/records?high_water=5000&compaction_generation=0&after={after}&limit=200"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        requests += 1;
+        let records = page["records"].as_array().unwrap();
+        if envelope_bytes == 0 {
+            envelope_bytes = serde_json::to_vec(&records[0]["envelope"]).unwrap().len();
+        }
+        served += records.len();
+        match page["next_after"].as_str() {
+            Some(next) => after = next.parse().unwrap(),
+            None => break,
+        }
+    }
+    let records_time = timed.elapsed();
+    assert_eq!(served, 5_000);
+
+    eprintln!(
+        "verified-resync timing: served envelope {envelope_bytes} B; seeding 5000 rows {seeded:?}; \
+         manifest 5000 entries in one request {manifest_time:?} ({manifest_bytes} B body); \
+         records paging of the same 5000 in {requests} requests of 200 {records_time:?}"
+    );
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn compaction_only_prunes_replay_expired_explicit_targets_and_fences_snapshot_pages() {
     let server = TestServer::start().await;
