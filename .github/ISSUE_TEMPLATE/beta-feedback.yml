@@ -1,0 +1,49 @@
+name: Beta feedback
+description: Share feedback about the Peppy beta.
+title: "[Beta] "
+labels:
+  - beta-feedback
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Issues are PUBLIC.** Do not paste phone numbers, contact names, message text, or screenshots that show them.
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Android (Google Play)
+        - Android (GitHub APK)
+        - Desktop macOS/Windows/Linux
+        - Web app
+        - iOS
+    validations:
+      required: true
+  - type: input
+    id: app-version
+    attributes:
+      label: App version
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+  - type: dropdown
+    id: feedback-type
+    attributes:
+      label: Feedback type
+      options:
+        - bug
+        - idea
+        - question
+        - other
