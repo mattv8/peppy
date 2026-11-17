@@ -835,6 +835,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_advance_mms_backfill_page(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_append_snapshot_manifest(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_append_snapshot_raw_page(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_apply_attachment_retention_response(
@@ -874,6 +876,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_snapshot(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_snapshot_with_compaction(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_snapshot_with_manifest(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_contact_book(
     ): Int
@@ -1441,6 +1445,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_advance_mms_backfill_page(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`phase`: RustBuffer.ByValue,`providerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_append_snapshot_manifest(`ptr`: Long,`generation`: Long,`entries`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_append_snapshot_raw_page(`ptr`: Long,`generation`: Long,`records`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_apply_attachment_retention_response(`ptr`: Long,`response`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1480,6 +1486,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_snapshot(`ptr`: Long,`highWater`: RustBuffer.ByValue,`recordCount`: Long,`purpose`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_snapshot_with_compaction(`ptr`: Long,`highWater`: RustBuffer.ByValue,`recordCount`: Long,`purpose`: RustBuffer.ByValue,`serverCompactionGeneration`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_snapshot_with_manifest(`ptr`: Long,`highWater`: RustBuffer.ByValue,`recordCount`: Long,`serverCompactionGeneration`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_capture_contact_book(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -2550,6 +2558,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_advance_mms_backfill_page() and 0xFFFF) != 31337) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_append_snapshot_manifest() and 0xFFFF) != 36009) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_append_snapshot_raw_page() and 0xFFFF) != 34355) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2608,6 +2619,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_snapshot_with_compaction() and 0xFFFF) != 12430) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_snapshot_with_manifest() and 0xFFFF) != 64430) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_contact_book() and 0xFFFF) != 63925) {
@@ -3565,6 +3579,33 @@ private class JavaLangRefCleanable(
 /**
  * @suppress
  */
+public object FfiConverterUByte: FfiConverter<UByte, Byte> {
+    override fun lift(value: Byte): UByte {
+        return value.toUByte()
+    }
+
+    fun lift(value: Int): UByte {
+        return value.toUByte()
+    }
+
+    override fun read(buf: ByteBuffer): UByte {
+        return lift(buf.get())
+    }
+
+    override fun lower(value: UByte): Byte {
+        return value.toByte()
+    }
+
+    override fun allocationSize(value: UByte) = 1UL
+
+    override fun write(value: UByte, buf: ByteBuffer) {
+        buf.put(value.toByte())
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterUShort: FfiConverter<UShort, Short> {
     override fun lift(value: Short): UShort {
         return value.toUShort()
@@ -3874,6 +3915,8 @@ public interface NativeClientInterface {
     
     fun `advanceMmsBackfillPage`(`generation`: kotlin.String, `scope`: kotlin.String, `phase`: NativeMmsBackfillPhase, `providerId`: kotlin.String)
     
+    fun `appendSnapshotManifest`(`generation`: kotlin.ULong, `entries`: List<NativeSnapshotManifestEntry>): NativeSnapshotManifestProgress
+    
     fun `appendSnapshotRawPage`(`generation`: kotlin.ULong, `records`: List<NativeRawSnapshotRecord>): NativeSnapshotProgress
     
     /**
@@ -3922,6 +3965,8 @@ public interface NativeClientInterface {
     fun `beginSnapshot`(`highWater`: kotlin.String, `recordCount`: kotlin.ULong, `purpose`: NativeSnapshotPurpose): NativeSnapshotProgress
     
     fun `beginSnapshotWithCompaction`(`highWater`: kotlin.String, `recordCount`: kotlin.ULong, `purpose`: NativeSnapshotPurpose, `serverCompactionGeneration`: kotlin.String?): NativeSnapshotProgress
+    
+    fun `beginSnapshotWithManifest`(`highWater`: kotlin.String, `recordCount`: kotlin.ULong, `serverCompactionGeneration`: kotlin.String?): NativeSnapshotProgress
     
     /**
      * Contact DTOs are Rust-owned JSON schemas; native hosts must not maintain a parallel wire model.
@@ -4713,6 +4758,22 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `appendSnapshotManifest`(`generation`: kotlin.ULong, `entries`: List<NativeSnapshotManifestEntry>): NativeSnapshotManifestProgress {
+            return FfiConverterTypeNativeSnapshotManifestProgress.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_append_snapshot_manifest(
+        it,
+        
+        FfiConverterULong.lower(`generation`),
+        FfiConverterSequenceTypeNativeSnapshotManifestEntry.lower(`entries`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `appendSnapshotRawPage`(`generation`: kotlin.ULong, `records`: List<NativeRawSnapshotRecord>): NativeSnapshotProgress {
             return FfiConverterTypeNativeSnapshotProgress.lift(
     callWithHandle {
@@ -5018,6 +5079,23 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         FfiConverterString.lower(`highWater`),
         FfiConverterULong.lower(`recordCount`),
         FfiConverterTypeNativeSnapshotPurpose.lower(`purpose`),
+        FfiConverterOptionalString.lower(`serverCompactionGeneration`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `beginSnapshotWithManifest`(`highWater`: kotlin.String, `recordCount`: kotlin.ULong, `serverCompactionGeneration`: kotlin.String?): NativeSnapshotProgress {
+            return FfiConverterTypeNativeSnapshotProgress.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_snapshot_with_manifest(
+        it,
+        
+        FfiConverterString.lower(`highWater`),
+        FfiConverterULong.lower(`recordCount`),
         FfiConverterOptionalString.lower(`serverCompactionGeneration`),_status)
 }
     }
@@ -16499,6 +16577,87 @@ public object FfiConverterTypeNativeSmsSource: FfiConverterRustBuffer<NativeSmsS
 
 
 
+data class NativeSnapshotManifestEntry (
+    var `cursor`: kotlin.String
+    , 
+    var `digest`: kotlin.String
+    , 
+    var `flags`: kotlin.UByte
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeSnapshotManifestEntry: FfiConverterRustBuffer<NativeSnapshotManifestEntry> {
+    override fun read(buf: ByteBuffer): NativeSnapshotManifestEntry {
+        return NativeSnapshotManifestEntry(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterUByte.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeSnapshotManifestEntry) = (
+            FfiConverterString.allocationSize(value.`cursor`) +
+            FfiConverterString.allocationSize(value.`digest`) +
+            FfiConverterUByte.allocationSize(value.`flags`)
+    )
+
+    override fun write(value: NativeSnapshotManifestEntry, buf: ByteBuffer) {
+            FfiConverterString.write(value.`cursor`, buf)
+            FfiConverterString.write(value.`digest`, buf)
+            FfiConverterUByte.write(value.`flags`, buf)
+    }
+}
+
+
+
+data class NativeSnapshotManifestProgress (
+    var `progress`: NativeSnapshotProgress
+    , 
+    var `missing`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeSnapshotManifestProgress: FfiConverterRustBuffer<NativeSnapshotManifestProgress> {
+    override fun read(buf: ByteBuffer): NativeSnapshotManifestProgress {
+        return NativeSnapshotManifestProgress(
+            FfiConverterTypeNativeSnapshotProgress.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeSnapshotManifestProgress) = (
+            FfiConverterTypeNativeSnapshotProgress.allocationSize(value.`progress`) +
+            FfiConverterUInt.allocationSize(value.`missing`)
+    )
+
+    override fun write(value: NativeSnapshotManifestProgress, buf: ByteBuffer) {
+            FfiConverterTypeNativeSnapshotProgress.write(value.`progress`, buf)
+            FfiConverterUInt.write(value.`missing`, buf)
+    }
+}
+
+
+
 data class NativeSnapshotProgress (
     var `generation`: kotlin.ULong
     , 
@@ -16511,6 +16670,8 @@ data class NativeSnapshotProgress (
     var `lastCursor`: kotlin.String
     , 
     var `serverCompactionGeneration`: kotlin.String?
+    , 
+    var `manifest`: kotlin.Boolean
     
 ){
     
@@ -16533,6 +16694,7 @@ public object FfiConverterTypeNativeSnapshotProgress: FfiConverterRustBuffer<Nat
             FfiConverterULong.read(buf),
             FfiConverterString.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -16542,7 +16704,8 @@ public object FfiConverterTypeNativeSnapshotProgress: FfiConverterRustBuffer<Nat
             FfiConverterULong.allocationSize(value.`expectedRecords`) +
             FfiConverterULong.allocationSize(value.`receivedRecords`) +
             FfiConverterString.allocationSize(value.`lastCursor`) +
-            FfiConverterOptionalString.allocationSize(value.`serverCompactionGeneration`)
+            FfiConverterOptionalString.allocationSize(value.`serverCompactionGeneration`) +
+            FfiConverterBoolean.allocationSize(value.`manifest`)
     )
 
     override fun write(value: NativeSnapshotProgress, buf: ByteBuffer) {
@@ -16552,6 +16715,7 @@ public object FfiConverterTypeNativeSnapshotProgress: FfiConverterRustBuffer<Nat
             FfiConverterULong.write(value.`receivedRecords`, buf)
             FfiConverterString.write(value.`lastCursor`, buf)
             FfiConverterOptionalString.write(value.`serverCompactionGeneration`, buf)
+            FfiConverterBoolean.write(value.`manifest`, buf)
     }
 }
 
@@ -21944,6 +22108,34 @@ public object FfiConverterSequenceTypeNativeSmsScanPlan: FfiConverterRustBuffer<
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeNativeSmsScanPlan.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeNativeSnapshotManifestEntry: FfiConverterRustBuffer<List<NativeSnapshotManifestEntry>> {
+    override fun read(buf: ByteBuffer): List<NativeSnapshotManifestEntry> {
+        val len = buf.getInt()
+        return List<NativeSnapshotManifestEntry>(len) {
+            FfiConverterTypeNativeSnapshotManifestEntry.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativeSnapshotManifestEntry>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativeSnapshotManifestEntry.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativeSnapshotManifestEntry>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativeSnapshotManifestEntry.write(it, buf)
         }
     }
 }

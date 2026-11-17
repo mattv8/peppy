@@ -145,8 +145,10 @@ pub(super) fn handles(command: &str) -> bool {
             | "sync_work_status"
             | "compaction_backfill_step"
             | "begin_snapshot"
+            | "begin_snapshot_manifest"
             | "snapshot_progress"
             | "append_snapshot_page"
+            | "append_snapshot_manifest"
             | "finish_snapshot"
             | "_worker_local_attachment_ids"
     )
@@ -452,8 +454,10 @@ impl BrowserCore {
             "sync_work_status" => self.sync_work_status(),
             "compaction_backfill_step" => self.compaction_backfill_step(args),
             "begin_snapshot" => self.begin_snapshot(args),
+            "begin_snapshot_manifest" => self.begin_snapshot_manifest(args),
             "snapshot_progress" => self.snapshot_progress(),
             "append_snapshot_page" => self.append_snapshot_page(args),
+            "append_snapshot_manifest" => self.append_snapshot_manifest(args),
             "finish_snapshot" => self.finish_snapshot(args),
             "_worker_local_attachment_ids" => {
                 let after = args
@@ -635,6 +639,19 @@ impl BrowserCore {
         Ok(snapshot_progress_view(progress))
     }
 
+    fn begin_snapshot_manifest(&self, args: Value) -> Result<Value, Failure> {
+        let high_water = parse_cursor(required_string(&args, "highWater")?)?;
+        let record_count = parse_u64(required_string(&args, "recordCount")?)?;
+        let generation = args
+            .get("serverCompactionGeneration")
+            .map(|value| parse_u64(value.as_str().ok_or_else(invalid)?))
+            .transpose()?;
+        self.client()?
+            .begin_snapshot_with_manifest(high_water, record_count, generation)
+            .map(snapshot_progress_view)
+            .map_err(core)
+    }
+
     fn snapshot_progress(&self) -> Result<Value, Failure> {
         Ok(
             json!({"progress": self.client()?.snapshot_progress().map_err(core)?.map(snapshot_progress_view)}),
@@ -664,6 +681,38 @@ impl BrowserCore {
             .append_snapshot_raw_page(generation, &records)
             .map_err(core)?;
         Ok(snapshot_progress_view(progress))
+    }
+
+    fn append_snapshot_manifest(&self, args: Value) -> Result<Value, Failure> {
+        let generation = parse_u64(required_string(&args, "generation")?)?;
+        let entries = args
+            .get("entries")
+            .and_then(Value::as_array)
+            .filter(|entries| {
+                !entries.is_empty()
+                    && entries.len() <= peppy_client_core::MAX_SNAPSHOT_MANIFEST_PAGE
+            })
+            .ok_or_else(invalid)?;
+        let entries = entries
+            .iter()
+            .map(|entry| {
+                let flags = entry
+                    .get("flags")
+                    .and_then(Value::as_u64)
+                    .filter(|flags| *flags <= 3)
+                    .ok_or_else(invalid)?;
+                Ok(peppy_client_core::SnapshotManifestEntry {
+                    cursor: parse_cursor(required_string(entry, "cursor")?)?,
+                    digest: hex_digest(required_string(entry, "digest")?)?,
+                    has_compaction: flags & 1 != 0,
+                    has_origin_tag: flags & 2 != 0,
+                })
+            })
+            .collect::<Result<Vec<_>, Failure>>()?;
+        self.client()?
+            .append_snapshot_manifest(generation, &entries)
+            .map(|result| json!({"progress": snapshot_progress_view(result.progress), "missing": result.missing}))
+            .map_err(core)
     }
 
     fn finish_snapshot(&self, args: Value) -> Result<Value, Failure> {
@@ -756,11 +805,147 @@ fn snapshot_progress_view(progress: SnapshotProgress) -> Value {
         "receivedRecords": progress.received_records.to_string(),
         "lastCursor": progress.last_cursor.0.to_string(),
         "serverCompactionGeneration": progress.server_compaction_generation.map(|value| value.to_string(),),
+        "manifest": progress.manifest,
     })
+}
+
+fn hex_digest(value: &str) -> Result<[u8; 32], Failure> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid());
+    }
+    let mut digest = [0; 32];
+    let (pairs, []) = value.as_bytes().as_chunks::<2>() else {
+        return Err(invalid());
+    };
+    for (index, pair) in pairs.iter().enumerate() {
+        let high = (pair[0] as char).to_digit(16).ok_or_else(invalid)?;
+        let low = (pair[1] as char).to_digit(16).ok_or_else(invalid)?;
+        digest[index] = ((high << 4) | low) as u8;
+    }
+    Ok(digest)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manifest_commands_validate_flags_and_report_manifest_progress() {
+        // Captured rows are sealed (and so listed as outbox envelopes) only once the vault is unlocked.
+        let root = tempfile::tempdir().unwrap();
+        let vault = peppy_client_core::VaultId::new();
+        let profile = peppy_client_core::KeyProfile::new(vault.0, 1).unwrap();
+        let header = create_vault_check_header(
+            &derive_root_key("passphrase", &profile).unwrap(),
+            profile.clone(),
+        )
+        .unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: root.path().join("client.db"),
+                vault_id: vault,
+                device_id: peppy_client_core::DeviceId::new(),
+            },
+            DatabaseKey::new(&[7; 32]).unwrap(),
+        )
+        .unwrap();
+        client.unlock(&profile, &header, "passphrase").unwrap();
+        let mut owned = BrowserCore::new(root.path().to_owned());
+        owned.client = Some(client);
+        let core = &mut owned;
+        let digest: String = {
+            let client = core.client.as_ref().unwrap();
+            client
+                .capture_incoming(peppy_client_core::IncomingSms {
+                    conversation_id: None,
+                    sender_address: "+15550004444".into(),
+                    body: "held record".into(),
+                    provider_message_id: Some("held-1".into()),
+                    imported: false,
+                })
+                .unwrap();
+            let envelope = client.pending_outbox().unwrap().remove(0);
+            client
+                .ingest(&envelope, peppy_client_core::Cursor(1))
+                .unwrap();
+            envelope
+                .wire_digest()
+                .unwrap()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        };
+        // An unflagged entry for a held plain record verifies through the command.
+        let begin = response(
+            core,
+            "begin_snapshot_manifest",
+            json!({"highWater": "1", "recordCount": "1"}),
+        );
+        assert_eq!(begin["value"]["manifest"], true);
+        let generation = begin["value"]["generation"].clone();
+        let page = response(
+            core,
+            "append_snapshot_manifest",
+            json!({"generation": generation, "entries": [{"cursor": "1", "digest": digest, "flags": 0}]}),
+        );
+        assert_eq!(page["value"]["missing"], 0);
+        // Each header flag reaches the core: a flagged entry never verifies, so it is missing.
+        for flags in [1, 2] {
+            let begin = response(
+                core,
+                "begin_snapshot_manifest",
+                json!({"highWater": "1", "recordCount": "1"}),
+            );
+            let generation = begin["value"]["generation"].clone();
+            let page = response(
+                core,
+                "append_snapshot_manifest",
+                json!({"generation": generation, "entries": [{"cursor": "1", "digest": digest, "flags": flags}]}),
+            );
+            assert_eq!(
+                page["value"]["missing"], 1,
+                "flags {flags} must reach the core"
+            );
+        }
+        // Only 0..=3 are valid, and digests must be lowercase hex.
+        let rejected = [
+            json!({"cursor": "1", "digest": digest, "flags": 4}),
+            json!({"cursor": "1", "digest": "AA".repeat(32), "flags": 0}),
+        ];
+        for entry in rejected {
+            let result = response(
+                core,
+                "append_snapshot_manifest",
+                json!({"generation": generation, "entries": [entry]}),
+            );
+            assert_eq!(result["error"]["code"], "invalid-request");
+        }
+        let refused = response(
+            core,
+            "begin_snapshot_manifest",
+            json!({"highWater": "200000", "recordCount": "100002"}),
+        );
+        // A core refusal keeps the generic `core` code at this boundary.
+        assert_eq!(refused["error"]["code"], "core");
+        assert_eq!(
+            response(
+                core,
+                "begin_snapshot",
+                json!({"highWater": "1", "recordCount": "1", "purpose": "bootstrap"})
+            )["value"]["manifest"],
+            false
+        );
+    }
+
+    #[test]
+    fn manifest_hex_digest_rejects_noncanonical_input() {
+        assert_eq!(super::hex_digest(&"00".repeat(32)).unwrap(), [0; 32]);
+        assert!(super::hex_digest(&"AA".repeat(32)).is_err());
+        assert!(super::hex_digest("0").is_err());
+        assert!(super::hex_digest(&"gg".repeat(32)).is_err());
+    }
     use super::*;
     use peppy_crypto::{create_vault_check_header, derive_root_key};
 
