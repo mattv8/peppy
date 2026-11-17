@@ -2904,3 +2904,103 @@ async fn membership_exchange_uses_transaction_local_scope_with_runtime_role() {
     let _ = task.await;
     fixture.cleanup().await;
 }
+
+#[tokio::test]
+async fn device_cursors_are_runtime_scoped_to_their_own_vault() {
+    let fixture = Fixture::new().await;
+    let own = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let own_device = Uuid::new_v4();
+    let other_device = Uuid::new_v4();
+    fixture.run_owner(&vault_insert(own)).await;
+    fixture.run_owner(&vault_insert(other)).await;
+    fixture.run_owner(&device_insert(own, own_device)).await;
+    fixture.run_owner(&device_insert(other, other_device)).await;
+    fixture
+        .run_owner(&format!(
+            "INSERT INTO device_cursors(vault_id,device_id,receive_cursor) VALUES ('{own}','{own_device}',3), ('{other}','{other_device}',7)"
+        ))
+        .await;
+
+    let mut transaction = fixture.runtime.begin().await.unwrap();
+    sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+        .bind(own.to_string())
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let visible: i64 = sqlx::query_scalar("SELECT count(*) FROM device_cursors WHERE vault_id=$1")
+        .bind(own)
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
+    let foreign_read: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM device_cursors WHERE vault_id=$1")
+            .bind(other)
+            .fetch_one(&mut *transaction)
+            .await
+            .unwrap();
+    let foreign_update = sqlx::query(
+        "UPDATE device_cursors SET receive_cursor=99 WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(other)
+    .bind(other_device)
+    .execute(&mut *transaction)
+    .await
+    .unwrap()
+    .rows_affected();
+    let foreign_delete =
+        sqlx::query("DELETE FROM device_cursors WHERE vault_id=$1 AND device_id=$2")
+            .bind(other)
+            .bind(other_device)
+            .execute(&mut *transaction)
+            .await
+            .unwrap()
+            .rows_affected();
+    transaction.rollback().await.unwrap();
+    assert_eq!(visible, 1, "runtime reads its own vault's cursor");
+    assert_eq!(
+        foreign_read, 0,
+        "runtime cannot read another vault's cursor"
+    );
+    assert_eq!(
+        foreign_update, 0,
+        "runtime cannot update another vault's cursor"
+    );
+    assert_eq!(
+        foreign_delete, 0,
+        "runtime cannot delete another vault's cursor"
+    );
+
+    // An insert into another vault is rejected by the policy's check, not silently dropped.
+    let mut transaction = fixture.runtime.begin().await.unwrap();
+    sqlx::query("SELECT set_config('peppy.vault_id', $1, true)")
+        .bind(own.to_string())
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let foreign_insert = sqlx::query(
+        "INSERT INTO device_cursors(vault_id,device_id,receive_cursor) VALUES ($1,$2,1)",
+    )
+    .bind(other)
+    .bind(Uuid::new_v4())
+    .execute(&mut *transaction)
+    .await;
+    assert!(
+        foreign_insert.is_err(),
+        "runtime cannot insert into another vault"
+    );
+    transaction.rollback().await.unwrap();
+
+    let untouched: Vec<(Uuid, i64)> =
+        sqlx::query_as("SELECT vault_id, receive_cursor FROM device_cursors ORDER BY vault_id")
+            .fetch_all(&fixture.migration)
+            .await
+            .unwrap();
+    let mut expected = vec![(own, 3), (other, 7)];
+    expected.sort();
+    assert_eq!(
+        untouched, expected,
+        "foreign writes left both rows unchanged"
+    );
+    fixture.cleanup().await;
+}
