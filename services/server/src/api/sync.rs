@@ -20,12 +20,13 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use super::{
-    ApiError, ApiResult, ApiState, Operation, auth_with_mode, authorize, database_unavailable,
-    still_active,
+    ApiError, ApiResult, ApiState, Operation, Principal, auth_with_mode, authorize,
+    database_unavailable, still_active,
 };
 use crate::storage::Storage;
 
 pub(super) const MAX_PAGE: u16 = 200;
+const MAX_MANIFEST_PAGE: u16 = 5_000;
 /// Serialized-envelope byte budget for one replay, snapshot or WebSocket page.
 /// The first row is always included, so a page always advances; a single
 /// envelope is at most ~1.4 MB of JSON.
@@ -291,11 +292,12 @@ async fn fetch_budgeted(
 
 /// Cursor to request next, or `None` when `records` reached `upper`.
 fn next_after(records: &[CursorRecord], upper: i64) -> Option<String> {
-    records
-        .last()
-        .map(|record| record.cursor)
-        .filter(|last| *last < upper)
-        .map(|last| last.to_string())
+    next_after_cursor(records.last().map(|record| record.cursor), upper)
+}
+
+fn next_after_cursor(last: Option<i64>, upper: i64) -> Option<String> {
+    last.filter(|cursor| *cursor < upper)
+        .map(|cursor| cursor.to_string())
 }
 
 pub(super) enum ReplayPage {
@@ -460,6 +462,8 @@ pub(super) async fn snapshot_start(
         "key_epoch": row.get::<i32, _>("key_epoch"),
         "profile_fingerprint": row.get::<String, _>("profile_fingerprint"),
         "max_page_size": MAX_PAGE,
+        "manifest_supported": true,
+        "max_manifest_page_size": MAX_MANIFEST_PAGE,
     })))
 }
 
@@ -469,6 +473,72 @@ pub(super) struct SnapshotPageQuery {
     compaction_generation: Option<String>,
     after: Option<String>,
     limit: Option<u16>,
+}
+
+struct SnapshotPageRequest {
+    high_water: i64,
+    compaction_generation: Option<i64>,
+    after: i64,
+}
+
+async fn snapshot_preamble(
+    state: &ApiState,
+    principal: &Principal,
+    query: &SnapshotPageQuery,
+    operation: &'static str,
+) -> Result<Result<(SnapshotPageRequest, Transaction<'static, Postgres>), Resync>, ApiError> {
+    let high_water = parse_cursor(&query.high_water)?;
+    let compaction_generation = query
+        .compaction_generation
+        .as_deref()
+        .map(parse_cursor)
+        .transpose()?;
+    let after = parse_cursor(query.after.as_deref().unwrap_or("0"))?;
+    if after > high_water {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_cursor"));
+    }
+    if compaction_generation.is_some() {
+        // Sending the fence is itself the device's declaration that it restarts
+        // a cut when the generation changes.
+        declare_compaction_fence(&state.db, principal.vault, principal.device)
+            .await
+            .map_err(|error| database_unavailable(&error, "snapshot_compaction_declare"))?;
+    }
+    let mut tx = read_only_snapshot(&state.db, principal.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, operation))?;
+    let marks = watermarks(&mut tx, principal.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, operation))?;
+    // Pre-compaction clients remain compatible until physical deletion. At
+    // that point a missing generation fails closed instead of returning a
+    // partial fixed-cut import.
+    let generation_changed = compaction_generation
+        .map_or(marks.compaction_generation != 0, |generation| {
+            generation != marks.compaction_generation
+        });
+    if high_water > marks.high_water || generation_changed {
+        tx.commit()
+            .await
+            .map_err(|error| database_unavailable(&error, operation))?;
+        return Ok(Err(Resync {
+            reason: if high_water > marks.high_water {
+                ResyncReason::CursorAhead
+            } else {
+                ResyncReason::CompactionGenerationChanged
+            },
+            high_water: marks.high_water,
+            replay_floor: marks.replay_floor,
+        }));
+    }
+    Ok(Ok((
+        SnapshotPageRequest {
+            high_water,
+            compaction_generation,
+            after,
+        },
+        tx,
+    )))
 }
 
 /// `GET /v1/snapshot/records?high_water=&after=&limit=` — one stable page under a fixed cut.
@@ -483,70 +553,116 @@ pub(super) async fn snapshot_records(
 ) -> Result<Response, ApiError> {
     let p = auth_with_mode(&s, &h).await?;
     authorize(&s, &p, Operation::Export).await?;
-    let high_water = parse_cursor(&q.high_water)?;
-    let compaction_generation = q
-        .compaction_generation
-        .as_deref()
-        .map(parse_cursor)
-        .transpose()?;
-    let after = parse_cursor(q.after.as_deref().unwrap_or("0"))?;
-    if after > high_water {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_cursor"));
-    }
     let limit = page_limit(q.limit);
-    if compaction_generation.is_some() {
-        // Sending the fence is itself the device's declaration that it restarts
-        // a cut when the generation changes.
-        declare_compaction_fence(&s.db, p.vault, p.device)
-            .await
-            .map_err(|error| database_unavailable(&error, "snapshot_compaction_declare"))?;
-    }
-    let read = async {
-        let mut tx = read_only_snapshot(&s.db, p.vault).await?;
-        let marks = watermarks(&mut tx, p.vault).await?;
-        // Pre-compaction clients remain compatible until physical deletion. At
-        // that point a missing generation fails closed instead of returning a
-        // partial fixed-cut import.
-        let generation_changed = compaction_generation
-            .map_or(marks.compaction_generation != 0, |generation| {
-                generation != marks.compaction_generation
-            });
-        if high_water > marks.high_water || generation_changed {
-            tx.commit().await?;
-            return Ok(Err(Resync {
-                reason: if high_water > marks.high_water {
-                    ResyncReason::CursorAhead
-                } else {
-                    ResyncReason::CompactionGenerationChanged
-                },
-                high_water: marks.high_water,
-                replay_floor: marks.replay_floor,
-            }));
-        }
-        let rows = fetch_budgeted(
-            &mut tx,
-            PageSource::ImmutableRecords,
-            p.vault,
-            after,
-            high_water,
-            limit,
-        )
-        .await?;
-        tx.commit().await?;
-        Ok::<_, sqlx::Error>(Ok(rows))
-    };
-    let rows = match read
-        .await
-        .map_err(|error| database_unavailable(&error, "snapshot_records"))?
-    {
-        Ok(rows) => rows,
+    let (request, mut tx) = match snapshot_preamble(&s, &p, &q, "snapshot_records").await? {
+        Ok(context) => context,
         Err(resync) => return Ok(resync.into_response()),
     };
+    let rows = fetch_budgeted(
+        &mut tx,
+        PageSource::ImmutableRecords,
+        p.vault,
+        request.after,
+        request.high_water,
+        limit,
+    )
+    .await
+    .map_err(|error| database_unavailable(&error, "snapshot_records"))?;
+    tx.commit()
+        .await
+        .map_err(|error| database_unavailable(&error, "snapshot_records"))?;
     Ok(Json(SnapshotPage {
-        high_water_cursor: high_water.to_string(),
-        compaction_generation: compaction_generation.unwrap_or_default().to_string(),
-        next_after: next_after(&rows, high_water),
+        high_water_cursor: request.high_water.to_string(),
+        compaction_generation: request
+            .compaction_generation
+            .unwrap_or_default()
+            .to_string(),
+        next_after: next_after(&rows, request.high_water),
         records: rows,
+    })
+    .into_response())
+}
+
+#[derive(Serialize)]
+struct SnapshotManifestEntry {
+    cursor: String,
+    digest: String,
+    flags: u8,
+}
+
+#[derive(Serialize)]
+struct SnapshotManifestPage {
+    high_water_cursor: String,
+    compaction_generation: String,
+    next_after: Option<String>,
+    entries: Vec<SnapshotManifestEntry>,
+}
+
+async fn fetch_manifest(
+    tx: &mut Transaction<'_, Postgres>,
+    vault: Uuid,
+    after: i64,
+    upper: i64,
+    limit: i64,
+) -> Result<Vec<SnapshotManifestEntry>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT cursor, cipher_digest,
+                COALESCE(jsonb_typeof(envelope->'compaction') <> 'null', FALSE) AS has_compaction,
+                COALESCE(jsonb_typeof(envelope->'origin_tag') <> 'null', FALSE) AS has_origin_tag
+         FROM encrypted_records
+         WHERE vault_id=$1 AND cursor>$2 AND cursor<=$3
+         ORDER BY cursor
+         LIMIT $4",
+    )
+    .bind(vault)
+    .bind(after)
+    .bind(upper)
+    .bind(limit)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| SnapshotManifestEntry {
+            cursor: row.get::<i64, _>("cursor").to_string(),
+            digest: hex::encode(row.get::<Vec<u8>, _>("cipher_digest")),
+            flags: u8::from(row.get::<bool, _>("has_compaction"))
+                | (u8::from(row.get::<bool, _>("has_origin_tag")) << 1),
+        })
+        .collect())
+}
+
+/// `GET /v1/snapshot/manifest?high_water=&after=&limit=` — record digests for verified resync.
+pub(super) async fn snapshot_manifest(
+    State(s): State<ApiState>,
+    h: HeaderMap,
+    Query(q): Query<SnapshotPageQuery>,
+) -> Result<Response, ApiError> {
+    let p = auth_with_mode(&s, &h).await?;
+    authorize(&s, &p, Operation::Export).await?;
+    let limit = i64::from(q.limit.unwrap_or(1_000).clamp(1, MAX_MANIFEST_PAGE));
+    let (request, mut tx) = match snapshot_preamble(&s, &p, &q, "snapshot_manifest").await? {
+        Ok(context) => context,
+        Err(resync) => return Ok(resync.into_response()),
+    };
+    let entries = fetch_manifest(&mut tx, p.vault, request.after, request.high_water, limit)
+        .await
+        .map_err(|error| database_unavailable(&error, "snapshot_manifest"))?;
+    tx.commit()
+        .await
+        .map_err(|error| database_unavailable(&error, "snapshot_manifest"))?;
+    Ok(Json(SnapshotManifestPage {
+        high_water_cursor: request.high_water.to_string(),
+        compaction_generation: request
+            .compaction_generation
+            .unwrap_or_default()
+            .to_string(),
+        next_after: next_after_cursor(
+            entries
+                .last()
+                .and_then(|entry| entry.cursor.parse::<i64>().ok()),
+            request.high_water,
+        ),
+        entries,
     })
     .into_response())
 }

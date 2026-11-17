@@ -3616,6 +3616,320 @@ async fn snapshot_pages_are_stable_under_concurrent_writes_and_converge_with_tai
 }
 
 #[tokio::test]
+async fn snapshot_manifest_matches_served_records_and_pages_with_the_cut() {
+    let server = TestServer::start().await;
+    let compacted = set_fingerprint(
+        compacting_event(server.vault, server.owner_device, 1, Uuid::new_v4(), vec![]),
+        &server.fingerprint,
+    );
+    let tagged = with_origin_tag(
+        set_fingerprint(
+            event(server.vault, server.owner_device, 2, Uuid::new_v4(), 2),
+            &server.fingerprint,
+        ),
+        [7; 32],
+    );
+    server.commit(&compacted).await;
+    server.commit(&tagged).await;
+    server.commit(&server.owner_event(3)).await;
+
+    let (status, start) = server.get(&server.owner_token, "/v1/snapshot").await;
+    assert_eq!(status, StatusCode::OK, "{start}");
+    assert_eq!(start["manifest_supported"], true);
+    assert_eq!(start["max_manifest_page_size"], 5_000);
+
+    let (status, records) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/records?high_water=3&compaction_generation=0&after=0&limit=3",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{records}");
+    let (status, manifest) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/manifest?high_water=3&compaction_generation=0&after=0&limit=3",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{manifest}");
+    assert_eq!(cursors(&manifest["entries"]), cursors(&records["records"]));
+    for (entry, record) in manifest["entries"]
+        .as_array()
+        .expect("manifest entries")
+        .iter()
+        .zip(records["records"].as_array().expect("snapshot records"))
+    {
+        let envelope: Envelope =
+            serde_json::from_value(record["envelope"].clone()).expect("served envelope");
+        assert_eq!(
+            entry["digest"],
+            hex::encode(envelope.wire_digest().expect("digest"))
+        );
+        let flags = entry["flags"].as_u64().expect("flags");
+        assert_eq!(flags & 1 != 0, envelope.compaction.is_some());
+        assert_eq!(flags & 2 != 0, envelope.origin_tag.is_some());
+    }
+    assert_eq!(manifest["entries"][2]["flags"], 0);
+
+    let (status, first) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/manifest?high_water=3&after=0&limit=1",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(cursors(&first["entries"]), vec![1]);
+    assert_eq!(first["next_after"], "1");
+    let (status, last) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/manifest?high_water=3&after=2&limit=0",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{last}");
+    assert_eq!(cursors(&last["entries"]), vec![3]);
+    assert_eq!(last["next_after"], Value::Null);
+    let (status, default_page) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/manifest?high_water=3&after=0",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{default_page}");
+    assert_eq!(cursors(&default_page["entries"]), vec![1, 2, 3]);
+
+    let (status, invalid) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/manifest?high_water=3&after=4",
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}");
+    assert_eq!(invalid["code"], "invalid_cursor");
+    let (records_status, records_resync) = server
+        .get(&server.owner_token, "/v1/snapshot/records?high_water=4")
+        .await;
+    let (manifest_status, manifest_resync) = server
+        .get(&server.owner_token, "/v1/snapshot/manifest?high_water=4")
+        .await;
+    assert_eq!(records_status, StatusCode::CONFLICT);
+    assert_eq!(manifest_status, StatusCode::CONFLICT);
+    assert_eq!(manifest_resync, records_resync);
+
+    let other_vault = Uuid::new_v4();
+    let (profile, fingerprint) = profile(other_vault, 1);
+    let foreign = create_owner(&server.pool, profile, vec![1], fingerprint.clone(), 1)
+        .await
+        .expect("foreign owner");
+    let foreign_event = set_fingerprint(
+        event(other_vault, foreign.device_id, 1, Uuid::new_v4(), 99),
+        &fingerprint,
+    );
+    let (status, body) = server
+        .post(&foreign.device_token, "/v1/events", &foreign_event)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, foreign_manifest) = server
+        .get(
+            &foreign.device_token,
+            "/v1/snapshot/manifest?high_water=1&after=0",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{foreign_manifest}");
+    assert_eq!(cursors(&foreign_manifest["entries"]), vec![1]);
+    let foreign_envelope: Envelope =
+        serde_json::from_value(foreign_event).expect("foreign envelope");
+    assert_eq!(
+        foreign_manifest["entries"][0]["digest"],
+        hex::encode(foreign_envelope.wire_digest().expect("foreign digest"))
+    );
+
+    sqlx::query("UPDATE devices SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2")
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .execute(&server.pool)
+        .await
+        .expect("revoke device");
+    let (status, _) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/manifest?high_water=3&after=0",
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn snapshot_manifest_clamps_pages_at_five_thousand_entries() {
+    let server = TestServer::start().await;
+    sqlx::query(
+        "INSERT INTO encrypted_records(vault_id,producer_device_id,envelope_id,cursor,producer_sequence,purpose,command_id,cipher_digest,envelope)
+         SELECT $1,$2,md5(cursor::text)::uuid,cursor,cursor,'event',NULL,decode(repeat('00',32),'hex'),
+                CASE WHEN cursor=1 THEN '{\"compaction\":null,\"origin_tag\":null}'::jsonb ELSE '{}'::jsonb END
+         FROM generate_series(1,5001) AS cursor",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .execute(&server.pool)
+    .await
+    .expect("insert retained records");
+    sqlx::query("UPDATE vaults SET next_cursor=5001 WHERE vault_id=$1")
+        .bind(server.vault)
+        .execute(&server.pool)
+        .await
+        .expect("advance high water");
+
+    let (status, default_page) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/manifest?high_water=5001&after=0",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{default_page}");
+    assert_eq!(
+        default_page["entries"]
+            .as_array()
+            .expect("default entries")
+            .len(),
+        1_000
+    );
+    let (status, minimum_page) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/manifest?high_water=5001&after=0&limit=0",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{minimum_page}");
+    assert_eq!(
+        minimum_page["entries"]
+            .as_array()
+            .expect("minimum entries")
+            .len(),
+        1
+    );
+    assert_eq!(minimum_page["entries"][0]["flags"], 0);
+    assert_eq!(default_page["entries"][1]["flags"], 0);
+    let digest = minimum_page["entries"][0]["digest"]
+        .as_str()
+        .expect("manifest digest");
+    assert_eq!(digest.len(), 64);
+    assert!(
+        digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit()
+                || (byte.is_ascii_lowercase() && byte.is_ascii_hexdigit())),
+        "digest must be lowercase hexadecimal: {digest}"
+    );
+
+    let (status, page) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/manifest?high_water=5001&after=0&limit=65535",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["entries"].as_array().expect("entries").len(), 5_000);
+    assert_eq!(page["next_after"], "5000");
+    let (status, tail) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/manifest?high_water=5001&after=5000&limit=65535",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{tail}");
+    assert_eq!(cursors(&tail["entries"]), vec![5001]);
+    assert_eq!(tail["next_after"], Value::Null);
+    let (status, empty) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/manifest?high_water=5001&after=5001",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert_eq!(empty["entries"], json!([]));
+    assert_eq!(empty["next_after"], Value::Null);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn snapshot_manifest_observes_compaction_generation_and_deletion() {
+    let server = TestServer::start().await;
+    let first = set_fingerprint(
+        compacting_event(server.vault, server.owner_device, 1, Uuid::new_v4(), vec![]),
+        &server.fingerprint,
+    );
+    let second = set_fingerprint(
+        compacting_event(
+            server.vault,
+            server.owner_device,
+            2,
+            Uuid::new_v4(),
+            vec![(server.owner_device, 1)],
+        ),
+        &server.fingerprint,
+    );
+    server.commit(&first).await;
+    server.commit(&second).await;
+    let gateway = server.provision_device("gateway").await;
+    for token in [&server.owner_token, &gateway.token] {
+        let (status, body) = server
+            .get(
+                token,
+                "/v1/snapshot/manifest?high_water=2&compaction_generation=0&after=0",
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let gateway_fences: bool = sqlx::query_scalar(
+        "SELECT compaction_generation_fence FROM devices WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(server.vault)
+    .bind(gateway.id)
+    .fetch_one(&server.pool)
+    .await
+    .expect("read fence");
+    assert!(gateway_fences);
+    sqlx::query("UPDATE event_log SET created_at=now()-interval '31 days' WHERE vault_id=$1")
+        .bind(server.vault)
+        .execute(&server.pool)
+        .await
+        .expect("age events");
+    assert_eq!(
+        prune_replay_log(&server.pool, Duration::from_secs(30 * 86_400))
+            .await
+            .expect("prune"),
+        2
+    );
+    assert_eq!(compact_records(&server.pool).await.expect("compact"), 1);
+
+    let (status, manifest) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/manifest?high_water=2&compaction_generation=1&after=0",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{manifest}");
+    assert_eq!(cursors(&manifest["entries"]), vec![2]);
+    let (records_status, records_resync) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/records?high_water=2&compaction_generation=0&after=0",
+        )
+        .await;
+    let (manifest_status, manifest_resync) = server
+        .get(
+            &server.owner_token,
+            "/v1/snapshot/manifest?high_water=2&compaction_generation=0&after=0",
+        )
+        .await;
+    assert_eq!(records_status, StatusCode::CONFLICT);
+    assert_eq!(manifest_status, StatusCode::CONFLICT);
+    assert_eq!(manifest_resync, records_resync);
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn compaction_only_prunes_replay_expired_explicit_targets_and_fences_snapshot_pages() {
     let server = TestServer::start().await;
     let first = set_fingerprint(
