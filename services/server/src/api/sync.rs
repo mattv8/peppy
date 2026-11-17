@@ -43,7 +43,7 @@ const MAX_INTERVAL_MILLIS: i64 = 10 * 365 * 86_400 * 1_000;
 /// environment; tests and embedders can pass explicit values.
 #[derive(Clone, Debug)]
 pub struct TransportOptions {
-    /// Transport-log replay retention (default 30 days). Older cursors receive `resync_required`.
+    /// Transport-log replay retention (default 30 days): the longest history is kept. Cursors below the replay floor receive `resync_required`.
     pub replay_retention: Duration,
     /// How often a live WebSocket rescans committed rows without any notice.
     pub durable_replay_interval: Duration,
@@ -404,13 +404,80 @@ pub(super) async fn events(
             high_water,
             replay_floor,
             rows,
-        } => Ok(Json(EventsPage {
-            high_water_cursor: high_water.to_string(),
-            replay_floor_cursor: replay_floor.to_string(),
-            next_after: next_after(&rows, high_water),
-            events: rows,
-        })
-        .into_response()),
+        } => {
+            let next = next_after(&rows, high_water);
+            record_device_cursor(&s.db, p.vault, p.device, after, next.is_none(), false).await;
+            Ok(Json(EventsPage {
+                high_water_cursor: high_water.to_string(),
+                replay_floor_cursor: replay_floor.to_string(),
+                next_after: next,
+                events: rows,
+            })
+            .into_response())
+        }
+    }
+}
+
+/// Best-effort durable replay progress. A failed report never changes the
+/// replay response or WebSocket handshake outcome.
+///
+/// A report that loses the race with pruning is simply not recorded. Its
+/// device's next request is classified by `Resync::classify` against the real
+/// floor, so the device either continues (its cursor is at or above the floor)
+/// or is told to resync. Recorded cursors bound how far the floor moves; they
+/// are not what makes replay correct.
+///
+/// Lock order: the vault row first, then `device_cursors`. Pruning and
+/// revocation take the vault row first too, so no path waits for the vault
+/// row while holding a `device_cursors` row. The decision read takes no lock; the
+/// share lock on the vault row is taken only when a write is due. It waits for
+/// the pruner's `FOR UPDATE`, so the floor read after it is the committed floor.
+pub(super) async fn record_device_cursor(
+    db: &PgPool,
+    vault: Uuid,
+    device: Uuid,
+    cursor: i64,
+    last_page: bool,
+    hello: bool,
+) {
+    let result = async {
+        let mut tx = crate::scope::begin(db, vault).await?;
+        // Mirrors the upsert's WHERE below; the upsert stays the final arbiter.
+        let stored: Option<(i64, bool)> = sqlx::query_as("SELECT receive_cursor, reported_at < now()-interval '5 minutes' FROM device_cursors WHERE vault_id=$1 AND device_id=$2")
+            .bind(vault)
+            .bind(device)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let due = match stored {
+            None => true,
+            Some((stored, stale)) => {
+                cursor < stored || stale || (cursor != stored && (last_page || hello))
+            }
+        };
+        if !due {
+            return tx.commit().await;
+        }
+        // A cursor below the floor read under the share lock was pruned: not recorded.
+        let floor: i64 = sqlx::query_scalar("SELECT replay_floor_cursor FROM vaults WHERE vault_id=$1 FOR SHARE")
+            .bind(vault)
+            .fetch_one(&mut *tx)
+            .await?;
+        if cursor < floor {
+            return tx.commit().await;
+        }
+        sqlx::query("INSERT INTO device_cursors(vault_id,device_id,receive_cursor,reported_at) VALUES($1,$2,$3,now()) ON CONFLICT(vault_id,device_id) DO UPDATE SET receive_cursor=EXCLUDED.receive_cursor,reported_at=now() WHERE EXCLUDED.receive_cursor < device_cursors.receive_cursor OR device_cursors.reported_at < now()-interval '5 minutes' OR (EXCLUDED.receive_cursor <> device_cursors.receive_cursor AND ($4 OR $5))")
+            .bind(vault)
+            .bind(device)
+            .bind(cursor)
+            .bind(last_page)
+            .bind(hello)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(error_kind = %error, "device cursor report failed");
     }
 }
 
@@ -777,16 +844,46 @@ pub async fn drain_outbox(
     })
 }
 
-/// Prunes an expired contiguous prefix of each vault's transport log and
+/// Progress of the devices that still count toward a vault's replay floor, as
+/// the lowest cursor among them (NULL when none counts). A device counts when it
+/// is not revoked and either reported within the retention (its stored cursor)
+/// or has no report and was paired within the retention (cursor 0). Expects
+/// `$1` = retention in milliseconds, `d` = `devices` and `c` = `device_cursors`.
+const COUNTED_PROGRESS: &str = "MIN(CASE WHEN d.revoked_at IS NULL AND c.reported_at >= now() - ($1::bigint * interval '1 millisecond') THEN c.receive_cursor WHEN d.revoked_at IS NULL AND c.device_id IS NULL AND d.created_at >= now() - ($1::bigint * interval '1 millisecond') THEN 0 END)";
+
+/// Prunes the eligible contiguous prefix of each vault's transport log and
 /// advances `replay_floor_cursor` in the same transaction. Immutable
 /// `encrypted_records` are never touched. Returns the number of rows removed.
+///
+/// A row is eligible when it is older than the retention (the cap) or when every
+/// counted device has already received it (progress). The floor moves to the
+/// greater of the age cut (rows older than the retention) and the progress cut
+/// (the lowest cursor of the counted devices).
+/// Candidate vaults are the union of two bounded sets: vaults with rows older
+/// than the retention (`event_log_created_at`), and vaults whose progress cut is
+/// above their floor, largest distance first (a full pass over `devices` and
+/// `device_cursors`). Each set is capped at `PRUNE_BATCH_VAULTS`; a pruned vault
+/// leaves its set, so the others rotate in.
 pub async fn prune_replay_log(db: &PgPool, retention: Duration) -> Result<u64, sqlx::Error> {
     let retention = interval_millis(retention);
-    let vaults: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT vault_id FROM event_log WHERE created_at < now() - ($1::bigint * interval '1 millisecond') LIMIT $2")
+    let aged: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT vault_id FROM event_log WHERE created_at < now() - ($1::bigint * interval '1 millisecond') LIMIT $2")
         .bind(retention)
         .bind(PRUNE_BATCH_VAULTS)
         .fetch_all(db)
         .await?;
+    let progressed: Vec<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT p.vault_id FROM (SELECT d.vault_id, {COUNTED_PROGRESS} AS progress FROM devices d LEFT JOIN device_cursors c ON c.vault_id=d.vault_id AND c.device_id=d.device_id GROUP BY d.vault_id) p JOIN vaults v ON v.vault_id=p.vault_id WHERE p.progress > v.replay_floor_cursor AND EXISTS (SELECT 1 FROM event_log e WHERE e.vault_id=v.vault_id) ORDER BY p.progress - v.replay_floor_cursor DESC LIMIT $2"
+    ))
+    .bind(retention)
+    .bind(PRUNE_BATCH_VAULTS)
+    .fetch_all(db)
+    .await?;
+    let mut vaults = aged;
+    for vault in progressed {
+        if !vaults.contains(&vault) {
+            vaults.push(vault);
+        }
+    }
     let mut removed = 0;
     for vault in vaults {
         let mut tx = db.begin().await?;
@@ -809,9 +906,18 @@ pub async fn prune_replay_log(db: &PgPool, retention: Duration) -> Result<u64, s
             tx.commit().await?;
             continue;
         };
-        // Every row below the youngest retained row is expired.
-        let cut = youngest
-            .map_or(newest, |cursor| cursor - 1)
+        let age_cut = youngest.map_or(newest, |cursor| cursor - 1);
+        // NULL (no counted device) means no progress cut. Never pass the newest
+        // cursor here: that would prune rows nobody has received.
+        let progress_cut: Option<i64> = sqlx::query_scalar(&format!(
+            "SELECT {COUNTED_PROGRESS} FROM devices d LEFT JOIN device_cursors c ON c.vault_id=d.vault_id AND c.device_id=d.device_id WHERE d.vault_id=$2"
+        ))
+        .bind(retention)
+        .bind(vault)
+        .fetch_one(&mut *tx)
+        .await?;
+        let cut = age_cut
+            .max(progress_cut.map_or(age_cut, |cursor| cursor.min(newest)))
             .min(floor.saturating_add(PRUNE_BATCH_ROWS));
         if cut <= floor {
             tx.commit().await?;
@@ -1236,7 +1342,7 @@ pub(super) fn spawn_maintenance(
                     if weak.strong_count() == 0 || db.is_closed() { return; }
                     match prune_replay_log(&db, options.replay_retention).await {
                         Ok(0) => {}
-                        Ok(rows) => tracing::info!(rows, "pruned expired replay log rows"),
+                        Ok(rows) => tracing::info!(rows, "pruned replay log rows"),
                         Err(error) => tracing::warn!(error_kind = %error, "replay pruning failed"),
                     }
                     match compact_records(&db).await {

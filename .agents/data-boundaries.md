@@ -48,7 +48,7 @@ Agent reference for security-sensitive behavior. Preserve these boundaries when 
 
 ## Notification storage and authority
 
-- Notification title, text, and app metadata travel in encrypted envelopes. Replay defaults to 30 days. Compatible clients can supersede state after replay retention; dismissal does not erase previously synced ciphertext immediately.
+- Notification title, text, and app metadata travel in encrypted envelopes. The server drops replay history sooner once every active device has received it; the retention period (`PEPPY_REPLAY_RETENTION_DAYS`, default 30 days) is the longest it is kept. Compatible clients can supersede state after replay retention; dismissal does not erase previously synced ciphertext immediately.
 - Notification imports share the 100,000-record snapshot limit. Coalescing and compaction reduce superseded state but do not remove legacy history or vault-wide bootstrap limits.
 - While keys are locked, notification plaintext is dropped; there is no plaintext backlog. Remote app filters apply after the phone syncs, and muting cannot recall an upload in flight.
 - Every vault-secret holder can request a phone notification dismissal. Mirroring does not encrypt carrier SMS/MMS or add forward secrecy. Push wakes carry opaque, content-free hints and are neither content nor delivery evidence.

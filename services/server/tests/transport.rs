@@ -6255,3 +6255,614 @@ async fn real_client_history_purges_on_the_real_server_and_fresh_snapshot_does_n
     assert_eq!(again["duplicate"], true);
     server.shutdown().await;
 }
+
+// Progress-based replay floor (L7). Cursor reports live in `device_cursors`; the
+// tests move time with SQL on `reported_at`, `devices.created_at` and `event_log.created_at`.
+
+fn replay_retention() -> Duration {
+    Duration::from_secs(30 * 86_400)
+}
+
+/// The stored `(receive_cursor, reported_at seconds since the epoch)` of a device.
+async fn cursor_report(server: &TestServer, device: Uuid) -> Option<(i64, f64)> {
+    sqlx::query_as("SELECT receive_cursor, EXTRACT(EPOCH FROM reported_at)::float8 FROM device_cursors WHERE vault_id=$1 AND device_id=$2")
+        .bind(server.vault)
+        .bind(device)
+        .fetch_optional(&server.pool)
+        .await
+        .unwrap()
+}
+
+async fn set_cursor_report(server: &TestServer, device: Uuid, cursor: i64, reported_secs_ago: i64) {
+    sqlx::query("INSERT INTO device_cursors(vault_id,device_id,receive_cursor,reported_at) VALUES($1,$2,$3,now()-($4::bigint * interval '1 second')) ON CONFLICT(vault_id,device_id) DO UPDATE SET receive_cursor=EXCLUDED.receive_cursor,reported_at=EXCLUDED.reported_at")
+        .bind(server.vault)
+        .bind(device)
+        .bind(cursor)
+        .bind(reported_secs_ago)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+}
+
+async fn replay_floor(server: &TestServer) -> i64 {
+    sqlx::query_scalar("SELECT replay_floor_cursor FROM vaults WHERE vault_id=$1")
+        .bind(server.vault)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap()
+}
+
+async fn retained_rows(server: &TestServer) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM event_log WHERE vault_id=$1")
+        .bind(server.vault)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap()
+}
+
+/// Ages transport rows up to `cursor` past the retention.
+async fn age_events(server: &TestServer, cursor: i64) {
+    sqlx::query(
+        "UPDATE event_log SET created_at=now()-interval '31 days' WHERE vault_id=$1 AND cursor<=$2",
+    )
+    .bind(server.vault)
+    .bind(cursor)
+    .execute(&server.pool)
+    .await
+    .unwrap();
+}
+
+/// Pairs `device` long ago: it is no longer counted unless it reported.
+async fn age_device(server: &TestServer, device: Uuid) {
+    sqlx::query(
+        "UPDATE devices SET created_at=now()-interval '31 days' WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(server.vault)
+    .bind(device)
+    .execute(&server.pool)
+    .await
+    .unwrap();
+}
+
+async fn prune_once(server: &TestServer) -> u64 {
+    prune_replay_log(&server.pool, replay_retention())
+        .await
+        .unwrap()
+}
+
+/// A vault built with SQL: `events` transport rows (aged `age_days` days), and when
+/// `reported_cursor` is set, one owner device that reported that cursor just now.
+async fn insert_vault(
+    pool: &PgPool,
+    vault: Uuid,
+    events: i64,
+    age_days: i64,
+    reported_cursor: Option<i64>,
+) {
+    let device = Uuid::new_v4();
+    sqlx::query("INSERT INTO vaults(vault_id,public_key_profile,encrypted_vault_check_header,key_epoch,profile_fingerprint,next_cursor) VALUES($1,$2,$3,1,$4,$5)")
+        .bind(vault)
+        .bind(json!({"fixture": true}))
+        .bind(vec![7u8])
+        .bind("0".repeat(64))
+        .bind(events)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,'owner',$3,$4,1)")
+        .bind(vault)
+        .bind(device)
+        .bind(json!({"fixture": true}))
+        .bind("0".repeat(64))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO event_log(vault_id,cursor,envelope_id,producer_device_id,producer_sequence,purpose,cipher_digest,envelope,created_at) SELECT $1,n,gen_random_uuid(),$2,n,'event',$3,$4,now()-($5::bigint * interval '1 day') FROM generate_series(1,$6::bigint) AS n")
+        .bind(vault)
+        .bind(device)
+        .bind(vec![0u8])
+        .bind(json!({}))
+        .bind(age_days)
+        .bind(events)
+        .execute(pool)
+        .await
+        .unwrap();
+    if let Some(cursor) = reported_cursor {
+        sqlx::query("INSERT INTO device_cursors(vault_id,device_id,receive_cursor,reported_at) VALUES($1,$2,$3,now())")
+            .bind(vault)
+            .bind(device)
+            .bind(cursor)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn events_fetch_and_hello_record_the_device_cursor() {
+    let server = TestServer::start().await;
+    for sequence in 1..=5 {
+        server.commit(&server.owner_event(sequence)).await;
+    }
+    let device = server.provision_device("device").await;
+    assert_eq!(cursor_report(&server, device.id).await, None);
+    let (status, _) = server.get(&device.token, "/v1/events?after=2").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cursor_report(&server, device.id).await.unwrap().0, 2);
+
+    let (status, _) = server.get(&server.owner_token, "/v1/events?after=3").await;
+    assert_eq!(status, StatusCode::OK);
+    let mut ws = server.connect_ws(&server.owner_token).await;
+    send_hello(&mut ws, "4").await;
+    assert_eq!(next_json(&mut ws, 3).await["type"], "ready");
+    assert_eq!(
+        cursor_report(&server, server.owner_device).await.unwrap().0,
+        4
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn cursor_write_rule_skips_intermediate_pages_and_recent_equal_values() {
+    let server = TestServer::start().await;
+    for sequence in 1..=10 {
+        server.commit(&server.owner_event(sequence)).await;
+    }
+    let device = server.provision_device("device").await;
+    set_cursor_report(&server, device.id, 2, 0).await;
+
+    // An intermediate page of a catch-up: a different value, but more pages follow.
+    let (status, page) = server
+        .get(&device.token, "/v1/events?after=4&limit=2")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page["next_after"].is_string(), "{page}");
+    assert_eq!(cursor_report(&server, device.id).await.unwrap().0, 2);
+
+    // The last page: the different value is written.
+    let (status, _) = server.get(&device.token, "/v1/events?after=4").await;
+    assert_eq!(status, StatusCode::OK);
+    let written = cursor_report(&server, device.id).await.unwrap();
+    assert_eq!(written.0, 4);
+
+    // An equal value inside five minutes is skipped: the report time does not move.
+    let (status, _) = server.get(&device.token, "/v1/events?after=4").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cursor_report(&server, device.id).await, Some(written));
+
+    // An equal value after five minutes is written again.
+    set_cursor_report(&server, device.id, 4, 6 * 60).await;
+    let stale = cursor_report(&server, device.id).await.unwrap().1;
+    let (status, _) = server.get(&device.token, "/v1/events?after=4").await;
+    assert_eq!(status, StatusCode::OK);
+    let refreshed = cursor_report(&server, device.id).await.unwrap();
+    assert_eq!(refreshed.0, 4);
+    assert!(refreshed.1 > stale + 300.0, "{refreshed:?} vs {stale}");
+
+    // A lower cursor (a rewind) is written at once, even on an intermediate page where
+    // the other clauses would skip it.
+    let (status, page) = server
+        .get(&device.token, "/v1/events?after=1&limit=2")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page["next_after"].is_string(), "{page}");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cursor_report(&server, device.id).await.unwrap().0, 1);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn ahead_and_expired_cursors_are_never_recorded() {
+    let server = TestServer::start().await;
+    for sequence in 1..=10 {
+        server.commit(&server.owner_event(sequence)).await;
+    }
+    age_events(&server, 6).await;
+    assert_eq!(prune_once(&server).await, 6);
+    let device = server.provision_device("device").await;
+
+    let (status, expired) = server.get(&device.token, "/v1/events?after=0").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(expired["reason"], "cursor_expired");
+    let (status, ahead) = server.get(&device.token, "/v1/events?after=11").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(ahead["reason"], "cursor_ahead");
+    assert_eq!(cursor_report(&server, device.id).await, None);
+
+    for (cursor, reason) in [("0", "cursor_expired"), ("11", "cursor_ahead")] {
+        let mut ws = server.connect_ws(&device.token).await;
+        send_hello(&mut ws, cursor).await;
+        let frame = next_json(&mut ws, 3).await;
+        assert_eq!(frame["type"], "resync_required", "{frame}");
+        assert_eq!(frame["reason"], reason);
+        assert_eq!(cursor_report(&server, device.id).await, None);
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn prune_stops_at_the_lowest_counted_cursor_even_when_every_row_is_young() {
+    let server = TestServer::start().await;
+    for sequence in 1..=10 {
+        server.commit(&server.owner_event(sequence)).await;
+    }
+    set_cursor_report(&server, server.owner_device, 10, 0).await;
+    let behind = server.provision_device("device").await;
+    set_cursor_report(&server, behind.id, 6, 0).await;
+
+    assert_eq!(prune_once(&server).await, 6);
+    assert_eq!(replay_floor(&server).await, 6);
+    assert_eq!(retained_rows(&server).await, 4);
+    // The device behind is exactly at the floor: it is served, one lower it resyncs.
+    let (status, _) = server.get(&behind.token, "/v1/events?after=6").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = server.get(&behind.token, "/v1/events?after=5").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["reason"], "cursor_expired");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn silent_device_stops_counting_once_its_report_is_older_than_the_retention() {
+    let server = TestServer::start().await;
+    for sequence in 1..=10 {
+        server.commit(&server.owner_event(sequence)).await;
+    }
+    set_cursor_report(&server, server.owner_device, 10, 0).await;
+    let silent = server.provision_device("device").await;
+    set_cursor_report(&server, silent.id, 3, 31 * 86_400).await;
+
+    assert_eq!(prune_once(&server).await, 10);
+    assert_eq!(replay_floor(&server).await, 10);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn newly_paired_device_without_a_report_holds_the_floor_until_the_retention_passes() {
+    let server = TestServer::start().await;
+    for sequence in 1..=10 {
+        server.commit(&server.owner_event(sequence)).await;
+    }
+    set_cursor_report(&server, server.owner_device, 10, 0).await;
+    // Pairing inserts only the device row, never a cursor row.
+    let paired = server.provision_device("device").await;
+    assert_eq!(cursor_report(&server, paired.id).await, None);
+
+    assert_eq!(prune_once(&server).await, 0);
+    assert_eq!(replay_floor(&server).await, 0);
+    age_device(&server, paired.id).await;
+    assert_eq!(prune_once(&server).await, 10);
+    assert_eq!(replay_floor(&server).await, 10);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn revoked_device_does_not_count_and_its_cursor_row_is_deleted_over_http() {
+    let server = TestServer::start().await;
+    for sequence in 1..=10 {
+        server.commit(&server.owner_event(sequence)).await;
+    }
+    set_cursor_report(&server, server.owner_device, 10, 0).await;
+    let device = server.provision_device("device").await;
+    set_cursor_report(&server, device.id, 0, 0).await;
+    assert_eq!(prune_once(&server).await, 0);
+
+    let (status, body) = server
+        .post(
+            &server.owner_token,
+            &format!("/v1/devices/{}/revoke", device.id),
+            &Value::Null,
+        )
+        .await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(cursor_report(&server, device.id).await, None);
+    assert_eq!(prune_once(&server).await, 10);
+    assert_eq!(replay_floor(&server).await, 10);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn caught_up_vault_with_only_young_rows_is_pruned() {
+    let server = TestServer::start().await;
+    for sequence in 1..=10 {
+        server.commit(&server.owner_event(sequence)).await;
+    }
+    set_cursor_report(&server, server.owner_device, 10, 0).await;
+    assert_eq!(prune_once(&server).await, 10);
+    assert_eq!(replay_floor(&server).await, 10);
+    assert_eq!(retained_rows(&server).await, 0);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn no_counted_device_prunes_by_age_only_and_young_rows_survive() {
+    let server = TestServer::start().await;
+    for sequence in 1..=10 {
+        server.commit(&server.owner_event(sequence)).await;
+    }
+    // The only device was paired long ago and never reported: it counts for nothing.
+    age_device(&server, server.owner_device).await;
+    assert_eq!(prune_once(&server).await, 0);
+    assert_eq!(retained_rows(&server).await, 10);
+    assert_eq!(replay_floor(&server).await, 0);
+
+    age_events(&server, 6).await;
+    assert_eq!(prune_once(&server).await, 6);
+    assert_eq!(replay_floor(&server).await, 6);
+    assert_eq!(retained_rows(&server).await, 4);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn candidate_sets_are_bounded_and_rotate_so_every_vault_is_pruned() {
+    let server = TestServer::start().await;
+    let pool = server.pool.clone();
+    // 100 vaults that hold their floor: a device at cursor 0 under young rows. They sort
+    // first by vault_id, so an ordering by vault_id alone would keep choosing them.
+    for index in 1..=100u128 {
+        insert_vault(&pool, Uuid::from_u128(index), 3, 0, Some(0)).await;
+    }
+    // 101 vaults caught up at cursor 3 under young rows: the progress set.
+    for index in 1..=101u128 {
+        insert_vault(&pool, Uuid::from_u128(1_000 + index), 3, 0, Some(3)).await;
+    }
+    // One vault whose rows are all older than the retention: the age set, sorted last.
+    let aged = Uuid::from_u128(u128::MAX);
+    insert_vault(&pool, aged, 2, 31, None).await;
+
+    // Pass one: the aged vault plus 100 progress vaults, never the holding vaults.
+    let first = prune_replay_log(&pool, replay_retention()).await.unwrap();
+    assert_eq!(first, 2 + 100 * 3);
+    // Pass two: the remaining progress vault; pass three: nothing left.
+    assert_eq!(
+        prune_replay_log(&pool, replay_retention()).await.unwrap(),
+        3
+    );
+    assert_eq!(
+        prune_replay_log(&pool, replay_retention()).await.unwrap(),
+        0
+    );
+    let pruned: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM vaults WHERE replay_floor_cursor > 0")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(pruned, 102);
+    let held: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM event_log WHERE vault_id BETWEEN $1 AND $2")
+            .bind(Uuid::from_u128(1))
+            .bind(Uuid::from_u128(100))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(held, 300, "holding vaults keep their rows");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn device_that_keeps_fetching_never_receives_cursor_expired_for_its_reported_cursor() {
+    let server = TestServer::start().await;
+    for sequence in 1..=10 {
+        server.commit(&server.owner_event(sequence)).await;
+    }
+    set_cursor_report(&server, server.owner_device, 10, 0).await;
+    let device = server.provision_device("device").await;
+    for cursor in [3, 6, 10] {
+        let (status, body) = server
+            .get(&device.token, &format!("/v1/events?after={cursor}"))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        prune_once(&server).await;
+        assert_eq!(replay_floor(&server).await, cursor);
+        assert_eq!(cursor_report(&server, device.id).await.unwrap().0, cursor);
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn vaults_do_not_affect_each_other() {
+    let server = TestServer::start().await;
+    for sequence in 1..=10 {
+        server.commit(&server.owner_event(sequence)).await;
+    }
+    set_cursor_report(&server, server.owner_device, 10, 0).await;
+    let other = Uuid::new_v4();
+    insert_vault(&server.pool, other, 10, 0, Some(0)).await;
+
+    assert_eq!(prune_once(&server).await, 10);
+    assert_eq!(replay_floor(&server).await, 10);
+    let other_state: (i64, i64) = sqlx::query_as("SELECT replay_floor_cursor, (SELECT count(*) FROM event_log WHERE vault_id=$1) FROM vaults WHERE vault_id=$1")
+        .bind(other)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+    assert_eq!(other_state, (0, 10));
+    server.shutdown().await;
+}
+
+/// A `GET` as a builder, so it can run on a spawned task while a lock is held.
+fn get_request(server: &TestServer, token: &str, path: &str) -> reqwest::RequestBuilder {
+    Client::new()
+        .get(format!("{}{path}", server.base_url))
+        .bearer_auth(token)
+}
+
+/// A report that reaches the share lock is blocked by the holder; the holder then
+/// raises the floor and commits, as a pruner would. The report must not be recorded
+/// if its cursor is now below the floor.
+#[tokio::test]
+async fn rewind_racing_a_prune_that_ends_below_the_new_floor_is_not_recorded() {
+    let server = TestServer::start().await;
+    for sequence in 1..=10 {
+        server.commit(&server.owner_event(sequence)).await;
+    }
+    set_cursor_report(&server, server.owner_device, 10, 0).await;
+    let device = server.provision_device("device").await;
+    set_cursor_report(&server, device.id, 8, 0).await;
+    let before = cursor_report(&server, device.id).await;
+
+    let (mut holder, pid) = hold_vault_lock(&server).await;
+    let task = tokio::spawn(send_detached(get_request(
+        &server,
+        &device.token,
+        "/v1/events?after=3",
+    )));
+    wait_for_lock_waiter(&server, pid, "FOR SHARE").await;
+    sqlx::query("UPDATE vaults SET replay_floor_cursor=5 WHERE vault_id=$1")
+        .bind(server.vault)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+
+    let (status, _) = finish_blocked(task).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        cursor_report(&server, device.id).await,
+        before,
+        "a rewind below the committed floor is not recorded"
+    );
+    server.shutdown().await;
+}
+
+/// A rewind committed before the prune reads progress is what the prune sees.
+#[tokio::test]
+async fn rewind_committed_before_the_prune_holds_the_floor_at_the_rewound_cursor() {
+    let server = TestServer::start().await;
+    for sequence in 1..=10 {
+        server.commit(&server.owner_event(sequence)).await;
+    }
+    set_cursor_report(&server, server.owner_device, 10, 0).await;
+    let device = server.provision_device("device").await;
+    set_cursor_report(&server, device.id, 8, 0).await;
+
+    let (status, _) = server.get(&device.token, "/v1/events?after=3").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cursor_report(&server, device.id).await.unwrap().0, 3);
+    assert_eq!(prune_once(&server).await, 3);
+    assert_eq!(replay_floor(&server).await, 3);
+    server.shutdown().await;
+}
+
+/// The same race for a device without a row: its first report is not recorded
+/// once the floor has passed its cursor.
+#[tokio::test]
+async fn first_report_racing_a_prune_that_ends_above_it_is_not_recorded() {
+    let server = TestServer::start().await;
+    for sequence in 1..=10 {
+        server.commit(&server.owner_event(sequence)).await;
+    }
+    set_cursor_report(&server, server.owner_device, 10, 0).await;
+    let device = server.provision_device("device").await;
+    assert_eq!(cursor_report(&server, device.id).await, None);
+
+    let (mut holder, pid) = hold_vault_lock(&server).await;
+    let task = tokio::spawn(send_detached(get_request(
+        &server,
+        &device.token,
+        "/v1/events?after=3",
+    )));
+    wait_for_lock_waiter(&server, pid, "FOR SHARE").await;
+    sqlx::query("UPDATE vaults SET replay_floor_cursor=5 WHERE vault_id=$1")
+        .bind(server.vault)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+
+    let (status, _) = finish_blocked(task).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cursor_report(&server, device.id).await, None);
+    server.shutdown().await;
+}
+
+/// A report at or above the floor still writes once the share lock is granted.
+#[tokio::test]
+async fn rewind_at_or_above_the_floor_writes_after_waiting_for_the_prune() {
+    let server = TestServer::start().await;
+    for sequence in 1..=10 {
+        server.commit(&server.owner_event(sequence)).await;
+    }
+    set_cursor_report(&server, server.owner_device, 10, 0).await;
+    let device = server.provision_device("device").await;
+    set_cursor_report(&server, device.id, 8, 0).await;
+
+    let (mut holder, pid) = hold_vault_lock(&server).await;
+    let task = tokio::spawn(send_detached(get_request(
+        &server,
+        &device.token,
+        "/v1/events?after=6",
+    )));
+    wait_for_lock_waiter(&server, pid, "FOR SHARE").await;
+    sqlx::query("UPDATE vaults SET replay_floor_cursor=5 WHERE vault_id=$1")
+        .bind(server.vault)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+
+    let (status, _) = finish_blocked(task).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cursor_report(&server, device.id).await.unwrap().0, 6);
+    server.shutdown().await;
+}
+
+/// Reports that do not write (an equal value inside five minutes, an intermediate
+/// page) never reach the vault lock: they complete while it is held.
+#[tokio::test]
+async fn non_writing_reports_do_not_wait_for_the_vault_lock() {
+    let server = TestServer::start().await;
+    for sequence in 1..=10 {
+        server.commit(&server.owner_event(sequence)).await;
+    }
+    let device = server.provision_device("device").await;
+    set_cursor_report(&server, device.id, 4, 0).await;
+    let equal = cursor_report(&server, device.id).await;
+
+    let (holder, _pid) = hold_vault_lock(&server).await;
+    let task = tokio::spawn(send_detached(get_request(
+        &server,
+        &device.token,
+        "/v1/events?after=4",
+    )));
+    let (status, _) = finish_blocked(task).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cursor_report(&server, device.id).await, equal);
+
+    set_cursor_report(&server, device.id, 2, 0).await;
+    let intermediate = cursor_report(&server, device.id).await;
+    let task = tokio::spawn(send_detached(get_request(
+        &server,
+        &device.token,
+        "/v1/events?after=4&limit=2",
+    )));
+    let (status, page) = finish_blocked(task).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page["next_after"].is_string(), "{page}");
+    assert_eq!(cursor_report(&server, device.id).await, intermediate);
+    holder.rollback().await.unwrap();
+    server.shutdown().await;
+}
+
+/// A probe from cursor 0 under a positive floor is told to resync, and its cursor
+/// is not recorded.
+#[tokio::test]
+async fn cursor_zero_under_a_positive_floor_resyncs_and_records_nothing() {
+    let server = TestServer::start().await;
+    for sequence in 1..=10 {
+        server.commit(&server.owner_event(sequence)).await;
+    }
+    age_events(&server, 6).await;
+    assert_eq!(prune_once(&server).await, 6);
+    let device = server.provision_device("device").await;
+    set_cursor_report(&server, device.id, 8, 0).await;
+    let before = cursor_report(&server, device.id).await;
+
+    let (status, body) = server
+        .get(&device.token, "/v1/events?after=0&limit=1")
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["reason"], "cursor_expired");
+    assert_eq!(cursor_report(&server, device.id).await, before);
+    server.shutdown().await;
+}

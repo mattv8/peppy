@@ -3,7 +3,7 @@ use std::env;
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
-const UP: [&str; 34] = [
+const UP: [&str; 35] = [
     include_str!("../migrations/0001_foundation.sql"),
     include_str!("../migrations/0002_messaging.sql"),
     include_str!("../migrations/0003_pairing_proofs.sql"),
@@ -38,9 +38,10 @@ const UP: [&str; 34] = [
     include_str!("../migrations/0032_live_ticket_cleanup_indexes.sql"),
     include_str!("../migrations/0033_live_ticket_admission_events.sql"),
     include_str!("../migrations/0034_vault_identity.sql"),
+    include_str!("../migrations/0035_device_cursor_reports.sql"),
 ];
 
-const DOWN: [&str; 34] = [
+const DOWN: [&str; 35] = [
     include_str!("../migrations/down/0001_foundation.down.sql"),
     include_str!("../migrations/down/0002_messaging.down.sql"),
     include_str!("../migrations/down/0003_pairing_proofs.down.sql"),
@@ -75,6 +76,7 @@ const DOWN: [&str; 34] = [
     include_str!("../migrations/down/0032_live_ticket_cleanup_indexes.down.sql"),
     include_str!("../migrations/down/0033_live_ticket_admission_events.down.sql"),
     include_str!("../migrations/down/0034_vault_identity.down.sql"),
+    include_str!("../migrations/down/0035_device_cursor_reports.down.sql"),
 ];
 
 #[tokio::test]
@@ -228,6 +230,7 @@ async fn run(database: &mut PgConnection, migration: &str) {
 }
 
 async fn assert_latest_schema(database: &mut PgConnection) {
+    assert!(column_exists(database, "device_cursors", "reported_at").await);
     assert!(!table_exists(database, "pairing_challenges").await);
     assert!(!table_exists(database, "pairing_intents").await);
     assert!(!table_exists(database, "pairing_join_requests").await);
@@ -441,4 +444,118 @@ async fn trigger_exists(database: &mut PgConnection, trigger: &str) -> bool {
 
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+/// Pairing before the upgrade wrote no cursor rows. The 0035 backfill gives every
+/// non-revoked device without one a `(0, now())` report, so a device that never
+/// reported keeps holding the floor after the upgrade, even when another device has
+/// progressed past it. A revoked device gets no row.
+#[tokio::test]
+async fn device_cursor_backfill_keeps_predating_devices_counting() {
+    let database_url = env::var("TEST_DATABASE_URL")
+        .expect("TEST_DATABASE_URL is required; integration tests never silently skip");
+    let schema = format!("migration_cursor_backfill_{}", Uuid::new_v4().simple());
+    let quoted_schema = quote_identifier(&schema);
+    let mut database = PgConnection::connect(&database_url).await.unwrap();
+    sqlx::query(&format!("CREATE SCHEMA {quoted_schema}"))
+        .execute(&mut database)
+        .await
+        .unwrap();
+    sqlx::query(&format!("SET search_path TO {quoted_schema}"))
+        .execute(&mut database)
+        .await
+        .unwrap();
+    for migration in &UP[..34] {
+        run(&mut database, migration).await;
+    }
+    let vault = Uuid::from_u128(0x35_0000_0000_0000_0000_0000_0000_0001);
+    let predating = Uuid::from_u128(0x35_0000_0000_0000_0000_0000_0000_0002);
+    let revoked = Uuid::from_u128(0x35_0000_0000_0000_0000_0000_0000_0003);
+    sqlx::query("INSERT INTO vaults(vault_id, public_key_profile, encrypted_vault_check_header, key_epoch, profile_fingerprint) VALUES($1,'{}','\\x01',1,repeat('e',64))")
+        .bind(vault)
+        .execute(&mut database)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch,created_at) VALUES($1,$2,'device','{}',repeat('e',64),1,now()-interval '60 days'), ($1,$3,'device','{}',repeat('e',64),1,now()-interval '60 days')")
+        .bind(vault)
+        .bind(predating)
+        .bind(revoked)
+        .execute(&mut database)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE devices SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2")
+        .bind(vault)
+        .bind(revoked)
+        .execute(&mut database)
+        .await
+        .unwrap();
+    run(&mut database, UP[34]).await;
+
+    let rows: Vec<(Uuid, i64)> =
+        sqlx::query_as("SELECT device_id, receive_cursor FROM device_cursors WHERE vault_id=$1")
+            .bind(vault)
+            .fetch_all(&mut database)
+            .await
+            .unwrap();
+    assert_eq!(
+        rows,
+        vec![(predating, 0)],
+        "only the non-revoked device is backfilled"
+    );
+
+    // Another device progressed to cursor 10 after the upgrade. Without the backfill
+    // the predating device would not count, and the floor would move to 10.
+    let advanced = Uuid::from_u128(0x35_0000_0000_0000_0000_0000_0000_0004);
+    sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,'device','{}',repeat('e',64),1)")
+        .bind(vault)
+        .bind(advanced)
+        .execute(&mut database)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO device_cursors(vault_id,device_id,receive_cursor) VALUES($1,$2,10)")
+        .bind(vault)
+        .bind(advanced)
+        .execute(&mut database)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO event_log(vault_id,cursor,envelope_id,producer_device_id,producer_sequence,purpose,cipher_digest,envelope) SELECT $1,n,gen_random_uuid(),$2,n,'event','\\x00','{}' FROM generate_series(1,10) AS n")
+        .bind(vault)
+        .bind(advanced)
+        .execute(&mut database)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE vaults SET next_cursor=10 WHERE vault_id=$1")
+        .bind(vault)
+        .execute(&mut database)
+        .await
+        .unwrap();
+
+    let options = {
+        let mut url = url::Url::parse(&database_url).unwrap();
+        url.query_pairs_mut()
+            .append_pair("options", &format!("-csearch_path={schema}"));
+        url
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(options.as_str())
+        .await
+        .unwrap();
+    let removed =
+        peppy_server::api::prune_replay_log(&pool, std::time::Duration::from_secs(30 * 86_400))
+            .await
+            .unwrap();
+    assert_eq!(removed, 0, "the backfilled device holds the floor at 0");
+    let floor: i64 = sqlx::query_scalar("SELECT replay_floor_cursor FROM vaults WHERE vault_id=$1")
+        .bind(vault)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(floor, 0);
+    pool.close().await;
+
+    sqlx::query(&format!("DROP SCHEMA {quoted_schema} CASCADE"))
+        .execute(&mut database)
+        .await
+        .unwrap();
 }
