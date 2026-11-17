@@ -3841,6 +3841,10 @@ fn inline_media_type(media_type: &str) -> Option<&'static str> {
         "image/png" => Some("image/png"),
         "image/gif" => Some("image/gif"),
         "image/webp" => Some("image/webp"),
+        #[cfg(target_os = "macos")]
+        "image/heic" => Some("image/heic"),
+        #[cfg(target_os = "macos")]
+        "image/heif" => Some("image/heif"),
         "video/mp4" => Some("video/mp4"),
         "video/3gpp" => Some("video/3gpp"),
         "audio/mpeg" => Some("audio/mpeg"),
@@ -4746,9 +4750,10 @@ where
 #[cfg(test)]
 mod media_protocol_tests {
     use super::{
-        media_protocol_response_for_state, media_protocol_response_with_reader, media_range,
-        release_media_capabilities, store_media_capability, take_window_media_capabilities,
-        AppState, MediaReadBudget, MAX_MEDIA_RANGE_BYTES, MAX_OPEN_MEDIA_CAPABILITIES,
+        inline_media_type, media_protocol_response_for_state, media_protocol_response_with_reader,
+        media_range, release_media_capabilities, store_media_capability,
+        take_window_media_capabilities, AppState, MediaReadBudget, MAX_MEDIA_RANGE_BYTES,
+        MAX_OPEN_MEDIA_CAPABILITIES,
     };
     use crate::{secure_store::MemoryStore, tests};
     use peppy_client_core::AttachmentId;
@@ -4769,17 +4774,21 @@ mod media_protocol_tests {
 
     impl ProtocolHarness {
         fn new(bytes: &[u8]) -> Self {
+            Self::with_media_type(bytes, "image/png", "protocol-media.png")
+        }
+
+        fn with_media_type(bytes: &[u8], media_type: &str, name: &str) -> Self {
             let fixture = tests::fixture_at("http://127.0.0.1:9");
             let session = Arc::new(tests::open(&fixture, &fixture.binding, &[]));
             session
                 .client
                 .unlock(&fixture.profile, &fixture.header, tests::PHRASE)
                 .unwrap();
-            let source = fixture.dir.path().join("protocol-media.png");
+            let source = fixture.dir.path().join(name);
             fs::write(&source, bytes).unwrap();
             let info = session
                 .client
-                .prepare_attachment(&source, "image/png", "protocol-media.png")
+                .prepare_attachment(&source, media_type, name)
                 .unwrap();
             session
                 .client
@@ -4880,6 +4889,41 @@ mod media_protocol_tests {
                 .to_owned();
             (attachment, token, evicted)
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_heic_and_heif_capabilities_preserve_original_bytes_and_mime() {
+        for (media_type, name, bytes) in [
+            (
+                "image/heic",
+                "original.heic",
+                b"deterministic-heic" as &[u8],
+            ),
+            ("image/heif", "original.heif", b"deterministic-heif"),
+        ] {
+            let harness = ProtocolHarness::with_media_type(bytes, media_type, name);
+            let response = harness.respond(Method::GET, None);
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.body(), bytes);
+            assert_eq!(
+                response.headers()[tauri::http::header::CONTENT_TYPE],
+                media_type
+            );
+        }
+    }
+
+    #[test]
+    fn inline_media_types_reject_html_and_svg() {
+        assert_eq!(inline_media_type("text/html"), None);
+        assert_eq!(inline_media_type("image/svg+xml"), None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn non_macos_rejects_heic_and_heif() {
+        assert_eq!(inline_media_type("image/heic"), None);
+        assert_eq!(inline_media_type("image/heif"), None);
     }
 
     #[test]
