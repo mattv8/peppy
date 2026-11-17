@@ -72,7 +72,7 @@ Snapshot history does not execute carrier work. The automated encrypted recovery
 
 Keep historical passphrases and key-profile material for history that must remain readable. Epoch rotation is manual; there is no automatic recovery when required historical material is lost.
 
-Peppy is a single-node foundation, not HA. Reserve storage for complete backup and restore data. `PEPPY_REPLAY_RETENTION_DAYS` defaults to `30` and accepts `1` through `3650`; expired or ahead cursors require snapshot resynchronization. Immutable snapshots have separate retention. Do not discard historical key material because transport replay rows aged out.
+Peppy is a single-node foundation, not HA. Reserve storage for complete backup and restore data. `PEPPY_REPLAY_RETENTION_DAYS` defaults to `30` and accepts `1` through `3650`. It is the longest replay history is kept; the server drops it sooner once every active device has received it. Expired or ahead cursors require snapshot resynchronization. Immutable snapshots have separate retention. Do not discard historical key material because transport replay rows aged out.
 # Prebuilt community edition
 
 The public server image defaults to
