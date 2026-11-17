@@ -13,9 +13,9 @@ inputs for the maintained bundled libsodium 1.0.22 source. The upstream
 `Cargo.lock` is intentionally omitted because its `.gitignore` excludes it.
 
 `Cargo.toml` has one dependency-manifest fix: build dependency `zip` is pinned to
-`=9.0.4`, retaining upstream `deflate` and disabled default features. This resolves
-RUSTSEC-2026-0367, RUSTSEC-2026-0368, and RUSTSEC-2026-0369 without changing
-libsodium behavior.
+`=9.0.5`, retaining upstream `deflate` and disabled default features. This resolves
+RUSTSEC-2026-0367, RUSTSEC-2026-0368, RUSTSEC-2026-0369, and RUSTSEC-2026-0548
+without changing libsodium behavior.
 
 ## Audit coverage
 
@@ -30,7 +30,7 @@ To refresh `upstream-audit.lock` when updating the vendored package:
 
 1. Update `vendor/libsodium-sys-stable/` with a new archive from crates.io and
    verify the new version in the manifest.
-2. Reapply the `zip =9.0.4` pin until a suitable upstream release requires a
+2. Reapply the `zip =9.0.5` pin until a suitable upstream release requires a
    patched zip version; remove the Peppy pin when that release is adopted.
 3. Edit `upstream-audit.lock` to match the package name and version, and update
    the checksum from the crates.io package details.

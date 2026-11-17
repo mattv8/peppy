@@ -23,6 +23,9 @@ ignore = [
   { id = "RUSTSEC-2026-0371", reason = "Transitive zbus_names via Tauri plugins on zbus 5; no released compatible zbus 6 migration. Track upstream Tauri and notify-rust updates. [expires: 2027-02-01]" },
   { id = "RUSTSEC-2026-0372", reason = "Transitive zvariant_derive via Tauri plugins on zbus 5; no released compatible zbus 6 migration. Track upstream Tauri and notify-rust updates. [expires: 2027-02-01]" },
   { id = "RUSTSEC-2026-0374", reason = "Transitive build-time parser via UniFFI CLI bindgen and Askama 0.16.1; no released compatible replacement. Remove after Askama replaces basic-toml in a release. [expires: 2027-02-01]" },
+  # Maintenance status only, with no patched release. rmcp requires chrono directly
+  # and through schemars' chrono04 feature. Remove when rmcp drops or replaces it.
+  { id = "RUSTSEC-2026-0543", reason = "Transitive chrono via rmcp 3.9.0 (server MCP transport) and its schemars chrono04 feature; unmaintained advisory with no patched release. Track rmcp for a replacement. [expires: 2027-02-01]" },
   # This one is a runtime vulnerability in the bundled SQLite. No release fixes
   # the SQLCipher bundle, and SQLx 0.8 pins libsqlite3-sys 0.30. Peppy opens only
   # app-managed databases, and SQLCipher HMAC-checks each page before decrypting,

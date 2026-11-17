@@ -106,7 +106,7 @@ default-features = false
 version = "0.2.15"
 
 [build-dependencies.zip]
-# Peppy: RUSTSEC-2026-0367/0368/0369 require zip >= 9.0.0.
-version = "=9.0.4"
+# Peppy: RUSTSEC-2026-0367/0368/0369 require zip >= 9.0.0; RUSTSEC-2026-0548 requires >= 9.0.5.
+version = "=9.0.5"
 features = ["deflate"]
 default-features = false
