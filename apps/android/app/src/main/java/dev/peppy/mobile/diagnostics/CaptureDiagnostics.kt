@@ -1,6 +1,7 @@
 package dev.peppy.mobile.diagnostics
 
 import dev.peppy.mobile.SmsCaptureSummary
+import dev.peppy.mobile.mms.MmsBackfillPause
 import dev.peppy.mobile.mms.MmsBackfillRecheckOutcome
 
 /** Measures a synchronous capture phase without extending trace context across suspensions. */
@@ -105,6 +106,12 @@ internal class MmsPassDiagnostics {
     var recheckProviderChanged = 0
     var recheckFeedbackFailed = 0
     var recheckIdentityMismatch = 0
+    var pause: MmsBackfillPause? = null
+
+    /** Every plan of a pass carries the same pause, so the first one seen is the pass's pause. A pass that reached no plan keeps null. */
+    fun recordPause(value: MmsBackfillPause?) {
+        pause = pause ?: value
+    }
 
     fun recordRecheckOutcome(outcome: MmsBackfillRecheckOutcome) {
         when (outcome) {
@@ -136,6 +143,15 @@ internal data class MmsCaptureScanDiagnostics(
     val unavailable: Int,
     val budgetExhausted: Boolean,
 )
+
+/** Fixed codes for the export vocabulary `mms_pause`; 0 means no pause was reported for the pass. */
+internal fun MmsBackfillPause?.diagnosticCode(): Long = when (this) {
+    null -> 0L
+    MmsBackfillPause.ABSOLUTE_RECOVERY_CAPACITY -> 1L
+    MmsBackfillPause.RECOVERY_CAPACITY -> 2L
+    MmsBackfillPause.LOCAL_CAPACITY -> 3L
+    MmsBackfillPause.REMOTE_STORAGE -> 4L
+}
 
 internal fun <T> captureMmsStage(stage: Long, block: () -> T): T =
     SyncDiagnostics.measureStage(SyncTraceEvent.CAPTURE_PROGRESS, stage, block)
@@ -172,6 +188,7 @@ internal fun <T> captureMmsPass(diagnostics: MmsPassDiagnostics, more: () -> Boo
             SyncTraceField.RECHECK_PROVIDER_CHANGED to diagnostics.recheckProviderChanged.toLong(),
             SyncTraceField.RECHECK_FEEDBACK_FAILED to diagnostics.recheckFeedbackFailed.toLong(),
             SyncTraceField.RECHECK_IDENTITY_MISMATCH to diagnostics.recheckIdentityMismatch.toLong(),
+            SyncTraceField.PAUSE to diagnostics.pause.diagnosticCode(),
             SyncTraceField.BUDGET_EXHAUSTED to if (diagnostics.budgetExhausted) 1 else 0,
             SyncTraceField.MORE to if (more()) 1 else 0,
             SyncTraceField.REASON to when {

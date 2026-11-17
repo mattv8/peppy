@@ -24,7 +24,7 @@ class MmsSettingsStateTest {
     }
 
     @Test
-    fun presentationPrioritizesLockedAndKeepsPausedHistoryVariantsDistinct() {
+    fun presentationPrioritizesLockedAndShowsHistoryPauseAsOlderHistory() {
         assertEquals(
             MmsPresentationStatus.LOCKED,
             mmsHealthPresentation(true, true, MmsHealth(databaseUnavailable = true)).status,
@@ -32,10 +32,6 @@ class MmsSettingsStateTest {
         assertEquals(
             MmsPresentationStatus.OLDER_HISTORY_PAUSED,
             mmsHealthPresentation(true, true, MmsHealth(backfillStatus = MmsBackfillStatus.OlderPausedHistoryLimit)).status,
-        )
-        assertEquals(
-            MmsPresentationStatus.HISTORY_PAUSED,
-            mmsHealthPresentation(true, true, MmsHealth(backfillStatus = MmsBackfillStatus.PausedHistoryLimit)).status,
         )
     }
 
@@ -90,7 +86,6 @@ class MmsSettingsStateTest {
         listOf(
             MmsBackfillStatus.PausedPhoneStorage to MmsPresentationStatus.PHONE_STORAGE_PAUSED,
             MmsBackfillStatus.OlderPausedHistoryLimit to MmsPresentationStatus.OLDER_HISTORY_PAUSED,
-            MmsBackfillStatus.PausedHistoryLimit to MmsPresentationStatus.HISTORY_PAUSED,
             MmsBackfillStatus.OlderPausedServerStorage to MmsPresentationStatus.SERVER_STORAGE_PAUSED,
         ).forEach { (backfill, expected) ->
             assertEquals(expected, mmsHealthPresentation(true, true, MmsHealth(pending = 2, backfillStatus = backfill)).status)
@@ -243,7 +238,7 @@ class MmsSettingsStateTest {
 
         assertEquals(MmsBackfillStatus.PausedPhoneStorage, mmsHealthFromNative(emptyList(), status(NativeMmsBackfillPause.LOCAL_CAPACITY), emptyList()).backfillStatus)
         assertEquals(MmsBackfillStatus.OlderPausedHistoryLimit, mmsHealthFromNative(emptyList(), status(NativeMmsBackfillPause.RECOVERY_CAPACITY), emptyList()).backfillStatus)
-        assertEquals(MmsBackfillStatus.PausedHistoryLimit, mmsHealthFromNative(emptyList(), status(NativeMmsBackfillPause.ABSOLUTE_RECOVERY_CAPACITY), emptyList()).backfillStatus)
+        assertEquals(MmsBackfillStatus.OlderPausedHistoryLimit, mmsHealthFromNative(emptyList(), status(NativeMmsBackfillPause.ABSOLUTE_RECOVERY_CAPACITY), emptyList()).backfillStatus)
     }
 
 }

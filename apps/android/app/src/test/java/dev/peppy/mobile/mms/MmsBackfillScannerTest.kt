@@ -70,6 +70,28 @@ class MmsBackfillScannerTest {
         assertTrue(core.finished.isEmpty())
     }
 
+    @Test fun historyLimitPauseRunsLiveButNotHistory() {
+        val core = FakeCore(
+            listOf(
+                MmsBackfillScanPlan(MmsBackfillPhase.LIVE, "10", "20", false, false, 32, pause = MmsBackfillPause.ABSOLUTE_RECOVERY_CAPACITY),
+                MmsBackfillScanPlan(MmsBackfillPhase.HISTORY, "4", "20", false, true, 32, pause = MmsBackfillPause.ABSOLUTE_RECOVERY_CAPACITY),
+            ),
+        )
+        val scanned = mutableListOf<MmsBackfillPhase>()
+
+        MmsBackfillScanner(core).run(
+            "generation", "scope", MmsLegacyBackfillState(null, null, null), "20", 1L, idle,
+            scanPage = { plan ->
+                scanned += plan.phase
+                MmsBackfillPageResult("12", exhausted = false, more = true)
+            },
+            recheck = { error("no recheck plan") },
+        )
+
+        assertEquals(listOf(MmsBackfillPhase.LIVE), scanned)
+        assertEquals(listOf(MmsBackfillPhase.LIVE to "12"), core.advanced)
+    }
+
     @Test fun recheckAttemptsEverySelectedRequestEvenWhenTheFirstNeedsFollowup() {
         val core = FakeCore(
             listOf(MmsBackfillScanPlan(MmsBackfillPhase.RECHECK, null, null, false, false, 32)),

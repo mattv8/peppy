@@ -11,6 +11,7 @@ import kotlinx.coroutines.CancellationException
 
 
 internal enum class MmsBackfillPhase { LIVE, LIVE_GAP, PROVIDER_RESCAN, HISTORY, RECHECK }
+internal enum class MmsBackfillPause { ABSOLUTE_RECOVERY_CAPACITY, RECOVERY_CAPACITY, LOCAL_CAPACITY, REMOTE_STORAGE }
 internal enum class MmsBackfillRecheckState { PENDING, BLOCKED, UNAVAILABLE, COMPLETE }
 internal enum class MmsBackfillRecheckOutcome { PROGRESS, VERIFIED, UNCHANGED_UNAVAILABLE, UNCHANGED_PART_UNAVAILABLE, TRANSIENT_FAILURE, PROVIDER_CHANGED, AWAITING_PROVIDER }
 internal data class MmsBackfillRecheckConditions(
@@ -37,6 +38,7 @@ internal data class MmsBackfillScanPlan(
     val historyFloor: String? = null,
     val providerRescanToken: String? = null,
     val liveGapToken: String? = null,
+    val pause: MmsBackfillPause? = null,
 )
 
 internal data class MmsBackfillRecheckRequest(
