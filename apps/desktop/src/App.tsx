@@ -1471,6 +1471,7 @@ function SettingsView({
   onTypingShare,
   requestedSection,
   onRequestedSectionConsumed,
+  onAddDevice,
   onAccountDeleted,
 }: {
   /** Changes each time "Free up space" asks for the storage card; 0 when nothing was requested. */
@@ -1523,8 +1524,9 @@ function SettingsView({
   typingShare?: boolean;
   typingShareError?: boolean;
   onTypingShare(enabled: boolean): void;
-  requestedSection?: string;
+  requestedSection?: "notifications" | "notification-apps" | "devices";
   onRequestedSectionConsumed?(): void;
+  onAddDevice?(): void;
   onAccountDeleted(result: { outcome: "deleted" | "pending"; provider: BillingProvider }): void;
 }) {
   const platform = detectPlatform();
@@ -1638,6 +1640,12 @@ function SettingsView({
   useEffect(() => {
     if (!requestedSection) return;
     selectSection(requestedSection);
+    if (requestedSection === "devices") {
+      window.setTimeout(() => {
+        const addDevice = document.getElementById("devices-add-device") as HTMLButtonElement | null;
+        (addDevice && !addDevice.disabled ? addDevice : document.getElementById("settings-devices-title"))?.focus({ preventScroll: true });
+      }, 0);
+    }
     onRequestedSectionConsumed?.();
   }, [onRequestedSectionConsumed, requestedSection, selectSection]);
 
@@ -1740,7 +1748,7 @@ function SettingsView({
           </button>
         )}
       </section>
-      <DevicesSettings key={`${sessionScopeId ?? "none"}:${encryption}`} serverOffline={serverOffline} accountReadOnly={accountReadOnly} browserHost={browserHost} sessionKey={sessionScopeId ?? "unavailable"} unlocked={encryption === "unlocked"} />
+      <DevicesSettings key={`${sessionScopeId ?? "none"}:${encryption}`} serverOffline={serverOffline} accountReadOnly={accountReadOnly} browserHost={browserHost} sessionKey={sessionScopeId ?? "unavailable"} unlocked={encryption === "unlocked"} onAddDevice={onAddDevice} />
       <NotificationSettings
         notifications={notifications}
         filters={filters}
@@ -2282,7 +2290,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const notificationsLocked = snapshot?.encryption.state !== "unlocked";
   const dismissibleNotificationsCount = dismissibleNotifications(snapshot?.notifications ?? [], snapshot?.appFilters ?? [], notificationsLocked).length;
   const contactsOpen = !revoked && activeView === "contacts";
-  const [notificationSettingsRequested, setNotificationSettingsRequested] = useState<"notifications" | "notification-apps">();
+  const [settingsSectionRequested, setSettingsSectionRequested] = useState<"notifications" | "notification-apps" | "devices">();
   const [notificationAppFilter, setNotificationAppFilter] = useState<string | null>(null);
   const notificationSearchRequestId = useRef(0);
   const dismissingNotificationsRef = useRef(false);
@@ -2352,8 +2360,20 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const notificationHandler = useRef<(request: NotificationActivation, context: ActivationContext) => Promise<void>>(async () => {});
   const [dismissingNotifications, setDismissingNotifications] = useState(false);
   const [addingPhone, setAddingPhone] = useState(false);
+  const [addDeviceFromSettings, setAddDeviceFromSettings] = useState(false);
   const [initialEnrollmentActive, setInitialEnrollmentActive] = useState(false);
   const [phoneDeferredOrigin, setPhoneDeferredOrigin] = useState<string | null>(null);
+  const openAddDevice = () => {
+    setAddDeviceFromSettings(true);
+    setAddingPhone(true);
+    setActiveView("conversations");
+  };
+  const returnToSettingsIfRequested = () => {
+    if (!addDeviceFromSettings) return;
+    setAddDeviceFromSettings(false);
+    setSettingsSectionRequested("devices");
+    setActiveView("settings");
+  };
   useEffect(() => {
     if (snapshot?.connection.state === "connected") setInitialEnrollmentActive(false);
   }, [snapshot?.connection.state]);
@@ -6305,8 +6325,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                typingShare={typingLinkAvailable && bridge.send_typing ? shareTyping : undefined}
                typingShareError={typingShareError}
                onTypingShare={changeTypingShare}
-                requestedSection={notificationSettingsRequested}
-                onRequestedSectionConsumed={() => setNotificationSettingsRequested(undefined)}
+                requestedSection={settingsSectionRequested}
+                onRequestedSectionConsumed={() => setSettingsSectionRequested(undefined)}
+                onAddDevice={snapshot?.deviceRole === "owner" ? openAddDevice : undefined}
                 onAccountDeleted={result => {
                   setDeletionResult(result);
                   void refresh().catch(() => undefined);
@@ -6342,8 +6363,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                   throw error;
                 });
               }}
-              onSettings={() => { setNotificationSettingsRequested("notifications"); setActiveView("settings"); }}
-              onManageApps={() => { setNotificationSettingsRequested("notification-apps"); setActiveView("settings"); }}
+              onSettings={() => { setSettingsSectionRequested("notifications"); setActiveView("settings"); }}
+              onManageApps={() => { setSettingsSectionRequested("notification-apps"); setActiveView("settings"); }}
               onDismissMany={async targets => {
                 if (dismissingNotificationsRef.current) return;
                 const pinnedTargets = targets.slice(0, 100);
@@ -6397,7 +6418,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                   enrollmentEstablished={!revoked && snapshot.deviceRole === "owner" && snapshot.encryption.state === "unlocked"}
                   addingPhone={!revoked && addingPhone}
                   connectionPending={snapshot.connection.errorCode === "connecting"}
-                  onExit={() => { setAddingPhone(false); setInitialEnrollmentActive(false); }}
+                  onExit={() => { setAddingPhone(false); returnToSettingsIfRequested(); setInitialEnrollmentActive(false); }}
                   onDeferPhone={async () => {
                     const key = phoneDeferredKey(snapshot.connection.origin);
                     if (key) localStorage.setItem(key, "1");
@@ -6405,8 +6426,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                      setInitialEnrollmentActive(false);
                      await refresh();
                     if (addingPhone) setAddingPhone(false);
+                    returnToSettingsIfRequested();
                   }}
-                  onJoined={async () => { await refresh(); setAddingPhone(false); setInitialEnrollmentActive(false); }}
+                  onJoined={async () => { await refresh(); setAddingPhone(false); returnToSettingsIfRequested(); setInitialEnrollmentActive(false); }}
                   onInitialEnrollmentStart={() => setInitialEnrollmentActive(true)}
                   fixedOrigin={browserHost ? fixedOrigin : undefined}
                   accountUrl={browserHost ? accountUrl : undefined}
