@@ -815,6 +815,18 @@ pub struct NativeSnapshotProgress {
     pub received_records: u64,
     pub last_cursor: String,
     pub server_compaction_generation: Option<String>,
+    pub manifest: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeSnapshotManifestEntry {
+    pub cursor: String,
+    pub digest: String,
+    pub flags: u8,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeSnapshotManifestProgress {
+    pub progress: NativeSnapshotProgress,
+    pub missing: u32,
 }
 
 /// State of the newest authoritative (server compaction) snapshot projection.
@@ -982,6 +994,30 @@ fn parse_canonical_u64(value: &str) -> Result<u64, MobileBindingsError> {
         return Err(MobileBindingsError::InvalidRequest);
     }
     Ok(parsed)
+}
+
+fn hex_digest(value: &str) -> Result<[u8; 32], MobileBindingsError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(MobileBindingsError::InvalidRequest);
+    }
+    let mut digest = [0; 32];
+    let (pairs, []) = value.as_bytes().as_chunks::<2>() else {
+        return Err(MobileBindingsError::InvalidRequest);
+    };
+    for (index, pair) in pairs.iter().enumerate() {
+        let high = (pair[0] as char)
+            .to_digit(16)
+            .ok_or(MobileBindingsError::InvalidRequest)?;
+        let low = (pair[1] as char)
+            .to_digit(16)
+            .ok_or(MobileBindingsError::InvalidRequest)?;
+        digest[index] = ((high << 4) | low) as u8;
+    }
+    Ok(digest)
 }
 
 /// Stable host-facing names; these exact strings are part of the native contract.
@@ -1159,6 +1195,7 @@ fn snapshot_progress_view(progress: peppy_client_core::SnapshotProgress) -> Nati
         received_records: progress.received_records,
         last_cursor: progress.last_cursor.0.to_string(),
         server_compaction_generation: progress.server_compaction_generation.map(|v| v.to_string()),
+        manifest: progress.manifest,
     }
 }
 
@@ -3687,6 +3724,26 @@ impl NativeClient {
         .map(snapshot_progress_view)
     }
 
+    pub fn begin_snapshot_with_manifest(
+        &self,
+        high_water: String,
+        record_count: u64,
+        server_compaction_generation: Option<String>,
+    ) -> Result<NativeSnapshotProgress, MobileBindingsError> {
+        let high_water = parse_cursor(high_water)?;
+        let server_compaction_generation = server_compaction_generation
+            .map(|value| parse_canonical_u64(&value))
+            .transpose()?;
+        with_client(&self.client, |client| {
+            client.begin_snapshot_with_manifest(
+                high_water,
+                record_count,
+                server_compaction_generation,
+            )
+        })
+        .map(snapshot_progress_view)
+    }
+
     pub fn set_server_compaction_supported(
         &self,
         supported: bool,
@@ -3789,6 +3846,35 @@ impl NativeClient {
             client.append_snapshot_raw_page(generation, &records)
         })
         .map(snapshot_progress_view)
+    }
+
+    pub fn append_snapshot_manifest(
+        &self,
+        generation: u64,
+        entries: Vec<NativeSnapshotManifestEntry>,
+    ) -> Result<NativeSnapshotManifestProgress, MobileBindingsError> {
+        let entries = entries
+            .into_iter()
+            .map(|entry| {
+                let digest = hex_digest(&entry.digest)?;
+                if entry.flags & !0b11 != 0 {
+                    return Err(MobileBindingsError::InvalidRequest);
+                }
+                Ok(peppy_client_core::SnapshotManifestEntry {
+                    cursor: parse_cursor(entry.cursor)?,
+                    digest,
+                    has_compaction: entry.flags & 1 != 0,
+                    has_origin_tag: entry.flags & 2 != 0,
+                })
+            })
+            .collect::<Result<Vec<_>, MobileBindingsError>>()?;
+        with_client(&self.client, |client| {
+            client.append_snapshot_manifest(generation, &entries)
+        })
+        .map(|result| NativeSnapshotManifestProgress {
+            progress: snapshot_progress_view(result.progress),
+            missing: result.missing,
+        })
     }
 
     /// Publishes only. Host work loops must drain with `apply_pending` until
@@ -4128,6 +4214,113 @@ impl NativePlaintextHandle {
 mod tests {
     use super::*;
     use peppy_client_core::SendRefusalReason;
+
+    #[test]
+    fn manifest_binding_validates_flags_and_maps_begin_and_progress() {
+        let path =
+            std::env::temp_dir().join(format!("manifest-binding-{}.db", uuid::Uuid::new_v4()));
+        let vault = uuid::Uuid::new_v4().to_string();
+        let device = uuid::Uuid::new_v4().to_string();
+        let client = open_at(&path, &vault, &device);
+        // Captured rows are sealed (and so listed as outbox envelopes) only once the vault is unlocked.
+        let profile = KeyProfile::new(uuid::Uuid::parse_str(&vault).unwrap(), 1).unwrap();
+        let header = peppy_crypto::create_vault_check_header(
+            &peppy_crypto::derive_root_key("passphrase", &profile).unwrap(),
+            profile.clone(),
+        )
+        .unwrap();
+        with_client(&client.client, |core| {
+            core.unlock(&profile, &header, "passphrase")
+        })
+        .unwrap();
+        client
+            .capture_incoming(NativeIncomingSms {
+                conversation_id: None,
+                sender_address: "+15550003333".into(),
+                body: "held record".into(),
+                provider_message_id: Some("held-1".into()),
+                imported: false,
+            })
+            .unwrap();
+        let envelope =
+            with_client(&client.client, |core| Ok(core.pending_outbox()?.remove(0))).unwrap();
+        with_client(&client.client, |core| {
+            core.ingest(&envelope, peppy_client_core::Cursor(1))
+                .map(|_| ())
+        })
+        .unwrap();
+        let digest: String = envelope
+            .wire_digest()
+            .unwrap()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let entry = |flags: u8, digest: String| NativeSnapshotManifestEntry {
+            cursor: "1".into(),
+            digest,
+            flags,
+        };
+        // An unflagged entry for a held plain record verifies through the binding.
+        let progress = client
+            .begin_snapshot_with_manifest("1".into(), 1, None)
+            .unwrap();
+        assert!(progress.manifest);
+        let page = client
+            .append_snapshot_manifest(progress.generation, vec![entry(0, digest.clone())])
+            .unwrap();
+        assert_eq!(page.missing, 0);
+        // Each header flag reaches the core: a flagged entry never verifies, so it is missing.
+        for flags in [1u8, 2] {
+            let progress = client
+                .begin_snapshot_with_manifest("1".into(), 1, None)
+                .unwrap();
+            let page = client
+                .append_snapshot_manifest(progress.generation, vec![entry(flags, digest.clone())])
+                .unwrap();
+            assert_eq!(page.missing, 1, "flags {flags} must reach the core");
+        }
+        // Only 0..=3 are valid; 4 is rejected before the core sees it.
+        let progress = client
+            .begin_snapshot_with_manifest("1".into(), 1, None)
+            .unwrap();
+        assert!(matches!(
+            client.append_snapshot_manifest(progress.generation, vec![entry(4, digest.clone())]),
+            Err(MobileBindingsError::InvalidRequest)
+        ));
+        assert!(matches!(
+            client.append_snapshot_manifest(progress.generation, vec![entry(0, "AA".repeat(32))]),
+            Err(MobileBindingsError::InvalidRequest)
+        ));
+        assert!(matches!(
+            client.begin_snapshot_with_manifest("200000".into(), 100_002, None),
+            Err(MobileBindingsError::InvalidRequest)
+        ));
+        assert!(
+            !client
+                .begin_snapshot("1".into(), 1, NativeSnapshotPurpose::Resync)
+                .unwrap()
+                .manifest
+        );
+        drop(client);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn manifest_hex_digest_rejects_noncanonical_input() {
+        assert_eq!(hex_digest(&"00".repeat(32)).unwrap(), [0; 32]);
+        assert!(matches!(
+            hex_digest(&"AA".repeat(32)),
+            Err(MobileBindingsError::InvalidRequest)
+        ));
+        assert!(matches!(
+            hex_digest("0"),
+            Err(MobileBindingsError::InvalidRequest)
+        ));
+        assert!(matches!(
+            hex_digest(&"gg".repeat(32)),
+            Err(MobileBindingsError::InvalidRequest)
+        ));
+    }
 
     #[test]
     fn permit_view_keeps_new_blocks_non_authorising() {

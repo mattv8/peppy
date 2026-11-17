@@ -8,12 +8,12 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use tempfile::TempDir;
 
-const BOOK: &str = "book1";
+pub(crate) const BOOK: &str = "book1";
 
-fn call(result: Result<String, Error>) -> Value {
+pub(crate) fn call(result: Result<String, Error>) -> Value {
     serde_json::from_str(&result.unwrap()).unwrap()
 }
-fn book(owner: &ClientConfig, id: &str) -> Value {
+pub(crate) fn book(owner: &ClientConfig, id: &str) -> Value {
     json!({
         "id": id,
         "owner_device_id": owner.device_id.to_string(),
@@ -25,7 +25,7 @@ fn book(owner: &ClientConfig, id: &str) -> Value {
         "policy": {"remote_edits": "auto", "large_delete_requires_approval": true}
     })
 }
-fn contact(book_id: &str, id: &str, given: &str) -> Value {
+pub(crate) fn contact(book_id: &str, id: &str, given: &str) -> Value {
     json!({
         "id": id,
         "book_id": book_id,
@@ -37,7 +37,7 @@ fn contact(book_id: &str, id: &str, given: &str) -> Value {
         "provenance": {"source_id": format!("native:src-{id}"), "account_id": "native:acct", "read_only": false}
     })
 }
-fn capture(client: &Client, book: &Value, contacts: Vec<Value>) {
+pub(crate) fn capture(client: &Client, book: &Value, contacts: Vec<Value>) {
     call(client.capture_contact_book(
         &json!({"schema_version": 1, "book": book, "contacts": contacts}).to_string(),
     ));
@@ -75,7 +75,7 @@ fn contact_upsert_envelope(
         .expect("authenticated contact upsert must remain pending for upload")
 }
 /// Visible (non-tombstoned) contact ids of `book_id`; empty when the book is unknown.
-fn visible(client: &Client, book_id: &str) -> Vec<String> {
+pub(crate) fn visible(client: &Client, book_id: &str) -> Vec<String> {
     let Ok(raw) = client.contact_book_view(
         &json!({"schema_version": 1, "book_id": book_id, "limit": 200}).to_string(),
     ) else {
@@ -93,7 +93,7 @@ fn visible(client: &Client, book_id: &str) -> Vec<String> {
     ids
 }
 /// The owner removes `id` with an authoritative full scan observing only `keep`.
-fn tombstone(owner: &Client, book_id: &str, scan: &str, keep: &[&str]) {
+pub(crate) fn tombstone(owner: &Client, book_id: &str, scan: &str, keep: &[&str]) {
     call(owner.begin_contact_scan(
         &json!({"schema_version": 1, "scan_id": scan, "book_id": book_id, "generation": "1", "access": "full", "authoritative": true}).to_string(),
     ));
@@ -112,7 +112,7 @@ fn tombstone(owner: &Client, book_id: &str, scan: &str, keep: &[&str]) {
 
 /// Server compaction model: a record named in any retained record's `supersedes` is dropped,
 /// and (past the purge horizon) terminal tombstones are dropped too. Cursors are preserved.
-fn compact(log: &[Envelope], purge_terminal: bool) -> Vec<SnapshotRecord> {
+pub(crate) fn compact(log: &[Envelope], purge_terminal: bool) -> Vec<SnapshotRecord> {
     let superseded: HashSet<(DeviceId, u64)> = log
         .iter()
         .filter_map(|e| e.compaction.as_ref())
@@ -146,7 +146,7 @@ fn import(client: &Client, records: &[SnapshotRecord], high_water: usize, genera
     client.finish_snapshot(session.generation).unwrap();
 }
 /// Calls `apply_pending` like native hosts do until no step reports progress.
-fn settle(client: &Client) -> ApplyReport {
+pub(crate) fn settle(client: &Client) -> ApplyReport {
     let mut total = ApplyReport::default();
     loop {
         let step = client.apply_pending(1000).unwrap();
@@ -161,7 +161,7 @@ fn settle(client: &Client) -> ApplyReport {
         }
     }
 }
-fn state(client: &Client) -> Option<(SnapshotProjectionState, Option<String>)> {
+pub(crate) fn state(client: &Client) -> Option<(SnapshotProjectionState, Option<String>)> {
     client
         .snapshot_projection_status()
         .unwrap()
