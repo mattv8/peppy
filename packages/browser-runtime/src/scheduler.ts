@@ -12,6 +12,8 @@ const MAX_REPLAY_PAGES = 20;
 const APPLY_LIMIT = 8;
 const HISTORY_WORK_STEP_LIMIT = 8;
 const MAX_SNAPSHOT_ATTEMPTS = 3;
+/** Manifest request limit; the server clamps any larger limit to this same maximum. */
+const MAX_MANIFEST_PAGE = 5000;
 const PAGE_BYTES = 8 * 1024 * 1024;
 const REPLAY_DISPATCH_BYTES = PAGE_BYTES - 64 * 1024;
 /** Exact UTF-8 size of the ingest_batch dispatch body with an empty events array. */
@@ -382,19 +384,31 @@ export class BrowserScheduler {
   }
 
   private async snapshot(signal: AbortSignal): Promise<void> {
-    for (let attempt = 0; attempt < MAX_SNAPSHOT_ATTEMPTS; attempt += 1) {
+    let attempt = 0;
+    let fresh = false;
+    let manifestAllowed = true;
+    for (;;) {
       try {
-        const progress = await this.startOrResumeSnapshot(signal, attempt > 0);
+        const progress = await this.startOrResumeSnapshot(signal, fresh, manifestAllowed);
         await this.importSnapshotCut(progress, signal);
         await this.apply(signal);
         return;
       } catch (error) {
-        if (!isResync(error) || attempt + 1 === MAX_SNAPSHOT_ATTEMPTS) throw error;
+        if (error instanceof SnapshotManifestUnsupported) {
+          // Not a resync attempt: the manifest is off for the rest of this call, and the marker never leaves it.
+          if (!manifestAllowed) throw new TransportError("invalid");
+          manifestAllowed = false;
+          fresh = true;
+          continue;
+        }
+        attempt += 1;
+        if (!isResync(error) || attempt === MAX_SNAPSHOT_ATTEMPTS) throw error;
+        fresh = true;
       }
     }
   }
 
-  private async startOrResumeSnapshot(signal: AbortSignal, fresh: boolean): Promise<Record<string, unknown>> {
+  private async startOrResumeSnapshot(signal: AbortSignal, fresh: boolean, manifestAllowed: boolean): Promise<Record<string, unknown>> {
     if (!fresh) {
       const existing = object(await this.session.query("snapshot_progress", {})).progress;
       if (existing !== null && existing !== undefined) {
@@ -403,12 +417,15 @@ export class BrowserScheduler {
       }
     }
     const start = object(await this.transport.json("/v1/snapshot", { method: "GET", signal }));
-    const progress = object(await this.session.mutate("begin_snapshot", {
+    const manifest = manifestAllowed && start.manifest_supported === true;
+    const begin = {
       highWater: requiredString(start.high_water_cursor),
       recordCount: requiredString(start.record_count),
-      purpose: "bootstrap",
       serverCompactionGeneration: start.compaction_supported === true ? requiredString(start.compaction_generation) : undefined,
-    }));
+    };
+    const progress = object(manifest
+      ? await this.session.mutate("begin_snapshot_manifest", begin)
+      : await this.session.mutate("begin_snapshot", { ...begin, purpose: "bootstrap" }));
     await this.publishSnapshotProgress("receiving", progress);
     return progress;
   }
@@ -417,20 +434,47 @@ export class BrowserScheduler {
     let current = progress;
     while (decimal(current.receivedRecords) < decimal(current.expectedRecords)) {
       throwIfAborted(signal);
-      const highWater = requiredString(current.highWater);
-      const after = requiredString(current.lastCursor);
-      const generation = requiredString(current.generation);
-      const fence = optionalString(current.serverCompactionGeneration);
-      const query = new URLSearchParams({ high_water: highWater, after, limit: String(PAGE_LIMIT) });
-      if (fence) query.set("compaction_generation", fence);
-      const page = object(await this.transport.json(`/v1/snapshot/records?${query}`, { method: "GET", signal, limit: PAGE_BYTES }));
-      const records = array(page.records);
-      if (records.length === 0) throw new TransportError("status", 409, "resync_required");
-      current = object(await this.session.mutate("append_snapshot_page", { generation, records }));
-      await this.publishSnapshotProgress("receiving", current);
+      current = current.manifest === true
+        ? await this.importManifestPage(current, signal)
+        : await this.importRecordPage(current, PAGE_LIMIT, signal);
     }
     await this.session.mutate("finish_snapshot", { generation: requiredString(current.generation) });
     await this.publishSnapshotProgress("applying", current);
+  }
+
+  /** Verifies one manifest page against the journal, then downloads only the records the core reports missing. */
+  private async importManifestPage(current: Record<string, unknown>, signal: AbortSignal): Promise<Record<string, unknown>> {
+    const query = snapshotCutQuery(current, MAX_MANIFEST_PAGE);
+    let page: Record<string, unknown>;
+    try {
+      // Only the manifest GET maps 404/405 to the fallback; the core and records requests keep their own errors.
+      page = object(await this.transport.json(`/v1/snapshot/manifest?${query}`, { method: "GET", signal, limit: PAGE_BYTES }));
+    } catch (error) {
+      if (error instanceof TransportError && error.kind === "status" && (error.status === 404 || error.status === 405)) throw new SnapshotManifestUnsupported();
+      throw error;
+    }
+    const entries = array(page.entries);
+    if (entries.length === 0) throw new TransportError("status", 409, "resync_required");
+    const verified = object(await this.session.mutate("append_snapshot_manifest", { generation: requiredString(current.generation), entries }));
+    let progress = object(verified.progress);
+    await this.publishSnapshotProgress("receiving", progress);
+    // Each records page stages at least one record or fails the attempt, so the loop ends; extra records from a server that ignores `limit` are kept.
+    const target = decimal(progress.receivedRecords) + BigInt(nonNegativeCount(verified.missing));
+    while (decimal(progress.receivedRecords) < target) {
+      throwIfAborted(signal);
+      const remaining = Number(target - decimal(progress.receivedRecords));
+      progress = await this.importRecordPage(progress, Math.min(remaining, PAGE_LIMIT), signal);
+    }
+    return progress;
+  }
+
+  private async importRecordPage(current: Record<string, unknown>, limit: number, signal: AbortSignal): Promise<Record<string, unknown>> {
+    const page = object(await this.transport.json(`/v1/snapshot/records?${snapshotCutQuery(current, limit)}`, { method: "GET", signal, limit: PAGE_BYTES }));
+    const records = array(page.records);
+    if (records.length === 0) throw new TransportError("status", 409, "resync_required");
+    const progress = object(await this.session.mutate("append_snapshot_page", { generation: requiredString(current.generation), records }));
+    await this.publishSnapshotProgress("receiving", progress);
+    return progress;
   }
 
   private async apply(signal: AbortSignal): Promise<void> {
@@ -548,6 +592,16 @@ function isCodedServerRefusal(error: unknown): boolean {
   return error instanceof TransportError && error.kind === "status" && error.status !== undefined && error.status >= 400 && error.status < 500 && typeof error.code === "string";
 }
 
+/** The server lacks the manifest route; the import restarts as a full record download. */
+class SnapshotManifestUnsupported extends Error {}
+
+function snapshotCutQuery(progress: Record<string, unknown>, limit: number): URLSearchParams {
+  const query = new URLSearchParams({ high_water: requiredString(progress.highWater), after: requiredString(progress.lastCursor), limit: String(limit) });
+  const fence = optionalString(progress.serverCompactionGeneration);
+  if (fence) query.set("compaction_generation", fence);
+  return query;
+}
+
 function isResync(error: unknown): boolean {
   return error instanceof TransportError && error.kind === "status" && (error.status === 409 || error.status === 400) && error.code === "resync_required";
 }
@@ -624,6 +678,10 @@ function progressPhase(
   return "current";
 }
 function nonNegative(value: unknown): number { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0; }
+function nonNegativeCount(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new TransportError("invalid");
+  return value;
+}
 function isTerminalHistoryStatus(value: unknown): boolean {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   return ["partial", "completed", "blocked", "failed", "cancelled"].includes((value as Record<string, unknown>).state as string);
