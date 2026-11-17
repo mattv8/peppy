@@ -54,6 +54,10 @@ class GatewaySyncTest : GatewayTestBase() {
     private var uploadResponse = LoopbackHttpServer.Response(200, """{"cursor":"9","duplicate":false}""")
     /** Responses consumed (one each) before normal snapshot-record pages are served. */
     private val brokenRecordPages = ArrayDeque<LoopbackHttpServer.Response>()
+    /** Responses consumed (one each) before normal manifest pages are served. */
+    private val brokenManifestPages = ArrayDeque<LoopbackHttpServer.Response>()
+    /** Serves manifest pages with the test's own entries when set; otherwise zero-digest entries (nothing verifies). */
+    private var manifestResponder: ((String) -> LoopbackHttpServer.Response?)? = null
     private var unauthorized = false
     /** Overrides the `/v1/snapshot` cut as (high_water_cursor, record_count). */
     private var snapshotCut: Pair<String, String>? = null
@@ -63,6 +67,8 @@ class GatewaySyncTest : GatewayTestBase() {
     private var snapshotCompactionSupported = false
     private var snapshotCompactionActive = false
     private var snapshotOriginTagsSupported: Boolean? = null
+    private var snapshotManifestSupported: Boolean? = null
+    private var maxManifestPageSize = 5_000
     private var uploadResponder: (() -> LoopbackHttpServer.Response)? = null
 
     private val server = LoopbackHttpServer { request ->
@@ -90,9 +96,13 @@ class GatewaySyncTest : GatewayTestBase() {
                         .put("compaction_active", snapshotCompactionActive)
                         .apply { if (snapshotCompactionSupported) put("compaction_generation", "1") }
                         .apply { snapshotOriginTagsSupported?.let { put("origin_tags_supported", it) } }
+                        .apply { snapshotManifestSupported?.let { put("manifest_supported", it).put("max_manifest_page_size", maxManifestPageSize) } }
                         .toString()
                 },
             )
+            request.method == "GET" && path == "/v1/snapshot/manifest" -> brokenManifestPages.removeFirstOrNull()
+                ?: manifestResponder?.invoke(request.target)
+                ?: LoopbackHttpServer.Response(200, JSONObject().put("entries", manifestAfter(request.target)).toString())
             request.method == "GET" && path == "/v1/snapshot/records" -> brokenRecordPages.removeFirstOrNull()
                 ?: LoopbackHttpServer.Response(200, JSONObject().put("records", recordsAfter(request.target)).toString())
             else -> LoopbackHttpServer.Response(404)
@@ -103,6 +113,16 @@ class GatewaySyncTest : GatewayTestBase() {
         val after = Regex("after=([0-9]+)").find(target)!!.groupValues[1].toInt()
         val limit = Regex("limit=([0-9]+)").find(target)!!.groupValues[1].toInt()
         return JSONArray().apply { for (i in after until minOf(after + limit, snapshot.length())) put(snapshot.get(i)) }
+    }
+
+    private fun manifestAfter(target: String): JSONArray {
+        val after = Regex("after=([0-9]+)").find(target)!!.groupValues[1].toInt()
+        val limit = Regex("limit=([0-9]+)").find(target)!!.groupValues[1].toInt()
+        return JSONArray().apply {
+            for (index in after until minOf(after + limit, snapshot.length())) {
+                put(JSONObject().put("cursor", snapshot.getJSONObject(index).getString("cursor")).put("digest", "0".repeat(64)).put("flags", 0))
+            }
+        }
     }
 
     @After
@@ -162,6 +182,364 @@ class GatewaySyncTest : GatewayTestBase() {
         val json = JSONObject(envelope)
         assertEquals(deviceId, json.getString("producer_device_id"))
         assertEquals("event", json.getString("purpose"))
+    }
+
+    /** A plain envelope (no compaction, no origin_tag) whose `wire_digest` is pinned in the Rust contract test. */
+    private val PINNED_PLAIN_ENVELOPE = """{"protocol_version":1,"envelope_id":"00000000-0000-0000-0000-000000000001",""" +
+        """"command_id":"00000000-0000-0000-0000-000000000002","vault_id":"00000000-0000-0000-0000-000000000003",""" +
+        """"producer_device_id":"00000000-0000-0000-0000-000000000004","producer_sequence":"9","key_epoch":2,""" +
+        """"crypto_suite":3,"profile_fingerprint":"${"a".repeat(64)}","purpose":"command",""" +
+        """"route":{"gateway_device_id":"00000000-0000-0000-0000-000000000005","subscription_id":"sim:fixture"},""" +
+        """"ciphertext":"AQID"}"""
+    private val PINNED_PLAIN_DIGEST = "128646e3b468bd6b0a322c287296fae9603530595259c4073fc083fa10a6765d"
+
+    /** Snapshot start requests (capability probe, resync cut) and snapshot pages, in order. */
+    private fun snapshotRequests() = requests.map { it.first }.filter { it.startsWith("GET /v1/snapshot") }
+
+    private fun twoSnapshotRecords(): Pair<String, String> {
+        val first = desktopCommandEnvelope(SimRoutes.routeId(3), "snapshot one").second
+        val second = desktopCommandEnvelope(SimRoutes.routeId(3), "snapshot two").second
+        snapshot = JSONArray().put(record(1, first)).put(record(2, second))
+        return first to second
+    }
+
+    /** Leaves a manifest generation staged with cursor 1 downloaded and cursor 2 still missing. */
+    private fun interruptManifestResync(client: NativeClientInterface, first: String) {
+        snapshotManifestSupported = true
+        eventsStatus = 409
+        brokenRecordPages += LoopbackHttpServer.Response(200, JSONObject().put("records", JSONArray().put(record(1, first))).toString())
+        brokenRecordPages += LoopbackHttpServer.Response(500)
+        assertTrue(sync(client).run().failure is GatewayTransportException)
+        assertEquals("1", client.snapshotProgress()?.lastCursor)
+        eventsStatus = 200
+        requests.clear()
+    }
+
+    @Test
+    fun manifestResyncDownloadsOnlyRecordsReportedMissingByTheManifest() {
+        val client = live()
+        twoSnapshotRecords()
+        snapshotManifestSupported = true
+        eventsStatus = 409
+
+        assertNull(sync(client).run().failure)
+
+        assertEquals(
+            listOf(
+                "GET /v1/snapshot",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+                "GET /v1/snapshot/records?high_water=2&after=0&limit=2",
+            ),
+            snapshotRequests(),
+        )
+        assertNull(client.snapshotProgress())
+    }
+
+    @Test
+    fun serverWithoutManifestSupportKeepsTheFullResyncImport() {
+        val client = live()
+        twoSnapshotRecords()
+        eventsStatus = 409
+
+        assertNull(sync(client).run().failure)
+
+        assertEquals(
+            listOf(
+                "GET /v1/snapshot",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/records?high_water=2&after=0&limit=200",
+            ),
+            snapshotRequests(),
+        )
+        assertNull(client.snapshotProgress())
+    }
+
+    @Test
+    fun manifestConflictRestartsFromAFreshCut() {
+        val client = live()
+        twoSnapshotRecords()
+        snapshotManifestSupported = true
+        eventsStatus = 409
+        brokenManifestPages += LoopbackHttpServer.Response(409, """{"code":"resync_required"}""")
+
+        assertNull(sync(client).run().failure)
+
+        assertEquals(
+            listOf(
+                "GET /v1/snapshot",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+                "GET /v1/snapshot/records?high_water=2&after=0&limit=2",
+            ),
+            snapshotRequests(),
+        )
+        assertNull(client.snapshotProgress())
+    }
+
+    @Test
+    fun resumedManifestGenerationContinuesFromItsLastCursor() {
+        val client = live()
+        val (first, _) = twoSnapshotRecords()
+        interruptManifestResync(client, first)
+
+        assertNull(sync(client).run().failure)
+
+        assertEquals(
+            listOf(
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/manifest?high_water=2&after=1&limit=5000",
+                "GET /v1/snapshot/records?high_water=2&after=1&limit=1",
+            ),
+            snapshotRequests(),
+        )
+        assertNull(client.snapshotProgress())
+    }
+
+    @Test
+    fun manifestRouteMissingOnResumeFallsBackToFullImport() {
+        val client = live()
+        val (first, _) = twoSnapshotRecords()
+        interruptManifestResync(client, first)
+        brokenManifestPages += LoopbackHttpServer.Response(404)
+
+        assertNull(sync(client).run().failure)
+
+        assertEquals(
+            listOf(
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/manifest?high_water=2&after=1&limit=5000",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/records?high_water=2&after=0&limit=200",
+            ),
+            snapshotRequests(),
+        )
+        assertNull(client.snapshotProgress())
+    }
+
+    @Test
+    fun emptyManifestPageWithNothingMissingFailsTheAttempt() {
+        val client = live()
+        twoSnapshotRecords()
+        snapshotManifestSupported = true
+        eventsStatus = 409
+        repeat(2) { brokenManifestPages += LoopbackHttpServer.Response(200, """{"entries":[]}""") }
+
+        val result = sync(client).run()
+
+        assertTrue(result.failure is GatewayTransportException)
+        assertEquals(
+            listOf(
+                "GET /v1/snapshot",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+            ),
+            snapshotRequests(),
+        )
+    }
+
+    @Test
+    fun recordsConflictInsideAManifestCutRestartsFromAFreshCut() {
+        val client = live()
+        twoSnapshotRecords()
+        snapshotManifestSupported = true
+        eventsStatus = 409
+        brokenRecordPages += LoopbackHttpServer.Response(409, """{"code":"resync_required"}""")
+
+        assertNull(sync(client).run().failure)
+
+        assertEquals(
+            listOf(
+                "GET /v1/snapshot",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+                "GET /v1/snapshot/records?high_water=2&after=0&limit=2",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+                "GET /v1/snapshot/records?high_water=2&after=0&limit=2",
+            ),
+            snapshotRequests(),
+        )
+        assertNull(client.snapshotProgress())
+    }
+
+    @Test
+    fun manifestRouteMissingOnFreshResyncFallsBackToFullImport() {
+        val client = live()
+        twoSnapshotRecords()
+        snapshotManifestSupported = true
+        eventsStatus = 409
+        brokenManifestPages += LoopbackHttpServer.Response(404)
+
+        assertNull(sync(client).run().failure)
+
+        assertEquals(
+            listOf(
+                "GET /v1/snapshot",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/records?high_water=2&after=0&limit=200",
+            ),
+            snapshotRequests(),
+        )
+        assertNull(client.snapshotProgress())
+    }
+
+    @Test
+    fun manifestFallbackStaysFullWhenTheFullCutConflicts() {
+        val client = live()
+        twoSnapshotRecords()
+        snapshotManifestSupported = true
+        eventsStatus = 409
+        brokenManifestPages += LoopbackHttpServer.Response(404)
+        brokenRecordPages += LoopbackHttpServer.Response(409, """{"code":"resync_required"}""")
+
+        assertNull(sync(client).run().failure)
+
+        assertEquals(
+            listOf(
+                "GET /v1/snapshot",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/records?high_water=2&after=0&limit=200",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/records?high_water=2&after=0&limit=200",
+            ),
+            snapshotRequests(),
+        )
+        assertNull(client.snapshotProgress())
+    }
+
+    @Test
+    fun manifestSkipsARecordTheJournalHoldsWhenItsDigestMatches() {
+        val client = live()
+        // Pinned by `legacy_carrier_envelope()` / `carrier_route_aad_is_byte_stable_fixture` in
+        // crates/protocol/tests/protocol_contract.rs: a plain envelope (no compaction, no origin_tag).
+        client.ingestRaw(PINNED_PLAIN_ENVELOPE.toByteArray(), "1")
+        val (_, second) = desktopCommandEnvelope(SimRoutes.routeId(3), "snapshot two")
+        snapshot = JSONArray().put(record(1, PINNED_PLAIN_ENVELOPE)).put(record(2, second))
+        snapshotManifestSupported = true
+        manifestResponder = {
+            LoopbackHttpServer.Response(
+                200,
+                JSONObject().put(
+                    "entries",
+                    JSONArray()
+                        .put(JSONObject().put("cursor", "1").put("digest", PINNED_PLAIN_DIGEST).put("flags", 0))
+                        .put(JSONObject().put("cursor", "2").put("digest", "0".repeat(64)).put("flags", 0)),
+                ).toString(),
+            )
+        }
+        eventsStatus = 409
+
+        assertNull(sync(client).run().failure)
+
+        assertEquals(
+            listOf(
+                "GET /v1/snapshot",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+                "GET /v1/snapshot/records?high_water=2&after=1&limit=1",
+            ),
+            snapshotRequests(),
+        )
+        assertNull(client.snapshotProgress())
+    }
+
+    @Test
+    fun malformedManifestEntryRestartsTheCut() {
+        val client = live()
+        twoSnapshotRecords()
+        snapshotManifestSupported = true
+        eventsStatus = 409
+        val numericCursor = JSONObject().put("entries", JSONArray().put(JSONObject().put("cursor", 1).put("digest", "0".repeat(64)).put("flags", 0)))
+        brokenManifestPages += LoopbackHttpServer.Response(200, numericCursor.toString())
+
+        assertNull(sync(client).run().failure)
+
+        assertEquals(
+            listOf(
+                "GET /v1/snapshot",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+                "GET /v1/snapshot/records?high_water=2&after=0&limit=2",
+            ),
+            snapshotRequests(),
+        )
+        assertNull(client.snapshotProgress())
+    }
+
+    @Test
+    fun malformedManifestPageRestartsTheCut() {
+        val client = live()
+        twoSnapshotRecords()
+        snapshotManifestSupported = true
+        eventsStatus = 409
+        brokenManifestPages += LoopbackHttpServer.Response(200, """{"entries":[""")
+
+        assertNull(sync(client).run().failure)
+
+        assertEquals(
+            listOf(
+                "GET /v1/snapshot",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+                "GET /v1/snapshot/records?high_water=2&after=0&limit=2",
+            ),
+            snapshotRequests(),
+        )
+        assertNull(client.snapshotProgress())
+    }
+
+    @Test
+    fun contactRepairResyncUsesTheManifest() {
+        val client = live()
+        client.requestContactRepair()
+        snapshotCompactionSupported = true
+        snapshotCompactionActive = true
+        snapshotManifestSupported = true
+        val (_, wire) = desktopCommandEnvelope(SimRoutes.routeId(3), "repair history")
+        events = JSONArray().put(record(1, wire))
+        snapshot = JSONArray().put(record(1, wire))
+
+        val result = sync(client).run()
+
+        assertNull(result.failure)
+        assertFalse(client.contactRepairRequired())
+        assertEquals(
+            listOf(
+                "GET /v1/snapshot/manifest?high_water=1&after=0&limit=5000&compaction_generation=1",
+                "GET /v1/snapshot/records?high_water=1&after=0&limit=1&compaction_generation=1",
+            ),
+            requests.map { it.first }.filter { it.startsWith("GET /v1/snapshot/") },
+        )
+    }
+
+    @Test
+    fun restoreRecoveryNeverRequestsTheManifest() {
+        val client = live()
+        val (_, wire) = desktopCommandEnvelope(SimRoutes.routeId(3), "restore history")
+        snapshot = JSONArray().put(record(1, wire))
+        snapshotManifestSupported = true
+        client.captureIncoming(NativeIncomingSms(null, "+15550007890", "restore", "p-restore", false))
+        uploadResponse = LoopbackHttpServer.Response(409, """{"code":"idempotency_conflict"}""")
+
+        sync(client).run()
+
+        assertEquals(SyncPhase.RECOVERY_REQUIRED, state.phase)
+        assertTrue(requests.none { it.first.startsWith("GET /v1/snapshot/manifest") })
+        assertNotNull(client.snapshotProgress())
+        assertFalse(client.snapshotProgress()!!.manifest)
     }
 
     @Test
@@ -340,6 +718,31 @@ class GatewaySyncTest : GatewayTestBase() {
         )
         assertTrue(client.beginSendAttempt(command).state != NativePermitState.PERMIT)
         assertEquals(SyncPhase.RECOVERY_REQUIRED, NativeGateway.status(context).syncPhase)
+    }
+
+    @Test
+    fun manifestBootstrapStillDetectsReusedDeviceIdentity() {
+        val client = enrollAndUnlock()
+        client.captureIncoming(NativeIncomingSms(null, "+15550004445", "an earlier install's capture", "p-old-manifest", false))
+        val ownWire = client.pendingOutboxJsonBatch(1uL).single()
+        val (_, commandWire) = desktopCommandEnvelope(SimRoutes.routeId(3), "old command")
+        snapshot = JSONArray().put(record(1, commandWire)).put(record(2, ownWire))
+        snapshotManifestSupported = true
+
+        sync(client).run()
+
+        assertEquals(
+            listOf(
+                "GET /v1/snapshot",
+                "GET /v1/snapshot",
+                "GET /v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+                "GET /v1/snapshot/records?high_water=2&after=0&limit=2",
+                "GET /v1/snapshot",
+            ),
+            snapshotRequests(),
+        )
+        assertEquals(SyncPhase.RECOVERY_REQUIRED, state.phase)
+        assertEquals(RecoveryReason.REUSED_DEVICE_IDENTITY, state.recoveryReason)
     }
 
     private fun live(): NativeClient = enrollAndUnlock().also { state.advance(SyncPhase.LIVE) }

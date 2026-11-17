@@ -3,6 +3,7 @@ package dev.peppy.mobile.diagnostics
 import android.provider.OpenableColumns
 import androidx.core.content.FileProvider
 import dev.peppy.mobile.GatewayEnqueueCause
+import dev.peppy.mobile.gateway.GatewayHttpRoute
 import androidx.test.core.app.ApplicationProvider
 import dev.peppy.mobile.BuildConfig
 import java.io.File
@@ -153,6 +154,8 @@ class DiagnosticsLogTest {
         assertTrue(header.contains("27:gm_link"))
         assertTrue(header.contains("28:rcs_sweep(rows=considered,count=skipped,processed=complete,pending=incomplete,unavailable=aborted,page_queries=pages)"))
         assertTrue(header.contains("gateway_enqueue(reason=cause)"))
+        val routes = GatewayHttpRoute.entries.joinToString(",") { "${it.code}:${it.name.lowercase()}" }
+        assertTrue(header.contains("http_routes=$routes"))
         val causes = GatewayEnqueueCause.entries.joinToString(",") { "${it.code}:${it.name.lowercase()}" }
         assertTrue(header.contains("gateway_enqueue_causes=$causes"))
         assertTrue(header.contains("40:provider_reads"))

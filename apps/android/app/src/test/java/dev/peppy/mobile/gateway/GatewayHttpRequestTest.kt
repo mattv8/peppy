@@ -20,6 +20,11 @@ import uniffi.peppy_mobile_bindings.NativeAttachmentRetentionRequest
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class GatewayHttpRequestTest {
+    @Test fun manifestSnapshotRouteHasItsOwnDiagnosticCode() {
+        assertEquals(GatewayHttpRoute.SNAPSHOT_MANIFEST, GatewayHttp.routeCategory("/v1/snapshot/manifest?after=3"))
+        assertEquals(9L, GatewayHttpRoute.SNAPSHOT_MANIFEST.code)
+    }
+
     @Test fun beforeRequestDenialBlocksJsonMethodsWithoutCallingResponseObserver() {
         val requests = AtomicInteger()
         var observed = 0
