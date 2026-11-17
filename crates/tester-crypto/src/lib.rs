@@ -2,8 +2,10 @@
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use peppy_crypto::{
-    CryptoError, EncryptedEnvelope, KeyPurpose, PurposeKey, decrypt, derive_purpose_key,
-    derive_root_key, encrypt, profile_fingerprint_bytes, verify_vault_check_header,
+    CryptoError, EncryptedEnvelope, KeyPurpose, PurposeKey,
+    beta_seats::{BetaSeatContext, BetaSeatKeypair, open_email, seal_email},
+    decrypt, derive_purpose_key, derive_root_key, encrypt, profile_fingerprint_bytes,
+    verify_vault_check_header,
 };
 use peppy_hosted_api::tester_admin_v2::{ALGORITHM, CiphertextV2, VERSION, VaultBindingV2};
 use serde::{Deserialize, Serialize};
@@ -23,6 +25,7 @@ const AAD_PREFIX: &[u8] = b"peppy-tester-vault-v2\0";
 struct Session {
     binding: VaultBindingV2,
     key: Box<PurposeKey>,
+    beta_keypair: BetaSeatKeypair,
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -69,6 +72,28 @@ struct DecryptRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CloseRequest {
     handle: Uuid,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BetaPublicKeyRequest {
+    handle: Uuid,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BetaOpenRequest {
+    handle: Uuid,
+    program_id: Uuid,
+    seat_id: Uuid,
+    sealed_email: SecretString,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BetaResealRequest {
+    from_handle: Uuid,
+    to_handle: Uuid,
+    program_id: Uuid,
+    seat_id: Uuid,
+    sealed_email: SecretString,
 }
 #[derive(Serialize)]
 struct Failure {
@@ -120,6 +145,9 @@ impl TesterCryptoWorker {
             "unlock" => self.unlock(request.args),
             "encrypt" => self.encrypt(request.args),
             "decrypt" => self.decrypt(request.args),
+            "betaPublicKey" => self.beta_public_key(request.args),
+            "betaOpen" => self.beta_open(request.args),
+            "betaReseal" => self.beta_reseal(request.args),
             "close" => self.close(request.args),
             _ => Err(failure("invalid-request", "The request is invalid.")),
         };
@@ -165,12 +193,17 @@ impl TesterCryptoWorker {
             derive_purpose_key(&root, &profile, KeyPurpose::TesterRegistry)
                 .map_err(crypto_failure)?,
         );
+        let beta_purpose_key =
+            derive_purpose_key(&root, &profile, KeyPurpose::BetaSeats).map_err(crypto_failure)?;
+        let beta_keypair =
+            BetaSeatKeypair::from_purpose_key(&beta_purpose_key).map_err(crypto_failure)?;
         let handle = Uuid::new_v4();
         self.sessions.insert(
             handle,
             Session {
                 binding: request.binding,
                 key,
+                beta_keypair,
             },
         );
         Ok(json!({"handle":handle}))
@@ -248,6 +281,85 @@ impl TesterCryptoWorker {
         }
         Ok(json!({}))
     }
+    fn beta_public_key(&self, args: Option<&serde_json::value::RawValue>) -> Result<Value, String> {
+        let request: BetaPublicKeyRequest = serde_json::from_str(
+            args.ok_or_else(|| failure("invalid-request", "The request is invalid."))?
+                .get(),
+        )
+        .map_err(|_| failure("invalid-request", "The request is invalid."))?;
+        let session = self
+            .sessions
+            .get(&request.handle)
+            .ok_or_else(|| failure("locked", "Unlock the vault before using beta seats."))?;
+        Ok(json!({"publicKey":URL_SAFE_NO_PAD.encode(session.beta_keypair.public_key())}))
+    }
+    fn beta_open(&self, args: Option<&serde_json::value::RawValue>) -> Result<Value, String> {
+        let request: BetaOpenRequest = serde_json::from_str(
+            args.ok_or_else(|| failure("invalid-request", "The request is invalid."))?
+                .get(),
+        )
+        .map_err(|_| failure("invalid-request", "The request is invalid."))?;
+        let sealed = decode_sealed_email(request.sealed_email.as_str())?;
+        let session = self
+            .sessions
+            .get(&request.handle)
+            .ok_or_else(|| failure("locked", "Unlock the vault before using beta seats."))?;
+        let plaintext = open_email(
+            &session.beta_keypair,
+            &BetaSeatContext {
+                program_id: request.program_id,
+                seat_id: request.seat_id,
+            },
+            &sealed,
+        )
+        .map_err(beta_failure)?;
+        Ok(json!({"plaintext":plaintext.as_str()}))
+    }
+    fn beta_reseal(&self, args: Option<&serde_json::value::RawValue>) -> Result<Value, String> {
+        let request: BetaResealRequest = serde_json::from_str(
+            args.ok_or_else(|| failure("invalid-request", "The request is invalid."))?
+                .get(),
+        )
+        .map_err(|_| failure("invalid-request", "The request is invalid."))?;
+        let sealed = decode_sealed_email(request.sealed_email.as_str())?;
+        let from_session = self
+            .sessions
+            .get(&request.from_handle)
+            .ok_or_else(|| failure("locked", "Unlock the vault before using beta seats."))?;
+        let context = BetaSeatContext {
+            program_id: request.program_id,
+            seat_id: request.seat_id,
+        };
+        let plaintext =
+            open_email(&from_session.beta_keypair, &context, &sealed).map_err(beta_failure)?;
+        let to_session = self
+            .sessions
+            .get(&request.to_handle)
+            .ok_or_else(|| failure("locked", "Unlock the vault before using beta seats."))?;
+        let sealed = seal_email(
+            &to_session.beta_keypair.public_key(),
+            &context,
+            plaintext.as_str(),
+        )
+        .map_err(beta_failure)?;
+        Ok(json!({"sealedEmail":URL_SAFE_NO_PAD.encode(sealed)}))
+    }
+}
+
+fn beta_failure(error: CryptoError) -> String {
+    match error {
+        CryptoError::AuthenticationFailed => failure(
+            "authentication-failed",
+            "The encrypted beta-seat email does not match this vault context.",
+        ),
+        _ => failure("invalid-request", "The beta-seat request is invalid."),
+    }
+}
+
+fn decode_sealed_email(value: &str) -> Result<Vec<u8>, String> {
+    URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| failure("invalid-request", "The beta-seat email is invalid."))
 }
 fn aad(
     binding: &VaultBindingV2,
@@ -479,5 +591,274 @@ mod tests {
         let response: Value =
             serde_json::from_str(&worker.dispatch(&"x".repeat(MAX_REQUEST_BYTES + 1))).unwrap();
         assert!(!response["ok"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn beta_public_key_and_open_bind_the_seat_context() {
+        let (binding, header) = fixture();
+        let mut worker = TesterCryptoWorker::default();
+        let handle = unlock(&mut worker, &binding, &header);
+        let public: Value = serde_json::from_str(
+            &worker
+                .dispatch(&json!({"command":"betaPublicKey","args":{"handle":handle}}).to_string()),
+        )
+        .unwrap();
+        let public_key: [u8; 32] = URL_SAFE_NO_PAD
+            .decode(public["value"]["publicKey"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let program_id = Uuid::new_v4();
+        let seat_id = Uuid::new_v4();
+        let sealed = seal_email(
+            &public_key,
+            &BetaSeatContext {
+                program_id,
+                seat_id,
+            },
+            "person@example.test",
+        )
+        .unwrap();
+        let response: Value = serde_json::from_str(
+            &worker
+                .dispatch(&json!({"command":"betaOpen","args":{"handle":handle,"programId":program_id,"seatId":seat_id,"sealedEmail":URL_SAFE_NO_PAD.encode(&sealed)}}).to_string()),
+        )
+        .unwrap();
+        assert_eq!(response["value"]["plaintext"], "person@example.test");
+
+        let wrong_context: Value = serde_json::from_str(
+            &worker
+                .dispatch(&json!({"command":"betaOpen","args":{"handle":handle,"programId":Uuid::new_v4(),"seatId":seat_id,"sealedEmail":URL_SAFE_NO_PAD.encode(&sealed)}}).to_string()),
+        )
+        .unwrap();
+        assert_eq!(wrong_context["error"]["code"], "authentication-failed");
+    }
+
+    #[test]
+    fn beta_reseal_never_returns_plaintext() {
+        let (binding, header) = fixture();
+        let mut worker = TesterCryptoWorker::default();
+        let from_handle = unlock(&mut worker, &binding, &header);
+        let to_handle = unlock(&mut worker, &binding, &header);
+        let public: Value = serde_json::from_str(&worker.dispatch(
+            &json!({"command":"betaPublicKey","args":{"handle":from_handle}}).to_string(),
+        ))
+        .unwrap();
+        let public_key: [u8; 32] = URL_SAFE_NO_PAD
+            .decode(public["value"]["publicKey"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let program_id = Uuid::new_v4();
+        let seat_id = Uuid::new_v4();
+        let sealed = seal_email(
+            &public_key,
+            &BetaSeatContext {
+                program_id,
+                seat_id,
+            },
+            "person@example.test",
+        )
+        .unwrap();
+        let resealed: Value = serde_json::from_str(
+            &worker
+                .dispatch(&json!({"command":"betaReseal","args":{"fromHandle":from_handle,"toHandle":to_handle,"programId":program_id,"seatId":seat_id,"sealedEmail":URL_SAFE_NO_PAD.encode(sealed)}}).to_string()),
+        )
+        .unwrap();
+        assert!(resealed["value"].get("plaintext").is_none());
+        assert!(resealed["value"]["sealedEmail"].is_string());
+    }
+
+    #[test]
+    fn beta_commands_reject_closed_handles() {
+        let (binding, header) = fixture();
+        let mut worker = TesterCryptoWorker::default();
+        let handle = unlock(&mut worker, &binding, &header);
+        worker.dispatch(&json!({"command":"close","args":{"handle":handle}}).to_string());
+        let response: Value = serde_json::from_str(
+            &worker
+                .dispatch(&json!({"command":"betaPublicKey","args":{"handle":handle}}).to_string()),
+        )
+        .unwrap();
+        assert_eq!(response["error"]["code"], "locked");
+    }
+
+    fn dispatch_value(worker: &mut TesterCryptoWorker, request: Value) -> Value {
+        serde_json::from_str(&worker.dispatch(&request.to_string())).unwrap()
+    }
+
+    fn beta_public_key_bytes(worker: &mut TesterCryptoWorker, handle: Uuid) -> [u8; 32] {
+        let public = dispatch_value(
+            worker,
+            json!({"command":"betaPublicKey","args":{"handle":handle}}),
+        );
+        URL_SAFE_NO_PAD
+            .decode(public["value"]["publicKey"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap()
+    }
+
+    fn seal_for_handle(
+        worker: &mut TesterCryptoWorker,
+        handle: Uuid,
+        context: &BetaSeatContext,
+        email: &str,
+    ) -> String {
+        let public_key = beta_public_key_bytes(worker, handle);
+        URL_SAFE_NO_PAD.encode(seal_email(&public_key, context, email).unwrap())
+    }
+
+    #[test]
+    fn beta_reseal_opens_only_with_the_destination_handle() {
+        let (from_binding, from_header) = fixture();
+        let (to_binding, to_header) = fixture();
+        let mut worker = TesterCryptoWorker::default();
+        let from_handle = unlock(&mut worker, &from_binding, &from_header);
+        let to_handle = unlock(&mut worker, &to_binding, &to_header);
+        let context = BetaSeatContext {
+            program_id: Uuid::new_v4(),
+            seat_id: Uuid::new_v4(),
+        };
+        let sealed = seal_for_handle(&mut worker, from_handle, &context, "person@example.test");
+        let resealed = dispatch_value(
+            &mut worker,
+            json!({"command":"betaReseal","args":{"fromHandle":from_handle,"toHandle":to_handle,"programId":context.program_id,"seatId":context.seat_id,"sealedEmail":sealed}}),
+        );
+        let resealed_email = resealed["value"]["sealedEmail"].as_str().unwrap();
+
+        let opened_by_destination = dispatch_value(
+            &mut worker,
+            json!({"command":"betaOpen","args":{"handle":to_handle,"programId":context.program_id,"seatId":context.seat_id,"sealedEmail":resealed_email}}),
+        );
+        assert_eq!(
+            opened_by_destination["value"]["plaintext"],
+            "person@example.test"
+        );
+
+        let opened_by_source = dispatch_value(
+            &mut worker,
+            json!({"command":"betaOpen","args":{"handle":from_handle,"programId":context.program_id,"seatId":context.seat_id,"sealedEmail":resealed_email}}),
+        );
+        assert_eq!(opened_by_source["error"]["code"], "authentication-failed");
+    }
+
+    #[test]
+    fn beta_reseal_and_open_reject_a_wrong_seat_or_program() {
+        let (from_binding, from_header) = fixture();
+        let (to_binding, to_header) = fixture();
+        let mut worker = TesterCryptoWorker::default();
+        let from_handle = unlock(&mut worker, &from_binding, &from_header);
+        let to_handle = unlock(&mut worker, &to_binding, &to_header);
+        let context = BetaSeatContext {
+            program_id: Uuid::new_v4(),
+            seat_id: Uuid::new_v4(),
+        };
+        let sealed = seal_for_handle(&mut worker, from_handle, &context, "person@example.test");
+        let wrong_ids = [
+            (Uuid::new_v4(), context.seat_id),
+            (context.program_id, Uuid::new_v4()),
+        ];
+        for (program_id, seat_id) in wrong_ids {
+            let reseal = dispatch_value(
+                &mut worker,
+                json!({"command":"betaReseal","args":{"fromHandle":from_handle,"toHandle":to_handle,"programId":program_id,"seatId":seat_id,"sealedEmail":sealed}}),
+            );
+            assert_eq!(reseal["error"]["code"], "authentication-failed");
+
+            let open = dispatch_value(
+                &mut worker,
+                json!({"command":"betaOpen","args":{"handle":from_handle,"programId":program_id,"seatId":seat_id,"sealedEmail":sealed}}),
+            );
+            assert_eq!(open["error"]["code"], "authentication-failed");
+        }
+    }
+
+    #[test]
+    fn beta_sealed_values_fail_closed_on_malformed_or_out_of_bounds_input() {
+        let (binding, header) = fixture();
+        let mut worker = TesterCryptoWorker::default();
+        let handle = unlock(&mut worker, &binding, &header);
+        let context = BetaSeatContext {
+            program_id: Uuid::new_v4(),
+            seat_id: Uuid::new_v4(),
+        };
+        let cases = [
+            ("!!!not-base64!!!".to_owned(), "invalid-request"),
+            (URL_SAFE_NO_PAD.encode([0_u8; 10]), "authentication-failed"),
+            (
+                URL_SAFE_NO_PAD.encode([0_u8; 1024]),
+                "authentication-failed",
+            ),
+        ];
+        for (sealed, code) in cases {
+            let open = dispatch_value(
+                &mut worker,
+                json!({"command":"betaOpen","args":{"handle":handle,"programId":context.program_id,"seatId":context.seat_id,"sealedEmail":sealed}}),
+            );
+            assert_eq!(open["error"]["code"], code);
+
+            let reseal = dispatch_value(
+                &mut worker,
+                json!({"command":"betaReseal","args":{"fromHandle":handle,"toHandle":handle,"programId":context.program_id,"seatId":context.seat_id,"sealedEmail":sealed}}),
+            );
+            assert_eq!(reseal["error"]["code"], code);
+        }
+    }
+
+    #[test]
+    fn beta_reseal_reports_locked_for_a_closed_source_or_destination() {
+        let (from_binding, from_header) = fixture();
+        let (to_binding, to_header) = fixture();
+        let mut worker = TesterCryptoWorker::default();
+        let from_handle = unlock(&mut worker, &from_binding, &from_header);
+        let to_handle = unlock(&mut worker, &to_binding, &to_header);
+        let context = BetaSeatContext {
+            program_id: Uuid::new_v4(),
+            seat_id: Uuid::new_v4(),
+        };
+        let sealed = seal_for_handle(&mut worker, from_handle, &context, "person@example.test");
+
+        dispatch_value(
+            &mut worker,
+            json!({"command":"close","args":{"handle":from_handle}}),
+        );
+        let closed_source = dispatch_value(
+            &mut worker,
+            json!({"command":"betaReseal","args":{"fromHandle":from_handle,"toHandle":to_handle,"programId":context.program_id,"seatId":context.seat_id,"sealedEmail":sealed}}),
+        );
+        assert_eq!(closed_source["error"]["code"], "locked");
+
+        let from_handle = unlock(&mut worker, &from_binding, &from_header);
+        let sealed = seal_for_handle(&mut worker, from_handle, &context, "person@example.test");
+        dispatch_value(
+            &mut worker,
+            json!({"command":"close","args":{"handle":to_handle}}),
+        );
+        let closed_destination = dispatch_value(
+            &mut worker,
+            json!({"command":"betaReseal","args":{"fromHandle":from_handle,"toHandle":to_handle,"programId":context.program_id,"seatId":context.seat_id,"sealedEmail":sealed}}),
+        );
+        assert_eq!(closed_destination["error"]["code"], "locked");
+    }
+
+    #[test]
+    fn beta_reseal_response_contains_only_the_sealed_email() {
+        let (from_binding, from_header) = fixture();
+        let (to_binding, to_header) = fixture();
+        let mut worker = TesterCryptoWorker::default();
+        let from_handle = unlock(&mut worker, &from_binding, &from_header);
+        let to_handle = unlock(&mut worker, &to_binding, &to_header);
+        let context = BetaSeatContext {
+            program_id: Uuid::new_v4(),
+            seat_id: Uuid::new_v4(),
+        };
+        let sealed = seal_for_handle(&mut worker, from_handle, &context, "person@example.test");
+        let resealed = dispatch_value(
+            &mut worker,
+            json!({"command":"betaReseal","args":{"fromHandle":from_handle,"toHandle":to_handle,"programId":context.program_id,"seatId":context.seat_id,"sealedEmail":sealed}}),
+        );
+        let fields: Vec<&String> = resealed["value"].as_object().unwrap().keys().collect();
+        assert_eq!(fields, vec!["sealedEmail"]);
     }
 }
