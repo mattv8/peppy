@@ -377,6 +377,7 @@ async fn route_authority_inventory_is_complete_and_device_routes_reject_bad_bear
         (Method::GET, "/v1/events".to_owned()),
         (Method::GET, "/v1/snapshot".to_owned()),
         (Method::GET, "/v1/snapshot/records?high_water=0".to_owned()),
+        (Method::GET, "/v1/snapshot/manifest?high_water=0".to_owned()),
         (Method::GET, "/v1/commands/pending".to_owned()),
         (Method::GET, "/v1/vault/key-profiles".to_owned()),
         (Method::GET, "/v1/vault/identity".to_owned()),
