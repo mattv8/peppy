@@ -87,6 +87,388 @@
       ],
       "type": "object"
     },
+    "BetaAdminResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "program": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BetaProgramState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seats": {
+          "items": {
+            "$ref": "#/$defs/BetaSeatEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "seats"
+      ],
+      "type": "object"
+    },
+    "BetaClaimOutcome": {
+      "enum": [
+        "claimed",
+        "already_claimed",
+        "link_unavailable",
+        "seats_full",
+        "paid_subscription",
+        "already_tester",
+        "verified_google_required",
+        "deletion_pending",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "BetaClaimRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "type": "object"
+    },
+    "BetaErrorCode": {
+      "enum": [
+        "forbidden",
+        "conflict",
+        "invalid",
+        "limit_below_claimed",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "BetaErrorResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/BetaErrorCode"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "BetaLinkAction": {
+      "enum": [
+        "rotate",
+        "disable",
+        "enable"
+      ],
+      "type": "string"
+    },
+    "BetaLinkRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/BetaLinkAction"
+        },
+        "expected_revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "action"
+      ],
+      "type": "object"
+    },
+    "BetaLinks": {
+      "additionalProperties": false,
+      "properties": {
+        "feedback_url": {
+          "type": "string"
+        },
+        "group_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "install_url": {
+          "type": "string"
+        },
+        "play_opt_in_url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "feedback_url",
+        "play_opt_in_url",
+        "install_url"
+      ],
+      "type": "object"
+    },
+    "BetaMembership": {
+      "enum": [
+        "none",
+        "seat",
+        "tester"
+      ],
+      "type": "string"
+    },
+    "BetaMembershipResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "links": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BetaLinks"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "membership": {
+          "$ref": "#/$defs/BetaMembership"
+        }
+      },
+      "required": [
+        "membership"
+      ],
+      "type": "object"
+    },
+    "BetaMutationResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "link_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "program": {
+          "$ref": "#/$defs/BetaProgramState"
+        },
+        "seats": {
+          "items": {
+            "$ref": "#/$defs/BetaSeatEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "program",
+        "seats"
+      ],
+      "type": "object"
+    },
+    "BetaProgramState": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/VaultBindingV2"
+        },
+        "claimed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "group_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "program_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "public_key": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "seat_limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "program_id",
+        "revision",
+        "enabled",
+        "seat_limit",
+        "claimed",
+        "public_key",
+        "binding"
+      ],
+      "type": "object"
+    },
+    "BetaResealRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/VaultBindingV2"
+        },
+        "expected_revision": {
+          "type": "string"
+        },
+        "public_key": {
+          "type": "string"
+        },
+        "seats": {
+          "items": {
+            "$ref": "#/$defs/BetaResealSeat"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "binding",
+        "public_key",
+        "seats"
+      ],
+      "type": "object"
+    },
+    "BetaResealSeat": {
+      "additionalProperties": false,
+      "properties": {
+        "sealed_email": {
+          "$ref": "#/$defs/SealedEmailV1"
+        },
+        "seat_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "seat_id",
+        "sealed_email"
+      ],
+      "type": "object"
+    },
+    "BetaRevokeRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_revision": {
+          "type": "string"
+        },
+        "seat_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "seat_id"
+      ],
+      "type": "object"
+    },
+    "BetaSeatEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "claimed_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "revoked_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sealed_email": {
+          "$ref": "#/$defs/SealedEmailV1"
+        },
+        "seat_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/BetaSeatStatus"
+        }
+      },
+      "required": [
+        "seat_id",
+        "status",
+        "claimed_at",
+        "sealed_email"
+      ],
+      "type": "object"
+    },
+    "BetaSeatStatus": {
+      "enum": [
+        "active",
+        "revoked"
+      ],
+      "type": "string"
+    },
+    "BetaSettingsRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_revision": {
+          "type": "string"
+        },
+        "group_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "seat_limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "seat_limit"
+      ],
+      "type": "object"
+    },
+    "BetaSetupRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/VaultBindingV2"
+        },
+        "group_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "public_key": {
+          "type": "string"
+        },
+        "seat_limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "binding",
+        "public_key",
+        "seat_limit"
+      ],
+      "type": "object"
+    },
     "BillingManageableIn": {
       "description": "Where the account's current billing can be managed.",
       "enum": [
@@ -779,6 +1161,28 @@
       ],
       "type": "object"
     },
+    "SealedEmailV1": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "const": "x25519-xsalsa20poly1305-sealedbox",
+          "type": "string"
+        },
+        "sealed": {
+          "type": "string"
+        },
+        "version": {
+          "const": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "algorithm",
+        "sealed"
+      ],
+      "type": "object"
+    },
     "SessionRenewalResponse": {
       "additionalProperties": false,
       "description": "Response confirming that an authenticated session remains active.",
@@ -1460,6 +1864,39 @@
     "attachment_storage_status": {
       "$ref": "#/$defs/AttachmentStorageStatusResponse"
     },
+    "beta_admin": {
+      "$ref": "#/$defs/BetaAdminResponse"
+    },
+    "beta_claim": {
+      "$ref": "#/$defs/BetaClaimRequest"
+    },
+    "beta_claim_outcome": {
+      "$ref": "#/$defs/BetaClaimOutcome"
+    },
+    "beta_error": {
+      "$ref": "#/$defs/BetaErrorResponse"
+    },
+    "beta_link": {
+      "$ref": "#/$defs/BetaLinkRequest"
+    },
+    "beta_membership": {
+      "$ref": "#/$defs/BetaMembershipResponse"
+    },
+    "beta_mutation": {
+      "$ref": "#/$defs/BetaMutationResponse"
+    },
+    "beta_reseal": {
+      "$ref": "#/$defs/BetaResealRequest"
+    },
+    "beta_revoke": {
+      "$ref": "#/$defs/BetaRevokeRequest"
+    },
+    "beta_settings": {
+      "$ref": "#/$defs/BetaSettingsRequest"
+    },
+    "beta_setup": {
+      "$ref": "#/$defs/BetaSetupRequest"
+    },
     "billing": {
       "$ref": "#/$defs/BillingSummary"
     },
@@ -1567,6 +2004,17 @@
     "tester_rekey_v2",
     "tester_migrate_v2",
     "tester_mutation_v2",
+    "beta_claim",
+    "beta_claim_outcome",
+    "beta_membership",
+    "beta_admin",
+    "beta_setup",
+    "beta_link",
+    "beta_settings",
+    "beta_revoke",
+    "beta_reseal",
+    "beta_mutation",
+    "beta_error",
     "session",
     "session_renewal",
     "config",
@@ -1588,6 +2036,14 @@
     "appSessionRenew": "/hosted/v1/web/app-session/renew",
     "attachmentStorageStatus": "/hosted/v1/attachment-storage/status",
     "authStart": "/hosted/v1/web/auth/{provider}/start",
+    "betaAdmin": "/hosted/v2/web/admin/beta",
+    "betaClaimStart": "/hosted/v1/web/beta/claim/start",
+    "betaLink": "/hosted/v2/web/admin/beta/link",
+    "betaMembership": "/hosted/v1/web/beta/membership",
+    "betaReseal": "/hosted/v2/web/admin/beta/reseal",
+    "betaRevoke": "/hosted/v2/web/admin/beta/revoke",
+    "betaSettings": "/hosted/v2/web/admin/beta/settings",
+    "betaSetup": "/hosted/v2/web/admin/beta/setup",
     "billing": "/hosted/v1/web/billing",
     "billingContext": "/hosted/v1/web/billing/context",
     "cancel": "/hosted/v1/web/billing/cancel",

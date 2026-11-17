@@ -991,6 +991,7 @@ mod tests {
 pub mod account_access;
 pub mod attachments;
 pub mod auth_web;
+pub mod beta_seats;
 pub mod billing_apple;
 pub mod billing_play;
 pub mod billing_web;
