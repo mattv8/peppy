@@ -45,7 +45,7 @@ expected_assets() {
       while IFS='|' read -r _target asset; do
         printf '%s\n%s.sig\n' "$asset" "$asset"
       done < <(release_update_targets "$version")
-      printf 'latest.json\npeppy-%s-macos-aarch64.dmg\n' "$version"
+      printf 'latest.json\npeppy-%s-macos-arm64.dmg\npeppy-%s-macos-x64.dmg\n' "$version" "$version"
       ;;
     android)
       printf 'peppy-%s-android.apk\npeppy-%s-android.aab\n' "$version" "$version"

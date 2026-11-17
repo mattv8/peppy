@@ -5,7 +5,11 @@
     "createUpdaterArtifacts": false,
     "macOS": {
       "minimumSystemVersion": "13.0",
-      "entitlements": "../../../packaging/macos/app-store/entitlements.plist"
+      "entitlements": "../../../packaging/macos/app-store/entitlements.plist",
+      "infoPlist": "../../../packaging/macos/app-store/Info.plist",
+      "files": {
+        "Resources/PrivacyInfo.xcprivacy": "../../../packaging/macos/app-store/PrivacyInfo.xcprivacy"
+      }
     }
   },
   "plugins": {

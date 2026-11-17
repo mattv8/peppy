@@ -6,20 +6,22 @@ root=$(mktemp -d)
 trap 'rm -rf "$root"' EXIT
 fixture="$root/download"
 
-mkdir -p "$fixture/desktop-linux-release-artifacts" "$fixture/desktop-macos-release-artifacts/apps/desktop/src-tauri/target/release/bundle/dmg" "$fixture/desktop-windows-release-artifacts/nsis" "$fixture/desktop-windows-release-artifacts/msi"
+mkdir -p "$fixture/desktop-linux-release-artifacts" "$fixture/desktop-macos-arm64-release-artifacts/apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg" "$fixture/desktop-macos-x64-release-artifacts/apps/desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg" "$fixture/desktop-windows-release-artifacts/nsis" "$fixture/desktop-windows-release-artifacts/msi"
 mkdir -p "$root/linux/appimage" "$root/linux/deb" "$root/linux/rpm"
 printf appimage > "$root/linux/appimage/Peppy.AppImage"
 printf deb > "$root/linux/deb/peppy.deb"
 printf rpm > "$root/linux/rpm/peppy.rpm"
 tar -C "$root/linux" -czf "$fixture/desktop-linux-release-artifacts/desktop-linux-bundles.tar.gz" appimage deb rpm
-printf mac > "$fixture/desktop-macos-release-artifacts/apps/desktop/src-tauri/target/release/bundle/dmg/Peppy_X_aarch64.dmg"
-printf archive > "$fixture/desktop-macos-release-artifacts/Peppy.app.tar.gz"
+printf arm64 > "$fixture/desktop-macos-arm64-release-artifacts/apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Peppy_X_aarch64.dmg"
+printf x64 > "$fixture/desktop-macos-x64-release-artifacts/apps/desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/Peppy_X_x64.dmg"
+printf arm64-archive > "$fixture/desktop-macos-arm64-release-artifacts/desktop-macos-arm64.app.tar.gz"
+printf x64-archive > "$fixture/desktop-macos-x64-release-artifacts/desktop-macos-x64.app.tar.gz"
 printf exe > "$fixture/desktop-windows-release-artifacts/nsis/Peppy_X_x64-setup.exe"
 printf msi > "$fixture/desktop-windows-release-artifacts/msi/Peppy_X_x64_en-US.msi"
 
 desktop_out="$root/desktop"
 "$script_dir/stage-assets.sh" --group desktop 0.2.0 stable "$fixture" "$desktop_out"
-test "$(find "$desktop_out" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 8
+test "$(find "$desktop_out" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 10
 test ! -e "$desktop_out/peppy-0.2.0-android.apk"
 
 key="$root/test-updater.key"
@@ -30,7 +32,9 @@ PEPPY_UPDATE_PUBLIC_KEY=$(<"$key.pub")
 "$script_dir/sign-update-assets.sh" 0.2.0 stable "$desktop_out"
 "$script_dir/generate-update-manifest.sh" 0.2.0 stable "$desktop_out"
 test -s "$desktop_out/latest.json"
-test "$(find "$desktop_out" -maxdepth 1 -type f -name '*.sig' | wc -l | tr -d ' ')" = 6
+test "$(find "$desktop_out" -maxdepth 1 -type f -name '*.sig' | wc -l | tr -d ' ')" = 7
+grep -Fq 'darwin-aarch64-app' "$desktop_out/latest.json"
+grep -Fq 'darwin-x86_64-app' "$desktop_out/latest.json"
 
 android_fixture="$root/android-download"
 mkdir -p "$android_fixture/android-release-artifacts"

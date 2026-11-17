@@ -175,31 +175,129 @@ fn main() {
     tauri_build::try_build(attributes).expect("failed to run tauri-build");
 }
 
-/// `swift-rs` is a macOS-host build dependency, so non-macOS hosts compile a no-op.
+/// The StoreKit bridge is built only for macOS targets.
 #[cfg(not(target_os = "macos"))]
 fn link_storekit_bridge() {}
 
 #[cfg(target_os = "macos")]
 fn link_storekit_bridge() {
-    use std::{env, ffi::OsStr, path::PathBuf};
+    use std::{
+        env,
+        ffi::OsStr,
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+    };
+
+    fn find_archive(directory: &Path) -> Option<PathBuf> {
+        for entry in fs::read_dir(directory).ok()?.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.file_name() == Some(OsStr::new("libStoreKitBridge.a")) {
+                return Some(path);
+            }
+            if path.is_dir() {
+                if let Some(archive) = find_archive(&path) {
+                    return Some(archive);
+                }
+            }
+        }
+        None
+    }
 
     if env::var_os("CARGO_CFG_TARGET_OS").as_deref() != Some(OsStr::new("macos")) {
         return;
     }
-    swift_rs::SwiftLinker::new("11.0")
-        .with_package("StoreKitBridge", "native/storekit")
-        .link();
-    // Swift 6.x's build system writes products to `out/Products/<Configuration>` instead of
-    // the `<triple>/<configuration>` directory swift-rs 1.0.9 adds to the search path.
-    let configuration = if env::var("PROFILE").as_deref() == Ok("release") {
-        "Release"
-    } else {
-        "Debug"
+
+    let arch = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("aarch64") => "arm64",
+        Ok("x86_64") => "x86_64",
+        Ok(arch) => panic!("unsupported macOS StoreKit bridge architecture: {arch}"),
+        Err(_) => panic!("Cargo did not set CARGO_CFG_TARGET_ARCH"),
     };
-    let products = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by Cargo"))
-        .join("swift-rs/StoreKitBridge/out/Products")
-        .join(configuration);
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
+    let deployment_target =
+        env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11.0".to_string());
+    let target = format!("{arch}-apple-macosx{deployment_target}");
+    let configuration = if env::var("PROFILE").as_deref() == Ok("release") {
+        "release"
+    } else {
+        "debug"
+    };
+    let manifest_dir =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("Cargo sets CARGO_MANIFEST_DIR"));
+    let package_path = manifest_dir.join("native/storekit");
+    let scratch_path = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by Cargo"))
+        .join("swift-build/StoreKitBridge");
+    let sdk_path = Command::new("xcrun")
+        .args(["--sdk", "macosx", "--show-sdk-path"])
+        .output()
+        .expect("could not invoke xcrun for the macOS SDK");
+    assert!(sdk_path.status.success(), "could not locate the macOS SDK");
+    let sdk_path = String::from_utf8(sdk_path.stdout).expect("xcrun returned a non-UTF-8 SDK path");
+    let status = Command::new("swift")
+        .args(["build", "--sdk", sdk_path.trim(), "-c", configuration])
+        .args(["--triple", &target, "--package-path"])
+        .arg(&package_path)
+        .args(["--scratch-path"])
+        .arg(&scratch_path)
+        .status()
+        .expect("could not invoke swift build");
+    assert!(status.success(), "could not compile StoreKitBridge");
+
+    let archive = find_archive(&scratch_path)
+        .unwrap_or_else(|| panic!("Swift build did not produce libStoreKitBridge.a"));
+    let architectures = Command::new("lipo")
+        .args(["-archs"])
+        .arg(&archive)
+        .output()
+        .expect("could not inspect StoreKitBridge architecture");
+    assert!(
+        architectures.status.success()
+            && String::from_utf8_lossy(&architectures.stdout).trim() == arch,
+        "StoreKitBridge archive does not match the requested {arch} architecture"
+    );
+    let products = archive
+        .parent()
+        .expect("StoreKitBridge archive has no parent");
     println!("cargo:rustc-link-search=native={}", products.display());
+    println!("cargo:rustc-link-lib=static=StoreKitBridge");
+
+    let target_info = Command::new("swift")
+        .args(["-target", &target, "-print-target-info"])
+        .output()
+        .expect("could not query Swift target information");
+    assert!(
+        target_info.status.success(),
+        "could not query Swift target information"
+    );
+    let target_info: serde_json::Value = serde_json::from_slice(&target_info.stdout)
+        .expect("Swift returned invalid target information");
+    let paths = target_info["paths"]["runtimeLibraryPaths"]
+        .as_array()
+        .expect("Swift target information omitted runtimeLibraryPaths");
+    for path in paths {
+        let path = path
+            .as_str()
+            .expect("Swift target information includes a non-string runtime path");
+        println!("cargo:rustc-link-search=native={path}");
+    }
+    let clang_search_dirs = Command::new("/usr/bin/clang")
+        .arg("--print-search-dirs")
+        .output()
+        .expect("could not query clang search paths");
+    assert!(
+        clang_search_dirs.status.success(),
+        "could not query clang search paths"
+    );
+    let clang_search_dirs = String::from_utf8_lossy(&clang_search_dirs.stdout);
+    let clang_library_path = clang_search_dirs
+        .lines()
+        .find_map(|line| line.strip_prefix("libraries: ="))
+        .expect("clang did not report library search paths");
+    println!("cargo:rustc-link-lib=clang_rt.osx");
+    println!("cargo:rustc-link-search={clang_library_path}/lib/darwin");
+    println!("cargo:rerun-if-changed={}", package_path.display());
     // App Store builds call StoreKit only on macOS 12+; direct macOS 11 builds need this weak link.
     println!("cargo:rustc-link-arg=-Wl,-weak-lswift_Concurrency");
     // The Swift concurrency runtime ships in newer OS versions; executables must find it there.
