@@ -13,8 +13,8 @@ use futures_util::{FutureExt, SinkExt, StreamExt};
 use peppy_client_core::{
     Client, Cursor, DraftPush, DraftPushOutcome, DraftTerminalReasonCore, DraftTransferDirection,
     DraftUpload, EnvelopePurpose, HistorySearchReplayProof, HistorySearchSyncFacts, KeyProfile,
-    RawReplayRecord, RawSnapshotRecord, SnapshotPurpose, VaultCheckHeader, MAX_APPLY_BATCH,
-    MAX_SEAL_BATCH, MAX_SNAPSHOT_PAGE,
+    RawReplayRecord, RawSnapshotRecord, SnapshotManifestEntry, SnapshotPurpose, VaultCheckHeader,
+    MAX_APPLY_BATCH, MAX_SEAL_BATCH, MAX_SNAPSHOT_MANIFEST_PAGE, MAX_SNAPSHOT_PAGE,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
@@ -526,10 +526,22 @@ struct SnapshotStart {
     compaction_generation: Option<String>,
     #[serde(default)]
     compaction_active: bool,
+    #[serde(default)]
+    manifest_supported: bool,
 }
 #[derive(Deserialize)]
 struct SnapshotPage {
     records: Vec<RawRecord>,
+}
+#[derive(Deserialize)]
+struct SnapshotManifestPage {
+    entries: Vec<SnapshotManifestRecord>,
+}
+#[derive(Deserialize)]
+struct SnapshotManifestRecord {
+    cursor: String,
+    digest: String,
+    flags: u8,
 }
 
 fn parse_cursor(value: &str) -> BridgeResult<u64> {
@@ -587,13 +599,15 @@ pub(crate) async fn snapshot_resync(session: &Arc<Session>) -> BridgeResult<()> 
     // A previously published generation must finish draining before a new one may begin.
     drain_apply(session, usize::MAX).await?;
     let mut fresh = false;
-    for _ in 0..MAX_SNAPSHOT_ATTEMPTS {
-        let progress = match start_or_resume(session, fresh).await {
-            Ok(progress) => progress,
-            Err(error) => return Err(error),
-        };
+    let mut manifest_allowed = true;
+    // Only `Impossible` outcomes count as attempts. `ManifestUnsupported` switches to the full
+    // import once: `manifest_allowed` stays false for the rest of this call, so it cannot spin.
+    let mut impossible = 0;
+    while impossible < MAX_SNAPSHOT_ATTEMPTS {
+        let progress = start_or_resume(session, fresh, manifest_allowed).await?;
         match import_cut(session, progress).await {
             Ok(()) => return Ok(()),
+            Err(CutError::Cancelled) => return Ok(()),
             Err(CutError::Impossible) => {
                 // The staged cut can never complete (server moved/rolled back, or ended early):
                 // never resume it again; `begin_snapshot` obsoletes it on the next attempt.
@@ -602,6 +616,16 @@ pub(crate) async fn snapshot_resync(session: &Arc<Session>) -> BridgeResult<()> 
                     .lock()
                     .unwrap_or_else(|p| p.into_inner()) = Some(progress.generation);
                 fresh = true;
+                impossible += 1;
+            }
+            Err(CutError::ManifestUnsupported) => {
+                // The server has no manifest route: finish this import with the full download.
+                *session
+                    .abandoned_snapshot
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner()) = Some(progress.generation);
+                fresh = true;
+                manifest_allowed = false;
             }
             Err(CutError::Other(error)) => return Err(error),
         }
@@ -616,6 +640,10 @@ const MAX_SNAPSHOT_ATTEMPTS: usize = 3;
 
 enum CutError {
     Impossible,
+    /// The manifest route is absent (404/405): the next attempt downloads the full history.
+    ManifestUnsupported,
+    /// The session was cancelled mid-cut; the cut stays staged and nothing is published.
+    Cancelled,
     Other(BridgeError),
 }
 
@@ -630,9 +658,12 @@ impl From<BridgeError> for CutError {
     }
 }
 
+/// Begins or resumes the Resync cut and returns its manifest page limit. A manifest cut is begun
+/// only when the server advertises the manifest and an earlier attempt has not met a 404/405.
 async fn start_or_resume(
     session: &Arc<Session>,
     fresh: bool,
+    manifest_allowed: bool,
 ) -> BridgeResult<peppy_client_core::SnapshotProgress> {
     if !fresh {
         let c = client(session);
@@ -660,17 +691,24 @@ async fn start_or_resume(
     let count = start.record_count.parse::<u64>().map_err(|_| invalid())?;
     let compaction_generation = parse_compaction_generation(&start).ok().flatten();
     let _ = start.max_page_size;
+    let manifest = manifest_allowed && start.manifest_supported;
     let c = client(session);
-    blocking(move || {
-        c.begin_snapshot_with_compaction(
-            Cursor(high_water),
-            count,
-            SnapshotPurpose::Resync,
-            compaction_generation,
-        )
-        .map_err(core_error)
+    let progress = blocking(move || {
+        if manifest {
+            c.begin_snapshot_with_manifest(Cursor(high_water), count, compaction_generation)
+                .map_err(core_error)
+        } else {
+            c.begin_snapshot_with_compaction(
+                Cursor(high_water),
+                count,
+                SnapshotPurpose::Resync,
+                compaction_generation,
+            )
+            .map_err(core_error)
+        }
     })
-    .await
+    .await?;
+    Ok(progress)
 }
 
 /// Metadata-only probe; a failed or legacy response deliberately disables compactable output.
@@ -728,10 +766,27 @@ async fn import_cut(
     session: &Arc<Session>,
     mut progress: peppy_client_core::SnapshotProgress,
 ) -> Result<(), CutError> {
+    if progress.manifest {
+        import_manifest_cut(session, &mut progress).await?;
+    } else {
+        import_records_cut(session, &mut progress).await?;
+    }
+    let (c, generation) = (client(session), progress.generation);
+    let _retention = session.attachment_retention_maintenance.lock().await;
+    session.begin_attachment_retention_restore();
+    blocking(move || c.finish_snapshot(generation).map_err(core_error)).await?;
+    drain_apply(session, usize::MAX).await?;
+    Ok(())
+}
+
+async fn import_records_cut(
+    session: &Arc<Session>,
+    progress: &mut peppy_client_core::SnapshotProgress,
+) -> Result<(), CutError> {
     let mut limit = MAX_SNAPSHOT_PAGE.min(200);
     while progress.received_records < progress.expected_records {
         if session.cancel.is_cancelled() {
-            return Ok(());
+            return Err(CutError::Cancelled);
         }
         let path = format!(
             "/v1/snapshot/records?high_water={}&after={}&limit={limit}{}",
@@ -756,36 +811,169 @@ async fn import_cut(
         if page.records.is_empty() {
             return Err(CutError::Impossible);
         }
-        let records = page
-            .records
-            .into_iter()
-            .map(|r| {
-                Ok(RawSnapshotRecord {
-                    cursor: Cursor(parse_cursor(&r.cursor)?),
-                    envelope_json: r.envelope.get().as_bytes().to_vec(),
-                })
-            })
-            .collect::<BridgeResult<Vec<_>>>()?;
-        let (c, generation) = (client(session), progress.generation);
-        match blocking(move || {
-            c.append_snapshot_raw_page(generation, &records)
-                .map_err(core_error)
-        })
-        .await
-        {
-            Ok(next) => progress = next,
+        match append_snapshot_records(session, progress, page.records).await {
+            Ok(next) => *progress = next,
             // Page byte cap: retry the same position with a smaller page.
             Err(error) if error.code == "invalid-request" && limit > 1 => limit /= 2,
             Err(error) => return Err(error.into()),
         }
         tokio::task::yield_now().await;
     }
-    let (c, generation) = (client(session), progress.generation);
-    let _retention = session.attachment_retention_maintenance.lock().await;
-    session.begin_attachment_retention_restore();
-    blocking(move || c.finish_snapshot(generation).map_err(core_error)).await?;
-    drain_apply(session, usize::MAX).await?;
     Ok(())
+}
+
+async fn import_manifest_cut(
+    session: &Arc<Session>,
+    progress: &mut peppy_client_core::SnapshotProgress,
+) -> Result<(), CutError> {
+    let mut record_limit = MAX_SNAPSHOT_PAGE.min(200);
+    while progress.received_records < progress.expected_records {
+        if session.cancel.is_cancelled() {
+            return Err(CutError::Cancelled);
+        }
+        // The server clamps `limit` to its own maximum, which equals MAX_SNAPSHOT_MANIFEST_PAGE.
+        let path = format!(
+            "/v1/snapshot/manifest?high_water={}&after={}&limit={MAX_SNAPSHOT_MANIFEST_PAGE}{}",
+            progress.high_water.0,
+            progress.last_cursor.0,
+            progress
+                .server_compaction_generation
+                .map(|v| format!("&compaction_generation={v}"))
+                .unwrap_or_default(),
+        );
+        let page: SnapshotManifestPage = match session.api.get_json(&path, MAX_PAGE_BYTES).await {
+            Ok(page) => page,
+            Err(NetError::Status {
+                status: 404 | 405, ..
+            }) => return Err(CutError::ManifestUnsupported),
+            Err(NetError::Status {
+                status: 400 | 409, ..
+            })
+            | Err(NetError::Invalid) => return Err(CutError::Impossible),
+            Err(error) => return Err(CutError::Other(sync_net_error(error))),
+        };
+        if page.entries.is_empty() {
+            return Err(CutError::Impossible);
+        }
+        let entries = page
+            .entries
+            .into_iter()
+            .map(parse_manifest_entry)
+            .collect::<BridgeResult<Vec<_>>>()
+            .map_err(|_| CutError::Impossible)?;
+        let (c, generation) = (client(session), progress.generation);
+        let manifest = match blocking(move || {
+            c.append_snapshot_manifest(generation, &entries)
+                .map_err(core_error)
+        })
+        .await
+        {
+            Ok(manifest) => manifest,
+            // Too many entries for one page, or another refused page: restart the cut.
+            Err(error) if error.code == "invalid-request" => return Err(CutError::Impossible),
+            Err(error) => return Err(error.into()),
+        };
+        *progress = manifest.progress;
+        let mut remaining = manifest.missing as usize;
+        while remaining > 0 {
+            if session.cancel.is_cancelled() {
+                return Err(CutError::Cancelled);
+            }
+            let limit = remaining.min(record_limit);
+            let path = format!(
+                "/v1/snapshot/records?high_water={}&after={}&limit={limit}{}",
+                progress.high_water.0,
+                progress.last_cursor.0,
+                progress
+                    .server_compaction_generation
+                    .map(|v| format!("&compaction_generation={v}"))
+                    .unwrap_or_default(),
+            );
+            let page: SnapshotPage = match session.api.get_json(&path, MAX_PAGE_BYTES).await {
+                Ok(page) => page,
+                Err(NetError::TooLarge) if record_limit > 1 => {
+                    record_limit /= 2;
+                    continue;
+                }
+                Err(NetError::Status {
+                    status: 400 | 409, ..
+                }) => return Err(CutError::Impossible),
+                Err(error) => return Err(CutError::Other(sync_net_error(error))),
+            };
+            if page.records.is_empty() {
+                return Err(CutError::Impossible);
+            }
+            let count = page.records.len();
+            match append_snapshot_records(session, progress, page.records).await {
+                Ok(next) => {
+                    // Extra records from a server that ignores `limit` are records of this cut too.
+                    *progress = next;
+                    remaining = remaining.saturating_sub(count);
+                }
+                Err(error) if error.code == "invalid-request" && record_limit > 1 => {
+                    record_limit /= 2
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+    Ok(())
+}
+
+/// Decodes one manifest entry. Anything outside the wire contract is rejected: a cursor must be
+/// decimal digits, the digest exactly 64 lowercase hex characters and flags 0..=3.
+fn parse_manifest_entry(record: SnapshotManifestRecord) -> BridgeResult<SnapshotManifestEntry> {
+    let invalid = || BridgeError::from(NetError::Invalid);
+    if record.cursor.bytes().any(|byte| !byte.is_ascii_digit()) || record.flags > 0b11 {
+        return Err(invalid());
+    }
+    Ok(SnapshotManifestEntry {
+        cursor: Cursor(parse_cursor(&record.cursor)?),
+        digest: lower_hex_digest(&record.digest).ok_or_else(invalid)?,
+        has_compaction: record.flags & 1 != 0,
+        has_origin_tag: record.flags & 2 != 0,
+    })
+}
+
+/// Exactly 64 lowercase hex characters (a SHA-256 digest); anything else is `None`.
+fn lower_hex_digest(text: &str) -> Option<[u8; 32]> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let nibble = |byte: u8| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    };
+    let mut digest = [0; 32];
+    for (index, out) in digest.iter_mut().enumerate() {
+        *out = (nibble(bytes[2 * index])? << 4) | nibble(bytes[2 * index + 1])?;
+    }
+    Some(digest)
+}
+
+async fn append_snapshot_records(
+    session: &Arc<Session>,
+    progress: &peppy_client_core::SnapshotProgress,
+    records: Vec<RawRecord>,
+) -> BridgeResult<peppy_client_core::SnapshotProgress> {
+    let records = records
+        .into_iter()
+        .map(|r| {
+            Ok(RawSnapshotRecord {
+                cursor: Cursor(parse_cursor(&r.cursor)?),
+                envelope_json: r.envelope.get().as_bytes().to_vec(),
+            })
+        })
+        .collect::<BridgeResult<Vec<_>>>()?;
+    let (c, generation) = (client(session), progress.generation);
+    blocking(move || {
+        c.append_snapshot_raw_page(generation, &records)
+            .map_err(core_error)
+    })
+    .await
 }
 
 /// HTTP replay after the durable receive cursor (bounded pages, adaptive size).
