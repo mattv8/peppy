@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Modal } from "@peppy/desktop-ui";
+import { Modal, Plus } from "@peppy/desktop-ui";
 import { bridge, type DeviceRosterView, type ManagedDeviceView } from "../bridge/bridge";
 import { errorCode } from "../bridge/bridgeErrors";
 import { peppyCopy } from "../generated/peppyCopy";
@@ -24,6 +24,7 @@ const presenceState = (device: ManagedDeviceView, accountPaused: boolean) => {
   if (device.presence.state === "connected") return "connected";
   return accountPaused ? "paused" : "delayed";
 };
+const DEVICES_DESCRIPTION = "Devices can access this encrypted vault. Removing a device revokes server access; it does not erase local data or secrets.";
 const OFFLINE_REMOVE_ERROR = "The device may not have been removed because the server is offline. The list refreshes when Peppy reconnects, or you can retry now.";
 const loadError = (error: unknown) => typeof error === "object" && error !== null && "message" in error && typeof error.message === "string" && error.message ? error.message : "The device roster could not be loaded.";
 const revokeError = (error: unknown) => {
@@ -37,7 +38,7 @@ const revokeError = (error: unknown) => {
   return "The removal outcome is unknown. The roster was reloaded to check it.";
 };
 
-export function DevicesSettings({ serverOffline = false, accountReadOnly = false, browserHost = false, sessionKey = "unavailable", unlocked = false }: { serverOffline?: boolean; accountReadOnly?: boolean; browserHost?: boolean; sessionKey?: string; unlocked?: boolean }) {
+export function DevicesSettings({ serverOffline = false, accountReadOnly = false, browserHost = false, sessionKey = "unavailable", unlocked = false, onAddDevice }: { serverOffline?: boolean; accountReadOnly?: boolean; browserHost?: boolean; sessionKey?: string; unlocked?: boolean; onAddDevice?: () => void }) {
   const [roster, setRoster] = useState<DeviceRosterView | null>(null);
   const [loading, setLoading] = useState(true);
   const [target, setTarget] = useState<ManagedDeviceView | null>(null);
@@ -56,6 +57,7 @@ export function DevicesSettings({ serverOffline = false, accountReadOnly = false
   const offline = serverOffline || offlineFromFailure;
   /* Server-offline takes precedence: the offline wording stays exactly as before. */
   const accountPaused = accountReadOnly && !serverOffline;
+  const addDeviceNote = offline ? "Unavailable while offline." : !unlocked ? "Unlock Peppy to add a device." : accountReadOnly ? "Adding devices is paused while the account is read-only." : "";
 
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
@@ -152,7 +154,7 @@ export function DevicesSettings({ serverOffline = false, accountReadOnly = false
 
   return <section id="settings-devices" className="settings-card" data-settings-section="devices" aria-labelledby="settings-devices-title" aria-busy={loading}>
     <h2 id="settings-devices-title" ref={titleHeading} tabIndex={-1}>Devices</h2>
-    <p>Devices can access this encrypted vault. Removing a device revokes server access; it does not erase local data or secrets.</p>
+    {onAddDevice ? <div id="devices-intro-row"><div data-devices-intro-copy><p>{DEVICES_DESCRIPTION}</p>{addDeviceNote && <span id="devices-add-device-note" className="settings-note">{addDeviceNote}</span>}</div><button id="devices-add-device" type="button" className="secondary-button" disabled={Boolean(addDeviceNote)} aria-describedby={addDeviceNote ? "devices-add-device-note" : undefined} onClick={onAddDevice}><Plus size={14} strokeWidth={1.75} aria-hidden />Add new device</button></div> : <p>{DEVICES_DESCRIPTION}</p>}
     {offline && <p id="devices-offline-notice" data-devices-offline-notice role="status" className="settings-note">{roster ? "Server offline. Showing the last loaded list; removing devices is unavailable." : "Server offline. The device list will load when the server is back."}</p>}
     {error && <p id="devices-error" role="alert" className="settings-error" data-devices-remove-error={error === OFFLINE_REMOVE_ERROR || undefined}>{error}</p>}
     {accountPaused && roster && <p id="devices-read-only-caption" data-devices-read-only-caption className="settings-note">{peppyCopy.devices_read_only_caption}</p>}
