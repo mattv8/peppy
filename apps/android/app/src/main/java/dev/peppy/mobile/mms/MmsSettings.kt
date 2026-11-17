@@ -83,7 +83,6 @@ internal data class MmsHealth(
 internal sealed interface MmsBackfillStatus {
     data object PausedPhoneStorage : MmsBackfillStatus
     data object OlderPausedHistoryLimit : MmsBackfillStatus
-    data object PausedHistoryLimit : MmsBackfillStatus
     data object OlderPausedServerStorage : MmsBackfillStatus
     data object GettingReady : MmsBackfillStatus
     data object CopyingOlder : MmsBackfillStatus
@@ -93,7 +92,7 @@ internal sealed interface MmsBackfillStatus {
 
 internal enum class MmsPresentationStatus {
     OFF, ACCESS_NEEDED, LOCKED, GETTING_READY, COPYING_OLDER, COPYING, UP_TO_DATE, MOSTLY_UP_TO_DATE,
-    PHONE_STORAGE_PAUSED, OLDER_HISTORY_PAUSED, HISTORY_PAUSED, SERVER_STORAGE_PAUSED,
+    PHONE_STORAGE_PAUSED, OLDER_HISTORY_PAUSED, SERVER_STORAGE_PAUSED,
 }
 
 internal enum class MmsHealthNote { ACCESS_NEEDED, LOCKED, NOT_COPIED, SKIPPED, BOTH }
@@ -124,7 +123,6 @@ internal fun mmsHealthPresentation(
     val status = when (health.backfillStatus ?: MmsBackfillStatus.GettingReady) {
         MmsBackfillStatus.PausedPhoneStorage -> MmsPresentationStatus.PHONE_STORAGE_PAUSED
         MmsBackfillStatus.OlderPausedHistoryLimit -> MmsPresentationStatus.OLDER_HISTORY_PAUSED
-        MmsBackfillStatus.PausedHistoryLimit -> MmsPresentationStatus.HISTORY_PAUSED
         MmsBackfillStatus.OlderPausedServerStorage -> MmsPresentationStatus.SERVER_STORAGE_PAUSED
         MmsBackfillStatus.GettingReady -> MmsPresentationStatus.GETTING_READY
         MmsBackfillStatus.CopyingOlder -> MmsPresentationStatus.COPYING_OLDER
@@ -150,7 +148,6 @@ private fun MmsPresentationStatus.text(): String = when (this) {
     MmsPresentationStatus.MOSTLY_UP_TO_DATE -> stringResource(R.string.peppy_toggle_android_mms_status_mostly_up_to_date)
     MmsPresentationStatus.PHONE_STORAGE_PAUSED -> stringResource(R.string.peppy_toggle_android_mms_status_paused_phone_storage)
     MmsPresentationStatus.OLDER_HISTORY_PAUSED -> stringResource(R.string.peppy_toggle_android_mms_status_older_paused_history_limit)
-    MmsPresentationStatus.HISTORY_PAUSED -> stringResource(R.string.peppy_toggle_android_mms_status_paused_history_limit)
     MmsPresentationStatus.SERVER_STORAGE_PAUSED -> stringResource(R.string.peppy_toggle_android_mms_status_older_paused_server_storage)
 }
 
@@ -219,8 +216,8 @@ internal fun mmsHealthFromNative(
     val incomplete = acquisitions.filter { it.state != NativeMmsAcquisitionState.COMPLETE }
     val status = when (backfill.pause) {
         NativeMmsBackfillPause.LOCAL_CAPACITY -> MmsBackfillStatus.PausedPhoneStorage
-        NativeMmsBackfillPause.RECOVERY_CAPACITY -> MmsBackfillStatus.OlderPausedHistoryLimit
-        NativeMmsBackfillPause.ABSOLUTE_RECOVERY_CAPACITY -> MmsBackfillStatus.PausedHistoryLimit
+        // Live MMS keeps capturing at the snapshot ceiling; only older history waits.
+        NativeMmsBackfillPause.RECOVERY_CAPACITY, NativeMmsBackfillPause.ABSOLUTE_RECOVERY_CAPACITY -> MmsBackfillStatus.OlderPausedHistoryLimit
         NativeMmsBackfillPause.REMOTE_STORAGE -> MmsBackfillStatus.OlderPausedServerStorage
         null -> when {
             !backfill.baselineInitialized -> MmsBackfillStatus.GettingReady

@@ -10,6 +10,7 @@ import dev.peppy.mobile.diagnostics.SyncDiagnosticStage
 import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import dev.peppy.mobile.diagnostics.SyncTraceEvent
 import dev.peppy.mobile.diagnostics.SyncTraceField
+import dev.peppy.mobile.mms.MmsBackfillPause
 import dev.peppy.mobile.mms.MmsBackfillPhase
 import dev.peppy.mobile.mms.MmsBackfillRecheck
 import dev.peppy.mobile.mms.MmsBackfillRecheckConditions
@@ -461,6 +462,39 @@ class MmsCaptureOrchestrationTest {
         assertFalse(finishInput!!.getBoolean("exhausted"))
         assertEquals("provider_error", finishInput!!.getString("reason"))
         assertFalse(result.more)
+    }
+
+    @Test fun passRecordCarriesTheCorePauseCodeForEachPauseAndNone() {
+        listOf(
+            null to 0L,
+            MmsBackfillPause.ABSOLUTE_RECOVERY_CAPACITY to 1L,
+            MmsBackfillPause.RECOVERY_CAPACITY to 2L,
+            MmsBackfillPause.LOCAL_CAPACITY to 3L,
+            MmsBackfillPause.REMOTE_STORAGE to 4L,
+        ).forEach { (pause, code) ->
+            val events = mutableListOf<String>()
+
+            SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+                MmsCapture.run(plan(), FakeCore(pause = pause), FakeProvider(listOf(record(1))), temp())
+            }
+
+            val fields = traceFields(events.single { it.startsWith("event=${SyncTraceEvent.MMS_CAPTURE_PASS.code} ") })
+            assertEquals("pause=$pause", code, fields[SyncTraceField.PAUSE.code])
+        }
+    }
+
+    @Test fun liveCaptureStillRunsAtTheHistoryLimitWhileHistoryWaits() {
+        val events = mutableListOf<String>()
+        val core = FakeCore(initialLiveCursor = "0", historyUpperBound = "0", pause = MmsBackfillPause.ABSOLUTE_RECOVERY_CAPACITY)
+
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+            MmsCapture.run(plan(), core, FakeProvider(listOf(record(1))), temp())
+        }
+
+        assertTrue(core.advanced.contains(MmsBackfillPhase.LIVE to "1"))
+        assertTrue(core.advanced.none { it.first == MmsBackfillPhase.HISTORY })
+        val fields = traceFields(events.single { it.startsWith("event=${SyncTraceEvent.MMS_CAPTURE_PASS.code} ") })
+        assertEquals(1L, fields[SyncTraceField.PAUSE.code])
     }
 
     @Test fun unknownProviderDatesReachCoreAsUnknownSentinel() {
@@ -1299,6 +1333,7 @@ class MmsCaptureOrchestrationTest {
         private val completeError: Exception? = null,
         private val resolvedAcquisitionId: String? = null,
         override val providerRouter: RcsProviderRowRouter = RcsProviderRowRouter.acquireAll(),
+        private val pause: MmsBackfillPause? = null,
     ) : MmsCaptureCore {
         var migrations = 0
         val reasons = mutableListOf<String?>()
@@ -1317,7 +1352,17 @@ class MmsCaptureOrchestrationTest {
         private var historyCursor: String? = null
         private var historyComplete = false
         override fun migrate(generation: String, scope: String, legacy: MmsLegacyBackfillState) { migrations++ }
-        override fun plans(generation: String, scope: String, observedMaxId: String): List<MmsBackfillScanPlan> {
+        override fun plans(generation: String, scope: String, observedMaxId: String) = corePlans(observedMaxId).map { plan ->
+            plan.copy(paused = pausedByCore(plan), pause = pause)
+        }
+        // Core shape: live capture pauses only for local capacity, rechecks never pause, history and provider rescan pause for any pause.
+        private fun pausedByCore(plan: MmsBackfillScanPlan) = when {
+            pause == null -> plan.paused
+            plan.phase == MmsBackfillPhase.LIVE || plan.phase == MmsBackfillPhase.LIVE_GAP -> pause == MmsBackfillPause.LOCAL_CAPACITY
+            plan.phase == MmsBackfillPhase.RECHECK -> false
+            else -> true
+        }
+        private fun corePlans(observedMaxId: String): List<MmsBackfillScanPlan> {
             val bound = baseline ?: observedMaxId.also { baseline = it }
             if (liveCursor == null) liveCursor = bound
             providerRescanToken?.let {

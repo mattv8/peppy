@@ -57,7 +57,6 @@ export const peppyCopy = {
   toggle_android_mms_note_locked: "Unlock Peppy to see MMS status.",
   toggle_android_mms_status_paused_phone_storage: "Paused: free up space on this phone",
   toggle_android_mms_status_older_paused_history_limit: "Older MMS paused at history limit",
-  toggle_android_mms_status_paused_history_limit: "MMS paused at history limit",
   toggle_android_mms_status_older_paused_server_storage: "Older MMS paused: server storage is full",
   toggle_android_mms_status_getting_ready: "Getting ready",
   toggle_android_mms_status_copying_older: "Copying older MMS…",

@@ -571,16 +571,6 @@
         }
       }
     },
-    "peppy.toggle_android_mms_status_paused_history_limit": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "MMS paused at history limit"
-          }
-        }
-      }
-    },
     "peppy.toggle_android_mms_status_older_paused_server_storage": {
       "localizations": {
         "en": {

@@ -35,6 +35,7 @@ import dev.peppy.mobile.gateway.MmsHistoryCaptureAdmission
 import dev.peppy.mobile.gateway.NativeGateway
 import dev.peppy.mobile.mms.MmsBackfillCore
 import dev.peppy.mobile.mms.MmsBackfillPageResult
+import dev.peppy.mobile.mms.MmsBackfillPause
 import dev.peppy.mobile.mms.MmsBackfillPhase
 import dev.peppy.mobile.mms.MmsBackfillRecheck
 import dev.peppy.mobile.mms.MmsBackfillRecheckConditions
@@ -626,6 +627,7 @@ internal object MmsCapture {
                             coordinator.finish(plan.generation, admission, observations, exhausted, reason)
                         } },
                     canRunPlan = { scanPlan ->
+                        diagnostics.recordPause(scanPlan.pause)
                         scanPlan.phase != MmsBackfillPhase.PROVIDER_RESCAN || restrictedAccess() == RestrictedMessageAccess.ALLOWED
                     },
                     canCommitProviderRescan = {
@@ -1144,6 +1146,7 @@ private class NativeCore(internal val client: NativeClientInterface) : MmsCaptur
                 it.historyFloor,
                 it.providerRescanToken,
                 it.liveGapToken,
+                it.pause?.let { pause -> MmsBackfillPause.valueOf(pause.name) },
             )
         }
 

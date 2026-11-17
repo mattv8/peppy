@@ -170,6 +170,19 @@ class DiagnosticsLogTest {
         assertFalse(lines.any { it.isBlank() })
     }
 
+    @Test fun exportHeaderDocumentsTheMmsPausePassField() = runBlocking {
+        var snapshot: File? = null
+        val log = DiagnosticsLog(context, { file -> snapshot = file; android.net.Uri.fromFile(file) }) { _, _, _ -> }
+        log.setEnabled(true)
+
+        assertNotNull(log.export())
+
+        val header = requireNotNull(snapshot).readLines().first()
+        assertTrue(header.contains("recheck_identity_mismatch,pause)"))
+        assertTrue(header.contains("62:recheck_identity_mismatch,63:pause stages="))
+        assertTrue(header.contains("mms_pause=0:none,1:absolute_recovery_capacity,2:recovery_capacity,3:local_capacity,4:remote_storage"))
+    }
+
     @Test fun fullQueueDropsRecordsWithoutBlockingTheProducer() = runBlocking {
         var dropped = 0L
         val writerEntered = CountDownLatch(1)
