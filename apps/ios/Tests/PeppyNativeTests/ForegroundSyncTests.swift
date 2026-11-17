@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import PeppyBindings
 import Testing
@@ -339,6 +340,263 @@ import Testing
         try client.dispose()
     }
 
+    /// Producer history 1...5; the holder keeps 1...`held` and the replay floor then passes its cursor.
+    func staleHolder(_ server: FakeServer, held: Int = 3) async throws -> (holder: NativeClient, conversationId: String) {
+        let producer = try openUnlockedClient(server, passphrase: passphrase)
+        let first = try capture(producer, "history 0")
+        for index in 1..<held { _ = try capture(producer, "history \(index)") }
+        _ = try await sync(producer, server)
+        let holder = try openUnlockedClient(server, passphrase: passphrase)
+        _ = try await sync(holder, server)
+        for index in held..<5 { _ = try capture(producer, "history \(index)") }
+        _ = try await sync(producer, server)
+        server.mutate { $0.replayFloor = 5 }
+        try producer.dispose()
+        return (holder, first.conversationId)
+    }
+
+    /// The query items of each request to `path`, in order.
+    func queries(_ server: FakeServer, _ path: String) -> [[String: String]] {
+        server.lock.withLock { server.requests }.filter { $0.url.path == path }.map { request in
+            Dictionary(uniqueKeysWithValues: (URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
+                .map { ($0.name, $0.value ?? "") })
+        }
+    }
+
+    @Test func aManifestResyncDownloadsOnlyTheRecordsTheDeviceLacks() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        offerManifest(server)
+        let (holder, conversationId) = try await staleHolder(server)
+        let report = try await sync(holder, server)
+
+        let manifest = queries(server, "/v1/snapshot/manifest")
+        #expect(manifest.count == 1 && manifest[0]["after"] == "0" && manifest[0]["high_water"] == "5" && manifest[0]["limit"] == "5000")
+        let records = queries(server, "/v1/snapshot/records")
+        #expect(records.count == 1 && records[0]["after"] == "3" && records[0]["limit"] == "2", "only records 4 and 5 are downloaded")
+        #expect(report.snapshotPublished && report.snapshotRecords == 2 && report.snapshotRemaining == 0)
+        #expect(report.receiveCursor == "5" && report.complete)
+        #expect(try holder.messages(conversationId: conversationId).map(\.body).sorted() == (0..<5).map { "history \($0)" }.sorted())
+        try holder.dispose()
+    }
+
+    @Test func aServerWithoutManifestSupportKeepsTheFullResyncImport() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let (holder, conversationId) = try await staleHolder(server)
+        let mark = server.paths.count
+        let report = try await sync(holder, server)
+
+        #expect(Array(server.paths.dropFirst(mark)) == [
+            "POST /v1/compaction/capability", "GET /v1/snapshot", "GET /v1/events",
+            "GET /v1/snapshot", "GET /v1/snapshot/records", "GET /v1/events",
+        ])
+        #expect(report.snapshotPublished && report.snapshotRecords == 5 && report.receiveCursor == "5" && report.complete)
+        #expect(try holder.messages(conversationId: conversationId).count == 5)
+        try holder.dispose()
+    }
+
+    @Test func aManifestResyncAnsweredWithResyncRestartsFromAFreshCut() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let resyncOnce = OnceFlag()
+        offerManifest(server, manifestAnswer: { request in
+            // The first manifest request answers with a resync; the restarted cut then succeeds.
+            resyncOnce.take()
+                ? server.reply(request, 409, ["code": "resync_required", "reason": "compaction_generation_changed"])
+                : nil
+        })
+        let (holder, _) = try await staleHolder(server)
+        let mark = server.paths.count
+        let report = try await sync(holder, server)
+
+        #expect(Array(server.paths.dropFirst(mark)) == [
+            "POST /v1/compaction/capability", "GET /v1/snapshot", "GET /v1/events",
+            "GET /v1/snapshot", "GET /v1/snapshot/manifest",
+            "GET /v1/snapshot", "GET /v1/snapshot/manifest", "GET /v1/snapshot/records", "GET /v1/events",
+        ], "the resync answer restarts once from a fresh cut, then the manifest completes")
+        #expect(queries(server, "/v1/snapshot/manifest").map { $0["after"] } == ["0", "0"])
+        #expect(report.snapshotPublished && report.snapshotRecords == 2 && report.receiveCursor == "5" && report.complete)
+        try holder.dispose()
+    }
+
+    @Test func aStagedManifestGenerationResumesWithTheManifest() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        offerManifest(server)
+        let (holder, conversationId) = try await staleHolder(server)
+        var budget = SyncBudget()
+        budget.maxRequests = 5 // capability probe, cut, events resync, cut, manifest; the first records request is refused
+        let partial = try await sync(holder, server, budget: budget)
+        #expect(!partial.complete && !partial.snapshotPublished)
+        let staged = try #require(try holder.snapshotProgress())
+        #expect(staged.manifest && staged.receivedRecords == 3 && staged.lastCursor == "3")
+
+        budget.maxRequests = 24
+        let mark = server.paths.count
+        let resumed = try await sync(holder, server, budget: budget)
+        #expect(Array(server.paths.dropFirst(mark)) == [
+            "POST /v1/compaction/capability", "GET /v1/snapshot", "GET /v1/snapshot/manifest",
+            "GET /v1/snapshot/records", "GET /v1/events",
+        ], "the staged generation continues with the manifest, not a new cut")
+        #expect(queries(server, "/v1/snapshot/manifest").last?["after"] == "3")
+        #expect(resumed.snapshotPublished && resumed.snapshotRecords == 2 && resumed.receiveCursor == "5" && resumed.complete)
+        #expect(try holder.messages(conversationId: conversationId).count == 5)
+        try holder.dispose()
+    }
+
+    @Test func aStagedManifestGenerationFallsBackToTheFullImportWhenTheRouteIsGone() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        offerManifest(server)
+        let (holder, conversationId) = try await staleHolder(server)
+        var budget = SyncBudget()
+        budget.maxRequests = 5
+        _ = try await sync(holder, server, budget: budget)
+        #expect(try holder.snapshotProgress()?.manifest == true)
+
+        offerManifest(server, manifestAnswer: { request in server.reply(request, 404, ["code": "not_found"]) })
+        budget.maxRequests = 24
+        let mark = server.paths.count
+        let resumed = try await sync(holder, server, budget: budget)
+        #expect(Array(server.paths.dropFirst(mark)) == [
+            "POST /v1/compaction/capability", "GET /v1/snapshot", "GET /v1/snapshot/manifest",
+            "GET /v1/snapshot", "GET /v1/snapshot/records", "GET /v1/events",
+        ])
+        #expect(queries(server, "/v1/snapshot/records").last?["after"] == "0", "the restart is a full import")
+        #expect(resumed.snapshotPublished && resumed.snapshotRecords == 5 && resumed.receiveCursor == "5" && resumed.complete)
+        #expect(try holder.messages(conversationId: conversationId).count == 5)
+        try holder.dispose()
+    }
+
+    @Test func anEmptyManifestPageWithNothingMissingFailsTheAttempt() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        offerManifest(server, manifestAnswer: { request in
+            server.reply(request, 200, ["high_water_cursor": "5", "compaction_generation": "0", "next_after": NSNull(), "entries": []])
+        })
+        let (holder, _) = try await staleHolder(server)
+
+        await #expect(throws: ClientError.invalidResponse("short manifest")) { try await sync(holder, server) }
+        let staged = try #require(try holder.snapshotProgress())
+        #expect(staged.manifest && staged.receivedRecords == 0, "no progress is recorded")
+        try holder.dispose()
+    }
+
+    @Test func aRecordsNotFoundInsideAManifestGenerationFailsWithoutRestartingTheImport() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        offerManifest(server, recordsAnswer: { request in server.reply(request, 404, ["code": "not_found"]) })
+        let (holder, _) = try await staleHolder(server)
+        let mark = server.paths.count
+
+        await #expect(throws: ClientError.server(status: 404, code: "not_found")) { try await sync(holder, server) }
+        #expect(Array(server.paths.dropFirst(mark)) == [
+            "POST /v1/compaction/capability", "GET /v1/snapshot", "GET /v1/events",
+            "GET /v1/snapshot", "GET /v1/snapshot/manifest", "GET /v1/snapshot/records",
+        ], "only the manifest route falls back; a records 404 fails as it did before")
+        try holder.dispose()
+    }
+
+    @Test func aManifestRouteFallbackKeepsTheResyncRetry() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        offerManifest(server)
+        let (holder, conversationId) = try await staleHolder(server)
+        var budget = SyncBudget()
+        budget.maxRequests = 5 // stages the manifest generation with nothing appended
+        _ = try await sync(holder, server, budget: budget)
+        #expect(try holder.snapshotProgress()?.manifest == true)
+
+        let resyncOnce = OnceFlag()
+        offerManifest(server, manifestAnswer: { request in server.reply(request, 404, ["code": "not_found"]) },
+                      recordsAnswer: { request in
+                          resyncOnce.take()
+                              ? server.reply(request, 409, ["code": "resync_required", "reason": "cursor_ahead"])
+                              : nil
+                      })
+        budget.maxRequests = 24
+        let mark = server.paths.count
+        let resumed = try await sync(holder, server, budget: budget)
+
+        #expect(Array(server.paths.dropFirst(mark)) == [
+            "POST /v1/compaction/capability", "GET /v1/snapshot", "GET /v1/snapshot/manifest",
+            "GET /v1/snapshot", "GET /v1/snapshot/records",
+            "GET /v1/snapshot", "GET /v1/snapshot/records", "GET /v1/events",
+        ], "the fallback full import is restarted once by a later resync answer, as a resync always is")
+        #expect(resumed.snapshotPublished && resumed.snapshotRecords == 5 && resumed.receiveCursor == "5" && resumed.complete)
+        #expect(try holder.messages(conversationId: conversationId).count == 5)
+        try holder.dispose()
+    }
+
+    @Test func theManifestRequestCarriesTheCompactionGenerationLikeTheRecordsRequest() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        offerManifest(server, generation: "7")
+        let (holder, _) = try await staleHolder(server)
+        _ = try await sync(holder, server)
+
+        #expect(queries(server, "/v1/snapshot/manifest").first?["compaction_generation"] == "7")
+        #expect(queries(server, "/v1/snapshot/records").first?["compaction_generation"] == "7")
+        try holder.dispose()
+    }
+
+    @Test func aMissingRunThatEndsAtThePageBoundaryContinuesOnTheNextManifestPage() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        offerManifest(server, pageSize: 3) // the fake clamps each page to three entries, as the server clamps to its maximum
+        let (holder, conversationId) = try await staleHolder(server, held: 2)
+        let mark = server.paths.count
+        let report = try await sync(holder, server)
+
+        #expect(Array(server.paths.dropFirst(mark)) == [
+            "POST /v1/compaction/capability", "GET /v1/snapshot", "GET /v1/events",
+            "GET /v1/snapshot", "GET /v1/snapshot/manifest", "GET /v1/snapshot/records",
+            "GET /v1/snapshot/manifest", "GET /v1/snapshot/records", "GET /v1/events",
+        ])
+        #expect(queries(server, "/v1/snapshot/manifest").map { $0["after"] } == ["0", "3"])
+        #expect(queries(server, "/v1/snapshot/records").map { [$0["after"], $0["limit"]] } == [["2", "1"], ["3", "2"]])
+        #expect(report.snapshotPublished && report.snapshotRecords == 3 && report.receiveCursor == "5" && report.complete)
+        #expect(try holder.messages(conversationId: conversationId).map(\.body).sorted() == (0..<5).map { "history \($0)" }.sorted())
+        try holder.dispose()
+    }
+
+    @Test func aStagedFullImportResumesAsAFullImportWhenTheServerNowOffersManifests() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let (holder, conversationId) = try await staleHolder(server)
+        var budget = SyncBudget()
+        budget.pageLimit = 1
+        budget.maxRequests = 6 // capability probe, cut, events resync, cut, and two single-record pages
+        let partial = try await sync(holder, server, budget: budget)
+        #expect(!partial.complete && !partial.snapshotPublished)
+        let staged = try #require(try holder.snapshotProgress())
+        #expect(!staged.manifest && staged.receivedRecords == 2)
+
+        offerManifest(server) // the server now advertises manifests; the staged generation is a full import
+        budget.maxRequests = 24
+        let mark = server.paths.count
+        let resumed = try await sync(holder, server, budget: budget)
+
+        #expect(Array(server.paths.dropFirst(mark)) == [
+            "POST /v1/compaction/capability", "GET /v1/snapshot", "GET /v1/snapshot/records",
+            "GET /v1/snapshot/records", "GET /v1/snapshot/records", "GET /v1/events",
+        ])
+        #expect(queries(server, "/v1/snapshot/manifest").isEmpty)
+        #expect(resumed.snapshotPublished && resumed.snapshotRecords == 3 && resumed.receiveCursor == "5" && resumed.complete)
+        #expect(try holder.messages(conversationId: conversationId).count == 5)
+        try holder.dispose()
+    }
+
+    /// `carrier_route_aad_is_byte_stable_fixture` in `crates/protocol/tests/protocol_contract.rs` pins this envelope's
+    /// `wire_digest` (READ ONLY reference). The port must reproduce that value, so it cannot drift silently.
+    @Test func manifestDigestPortMatchesTheRustWireDigestFixture() throws {
+        let envelope: [String: Any] = [
+            "protocol_version": 1,
+            "envelope_id": "00000000-0000-0000-0000-000000000001",
+            "command_id": "00000000-0000-0000-0000-000000000002",
+            "vault_id": "00000000-0000-0000-0000-000000000003",
+            "producer_device_id": "00000000-0000-0000-0000-000000000004",
+            "producer_sequence": "9",
+            "key_epoch": 2,
+            "crypto_suite": 3,
+            "profile_fingerprint": String(repeating: "a", count: 64),
+            "purpose": "command",
+            "route": ["gateway_device_id": "00000000-0000-0000-0000-000000000005", "subscription_id": "sim:fixture"],
+            "ciphertext": "AQID",
+        ]
+        #expect(try ManifestFixture.digest(envelope) == "128646e3b468bd6b0a322c287296fae9603530595259c4073fc083fa10a6765d")
+    }
+
     @Test func requestAndClientDiagnosticsRedactTheToken() throws {
         let server = try FakeServer(passphrase: passphrase)
         let client = try serverClient(server)
@@ -392,6 +650,142 @@ import Testing
         else { return nil }
         return object["cleanup_ready"] as? Bool
     }
+}
+
+/// Adds the manifest route to the fake: `GET /v1/snapshot` advertises it, and `GET /v1/snapshot/manifest`
+/// lists the log's cursors and digests, paged like the real route (`pageSize` mimics the server's clamp).
+/// `manifestAnswer` and `recordsAnswer` may answer first; the others keep the fake's normal answers.
+func offerManifest(
+    _ server: FakeServer,
+    generation: String = "0",
+    pageSize: Int = 5_000,
+    manifestAnswer: (@Sendable (HTTPRequest) -> HTTPResponse?)? = nil,
+    recordsAnswer: (@Sendable (HTTPRequest) -> HTTPResponse?)? = nil
+) {
+    server.mutate { $0.override = { request in
+        switch (request.method, request.url.path) {
+        case ("GET", "/v1/snapshot"):
+            return server.reply(request, 200, [
+                "snapshot_version": 1, "compaction_supported": true, "compaction_active": server.compactionActive, "compaction_generation": generation,
+                "vault_id": server.vaultId, "high_water_cursor": String(server.log.last?.cursor ?? 0),
+                "record_count": String(server.log.count), "replay_floor_cursor": String(server.replayFloor),
+                "key_epoch": 1, "profile_fingerprint": "unused", "max_page_size": 200,
+                "manifest_supported": true, "max_manifest_page_size": 5_000,
+            ])
+        case ("GET", "/v1/snapshot/manifest"):
+            if let answer = manifestAnswer?(request) { return answer }
+            let query = Dictionary(uniqueKeysWithValues: (URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
+                .map { ($0.name, $0.value ?? "") })
+            let high = UInt64(query["high_water"] ?? "0")!
+            let after = UInt64(query["after"] ?? "0")!
+            let limit = min(Int(query["limit"] ?? "1000")!, pageSize)
+            let rows = server.log.filter { $0.cursor > after && $0.cursor <= high }.prefix(limit)
+            let next: Any = rows.last.map { $0.cursor < high ? String($0.cursor) as Any : NSNull() } ?? NSNull()
+            do {
+                // No test envelope carries compaction metadata or an origin tag, so every flag is 0.
+                let entries = try rows.map { row -> [String: Any] in
+                    ["cursor": String(row.cursor), "digest": try ManifestFixture.digest(row.envelope), "flags": 0]
+                }
+                return server.reply(request, 200, [
+                    "high_water_cursor": String(high), "compaction_generation": generation, "next_after": next, "entries": entries,
+                ])
+            } catch {
+                Issue.record(error)
+                return nil
+            }
+        case ("GET", "/v1/snapshot/records"):
+            return recordsAnswer?(request)
+        default:
+            return nil
+        }
+    } }
+}
+
+/// Answers once: `take()` is true for the first caller only. Override closures run under the fake's lock.
+final class OnceFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var spent = false
+    func take() -> Bool {
+        lock.withLock {
+            if spent { return false }
+            spent = true
+            return true
+        }
+    }
+}
+
+/// The server's `cipher_digest` (`Envelope::wire_digest`): SHA-256 over the binary AAD, then the ciphertext.
+/// The bindings expose no digest, so the fake ports the AAD layout of `crates/protocol/src/envelope.rs`.
+/// A wrong port makes every entry non-verifying, which the manifest tests would catch.
+enum ManifestFixture {
+    /// A field the port cannot read; the caller's test fails with it.
+    struct Malformed: Error, CustomStringConvertible {
+        let field: String
+        var description: String { "manifest fixture: malformed \(field)" }
+    }
+
+    static func digest(_ envelope: [String: Any]) throws -> String {
+        var aad = Data("peppy-envelope-aad-v1\0".utf8)
+        aad += try bigEndian(integer(envelope, "protocol_version", UInt16.self))
+        aad += try uuid(envelope, "envelope_id")
+        aad += try uuid(envelope, "vault_id")
+        aad += try uuid(envelope, "producer_device_id")
+        aad += try bigEndian(sequence(envelope))
+        aad += try bigEndian(integer(envelope, "key_epoch", UInt32.self))
+        aad += try bigEndian(integer(envelope, "crypto_suite", UInt16.self))
+        aad += try text(envelope, "profile_fingerprint")
+        let purpose: UInt8 = envelope["purpose"] as? String == "command" ? 1 : 2
+        aad.append(purpose)
+        if envelope["command_id"] is String {
+            aad.append(1)
+            aad += try uuid(envelope, "command_id")
+        } else {
+            aad.append(0)
+        }
+        if let route = envelope["route"] as? [String: Any] {
+            if route["kind"] as? String == "rcs_link" {
+                aad.append(2)
+                aad += try uuid(route, "gateway_device_id")
+            } else {
+                let subscription = try text(route, "subscription_id")
+                aad.append(1)
+                aad += try uuid(route, "gateway_device_id")
+                guard let length = UInt16(exactly: subscription.count) else { throw Malformed(field: "subscription_id") }
+                aad += bigEndian(length) + subscription
+            }
+        } else {
+            aad.append(0)
+        }
+        guard let encoded = envelope["ciphertext"] as? String, let ciphertext = Data(base64Encoded: encoded) else {
+            throw Malformed(field: "ciphertext")
+        }
+        return SHA256.hash(data: aad + ciphertext).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func integer<T: FixedWidthInteger>(_ object: [String: Any], _ key: String, _: T.Type) throws -> T {
+        guard let value = object[key] as? Int, let exact = T(exactly: value) else { throw Malformed(field: key) }
+        return exact
+    }
+
+    private static func sequence(_ envelope: [String: Any]) throws -> UInt64 {
+        guard let text = envelope["producer_sequence"] as? String, let value = UInt64(text) else {
+            throw Malformed(field: "producer_sequence")
+        }
+        return value
+    }
+
+    /// Ids are 16 raw bytes in the AAD (`Envelope::aad_bytes`), not their text.
+    private static func uuid(_ object: [String: Any], _ key: String) throws -> Data {
+        guard let text = object[key] as? String, let id = UUID(uuidString: text) else { throw Malformed(field: key) }
+        return withUnsafeBytes(of: id.uuid) { Data($0) }
+    }
+
+    private static func text(_ object: [String: Any], _ key: String) throws -> Data {
+        guard let text = object[key] as? String else { throw Malformed(field: key) }
+        return Data(text.utf8)
+    }
+
+    private static func bigEndian<T: FixedWidthInteger>(_ value: T) -> Data { withUnsafeBytes(of: value.bigEndian) { Data($0) } }
 }
 
 struct RefusingTransport: HTTPTransport {
