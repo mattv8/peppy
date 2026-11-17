@@ -1841,6 +1841,12 @@ pub(super) async fn instance_revoke_device(
             return Err(ApiError(StatusCode::CONFLICT, "last_active_owner"));
         }
     }
+    sqlx::query("DELETE FROM device_cursors WHERE vault_id=$1 AND device_id=$2")
+        .bind(vault_id)
+        .bind(device_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "revoke_device_cursor"))?;
     sqlx::query("UPDATE devices SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2")
         .bind(vault_id)
         .bind(device_id)
@@ -2399,6 +2405,12 @@ async fn revoke_device(
             return Err(ApiError(StatusCode::CONFLICT, "last_active_owner"));
         }
     }
+    sqlx::query("DELETE FROM device_cursors WHERE vault_id=$1 AND device_id=$2")
+        .bind(p.vault)
+        .bind(device_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "revoke_device_cursor"))?;
     sqlx::query("UPDATE devices SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2")
         .bind(p.vault)
         .bind(device_id)
@@ -5594,6 +5606,15 @@ async fn ws_session_inner(
             return WsStop::Database.close(&mut socket).await;
         }
     };
+    sync::record_device_cursor(
+        &state.db,
+        principal.vault,
+        principal.device,
+        cursor,
+        false,
+        true,
+    )
+    .await;
     let mut peers = adaptive_keepalive && current_keepalive_peers(&state, &principal).await;
     // Negotiation acknowledgment: the server's version, the accepted resume
     // point and current watermarks, then replay frames follow.

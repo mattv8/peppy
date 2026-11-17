@@ -1373,6 +1373,17 @@ async fn instance_admin_and_owner_revocation_both_retire_wake_routes_and_jobs() 
         );
     }
 
+    // Revocation deletes the device's replay-progress row on both paths.
+    for device in [admin_target, owner_target] {
+        sqlx::query(
+            "INSERT INTO device_cursors(vault_id,device_id,receive_cursor) VALUES($1,$2,5)",
+        )
+        .bind(vault)
+        .bind(device)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    }
     let admin_revoke = send(
         app.clone(),
         Method::POST,
@@ -1393,6 +1404,15 @@ async fn instance_admin_and_owner_revocation_both_retire_wake_routes_and_jobs() 
     assert_eq!(owner_revoke.status(), StatusCode::NO_CONTENT);
 
     for device in [admin_target, owner_target] {
+        let cursor_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM device_cursors WHERE vault_id=$1 AND device_id=$2",
+        )
+        .bind(vault)
+        .bind(device)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(cursor_rows, 0, "revocation deletes the device cursor row");
         assert_eq!(wake_effects(&fixture.pool, vault, device).await, (true, 0));
         assert_eq!(
             roster_wake_route(app.clone(), &owner_token, device).await,
