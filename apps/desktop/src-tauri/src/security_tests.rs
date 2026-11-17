@@ -4,22 +4,24 @@ use crate::{
     secure_store::{MemoryStore, SecretStore},
     session::Session,
     sync::{self, classify, next_backoff, Failure, MediaOutcome, STABLE_CONNECTION},
-    tests::{fixture_at, gateway, input, noop, open, routed, PHRASE},
+    tests::{fixture_at, gateway, input, noop, open, routed, Fixture, PHRASE},
     AppState, PreparedPublicCopy,
 };
 use axum::{
     extract::{Path as AxumPath, Query},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, Uri},
     routing::{get, post},
     Json, Router,
 };
-use peppy_client_core::{Cursor, RawSnapshotRecord, SnapshotPurpose};
+use peppy_client_core::{
+    Cursor, Envelope, IncomingSms, RawSnapshotRecord, SnapshotManifestEntry, SnapshotPurpose,
+};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU16, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -1219,6 +1221,825 @@ async fn snapshot_cut_rejected_by_server_is_abandoned_and_restarted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snapshot_cut_that_ends_early_is_abandoned_and_restarted() {
     stale_cut_is_restarted("empty").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_snapshot_downloads_reported_missing_records() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen_manifest = requests.clone();
+    let seen_records = requests.clone();
+    let router = Router::new()
+        .route(
+            "/v1/snapshot",
+            get(|| async {
+                Json(json!({
+                    "snapshot_version": 1,
+                    "high_water_cursor": "2",
+                    "record_count": "2",
+                    "manifest_supported": true,
+                    "max_manifest_page_size": 5000,
+                }))
+            }),
+        )
+        .route(
+            "/v1/snapshot/manifest",
+            get(move |Query(query): Query<HashMap<String, String>>| {
+                let seen = seen_manifest.clone();
+                async move {
+                    seen.lock().unwrap().push(format!(
+                        "manifest after={} limit={}",
+                        query["after"], query["limit"]
+                    ));
+                    Json(json!({
+                        "entries": [
+                            {"cursor":"1","digest":"0000000000000000000000000000000000000000000000000000000000000000","flags":0},
+                            {"cursor":"2","digest":"0000000000000000000000000000000000000000000000000000000000000000","flags":0},
+                        ],
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/v1/snapshot/records",
+            get(move |Query(query): Query<HashMap<String, String>>| {
+                let seen = seen_records.clone();
+                async move {
+                    seen.lock().unwrap().push(format!(
+                        "records after={} limit={}",
+                        query["after"], query["limit"]
+                    ));
+                    Json(json!({
+                        "records": [
+                            {"cursor":"1","envelope":{"malformed":1}},
+                            {"cursor":"2","envelope":{"malformed":2}},
+                        ],
+                    }))
+                }
+            }),
+        );
+    let origin = serve(router).await;
+    let f = fixture_at(&origin);
+    let session = Arc::new(open(&f, &f.binding, &[]));
+    session
+        .client
+        .unlock(&f.profile, &f.header, PHRASE)
+        .unwrap();
+
+    sync::snapshot_resync(&session).await.unwrap();
+
+    assert_eq!(
+        *requests.lock().unwrap(),
+        ["manifest after=0 limit=5000", "records after=0 limit=2"]
+    );
+    assert_eq!(session.client.receive_cursor().unwrap(), Cursor(2));
+    assert!(session.client.snapshot_progress().unwrap().is_none());
+    session.cancel.cancel();
+}
+
+/// A record the manifest mock holds: its cursor, the envelope it serves and its manifest digest.
+#[derive(Clone)]
+struct MockRecord {
+    cursor: u64,
+    envelope: Value,
+    digest: String,
+}
+
+/// Answers one snapshot request: its request count from zero, the query and the mock's log.
+type SnapshotReply = Arc<
+    dyn Fn(usize, &HashMap<String, String>, &[MockRecord]) -> (StatusCode, Value) + Send + Sync,
+>;
+
+fn mock_records(envelopes: &[Envelope]) -> Vec<MockRecord> {
+    envelopes
+        .iter()
+        .enumerate()
+        .map(|(n, envelope)| MockRecord {
+            cursor: n as u64 + 1,
+            envelope: serde_json::to_value(envelope).unwrap(),
+            digest: envelope
+                .wire_digest()
+                .unwrap()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+        })
+        .collect()
+}
+
+/// Envelopes this session's vault seals; each is captured and acknowledged so the outbox stays empty.
+fn sealed_envelopes(session: &Session, count: usize) -> Vec<Envelope> {
+    (0..count)
+        .map(|n| {
+            session
+                .client
+                .capture_incoming(IncomingSms {
+                    conversation_id: None,
+                    sender_address: "+15555550100".into(),
+                    body: format!("resync {n}"),
+                    provider_message_id: Some(format!("resync-{n}")),
+                    imported: false,
+                })
+                .unwrap();
+            let envelope = session.client.pending_outbox_batch(1).unwrap().remove(0);
+            session.client.ack_outbox(envelope.envelope_id).unwrap();
+            envelope
+        })
+        .collect()
+}
+
+fn open_unlocked(f: &Fixture) -> Session {
+    let session = open(f, &f.binding, &[]);
+    session
+        .client
+        .unlock(&f.profile, &f.header, PHRASE)
+        .unwrap();
+    session
+}
+
+/// The records of `log` after the query's `after` cursor, at most its `limit`, as a server pages them.
+fn page_of<'a>(query: &HashMap<String, String>, log: &'a [MockRecord]) -> Vec<&'a MockRecord> {
+    let after: u64 = query["after"].parse().unwrap();
+    let limit: usize = query["limit"].parse().unwrap();
+    log.iter()
+        .filter(|record| record.cursor > after)
+        .take(limit)
+        .collect()
+}
+
+fn honest_manifest(
+    _: usize,
+    query: &HashMap<String, String>,
+    log: &[MockRecord],
+) -> (StatusCode, Value) {
+    let entries: Vec<Value> = page_of(query, log)
+        .into_iter()
+        .map(|r| json!({"cursor": r.cursor.to_string(), "digest": r.digest, "flags": 0}))
+        .collect();
+    (StatusCode::OK, json!({"entries": entries}))
+}
+
+fn honest_records(
+    _: usize,
+    query: &HashMap<String, String>,
+    log: &[MockRecord],
+) -> (StatusCode, Value) {
+    records_page(page_of(query, log))
+}
+
+fn records_page(records: Vec<&MockRecord>) -> (StatusCode, Value) {
+    let records: Vec<Value> = records
+        .into_iter()
+        .map(|r| json!({"cursor": r.cursor.to_string(), "envelope": r.envelope}))
+        .collect();
+    (StatusCode::OK, json!({"records": records}))
+}
+
+fn not_found(_: usize, _: &HashMap<String, String>, _: &[MockRecord]) -> (StatusCode, Value) {
+    (StatusCode::NOT_FOUND, json!({"code": "not_found"}))
+}
+
+fn conflict(_: usize, _: &HashMap<String, String>, _: &[MockRecord]) -> (StatusCode, Value) {
+    (
+        StatusCode::CONFLICT,
+        json!({"code": "resync_required", "reason": "cursor_ahead"}),
+    )
+}
+
+/// Serves the snapshot described by `log` (filled in once the session exists). `/v1/snapshot`
+/// advertises the manifest when `advertised`. Manifest and records requests are answered by
+/// `manifest` and `records`, each receiving its own request count from zero. Every request is
+/// recorded as its path and query.
+async fn resync_mock(
+    log: Arc<Mutex<Vec<MockRecord>>>,
+    advertised: bool,
+    manifest: SnapshotReply,
+    records: SnapshotReply,
+) -> (String, Arc<Mutex<Vec<String>>>) {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let (start_log, start_seen) = (log.clone(), requests.clone());
+    let (manifest_log, manifest_seen) = (log.clone(), requests.clone());
+    let (records_log, records_seen) = (log, requests.clone());
+    let manifest_hits = Arc::new(AtomicUsize::new(0));
+    let records_hits = Arc::new(AtomicUsize::new(0));
+    let router = Router::new()
+        .route(
+            "/v1/snapshot",
+            get(move |uri: Uri| {
+                let (log, seen) = (start_log.clone(), start_seen.clone());
+                async move {
+                    seen.lock().unwrap().push(uri.to_string());
+                    let log = log.lock().unwrap();
+                    let mut start = json!({
+                        "snapshot_version": 1,
+                        "high_water_cursor": log.last().map_or(0, |r| r.cursor).to_string(),
+                        "record_count": log.len().to_string(),
+                    });
+                    if advertised {
+                        start["manifest_supported"] = json!(true);
+                        start["max_manifest_page_size"] = json!(5000);
+                    }
+                    Json(start)
+                }
+            }),
+        )
+        .route(
+            "/v1/snapshot/manifest",
+            get(
+                move |uri: Uri, Query(query): Query<HashMap<String, String>>| {
+                    let (log, seen, hits, reply) = (
+                        manifest_log.clone(),
+                        manifest_seen.clone(),
+                        manifest_hits.clone(),
+                        manifest.clone(),
+                    );
+                    async move {
+                        seen.lock().unwrap().push(uri.to_string());
+                        let n = hits.fetch_add(1, Ordering::SeqCst);
+                        let log = log.lock().unwrap().clone();
+                        let (status, body) = reply(n, &query, &log);
+                        (status, Json(body))
+                    }
+                },
+            ),
+        )
+        .route(
+            "/v1/snapshot/records",
+            get(
+                move |uri: Uri, Query(query): Query<HashMap<String, String>>| {
+                    let (log, seen, hits, reply) = (
+                        records_log.clone(),
+                        records_seen.clone(),
+                        records_hits.clone(),
+                        records.clone(),
+                    );
+                    async move {
+                        seen.lock().unwrap().push(uri.to_string());
+                        let n = hits.fetch_add(1, Ordering::SeqCst);
+                        let log = log.lock().unwrap().clone();
+                        let (status, body) = reply(n, &query, &log);
+                        (status, Json(body))
+                    }
+                },
+            ),
+        );
+    (serve(router).await, requests)
+}
+
+/// A snapshot whose manifest and records are both answered honestly from the log.
+async fn manifest_mock(
+    log: Arc<Mutex<Vec<MockRecord>>>,
+    advertised: bool,
+    manifest: SnapshotReply,
+) -> (String, Arc<Mutex<Vec<String>>>) {
+    resync_mock(log, advertised, manifest, Arc::new(honest_records)).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_resync_downloads_only_the_records_the_journal_cannot_verify() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (origin, requests) = manifest_mock(log.clone(), true, Arc::new(honest_manifest)).await;
+    let f = fixture_at(&origin);
+    let session = Arc::new(open_unlocked(&f));
+    let envelopes = sealed_envelopes(&session, 3);
+    // Cursors 1 and 3 are journaled; cursor 2 is missing locally.
+    session.client.ingest(&envelopes[0], Cursor(1)).unwrap();
+    session.client.ingest(&envelopes[2], Cursor(3)).unwrap();
+    *log.lock().unwrap() = mock_records(&envelopes);
+
+    sync::snapshot_resync(&session).await.unwrap();
+
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [
+            "/v1/snapshot",
+            "/v1/snapshot/manifest?high_water=3&after=0&limit=5000",
+            "/v1/snapshot/records?high_water=3&after=1&limit=1",
+            "/v1/snapshot/manifest?high_water=3&after=2&limit=5000",
+        ]
+    );
+    assert_eq!(session.client.receive_cursor().unwrap(), Cursor(3));
+    assert!(session.client.snapshot_progress().unwrap().is_none());
+    assert!(session.client.quarantined().unwrap().is_empty());
+    session.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_without_manifest_support_keeps_the_full_import() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (origin, requests) = manifest_mock(log.clone(), false, Arc::new(not_found)).await;
+    let f = fixture_at(&origin);
+    let session = Arc::new(open_unlocked(&f));
+    let envelopes = sealed_envelopes(&session, 3);
+    *log.lock().unwrap() = mock_records(&envelopes);
+
+    sync::snapshot_resync(&session).await.unwrap();
+
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [
+            "/v1/snapshot",
+            "/v1/snapshot/records?high_water=3&after=0&limit=200",
+        ]
+    );
+    assert_eq!(session.client.receive_cursor().unwrap(), Cursor(3));
+    session.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_resync_conflict_restarts_from_a_fresh_snapshot_start() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let reply: SnapshotReply = Arc::new(
+        |n: usize, query: &HashMap<String, String>, log: &[MockRecord]| {
+            if n == 0 {
+                (
+                    StatusCode::CONFLICT,
+                    json!({"code": "resync_required", "reason": "cursor_ahead"}),
+                )
+            } else {
+                honest_manifest(n, query, log)
+            }
+        },
+    );
+    let (origin, requests) = manifest_mock(log.clone(), true, reply).await;
+    let f = fixture_at(&origin);
+    let session = Arc::new(open_unlocked(&f));
+    let envelopes = sealed_envelopes(&session, 2);
+    *log.lock().unwrap() = mock_records(&envelopes);
+
+    sync::snapshot_resync(&session).await.unwrap();
+
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [
+            "/v1/snapshot",
+            "/v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+            "/v1/snapshot",
+            "/v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+            "/v1/snapshot/records?high_water=2&after=0&limit=2",
+        ]
+    );
+    assert_eq!(session.client.receive_cursor().unwrap(), Cursor(2));
+    session.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn undecodable_manifest_entries_fail_the_cut_without_publishing() {
+    let cases = [
+        (
+            "non-hex digest",
+            json!({"cursor": "1", "digest": format!("g{}", "0".repeat(63)), "flags": 0}),
+        ),
+        (
+            "uppercase digest",
+            json!({"cursor": "1", "digest": format!("A{}", "0".repeat(63)), "flags": 0}),
+        ),
+        (
+            "short digest",
+            json!({"cursor": "1", "digest": "0".repeat(62), "flags": 0}),
+        ),
+        (
+            "flags 4",
+            json!({"cursor": "1", "digest": "0".repeat(64), "flags": 4}),
+        ),
+        (
+            "non-numeric cursor",
+            json!({"cursor": "one", "digest": "0".repeat(64), "flags": 0}),
+        ),
+        (
+            "signed cursor",
+            json!({"cursor": "+1", "digest": "0".repeat(64), "flags": 0}),
+        ),
+    ];
+    for (label, entry) in cases {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let page = json!({"entries": [entry]});
+        let reply: SnapshotReply = Arc::new(
+            move |_: usize, _: &HashMap<String, String>, _: &[MockRecord]| {
+                (StatusCode::OK, page.clone())
+            },
+        );
+        let (origin, requests) = manifest_mock(log.clone(), true, reply).await;
+        let f = fixture_at(&origin);
+        let session = Arc::new(open_unlocked(&f));
+        let envelopes = sealed_envelopes(&session, 1);
+        *log.lock().unwrap() = mock_records(&envelopes);
+
+        let error = sync::snapshot_resync(&session).await.unwrap_err();
+
+        assert_eq!(error.code, "resync-required", "{label}");
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|r| !r.contains("/records")),
+            "{label}: no record is downloaded"
+        );
+        assert_eq!(
+            session.client.receive_cursor().unwrap(),
+            Cursor(0),
+            "{label}"
+        );
+        let staged = session
+            .client
+            .snapshot_progress()
+            .unwrap()
+            .expect("the cut stays staged, unpublished");
+        assert_eq!(staged.received_records, 0, "{label}");
+        session.cancel.cancel();
+    }
+}
+
+/// Leaves a manifest generation (high water 3) with cursor 1 journaled and verified, the state a
+/// session keeps when it closes in the middle of a manifest import.
+fn stage_manifest_generation(session: &Session, envelopes: &[Envelope]) {
+    session.client.ingest(&envelopes[0], Cursor(1)).unwrap();
+    let progress = session
+        .client
+        .begin_snapshot_with_manifest(Cursor(3), 3, None)
+        .unwrap();
+    let entry = SnapshotManifestEntry {
+        cursor: Cursor(1),
+        digest: envelopes[0].wire_digest().unwrap(),
+        has_compaction: false,
+        has_origin_tag: false,
+    };
+    session
+        .client
+        .append_snapshot_manifest(progress.generation, &[entry])
+        .unwrap();
+}
+
+/// Stages a manifest generation, closes that session and reopens the same vault. The returned
+/// fixture owns the database directory and must outlive the session.
+async fn resume_staged_manifest(
+    manifest: SnapshotReply,
+) -> (Fixture, Arc<Session>, Arc<Mutex<Vec<String>>>) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (origin, requests) = manifest_mock(log.clone(), true, manifest).await;
+    let f = fixture_at(&origin);
+    let first = Arc::new(open_unlocked(&f));
+    let envelopes = sealed_envelopes(&first, 3);
+    *log.lock().unwrap() = mock_records(&envelopes);
+    stage_manifest_generation(&first, &envelopes);
+    first.cancel.cancel();
+    drop(first);
+    let session = Arc::new(open_unlocked(&f));
+    (f, session, requests)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staged_manifest_generation_resumes_from_its_last_cursor() {
+    let (_fixture, session, requests) = resume_staged_manifest(Arc::new(honest_manifest)).await;
+
+    sync::snapshot_resync(&session).await.unwrap();
+
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [
+            // A resumed generation has no start response at hand: the core's page constant applies.
+            "/v1/snapshot/manifest?high_water=3&after=1&limit=5000",
+            "/v1/snapshot/records?high_water=3&after=1&limit=2",
+        ]
+    );
+    assert_eq!(session.client.receive_cursor().unwrap(), Cursor(3));
+    assert!(session.client.snapshot_progress().unwrap().is_none());
+    session.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumed_manifest_generation_that_meets_a_404_finishes_with_the_full_import() {
+    let (_fixture, session, requests) = resume_staged_manifest(Arc::new(not_found)).await;
+
+    sync::snapshot_resync(&session).await.unwrap();
+
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [
+            "/v1/snapshot/manifest?high_water=3&after=1&limit=5000",
+            "/v1/snapshot",
+            "/v1/snapshot/records?high_water=3&after=0&limit=200",
+        ]
+    );
+    assert_eq!(session.client.receive_cursor().unwrap(), Cursor(3));
+    assert!(session.client.snapshot_progress().unwrap().is_none());
+    session.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_manifest_page_with_nothing_missing_fails_each_attempt() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let reply: SnapshotReply =
+        Arc::new(|_: usize, _: &HashMap<String, String>, _: &[MockRecord]| {
+            (StatusCode::OK, json!({"entries": []}))
+        });
+    let (origin, requests) = manifest_mock(log.clone(), true, reply).await;
+    let f = fixture_at(&origin);
+    let session = Arc::new(open_unlocked(&f));
+    let envelopes = sealed_envelopes(&session, 2);
+    *log.lock().unwrap() = mock_records(&envelopes);
+
+    let error = sync::snapshot_resync(&session).await.unwrap_err();
+
+    assert_eq!(error.code, "resync-required");
+    let manifest = "/v1/snapshot/manifest?high_water=2&after=0&limit=5000";
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [
+            "/v1/snapshot",
+            manifest,
+            "/v1/snapshot",
+            manifest,
+            "/v1/snapshot",
+            manifest,
+        ],
+        "three bounded attempts, each restarted from a fresh start, none downloads records"
+    );
+    assert_eq!(session.client.receive_cursor().unwrap(), Cursor(0));
+    session.cancel.cancel();
+}
+
+/// The session's cancel token, filled in once the session exists so a mock reply can cancel it.
+type CancelHandle = Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>;
+
+fn cancel_session(handle: &CancelHandle) {
+    if let Some(token) = handle.lock().unwrap().as_ref() {
+        token.cancel();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_during_a_full_import_returns_without_finishing() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let cancel: CancelHandle = Arc::new(Mutex::new(None));
+    let reply_cancel = cancel.clone();
+    // One record per page; cancelled while serving the first page, which is still staged.
+    let records: SnapshotReply = Arc::new(
+        move |n: usize, query: &HashMap<String, String>, log: &[MockRecord]| {
+            if n == 0 {
+                cancel_session(&reply_cancel);
+            }
+            records_page(page_of(query, log).into_iter().take(1).collect())
+        },
+    );
+    let (origin, requests) = resync_mock(log.clone(), false, Arc::new(not_found), records).await;
+    let f = fixture_at(&origin);
+    let session = Arc::new(open_unlocked(&f));
+    *cancel.lock().unwrap() = Some(session.cancel.clone());
+    let envelopes = sealed_envelopes(&session, 3);
+    *log.lock().unwrap() = mock_records(&envelopes);
+
+    sync::snapshot_resync(&session).await.unwrap();
+
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [
+            "/v1/snapshot",
+            "/v1/snapshot/records?high_water=3&after=0&limit=200",
+        ],
+        "no request follows the cancelled page"
+    );
+    assert_eq!(session.client.receive_cursor().unwrap(), Cursor(0));
+    let staged = session
+        .client
+        .snapshot_progress()
+        .unwrap()
+        .expect("the cut stays staged and resumable");
+    assert_eq!(staged.received_records, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_during_a_manifest_import_returns_before_any_records_request() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let cancel: CancelHandle = Arc::new(Mutex::new(None));
+    let reply_cancel = cancel.clone();
+    let manifest: SnapshotReply = Arc::new(
+        move |n: usize, query: &HashMap<String, String>, log: &[MockRecord]| {
+            if n == 0 {
+                cancel_session(&reply_cancel);
+            }
+            honest_manifest(n, query, log)
+        },
+    );
+    let (origin, requests) = manifest_mock(log.clone(), true, manifest).await;
+    let f = fixture_at(&origin);
+    let session = Arc::new(open_unlocked(&f));
+    *cancel.lock().unwrap() = Some(session.cancel.clone());
+    let envelopes = sealed_envelopes(&session, 2);
+    *log.lock().unwrap() = mock_records(&envelopes);
+
+    sync::snapshot_resync(&session).await.unwrap();
+
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [
+            "/v1/snapshot",
+            "/v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+        ],
+        "the missing run is not downloaded once cancelled"
+    );
+    assert_eq!(session.client.receive_cursor().unwrap(), Cursor(0));
+    let staged = session
+        .client
+        .snapshot_progress()
+        .unwrap()
+        .expect("the cut stays staged and resumable");
+    assert_eq!(staged.received_records, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_fallback_to_the_full_import_does_not_spend_an_attempt() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    // The first two full-import pages are refused with a 409: each restarts the cut, and the
+    // third attempt completes.
+    let records: SnapshotReply = Arc::new(
+        |n: usize, query: &HashMap<String, String>, log: &[MockRecord]| {
+            if n < 2 {
+                conflict(n, query, log)
+            } else {
+                honest_records(n, query, log)
+            }
+        },
+    );
+    let (origin, requests) = resync_mock(log.clone(), true, Arc::new(not_found), records).await;
+    let f = fixture_at(&origin);
+    let session = Arc::new(open_unlocked(&f));
+    let envelopes = sealed_envelopes(&session, 3);
+    *log.lock().unwrap() = mock_records(&envelopes);
+
+    sync::snapshot_resync(&session).await.unwrap();
+
+    let manifest = "/v1/snapshot/manifest?high_water=3&after=0&limit=5000";
+    let records = "/v1/snapshot/records?high_water=3&after=0&limit=200";
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [
+            "/v1/snapshot",
+            manifest,
+            "/v1/snapshot",
+            records,
+            "/v1/snapshot",
+            records,
+            "/v1/snapshot",
+            records,
+        ]
+    );
+    assert_eq!(session.client.receive_cursor().unwrap(), Cursor(3));
+    assert!(session.client.snapshot_progress().unwrap().is_none());
+    session.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn records_conflict_inside_a_manifest_cut_restarts_from_a_fresh_snapshot_start() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let records: SnapshotReply = Arc::new(
+        |n: usize, query: &HashMap<String, String>, log: &[MockRecord]| {
+            if n == 0 {
+                conflict(n, query, log)
+            } else {
+                honest_records(n, query, log)
+            }
+        },
+    );
+    let (origin, requests) =
+        resync_mock(log.clone(), true, Arc::new(honest_manifest), records).await;
+    let f = fixture_at(&origin);
+    let session = Arc::new(open_unlocked(&f));
+    let envelopes = sealed_envelopes(&session, 2);
+    *log.lock().unwrap() = mock_records(&envelopes);
+
+    sync::snapshot_resync(&session).await.unwrap();
+
+    let manifest = "/v1/snapshot/manifest?high_water=2&after=0&limit=5000";
+    let records = "/v1/snapshot/records?high_water=2&after=0&limit=2";
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [
+            "/v1/snapshot",
+            manifest,
+            records,
+            "/v1/snapshot",
+            manifest,
+            records,
+        ]
+    );
+    assert_eq!(session.client.receive_cursor().unwrap(), Cursor(2));
+    session.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn records_beyond_the_requested_limit_are_authoritative_records_of_the_cut() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    // The manifest reports only the first two missing records; the records route ignores `limit`
+    // and returns all three.
+    let manifest: SnapshotReply = Arc::new(
+        |_: usize, _: &HashMap<String, String>, log: &[MockRecord]| {
+            let entries: Vec<Value> = log
+                .iter()
+                .take(2)
+                .map(|r| json!({"cursor": r.cursor.to_string(), "digest": r.digest, "flags": 0}))
+                .collect();
+            (StatusCode::OK, json!({"entries": entries}))
+        },
+    );
+    let records: SnapshotReply = Arc::new(
+        |_: usize, _: &HashMap<String, String>, log: &[MockRecord]| {
+            records_page(log.iter().collect())
+        },
+    );
+    let (origin, requests) = resync_mock(log.clone(), true, manifest, records).await;
+    let f = fixture_at(&origin);
+    let session = Arc::new(open_unlocked(&f));
+    let envelopes = sealed_envelopes(&session, 3);
+    *log.lock().unwrap() = mock_records(&envelopes);
+
+    sync::snapshot_resync(&session).await.unwrap();
+
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [
+            "/v1/snapshot",
+            "/v1/snapshot/manifest?high_water=3&after=0&limit=5000",
+            "/v1/snapshot/records?high_water=3&after=0&limit=2",
+        ]
+    );
+    assert_eq!(session.client.receive_cursor().unwrap(), Cursor(3));
+    assert!(session.client.snapshot_progress().unwrap().is_none());
+    session.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_page_beyond_the_core_entry_bound_fails_each_attempt() {
+    // 5,001 entries exceed the core's manifest page bound: each attempt is refused and restarted.
+    let log: Vec<MockRecord> = (1..=5001u64)
+        .map(|cursor| MockRecord {
+            cursor,
+            envelope: Value::Null,
+            digest: "0".repeat(64),
+        })
+        .collect();
+    let log = Arc::new(Mutex::new(log));
+    let manifest: SnapshotReply = Arc::new(
+        |_: usize, _: &HashMap<String, String>, log: &[MockRecord]| {
+            let entries: Vec<Value> = log
+                .iter()
+                .map(|r| json!({"cursor": r.cursor.to_string(), "digest": r.digest, "flags": 0}))
+                .collect();
+            (StatusCode::OK, json!({"entries": entries}))
+        },
+    );
+    let (origin, requests) =
+        resync_mock(log.clone(), true, manifest, Arc::new(honest_records)).await;
+    let f = fixture_at(&origin);
+    let session = Arc::new(open_unlocked(&f));
+
+    let error = sync::snapshot_resync(&session).await.unwrap_err();
+
+    assert_eq!(error.code, "resync-required");
+    let manifest = "/v1/snapshot/manifest?high_water=5001&after=0&limit=5000";
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [
+            "/v1/snapshot",
+            manifest,
+            "/v1/snapshot",
+            manifest,
+            "/v1/snapshot",
+            manifest
+        ],
+    );
+    assert_eq!(session.client.receive_cursor().unwrap(), Cursor(0));
+    session.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn records_not_found_inside_a_manifest_cut_is_a_hard_error() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (origin, requests) = resync_mock(
+        log.clone(),
+        true,
+        Arc::new(honest_manifest),
+        Arc::new(not_found),
+    )
+    .await;
+    let f = fixture_at(&origin);
+    let session = Arc::new(open_unlocked(&f));
+    let envelopes = sealed_envelopes(&session, 2);
+    *log.lock().unwrap() = mock_records(&envelopes);
+
+    let error = sync::snapshot_resync(&session).await.unwrap_err();
+
+    assert_ne!(error.code, "resync-required");
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [
+            "/v1/snapshot",
+            "/v1/snapshot/manifest?high_water=2&after=0&limit=5000",
+            "/v1/snapshot/records?high_water=2&after=0&limit=2",
+        ],
+        "a records 404 neither restarts the cut nor falls back to the full import"
+    );
+    session.cancel.cancel();
 }
 
 // ---- 4. Media retry policy ----------------------------------------------------------------
