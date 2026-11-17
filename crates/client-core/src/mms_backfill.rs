@@ -407,12 +407,9 @@ impl Client {
             history_upper_bound: Some(baseline.clone()),
             history_complete: complete,
             pause,
-            // The reserve protects history recovery only. Live delivery may consume it until
-            // the absolute snapshot ceiling, while genuine local media pressure still stops it.
-            paused: matches!(
-                pause,
-                Some(MmsBackfillPause::AbsoluteRecoveryCapacity | MmsBackfillPause::LocalCapacity)
-            ),
+            // Live capture is delivery, as SMS and link RCS are: only local pressure stops it.
+            // Imported history stops at the snapshot ceiling, not live capture.
+            paused: matches!(pause, Some(MmsBackfillPause::LocalCapacity)),
             budget: MAX_MMS_BACKFILL_RECHECK,
         }];
         if let Some(gap) = live_gap {
@@ -428,13 +425,7 @@ impl Client {
                 history_upper_bound: Some(gap.upper_bound),
                 history_complete: complete,
                 pause,
-                paused: matches!(
-                    pause,
-                    Some(
-                        MmsBackfillPause::AbsoluteRecoveryCapacity
-                            | MmsBackfillPause::LocalCapacity
-                    )
-                ),
+                paused: matches!(pause, Some(MmsBackfillPause::LocalCapacity)),
                 budget: MAX_MMS_BACKFILL_RECHECK,
             });
         }
@@ -485,7 +476,8 @@ impl Client {
                 history_upper_bound: None,
                 history_complete: complete,
                 pause,
-                paused: matches!(pause, Some(MmsBackfillPause::AbsoluteRecoveryCapacity)),
+                // Never paused by capacity: at the ceiling, selection excludes imported rows instead.
+                paused: false,
                 budget: MAX_MMS_BACKFILL_RECHECK,
             },
         ]);
@@ -843,14 +835,28 @@ impl Client {
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Measured capacity, not the stored pause: a local pause may mask the ceiling.
+        let exclude_imported = recovery_capacity(&tx)? == RecoveryCapacity::Absolute;
         if conditions.capacity_changed || conditions.explicit_refresh {
             clear_recheck_due(&tx, generation, scope)?;
         }
         if conditions.provider_changed {
-            reset_pending_recheck_due(&tx, generation, scope, MAX_MMS_BACKFILL_RECHECK)?;
+            reset_pending_recheck_due(
+                &tx,
+                generation,
+                scope,
+                MAX_MMS_BACKFILL_RECHECK,
+                exclude_imported,
+            )?;
         }
-        let pending =
-            due_recheck_partition(&tx, generation, scope, now_ms, MAX_MMS_BACKFILL_RECHECK)?;
+        let pending = due_recheck_partition(
+            &tx,
+            generation,
+            scope,
+            now_ms,
+            MAX_MMS_BACKFILL_RECHECK,
+            exclude_imported,
+        )?;
         let mut requests = pending;
         if (conditions.charging || conditions.explicit_refresh)
             && requests.len() < MAX_MMS_BACKFILL_RECHECK
@@ -862,6 +868,7 @@ impl Client {
                 now_ms,
                 conditions.explicit_refresh,
                 MAX_MMS_BACKFILL_RECHECK - requests.len(),
+                exclude_imported,
             )?);
         }
         let continuation_due = !requests.is_empty();
@@ -1395,10 +1402,10 @@ fn effective_pause(
     local_full: bool,
     remote_full: bool,
 ) -> Option<MmsBackfillPause> {
-    if recovery == RecoveryCapacity::Absolute {
-        Some(MmsBackfillPause::AbsoluteRecoveryCapacity)
-    } else if local_full {
+    if local_full {
         Some(MmsBackfillPause::LocalCapacity)
+    } else if recovery == RecoveryCapacity::Absolute {
+        Some(MmsBackfillPause::AbsoluteRecoveryCapacity)
     } else if recovery == RecoveryCapacity::Reserve {
         Some(MmsBackfillPause::RecoveryCapacity)
     } else if remote_full {
@@ -1578,7 +1585,7 @@ fn clear_recheck_due(conn: &Connection, generation: &str, scope: &str) -> Result
 
 /// Pending rows of one scope in numeric provider chronology, newest first. The provider hint reset
 /// and the fair due selection both start from this bounded candidate set.
-fn newest_pending_candidates(provider_wide: bool, limit_sql: &str) -> String {
+fn newest_pending_candidates(provider_wide: bool, provenance: &str, limit_sql: &str) -> String {
     let scope_predicate = if provider_wide {
         ""
     } else {
@@ -1586,10 +1593,21 @@ fn newest_pending_candidates(provider_wide: bool, limit_sql: &str) -> String {
     };
     format!(
         "SELECT acquisition_id,local_order,provider_message_id,direction,state FROM mms_acquisitions
-         WHERE source_generation=? {scope_predicate} AND state='pending'
+         WHERE source_generation=? {scope_predicate} AND state='pending' {provenance}
          ORDER BY length(provider_message_id) DESC,provider_message_id DESC,local_order DESC
          LIMIT {limit_sql}"
     )
+}
+
+/// At the snapshot ceiling only live rows take part in recheck selection, so imported history
+/// keeps its attempt and claim bookkeeping until capacity returns. Provenance is the stored
+/// acquisition input, and rows with missing provenance are excluded.
+fn live_provenance_filter(exclude_imported: bool, input_column: &str) -> String {
+    if exclude_imported {
+        format!("AND json_extract({input_column},'$.imported')=0")
+    } else {
+        String::new()
+    }
 }
 
 /// Binds the scope placeholders used by `newest_pending_candidates`, in order.
@@ -1606,6 +1624,7 @@ fn reset_pending_recheck_due(
     generation: &str,
     scope: &str,
     limit: usize,
+    exclude_imported: bool,
 ) -> Result<(), Error> {
     let provider_wide = scope == PROVIDER_WIDE_SCOPE;
     // The awaiting_provider clause only adds failure_count==2 rows (lower counts already match the
@@ -1616,7 +1635,11 @@ fn reset_pending_recheck_due(
          WHERE r.acquisition_id IS NULL
             OR r.failure_count<?
             OR (r.last_reason='awaiting_provider' AND r.failure_count<=?)",
-        newest_pending_candidates(provider_wide, "?")
+        newest_pending_candidates(
+            provider_wide,
+            &live_provenance_filter(exclude_imported, "input"),
+            "?"
+        )
     );
     let mut values = scope_values(generation, scope, provider_wide);
     values.push(Value::Integer(limit as i64));
@@ -1652,16 +1675,18 @@ fn due_recheck_partition(
     scope: &str,
     now_ms: i64,
     limit: usize,
+    exclude_imported: bool,
 ) -> Result<Vec<RecheckRow>, Error> {
     let provider_wide = scope == PROVIDER_WIDE_SCOPE;
     let query = format!(
         "SELECT c.acquisition_id,c.local_order,c.provider_message_id,c.direction,c.state FROM mms_acquisitions c
           LEFT JOIN mms_backfill_recheck_state r ON r.acquisition_id=c.acquisition_id
           LEFT JOIN mms_backfill_recheck_attempts t ON t.acquisition_id=c.acquisition_id
-          WHERE c.source_generation=? {scope_predicate} AND c.state='pending' AND (COALESCE(r.next_due_at_ms,0)<=? OR ?<t.attempted_at_ms)
+          WHERE c.source_generation=? {scope_predicate} AND c.state='pending' {provenance} AND (COALESCE(r.next_due_at_ms,0)<=? OR ?<t.attempted_at_ms)
           ORDER BY COALESCE(t.attempted_at_ms,0) ASC,length(c.provider_message_id) DESC,c.provider_message_id DESC,c.local_order DESC
           LIMIT ?",
         scope_predicate = if provider_wide { "" } else { "AND c.subscription_id=?" },
+        provenance = live_provenance_filter(exclude_imported, "c.input"),
     );
     let mut statement = conn.prepare(&query)?;
     let mut values = scope_values(generation, scope, provider_wide);
@@ -1829,18 +1854,20 @@ fn claimed_completed_rows(
     generation: &str,
     scope: &str,
     limit: usize,
+    exclude_imported: bool,
 ) -> Result<Vec<RecheckRow>, Error> {
     conn.execute(
         "DELETE FROM mms_backfill_completed_claims WHERE source_generation=? AND subscription_id=?
            AND NOT EXISTS(SELECT 1 FROM mms_acquisitions a WHERE a.acquisition_id=mms_backfill_completed_claims.acquisition_id)",
         params![generation, scope],
     )?;
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare(&format!(
         "SELECT a.acquisition_id,a.local_order,a.provider_message_id,a.direction,a.state
          FROM mms_backfill_completed_claims c JOIN mms_acquisitions a ON a.acquisition_id=c.acquisition_id
-         WHERE c.source_generation=? AND c.subscription_id=?
+         WHERE c.source_generation=? AND c.subscription_id=? {provenance}
          ORDER BY length(a.provider_message_id) DESC,a.provider_message_id DESC,a.local_order DESC LIMIT ?",
-    )?;
+        provenance = live_provenance_filter(exclude_imported, "a.input"),
+    ))?;
     statement
         .query_map(params![generation, scope, limit], decode_recheck_row)?
         .collect::<Result<Vec<_>, _>>()
@@ -1883,6 +1910,7 @@ fn completed_segments(
     generation: &str,
     scope: &str,
     cursor: Option<&SweepPosition>,
+    exclude_imported: bool,
 ) -> Vec<(String, Vec<Value>)> {
     let provider_wide = scope == PROVIDER_WIDE_SCOPE;
     let filters: Vec<(&str, &str, Vec<Value>)> = match cursor {
@@ -1921,7 +1949,11 @@ fn completed_segments(
                 values.push(Value::Text(scope.into()));
             }
             values.extend(filter_values);
-            (completed_segment_sql(provider_wide, filter, order), values)
+            let filter = format!(
+                "{filter} {}",
+                live_provenance_filter(exclude_imported, "input")
+            );
+            (completed_segment_sql(provider_wide, &filter, order), values)
         })
         .collect()
 }
@@ -1932,9 +1964,10 @@ fn completed_batch_rows(
     scope: &str,
     cursor: Option<&SweepPosition>,
     limit: usize,
+    exclude_imported: bool,
 ) -> Result<Vec<RecheckRow>, Error> {
     let mut rows = Vec::new();
-    for (sql, mut values) in completed_segments(generation, scope, cursor) {
+    for (sql, mut values) in completed_segments(generation, scope, cursor, exclude_imported) {
         let remaining = limit.saturating_sub(rows.len());
         if remaining == 0 {
             break;
@@ -1963,11 +1996,12 @@ fn completed_recheck_partition(
     now_ms: i64,
     explicit_refresh: bool,
     limit: usize,
+    exclude_imported: bool,
 ) -> Result<Vec<RecheckRow>, Error> {
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let claimed = claimed_completed_rows(conn, generation, scope, limit)?;
+    let claimed = claimed_completed_rows(conn, generation, scope, limit, exclude_imported)?;
     if !claimed.is_empty() {
         return Ok(claimed);
     }
@@ -1991,7 +2025,14 @@ fn completed_recheck_partition(
         if sweep.completed_at_ms.is_some() {
             sweep.restart(now_ms);
         }
-        let rows = completed_batch_rows(conn, generation, scope, sweep.cursor.as_ref(), limit)?;
+        let rows = completed_batch_rows(
+            conn,
+            generation,
+            scope,
+            sweep.cursor.as_ref(),
+            limit,
+            exclude_imported,
+        )?;
         match rows.last() {
             Some(last) => {
                 claim_completed_rows(conn, generation, scope, &rows)?;
@@ -2254,7 +2295,44 @@ mod tests {
         );
         assert_eq!(
             effective_pause(RecoveryCapacity::Absolute, true, false),
+            Some(MmsBackfillPause::LocalCapacity)
+        );
+    }
+
+    #[test]
+    fn local_pressure_alone_keeps_its_pause() {
+        assert_eq!(
+            effective_pause(RecoveryCapacity::Available, true, false),
+            Some(MmsBackfillPause::LocalCapacity)
+        );
+        assert_eq!(
+            effective_pause(RecoveryCapacity::Available, false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn absolute_capacity_with_media_pressure_stores_local_capacity() {
+        let conn = capacity_connection();
+        conn.execute(
+            "INSERT INTO messages(local_order) VALUES(?)",
+            [MAX_SNAPSHOT_RECORDS],
+        )
+        .unwrap();
+        assert_eq!(
+            refresh_local_pause(&conn, "generation", "scope", 0, None).unwrap(),
             Some(MmsBackfillPause::AbsoluteRecoveryCapacity)
+        );
+        assert_eq!(
+            refresh_local_pause(
+                &conn,
+                "generation",
+                "scope",
+                MAX_PENDING_MMS_MEDIA_BYTES,
+                Some(MmsBackfillPause::AbsoluteRecoveryCapacity),
+            )
+            .unwrap(),
+            Some(MmsBackfillPause::LocalCapacity)
         );
     }
 
@@ -2439,12 +2517,12 @@ mod tests {
         .unwrap();
 
         assert!(
-            due_recheck_partition(&conn, "generation", "scope", 99, 32)
+            due_recheck_partition(&conn, "generation", "scope", 99, 32, false)
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            due_recheck_partition(&conn, "generation", "scope", 100, 32)
+            due_recheck_partition(&conn, "generation", "scope", 100, 32, false)
                 .unwrap()
                 .len(),
             1
@@ -2599,7 +2677,8 @@ mod tests {
         insert_complete(&conn, "c", "10", "outgoing");
         insert_complete(&conn, "d", "9", "incoming");
 
-        let first = completed_recheck_partition(&conn, "generation", "scope", 0, false, 2).unwrap();
+        let first =
+            completed_recheck_partition(&conn, "generation", "scope", 0, false, 2, false).unwrap();
         assert_eq!(
             ids(&first),
             ["c", "b"],
@@ -2608,12 +2687,12 @@ mod tests {
         resolve_batch(&conn, &["c", "b"]);
 
         let second =
-            completed_recheck_partition(&conn, "generation", "scope", 0, false, 2).unwrap();
+            completed_recheck_partition(&conn, "generation", "scope", 0, false, 2, false).unwrap();
         assert_eq!(ids(&second), ["d", "a"]);
         resolve_batch(&conn, &["d", "a"]);
 
         assert!(
-            completed_recheck_partition(&conn, "generation", "scope", 0, false, 2)
+            completed_recheck_partition(&conn, "generation", "scope", 0, false, 2, false)
                 .unwrap()
                 .is_empty()
         );
@@ -2626,7 +2705,8 @@ mod tests {
         insert_complete(&conn, "b", "2", "incoming");
         insert_complete(&conn, "c", "3", "incoming");
 
-        let batch = completed_recheck_partition(&conn, "generation", "scope", 0, false, 2).unwrap();
+        let batch =
+            completed_recheck_partition(&conn, "generation", "scope", 0, false, 2, false).unwrap();
         assert_eq!(ids(&batch), ["c", "b"]);
         // One outcome resolves only its own claim; the cursor must not skip the other row.
         conn.execute(
@@ -2635,7 +2715,7 @@ mod tests {
         )
         .unwrap();
         let remaining =
-            completed_recheck_partition(&conn, "generation", "scope", 0, false, 2).unwrap();
+            completed_recheck_partition(&conn, "generation", "scope", 0, false, 2, false).unwrap();
         assert_eq!(
             ids(&remaining),
             ["b"],
@@ -2643,7 +2723,10 @@ mod tests {
         );
         resolve_batch(&conn, &["b"]);
         assert_eq!(
-            ids(&completed_recheck_partition(&conn, "generation", "scope", 0, false, 2).unwrap()),
+            ids(
+                &completed_recheck_partition(&conn, "generation", "scope", 0, false, 2, false)
+                    .unwrap()
+            ),
             ["a"]
         );
     }
@@ -2676,7 +2759,7 @@ mod tests {
             .into_iter()
             .flat_map(|scope| [(scope, None), (scope, Some(&deep))])
         {
-            for (sql, mut values) in completed_segments("generation", scope, cursor) {
+            for (sql, mut values) in completed_segments("generation", scope, cursor, false) {
                 values.push(Value::Integer(MAX_MMS_BACKFILL_RECHECK as i64));
                 let mut plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
                 let details = plan
@@ -2709,5 +2792,553 @@ mod tests {
                 assert!(steps < 2_000, "steps={steps} cursor={cursor:?}");
             }
         }
+    }
+
+    const DUE_AT_MS: i64 = 2 * 60 * 60 * 1000;
+
+    fn recheck_input(provider_id: &str, imported: bool) -> MmsAcquisitionInput {
+        MmsAcquisitionInput {
+            source: MmsSource {
+                source_generation: "generation".into(),
+                subscription_id: "scope".into(),
+                provider_message_id: provider_id.into(),
+                provider_thread_id: None,
+            },
+            direction: Direction::Incoming,
+            sender_address: Some("+15555550100".into()),
+            recipients: Vec::new(),
+            subject: None,
+            body: "recheck".into(),
+            imported,
+            observed_at_ms: 1,
+            provider_read: None,
+            transaction_id: None,
+        }
+    }
+
+    fn admit_recheck_row(client: &Client, provider_id: &str, imported: bool) -> String {
+        client
+            .begin_mms_acquisition(recheck_input(provider_id, imported))
+            .unwrap()
+            .acquisition_id
+    }
+
+    fn admit_completed_recheck_row(client: &Client, provider_id: &str, imported: bool) -> String {
+        let id = admit_recheck_row(client, provider_id, imported);
+        client.complete_mms_acquisition(&id).unwrap();
+        id
+    }
+
+    /// The measured recovery capacity is at the snapshot ceiling.
+    fn record_absolute_capacity(client: &Client) {
+        client
+            .record_recovery_snapshot_capacity(Cursor(MAX_SNAPSHOT_RECORDS), MAX_SNAPSHOT_RECORDS)
+            .unwrap();
+    }
+
+    fn restore_recovery_capacity(client: &Client) {
+        client
+            .record_recovery_snapshot_capacity(Cursor(MAX_SNAPSHOT_RECORDS + 1), 0)
+            .unwrap();
+    }
+
+    fn due_recheck_ids(
+        client: &Client,
+        now_ms: i64,
+        conditions: MmsBackfillRecheckConditions,
+    ) -> Vec<String> {
+        let mut ids: Vec<String> = client
+            .mms_backfill_due_rechecks("generation", "scope", now_ms, conditions)
+            .unwrap()
+            .requests
+            .into_iter()
+            .map(|request| request.acquisition_id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Imported rows get seven-digit provider IDs and live rows three-digit ones, so provider
+    /// chronology sorts every imported row ahead of every live row in both recheck partitions.
+    fn imported_provider_id(number: u32) -> String {
+        format!("1000{number:03}")
+    }
+
+    /// Recheck backoff rows and attempt rows, each in a stable order.
+    type Bookkeeping = (Vec<(String, i64, i64, Option<String>)>, Vec<(String, i64)>);
+
+    fn recheck_bookkeeping(client: &Client) -> Bookkeeping {
+        let store = client.lock().unwrap();
+        let states = {
+            let mut statement = store
+                .conn
+                .prepare("SELECT acquisition_id,next_due_at_ms,failure_count,last_reason FROM mms_backfill_recheck_state ORDER BY acquisition_id")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let attempts = {
+            let mut statement = store
+                .conn
+                .prepare("SELECT acquisition_id,attempted_at_ms FROM mms_backfill_recheck_attempts ORDER BY acquisition_id")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        (states, attempts)
+    }
+
+    /// The rows of a snapshot that belong to `ids`.
+    fn bookkeeping_for(bookkeeping: &Bookkeeping, ids: &[String]) -> Bookkeeping {
+        (
+            bookkeeping
+                .0
+                .iter()
+                .filter(|row| ids.contains(&row.0))
+                .cloned()
+                .collect(),
+            bookkeeping
+                .1
+                .iter()
+                .filter(|row| ids.contains(&row.0))
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// The pending rows the partition returns before any imported-row filter is applied.
+    fn unfiltered_pending_head(client: &Client) -> Vec<String> {
+        let store = client.lock().unwrap();
+        due_recheck_partition(
+            &store.conn,
+            "generation",
+            "scope",
+            DUE_AT_MS,
+            MAX_MMS_BACKFILL_RECHECK,
+            false,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.0)
+        .collect()
+    }
+
+    /// The completed rows the first sweep batch returns before any imported-row filter is applied.
+    fn unfiltered_completed_head(client: &Client) -> Vec<String> {
+        let store = client.lock().unwrap();
+        completed_batch_rows(
+            &store.conn,
+            "generation",
+            "scope",
+            None,
+            MAX_MMS_BACKFILL_RECHECK,
+            false,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.0)
+        .collect()
+    }
+
+    fn stored_completed_claims(client: &Client, ids: &[String]) -> i64 {
+        let store = client.lock().unwrap();
+        ids.iter()
+            .map(|id| {
+                store
+                    .conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM mms_backfill_completed_claims WHERE acquisition_id=?",
+                        [id.as_str()],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap()
+            })
+            .sum()
+    }
+
+    #[test]
+    fn absolute_capacity_rechecks_only_live_pending_rows() {
+        let (_directory, client) = outcome_client();
+        let imported: Vec<String> = (0..40)
+            .map(|number| admit_recheck_row(&client, &imported_provider_id(number), true))
+            .collect();
+        let mut live: Vec<String> = (200..203)
+            .map(|id| admit_recheck_row(&client, &id.to_string(), false))
+            .collect();
+        // Equal attempt stamps leave provider chronology as the only ordering, so without the
+        // imported filter the 32-row budget would fill with imported rows before any live row.
+        for id in imported.iter().chain(&live) {
+            client
+                .record_mms_backfill_recheck_outcome(
+                    id,
+                    1,
+                    MmsBackfillRecheckOutcome::TransientFailure,
+                    MmsBackfillRecheckConditions::default(),
+                )
+                .unwrap();
+        }
+        live.sort();
+        assert!(
+            unfiltered_pending_head(&client)
+                .iter()
+                .all(|id| imported.contains(id)),
+            "the fixture must sort every imported row ahead of the live rows"
+        );
+        record_absolute_capacity(&client);
+        let before = recheck_bookkeeping(&client);
+        assert_eq!(
+            before
+                .1
+                .iter()
+                .filter(|row| imported.contains(&row.0))
+                .count(),
+            40,
+            "each imported row has an attempt stamp"
+        );
+
+        assert_eq!(
+            due_recheck_ids(&client, DUE_AT_MS, MmsBackfillRecheckConditions::default()),
+            live
+        );
+        assert_eq!(
+            recheck_bookkeeping(&client),
+            before,
+            "excluded and live rows keep their bookkeeping"
+        );
+    }
+
+    #[test]
+    fn imported_pending_rechecks_return_when_capacity_returns() {
+        let (_directory, client) = outcome_client();
+        let imported: Vec<String> = (100..140)
+            .map(|id| admit_recheck_row(&client, &id.to_string(), true))
+            .collect();
+        for id in 200..203 {
+            admit_recheck_row(&client, &id.to_string(), false);
+        }
+        record_absolute_capacity(&client);
+        let conditions = MmsBackfillRecheckConditions::default();
+        assert!(
+            due_recheck_ids(&client, DUE_AT_MS, conditions)
+                .iter()
+                .all(|id| !imported.contains(id))
+        );
+
+        restore_recovery_capacity(&client);
+        let due = due_recheck_ids(&client, DUE_AT_MS, conditions);
+        assert_eq!(due.len(), MAX_MMS_BACKFILL_RECHECK);
+        assert!(due.iter().any(|id| imported.contains(id)));
+    }
+
+    #[test]
+    fn absolute_capacity_sweeps_only_live_completed_rows() {
+        for conditions in [
+            MmsBackfillRecheckConditions {
+                charging: true,
+                ..Default::default()
+            },
+            MmsBackfillRecheckConditions {
+                explicit_refresh: true,
+                ..Default::default()
+            },
+        ] {
+            let (_directory, client) = outcome_client();
+            let imported: Vec<String> = (0..40)
+                .map(|number| {
+                    admit_completed_recheck_row(&client, &imported_provider_id(number), true)
+                })
+                .collect();
+            let mut live: Vec<String> = (200..203)
+                .map(|id| admit_completed_recheck_row(&client, &id.to_string(), false))
+                .collect();
+            live.sort();
+            assert!(
+                unfiltered_completed_head(&client)
+                    .iter()
+                    .all(|id| imported.contains(id)),
+                "the fixture must sort every imported row ahead of the live rows"
+            );
+            record_absolute_capacity(&client);
+
+            assert_eq!(
+                due_recheck_ids(&client, 1, conditions),
+                live,
+                "{conditions:?}"
+            );
+            for id in &live {
+                client
+                    .record_mms_backfill_recheck_outcome(
+                        id,
+                        2,
+                        MmsBackfillRecheckOutcome::Verified,
+                        conditions,
+                    )
+                    .unwrap();
+            }
+            assert!(
+                due_recheck_ids(&client, 3, conditions)
+                    .iter()
+                    .all(|id| live.contains(id)),
+                "{conditions:?}"
+            );
+
+            restore_recovery_capacity(&client);
+            let restored = due_recheck_ids(
+                &client,
+                4,
+                MmsBackfillRecheckConditions {
+                    explicit_refresh: true,
+                    ..conditions
+                },
+            );
+            assert!(
+                restored.iter().any(|id| imported.contains(id)),
+                "{conditions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unresolved_imported_claims_stay_stored_and_return_first_when_capacity_returns() {
+        let (_directory, client) = outcome_client();
+        let imported: Vec<String> = (0..40)
+            .map(|number| admit_completed_recheck_row(&client, &imported_provider_id(number), true))
+            .collect();
+        let mut live: Vec<String> = (200..203)
+            .map(|id| admit_completed_recheck_row(&client, &id.to_string(), false))
+            .collect();
+        live.sort();
+        let charging = MmsBackfillRecheckConditions {
+            charging: true,
+            ..Default::default()
+        };
+
+        // Below the ceiling the first batch claims 32 imported rows and leaves them unresolved.
+        let claimed = due_recheck_ids(&client, 1, charging);
+        assert_eq!(claimed.len(), MAX_MMS_BACKFILL_RECHECK);
+        assert!(claimed.iter().all(|id| imported.contains(id)));
+
+        record_absolute_capacity(&client);
+        // The unresolved imported claims are filtered out, so the sweep reaches the live rows.
+        assert_eq!(due_recheck_ids(&client, 2, charging), live);
+        for id in &live {
+            client
+                .record_mms_backfill_recheck_outcome(
+                    id,
+                    3,
+                    MmsBackfillRecheckOutcome::Verified,
+                    charging,
+                )
+                .unwrap();
+        }
+        // The live rows are exhausted, so the filtered sweep completes without the imported rows.
+        assert!(due_recheck_ids(&client, 4, charging).is_empty());
+        assert_eq!(stored_completed_claims(&client, &imported), 32);
+        assert_eq!(stored_completed_claims(&client, &live), 0);
+
+        // Once capacity returns, the stored imported claims come back first and can be resolved.
+        restore_recovery_capacity(&client);
+        let returned = due_recheck_ids(&client, 5, charging);
+        assert_eq!(returned, claimed);
+        for id in &returned {
+            client
+                .record_mms_backfill_recheck_outcome(
+                    id,
+                    6,
+                    MmsBackfillRecheckOutcome::Verified,
+                    charging,
+                )
+                .unwrap();
+        }
+        assert_eq!(stored_completed_claims(&client, &imported), 0);
+    }
+
+    #[test]
+    fn provider_change_reset_leaves_imported_bookkeeping_untouched() {
+        const EARLY_MS: i64 = 60 * 1000;
+        let (_directory, client) = outcome_client();
+        let imported: Vec<String> = (0..40)
+            .map(|number| admit_recheck_row(&client, &imported_provider_id(number), true))
+            .collect();
+        let live = admit_recheck_row(&client, "200", false);
+        // Every row has backoff and an attempt stamp, so the reset has something to clear.
+        for id in imported.iter().chain(std::slice::from_ref(&live)) {
+            client
+                .record_mms_backfill_recheck_outcome(
+                    id,
+                    1,
+                    MmsBackfillRecheckOutcome::TransientFailure,
+                    MmsBackfillRecheckConditions::default(),
+                )
+                .unwrap();
+        }
+        record_absolute_capacity(&client);
+        assert!(
+            due_recheck_ids(&client, EARLY_MS, MmsBackfillRecheckConditions::default()).is_empty()
+        );
+        let before = recheck_bookkeeping(&client);
+
+        let reset = client
+            .mms_backfill_due_rechecks(
+                "generation",
+                "scope",
+                EARLY_MS,
+                MmsBackfillRecheckConditions {
+                    provider_changed: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            reset
+                .requests
+                .iter()
+                .map(|request| request.acquisition_id.clone())
+                .collect::<Vec<_>>(),
+            vec![live.clone()],
+            "the live row is reset and returned"
+        );
+        let after = recheck_bookkeeping(&client);
+        assert_eq!(
+            bookkeeping_for(&after, &imported),
+            bookkeeping_for(&before, &imported),
+            "imported backoff and attempt rows are unchanged"
+        );
+        assert_eq!(
+            bookkeeping_for(&after, std::slice::from_ref(&live)).1,
+            vec![(live, 0)]
+        );
+    }
+
+    #[test]
+    fn stored_local_pause_masking_absolute_still_selects_only_live_rechecks() {
+        let (_directory, client) = outcome_client();
+        client
+            .plan_mms_backfill_scans("generation", "scope", "10")
+            .unwrap();
+        for id in 100..140 {
+            admit_recheck_row(&client, &id.to_string(), true);
+        }
+        let live: Vec<String> = (200..203)
+            .map(|id| admit_recheck_row(&client, &id.to_string(), false))
+            .collect();
+        record_absolute_capacity(&client);
+        client
+            .pause_mms_backfill_for_local_capacity("generation", "scope")
+            .unwrap();
+        assert_eq!(
+            client
+                .mms_backfill_status("generation", "scope")
+                .unwrap()
+                .pause,
+            Some(MmsBackfillPause::LocalCapacity)
+        );
+
+        let mut expected = live;
+        expected.sort();
+        assert_eq!(
+            due_recheck_ids(&client, DUE_AT_MS, MmsBackfillRecheckConditions::default()),
+            expected
+        );
+    }
+
+    #[test]
+    fn replaced_provider_identity_at_absolute_is_admitted_only_as_live() {
+        let (_directory, client) = outcome_client();
+        client
+            .begin_mms_acquisition(MmsAcquisitionInput {
+                transaction_id: Some("instance-1".into()),
+                ..recheck_input("300", true)
+            })
+            .unwrap();
+        record_absolute_capacity(&client);
+
+        let live = client
+            .begin_mms_acquisition(MmsAcquisitionInput {
+                transaction_id: Some("instance-2".into()),
+                ..recheck_input("300", false)
+            })
+            .unwrap();
+        assert_eq!(live.state, MmsAcquisitionState::Pending);
+        assert_eq!(
+            due_recheck_ids(&client, DUE_AT_MS, MmsBackfillRecheckConditions::default()),
+            vec![live.acquisition_id.clone()]
+        );
+
+        // An imported replacement is refused, and the refusal leaves the live row pending.
+        assert_eq!(
+            client.begin_mms_acquisition(MmsAcquisitionInput {
+                transaction_id: Some("instance-3".into()),
+                ..recheck_input("300", true)
+            }),
+            Err(Error::MmsAcquisitionLimit)
+        );
+        assert_eq!(
+            due_recheck_ids(&client, DUE_AT_MS, MmsBackfillRecheckConditions::default()),
+            vec![live.acquisition_id]
+        );
+    }
+
+    #[test]
+    fn media_pressure_at_absolute_capacity_pauses_live_plans() {
+        let (_directory, client) = outcome_client();
+        client
+            .plan_mms_backfill_scans("generation", "scope", "10")
+            .unwrap();
+        record_absolute_capacity(&client);
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO attachments(attachment_id,state,media_type,display_name,plaintext_bytes,ciphertext_bytes,ciphertext_sha256,stream_version,file_key)
+                     VALUES('media','pending_upload','image/jpeg','photo.jpg',?,1,'digest',1,x'00')",
+                    [MAX_PENDING_MMS_MEDIA_BYTES as i64],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO mms_acquisition_parts(acquisition_id,provider_part_id,attachment_id,position) VALUES('acquisition','part','media',0)",
+                    [],
+                )
+                .unwrap();
+        }
+
+        let plans = client
+            .plan_mms_backfill_scans("generation", "scope", "600")
+            .unwrap();
+        let live = plans
+            .iter()
+            .find(|plan| plan.phase == MmsBackfillPhase::Live)
+            .unwrap();
+        let recheck = plans
+            .iter()
+            .find(|plan| plan.phase == MmsBackfillPhase::Recheck)
+            .unwrap();
+        assert_eq!(live.pause, Some(MmsBackfillPause::LocalCapacity));
+        assert!(live.paused);
+        assert!(
+            plans
+                .iter()
+                .any(|plan| plan.phase == MmsBackfillPhase::LiveGap && plan.paused)
+        );
+        assert!(!recheck.paused);
     }
 }

@@ -1942,6 +1942,48 @@ fn the_capture_does_not_store_a_chat_message_the_link_already_delivered() {
     assert_eq!(message_count(&gateway), delivered);
 }
 
+/// A mirror identity has no age limit: a copy the link delivered a day earlier is still not stored
+/// again when the capture completes it.
+#[test]
+fn the_capture_does_not_store_a_day_old_chat_message_the_link_delivered() {
+    let (gateway, generation) = link_owned_gateway();
+    gateway
+        .client
+        .ingest_rcs_projected_record(gateway.conversation, generation, link_record())
+        .unwrap();
+    let delivered = message_count(&gateway);
+    let day_old = MmsAcquisitionInput {
+        observed_at_ms: wall_clock_ms() - 24 * 60 * 60 * 1_000,
+        ..mirrored_acquisition("mirrored-day-old")
+    };
+    let acquisition = gateway.client.begin_mms_acquisition(day_old).unwrap();
+
+    let captured = gateway
+        .client
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+
+    assert!(captured.duplicate);
+    assert_eq!(message_count(&gateway), delivered);
+}
+
+/// Ownership is decided before age, so a day-old copy for a chat the link does not own is captured.
+#[test]
+fn a_day_old_mirrored_row_for_a_chat_the_link_does_not_own_is_captured() {
+    let gateway = send_proof_gateway();
+
+    let route = gateway
+        .client
+        .route_rcs_provider_row_result(mirrored_row(
+            Some(mirrored_transaction_id(MIRRORED_MESSAGE_ID)),
+            wall_clock_ms() - 24 * 60 * 60 * 1_000,
+        ))
+        .unwrap();
+
+    assert_eq!(route.route, RcsProviderRowRoute::Provider);
+    assert_eq!(route.reason, Some(RcsProviderRouteReason::NotLinkOwned));
+}
+
 fn photo() -> RcsIncomingAttachment {
     RcsIncomingAttachment {
         original_index: 0,
