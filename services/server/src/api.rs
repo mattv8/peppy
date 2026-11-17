@@ -912,6 +912,7 @@ fn build_router_with_live_backend(
         .route("/v1/events", get(sync::events))
         .route("/v1/snapshot", get(sync::snapshot_start))
         .route("/v1/snapshot/records", get(sync::snapshot_records))
+        .route("/v1/snapshot/manifest", get(sync::snapshot_manifest))
         .route("/v1/commands/pending", get(sync::pending_commands))
         .route("/v1/drafts", get(drafts::list))
         .route(
