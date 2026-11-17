@@ -770,6 +770,90 @@ describe("setup landing routing", () => {
     await waitFor(() => expect(document.getElementById("conversation-stage")).toBeInTheDocument());
   });
 
+  it("opens phone setup from Settings devices", async () => {
+    const origin = "https://example.test";
+    localStorage.setItem(`peppy.setup.phoneDeferred:${origin}`, "1");
+    await landingSnapshot({ connection: { state: "connected", origin }, gateways: [SMS_ONLY], deviceRole: "owner" });
+    vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: true }));
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add new device" }));
+
+    await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer"));
+    expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Settings" })).not.toBeInTheDocument();
+  });
+
+  it("returns Settings device focus after cancelling a new device setup", async () => {
+    const cancellation = deferred<void>();
+    const origin = "https://example.test";
+    localStorage.setItem(`peppy.setup.phoneDeferred:${origin}`, "1");
+    await landingSnapshot({ connection: { state: "connected", origin }, gateways: [SMS_ONLY], deviceRole: "owner" });
+    vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: true }));
+    vi.mocked(bridge.enrollment_cancel).mockReturnValue(cancellation.promise);
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add new device" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    await act(async () => cancellation.resolve());
+
+    const settings = await screen.findByRole("region", { name: "Settings" });
+    const addDevice = within(settings).getByRole("button", { name: "Add new device" });
+    expect(document.getElementById("settings-devices")).toBeInTheDocument();
+    await waitFor(() => expect(document.activeElement).toBe(addDevice));
+  });
+
+  it("returns to Settings after a new phone joins", async () => {
+    const origin = "https://example.test";
+    localStorage.setItem(`peppy.setup.phoneDeferred:${origin}`, "1");
+    await landingSnapshot({ connection: { state: "connected", origin }, gateways: [SMS_ONLY], deviceRole: "owner" });
+    vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: true }));
+    vi.mocked(bridge.enrollment_add_phone).mockResolvedValue(enrollment("phone_connected"));
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add new device" }));
+    await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer"));
+
+    const settings = await screen.findByRole("region", { name: "Settings" });
+    const addDevice = within(settings).getByRole("button", { name: "Add new device" });
+    await waitFor(() => expect(document.activeElement).toBe(addDevice));
+    expect(document.getElementById("enrollment-qr-image")).not.toBeInTheDocument();
+  });
+
+  it("returns to Settings when a new device setup is put off", async () => {
+    const origin = "https://example.test";
+    localStorage.setItem(`peppy.setup.phoneDeferred:${origin}`, "1");
+    await landingSnapshot({ connection: { state: "connected", origin }, gateways: [SMS_ONLY], deviceRole: "owner" });
+    vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: true }));
+    vi.spyOn(bridge, "enrollment_cancel_phone").mockResolvedValue(enrollment("ready", { owner: true, hasGateway: true }));
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add new device" }));
+    await screen.findByRole("img", { name: /pairing qr/i });
+    fireEvent.click(screen.getByRole("button", { name: "Set up phone later" }));
+
+    const settings = await screen.findByRole("region", { name: "Settings" });
+    const addDevice = within(settings).getByRole("button", { name: "Add new device" });
+    await waitFor(() => expect(document.activeElement).toBe(addDevice));
+    expect(document.getElementById("enrollment-qr-image")).not.toBeInTheDocument();
+  });
+
+  it("hides Add new device in Settings for non-owners", async () => {
+    const origin = "https://example.test";
+    localStorage.setItem(`peppy.setup.phoneDeferred:${origin}`, "1");
+    await landingSnapshot({ connection: { state: "connected", origin }, gateways: [SMS_ONLY], deviceRole: "joined" });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+
+    expect(await screen.findByRole("region", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add new device" })).not.toBeInTheDocument();
+  });
+
   it("disables Connect a phone while disconnected or locked", async () => {
     await landingSnapshot({ connection: { state: "offline", errorCode: "offline" }, gateways: [], deviceRole: "owner" });
     const { unmount } = render(<App />);
