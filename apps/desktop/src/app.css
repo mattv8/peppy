@@ -122,7 +122,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 .head-panel-status [data-connection-state] { display: grid; width: 22px; height: 22px; place-items: center; }
 .head-panel-status .connection-dot { box-shadow: 0 0 0 1px var(--peppy-accent-text); }
 
-#desktop-loading-state { flex: 1; min-width: 0; padding: 8px; color: var(--peppy-text-secondary); }
+#desktop-loading-state { flex: 1; display: flex; align-items: center; justify-content: center; min-width: 0; color: var(--peppy-text-secondary); }
 .head-panel-shell #conversation-stage { min-height: 0; }
 .head-panel-shell #composer-area { padding: 0 8px 8px; }
 #head-panel-header button:disabled { opacity: .5; }

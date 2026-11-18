@@ -2608,6 +2608,10 @@ pub fn next_backoff(current: Duration, stable: bool) -> Duration {
 
 /// Outbound/media worker: runs immediately, on wake hints, and every 15 s.
 async fn worker(session: Arc<Session>) {
+    session.first_snapshot_or_timeout().await;
+    if session.cancel.is_cancelled() {
+        return;
+    }
     let mut ticks = 0u32;
     let mut backoff = Duration::from_secs(1);
     loop {
@@ -2950,6 +2954,10 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
 /// Live loop: verify credential, HTTP catch-up (including staged snapshot), then WebSocket;
 /// reconnect with bounded jittered backoff. Revocation stops all networking for the session.
 async fn live(session: Arc<Session>) {
+    session.first_snapshot_or_timeout().await;
+    if session.cancel.is_cancelled() {
+        return;
+    }
     let mut backoff = Duration::from_secs(1);
     loop {
         if session.cancel.is_cancelled() {
@@ -3037,6 +3045,40 @@ async fn live(session: Arc<Session>) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod first_snapshot_tests {
+    use super::*;
+
+    fn session() -> Arc<Session> {
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        Arc::new(crate::tests::open(&fixture, &fixture.binding, &[]))
+    }
+
+    #[tokio::test]
+    async fn first_snapshot_served_returns_immediately() {
+        let session = session();
+        session.mark_first_snapshot_served();
+        tokio::time::timeout(Duration::from_millis(100), session.first_snapshot_or_timeout()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn first_snapshot_timeout_returns_without_a_window() {
+        let session = session();
+        let start = tokio::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(12), session.first_snapshot_or_timeout()).await.unwrap();
+        assert!(start.elapsed() >= Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn first_snapshot_cancel_allows_workers_to_drain() {
+        let session = session();
+        session.track_worker(tokio::spawn(worker(session.clone())));
+        session.track_worker(tokio::spawn(live(session.clone())));
+        tokio::task::yield_now().await;
+        assert!(drain(&session, Duration::from_secs(1)).await);
     }
 }
 

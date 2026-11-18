@@ -25,6 +25,8 @@ pub mod images;
 pub mod mms_plan;
 pub mod notification_activation;
 pub use notification_activation::*;
+pub mod launch_progress;
+pub use launch_progress::*;
 pub mod quick_reply;
 pub mod reactions;
 pub use reactions::{

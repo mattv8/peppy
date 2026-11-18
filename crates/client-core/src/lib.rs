@@ -1506,6 +1506,14 @@ pub struct ApplyReport {
     pub superseded: usize,
 }
 
+/// Progress through a decoder revision recovery scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecoderRecoveryProgress {
+    pub epoch: u32,
+    pub completed: u64,
+    pub total: u64,
+}
+
 /// Opaque purpose-key cache for native secure storage only. It deliberately implements no
 /// `Debug`, `Clone` or `Serialize`; never place it in UI view models, JS, logs or plain files.
 /// Bound to format version, vault, device, epoch, profile fingerprint and both purposes.
@@ -2925,6 +2933,7 @@ impl Client {
                 active_epoch: s.active_epoch,
             },
             profile.key_epoch,
+            &mut |_| {},
         )?;
         seal_with_store(s)
     }
@@ -3034,6 +3043,7 @@ impl Client {
                 active_epoch: s.active_epoch,
             },
             profile.key_epoch,
+            &mut |_| {},
         )?;
         seal_with_store(s)
     }
@@ -3293,6 +3303,15 @@ impl Client {
     /// profile or changes the active epoch. On any failure installed keys and the outbox are
     /// unchanged. Seals locked work when the active epoch becomes available.
     pub fn import_native_key_cache(&self, cache: &NativeKeyCache) -> Result<(), Error> {
+        self.import_native_key_cache_with_progress(cache, &mut |_| {})
+    }
+
+    /// The sink runs while the Store lock is held and must not block or call back into Client.
+    pub fn import_native_key_cache_with_progress(
+        &self,
+        cache: &NativeKeyCache,
+        on_progress: &mut dyn FnMut(DecoderRecoveryProgress),
+    ) -> Result<(), Error> {
         let bytes = cache.native_storage_bytes();
         if bytes.len() < 5
             || &bytes[..4] != KEY_CACHE_MAGIC
@@ -3386,6 +3405,7 @@ impl Client {
                 active_epoch: s.active_epoch,
             },
             epoch,
+            on_progress,
         )?;
         seal_with_store(s)
     }
@@ -11219,7 +11239,12 @@ fn initialize_battery_lookup_indexes(conn: &mut Connection) -> Result<(), Error>
     Ok(())
 }
 
-fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<(), Error> {
+fn recover_decoder_revision(
+    conn: &Connection,
+    ctx: &Ctx,
+    epoch: u32,
+    on_progress: &mut dyn FnMut(DecoderRecoveryProgress),
+) -> Result<(), Error> {
     let marker = format!("decoder_revision:{epoch}");
     if get_meta(conn, &marker)?.as_deref() == Some(DECODER_REVISION) {
         return Ok(());
@@ -11227,6 +11252,12 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
     let Some(keys) = ctx.keys.get(&epoch) else {
         return Ok(());
     };
+    let total: u64 = conn.query_row(
+        "SELECT COUNT(*) FROM journal WHERE key_epoch=? AND ((status='quarantined' AND reason='invalid_payload') OR status='applied')",
+        params![epoch],
+        |row| row.get(0),
+    )?;
+    let mut completed = 0_u64;
     let mut after = i64::MIN;
     loop {
         let rows: Vec<(i64, String, Vec<u8>, bool)> = {
@@ -11243,6 +11274,7 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
             break;
         }
         after = rows.last().expect("nonempty recovery page").0;
+        let page_len = rows.len() as u64;
         for (cursor, status, wire, historical) in rows {
             let Some(envelope) = parse_wire(&wire) else {
                 continue;
@@ -11762,8 +11794,20 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                 _ => {}
             }
         }
+        completed = completed.saturating_add(page_len).min(total);
+        on_progress(DecoderRecoveryProgress {
+            epoch,
+            completed,
+            total,
+        });
     }
-    set_meta(conn, &marker, DECODER_REVISION)
+    set_meta(conn, &marker, DECODER_REVISION)?;
+    on_progress(DecoderRecoveryProgress {
+        epoch,
+        completed: total,
+        total,
+    });
+    Ok(())
 }
 
 /// A newly accepted successor may have been rejected by this version before its ownership
@@ -21194,6 +21238,179 @@ mod tests {
     }
 
     #[test]
+    fn native_cache_decoder_recovery_reports_pages_and_matches_noop() {
+        use peppy_crypto::{create_vault_check_header, derive_root_key};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let device_id = DeviceId::new();
+        let source = Client::open(
+            ClientConfig {
+                database_path: dir.path().join("source.db"),
+                vault_id,
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[5; 32]).unwrap(),
+        )
+        .unwrap();
+        source
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let acquisition = source
+            .begin_mms_acquisition(MmsAcquisitionInput {
+                source: MmsSource {
+                    source_generation: "generation".into(),
+                    subscription_id: "sim-1".into(),
+                    provider_message_id: "provider-1".into(),
+                    provider_thread_id: Some("thread-1".into()),
+                },
+                direction: Direction::Incoming,
+                sender_address: Some("+15555550101".into()),
+                recipients: vec!["+15555550100".into()],
+                subject: Some("subject".into()),
+                body: "old message".into(),
+                imported: false,
+                observed_at_ms: 1,
+                provider_read: None,
+                transaction_id: None,
+            })
+            .unwrap();
+        source
+            .complete_mms_acquisition(&acquisition.acquisition_id)
+            .unwrap();
+        source.set_mms_own_address("sim-1", "+15555550100").unwrap();
+        let envelopes = source.pending_outbox().unwrap();
+        assert_eq!(envelopes.len(), 2);
+        let clients: Vec<_> = ["progress.db", "baseline.db"]
+            .iter()
+            .map(|name| {
+                let config = ClientConfig {
+                    database_path: dir.path().join(name),
+                    vault_id,
+                    device_id,
+                };
+                let client = Client::open(config, DatabaseKey::new(&[6; 32]).unwrap()).unwrap();
+                client.unlock(&profile, &header, "correct horse battery staple").unwrap();
+                for (index, envelope) in envelopes.iter().enumerate() {
+                    client.ingest(envelope, Cursor(index as u64 + 1)).unwrap();
+                }
+                assert_eq!(client.apply_pending(10).unwrap().applied, 2);
+                let store = client.lock().unwrap();
+                store.conn.execute("DELETE FROM mms_own_addresses", []).unwrap();
+                store.conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload',historical=0 WHERE cursor=1", []).unwrap();
+                for cursor in 3..=300 {
+                    store.conn.execute(
+                        "INSERT INTO journal(cursor,key_epoch,wire,status,reason) VALUES(?,1,X'01',?,?)",
+                        params![cursor, if cursor % 2 == 0 { "applied" } else { "quarantined" }, if cursor % 2 == 0 { None } else { Some("invalid_payload") }],
+                    ).unwrap();
+                }
+                store.conn.execute(
+                    "INSERT INTO journal(cursor,key_epoch,wire,status,reason) VALUES(301,1,X'01','pending',NULL),(302,2,X'01','applied',NULL),(303,1,X'01','quarantined','authentication_failed')",
+                    [],
+                ).unwrap();
+                store.conn.execute("DELETE FROM metadata WHERE k='decoder_revision:1'", []).unwrap();
+                drop(store);
+                client
+            })
+            .collect();
+        let cache = clients[0].export_native_key_cache(1).unwrap();
+        let snapshot = |client: &Client| {
+            let store = client.lock().unwrap();
+            let mut query = store
+                .conn
+                .prepare("SELECT cursor,status,reason,historical FROM journal ORDER BY cursor")
+                .unwrap();
+            let journal = query
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let mut query = store.conn.prepare("SELECT source_device_id,subscription_id,address,revision FROM mms_own_addresses ORDER BY source_device_id,subscription_id").unwrap();
+            let addresses = query
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            (
+                journal,
+                addresses,
+                get_meta(&store.conn, "decoder_revision:1").unwrap(),
+            )
+        };
+        let before = snapshot(&clients[0]);
+        assert_eq!(before, snapshot(&clients[1]));
+        let mut progress = Vec::new();
+        clients[0]
+            .import_native_key_cache_with_progress(&cache, &mut |event| progress.push(event))
+            .unwrap();
+        clients[1].import_native_key_cache(&cache).unwrap();
+        assert_eq!(
+            progress.iter().map(|p| p.completed).collect::<Vec<_>>(),
+            vec![256, 300, 300]
+        );
+        assert!(progress.iter().all(|p| p.epoch == 1 && p.total == 300));
+        let after = snapshot(&clients[0]);
+        assert_ne!(before.0, after.0);
+        assert!(before.1.is_empty());
+        assert_eq!(after.1.len(), 1);
+        assert_eq!(after.0[0].1, "pending");
+        assert_eq!(after.0[0].2, None);
+        assert_eq!(after.0[0].3, 1);
+        assert_eq!(after.2.as_deref(), Some(DECODER_REVISION));
+        assert_eq!(after, snapshot(&clients[1]));
+        progress.clear();
+        clients[0]
+            .import_native_key_cache_with_progress(&cache, &mut |event| progress.push(event))
+            .unwrap();
+        assert!(progress.is_empty());
+    }
+
+    #[test]
+    fn decoder_recovery_without_epoch_keys_does_not_report_progress() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: dir.path().join("locked.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[6; 32]).unwrap(),
+        )
+        .unwrap();
+        let mut store = client.lock().unwrap();
+        let (conn, ctx) = store.parts();
+        assert!(ctx.keys.get(&1).is_none());
+        assert_ne!(
+            get_meta(conn, "decoder_revision:1").unwrap().as_deref(),
+            Some(DECODER_REVISION)
+        );
+        let mut progress = Vec::new();
+        recover_decoder_revision(conn, &ctx, 1, &mut |event| progress.push(event)).unwrap();
+        assert!(progress.is_empty());
+        assert_ne!(
+            get_meta(conn, "decoder_revision:1").unwrap().as_deref(),
+            Some(DECODER_REVISION)
+        );
+    }
+
+    #[test]
     fn native_cache_decoder_recovery_replays_only_authenticated_events_as_history() {
         use peppy_crypto::{create_vault_check_header, derive_root_key};
         let dir = tempfile::TempDir::new().unwrap();
@@ -21278,7 +21495,12 @@ mod tests {
         }
         drop(target);
         let recovered = Client::open(target_cfg, DatabaseKey::new(&[6; 32]).unwrap()).unwrap();
-        recovered.import_native_key_cache(&cache).unwrap();
+        let mut progress = Vec::new();
+        recovered
+            .import_native_key_cache_with_progress(&cache, &mut |event| progress.push(event))
+            .unwrap();
+        assert_eq!(progress.last().unwrap().completed, 2);
+        assert_eq!(progress.last().unwrap().total, 2);
         {
             let store = recovered.lock().unwrap();
             let (status, historical): (String, i64) = store

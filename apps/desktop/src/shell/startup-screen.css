@@ -1,0 +1,33 @@
+#startup-screen { flex: 1; display: flex; align-items: center; justify-content: center; min-width: 0; max-width: 100%; padding: 24px; }
+.startup-stack, .startup-error { display: flex; flex-direction: column; align-items: center; gap: 10px; max-width: 340px; text-align: center; }
+.startup-spinner { color: var(--peppy-accent); }
+#startup-title { margin: 0; color: var(--peppy-text-strong); font-size: 14px; font-weight: 700; }
+#startup-detail, #startup-count { margin: 0; color: var(--peppy-text-secondary); font-size: 12px; line-height: 17px; }
+#startup-detail { text-wrap: balance; }
+#startup-count, #startup-steps span { font-variant-numeric: tabular-nums; }
+#startup-progress {
+  -webkit-appearance: none;
+  appearance: none;
+  border: 0;
+  height: 4px;
+  border-radius: var(--peppy-radius-pill);
+  background: var(--peppy-surface-active);
+  overflow: hidden;
+}
+#startup-progress { width: 260px; max-width: 100%; }
+#startup-progress::-webkit-progress-bar { background: var(--peppy-surface-active); border-radius: inherit; }
+#startup-progress::-webkit-progress-value { background: var(--peppy-accent); border-radius: inherit; }
+#startup-progress::-moz-progress-bar { background: var(--peppy-accent); border-radius: inherit; }
+#startup-steps { box-sizing: border-box; list-style: none; margin: 6px 0 0; padding: 10px 14px; min-width: 0; width: 240px; max-width: 100%; display: flex; flex-direction: column; gap: 6px; text-align: left; background: var(--peppy-surface-widget); border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-md); }
+#startup-steps li { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--peppy-text-muted); }
+#startup-steps .startup-step-current { color: var(--peppy-text-primary); font-weight: 700; }
+#startup-steps span { margin-inline-start: auto; color: var(--peppy-text-muted); font-weight: 400; white-space: nowrap; }
+.startup-error { box-sizing: border-box; max-width: 376px; padding: 16px 18px; background: var(--peppy-surface-widget); border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-md); }
+.startup-error > svg { color: var(--peppy-error-text); }
+@media (forced-colors: active) {
+  #startup-steps, .startup-error { border-color: CanvasText; }
+  #startup-progress { border: 1px solid CanvasText; background: Canvas; }
+  #startup-progress::-webkit-progress-value { background: Highlight; }
+  #startup-progress::-moz-progress-bar { background: Highlight; }
+  .startup-spinner { color: currentColor; }
+}
