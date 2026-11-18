@@ -158,7 +158,7 @@ package_app_store() {
     install -m 0644 "$profile" "$app/Contents/embedded.provisionprofile"
     info_plist="$app/Contents/Info.plist"
     plutil -replace CFBundleVersion -string "$MACOS_BUILD_NUMBER" "$info_plist"
-    plutil -replace ITSAppUsesNonExemptEncryption -bool true "$info_plist"
+    plutil -replace ITSAppUsesNonExemptEncryption -bool false "$info_plist"
     plutil -replace LSMinimumSystemVersion -string 13.0 "$info_plist"
     plutil -replace DTXcode -string "$xcode_version" "$info_plist"
     plutil -replace DTXcodeBuild -string "$xcode_build" "$info_plist"

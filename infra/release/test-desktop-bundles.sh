@@ -536,7 +536,7 @@ grep -Fq 'pkgutil|--check-signature' "$log"
 grep -Fq 'pkgutil|--expand-full' "$log"
 test -f "$root/pkg/Peppy.pkg"
 test -f "$root/pkg/Peppy.Info.plist"
-/usr/bin/plutil -extract ITSAppUsesNonExemptEncryption raw -o - "$root/pkg/Peppy.Info.plist" | grep -Fqx true
+/usr/bin/plutil -extract ITSAppUsesNonExemptEncryption raw -o - "$root/pkg/Peppy.Info.plist" | grep -Fqx false
 /usr/bin/plutil -extract LSMinimumSystemVersion raw -o - "$root/pkg/Peppy.Info.plist" | grep -Fqx 13.0
 /usr/bin/plutil -extract CFBundleSupportedPlatforms.0 raw -o - "$root/pkg/Peppy.Info.plist" | grep -Fqx MacOSX
 if grep -Fq 'repair|' "$log" || grep -Fq '^xcrun|' "$log" || grep -Fq 'notarytool' "$log"; then
