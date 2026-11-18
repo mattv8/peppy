@@ -5092,6 +5092,76 @@ async fn compaction_collapses_chains_protects_targets_holds_pending_and_keeps_re
 }
 
 #[tokio::test]
+async fn compaction_removes_a_seventy_record_supersession_chain_down_to_its_newest_record() {
+    let server = TestServer::start().await;
+    let (o, v, f) = (
+        server.owner_device,
+        server.vault,
+        server.fingerprint.clone(),
+    );
+    // 1 <- 2 <- ... <- 70: each record supersedes its predecessor, so only the newest stays.
+    for sequence in 1..=70_u64 {
+        let supersedes = if sequence == 1 {
+            vec![]
+        } else {
+            vec![(o, sequence - 1)]
+        };
+        server
+            .commit(&marked_event(
+                v,
+                o,
+                sequence,
+                sequence as u8,
+                false,
+                supersedes,
+                &f,
+            ))
+            .await;
+    }
+    age_and_prune(&server).await;
+    let (status, _) = server
+        .post(&server.owner_token, "/v1/compaction/capability", &json!({}))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let generation_before: i64 =
+        sqlx::query_scalar("SELECT compaction_generation FROM vaults WHERE vault_id=$1")
+            .bind(v)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+
+    assert_eq!(compact_records(&server.pool).await.unwrap(), 69);
+    assert_eq!(retained(&server).await, vec![70]);
+    let generation_after: i64 =
+        sqlx::query_scalar("SELECT compaction_generation FROM vaults WHERE vault_id=$1")
+            .bind(v)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+    assert_eq!(generation_after, generation_before + 1);
+    let retry_identities: Vec<i64> = sqlx::query_scalar(
+        "SELECT producer_sequence FROM compacted_records WHERE vault_id=$1 AND producer_device_id=$2 ORDER BY producer_sequence",
+    )
+    .bind(v)
+    .bind(o)
+    .fetch_all(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(retry_identities, (1..=69).collect::<Vec<i64>>());
+    // Only the newest record's own reference remains; no row is owned by a deleted record.
+    let remaining_references: Vec<i64> = sqlx::query_scalar(
+        "SELECT by_cursor FROM record_supersessions WHERE vault_id=$1 ORDER BY by_cursor",
+    )
+    .bind(v)
+    .fetch_all(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining_references, vec![70]);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn replay_expiry_and_ahead_cursors_resync_while_immutable_records_survive_pruning() {
     let server = TestServer::start().await;
     let mut bodies = Vec::new();
