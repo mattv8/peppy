@@ -1,3 +1,4 @@
+import { isSnapshotTooLarge } from "./core.js";
 import { TransportError } from "./transport.js";
 
 const MAX_BACKFILL_ROUNDS = 8;
@@ -32,6 +33,8 @@ export interface ProtocolMediaHooks {
   afterReferences?(signal: AbortSignal): Promise<void>;
   /** Import one server-fenced snapshot when the core has latched contact repair. */
   repairSnapshot?(signal: AbortSignal): Promise<void>;
+  /** True while a refused import's window is open; repair must not fetch or begin then. */
+  snapshotRefused?(): boolean;
 }
 
 export interface ProtocolRound {
@@ -194,15 +197,28 @@ export class SchedulerProtocol {
     if (this.repairAttempted || work.pendingSnapshot === true || work.pendingApply === true) return false;
     const repair = await nonfatalValue(() => this.session.query("contact_repair_status", {}).then(object), undefined, signal);
     if (repair?.repairRequired !== true) return false;
-    return await nonfatalValue(async () => {
+    // The optional repair is deferred, not failed, while the refusal window is open: the rest of the round still runs.
+    if (media.snapshotRefused?.()) return false;
+    const repairable = await nonfatalValue(async () => {
       const snapshot = object(await this.transport.json("/v1/snapshot", { method: "GET", signal }));
       if (snapshot.compaction_supported !== true) return false;
       canonicalDecimal(snapshot.compaction_generation);
-      if (!media.repairSnapshot) return false;
-      this.repairAttempted = true;
+      return media.repairSnapshot !== undefined;
+    }, false, signal);
+    if (!repairable || !media.repairSnapshot) return false;
+    this.repairAttempted = true;
+    try {
       await media.repairSnapshot(signal);
       return true;
-    }, false, signal);
+    } catch (error) {
+      if (isSnapshotTooLarge(error)) {
+        // Refused by the window: release the latch so the repair runs again once the window allows.
+        this.repairAttempted = false;
+        return false;
+      }
+      throwIfFatal(error, signal);
+      return false;
+    }
   }
 
   private photoTransferState(signal: AbortSignal): Promise<Record<string, unknown>> {

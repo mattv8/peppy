@@ -38,6 +38,13 @@ describe("status severity", () => {
     expect(connectionText({ state: "offline", errorCode: "server-unavailable" })).toBe("Offline — server offline; reconnecting");
   });
 
+  it("keeps a too-large history import connected and warning-toned", () => {
+    const connection = { state: "connected" as const, errorCode: "snapshot-too-large" };
+    expect(connectionText(connection)).toBe("Connected — history is too large for this version; update Peppy");
+    expect(connectionText(connection)).not.toMatch(/Connection error|Offline/);
+    expect(statusTone(connection, "unlocked")).toBe("warning");
+  });
+
   it("labels notification posting failures without treating them as server outages", () => {
     expect(connectionText({ state: "error", errorCode: "notification-post" })).toBe(
       "Connection error — could not show a notification on this computer",

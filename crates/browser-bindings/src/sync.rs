@@ -925,10 +925,10 @@ mod tests {
         let refused = response(
             core,
             "begin_snapshot_manifest",
-            json!({"highWater": "200000", "recordCount": "100002"}),
+            json!({"highWater": "2000000", "recordCount": "1000001"}),
         );
-        // A core refusal keeps the generic `core` code at this boundary.
-        assert_eq!(refused["error"]["code"], "core");
+        // Above the transport ceiling (MAX_SNAPSHOT_RECORDS = 1_000_000) the core refuses with its own code.
+        assert_eq!(refused["error"]["code"], "snapshot-too-large");
         assert_eq!(
             response(
                 core,

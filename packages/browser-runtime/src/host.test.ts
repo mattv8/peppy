@@ -3213,3 +3213,20 @@ describe("draft sync prompt", () => {
     expect(run).not.toHaveBeenCalled();
   });
 });
+
+describe("browser snapshot import retry command", () => {
+  it("forwards an explicit retry to the network adapter once", async () => {
+    const session = new FakeSession();
+    const retrySnapshotImport = vi.fn();
+    const host = new BrowserWorkerHost({
+      locks: locks(), boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, listDevices: async () => ({ devices: [] }), retrySnapshotImport } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "retry_snapshot_import", args: {} });
+    await eventually(() => retrySnapshotImport.mock.calls.length === 1);
+    expect(retrySnapshotImport).toHaveBeenCalledOnce();
+    expect(attached.messages).toContainEqual({ id: 1, ok: true, value: undefined });
+  });
+});

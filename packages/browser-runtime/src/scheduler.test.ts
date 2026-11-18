@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserScheduler } from "./scheduler.js";
 import { transferMedia } from "./scheduler-media.js";
 import { CoreRejectedError } from "./core.js";
@@ -2296,5 +2296,358 @@ describe("verified resync through the server manifest", () => {
       "core:append_snapshot_page 4,5",
       "core:finish_snapshot",
     ]);
+  });
+});
+
+describe("snapshot-too-large retry gate", () => {
+  const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Resync every time until a begin succeeds; `beginFailure` decides each begin's outcome. */
+  function tooLargeFixture(beginFailure: () => Error | undefined) {
+    const snapshotRequests: string[] = [];
+    const contexts: Record<string, unknown>[] = [];
+    let mustResync = true;
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string, args?: Record<string, unknown>) => {
+        if (command === "_worker_apply_server_context") contexts.push(args ?? {});
+        if (command === "snapshot_progress") return { progress: null };
+        if (command === "receive_cursor") return { cursor: "0" };
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "sync_work_status") return {};
+        return [];
+      },
+      mutate: async (command: string) => {
+        if (command === "begin_snapshot") {
+          const failure = beginFailure();
+          if (failure) throw failure;
+          mustResync = false;
+          return { generation: "1", highWater: "0", expectedRecords: "0", receivedRecords: "0", lastCursor: "0", manifest: false };
+        }
+        return command === "apply_pending" ? { applied: 0, quarantined: 0, drained: 0 } : {};
+      },
+    };
+    const transport = {
+      json: async (path: string) => {
+        if (path.startsWith("/v1/events")) {
+          if (mustResync) throw new TransportError("status", 409, "resync_required");
+          return { events: [], next_after: null, high_water_cursor: "0" };
+        }
+        if (path === "/v1/snapshot") {
+          snapshotRequests.push(path);
+          return { high_water_cursor: "0", record_count: "0" };
+        }
+        if (path === "/v1/devices") return { devices: [] };
+        if (path === "/v1/capabilities") return { capabilities: [] };
+        throw new Error(path);
+      },
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    };
+    return {
+      scheduler: new BrowserScheduler(session, transport),
+      snapshotRequests,
+      contexts,
+      resync: () => { mustResync = true; },
+    };
+  }
+
+  it("stays connected, does not retry at once, and retries exactly after six hours", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-01-01T00:00:00Z") });
+    const fixture = tooLargeFixture(() => new CoreRejectedError("snapshot-too-large"));
+
+    expect(await fixture.scheduler.poll()).toEqual({ connection: "connected" });
+    expect(fixture.snapshotRequests).toHaveLength(1);
+    // Flush the fire-and-forget context refresh. A real timer, not vi.waitFor: waitFor advances fake timers.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(fixture.contexts.at(-1)).toMatchObject({ connection: "connected", snapshotTooLarge: true });
+
+    expect(await fixture.scheduler.poll()).toEqual({ connection: "connected" });
+    expect(fixture.snapshotRequests).toHaveLength(1);
+
+    vi.setSystemTime(Date.now() + SIX_HOURS_MS - 1);
+    await fixture.scheduler.poll();
+    expect(fixture.snapshotRequests).toHaveLength(1);
+
+    vi.setSystemTime(Date.now() + 1);
+    expect(await fixture.scheduler.poll()).toEqual({ connection: "connected" });
+    expect(fixture.snapshotRequests).toHaveLength(2);
+  });
+
+  it("clears the block when a retry begins, so a later too-large begin is attempted at once", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-01-01T00:00:00Z") });
+    let fail = true;
+    const fixture = tooLargeFixture(() => (fail ? new CoreRejectedError("snapshot-too-large") : undefined));
+
+    await fixture.scheduler.poll();
+    expect(fixture.snapshotRequests).toHaveLength(1);
+
+    vi.setSystemTime(Date.now() + SIX_HOURS_MS);
+    fail = false;
+    expect(await fixture.scheduler.poll()).toEqual({ connection: "connected" });
+    expect(fixture.snapshotRequests).toHaveLength(2);
+
+    fixture.resync();
+    fail = true;
+    await fixture.scheduler.poll();
+    expect(fixture.snapshotRequests).toHaveLength(3);
+  });
+
+  it("reports other snapshot failures as the generic error and retries at once", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-01-01T00:00:00Z") });
+    const fixture = tooLargeFixture(() => new CoreRejectedError("core"));
+
+    expect(await fixture.scheduler.poll()).toEqual({ connection: "error" });
+    expect(await fixture.scheduler.poll()).toEqual({ connection: "error" });
+    expect(fixture.snapshotRequests).toHaveLength(2);
+    expect(fixture.contexts.some(context => context.snapshotTooLarge === true)).toBe(false);
+  });
+});
+
+describe("snapshot-too-large review fixes", () => {
+  const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Begins are refused while `refuse` is set. `repair` makes the server latch contact repair. */
+  function refusedImportFixture(options: { repair?: boolean } = {}) {
+    const begins: string[] = [];
+    const snapshotRequests: string[] = [];
+    const eventRequests: string[] = [];
+    const requests: string[] = [];
+    const applies: string[] = [];
+    const contexts: Record<string, unknown>[] = [];
+    let refuse = true;
+    let mustResync = options.repair !== true;
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string, args?: Record<string, unknown>) => {
+        if (command === "_worker_apply_server_context") contexts.push(args ?? {});
+        if (command === "snapshot_progress") return { progress: null };
+        if (command === "receive_cursor") return { cursor: "0" };
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "sync_work_status") return {};
+        if (command === "contact_repair_status") return { repairRequired: options.repair === true };
+        return [];
+      },
+      mutate: async (command: string) => {
+        if (command === "apply_pending") applies.push(command);
+        if (command === "begin_snapshot") {
+          begins.push(command);
+          if (refuse) throw new CoreRejectedError("snapshot-too-large");
+          mustResync = false;
+          return { generation: "1", highWater: "0", expectedRecords: "0", receivedRecords: "0", lastCursor: "0", manifest: false };
+        }
+        return command === "apply_pending" ? { applied: 0, quarantined: 0, drained: 0 } : {};
+      },
+    };
+    const transport = {
+      json: async (path: string) => {
+        requests.push(path);
+        if (path.startsWith("/v1/events")) {
+          eventRequests.push(path);
+          if (mustResync) throw new TransportError("status", 409, "resync_required");
+          return { events: [], next_after: null, high_water_cursor: "0" };
+        }
+        if (path === "/v1/snapshot") {
+          snapshotRequests.push(path);
+          return { high_water_cursor: "0", record_count: "0", compaction_supported: options.repair === true, compaction_generation: "1" };
+        }
+        if (path === "/v1/devices") return { devices: [] };
+        if (path === "/v1/capabilities") return { capabilities: [] };
+        throw new Error(path);
+      },
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+      // The protocol round runs only with discard; it is needed for the repair case alone.
+      ...(options.repair === true ? { discard: async () => undefined } : {}),
+    };
+    return {
+      scheduler: new BrowserScheduler(session, transport),
+      begins,
+      snapshotRequests,
+      eventRequests,
+      requests,
+      applies,
+      contexts,
+      allowBegins: () => { refuse = false; },
+    };
+  }
+
+  it("refuses again after a second rejection without a retry on the next poll", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-01-01T00:00:00Z") });
+    const fixture = refusedImportFixture();
+
+    await fixture.scheduler.poll();
+    expect(fixture.begins).toHaveLength(1);
+
+    vi.setSystemTime(Date.now() + SIX_HOURS_MS);
+    await fixture.scheduler.poll();
+    expect(fixture.begins).toHaveLength(2);
+
+    await fixture.scheduler.poll();
+    expect(fixture.begins).toHaveLength(2);
+
+    vi.setSystemTime(Date.now() + SIX_HOURS_MS - 1);
+    await fixture.scheduler.poll();
+    expect(fixture.begins).toHaveLength(2);
+
+    vi.setSystemTime(Date.now() + 1);
+    await fixture.scheduler.poll();
+    expect(fixture.begins).toHaveLength(3);
+  });
+
+
+  it("lets one user-requested import attempt run before the window ends", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-01-01T00:00:00Z") });
+    const fixture = refusedImportFixture();
+    await fixture.scheduler.poll();
+    expect(fixture.begins).toHaveLength(1);
+
+    fixture.scheduler.retrySnapshotImport();
+    fixture.allowBegins();
+    await fixture.scheduler.poll();
+    expect(fixture.begins).toHaveLength(2);
+    // A cleared window omits the flag; the host reads an absent flag as not too large.
+    expect(fixture.contexts.at(-1)?.snapshotTooLarge).toBeUndefined();
+    vi.useRealTimers();
+  });
+});
+
+/** Exact requests of one gated poll inside the refusal window (metadata reads only; no begin, no pages). */
+const EXPECTED_GATED_REQUESTS: string[] = [
+  "GET /v1/vault",
+  "POST /v1/compaction/capability",
+  "GET /v1/snapshot",
+  "GET /v1/snapshot",
+  "GET /v1/events?after=0&limit=1",
+  "GET /v1/events?after=0&limit=100",
+];
+
+/** Production-shaped transport: discard, compaction, reclamation and repair reads, as the scheduler runs them. */
+function productionRefusedFixture(options: { repairRequired: boolean; reclaim?: boolean; resync?: boolean; events?: (poll: number) => unknown[] }) {
+  const requests: string[] = [];
+  const begins: string[] = [];
+  const ingested: string[] = [];
+  const contexts: Record<string, unknown>[] = [];
+  let acknowledged = false;
+  let polls = 0;
+  let mustResync = options.resync !== false;
+  const session = {
+    hydrate: async () => undefined,
+    query: async (command: string, args?: Record<string, unknown>) => {
+      if (command === "_worker_apply_server_context") contexts.push(args ?? {});
+      if (command === "_worker_identity_metadata") return { vaultId: "vault", deviceId: "device" };
+      if (command === "snapshot_progress") return { progress: null };
+      if (command === "receive_cursor") return { cursor: "0" };
+      if (command === "pending_outbox") return { envelopes: [] };
+      if (command === "sync_work_status") return { pendingSeal: false, pendingApply: false, pendingSnapshot: false };
+      if (command === "key_status") return { activeEpoch: "1", unlockedEpochs: ["1"] };
+      if (command === "compaction_status") return { server_supported: false, server_active: false };
+      if (command === "contact_repair_status") return { repairRequired: options.repairRequired };
+      if (command === "contact_photo_transfer_state") {
+        const reclaims = options.reclaim === true && !acknowledged ? [{ attachment_id: "a1", remote_object_id: "r1", release_after_cursor: "0" }] : [];
+        return { uploads: [], registrations: [], reclaims };
+      }
+      return [];
+    },
+    mutate: async (command: string, args?: Record<string, unknown>) => {
+      if (command === "begin_snapshot" || command === "begin_snapshot_manifest") {
+        begins.push(command);
+        throw new CoreRejectedError("snapshot-too-large");
+      }
+      if (command === "ingest_batch") {
+        for (const event of args?.events as { cursor: string }[]) ingested.push(event.cursor);
+        return {};
+      }
+      if (command === "acknowledge_contact_photo_reclaim") acknowledged = true;
+      if (command === "apply_pending") return { applied: 0, quarantined: 0, drained: 0 };
+      return { sealed: 0, backfill_complete: true, processed: 0 };
+    },
+  };
+  const transport = {
+    json: async (path: string, request?: { method?: string }) => {
+      requests.push(`${request?.method ?? "GET"} ${path}`);
+      if (path === "/v1/vault") return { vault_id: "vault", device_id: "device", key_epoch: 1, profile_fingerprint: "fingerprint", public_key_profile: {}, encrypted_vault_check_header: btoa("{}") };
+      if (path === "/v1/snapshot") return { high_water_cursor: "0", record_count: "0", compaction_supported: true, compaction_active: true, compaction_generation: "3" };
+      if (path.startsWith("/v1/events")) {
+        polls += 1;
+        if (mustResync) throw new TransportError("status", 409, "resync_required");
+        return { events: options.events?.(polls) ?? [], next_after: null, high_water_cursor: "0", replay_floor_cursor: "0" };
+      }
+      if (path === "/v1/devices") return { devices: [] };
+      if (path === "/v1/capabilities") return { capabilities: [] };
+      throw new Error(path);
+    },
+    discard: async (path: string, request: { method: string }) => {
+      requests.push(`${request.method} ${path}`);
+    },
+    upload: async () => undefined,
+    download: async () => new Uint8Array(),
+  };
+  return {
+    scheduler: new BrowserScheduler(session, transport),
+    requests,
+    begins,
+    ingested,
+    contexts,
+    allowBegins: () => { mustResync = false; },
+  };
+}
+
+describe("refused import in production-shaped rounds", () => {
+  const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("makes only metadata reads on gated polls: no import begin, no snapshot page or manifest request", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-01-01T00:00:00Z") });
+    const fixture = productionRefusedFixture({ repairRequired: true, reclaim: true });
+
+    await fixture.scheduler.poll();
+    expect(fixture.begins).toHaveLength(1);
+
+    const gated: string[][] = [];
+    for (let poll = 0; poll < 3; poll += 1) {
+      const before = fixture.requests.length;
+      expect(await fixture.scheduler.poll()).toEqual({ connection: "connected" });
+      gated.push(fixture.requests.slice(before));
+    }
+
+    expect(fixture.begins).toHaveLength(1);
+    for (const requests of gated) {
+      expect(requests.some(request => request.includes("/v1/snapshot/records") || request.includes("/v1/snapshot/manifest"))).toBe(false);
+    }
+    expect(gated[1]).toEqual(gated[0]);
+    expect(gated[2]).toEqual(gated[0]);
+    expect(gated[0]).toEqual(EXPECTED_GATED_REQUESTS);
+    // The refusal is restored by a status-only write, which the Rust binding accepts without a roster.
+    expect(fixture.contexts.some(context => context.devices === null && context.connection === "connected" && context.snapshotTooLarge === true)).toBe(true);
+  });
+
+  it("keeps ingesting new replay events while only the optional repair is refused", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-01-01T00:00:00Z") });
+    const fixture = productionRefusedFixture({
+      repairRequired: true,
+      resync: false,
+      events: poll => [{ cursor: String(poll), envelope: {} }],
+    });
+
+    expect(await fixture.scheduler.poll()).toEqual({ connection: "connected" });
+    expect(fixture.begins).toHaveLength(1);
+    expect(await fixture.scheduler.poll()).toEqual({ connection: "connected" });
+    expect(await fixture.scheduler.poll()).toEqual({ connection: "connected" });
+
+    expect(fixture.begins).toHaveLength(1);
+    expect(fixture.ingested).toEqual(["1", "2", "3"]);
+    expect(fixture.contexts.at(-1)).toMatchObject({ connection: "connected", snapshotTooLarge: true });
   });
 });

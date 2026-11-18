@@ -1,5 +1,6 @@
 import type { StatusTone } from "@peppy/desktop-ui";
 import type { DesktopSnapshot } from "../bridge/bridge";
+import { peppyCopy } from "../generated/peppyCopy";
 
 type Connection = DesktopSnapshot["connection"];
 type EncryptionState = DesktopSnapshot["encryption"]["state"];
@@ -22,6 +23,7 @@ const CONNECTION_CODE_LABEL: Record<string, string> = {
   "live-closed": "server offline; reconnecting",
   "live-timeout": "live connection timed out; reconnecting",
   "notification-post": "could not show a notification on this computer",
+  "snapshot-too-large": peppyCopy.status_history_too_large,
 };
 
 const SERVER_UNREACHABLE_CODES = new Set([
@@ -53,6 +55,7 @@ export function statusTone(connection: Connection, encryption: EncryptionState, 
   if (connection.state === "error" || connection.state === "missing-native-host") return "error";
   if (encryption === "mismatch") return "warning";
   if (serverUnreachable) return "warning";
+  if (connection.errorCode === "snapshot-too-large") return "warning";
   return connection.state === "connected" && encryption === "unlocked" ? "ok" : "neutral";
 }
 

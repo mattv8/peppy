@@ -125,6 +125,7 @@ import { AppLockScreen, AppLockSettings } from "./shell/AppLock";
 import { UpdatesSettings } from "./updates/UpdatesSettings";
 import { isTauriUpdateHost, useUpdateActivity } from "./updates/updates";
 import { connectionText, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./shell/status";
+import { SyncTooLargeNotice } from "./shell/SyncTooLargeNotice";
 import { isSettingUp, liveSettingUpGatewayFor, resolveStoredRoute, settingUpGatewayFor } from "./setup/settingUpRoute";
 import { formatCopy } from "./generated/peppyCopy";
 import { SystemRibbon, SystemRibbonAnnouncement, SystemRibbonStrip } from "./notices/SystemRibbon";
@@ -5972,7 +5973,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   ];
   /* Progress is shown only for enrolled, unlocked UI; locked and setup states never render it. */
   const syncProgressEligible = Boolean(snapshot && enrolled && !showSetup && snapshot.encryption.state !== "locked" && !appLock?.locked);
-  const syncProgressBanner = syncProgressEligible ? <SyncProgress progress={snapshot?.syncProgress} /> : null;
+  const syncTooLarge = snapshot?.connection.errorCode === "snapshot-too-large";
+  const syncProgressBanner = syncProgressEligible
+    ? syncTooLarge
+      ? <SyncTooLargeNotice browserHost={browserHost} onCheckForUpdates={() => { setSettingsSectionRequested("updates"); setActiveView("settings"); }} onReload={() => void bridge.retry_snapshot_import().finally(() => window.location.reload())} />
+      : <SyncProgress progress={snapshot?.syncProgress} />
+    : null;
   const appNoticeBanner = <AppNoticeBanner
     notices={appNotices}
     onDismiss={(source) => {

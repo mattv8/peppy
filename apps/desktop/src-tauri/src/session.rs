@@ -160,6 +160,8 @@ pub struct Session {
     pub repair_wake: Notify,
     /// One fenced repair snapshot per session (or per manual request) while the latch is set.
     pub repair_attempted: AtomicBool,
+    /// Refused snapshot begin, shared by every snapshot path (see `sync::SnapshotTooLargeGate`).
+    pub(crate) snapshot_too_large: Mutex<crate::sync::SnapshotTooLargeGate>,
     /// Prevents duplicate standalone search-index maintenance loops for one session.
     pub index_driver_running: AtomicBool,
     /// Latches completed search-index maintenance for this session.
@@ -552,6 +554,7 @@ pub fn open_session(
         replay_page_in_flight: AtomicBool::new(false),
         repair_wake: Notify::new(),
         repair_attempted: AtomicBool::new(false),
+        snapshot_too_large: Mutex::new(crate::sync::SnapshotTooLargeGate::default()),
         index_driver_running: AtomicBool::new(false),
         index_driver_ready: AtomicBool::new(false),
         index_driver_saw_indexing: AtomicBool::new(false),
@@ -1932,6 +1935,12 @@ impl Session {
         let tone_overrides = unlocked
             .then(|| self.client.conversation_tones().map_err(core_error))
             .transpose()?;
+        // A refused import keeps the connection live; the code tells the UI why history is missing.
+        let too_large = self
+            .snapshot_too_large
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .is_marked();
         let connection = if status.revoked {
             dto::Connection {
                 state: "error",
@@ -1942,7 +1951,11 @@ impl Session {
             dto::Connection {
                 state: "connected",
                 origin,
-                error_code: status.work_error,
+                error_code: if too_large {
+                    Some("snapshot-too-large")
+                } else {
+                    status.work_error
+                },
             }
         } else {
             dto::Connection {

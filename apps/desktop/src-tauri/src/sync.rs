@@ -596,6 +596,16 @@ async fn ingest_page(session: &Arc<Session>, records: Vec<RawRecord>) -> BridgeR
 /// Records are passed raw so invalid ones are quarantined by core. Snapshot history is merge-only
 /// and its commands are historical (never executable); the restore guard is never touched.
 pub(crate) async fn snapshot_resync(session: &Arc<Session>) -> BridgeResult<()> {
+    // Refused before any network or core work while the window is open, whichever path asked.
+    if !snapshot_gate(session)
+        .wait_before_attempt(Instant::now())
+        .is_zero()
+    {
+        return Err(BridgeError::new(
+            SNAPSHOT_TOO_LARGE_CODE,
+            "This history is too large for this version.",
+        ));
+    }
     // A previously published generation must finish draining before a new one may begin.
     drain_apply(session, usize::MAX).await?;
     let mut fresh = false;
@@ -637,6 +647,59 @@ pub(crate) async fn snapshot_resync(session: &Arc<Session>) -> BridgeResult<()> 
 }
 
 const MAX_SNAPSHOT_ATTEMPTS: usize = 3;
+const SNAPSHOT_TOO_LARGE_RETRY: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Session-wide memory of a refused snapshot begin. It is shared by every snapshot path (live loop,
+/// wake-ups, contact repair), so none of them can begin an import before the window ends. Pure:
+/// callers pass `now`, so the decision is testable without sleeping.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SnapshotTooLargeGate {
+    blocked_at: Option<Instant>,
+}
+
+impl SnapshotTooLargeGate {
+    /// Records a refused begin at `now`; the next begin waits `SNAPSHOT_TOO_LARGE_RETRY`.
+    pub(crate) fn record_too_large(&mut self, now: Instant) {
+        self.blocked_at = Some(now);
+    }
+
+    /// Remaining wait before a begin may run again at `now`; zero when no begin is blocked.
+    pub(crate) fn wait_before_attempt(&self, now: Instant) -> Duration {
+        self.blocked_at.map_or(Duration::ZERO, |at| {
+            SNAPSHOT_TOO_LARGE_RETRY.saturating_sub(now.saturating_duration_since(at))
+        })
+    }
+
+    /// True while a refusal is outstanding, whether or not its window has ended. Only a successful
+    /// begin clears it, so the history stays reported as too large until an import really starts.
+    pub(crate) fn is_marked(&self) -> bool {
+        self.blocked_at.is_some()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.blocked_at = None;
+    }
+}
+
+/// Snapshot refusal code shared with the desktop bridge.
+const SNAPSHOT_TOO_LARGE_CODE: &str = "snapshot-too-large";
+
+/// Lock the session-wide snapshot gate. A poisoned lock still holds valid gate state.
+fn snapshot_gate(session: &Session) -> std::sync::MutexGuard<'_, SnapshotTooLargeGate> {
+    session
+        .snapshot_too_large
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// A contact repair that was refused as too large must be allowed to run again once the window ends.
+fn settle_repair_attempt(session: &Session, result: &BridgeResult<()>) {
+    if matches!(result, Err(error) if error.code == SNAPSHOT_TOO_LARGE_CODE) {
+        session
+            .repair_attempted
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 enum CutError {
     Impossible,
@@ -707,7 +770,22 @@ async fn start_or_resume(
             .map_err(core_error)
         }
     })
-    .await?;
+    .await;
+    let progress = match progress {
+        Ok(progress) => progress,
+        Err(error) => {
+            if error.code == SNAPSHOT_TOO_LARGE_CODE {
+                snapshot_gate(session).record_too_large(Instant::now());
+            }
+            return Err(error);
+        }
+    };
+    snapshot_gate(session).clear();
+    session.set_status(|status| {
+        if status.error_code == Some(SNAPSHOT_TOO_LARGE_CODE) {
+            status.error_code = None;
+        }
+    });
     Ok(progress)
 }
 
@@ -2411,10 +2489,18 @@ async fn reclaim_contact_photos(
 
 /// One fenced compaction snapshot while core latches a contact projection repair. Runs once per
 /// session (or per manual request) so an unsupported server cannot cause a snapshot loop.
+/// Runs the optional contact repair. A refusal by the window only defers it: the caller's round keeps
+/// going (replay, drafts, outbox), and the repair is attempted again once the window allows.
 async fn repair_if_required(session: &Arc<Session>) -> BridgeResult<()> {
     let c = client(session);
     let required = blocking(move || c.contact_repair_required().map_err(core_error)).await?;
-    if !required
+    if !required {
+        return Ok(());
+    }
+    let window_open = !snapshot_gate(session)
+        .wait_before_attempt(Instant::now())
+        .is_zero();
+    if window_open
         || session
             .repair_attempted
             .swap(true, std::sync::atomic::Ordering::SeqCst)
@@ -2422,8 +2508,12 @@ async fn repair_if_required(session: &Arc<Session>) -> BridgeResult<()> {
         return Ok(());
     }
     let result = snapshot_resync(session).await;
+    settle_repair_attempt(session, &result);
     session.notify();
-    result
+    match result {
+        Err(error) if error.code == SNAPSHOT_TOO_LARGE_CODE => Ok(()),
+        other => other,
+    }
 }
 
 fn revoke(session: &Arc<Session>) {
@@ -2850,11 +2940,34 @@ async fn live(session: Arc<Session>) {
             if error.code == "revoked" {
                 return revoke(&session);
             }
+            let snapshot_too_large = error.code == "snapshot-too-large";
             session.set_status(|status| {
-                status.live = false;
+                if snapshot_too_large {
+                    // The server is reachable; this is a product compatibility state, not a
+                    // broken connection.
+                    status.live = true;
+                } else {
+                    status.live = false;
+                }
                 status.error_code = Some(error.code);
             });
             session.notify();
+            if snapshot_too_large {
+                // Wait out the remaining window. A refusal without a recorded window (for example an
+                // append refusal) starts one here, so the loop never spins on it.
+                let wait = {
+                    let mut gate = snapshot_gate(&session);
+                    let now = Instant::now();
+                    if gate.wait_before_attempt(now).is_zero() {
+                        gate.record_too_large(now);
+                    }
+                    gate.wait_before_attempt(now)
+                };
+                if !pause_live(&session, wait).await {
+                    return;
+                }
+                continue;
+            }
             backoff = next_backoff(backoff, false);
             if !pause_live(&session, jitter(backoff)).await {
                 return;
@@ -3993,6 +4106,187 @@ mod drain_tests {
         assert_eq!(
             status.rcs_live_roster,
             vec![fixture.binding.device_id, active_peer]
+        );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_too_large_gate_tests {
+    use super::*;
+    use crate::tests::{fixture_at, open};
+
+    const SIX_HOURS: Duration = Duration::from_secs(6 * 60 * 60);
+
+    #[test]
+    fn first_attempt_at_start_is_not_blocked() {
+        let gate = SnapshotTooLargeGate::default();
+        assert_eq!(gate.wait_before_attempt(Instant::now()), Duration::ZERO);
+    }
+
+    #[test]
+    fn too_large_begin_waits_six_hours_without_an_immediate_retry() {
+        let start = Instant::now();
+        let mut gate = SnapshotTooLargeGate::default();
+        gate.record_too_large(start);
+        assert_eq!(gate.wait_before_attempt(start), SIX_HOURS);
+        assert_eq!(
+            gate.wait_before_attempt(start + Duration::from_secs(60 * 60)),
+            SIX_HOURS - Duration::from_secs(60 * 60)
+        );
+        assert_eq!(
+            gate.wait_before_attempt(start + SIX_HOURS - Duration::from_millis(1)),
+            Duration::from_millis(1)
+        );
+    }
+
+    #[test]
+    fn retry_is_allowed_once_six_hours_have_passed() {
+        let start = Instant::now();
+        let mut gate = SnapshotTooLargeGate::default();
+        gate.record_too_large(start);
+        assert_eq!(gate.wait_before_attempt(start + SIX_HOURS), Duration::ZERO);
+        assert_eq!(
+            gate.wait_before_attempt(start + SIX_HOURS + Duration::from_secs(1)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn completed_round_clears_the_block() {
+        let start = Instant::now();
+        let mut gate = SnapshotTooLargeGate::default();
+        gate.record_too_large(start);
+        gate.clear();
+        assert_eq!(gate, SnapshotTooLargeGate::default());
+        assert_eq!(gate.wait_before_attempt(start), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_new_too_large_begin_after_clear_starts_a_fresh_window() {
+        let start = Instant::now();
+        let mut gate = SnapshotTooLargeGate::default();
+        gate.record_too_large(start);
+        gate.clear();
+        let later = start + Duration::from_secs(60 * 60);
+        gate.record_too_large(later);
+        assert_eq!(gate.wait_before_attempt(later), SIX_HOURS);
+        // The fresh window runs from `later`, so the original six hours have no effect.
+        assert_eq!(
+            gate.wait_before_attempt(start + SIX_HOURS),
+            Duration::from_secs(60 * 60)
+        );
+        assert_eq!(gate.wait_before_attempt(later + SIX_HOURS), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_refused_retry_restarts_the_window_from_the_refusal() {
+        let start = Instant::now();
+        let mut gate = SnapshotTooLargeGate::default();
+        gate.record_too_large(start);
+        let retry = start + SIX_HOURS;
+        assert_eq!(gate.wait_before_attempt(retry), Duration::ZERO);
+        gate.record_too_large(retry);
+        assert_eq!(gate.wait_before_attempt(retry), SIX_HOURS);
+        assert!(gate.is_marked());
+    }
+
+    #[test]
+    fn refusal_stays_reported_until_a_begin_succeeds() {
+        let start = Instant::now();
+        let mut gate = SnapshotTooLargeGate::default();
+        gate.record_too_large(start);
+        assert!(gate.is_marked());
+        assert!(gate.wait_before_attempt(start + SIX_HOURS).is_zero());
+        assert!(
+            gate.is_marked(),
+            "an expired window alone must not clear the report"
+        );
+    }
+
+    fn too_large_session() -> Arc<Session> {
+        let f = fixture_at("http://127.0.0.1:1");
+        Arc::new(open(&f, &f.binding, &[]))
+    }
+
+    /// An unlocked session, for calls that need the core database (contact-repair latch). The fixture
+    /// owns the database directory, so the caller keeps it alive for the whole test.
+    fn unlocked_too_large_session() -> (crate::tests::Fixture, Arc<Session>) {
+        let f = fixture_at("http://127.0.0.1:1");
+        let session = Arc::new(open(&f, &f.binding, &[]));
+        session
+            .client
+            .unlock(&f.profile, &f.header, crate::tests::PHRASE)
+            .unwrap();
+        (f, session)
+    }
+
+    #[test]
+    fn connection_view_reports_a_refused_import_as_connected_with_its_code() {
+        let session = too_large_session();
+        session.set_status(|status| status.live = true);
+        let before = session
+            .snapshot(None, None, crate::head(), None, Default::default())
+            .unwrap()
+            .0;
+        assert_eq!(before.connection.state, "connected");
+        assert_eq!(before.connection.error_code, None);
+
+        snapshot_gate(&session).record_too_large(Instant::now());
+        let during = session
+            .snapshot(None, None, crate::head(), None, Default::default())
+            .unwrap()
+            .0;
+        assert_eq!(during.connection.state, "connected");
+        assert_eq!(during.connection.error_code, Some("snapshot-too-large"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refused_window_defers_the_optional_repair_without_failing_the_live_round() {
+        let (_fixture, session) = unlocked_too_large_session();
+        session.client.request_contact_repair().unwrap();
+        snapshot_gate(&session).record_too_large(Instant::now());
+        // The repair is only deferred: the round that calls it must not fail, so replay, drafts and
+        // outbox keep running, and the live task does not sleep out the window.
+        repair_if_required(&session).await.unwrap();
+        assert!(
+            !session
+                .repair_attempted
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refused_window_stops_snapshot_resync_before_any_network_or_core_work() {
+        let session = too_large_session();
+        snapshot_gate(&session).record_too_large(Instant::now());
+        let error = snapshot_resync(&session).await.unwrap_err();
+        assert_eq!(error.code, SNAPSHOT_TOO_LARGE_CODE);
+    }
+
+    #[test]
+    fn refused_contact_repair_is_released_so_it_can_run_after_the_window() {
+        let session = too_large_session();
+        session
+            .repair_attempted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        settle_repair_attempt(
+            &session,
+            &Err(BridgeError::new(SNAPSHOT_TOO_LARGE_CODE, "too large")),
+        );
+        assert!(
+            !session
+                .repair_attempted
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+
+        session
+            .repair_attempted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        settle_repair_attempt(&session, &Ok(()));
+        assert!(
+            session
+                .repair_attempted
+                .load(std::sync::atomic::Ordering::SeqCst)
         );
     }
 }

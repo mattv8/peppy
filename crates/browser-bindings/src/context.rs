@@ -13,6 +13,8 @@ struct ServerContextInput {
     capabilities: Option<Value>,
     #[serde(default)]
     outbox_rejected: bool,
+    #[serde(default)]
+    snapshot_too_large: bool,
 }
 
 impl BrowserCore {
@@ -35,14 +37,17 @@ impl BrowserCore {
         {
             return Err(invalid());
         }
-        let applies_roster = input.connection == "connected"
-            || input.connection == "error"
-                && (input.devices.is_some() || input.capabilities.is_some());
+        // A status-only update (no roster fields) keeps the last verified roster, whatever the connection.
+        // A roster, when present, is validated only for a connected or degraded connection.
+        let has_roster = input.devices.is_some() || input.capabilities.is_some();
+        let applies_roster =
+            has_roster && (input.connection == "connected" || input.connection == "error");
         if !applies_roster {
-            if input.devices.is_some() || input.capabilities.is_some() {
+            if has_roster {
                 return Err(invalid());
             }
             self.context.connection = Some(input.connection);
+            self.context.snapshot_too_large = input.snapshot_too_large;
             if !matches!(self.context.connection.as_deref(), Some("offline")) {
                 self.context.rcs_roster_validated = false;
             }
@@ -74,6 +79,7 @@ impl BrowserCore {
         let views = gateways::gateway_views(&devices, &capabilities);
         self.context.connection = Some(input.connection);
         self.context.outbox_rejected = input.outbox_rejected;
+        self.context.snapshot_too_large = input.snapshot_too_large;
         self.context.device_role = Some(role.clone());
         self.context.gateways = Some(views.clone());
         self.context.revoked_device_ids = devices
@@ -178,6 +184,55 @@ mod tests {
             response(&mut core, "snapshot", json!({}))["connection"]["state"],
             "error"
         );
+    }
+
+    #[test]
+    fn status_only_refusal_restores_connected_after_a_failed_roster_and_an_offline_poll() {
+        let (_root, mut core, device) = unlocked_core();
+        let gateway = DeviceId::new();
+        let refused = |connection: &str| json!({"connection": connection, "devices": null, "capabilities": null, "snapshotTooLarge": true});
+        // The first roster refresh never succeeded, so the connected status arrives without a roster.
+        response(
+            &mut core,
+            "_worker_apply_server_context",
+            refused("connected"),
+        );
+        let state = response(&mut core, "snapshot", json!({}));
+        assert_eq!(state["connection"]["state"], "connected");
+        assert_eq!(state["connection"]["errorCode"], "snapshot-too-large");
+
+        // A later roster is verified, then an offline poll updates the status only.
+        response(
+            &mut core,
+            "_worker_apply_server_context",
+            context(
+                json!({"devices":[
+                    {"device_id":device,"role":"device","revoked":false},
+                    {"device_id":gateway,"role":"gateway","revoked":false}
+                ]}),
+                json!({"capabilities":[{"device_id":gateway,"simulator":false,"capabilities":{"sims":[]}}]}),
+            ),
+        );
+        response(
+            &mut core,
+            "_worker_apply_server_context",
+            json!({"connection": "offline", "devices": null, "capabilities": null}),
+        );
+        assert_eq!(
+            response(&mut core, "snapshot", json!({}))["connection"]["state"],
+            "offline"
+        );
+
+        // The gated poll restores connected + snapshot-too-large while keeping the verified roster.
+        response(
+            &mut core,
+            "_worker_apply_server_context",
+            refused("connected"),
+        );
+        let restored = response(&mut core, "snapshot", json!({}));
+        assert_eq!(restored["connection"]["state"], "connected");
+        assert_eq!(restored["connection"]["errorCode"], "snapshot-too-large");
+        assert_eq!(core.context.gateways.as_ref().map(Vec::len), Some(1));
     }
 
     #[test]

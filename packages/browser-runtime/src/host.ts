@@ -142,6 +142,8 @@ export interface BrowserNetwork {
   mcpDenyAuthorization(id: string): Promise<McpAuthorizationDecision>;
   subscribeChanges?(listener: () => void): () => void;
   retryAttachment?(id: string): void;
+  /** The user asked for a fresh history import attempt (Reload on the too-large notice). */
+  retrySnapshotImport?(): void;
   wake?(): void;
   startHistorySearch?(attemptId: string): void;
   stopHistorySearch?(attemptId: string): void;
@@ -588,6 +590,7 @@ async function dispatchValidatedBrowserRpc(session: HostSession, request: RpcReq
       }
     }
     if (command === "retry_attachment") { await session.query("attachment_info", { id: requiredId(args) }); return { id, ok: true, value: undefined }; }
+    if (command === "retry_snapshot_import") return { id, ok: true, value: undefined };
     if (command === "publish_attachment") {
       if (!publisher) throw { code: "unavailable" };
       const value = await publishAttachment(session, publisher, args);
@@ -1224,13 +1227,14 @@ export class BrowserWorkerHost {
     }
     const mediaSyncNoop = command === "media_sync_request" && response.ok && !mediaSyncRequestAccepted(response.value);
     const mutationChanged = command !== "advance_search_index" && command !== undefined && INVOCATIONS[command]?.mutation && !mediaSyncNoop && (response.ok || (!response.ok && response.error.code === "draft-moved"));
-    const successfulSideEffect = response.ok && (command === "unlock" || command === "publish_attachment" || command === "retry_attachment");
+    const successfulSideEffect = response.ok && (command === "unlock" || command === "publish_attachment" || command === "retry_attachment" || command === "retry_snapshot_import");
     const generationChanged = generation !== this.visibleGeneration();
     if (mutationChanged || successfulSideEffect || generationChanged) {
       this.changed();
       if (response.ok && command === "save_draft") this.dependencies.network?.draftSaved?.();
       if (command === "load_state" && generationChanged) this.dependencies.network?.wake?.();
       if (command === "retry_attachment") this.dependencies.network?.retryAttachment?.(requiredId(request.args));
+      if (command === "retry_snapshot_import") this.dependencies.network?.retrySnapshotImport?.();
       if (command === "send_draft" || command === "retry_attachment" || command === "request_contact_sync" || command === "request_attachment_download" || command === "media_sync_request" || command === "load_media" || command === "save_attachment") this.dependencies.network?.wake?.();
     }
     if (response.ok && command === "search_local") {
@@ -1993,6 +1997,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
         startHistorySearch(attemptId) { scheduler?.trackHistorySearch(attemptId); void scheduler?.poll().finally(clearReplayPageInFlight).catch(() => undefined); },
        stopHistorySearch(attemptId) { scheduler?.untrackHistorySearch(attemptId); },
       retryAttachment(id) { scheduler?.retryAttachment(id); },
+      retrySnapshotImport() { scheduler?.retrySnapshotImport(); void scheduler?.poll().finally(clearReplayPageInFlight).catch(() => undefined); },
       async unlockNewEpoch(passphrase) { if (!scheduler) throw { code: "unavailable" }; await scheduler.unlockNewEpoch(passphrase); },
       epochStatus() { const state = scheduler?.epochStatus?.state; return state === "epoch-mismatch" || state === "needs-unlock" ? state : undefined; },
        syncProgress() { return syncProgress; },
