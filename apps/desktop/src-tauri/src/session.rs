@@ -160,6 +160,9 @@ pub struct Session {
     pub repair_wake: Notify,
     /// One fenced repair snapshot per session (or per manual request) while the latch is set.
     pub repair_attempted: AtomicBool,
+    /// Test-only: forces the named snapshot append to be refused as too large.
+    #[cfg(test)]
+    pub(crate) refuse_snapshot_append: Mutex<Option<crate::sync::AppendKind>>,
     /// Refused snapshot begin, shared by every snapshot path (see `sync::SnapshotTooLargeGate`).
     pub(crate) snapshot_too_large: Mutex<crate::sync::SnapshotTooLargeGate>,
     /// Prevents duplicate standalone search-index maintenance loops for one session.
@@ -555,6 +558,8 @@ pub fn open_session(
         repair_wake: Notify::new(),
         repair_attempted: AtomicBool::new(false),
         snapshot_too_large: Mutex::new(crate::sync::SnapshotTooLargeGate::default()),
+        #[cfg(test)]
+        refuse_snapshot_append: Mutex::new(None),
         index_driver_running: AtomicBool::new(false),
         index_driver_ready: AtomicBool::new(false),
         index_driver_saw_indexing: AtomicBool::new(false),

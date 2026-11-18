@@ -127,7 +127,7 @@ import { isTauriUpdateHost, useUpdateActivity } from "./updates/updates";
 import { connectionText, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./shell/status";
 import { SyncTooLargeNotice } from "./shell/SyncTooLargeNotice";
 import { isSettingUp, liveSettingUpGatewayFor, resolveStoredRoute, settingUpGatewayFor } from "./setup/settingUpRoute";
-import { DEFAULT_MMS_LIMIT_BYTES, availabilityProblem, gatewayAvailability, routeProblem, type RouteChoice } from "./setup/routeProblem";
+import { DEFAULT_MMS_LIMIT_BYTES, availabilityProblem, gatewayAvailability, importingRefusal, routeProblem, type RouteChoice } from "./setup/routeProblem";
 import { fileSize } from "./fileSize";
 import { formatCopy } from "./generated/peppyCopy";
 import { SystemRibbon, SystemRibbonAnnouncement, SystemRibbonStrip } from "./notices/SystemRibbon";
@@ -713,7 +713,7 @@ function GatewaySelector({
             availability: gatewayAvailability(item),
             // A setting-up phone is listed and explained, but cannot be chosen (ux-design 6.1, ruling R13).
             disabled: isSettingUp(item) || gatewayAvailability(item) === "unsupported_platform",
-            disabledReason: isSettingUp(item) ? formatCopy(peppyCopy.gateway_problem_setting_up, item.name) : undefined,
+            disabledReason: isSettingUp(item) ? importingRefusal(item, gateways) : undefined,
             gatewayId: item.id,
             simId: item.simId,
           })),

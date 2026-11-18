@@ -2651,3 +2651,88 @@ describe("refused import in production-shaped rounds", () => {
     expect(fixture.contexts.at(-1)).toMatchObject({ connection: "connected", snapshotTooLarge: true });
   });
 });
+
+/** A repair import whose begin is accepted and whose append (records or manifest page) is refused as too large. */
+function appendRefusalFixture(refused: "page" | "manifest") {
+  const requests: string[] = [];
+  const begins: string[] = [];
+  const appends: string[] = [];
+  const contexts: Record<string, unknown>[] = [];
+  const progress = (manifest: boolean, receivedRecords = "0") => ({ generation: "1", highWater: "2", expectedRecords: "2", receivedRecords, lastCursor: "0", manifest });
+  const session = {
+    hydrate: async () => undefined,
+    query: async (command: string, args?: Record<string, unknown>) => {
+      if (command === "_worker_apply_server_context") contexts.push(args ?? {});
+      if (command === "_worker_identity_metadata") return { vaultId: "vault", deviceId: "device" };
+      if (command === "snapshot_progress") return { progress: null };
+      if (command === "receive_cursor") return { cursor: "0" };
+      if (command === "pending_outbox") return { envelopes: [] };
+      if (command === "sync_work_status") return { pendingSeal: false, pendingApply: false, pendingSnapshot: false };
+      if (command === "key_status") return { activeEpoch: "1", unlockedEpochs: ["1"] };
+      if (command === "compaction_status") return { server_supported: false, server_active: false };
+      if (command === "contact_repair_status") return { repairRequired: true };
+      if (command === "contact_photo_transfer_state") return { uploads: [], registrations: [], reclaims: [] };
+      return [];
+    },
+    mutate: async (command: string) => {
+      if (command === "begin_snapshot" || command === "begin_snapshot_manifest") {
+        begins.push(command);
+        return progress(command === "begin_snapshot_manifest");
+      }
+      if (command === "append_snapshot_manifest") {
+        appends.push(command);
+        if (refused === "manifest") throw new CoreRejectedError("snapshot-too-large");
+        return { progress: progress(true), missing: 2 };
+      }
+      if (command === "append_snapshot_page") {
+        appends.push(command);
+        if (refused === "page") throw new CoreRejectedError("snapshot-too-large");
+        return progress(true, "2");
+      }
+      return { sealed: 0, backfill_complete: true, processed: 0, applied: 0, quarantined: 0, drained: 0 };
+    },
+  };
+  const transport = {
+    json: async (path: string, request?: { method?: string }) => {
+      requests.push(`${request?.method ?? "GET"} ${path}`);
+      if (path === "/v1/vault") return { vault_id: "vault", device_id: "device", key_epoch: 1, profile_fingerprint: "fingerprint", public_key_profile: {}, encrypted_vault_check_header: btoa("{}") };
+      if (path === "/v1/snapshot") return { high_water_cursor: "2", record_count: "2", manifest_supported: true, max_manifest_page_size: 5000, compaction_supported: true, compaction_generation: "3" };
+      if (path.startsWith("/v1/snapshot/manifest")) return { high_water_cursor: "2", compaction_generation: "3", next_after: null, entries: [{ cursor: "1", digest: "0".repeat(64), flags: 0 }, { cursor: "2", digest: "0".repeat(64), flags: 0 }] };
+      if (path.startsWith("/v1/snapshot/records")) return { high_water_cursor: "2", records: [{ cursor: "1", envelope: {} }, { cursor: "2", envelope: {} }], next_after: null };
+      if (path.startsWith("/v1/events")) throw new TransportError("status", 409, "resync_required");
+      if (path === "/v1/devices") return { devices: [] };
+      if (path === "/v1/capabilities") return { capabilities: [] };
+      throw new Error(path);
+    },
+    discard: async (path: string, request: { method: string }) => { requests.push(`${request.method} ${path}`); },
+    upload: async () => undefined,
+    download: async () => new Uint8Array(),
+  };
+  return { scheduler: new BrowserScheduler(session, transport), requests, begins, appends, contexts };
+}
+
+describe("refused append inside a repair import marks the window", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each(["page", "manifest"] as const)("defers the repair and stops further import reads after a refused %s append", async refused => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-01-01T00:00:00Z") });
+    const fixture = appendRefusalFixture(refused);
+
+    expect(await fixture.scheduler.poll()).toEqual({ connection: "connected" });
+    expect(fixture.begins).toHaveLength(1);
+    // The page case first appends the manifest, then the refused records page; the manifest case stops at its refusal.
+    expect(fixture.appends.at(-1)).toBe(refused === "page" ? "append_snapshot_page" : "append_snapshot_manifest");
+    const appendsBeforeWindow = fixture.appends.length;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(fixture.contexts.at(-1)).toMatchObject({ connection: "connected", snapshotTooLarge: true });
+
+    const before = fixture.requests.length;
+    expect(await fixture.scheduler.poll()).toEqual({ connection: "connected" });
+    const inWindow = fixture.requests.slice(before);
+    expect(fixture.begins).toHaveLength(1);
+    expect(fixture.appends).toHaveLength(appendsBeforeWindow);
+    expect(inWindow.some(request => request.includes("/v1/snapshot/records") || request.includes("/v1/snapshot/manifest"))).toBe(false);
+  });
+});

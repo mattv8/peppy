@@ -63,9 +63,12 @@ describe("routeProblem for a phone that is setting up", () => {
     const importingDelayed = settingUpPhone({ availability: "delayed", settingUp: true, lastSeenAgeSeconds: 120 });
     const route = (gateway: GatewayView) => ({ kind: "route" as const, gateway, implicit: false });
 
+    // The flag still refuses the send; the wording is the phone's presence, as for a non-importing phone.
     expect(routeProblem(route(importingOffline), [importingOffline], false, 1, noMmsPlan))
-      .toBe("Pixel 8 is still setting up. It can send when that finishes.");
+      .toBe("Pixel 8 isn't responding. Sending is paused until it reconnects.");
     expect(routeProblem(route(importingDelayed), [importingDelayed], false, 1, noMmsPlan))
+      .toBe("Pixel 8 was last seen 2m ago. Sending is paused until it reconnects.");
+    expect(routeProblem(route(settingUpPhone({ availability: "connected", settingUp: true })), [settingUpPhone({ availability: "connected", settingUp: true })], false, 1, noMmsPlan))
       .toBe("Pixel 8 is still setting up. It can send when that finishes.");
     expect(headRoutePresentation(route(importingOffline), [importingOffline]).state).toBe("Not responding");
     expect(headRoutePresentation(route(importingDelayed), [importingDelayed]).state).toBe("Seen 2m ago");
@@ -159,6 +162,22 @@ describe("App phone that is setting up", () => {
     expect(selector).not.toHaveTextContent("sim-9");
     expect(selector).toHaveTextContent("Pixel 8");
     expect(selector).toHaveTextContent("Setting up");
+  });
+
+  it.each([
+    ["offline", undefined, "Pixel 8 isn't responding. Sending is paused until it reconnects."],
+    ["delayed", 120, "Pixel 8 was last seen 2m ago. Sending is paused until it reconnects."],
+  ] as const)("gives an importing phone with %s presence its presence reason in the picker", async (availability, lastSeenAgeSeconds, reason) => {
+    snapshot = {
+      ...snapshot,
+      gateways: [readyPhone, settingUpPhone({ availability, lastSeenAgeSeconds, settingUp: true })],
+    };
+    render(<App hostKind="browser" />);
+    const combobox = await screen.findByRole("combobox", { name: "Phone" });
+    fireEvent.click(combobox);
+    const option = screen.getByRole("option", { name: /Pixel 8/ });
+    expect(option).toHaveAttribute("aria-disabled", "true");
+    expect(option).toHaveAccessibleDescription(reason);
   });
 
   it("keeps a stored sendable route when the setting-up phone is activated, and saves the stored pair", async () => {

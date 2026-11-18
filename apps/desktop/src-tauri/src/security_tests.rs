@@ -2548,3 +2548,43 @@ fn mcp_oauth_redirect_validation_allows_only_vetted_callback_schemes() {
         "invalid-request"
     );
 }
+
+/// A too-large refusal of a records or manifest append inside a repair import must mark the refusal
+/// window itself: the notice shows, the repair is only deferred, and no further repair import starts
+/// inside the window.
+async fn refused_append_marks_the_window_and_defers_the_repair(kind: crate::sync::AppendKind) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (origin, requests) = manifest_mock(log.clone(), true, Arc::new(honest_manifest)).await;
+    let f = fixture_at(&origin);
+    let session = Arc::new(open_unlocked(&f));
+    *log.lock().unwrap() = mock_records(&sealed_envelopes(&session, 2));
+    session.client.request_contact_repair().unwrap();
+    *session.refuse_snapshot_append.lock().unwrap() = Some(kind);
+    session.set_status(|status| status.live = true);
+
+    // The optional repair is deferred, not failed: the caller's round keeps going.
+    sync::repair_if_required(&session).await.unwrap();
+
+    let view = session
+        .snapshot(None, None, crate::head(), None, Default::default())
+        .unwrap()
+        .0;
+    assert_eq!(view.connection.state, "connected");
+    assert_eq!(view.connection.error_code, Some("snapshot-too-large"));
+
+    // Inside the window the repair is not attempted again, so the server sees no further import reads.
+    let before = requests.lock().unwrap().len();
+    sync::repair_if_required(&session).await.unwrap();
+    assert_eq!(requests.lock().unwrap().len(), before);
+    session.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_records_page_marks_the_window_and_defers_the_repair() {
+    refused_append_marks_the_window_and_defers_the_repair(crate::sync::AppendKind::Records).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_manifest_page_marks_the_window_and_defers_the_repair() {
+    refused_append_marks_the_window_and_defers_the_repair(crate::sync::AppendKind::Manifest).await;
+}
