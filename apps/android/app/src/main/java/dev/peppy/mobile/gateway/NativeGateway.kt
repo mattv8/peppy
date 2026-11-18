@@ -76,7 +76,17 @@ data class GatewayStatus(
     val recoveryReason: RecoveryReason? = null,
     val outboxRejection: String? = null,
     val softRejection: SoftRejection? = null,
+    val setupProgress: SetupProgress? = null,
+    val historyTooLarge: Boolean = false,
+    /** True when the marker came from a page-append byte cap (7 day recheck); the card copy names the matching interval. */
+    val historyTooLargeByteCap: Boolean = false,
 )
+
+sealed interface SetupProgress {
+    data object Checking : SetupProgress
+    data class Downloading(val staged: Long, val expected: Long) : SetupProgress
+    data class Organizing(val remaining: Long) : SetupProgress
+}
 
 /** Only produced when the database is open and the shared vault purpose keys are installed. */
 class GatewaySession(
@@ -306,9 +316,18 @@ object NativeGateway {
         val state = GatewayStateStore(context)
         return synchronized(lock) {
             val identity = identity(prefs(context))
+            val setupProgress = state.setupProgress?.let {
+                when (it.phase) {
+                    GatewayStateStore.SetupPhase.CHECKING -> SetupProgress.Checking
+                    GatewayStateStore.SetupPhase.DOWNLOADING -> SetupProgress.Downloading(it.staged, it.expected)
+                    GatewayStateStore.SetupPhase.ORGANIZING -> SetupProgress.Organizing(it.remaining)
+                }
+            }
             GatewayStatus(
                 identity != null, identity?.origin, opened, opened && sharedKeysReady,
                 state.phase, state.recoveryReason, state.outboxRejection, state.softRejection,
+                setupProgress, state.hasHistoryTooLarge,
+                state.historyTooLargeKind == HistoryTooLargeKind.DOWNLOAD_BYTE_CAP,
             )
         }
     }

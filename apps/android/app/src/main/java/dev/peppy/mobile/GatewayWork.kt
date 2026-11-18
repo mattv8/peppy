@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
@@ -32,6 +33,7 @@ import dev.peppy.mobile.gateway.GatewayHttp
 import dev.peppy.mobile.gateway.GatewayPolicyHost
 import dev.peppy.mobile.gateway.GatewayStateStore
 import dev.peppy.mobile.gateway.GatewayTransportException
+import dev.peppy.mobile.gateway.HistoryTooLargeKind
 import dev.peppy.mobile.gateway.HttpResult
 import dev.peppy.mobile.gateway.MessageHistoryRequestCoordinator
 import dev.peppy.mobile.gateway.NativeGateway
@@ -312,8 +314,9 @@ internal class GatewayAccountPausedException : IOException("account access pause
  * RECOVERY_REQUIRED state, sets the core restore guard, and never uploads or touches the carrier.
  * Nothing is uploaded and no command is executed until the bootstrap snapshot is fully drained.
  *
- * Budgets per pass: up to 4 snapshot pages (200 records) or 4 replay pages (200 events), up to 4
- * apply batches of 50, up to 50 uploads before and after dispatch, at most 10 carrier commands.
+ * Budgets per pass: snapshot staging and snapshot draining each have a 20-second time budget; live
+ * replay has up to 4 pages (200 events) and 4 apply batches of 50; uploads have up to 50 entries
+ * before and after dispatch, and carrier dispatch handles at most 10 commands.
  */
 class GatewaySync(
     private val client: NativeClientInterface,
@@ -338,6 +341,8 @@ class GatewaySync(
     /** Cancellation fences phases before they admit new permits or invoke host effects. */
     private val effectPermitted: () -> Boolean = { true },
     private val nowMs: () -> Long = { System.currentTimeMillis() },
+    /** Monotonic clock for snapshot pass budgets. */
+    private val elapsedMs: () -> Long = { SystemClock.elapsedRealtime() },
 ) {
     private enum class GatewayPhase(val code: Long) {
         RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), SEND_CANCELLATIONS(23), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_PHONE_READS(21), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19), MMS_CLEANUP(BackgroundDiagnostics.MMS_CLEANUP_PHASE), MESSAGING_APP(22),
@@ -367,6 +372,30 @@ class GatewaySync(
     private var accountPaused = false
     private var commandsProgressed = false
     private var carrierOnlyProofBlocked = 0
+
+    /** Setup progress commits at most once per [SETUP_PROGRESS_WRITE_MS]; [SetupProgressWriter.flush] keeps the last value. */
+    private val setupWriter = SetupProgressWriter()
+
+    private inner class SetupProgressWriter {
+        private var pending: GatewayStateStore.SetupProgressState? = null
+        private var lastWriteMs: Long? = null
+
+        fun offer(progress: GatewayStateStore.SetupProgressState) {
+            val now = elapsedMs()
+            val last = lastWriteMs
+            if (last == null || now - last >= SETUP_PROGRESS_WRITE_MS) write(progress, now) else pending = progress
+        }
+
+        fun flush() {
+            pending?.let { write(it, elapsedMs()) }
+        }
+
+        private fun write(progress: GatewayStateStore.SetupProgressState, now: Long) {
+            pending = null
+            lastWriteMs = now
+            state.writeSetupProgress(progress)
+        }
+    }
 
     fun run(): PassResult {
         ensureEffectsPermitted()
@@ -398,7 +427,10 @@ class GatewaySync(
             failure = error
         }
         ensureEffectsPermitted()
-        phase(GatewayPhase.CAPABILITIES) { publish(capabilities); false }
+        phase(GatewayPhase.CAPABILITIES) {
+            publish(capabilitiesForPhase())
+            false
+        }
         // Probe even when live replay does not need a resync; unknown/failed capability is false.
         phase(GatewayPhase.COMPACTION_CAPABILITY) { probeSnapshotCapability(); false }
         when (state.phase) {
@@ -453,22 +485,37 @@ class GatewaySync(
     private fun phase(phase: GatewayPhase, block: () -> Boolean) {
         try {
             ensureEffectsPermitted()
-            if (SyncDiagnostics.measurePhase(phase.code, block)) more = true
+            if (SyncDiagnostics.measurePhase(phase.code, ::gatewayErrorKind, block)) more = true
         } catch (error: GatewayAuthException) {
             throw error
         } catch (_: GatewayAccountPausedException) {
             // Policy pause: this phase stops for the pass; the rest of the pass continues.
             accountPaused = true
+        } catch (_: MobileBindingsException.SnapshotTooLarge) {
+            // The refusing call already recorded the too-large marker and its kind; the failed phase keeps core_error 5.
         } catch (error: Exception) {
             val transient = error is IOException || error is JSONException ||
                 error is MobileBindingsException || error is NumberFormatException
             if (!transient) throw error
             if (failure == null) failure = error
+        } finally {
+            // Writes the last throttled setup progress at the end of every phase, including after a stop.
+            setupWriter.flush()
         }
     }
 
     private fun ensureEffectsPermitted() {
         if (!effectPermitted()) throw CancellationException("gateway pass cancelled")
+    }
+
+    private fun gatewayErrorKind(error: Throwable): Long = when (error) {
+        is MobileBindingsException.SnapshotTooLarge -> 5
+        is MobileBindingsException.InvalidRequest -> 3
+        is MobileBindingsException.Conflict -> 4
+        is MobileBindingsException -> 9
+        is IOException -> 1
+        is JSONException, is NumberFormatException -> 2
+        else -> 10
     }
 
     private fun publish(report: JSONObject) {
@@ -478,15 +525,18 @@ class GatewaySync(
     }
 
     private fun bootstrap(): Boolean {
-        val progress = client.snapshotProgress() ?: try {
-            beginSnapshot(NativeSnapshotPurpose.RESYNC)
-        } catch (error: MobileBindingsException.InvalidRequest) {
-            // InvalidRequest is generic: an unfinished drain of an already-published generation,
-            // but also record_count > 100k, count > high water, or a malformed cut. Never infer
-            // which. Drain (harmless either way), stay in BOOTSTRAP, and report for bounded retry;
-            // a fresh generation is staged once begin succeeds.
-            drain()
-            throw error
+        val progress = client.snapshotProgress() ?: run {
+            if (!canBeginSnapshot()) return false
+            try {
+                beginSnapshot(NativeSnapshotPurpose.RESYNC)
+            } catch (error: MobileBindingsException.InvalidRequest) {
+                // InvalidRequest is generic: an unfinished drain of an already-published generation,
+                // count above high water, or a malformed cut. Never infer which. Drain (harmless
+                // either way), stay in BOOTSTRAP, and report for bounded retry; a fresh generation is
+                // staged once begin succeeds.
+                drain()
+                throw error
+            }
         }
         return when (stage(progress, NativeSnapshotPurpose.RESYNC, detectOwnRecords = true)) {
             Stage.OWN_RECORDS -> {
@@ -498,12 +548,16 @@ class GatewaySync(
                 finishBootstrap()
             }
             Stage.STAGING -> true
+            Stage.DEFERRED -> false
         }
     }
 
     private fun finishBootstrap(): Boolean {
         val remaining = drain()
-        if (!remaining) state.advance(SyncPhase.LIVE)
+        if (!remaining) {
+            state.advance(SyncPhase.LIVE)
+            publish(capabilitiesForPhase())
+        }
         return remaining
     }
 
@@ -522,8 +576,11 @@ class GatewaySync(
         // Repair only a cut replay has consumed. A fresh cut fetched here could include
         // unreceived SMS commands and permanently turn those commands into history.
         if (cut.getString("high_water_cursor") != client.receiveCursor()) return true
+        if (!canBeginSnapshot()) return false
         val progress = beginSnapshot(NativeSnapshotPurpose.RESYNC, cut)
-        if (stage(progress, NativeSnapshotPurpose.RESYNC, detectOwnRecords = false) != Stage.FINISHED) return true
+        val staging = stage(progress, NativeSnapshotPurpose.RESYNC, detectOwnRecords = false)
+        if (staging == Stage.DEFERRED) return false
+        if (staging != Stage.FINISHED) return true
         val draining = drain()
         val status = client.snapshotProjectionStatus()
         if (status?.state == uniffi.peppy_mobile_bindings.NativeSnapshotProjectionState.FAILED) {
@@ -534,21 +591,20 @@ class GatewaySync(
 
     private fun receive(): Boolean {
         client.snapshotProgress()?.let {
-            stage(it, NativeSnapshotPurpose.RESYNC, detectOwnRecords = false)
-            return true // a finished generation still has to drain
+            return stage(it, NativeSnapshotPurpose.RESYNC, detectOwnRecords = false) != Stage.DEFERRED // a finished generation still has to drain
         }
         repeat(RECEIVE_PAGES) { pageIndex ->
             if (pageIndex > 0) ensureEffectsPermitted()
             val cursor = client.receiveCursor()
             val response = http.get("/v1/events?after=$cursor&limit=$EVENT_PAGE")
             if (response.code == 409) {
+                if (!canBeginSnapshot()) return false
                 val progress = try {
                     beginSnapshot(NativeSnapshotPurpose.RESYNC)
                 } catch (_: MobileBindingsException.InvalidRequest) {
                     return true // A published generation is still draining; drain first, then retry.
                 }
-                stage(progress, NativeSnapshotPurpose.RESYNC, detectOwnRecords = false)
-                return true
+                return stage(progress, NativeSnapshotPurpose.RESYNC, detectOwnRecords = false) != Stage.DEFERRED
             }
             val page = JSONObject(checkBody(response))
             val events = page.getJSONArray("events")
@@ -566,7 +622,8 @@ class GatewaySync(
         return true
     }
 
-    private enum class Stage { STAGING, FINISHED, OWN_RECORDS }
+    /** DEFERRED: a too-large marker or an append refusal stopped staging; nothing more to do this pass. */
+    private enum class Stage { STAGING, FINISHED, OWN_RECORDS, DEFERRED }
 
     /** One staging request: progress, an impossible cut (restart), or own-device history (reused identity). */
     private sealed interface StageStep {
@@ -584,14 +641,26 @@ class GatewaySync(
     ): NativeSnapshotProgress {
         val start = cut ?: JSONObject(checkBody(http.get("/v1/snapshot")))
         val generation = snapshotCompactionState(start).generation
-        if (purpose == NativeSnapshotPurpose.RESYNC && manifestAllowed && snapshotManifestSupported(start)) {
-            return client.beginSnapshotWithManifest(
-                start.getString("high_water_cursor"), start.getString("record_count").toULong(), generation,
-            )
+        val progress = try {
+            if (purpose == NativeSnapshotPurpose.RESYNC && manifestAllowed && snapshotManifestSupported(start)) {
+                client.beginSnapshotWithManifest(
+                    start.getString("high_water_cursor"), start.getString("record_count").toULong(), generation,
+                )
+            } else {
+                client.beginSnapshotWithCompaction(
+                    start.getString("high_water_cursor"), start.getString("record_count").toULong(), purpose, generation,
+                )
+            }
+        } catch (error: MobileBindingsException.SnapshotTooLarge) {
+            // Record ceiling: nothing was downloaded, so the short recheck window applies. Restore never uses the marker.
+            if (purpose == NativeSnapshotPurpose.RESYNC) state.recordHistoryTooLarge(nowMs(), HistoryTooLargeKind.SNAPSHOT_BEGIN)
+            throw error
         }
-        return client.beginSnapshotWithCompaction(
-            start.getString("high_water_cursor"), start.getString("record_count").toULong(), purpose, generation,
-        )
+        if (purpose == NativeSnapshotPurpose.RESYNC) {
+            state.clearHistoryTooLarge()
+            setupWriter.offer(GatewayStateStore.SetupProgressState(GatewayStateStore.SetupPhase.CHECKING))
+        }
+        return progress
     }
 
     private fun probeSnapshotCapability() {
@@ -677,29 +746,40 @@ class GatewaySync(
     }
 
     /**
-     * Stages up to [SNAPSHOT_PAGES] pages. An impossible cut (server 400/409, an empty page before
-     * the expected count, or a page the core refuses) restarts staging from a fresh `/v1/snapshot`
-     * at most once per pass; a second failure is reported for bounded WorkManager retry.
+     * Stages until complete or [SNAPSHOT_STAGE_BUDGET_MS] has elapsed. An impossible cut (server
+     * 400/409, an empty page before the expected count, or a page the core refuses) restarts
+     * staging from a fresh `/v1/snapshot` at most once per pass; a second failure is reported for
+     * bounded WorkManager retry.
      */
     private fun stage(initial: NativeSnapshotProgress, purpose: NativeSnapshotPurpose, detectOwnRecords: Boolean): Stage {
+        // A too-large marker blocks resuming and restarting alike: no staging request until an attempt is allowed.
+        if (!canBeginSnapshot()) return Stage.DEFERRED
         var progress = initial
         var restarted = false
+        val startedAt = elapsedMs()
+        val withinBudget = { elapsedMs() - startedAt < SNAPSHOT_STAGE_BUDGET_MS }
         // A 404/405 manifest route stays unavailable for the rest of this call, restarts included.
         var manifestAllowed = true
-        repeat(SNAPSHOT_PAGES) {
+        while (true) {
+            ensureEffectsPermitted()
             if (progress.receivedRecords >= progress.expectedRecords) {
                 client.finishSnapshot(progress.generation)
+                // A completed generation (including one resumed after the window) ends the too-large state.
+                state.clearHistoryTooLarge()
                 return Stage.FINISHED
             }
-            when (val step = if (progress.manifest) stageManifestPage(progress, detectOwnRecords) else stageRecordsPage(progress, SNAPSHOT_PAGE, detectOwnRecords)) {
+            if (!withinBudget()) return Stage.STAGING
+            when (val step = if (progress.manifest) stageManifestPage(progress, detectOwnRecords, withinBudget) else stageRecordsPage(progress, SNAPSHOT_PAGE, detectOwnRecords)) {
                 StageStep.OwnRecords -> return Stage.OWN_RECORDS
                 // Full cut; like the restart below, this re-fetches /v1/snapshot on the contact-repair path too.
                 StageStep.ManifestUnavailable -> {
+                    if (!canBeginSnapshot()) return Stage.DEFERRED
                     manifestAllowed = false
                     progress = beginSnapshot(purpose, manifestAllowed = false)
                 }
                 StageStep.Impossible -> {
                     if (restarted) throw GatewayTransportException("snapshot cut unavailable")
+                    if (!canBeginSnapshot()) return Stage.DEFERRED
                     restarted = true
                     // Re-fetches /v1/snapshot (also on the contact-repair path), as the existing restart does.
                     progress = beginSnapshot(purpose, manifestAllowed = manifestAllowed) // obsoletes the broken staging generation
@@ -707,12 +787,8 @@ class GatewaySync(
                 is StageStep.Manifest -> progress = step.progress
                 is StageStep.Downloaded -> progress = step.progress
             }
+            setupWriter.offer(GatewayStateStore.SetupProgressState(GatewayStateStore.SetupPhase.DOWNLOADING, progress.receivedRecords.toLong(), progress.expectedRecords.toLong()))
         }
-        if (progress.receivedRecords >= progress.expectedRecords) {
-            client.finishSnapshot(progress.generation)
-            return Stage.FINISHED
-        }
-        return Stage.STAGING
     }
 
     /**
@@ -720,7 +796,7 @@ class GatewaySync(
      * missing. A 404/405 manifest route is [StageStep.ManifestUnavailable]; a refused or malformed page
      * is [StageStep.Impossible], which restarts the cut like a refused records page.
      */
-    private fun stageManifestPage(progress: NativeSnapshotProgress, detectOwnRecords: Boolean): StageStep {
+    private fun stageManifestPage(progress: NativeSnapshotProgress, detectOwnRecords: Boolean, withinBudget: () -> Boolean): StageStep {
         // The server clamps the limit to its 5,000 maximum, the value it advertises.
         val response = http.get(
             "/v1/snapshot/manifest?high_water=${progress.highWater}&after=${progress.lastCursor}&limit=$SNAPSHOT_MANIFEST_PAGE${progress.serverCompactionGeneration?.let { "&compaction_generation=$it" } ?: ""}",
@@ -734,10 +810,16 @@ class GatewaySync(
             client.appendSnapshotManifest(progress.generation, entries)
         } catch (_: MobileBindingsException.InvalidRequest) {
             return StageStep.Impossible
+        } catch (error: MobileBindingsException.SnapshotTooLarge) {
+            state.recordHistoryTooLarge(nowMs(), HistoryTooLargeKind.DOWNLOAD_BYTE_CAP)
+            throw error
         }
         var next = manifest.progress
         var missing = manifest.missing.toInt()
         while (missing > 0) {
+            // A stop returns the last staged cursor: the core resumes the same manifest page from there.
+            ensureEffectsPermitted()
+            if (!withinBudget()) return StageStep.Manifest(next)
             when (val step = stageRecordsPage(next, minOf(missing, SNAPSHOT_PAGE), detectOwnRecords)) {
                 is StageStep.Downloaded -> {
                     next = step.progress
@@ -786,6 +868,10 @@ class GatewaySync(
             client.appendSnapshotRawPage(progress.generation, records)
         } catch (_: MobileBindingsException.InvalidRequest) {
             return StageStep.Impossible
+        } catch (error: MobileBindingsException.SnapshotTooLarge) {
+            // Byte cap after a download: the failed phase keeps core_error 5, with no worker failure and no retry.
+            state.recordHistoryTooLarge(nowMs(), HistoryTooLargeKind.DOWNLOAD_BYTE_CAP)
+            throw error
         }
         if (diagnosticsEnabled) snapshotReceived += records.size.toLong()
         return StageStep.Downloaded(staged, records.size)
@@ -793,7 +879,13 @@ class GatewaySync(
 
     /** `applied == 0` is not completion; only `snapshotRemaining == 0` ends a snapshot drain. */
     private fun drain(): Boolean {
-        repeat(APPLY_BATCHES) {
+        val startedAt = elapsedMs()
+        var liveBatches = 0
+        var snapshotDraining = false
+        while (snapshotDraining || liveBatches < APPLY_BATCHES) {
+            ensureEffectsPermitted()
+            if (snapshotDraining && elapsedMs() - startedAt >= SNAPSHOT_DRAIN_BUDGET_MS) return true
+
             val report = client.applyPending(APPLY_BATCH.toULong())
             val progressed = report.applied + report.quarantined + report.drained + report.superseded
             if (progressed > 0uL) commandsProgressed = true
@@ -801,7 +893,13 @@ class GatewaySync(
                 this.progressed += progressed.toLong()
                 snapshotRemaining = report.snapshotRemaining.toLong()
             }
-            if (report.snapshotRemaining == 0uL && progressed < APPLY_BATCH.toULong()) return false
+            snapshotDraining = report.snapshotRemaining > 0uL
+            if (snapshotDraining) {
+                setupWriter.offer(GatewayStateStore.SetupProgressState(GatewayStateStore.SetupPhase.ORGANIZING, remaining = report.snapshotRemaining.toLong()))
+            } else {
+                liveBatches++
+                if (progressed < APPLY_BATCH.toULong()) return false
+            }
         }
         return true
     }
@@ -894,15 +992,29 @@ class GatewaySync(
         return result.body ?: throw GatewayTransportException("empty body")
     }
 
+    private fun canBeginSnapshot(): Boolean = state.snapshotAttemptAllowed(nowMs())
+
+    private fun capabilitiesForPhase(): JSONObject = when (state.phase) {
+        SyncPhase.BOOTSTRAP, SyncPhase.BOOTSTRAP_DRAINING ->
+            SimRoutes.capabilityReport(emptyList(), sendPermissionGranted = false, setupState = "importing")
+        SyncPhase.LIVE -> JSONObject(capabilities.toString()).apply {
+            getJSONObject("capabilities").put("setup", JSONObject().put("state", "ready"))
+        }
+        SyncPhase.RECOVERY_REQUIRED -> SimRoutes.capabilityReport(emptyList(), sendPermissionGranted = false)
+    }
+
     companion object {
         const val EVENT_PAGE = 50
         const val RECEIVE_PAGES = 4
-        const val SNAPSHOT_PAGES = 4
         const val SNAPSHOT_PAGE = 200
+        const val SNAPSHOT_STAGE_BUDGET_MS = 20_000L
         /** The server's manifest maximum; a resumed generation needs no advertisement fetch. */
         const val SNAPSHOT_MANIFEST_PAGE = 5_000
         const val APPLY_BATCHES = 4
         const val APPLY_BATCH = 50
+        const val SNAPSHOT_DRAIN_BUDGET_MS = 20_000L
+        /** Minimum spacing of persisted setup-progress commits during a pass; the last value is always flushed. */
+        const val SETUP_PROGRESS_WRITE_MS = 1_000L
         const val OUTBOX_BATCH = 50
     }
 }
@@ -936,6 +1048,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
 
     private fun runPass(job: kotlinx.coroutines.Job?): Result {
         GatewayStateStore(applicationContext).migrateRejectionPolicy(System.currentTimeMillis())
+        GatewayStateStore(applicationContext).clearStaleSetupProgress()
         val captureHint = GatewayWork.beginPass(applicationContext)
         val result = pass(captureHint, job)
         if (result == Result.success()) GatewayWork.finishPass()

@@ -285,6 +285,34 @@ class SyncDiagnosticsTest : GatewayTestBase() {
         }
     }
 
+    @Test fun failedGatewayPhaseRecordsStableErrorKindAndRethrowsTheOriginalFailure() {
+        val events = mutableListOf<String>()
+        val failure = IllegalStateException("original")
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+            try {
+                SyncDiagnostics.measurePhase(4L, { 3L }) { throw failure }
+                fail("expected original failure")
+            } catch (caught: IllegalStateException) {
+                assertTrue(caught === failure)
+            }
+        }
+        val event = traceFields(events.single())
+        assertEquals(SyncTraceEvent.GATEWAY_PHASE.code, event.getValue("event"))
+        assertEquals(4L, event.getValue(SyncTraceField.PHASE.code.toString()))
+        assertEquals(0L, event.getValue(SyncTraceField.SUCCESS.code.toString()))
+        assertEquals(3L, event.getValue(SyncTraceField.CORE_ERROR.code.toString()))
+    }
+
+    @Test fun successfulGatewayPhaseOmitsErrorKind() {
+        val events = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+            assertEquals("ok", SyncDiagnostics.measurePhase(4L, { 3L }) { "ok" })
+        }
+        val event = traceFields(events.single())
+        assertEquals(1L, event.getValue(SyncTraceField.SUCCESS.code.toString()))
+        assertFalse(event.containsKey(SyncTraceField.CORE_ERROR.code.toString()))
+    }
+
     private fun gatewayWorker(input: Data) = TestListenableWorkerBuilder<GatewaySyncWorker>(context).setInputData(input).build()
 
     private fun traceFields(line: String): Map<String, Long> = line.split(' ').associate { token ->

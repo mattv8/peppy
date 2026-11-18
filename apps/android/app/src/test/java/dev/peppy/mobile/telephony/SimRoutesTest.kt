@@ -25,6 +25,18 @@ class SimRoutesTest {
     }
 
     @Test
+    fun setupStateIsReportedInsideCapabilitiesAndOmittedWhenAbsent() {
+        assertEquals(
+            """{"simulator":false,"capabilities":{"sims":[],"setup":{"state":"importing"}}}""",
+            SimRoutes.capabilityReport(emptyList(), sendPermissionGranted = false, setupState = "importing").toString(),
+        )
+        assertEquals(
+            """{"simulator":false,"capabilities":{"sims":[]}}""",
+            SimRoutes.capabilityReport(emptyList(), sendPermissionGranted = false).toString(),
+        )
+    }
+
+    @Test
     fun capabilityReportMatchesDesktopGatewayContract() {
         val routes = SimRoutes.current(defaultSmsSubscriptionId = 7)
         assertEquals(

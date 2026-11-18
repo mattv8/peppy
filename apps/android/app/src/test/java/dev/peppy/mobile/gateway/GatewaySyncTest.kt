@@ -34,7 +34,12 @@ import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.NativeIncomingSms
 import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativePermitState
+import uniffi.peppy_mobile_bindings.NativeRawSnapshotRecord
+import uniffi.peppy_mobile_bindings.NativeSnapshotManifestEntry
+import uniffi.peppy_mobile_bindings.NativeSnapshotManifestProgress
+import uniffi.peppy_mobile_bindings.NativeSnapshotProgress
 import uniffi.peppy_mobile_bindings.NativeSnapshotProjectionState
+import uniffi.peppy_mobile_bindings.NativeSnapshotPurpose
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -130,6 +135,15 @@ class GatewaySyncTest : GatewayTestBase() {
 
     private val state get() = GatewayStateStore(context)
     private val routes = SimRoutes.current(3)
+    private val SIX_HOURS_MS = 6 * 60 * 60 * 1000L
+    private val SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000L
+
+    private fun capabilityBodies() = requests.filter { it.first == "POST /v1/capabilities" }.map { it.second }
+
+    private fun importingReport() =
+        SimRoutes.capabilityReport(emptyList(), sendPermissionGranted = false, setupState = "importing").toString()
+
+    private fun readyReport() = SimRoutes.capabilityReport(routes, sendPermissionGranted = true, setupState = "ready").toString()
 
     private fun record(cursor: Int, wire: String) = JSONObject().put("cursor", cursor.toString()).put("envelope", JSONObject(wire))
 
@@ -157,6 +171,7 @@ class GatewaySyncTest : GatewayTestBase() {
         contacts: () -> Boolean = { false },
         contactPhotos: () -> Boolean = { false },
         nowMs: () -> Long = { System.currentTimeMillis() },
+        elapsedMs: () -> Long = { 0L },
         sessionCurrent: () -> Boolean = { true },
         effectPermitted: () -> Boolean = { true },
         processPendingSendCancellations: () -> Boolean = { false },
@@ -171,6 +186,7 @@ class GatewaySyncTest : GatewayTestBase() {
         effectPermitted = effectPermitted,
         processPendingSendCancellations = processPendingSendCancellations,
         nowMs = nowMs,
+        elapsedMs = elapsedMs,
     )
 
     private fun uploads() = requests.count { it.first == "POST /v1/events" }
@@ -201,6 +217,13 @@ class GatewaySyncTest : GatewayTestBase() {
         val second = desktopCommandEnvelope(SimRoutes.routeId(3), "snapshot two").second
         snapshot = JSONArray().put(record(1, first)).put(record(2, second))
         return first to second
+    }
+
+    private fun snapshotRecords(count: Int) {
+        val (_, wire) = desktopCommandEnvelope(SimRoutes.routeId(3), "large snapshot history")
+        snapshot = JSONArray().apply {
+            repeat(count) { index -> put(record(index + 1, wire)) }
+        }
     }
 
     /** Leaves a manifest generation staged with cursor 1 downloaded and cursor 2 still missing. */
@@ -687,6 +710,124 @@ class GatewaySyncTest : GatewayTestBase() {
         assertEquals(NativePermitState.HISTORICAL, client.beginSendAttempt(historical).state)
         assertEquals("1", client.receiveCursor())
         assertTrue("the bootstrap capture uploads only after the decision", uploads() >= 1)
+    }
+
+    @Test
+    fun bootstrapStagesMoreThanTheFormerPageBudgetInOnePass() {
+        val client = enrollAndUnlock()
+        snapshotRecords(3_000)
+
+        val result = sync(client).run()
+
+        assertNull(result.failure)
+        assertFalse(result.more)
+        assertEquals(SyncPhase.LIVE, state.phase)
+        assertEquals(15, requests.count { it.first.startsWith("GET /v1/snapshot/records") })
+    }
+
+    @Test
+    fun stagingBudgetContinuesFromDurableProgressWithoutAnotherSnapshotBegin() {
+        val client = enrollAndUnlock()
+        snapshotRecords(3_000)
+        var elapsed = 0L
+        var stagedPages = 0
+        val timedClient = object : NativeClientInterface by client {
+            override fun appendSnapshotRawPage(
+                generation: ULong,
+                records: List<NativeRawSnapshotRecord>,
+            ) =
+                client.appendSnapshotRawPage(generation, records).also {
+                    if (++stagedPages == 2) elapsed = GatewaySync.SNAPSHOT_STAGE_BUDGET_MS + 1
+                }
+        }
+
+        val first = sync(timedClient, elapsedMs = { elapsed }).run()
+
+        assertNull(first.failure)
+        assertTrue(first.more)
+        assertEquals(SyncPhase.BOOTSTRAP, state.phase)
+        assertEquals("400", client.snapshotProgress()?.lastCursor)
+        assertEquals(2, requests.count { it.first == "GET /v1/snapshot" })
+        assertEquals(
+            GatewayStateStore.SetupProgressState(GatewayStateStore.SetupPhase.DOWNLOADING, staged = 400, expected = 3_000),
+            state.setupProgress,
+        )
+
+        elapsed = 0L
+        val second = sync(timedClient, elapsedMs = { elapsed }).run()
+
+        assertNull(second.failure)
+        assertEquals(SyncPhase.LIVE, state.phase)
+        assertNull("setup progress is cleared once LIVE", state.setupProgress)
+        assertEquals("the second pass only probes compaction capability", 3, requests.count { it.first == "GET /v1/snapshot" })
+    }
+
+    @Test
+    fun drainBudgetContinuesPublishedSnapshotOnTheNextPass() {
+        val client = enrollAndUnlock()
+        snapshotRecords(3_000)
+        var elapsed = 0L
+        var applyCalls = 0
+        val timedClient = object : NativeClientInterface by client {
+            override fun applyPending(limit: ULong) = client.applyPending(limit).also {
+                if (++applyCalls == 1) elapsed = GatewaySync.SNAPSHOT_DRAIN_BUDGET_MS + 1
+            }
+        }
+
+        val first = sync(timedClient, elapsedMs = { elapsed }).run()
+
+        assertNull(first.failure)
+        assertTrue(first.more)
+        assertEquals(SyncPhase.BOOTSTRAP_DRAINING, state.phase)
+        assertEquals("published snapshot drain stopped at its budget", 1, applyCalls)
+        assertNull("the core reports no projection status until the bounded drain completes", client.snapshotProjectionStatus())
+        assertEquals(GatewayStateStore.SetupPhase.ORGANIZING, state.setupProgress?.phase)
+        assertEquals(listOf(importingReport()), capabilityBodies())
+
+        elapsed = 0L
+        val second = sync(timedClient, elapsedMs = { elapsed }).run()
+
+        assertNull(second.failure)
+        assertEquals(SyncPhase.LIVE, state.phase)
+        assertNull(state.setupProgress)
+        assertEquals(
+            "importing while draining, then ready in the pass that goes LIVE",
+            listOf(importingReport(), importingReport(), readyReport()),
+            capabilityBodies(),
+        )
+    }
+
+    @Test
+    fun stagingCancellationStopsBetweenSnapshotPages() {
+        val client = enrollAndUnlock()
+        snapshotRecords(600)
+        var stagedPages = 0
+        val cancellingClient = object : NativeClientInterface by client {
+            override fun appendSnapshotRawPage(
+                generation: ULong,
+                records: List<NativeRawSnapshotRecord>,
+            ) =
+                client.appendSnapshotRawPage(generation, records).also { stagedPages++ }
+        }
+
+        assertThrows(CancellationException::class.java) {
+            sync(cancellingClient, effectPermitted = { stagedPages == 0 }).run()
+        }
+        assertEquals("200", client.snapshotProgress()?.lastCursor)
+        assertEquals(1, requests.count { it.first.startsWith("GET /v1/snapshot/records") })
+    }
+
+    @Test
+    fun liveApplyRemainsBoundedWithoutASnapshot() {
+        val client = live()
+        var applyCalls = 0
+        val recordingClient = object : NativeClientInterface by client {
+            override fun applyPending(limit: ULong) = client.applyPending(limit).also { applyCalls++ }
+        }
+
+        sync(recordingClient).run()
+
+        assertTrue(applyCalls <= GatewaySync.APPLY_BATCHES)
     }
 
     @Test
@@ -1506,7 +1647,8 @@ class GatewaySyncTest : GatewayTestBase() {
         assertFalse(result.more)
         assertEquals(1, compactionStateCalls)
         assertEquals(1, requests.count { it.first == "POST /v1/compaction/capability" })
-        assertEquals(1, requests.count { it.first == "GET /v1/snapshot" })
+        assertEquals("a LIVE pass fetches the cut once, for the compaction probe", 1, requests.count { it.first == "GET /v1/snapshot" })
+        assertTrue(requests.none { it.first.startsWith("GET /v1/snapshot/records") })
         val progress = traces.map(::traceFields).single { it["event"] == SyncTraceEvent.GATEWAY_PROGRESS.code }
         assertFalse(progress.containsKey(SyncTraceField.READY.code.toString()))
         assertFalse(progress.containsKey(SyncTraceField.BACKFILL_PENDING.code.toString()))
@@ -1595,7 +1737,10 @@ class GatewaySyncTest : GatewayTestBase() {
         val carrier = FakeCarrier()
         val result = sync(client, carrier).run()
         assertNull(result.failure)
-        assertEquals(SimRoutes.capabilityReport(routes, true).toString(), requests.first { it.first == "POST /v1/capabilities" }.second)
+        assertEquals(
+            SimRoutes.capabilityReport(routes, true, setupState = "ready").toString(),
+            requests.first { it.first == "POST /v1/capabilities" }.second,
+        )
         assertTrue(requests.any { it.first == "GET /v1/events?after=0&limit=50" })
         val sent = shadowOf(carrier.calls.single().sent.first()).savedIntent
         assertEquals(commandId, CallbackIdentity.parse(sent.data)!!.commandId)
@@ -1638,7 +1783,441 @@ class GatewaySyncTest : GatewayTestBase() {
     }
 
     @Test
-    fun snapshotCountAboveCoreLimitNeverBypassesBootstrap() = assertInvalidCutStaysInBootstrap("200000", "100001")
+    fun snapshotCountAboveCoreLimitNeverBypassesBootstrap() {
+        val client = enrollAndUnlock()
+        snapshotCut = "1000001" to "1000001"
+        var now = 1_000L
+
+        val first = sync(client, nowMs = { now }).run()
+        now += SIX_HOURS_MS - 1
+        val second = sync(client, nowMs = { now }).run()
+
+        assertNull(first.failure)
+        assertNull(second.failure)
+        assertFalse(first.more)
+        assertEquals(SyncPhase.BOOTSTRAP, state.phase)
+        assertTrue(GatewayStateStore(context).hasHistoryTooLarge)
+        assertEquals(HistoryTooLargeKind.SNAPSHOT_BEGIN, GatewayStateStore(context).historyTooLargeKind)
+        assertNull(client.snapshotProgress())
+        assertEquals(0, uploads())
+        assertTrue(requests.none { it.first.startsWith("GET /v1/snapshot/records") || it.first.startsWith("GET /v1/events") })
+        // Each pass runs the compaction probe (2 fetches); only the first pass also fetches the cut for begin (+1).
+        assertEquals("the second pass inside six hours does not begin", 3, requests.count { it.first == "GET /v1/snapshot" })
+    }
+
+    @Test
+    fun snapshotCountAboveFormerCeilingIsAcceptedAndStagingStarts() {
+        val client = enrollAndUnlock()
+        snapshotRecords(400)
+        snapshotCut = "100001" to "100001"
+        var elapsed = 0L
+        var stagedPages = 0
+        val pagedClient = object : NativeClientInterface by client {
+            override fun appendSnapshotRawPage(generation: ULong, records: List<NativeRawSnapshotRecord>) =
+                client.appendSnapshotRawPage(generation, records).also {
+                    if (++stagedPages == 1) elapsed = GatewaySync.SNAPSHOT_STAGE_BUDGET_MS + 1
+                }
+        }
+
+        val result = sync(pagedClient, elapsedMs = { elapsed }).run()
+
+        assertNull(result.failure)
+        assertTrue(result.more)
+        assertEquals(SyncPhase.BOOTSTRAP, state.phase)
+        assertFalse(GatewayStateStore(context).hasHistoryTooLarge)
+        assertNotNull(client.snapshotProgress())
+        assertTrue(client.snapshotProgress()!!.receivedRecords > 0uL)
+        assertEquals(1, requests.count { it.first.startsWith("GET /v1/snapshot/records") })
+    }
+
+    @Test
+    fun tooLargeMarkerIsRetriedOnceAfterSixHoursAndClearedBySuccessfulBegin() {
+        val client = enrollAndUnlock()
+        snapshotCut = "1000001" to "1000001"
+        var now = 1_000L
+        sync(client, nowMs = { now }).run()
+        assertTrue(GatewayStateStore(context).hasHistoryTooLarge)
+
+        snapshotCut = null
+        twoSnapshotRecords()
+        now += SIX_HOURS_MS - 1
+        val skipped = sync(client, nowMs = { now }).run()
+        assertNull(skipped.failure)
+        assertEquals(SyncPhase.BOOTSTRAP, state.phase)
+        assertTrue("still inside the six-hour window", GatewayStateStore(context).hasHistoryTooLarge)
+
+        now += 1
+        val retried = sync(client, nowMs = { now }).run()
+
+        assertNull(retried.failure)
+        assertFalse(GatewayStateStore(context).hasHistoryTooLarge)
+        assertEquals(SyncPhase.LIVE, state.phase)
+    }
+
+    @Test
+    fun tooLargeResyncBeginFromReceiveIsNotAFailure() {
+        val client = live()
+        eventsStatus = 409
+        snapshotCut = "1000001" to "1000001"
+
+        val result = sync(client).run()
+
+        assertNull(result.failure)
+        assertEquals(SyncPhase.LIVE, state.phase)
+        assertTrue(GatewayStateStore(context).hasHistoryTooLarge)
+        assertTrue(requests.none { it.first.startsWith("GET /v1/snapshot/records") })
+    }
+
+    @Test
+    fun tooLargeContactRepairBeginIsNotAFailureAndKeepsTheRepairLatch() {
+        val repairing = live()
+        repairing.requestContactRepair()
+        snapshotCompactionSupported = true
+        snapshotCompactionActive = true
+        val refusing = object : NativeClientInterface by repairing {
+            override fun beginSnapshotWithCompaction(
+                highWater: String,
+                recordCount: ULong,
+                purpose: NativeSnapshotPurpose,
+                serverCompactionGeneration: String?,
+            ): NativeSnapshotProgress = throw MobileBindingsException.SnapshotTooLarge()
+        }
+
+        val result = sync(refusing).run()
+
+        assertNull(result.failure)
+        assertTrue(repairing.contactRepairRequired())
+        assertTrue(GatewayStateStore(context).hasHistoryTooLarge)
+    }
+
+    @Test
+    fun tooLargeRecordsPageAppendIsNotAFailureAndNeverGoesLive() {
+        val client = enrollAndUnlock()
+        twoSnapshotRecords()
+        val refusing = object : NativeClientInterface by client {
+            override fun appendSnapshotRawPage(generation: ULong, records: List<NativeRawSnapshotRecord>): NativeSnapshotProgress =
+                throw MobileBindingsException.SnapshotTooLarge()
+        }
+
+        val result = sync(refusing).run()
+
+        assertNull(result.failure)
+        assertEquals(SyncPhase.BOOTSTRAP, state.phase)
+        assertTrue(GatewayStateStore(context).hasHistoryTooLarge)
+        assertEquals(HistoryTooLargeKind.DOWNLOAD_BYTE_CAP, GatewayStateStore(context).historyTooLargeKind)
+        assertEquals(0, uploads())
+    }
+
+    @Test
+    fun tooLargeManifestPageAppendIsNotAFailureAndNeverGoesLive() {
+        val client = enrollAndUnlock()
+        snapshotManifestSupported = true
+        twoSnapshotRecords()
+        val refusing = object : NativeClientInterface by client {
+            override fun appendSnapshotManifest(
+                generation: ULong,
+                entries: List<NativeSnapshotManifestEntry>,
+            ): NativeSnapshotManifestProgress = throw MobileBindingsException.SnapshotTooLarge()
+        }
+
+        val result = sync(refusing).run()
+
+        assertNull(result.failure)
+        assertEquals(SyncPhase.BOOTSTRAP, state.phase)
+        assertTrue(GatewayStateStore(context).hasHistoryTooLarge)
+        assertEquals(0, uploads())
+    }
+
+    @Test
+    fun capabilityBodyBootstrapsAsImportingAndGoesReadyInTheSamePassThatGoesLive() {
+        val client = enrollAndUnlock()
+        twoSnapshotRecords()
+
+        val result = sync(client).run()
+
+        assertNull(result.failure)
+        assertEquals(SyncPhase.LIVE, state.phase)
+        assertEquals(listOf(importingReport(), readyReport()), capabilityBodies())
+    }
+
+    @Test
+    fun capabilityBodyDuringRecoveryPublishesNoRoutesAndNoSetupState() {
+        val client = enrollAndUnlock()
+        state.requireRecovery(RecoveryReason.REUSED_DEVICE_IDENTITY)
+
+        sync(client).run()
+
+        assertEquals(
+            listOf(SimRoutes.capabilityReport(emptyList(), sendPermissionGranted = false).toString()),
+            capabilityBodies(),
+        )
+    }
+
+    @Test
+    fun failedBootstrapPhaseRecordsStableCoreErrorKind() {
+        val client = enrollAndUnlock()
+        snapshotCut = "2" to "5"
+        val traces = mutableListOf<String>()
+
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 2L }, traces::add) { sync(client).run() }
+
+        val failed = traces.map(::traceFields).single {
+            it["event"] == SyncTraceEvent.GATEWAY_PHASE.code && it[SyncTraceField.SUCCESS.code.toString()] == 0L
+        }
+        assertEquals(4L, failed.getValue(SyncTraceField.PHASE.code.toString()))
+        assertEquals("InvalidRequest is core kind 3", 3L, failed.getValue(SyncTraceField.CORE_ERROR.code.toString()))
+    }
+
+    @Test
+    fun manifestMissingRunStopsAtBudgetAndResumesWithoutRedownloadingStagedRows() {
+        val client = enrollAndUnlock()
+        snapshotManifestSupported = true
+        snapshotRecords(1_000)
+        var elapsed = 0L
+        var pages = 0
+        val timedClient = object : NativeClientInterface by client {
+            override fun appendSnapshotRawPage(generation: ULong, records: List<NativeRawSnapshotRecord>) =
+                client.appendSnapshotRawPage(generation, records).also {
+                    if (++pages == 1) elapsed = GatewaySync.SNAPSHOT_STAGE_BUDGET_MS + 1
+                }
+        }
+
+        val first = sync(timedClient, elapsedMs = { elapsed }).run()
+
+        assertNull(first.failure)
+        assertTrue(first.more)
+        assertEquals(SyncPhase.BOOTSTRAP, state.phase)
+        assertEquals("200", client.snapshotProgress()?.lastCursor)
+        assertEquals(1, requests.count { it.first.startsWith("GET /v1/snapshot/records?high_water=1000&after=0&") })
+
+        elapsed = 0L
+        val second = sync(timedClient, elapsedMs = { elapsed }).run()
+
+        assertNull(second.failure)
+        assertEquals(SyncPhase.LIVE, state.phase)
+        assertEquals(
+            "the resumed pass starts after the staged cursor and never downloads cursor 1..200 again",
+            1,
+            requests.count { it.first.startsWith("GET /v1/snapshot/records") && it.first.contains("&after=0&") },
+        )
+    }
+
+    @Test
+    fun cancellationBetweenManifestMissingRequestsStopsThePass() {
+        val client = enrollAndUnlock()
+        snapshotManifestSupported = true
+        snapshotRecords(1_000)
+        var pages = 0
+        val cancellingClient = object : NativeClientInterface by client {
+            override fun appendSnapshotRawPage(generation: ULong, records: List<NativeRawSnapshotRecord>) =
+                client.appendSnapshotRawPage(generation, records).also { pages++ }
+        }
+
+        assertThrows(CancellationException::class.java) {
+            sync(cancellingClient, effectPermitted = { pages == 0 }).run()
+        }
+        assertEquals(1, requests.count { it.first.startsWith("GET /v1/snapshot/records") })
+    }
+
+    @Test
+    fun rejectedRestartOfAnExistingGenerationStopsStagingUntilTheRecheckWindow() {
+        val client = enrollAndUnlock()
+        snapshotRecords(3_000)
+        var now = 1_000L
+        var elapsed = 0L
+        var pages = 0
+        val timedClient = object : NativeClientInterface by client {
+            override fun appendSnapshotRawPage(generation: ULong, records: List<NativeRawSnapshotRecord>) =
+                client.appendSnapshotRawPage(generation, records).also {
+                    if (++pages == 1) elapsed = GatewaySync.SNAPSHOT_STAGE_BUDGET_MS + 1
+                }
+        }
+        // Pass 1 stages one page and stops at the budget, leaving an existing generation.
+        sync(timedClient, elapsedMs = { elapsed }, nowMs = { now }).run()
+        assertEquals("200", client.snapshotProgress()?.lastCursor)
+
+        // Pass 2: the staged generation's next page is refused, so the restart is a begin above the ceiling.
+        snapshotCut = "1000001" to "1000001"
+        brokenRecordPages.add(LoopbackHttpServer.Response(409))
+        elapsed = 0L
+        now += 1
+        sync(timedClient, elapsedMs = { elapsed }, nowMs = { now }).run()
+        val markedAt = GatewayStateStore(context).historyTooLargeCheckedMs
+        assertEquals(now, markedAt)
+
+        // Pass 3 inside six hours: no staging request, no begin, and the marker does not move.
+        val stagingRequestsBefore = requests.count { it.first.startsWith("GET /v1/snapshot/records") || it.first.startsWith("GET /v1/snapshot/manifest") }
+        val cutFetchesBefore = requests.count { it.first == "GET /v1/snapshot" }
+        now = markedAt!! + SIX_HOURS_MS - 1
+        sync(timedClient, elapsedMs = { elapsed }, nowMs = { now }).run()
+        assertEquals(stagingRequestsBefore, requests.count { it.first.startsWith("GET /v1/snapshot/records") || it.first.startsWith("GET /v1/snapshot/manifest") })
+        assertEquals("only the compaction probe fetches the cut", cutFetchesBefore + 1, requests.count { it.first == "GET /v1/snapshot" })
+        assertEquals("a skipped pass does not move the marker", markedAt, GatewayStateStore(context).historyTooLargeCheckedMs)
+
+        // Pass 4 after six hours: exactly one attempt (probe plus one cut fetch), which refreshes the marker.
+        brokenRecordPages.add(LoopbackHttpServer.Response(409))
+        now = markedAt + SIX_HOURS_MS
+        val cutFetchesBeforeAttempt = requests.count { it.first == "GET /v1/snapshot" }
+        sync(timedClient, elapsedMs = { elapsed }, nowMs = { now }).run()
+        assertEquals("one attempt: the probe and one cut fetch", cutFetchesBeforeAttempt + 2, requests.count { it.first == "GET /v1/snapshot" })
+        assertEquals(now, GatewayStateStore(context).historyTooLargeCheckedMs)
+    }
+
+    @Test
+    fun byteCapMarkerSkipsSixHoursAndRetriesAfterSevenDays() {
+        val client = enrollAndUnlock()
+        twoSnapshotRecords()
+        var appends = 0
+        val refusingAppend = object : NativeClientInterface by client {
+            override fun appendSnapshotRawPage(generation: ULong, records: List<NativeRawSnapshotRecord>): NativeSnapshotProgress {
+                appends++
+                throw MobileBindingsException.SnapshotTooLarge()
+            }
+        }
+        var now = 1_000L
+        sync(refusingAppend, nowMs = { now }).run()
+        assertEquals(1, appends)
+        assertEquals(HistoryTooLargeKind.DOWNLOAD_BYTE_CAP, GatewayStateStore(context).historyTooLargeKind)
+
+        now += SIX_HOURS_MS
+        sync(refusingAppend, nowMs = { now }).run()
+        assertEquals("the byte-cap kind does not retry at six hours", 1, appends)
+
+        now = 1_000L + SEVEN_DAYS_MS
+        sync(refusingAppend, nowMs = { now }).run()
+        assertEquals("one retry after seven days", 2, appends)
+    }
+
+    /** Raw persisted setup phase, so the check does not depend on the store's own LIVE read guard. */
+    private fun rawPersistedSetupPhase(): String? =
+        context.getSharedPreferences("peppy-gateway-state", android.content.Context.MODE_PRIVATE).getString("setup-phase.v1", null)
+
+    @Test
+    fun liveResyncPersistsNoSetupProgressAndShowsNoCard() {
+        val client = live()
+        eventsStatus = 409
+        twoSnapshotRecords()
+
+        val result = sync(client).run()
+
+        assertNull(result.failure)
+        assertEquals(SyncPhase.LIVE, state.phase)
+        assertNull("a LIVE resync must not persist import progress", rawPersistedSetupPhase())
+        assertNull(state.setupProgress)
+    }
+
+    @Test
+    fun liveContactRepairPersistsNoSetupProgress() {
+        val repairing = live()
+        repairing.requestContactRepair()
+        snapshotCompactionSupported = true
+        snapshotCompactionActive = true
+
+        val result = sync(repairing).run()
+
+        assertNull(result.failure)
+        assertFalse(repairing.contactRepairRequired())
+        assertNull("contact repair is not an import", rawPersistedSetupPhase())
+    }
+
+    @Test
+    fun retainedGenerationCompletingAfterTheWindowEndsTheTooLargeState() {
+        val client = enrollAndUnlock()
+        snapshotRecords(3_000)
+        var now = 1_000L
+        var elapsed = 0L
+        var pages = 0
+        val timedClient = object : NativeClientInterface by client {
+            override fun appendSnapshotRawPage(generation: ULong, records: List<NativeRawSnapshotRecord>) =
+                client.appendSnapshotRawPage(generation, records).also {
+                    if (++pages == 1) elapsed = GatewaySync.SNAPSHOT_STAGE_BUDGET_MS + 1
+                }
+        }
+        sync(timedClient, elapsedMs = { elapsed }, nowMs = { now }).run()
+        snapshotCut = "1000001" to "1000001"
+        brokenRecordPages.add(LoopbackHttpServer.Response(409))
+        elapsed = 0L
+        now += 1
+        sync(timedClient, elapsedMs = { elapsed }, nowMs = { now }).run()
+        assertTrue(GatewayStateStore(context).hasHistoryTooLarge)
+
+        // The window expires; the retained generation is still there and no begin is needed to finish it.
+        snapshotCut = null
+        now = (GatewayStateStore(context).historyTooLargeCheckedMs ?: error("marker")) + SIX_HOURS_MS
+        val result = sync(timedClient, elapsedMs = { elapsed }, nowMs = { now }).run()
+
+        assertNull(result.failure)
+        assertEquals("the resumed generation completes and the phone goes LIVE", SyncPhase.LIVE, state.phase)
+        assertFalse("completing the retained generation ends the too-large state", GatewayStateStore(context).hasHistoryTooLarge)
+    }
+
+    @Test
+    fun recordsPageByteCapRefusalKeepsCoreErrorKindWithoutAFailure() {
+        val client = enrollAndUnlock()
+        twoSnapshotRecords()
+        val refusing = object : NativeClientInterface by client {
+            override fun appendSnapshotRawPage(generation: ULong, records: List<NativeRawSnapshotRecord>): NativeSnapshotProgress =
+                throw MobileBindingsException.SnapshotTooLarge()
+        }
+        val traces = mutableListOf<String>()
+
+        val result = SyncDiagnostics.withTestConfiguration(true, { 10L }, { 2L }, traces::add) { sync(refusing).run() }
+
+        assertNull(result.failure)
+        assertFalse(result.more)
+        val bootstrap = traces.map(::traceFields).single {
+            it["event"] == SyncTraceEvent.GATEWAY_PHASE.code && it[SyncTraceField.PHASE.code.toString()] == 4L
+        }
+        assertEquals(0L, bootstrap.getValue(SyncTraceField.SUCCESS.code.toString()))
+        assertEquals(5L, bootstrap.getValue(SyncTraceField.CORE_ERROR.code.toString()))
+    }
+
+    @Test
+    fun manifestPageByteCapRefusalKeepsCoreErrorKindWithoutAFailure() {
+        val client = enrollAndUnlock()
+        snapshotManifestSupported = true
+        twoSnapshotRecords()
+        val refusing = object : NativeClientInterface by client {
+            override fun appendSnapshotManifest(
+                generation: ULong,
+                entries: List<NativeSnapshotManifestEntry>,
+            ): NativeSnapshotManifestProgress = throw MobileBindingsException.SnapshotTooLarge()
+        }
+        val traces = mutableListOf<String>()
+
+        val result = SyncDiagnostics.withTestConfiguration(true, { 10L }, { 2L }, traces::add) { sync(refusing).run() }
+
+        assertNull(result.failure)
+        assertFalse(result.more)
+        val bootstrap = traces.map(::traceFields).single {
+            it["event"] == SyncTraceEvent.GATEWAY_PHASE.code && it[SyncTraceField.PHASE.code.toString()] == 4L
+        }
+        assertEquals(0L, bootstrap.getValue(SyncTraceField.SUCCESS.code.toString()))
+        assertEquals(5L, bootstrap.getValue(SyncTraceField.CORE_ERROR.code.toString()))
+    }
+
+    @Test
+    fun setupProgressWritesAreThrottledButEndWithTheLastValue() {
+        val client = enrollAndUnlock()
+        snapshotRecords(3_000)
+        var elapsed = 0L
+        var pages = 0
+        val timedClient = object : NativeClientInterface by client {
+            override fun appendSnapshotRawPage(generation: ULong, records: List<NativeRawSnapshotRecord>) =
+                client.appendSnapshotRawPage(generation, records).also {
+                    // Three pages land within one write interval; the budget then ends the pass.
+                    if (++pages == 3) elapsed = GatewaySync.SNAPSHOT_STAGE_BUDGET_MS + 1
+                }
+        }
+
+        sync(timedClient, elapsedMs = { elapsed }).run()
+
+        assertEquals(
+            "the last staged value is written at the end of the phase",
+            GatewayStateStore.SetupProgressState(GatewayStateStore.SetupPhase.DOWNLOADING, staged = 600, expected = 3_000),
+            state.setupProgress,
+        )
+    }
 
     @Test
     fun snapshotCountAboveHighWaterNeverBypassesBootstrap() = assertInvalidCutStaysInBootstrap("2", "5")

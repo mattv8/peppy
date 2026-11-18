@@ -94,13 +94,13 @@ internal object SyncDiagnostics {
         }
     }
 
-    internal fun <T> measurePhase(phase: Long, block: () -> T): T {
+    internal fun <T> measurePhase(phase: Long, errorKind: (Throwable) -> Long = { 0 }, block: () -> T): T {
         if (!enabled) return block()
         val start = nowMs(); val startCpu = configuration.cpuMs()
         return try {
             block().also { record(SyncTraceEvent.GATEWAY_PHASE, SyncTraceField.PHASE to phase, SyncTraceField.DURATION_MS to (nowMs() - start), SyncTraceField.CPU_MS to (configuration.cpuMs() - startCpu), SyncTraceField.SUCCESS to 1) }
         } catch (error: Throwable) {
-            record(SyncTraceEvent.GATEWAY_PHASE, SyncTraceField.PHASE to phase, SyncTraceField.DURATION_MS to (nowMs() - start), SyncTraceField.CPU_MS to (configuration.cpuMs() - startCpu), SyncTraceField.SUCCESS to 0)
+            record(SyncTraceEvent.GATEWAY_PHASE, SyncTraceField.PHASE to phase, SyncTraceField.DURATION_MS to (nowMs() - start), SyncTraceField.CPU_MS to (configuration.cpuMs() - startCpu), SyncTraceField.SUCCESS to 0, SyncTraceField.CORE_ERROR to errorKind(error))
             throw error
         }
     }
