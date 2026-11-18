@@ -58,9 +58,12 @@ fn reaction_support_is_native_only_for_a_capable_eligible_gateway() {
     let absent = ConversationId::new();
     grant_eligibility(&fixture, gateway, absent);
     assert_eq!(
-        fixture.client.reaction_support(absent).unwrap().support,
-        ReactionSupport::None,
-        "an absent capability is not a prompt to update while the feature is not released"
+        fixture.client.reaction_support(absent).unwrap(),
+        ReactionSupportView {
+            support: ReactionSupport::NeedsPhoneUpdate,
+            gateway_id: Some(gateway)
+        },
+        "a gateway with no capability for the active epoch never advertised reactions"
     );
 
     let native = native_conversation(&fixture, gateway, true);
@@ -77,6 +80,31 @@ fn reaction_support_is_native_only_for_a_capable_eligible_gateway() {
         fixture.client.reaction_support(declined).unwrap().support,
         ReactionSupport::None
     );
+}
+
+#[test]
+fn reaction_react_refuses_an_rcs_message_whose_phone_predates_reactions() {
+    let fixture = Fixture::new();
+    let gateway = DeviceId::new();
+    let conversation = ConversationId::new();
+    grant_eligibility(&fixture, gateway, conversation);
+    let message = seed_message(
+        &fixture,
+        Transport::Rcs,
+        Direction::Incoming,
+        "hi",
+        conversation,
+    );
+    let before = outbox_count(&fixture);
+
+    let result = fixture
+        .client
+        .react_to_message(message, Some("👍".into()), true, None)
+        .unwrap();
+
+    assert_eq!(result, refusal(SubmitRefusal::NeedsPhoneUpdate));
+    assert!(request_row(&fixture, message).is_none());
+    assert_eq!(outbox_count(&fixture), before);
 }
 
 #[test]

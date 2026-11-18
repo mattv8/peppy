@@ -1198,7 +1198,6 @@ pub struct SendCancellationView {
     pub requires_gateway_update: bool,
 }
 
-pub const NATIVE_REACTIONS_RELEASED: bool = false;
 pub const REACTION_REQUEST_TTL_MS: i64 = 600_000;
 const REACTION_REQUEST_SKEW_MS: i64 = sender_blocklist::REQUEST_SKEW_MS;
 

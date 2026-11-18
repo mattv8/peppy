@@ -92,6 +92,17 @@ class GoogleMessagesLinkServiceTest {
         handle.allowRunReturn.countDown()
     }
 
+    @Test fun `reactions are supported only while native RCS is on and the link is linked and running`() {
+        val linked = LinkStatus(1, "linked", true, true, true, 0, "")
+        GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = null
+        assertTrue(GoogleMessagesLinkService.reactionsSupported(linked))
+        assertFalse(GoogleMessagesLinkService.reactionsSupported(linked.copy(running = false)))
+        assertFalse(GoogleMessagesLinkService.reactionsSupported(linked.copy(state = "needs_relink")))
+
+        GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = false
+        assertFalse(GoogleMessagesLinkService.reactionsSupported(linked))
+    }
+
     @Test fun `native RCS gate defaults on and honors the test override`() {
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = null
         assertTrue(GoogleMessagesLinkService.nativeRcsEnabled())

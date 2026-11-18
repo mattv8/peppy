@@ -874,6 +874,13 @@ pub(crate) fn support_view(
         )
         .optional()?;
     if let Some(gateway) = gateway {
+        // Without an active epoch the capability cannot be read, so nothing is known about it.
+        let Some(epoch) = epoch else {
+            return Ok(ReactionSupportView {
+                support: ReactionSupport::None,
+                gateway_id: None,
+            });
+        };
         let capability: Option<bool> = conn
             .query_row(
                 "SELECT supported FROM reaction_capabilities WHERE device_id=? AND key_epoch=?",
@@ -884,8 +891,7 @@ pub(crate) fn support_view(
         let support = match capability {
             Some(true) => ReactionSupport::Native,
             Some(false) => ReactionSupport::None,
-            None if NATIVE_REACTIONS_RELEASED => ReactionSupport::NeedsPhoneUpdate,
-            None => ReactionSupport::None,
+            None => ReactionSupport::NeedsPhoneUpdate,
         };
         let gateway_id = match support {
             ReactionSupport::Native | ReactionSupport::NeedsPhoneUpdate => Some(parse(&gateway)?),
