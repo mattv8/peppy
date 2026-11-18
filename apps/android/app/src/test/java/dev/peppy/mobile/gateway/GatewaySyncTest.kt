@@ -712,6 +712,79 @@ class GatewaySyncTest : GatewayTestBase() {
         assertTrue("the bootstrap capture uploads only after the decision", uploads() >= 1)
     }
 
+    // A pass that bootstraps to LIVE selects its branch before bootstrap runs, so the first LIVE
+    // branch (retirement, receive, dispatch) is the next pass.
+    @Test
+    fun swallowedCommandIsRetiredInTheFirstLivePassAndItsStatusUploaded() {
+        val client = enrollAndUnlock()
+        val (_, wire) = desktopCommandEnvelope(SimRoutes.routeId(3), "swallowed during bootstrap")
+        snapshot = JSONArray().put(record(1, wire))
+        assertNull(sync(client).run().failure)
+        assertEquals(SyncPhase.LIVE, state.phase)
+
+        val live = sync(client).run()
+
+        assertNull(live.failure)
+        // The first LIVE pass retired it, so nothing is left for a direct call to retire.
+        assertEquals(0u, client.retireSwallowedCommands())
+        assertTrue("the retirement status is uploaded and acked in the same pass", client.pendingOutboxJsonBatch(10uL).isEmpty())
+        assertTrue(uploads() >= 1)
+    }
+
+    @Test
+    fun liveCommandReceivedInTheRetiringPassIsDispatchedExactlyOnce() {
+        val client = enrollAndUnlock()
+        val (_, historicalWire) = desktopCommandEnvelope(SimRoutes.routeId(3), "swallowed during bootstrap")
+        snapshot = JSONArray().put(record(1, historicalWire))
+        val (liveCommand, liveWire) = desktopCommandEnvelope(SimRoutes.routeId(3), "live after bootstrap")
+        serveEventPages(listOf(record(2, liveWire)))
+        val carrier = FakeCarrier()
+        assertNull(sync(client, carrier).run().failure)
+        assertTrue("bootstrap alone dispatches nothing", carrier.calls.isEmpty())
+
+        val live = sync(client, carrier).run()
+
+        assertNull(live.failure)
+        assertEquals(1, carrier.calls.size)
+        val sent = shadowOf(carrier.calls.single().sent.first()).savedIntent
+        assertEquals(liveCommand, CallbackIdentity.parse(sent.data)!!.commandId)
+        assertEquals(0u, client.retireSwallowedCommands())
+    }
+
+    @Test
+    fun fullRetirementBatchAsksForAnotherPassAndTheRemainderFinishes() {
+        val client = enrollAndUnlock()
+        snapshot = JSONArray().apply {
+            repeat(GatewaySync.RETIRE_SWALLOWED_BATCH + 1) { index ->
+                val (_, wire) = desktopCommandEnvelope(SimRoutes.routeId(3), "swallowed $index")
+                put(record(index + 1, wire))
+            }
+        }
+        assertNull(sync(client).run().failure)
+
+        val full = sync(client).run()
+
+        assertNull(full.failure)
+        assertTrue("a full retirement batch asks for another pass", full.more)
+        assertNull(sync(client).run().failure)
+        assertEquals(0u, client.retireSwallowedCommands())
+    }
+
+    @Test
+    fun laterLivePassesRetireNothingMore() {
+        val client = enrollAndUnlock()
+        val (_, wire) = desktopCommandEnvelope(SimRoutes.routeId(3), "swallowed once")
+        snapshot = JSONArray().put(record(1, wire))
+        assertNull(sync(client).run().failure)
+        assertNull(sync(client).run().failure)
+
+        val later = sync(client).run()
+
+        assertNull(later.failure)
+        assertEquals(0u, client.retireSwallowedCommands())
+        assertTrue(client.pendingOutboxJsonBatch(10uL).isEmpty())
+    }
+
     @Test
     fun bootstrapStagesMoreThanTheFormerPageBudgetInOnePass() {
         val client = enrollAndUnlock()

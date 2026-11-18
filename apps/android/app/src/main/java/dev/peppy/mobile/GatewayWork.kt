@@ -338,6 +338,13 @@ class GatewaySync(
     private val sessionCurrent: () -> Boolean = { true },
     /** Reconciles durable cancellation requests after receive/apply and before effects. */
     private val processPendingSendCancellations: () -> Boolean = { client.processPendingSendCancellations() },
+    /**
+     * Retires commands a snapshot swallowed as history, at most one core batch per LIVE pass before
+     * dispatch. Returns true when the batch was full, so the pass asks for another pass.
+     */
+    private val retireSwallowedCommands: () -> Boolean = {
+        client.retireSwallowedCommands() >= RETIRE_SWALLOWED_BATCH.toUInt()
+    },
     /** Cancellation fences phases before they admit new permits or invoke host effects. */
     private val effectPermitted: () -> Boolean = { true },
     private val nowMs: () -> Long = { System.currentTimeMillis() },
@@ -345,7 +352,7 @@ class GatewaySync(
     private val elapsedMs: () -> Long = { SystemClock.elapsedRealtime() },
 ) {
     private enum class GatewayPhase(val code: Long) {
-        RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), SEND_CANCELLATIONS(23), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_PHONE_READS(21), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19), MMS_CLEANUP(BackgroundDiagnostics.MMS_CLEANUP_PHASE), MESSAGING_APP(22),
+        RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), SEND_CANCELLATIONS(23), RETIRE_SWALLOWED(24), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_PHONE_READS(21), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19), MMS_CLEANUP(BackgroundDiagnostics.MMS_CLEANUP_PHASE), MESSAGING_APP(22),
     }
     class PassResult(
         val more: Boolean,
@@ -445,6 +452,9 @@ class GatewaySync(
                 var applyRemaining = true
                 phase(GatewayPhase.DRAIN_AFTER_RECEIVE) { applyRemaining = drain(); applyRemaining }
                 phase(GatewayPhase.SEND_CANCELLATIONS) { processPendingSendCancellations() }
+                // Core refuses while a snapshot stages or drains; a failure is recorded as a phase
+                // failure and does not stop the dispatch phase below.
+                phase(GatewayPhase.RETIRE_SWALLOWED) { retireSwallowedCommands() }
                 if (!continuingSnapshot && !applyRemaining && client.contactRepairRequired() && client.serverCompactionSupported()) {
                     phase(GatewayPhase.CONTACT_REPAIR) { repairContactProjection() }
                 }
@@ -1004,6 +1014,8 @@ class GatewaySync(
     }
 
     companion object {
+        /** Must equal `RETIRE_SWALLOWED_BATCH` in `crates/client-core/src/lib.rs`. */
+        const val RETIRE_SWALLOWED_BATCH = 200
         const val EVENT_PAGE = 50
         const val RECEIVE_PAGES = 4
         const val SNAPSHOT_PAGE = 200
