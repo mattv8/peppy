@@ -8,6 +8,6 @@ export function ReactionSettings({ show, onShow }: { show: boolean; onShow(show:
         <span aria-hidden />
       </span>
     </div>
-    <p id="settings-show-reactions-hint" className="settings-field-hint">Show reaction texts such as “Reacted 😆 to …” as a badge on the original message. Turn off to show them as ordinary messages.</p>
+    <p id="settings-show-reactions-hint" className="settings-field-hint">Show reaction texts such as “Reacted 😆 to …” as a badge on the original message. Turn off to show them as ordinary messages. Reactions sent natively from your phone always show.</p>
   </section>;
 }

@@ -77,7 +77,7 @@ export {
 } from "./phone";
 import "./styles.css";
 import "./avatar-palette.generated.css";
-export { Pencil, Send, Eye, EyeOff, RefreshCw } from "lucide-react";
+export { Pencil, Send, Eye, EyeOff, RefreshCw, SmilePlus } from "lucide-react";
 export { ContactAvatar } from "./ContactAvatar";
 export {
   AVATAR_PALETTE_SIZE,

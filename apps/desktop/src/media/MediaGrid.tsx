@@ -8,6 +8,9 @@ import { rcsAttachmentIndex } from "../rcs/rcsMediaState";
 import "./media.css";
 import "./media-carousel.css";
 
+/** The sr-only "Press R to react." line outside the message log, rendered by the reaction layer owner. */
+export const REACTION_HINT_ID = "message-reaction-hint-r";
+
 export type MediaGridProps = {
   messages: GalleryMessage[];
   onOpen(item: { attachment: GalleryAttachment; message: GalleryMessage }): void;
@@ -19,9 +22,13 @@ export type MediaGridProps = {
   isMessagePending?(message: GalleryMessage): boolean;
   messageTitle?(message: GalleryMessage): string | undefined;
   senderRun?(group: MessageGroup): { label?: ReactNode; avatar?: ReactNode; gutter: boolean; ariaName?: string; start: boolean; end: boolean } | undefined;
+  /** Whether a message can take a reaction; reactable slides and single tiles get the reaction hooks. */
+  reactable?(message: GalleryMessage): boolean;
+  /** Reaction badges for a media message, drawn over the photo (overlay placement). */
+  renderBadges?(message: GalleryMessage): ReactNode;
 };
 
-function Carousel({ group, onOpen, messageTitle }: { group: MessageGroup; onOpen: MediaGridProps["onOpen"]; messageTitle?: MediaGridProps["messageTitle"] }) {
+function Carousel({ group, onOpen, messageTitle, reactable, renderBadges }: { group: MessageGroup; onOpen: MediaGridProps["onOpen"]; messageTitle?: MediaGridProps["messageTitle"]; reactable?: MediaGridProps["reactable"]; renderBadges?: MediaGridProps["renderBadges"] }) {
   const carouselRef = useRef<HTMLDivElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
   const bodyRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -116,11 +123,12 @@ function Carousel({ group, onOpen, messageTitle }: { group: MessageGroup; onOpen
   const groupLabel = requestableAttachments.length ? `Sync ${requestableAttachments.length} images` : "Requested";
   return <><div ref={carouselRef} tabIndex={-1} data-media-carousel data-media-group={group.id} data-sync-owner={allHeld ? "group" : undefined} data-sync={groupSyncState} role="region" aria-roledescription="carousel" aria-label={`Images, ${total} total`} data-slide-count={total} data-has-peek={total >= 4 || undefined} data-can-scroll-prev={scrollState.previous || undefined} data-can-scroll-next={scrollState.next || undefined}>
     <div ref={trackRef} className="carousel-track">
-      {group.attachments.map(({ attachment, message }, index) => <div key={`${message.id}:${attachment.rcsState ? rcsAttachmentIndex(message, attachment) : attachment.id}`} ref={(element) => { slideRefs.current[index] = element; }} data-media-slide data-media-attachment={attachment.id} data-media-message={message.id} data-slide-index={index} role="group" aria-roledescription="slide" aria-label={`${index + 1} of ${total}`} title={messageTitle?.(message)}>
-        <MediaTile attachment={attachment} message={message} variant="slide" label={`Photo, ${index + 1} of ${total}`} onOpen={() => onOpen({ attachment, message })} suppressHeldControl={allHeld} prefetchIds={[group.attachments[index + 1] ? demandTarget(group.attachments[index + 1].attachment) : undefined]} bodyRef={bodyRefCallbacks[index]} onBodyKeyDown={(event) => {
+      {group.attachments.map(({ attachment, message }, index) => <div key={`${message.id}:${attachment.rcsState ? rcsAttachmentIndex(message, attachment) : attachment.id}`} ref={(element) => { slideRefs.current[index] = element; }} data-media-slide data-media-attachment={attachment.id} data-media-message={message.id} data-reaction-ok={reactable?.(message) ? "" : undefined} data-reaction-message={reactable?.(message) ? message.id : undefined} aria-keyshortcuts={reactable?.(message) ? "R" : undefined} data-slide-index={index} role="group" aria-roledescription="slide" aria-label={`${index + 1} of ${total}`} title={messageTitle?.(message)}>
+        <MediaTile attachment={attachment} message={message} variant="slide" describedBy={reactable?.(message) ? REACTION_HINT_ID : undefined} label={`Photo, ${index + 1} of ${total}`} onOpen={() => onOpen({ attachment, message })} suppressHeldControl={allHeld} prefetchIds={[group.attachments[index + 1] ? demandTarget(group.attachments[index + 1].attachment) : undefined]} bodyRef={bodyRefCallbacks[index]} onBodyKeyDown={(event) => {
           if (event.key === "ArrowLeft" && moveFocus(index, -1)) event.preventDefault();
           if (event.key === "ArrowRight" && moveFocus(index, 1)) event.preventDefault();
         }} />
+        {renderBadges && group.attachments.findIndex((item) => item.message.id === message.id) === index && renderBadges(message)}
       </div>)}
     </div>
     {allHeld && <MediaSyncButton attachmentIds={(requestableAttachments.length ? requestableAttachments : pendingAttachments).map(({ attachment }) => attachment.id)} label={groupLabel} ariaLabel={`${groupLabel} using mobile data if needed`} retryAriaLabel={`Request again ${pendingAttachments.length} images using mobile data if needed`} describedBy={holdNoteId} initialState={requestableAttachments.length ? undefined : "queued"} resetKey={groupResetKey} className="carousel-sync" dataAttributes={{ "data-group-sync": group.id }} onFocus={() => { groupControlFocused.current = true; }} onBlur={() => { groupControlFocused.current = false; }} onStateChange={setGroupSyncState} />}
@@ -130,16 +138,19 @@ function Carousel({ group, onOpen, messageTitle }: { group: MessageGroup; onOpen
   </div>{allHeld && <p id={holdNoteId} data-group-hold-note aria-live="off"><WifiOff size={12} aria-hidden="true" />{groupStatus}</p>}</>;
 }
 
-function Group({ group, onOpen, renderMessageMeta, messageRef, renderCaption, renderMessageAction, isMessagePending, messageTitle, senderRun }: { group: MessageGroup; onOpen: MediaGridProps["onOpen"]; renderMessageMeta?: MediaGridProps["renderMessageMeta"]; messageRef?: MediaGridProps["messageRef"]; renderCaption?: MediaGridProps["renderCaption"]; renderMessageAction?: MediaGridProps["renderMessageAction"]; isMessagePending?: MediaGridProps["isMessagePending"]; messageTitle?: MediaGridProps["messageTitle"]; senderRun?: MediaGridProps["senderRun"] }) {
+function Group({ group, onOpen, renderMessageMeta, messageRef, renderCaption, renderMessageAction, isMessagePending, messageTitle, senderRun, reactable, renderBadges }: { group: MessageGroup; onOpen: MediaGridProps["onOpen"]; renderMessageMeta?: MediaGridProps["renderMessageMeta"]; messageRef?: MediaGridProps["messageRef"]; renderCaption?: MediaGridProps["renderCaption"]; renderMessageAction?: MediaGridProps["renderMessageAction"]; isMessagePending?: MediaGridProps["isMessagePending"]; messageTitle?: MediaGridProps["messageTitle"]; senderRun?: MediaGridProps["senderRun"]; reactable?: MediaGridProps["reactable"]; renderBadges?: MediaGridProps["renderBadges"] }) {
   const finalMessage = group.messages.at(-1);
   const isGrouped = group.messages.length > 1 || group.attachments.length > 1;
   const onlyAttachment = group.attachments[0];
   const sender = senderRun?.(group);
   const imageLabel = `${group.attachments.length} image${group.attachments.length === 1 ? "" : "s"}`;
-  const article = <article className="message-bubble" data-media-message-content={group.id} data-grouped={isGrouped || undefined} data-sender={group.messages[0].sender} data-sender-address={group.messages[0].senderAddress} aria-label={sender?.ariaName ? `${imageLabel} from ${sender.ariaName}` : imageLabel} title={group.attachments.length === 1 && onlyAttachment ? messageTitle?.(onlyAttachment.message) : undefined}>
+  // A single photo has no slide, so its bubble carries the reaction target.
+  const singleReactable = group.messages.length === 1 && group.attachments.length === 1 && Boolean(reactable?.(group.messages[0]));
+  const article = <article className="message-bubble" data-media-message-content={group.id} data-grouped={isGrouped || undefined} data-reaction-ok={singleReactable ? "" : undefined} data-reaction-message={singleReactable ? group.messages[0].id : undefined} aria-keyshortcuts={singleReactable ? "R" : undefined} data-sender={group.messages[0].sender} data-sender-address={group.messages[0].senderAddress} aria-label={sender?.ariaName ? `${imageLabel} from ${sender.ariaName}` : imageLabel} title={group.attachments.length === 1 && onlyAttachment ? messageTitle?.(onlyAttachment.message) : undefined}>
       {group.messages.map((message) => <span key={message.id} data-media-message-action={message.id}>{renderMessageAction?.(message)}</span>)}
       {!isMessagePending?.(group.messages[0]) && <>
-        {group.attachments.length === 1 && onlyAttachment ? <MediaTile attachment={onlyAttachment.attachment} message={onlyAttachment.message} variant="single" onOpen={() => onOpen(onlyAttachment)} /> : <Carousel group={group} onOpen={onOpen} messageTitle={messageTitle} />}
+        {group.attachments.length === 1 && onlyAttachment ? <MediaTile attachment={onlyAttachment.attachment} message={onlyAttachment.message} variant="single" describedBy={singleReactable ? REACTION_HINT_ID : undefined} onOpen={() => onOpen(onlyAttachment)} /> : <Carousel group={group} onOpen={onOpen} messageTitle={messageTitle} reactable={reactable} renderBadges={renderBadges} />}
+        {group.messages.length === 1 && group.attachments.length === 1 && renderBadges?.(group.messages[0])}
         {finalMessage?.body && <p data-group-caption>{renderCaption?.(finalMessage) ?? finalMessage.body}</p>}
         {finalMessage?.subject && <p data-group-subject>Subject: {finalMessage.subject}</p>}
       </>}

@@ -1,9 +1,10 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MessageView } from "@peppy/desktop-ui/bridge-contracts";
 import { ReactionBadges, ReactionNotice } from "./ReactionViews";
-import { linkReactions } from "./link";
+import { linkReactions, type ReactionBadgeInfo } from "./link";
+import { mergeReactions, type MergedReactionBadge } from "./merge";
 
 afterEach(cleanup);
 
@@ -50,12 +51,154 @@ describe("ReactionBadges", () => {
     expect(replacementRef).toHaveBeenLastCalledWith('["new-target","😆"]', null);
   });
 
-  it("preserves label, title and count semantics without the optional callback", () => {
+  it("preserves the full label as the group description, a title and counts", () => {
     const countedBadges = linkReactions([target, reaction, secondReaction]).badges.get(target.id)!;
     render(<ReactionBadges messageId={target.id} badges={countedBadges} actorName={actorName} />);
-    const group = screen.getByRole("img", { name: "Reactions: 😆 from Ada, Grace" });
+    const group = screen.getByRole("group", { name: "Reactions" });
     expect(group).toHaveAttribute("title", "Reactions: 😆 from Ada, Grace");
-    expect(group).toHaveTextContent("😆2");
+    expect(group).toHaveAccessibleDescription("Reactions: 😆 from Ada, Grace");
+    expect(group).toHaveAttribute("data-reaction-badges", target.id);
+    expect(screen.getByRole("img", { name: "😆 from Ada, Grace" })).toHaveTextContent("😆2");
+  });
+
+  it("renders no group for an empty badge list", () => {
+    const { container } = render(<ReactionBadges messageId={target.id} badges={[]} actorName={actorName} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+});
+
+describe("own reaction chips", () => {
+  const mine = (overrides: Partial<MergedReactionBadge["own"] & object> & { emoji?: string } = {}) => {
+    const { emoji = "❤️", ...own } = overrides;
+    return { emoji, actors: [{ key: "self", sender: "self" as const }], reactionIds: [], source: own.source ?? "native", own: { state: "sent" as const, source: own.source ?? "native", ...own } } as MergedReactionBadge;
+  };
+  const renderOwn = (badges: MergedReactionBadge[], props: Partial<Parameters<typeof ReactionBadges>[0]> = {}) => render(<ReactionBadges messageId="m1" badges={badges} actorName={actorName} {...props} />);
+  const ownChip = (container: HTMLElement) => container.querySelector<HTMLElement>("[data-reaction-own]")!;
+
+  it("labels a confirmed native chip and makes it a button outside the tab order", () => {
+    const onOwnChip = vi.fn();
+    const { container } = renderOwn([mine()], { onOwnChip });
+    const chip = screen.getByRole("button", { name: "❤️ from you" });
+    expect(chip).toHaveAttribute("data-reaction-state", "sent");
+    expect(chip).toHaveAttribute("data-reaction-source", "native");
+    expect(chip).toHaveAttribute("tabindex", "-1");
+    expect(ownChip(container)).toBe(chip);
+    fireEvent.click(chip);
+    expect(onOwnChip).toHaveBeenCalledWith(expect.objectContaining({ emoji: "❤️", own: expect.objectContaining({ state: "sent" }) }));
+  });
+
+  it("shows a pending chip with the sending label and no action", () => {
+    const { container } = renderOwn([mine({ state: "sending", requestId: "r1", intent: "add" })]);
+    const chip = screen.getByRole("button", { name: "Your ❤️ reaction is sending." });
+    expect(chip).toHaveAttribute("data-reaction-state", "pending");
+    expect(chip).toHaveAttribute("tabindex", "-1");
+    expect(chip.querySelector("svg")).not.toBeNull();
+    expect(container.querySelector('[data-reaction-action]')).toBeNull();
+  });
+
+  it("dims a removing chip and marks it busy", () => {
+    renderOwn([mine({ emoji: "😂", state: "removing", requestId: "r2", intent: "remove", previousEmoji: "😂" })]);
+    const chip = screen.getByRole("button", { name: "Removing your 😂 reaction." });
+    expect(chip).toHaveAttribute("data-reaction-state", "removing");
+    expect(chip).toHaveAttribute("aria-busy", "true");
+  });
+
+  it("makes a failed chip focusable and labels the failed switch with the earlier emoji", () => {
+    renderOwn([mine({ state: "not_sent", requestId: "r3", intent: "switch", previousEmoji: "👍" })]);
+    const chip = screen.getByRole("button", { name: "Couldn't change your reaction to ❤️. Your earlier 👍 is still in place." });
+    expect(chip).toHaveAttribute("data-reaction-state", "failed");
+    expect(chip).toHaveAttribute("tabindex", "0");
+  });
+
+  it("labels an unknown chip and keeps it focusable", () => {
+    renderOwn([mine({ emoji: "😂", state: "unknown", requestId: "r4", intent: "add" })]);
+    const chip = screen.getByRole("button", { name: "Not sure your 😂 reaction was sent. It won't be sent again on its own." });
+    expect(chip).toHaveAttribute("data-reaction-state", "unknown");
+    expect(chip).toHaveAttribute("tabindex", "0");
+  });
+
+  it("renders text-sourced own chips as read-only images", () => {
+    const { container } = renderOwn([mine({ source: "text" })]);
+    const chip = screen.getByRole("img", { name: "❤️ from you" });
+    expect(chip).toHaveAttribute("data-reaction-source", "text");
+    expect(chip).not.toHaveAttribute("tabindex");
+    expect(container.querySelector("button")).toBeNull();
+  });
+
+  it("marks the group placement for media overlays", () => {
+    const { container } = renderOwn([mine()], { placement: "overlay-bottom-start" });
+    expect(container.querySelector('[data-reaction-placement="overlay-bottom-start"]')).toHaveClass("reaction-badges-overlay");
+  });
+
+  it("merges native and text badges into chips with their own states", () => {
+    const parsed: ReactionBadgeInfo[] = [{ emoji: "😂", actors: [{ key: "other:+15550002", sender: "other", senderAddress: "+15550002" }], reactionIds: ["m9"] }];
+    renderOwn(mergeReactions({ parsed, native: [{ emoji: "👍", actors: [{ self: false, address: "+15550001" }] }], ownRequest: { requestId: "r5", emoji: "❤️", state: "sending", previousEmoji: null } }));
+    expect(screen.getByRole("img", { name: "👍 from +15550001" })).toHaveAttribute("data-reaction-source", "native");
+    expect(screen.getByRole("img", { name: "😂 from +15550002" })).toHaveAttribute("data-reaction-source", "text");
+    expect(screen.getByRole("button", { name: "Your ❤️ reaction is sending." })).toBeInTheDocument();
+  });
+});
+
+describe("failed and unknown recovery", () => {
+  const failed: MergedReactionBadge = { emoji: "❤️", actors: [{ key: "self", sender: "self" }], reactionIds: [], source: "native", own: { state: "not_sent", source: "native", requestId: "req-add", intent: "add" } };
+  const unknown: MergedReactionBadge = { emoji: "😂", actors: [{ key: "self", sender: "self" }], reactionIds: [], source: "native", own: { state: "unknown", source: "native", requestId: "req-unknown", intent: "add" } };
+  const renderIn = (badges: MergedReactionBadge[], props: Partial<Parameters<typeof ReactionBadges>[0]> = {}) => render(<article tabIndex={-1}>
+    <ReactionBadges messageId="m1" badges={badges} actorName={actorName} {...props} />
+  </article>);
+
+  it("opens the failed popover focused on Try again and returns focus to the chip on Escape", () => {
+    renderIn([failed]);
+    const chip = screen.getByRole("button", { name: "Couldn't send your ❤️ reaction. Nothing was sent." });
+    chip.focus();
+    fireEvent.click(chip);
+    const dialog = document.getElementById("reaction-issue-m1")!;
+    expect(dialog).toHaveAttribute("data-reaction-issue", "failed");
+    expect(screen.getByRole("dialog", { name: "Couldn't send your ❤️ reaction" })).toBe(dialog);
+    expect(document.activeElement).toBe(dialog.querySelector('[data-reaction-action="retry"]'));
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(document.getElementById("reaction-issue-m1")).toBeNull();
+    expect(document.activeElement).toBe(chip);
+  });
+
+  it("retries a failed add with its emoji and removes the popover", () => {
+    const onRetry = vi.fn();
+    renderIn([failed], { onRetry });
+    fireEvent.click(screen.getByRole("button", { name: "Couldn't send your ❤️ reaction. Nothing was sent." }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onRetry).toHaveBeenCalledWith("req-add", "❤️");
+    expect(document.getElementById("reaction-issue-m1")).toBeNull();
+  });
+
+  it("discards a failed add and hands focus back to the message when the chip is gone", () => {
+    const onDismiss = vi.fn();
+    const { rerender } = renderIn([failed], { onDismiss });
+    fireEvent.click(screen.getByRole("button", { name: "Couldn't send your ❤️ reaction. Nothing was sent." }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect(onDismiss).toHaveBeenCalledWith("req-add");
+    rerender(<article tabIndex={-1}><ReactionBadges messageId="m1" badges={[]} actorName={actorName} onDismiss={onDismiss} /></article>);
+    expect(document.activeElement).toBe(document.querySelector("article"));
+  });
+
+  it("offers only Dismiss for an unknown attempt and resolves the popover when the chip goes", () => {
+    const onDismiss = vi.fn();
+    const { rerender } = renderIn([unknown], { onDismiss });
+    fireEvent.click(screen.getByRole("button", { name: "Not sure your 😂 reaction was sent. It won't be sent again on its own." }));
+    const dialog = screen.getByRole("dialog", { name: "Not sure your 😂 reaction was sent" });
+    expect(dialog).toHaveAttribute("data-reaction-issue", "unknown");
+    expect(within(dialog).getAllByRole("button").map((button) => button.textContent)).toEqual(["Dismiss"]);
+    expect(dialog).toHaveTextContent("Your phone may have sent it. Check your phone.");
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(onDismiss).toHaveBeenCalledWith("req-unknown");
+    rerender(<article><ReactionBadges messageId="m1" badges={[]} actorName={actorName} /></article>);
+    expect(document.getElementById("reaction-issue-m1")).toBeNull();
+  });
+
+  it("closes the popover without moving focus when the request resolves by itself", () => {
+    const { rerender } = renderIn([unknown]);
+    fireEvent.click(screen.getByRole("button", { name: "Not sure your 😂 reaction was sent. It won't be sent again on its own." }));
+    expect(document.getElementById("reaction-issue-m1")).not.toBeNull();
+    rerender(<article><ReactionBadges messageId="m1" badges={[{ emoji: "😂", actors: [{ key: "self", sender: "self" }], reactionIds: [], source: "native", own: { state: "sent", source: "native" } }]} actorName={actorName} /></article>);
+    expect(document.getElementById("reaction-issue-m1")).toBeNull();
   });
 });
 

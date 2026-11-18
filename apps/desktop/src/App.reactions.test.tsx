@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, REACTION_HIGHLIGHT_MS } from "./App";
@@ -483,7 +483,8 @@ describe("App reactions", () => {
     vi.spyOn(document, "hasFocus").mockReturnValue(true);
     vi.stubGlobal("IntersectionObserver", ReactionObserver);
     renderMessages([message("plan", "plan?"), message("reaction", "Reacted 😆 to “plan?”"), message("other", "Reacted 👍 to “plan?”", { senderAddress: "+15555550142" })]);
-    const chip = (await screen.findByRole("img", { name: /😆 from/ })).querySelector('[data-reaction-emoji="😆"]')!;
+    const chip = await screen.findByRole("img", { name: /😆 from/ });
+    expect(chip).toHaveAttribute("data-reaction-emoji", "😆");
     act(() => ReactionObserver.intersect(chip));
     await waitFor(() => expect(document.querySelector('[data-reaction-marker="reaction"]')).toHaveAttribute("hidden"));
     expect(screen.getByRole("button", { name: /reacted 👍/ })).toBeVisible();
@@ -509,8 +510,10 @@ describe("App reactions", () => {
   it("renders default-on badges and notices with resolved actor names", async () => {
     renderMessages([message("plan", "plan?", { sender: "self", senderAddress: undefined }), message("reaction", "Reacted 😆 to “plan?”")]);
 
-    const badges = await screen.findByRole("img", { name: /😆 from Aurora Chen/ });
+    // The badge group is role=group (ux-design E); the 😆 chip inside it keeps its named role=img.
+    const badges = await screen.findByRole("group", { name: "Reactions" });
     expect(badges).toHaveAttribute("data-reaction-badges", "plan");
+    expect(within(badges).getByRole("img", { name: /😆 from Aurora Chen/ })).toBeInTheDocument();
     expect(document.querySelector('[data-reaction-notice="reaction"]')).toHaveTextContent("Aurora Chen reacted 😆 to “plan?”");
     expect([...document.querySelectorAll(".message-bubble")].some((bubble) => bubble.textContent?.includes("Reacted 😆"))).toBe(false);
     expect(document.querySelector('article [data-reaction-badges]')).toBeNull();

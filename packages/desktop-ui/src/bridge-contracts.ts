@@ -68,7 +68,13 @@ export type SendCancellationView = {
 export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; draftState?: DraftAttachmentState; mediaHold?: "held" | "requested"; mediaMeta?: MediaMetadataView; remoteState?: "available" | "removed_by_storage_policy"; localAvailable?: boolean; rcsState?: RcsAttachmentState; rcsSendStatus?: RcsSendStatus; index?: number };
 export type SendRecoveryKind = "not-sent" | "unconfirmed-removed" | "unconfirmed-removed-cancel";
 export type SendRecovery = { kind: SendRecoveryKind; canSendAgain: boolean; sentAgain?: { messageId: string } };
-export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms" | "rcs"; subject?: string; participants?: string[]; rcsReported?: boolean; oneTimeCode?: string; groupHint?: "members_changed" | "update_required" | "withdrawn" | "create_unknown" | "create_not_rcs"; sendCancellation?: SendCancellationView; sendRecovery?: SendRecovery };
+export type ReactionActorView = { self: boolean; address?: string };
+export type MessageReactionView = { emoji: string; actors: ReactionActorView[] };
+export type OwnReactionRequestView = { requestId: string; emoji: string | null; previousEmoji?: string | null; state: "sending" | "not_sent" | "unknown"; refusal?: "expired" | "message_unavailable" | "not_rcs" | "link_unavailable" | "rejected" | "busy" | "invalid_emoji" };
+export type ReactionRoute = "native" | "text";
+export type ReactionSupport = "native" | "text" | "needs_phone_update" | "none";
+export type ReactionSubmitView = { accepted: boolean; requestId?: string; route?: ReactionRoute; reason?: "offline" | "unsupported" | "needs_phone_update" | "busy" | "not_reactable" | "invalid_emoji" };
+export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms" | "rcs"; subject?: string; participants?: string[]; rcsReported?: boolean; oneTimeCode?: string; groupHint?: "members_changed" | "update_required" | "withdrawn" | "create_unknown" | "create_not_rcs"; sendCancellation?: SendCancellationView; sendRecovery?: SendRecovery; reactions?: MessageReactionView[]; ownReactionRequest?: OwnReactionRequestView; reactable?: ReactionRoute };
 export type MessageWindow = GeneratedMessageWindow<MessageView>;
 export type MediaCursor = { sortAtMs: string; localOrder: string; messageId: string; attachmentPosition: number };
 export type MediaMetadataView = { width?: number; height?: number; durationMs?: string; thumbnail?: AttachmentView; previewUnavailable?: "thumbnail_unavailable" };
@@ -82,7 +88,7 @@ export type MediaOpen = { state: "ready"; url: string; mediaType: string; byteSi
 export type GroupView = { name?: string; members: string[]; state: "unlinked" | "proving" | "live" | "paused" | "withdrawn"; memberRevision: string; canCreate: boolean; createNeedsConfirmation: boolean; /** Best-effort local notices from core, oldest first. Compaction may drop some. */ notices?: GroupNoticeView[] };
 /** One membership or name change. `member` is canonical; `name` is absent when the group name was removed. `atMs` is decimal ms. */
 export type GroupNoticeView = { kind: "renamed" | "added" | "removed"; name?: string; member?: string; atMs: string };
-export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; hasOlderMessages?: boolean; participants?: string[]; recipientlessDraft?: boolean; draftOnly?: boolean; pinned?: boolean; folder?: ConversationFolder; folderReason?: "marked" | "blocked"; unblock?: "pending" | "failed"; canUnblock?: boolean; rcsEncryption?: boolean; rcsHistoryGap?: boolean; group?: GroupView };
+export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; hasOlderMessages?: boolean; participants?: string[]; recipientlessDraft?: boolean; draftOnly?: boolean; pinned?: boolean; folder?: ConversationFolder; folderReason?: "marked" | "blocked"; unblock?: "pending" | "failed"; canUnblock?: boolean; rcsEncryption?: boolean; rcsHistoryGap?: boolean; group?: GroupView; reactionSupport?: ReactionSupport; reactionGatewayId?: string };
 /** Effective folder from core: an archived conversation reads as `inbox` once a newer message arrives. */
 export type ConversationFolder = "inbox" | "archived" | "spam";
 export type HistoryPage = { conversationId: string; messages: MessageView[]; hasMore: boolean };
@@ -256,6 +262,9 @@ export interface DesktopBridge {
   cancel_send?(input: { messageId: string }): Promise<SendCancellationView>;
   /** Creates a new outgoing message for the original's content on the given carrier route. Never automatic. Rejects with `already-sent-again`, `route-unavailable`, `attachments-unavailable` or `offline`. */
   send_again(input: { messageId: string; gatewayId: string; simId: string }): Promise<{ messageId: string }>;
+  react_to_message?(input: { messageId: string; emoji: string | null }): Promise<ReactionSubmitView>;
+  dismiss_reaction_request?(input: { requestId: string }): Promise<void>;
+  open_emoji_picker?(): Promise<void>;
   mark_seen(visibleMessageIds: string[]): Promise<void>;
   copy_one_time_code(target: OneTimeCodeTarget, code: string): Promise<void>;
   /** Actual number changed, encoded as a canonical unsigned decimal string. */
