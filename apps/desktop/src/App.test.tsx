@@ -58,6 +58,17 @@ describe("composer draft identity", () => {
   });
 });
 
+describe("conversation header", () => {
+  it("does not repeat a one-to-one contact's name under the title", async () => {
+    host.conversations[0] = { ...host.conversations[0], participants: ["+18015551234"] };
+    host.contactResolution = { "+18015551234": { bookId: "book-1", contactId: "contact-1", displayName: "Ada" } };
+    render(<App />);
+
+    await waitFor(() => expect(document.querySelector("[data-header-title]")).toHaveTextContent("Ada"));
+    expect(document.querySelector("[data-conversation-participants]")).toBeNull();
+  });
+});
+
 describe("group sender attribution", () => {
   it("shows sender labels and run avatars only for group conversations", async () => {
     host.conversations[0] = {

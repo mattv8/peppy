@@ -5545,6 +5545,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       (isLocalDraftKey(slotKey)
         ? content.recipientIds.map((id) => displayAddressName(id, resolution)).join(", ") || "New message"
         : undefined);
+  const participantsLine = active?.participants?.map((part) => displayAddressName(part, resolution)).join(", ");
   const groupBarState = groupNoticeState(active?.group);
   const groupRcsLinked = Boolean(content.gatewayId && snapshot?.rcsStatus?.gateways.some((gateway) => gateway.gatewayId === content.gatewayId && gateway.state === "linked" && gateway.current && gateway.healthy));
   /** Copies definitely unsent RCS content into the draft. Nothing is sent. */
@@ -6422,7 +6423,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                   <div data-header-title-row><b data-header-title title={title}>{revoked ? "Set up Peppy" : title ?? (showSetup ? "Set up Peppy" : "Peppy")}</b>{!revoked && !headPanel && rcsRoute.current && <RcsBadge encryptionReported={active?.rcsEncryption === true} paused={active?.group?.state === "paused"} />}{!revoked && !headPanel && active?.group && !rcsRoute.current && active.group.state !== "withdrawn" && <MmsGroupBadge />}</div>
                   {active?.group
                     ? <small data-conversation-participants>{groupSubtitle({ name: active.group.name, memberNames: groupMembers(active).map((part) => displayAddressName(part, resolution)) })}</small>
-                    : active?.participants && <small data-conversation-participants>{active.participants.map((part) => displayAddressName(part, resolution)).join(", ")}</small>}
+                    : participantsLine && participantsLine !== title && <small data-conversation-participants>{participantsLine}</small>}
                 </div>
               )}
             </div>
